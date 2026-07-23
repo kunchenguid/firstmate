@@ -35,6 +35,29 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   Herdr additionally supports a default-off presentation-only layout when the
+#   local config/herdr-presentation-spaces flag exists. A clean fresh task first
+#   writes state/<id>.herdr-presentation atomically, then creates a disposable
+#   workspace containing only the ordinary task pane. The journal and visible
+#   random token are never endpoint or ownership authority. Existing, ambiguous,
+#   or recovered state is never adopted, reused, closed, or deleted through that
+#   presentation path; a flat launch is allowed only after duplicate-agent risk
+#   is independently absent. Treehouse allocation and task metadata are unchanged.
+#   A clean projected create makes one bounded attempt to hold the one
+#   session-scoped presentation-order lock (keyed by named session plus
+#   canonical socket, outside any home's state/) through launch handoff. Lock
+#   contention warns and falls back to the ordinary flat layout before any
+#   projection mutation. The exact response-derived new workspace is inserted
+#   immediately after its owning parent (firstmate or 2ndmate-<id>) contiguous
+#   child block. Ordering never authorizes lifecycle cleanup, and any
+#   unavailable, ambiguous, or failed move warns while the spawn continues.
+#   Every projected create, prune, and move captures and verifies the named
+#   session's exact active workspace and tab. A detected focus change restores
+#   only that exact tab id; an ambiguous pre-operation snapshot refuses the
+#   focus-sensitive presentation mutation.
+#   Every single-task invocation holds one task-id-scoped lock across backend
+#   creation through metadata publication, so concurrent same-id spawns serialize
+#   even when they select different backends.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -54,10 +77,12 @@
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
-#   A --secondmate spawn also propagates the primary's declared inheritable config
-#   into the secondmate home's config/, so the secondmate's OWN crewmates,
-#   dispatch profiles, backlog backend, and per-harness launch overrides inherit
-#   the primary's settings (fm-config-inherit-lib.sh).
+#   A --secondmate spawn also propagates the primary's declared inherited local
+#   material, so its OWN crewmates, dispatch profiles, backlog backend, and
+#   per-harness launch overrides inherit primary config, while the secondmate
+#   receives the primary's read-only shared captain-preference file
+#   (fm-config-inherit-lib.sh). A successful launch clears pending inherited
+#   config reread generations because the new agent reads the converged files.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
@@ -92,6 +117,7 @@
 #   A named variant under .[<harness>].variants layers over that harness's own three axes,
 #   per axis: command and args replace, env merges with the variant winning. With no variant
 #   selected the assembled launch string is byte-identical to the pre-variant one.
+#     __PIBRIEFENV__ shell assignment identifying the unchanged Pi positional brief
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -126,12 +152,16 @@ HARNESS_OVERRIDES="$CONFIG/harness-overrides.json"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -222,6 +252,16 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+HERDR_PROJECTION_ABORT_CLEANUP=0
+HERDR_PROJECTION_ABORT_SESSION=
+HERDR_PROJECTION_ABORT_TASK_PANE=
+HERDR_PROJECTION_ABORT_SEEDED_PANE=
+HERDR_PRESENTATION_ORDER_LOCK=
+HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+SPAWN_TASK_LOCK=
+SPAWN_TASK_LOCK_HELD=0
+CONFIG_INHERIT_LOCK=
+CONFIG_INHERIT_LOCK_HELD=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -240,38 +280,91 @@ parse_orca_worktree_result() {
   fi
 }
 
-orca_spawn_abort_cleanup() {
+spawn_abort_cleanup() {
   local status=$?
-  [ "$ORCA_ABORT_CLEANUP" = 1 ] || return "$status"
-  ORCA_ABORT_CLEANUP=0
-  if [ -n "${ORCA_TERMINAL:-}" ]; then
-    fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
+  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
+     && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
+    if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
+      echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup" >&2
+      HERDR_PROJECTION_ABORT_CLEANUP=0
+    fi
   fi
-  if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
-    if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
-      mkdir -p "$STATE" 2>/dev/null || true
-      if [ -d "$STATE" ]; then
-        {
-          echo "window=$W"
-          echo "worktree=${WT:-}"
-          echo "project=$PROJ_ABS"
-          echo "harness=$HARNESS"
-          echo "kind=$KIND"
-          echo "mode=${MODE:-no-mistakes}"
-          echo "yolo=${YOLO:-off}"
-          echo "tasktmp=${TASK_TMP:-}"
-          echo "model=${MODEL:-default}"
-          echo "effort=${EFFORT:-default}"
-          echo "backend=orca"
-          echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-          [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-        } > "$STATE/$ID.meta" 2>/dev/null || true
+  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+    fm_backend_herdr_projection_cleanup_exact \
+      "$HERDR_PROJECTION_ABORT_SESSION" \
+      "$HERDR_PROJECTION_ABORT_TASK_PANE" \
+      "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+  fi
+  if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
+    HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+    fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+  fi
+  if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
+    ORCA_ABORT_CLEANUP=0
+    if [ -n "${ORCA_TERMINAL:-}" ]; then
+      fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
+    fi
+    if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+      if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+        mkdir -p "$STATE" 2>/dev/null || true
+        if [ -d "$STATE" ]; then
+          {
+            echo "window=$W"
+            echo "worktree=${WT:-}"
+            echo "project=$PROJ_ABS"
+            echo "harness=$HARNESS"
+            echo "kind=$KIND"
+            echo "mode=${MODE:-no-mistakes}"
+            echo "yolo=${YOLO:-off}"
+            echo "tasktmp=${TASK_TMP:-}"
+            echo "model=${MODEL:-default}"
+            echo "effort=${EFFORT:-default}"
+            echo "backend=orca"
+            echo "orca_worktree_id=$ORCA_WORKTREE_ID"
+            [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+          } > "$STATE/$ID.meta" 2>/dev/null || true
+        fi
       fi
     fi
   fi
+  if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
+    SPAWN_TASK_LOCK_HELD=0
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+  fi
+  if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
+    CONFIG_INHERIT_LOCK_HELD=0
+    fm_lock_release "$CONFIG_INHERIT_LOCK" || true
+  fi
   return "$status"
 }
-trap orca_spawn_abort_cleanup EXIT
+trap spawn_abort_cleanup EXIT
+
+# One bounded lock per live Herdr session/socket, shared across all homes.
+# <session> is required so secondmate and primary spawns serialize against the
+# same session without writing any other home's state directory.
+spawn_herdr_presentation_order_lock_acquire() {
+  local session=${1:-} attempt lock_path
+  [ -n "$session" ] || session=$(fm_backend_herdr_session)
+  lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
+  HERDR_PRESENTATION_ORDER_LOCK="$lock_path"
+  attempt=0
+  while [ "$attempt" -lt 50 ]; do
+    if fm_lock_try_acquire "$HERDR_PRESENTATION_ORDER_LOCK"; then
+      HERDR_PRESENTATION_ORDER_LOCK_HELD=1
+      return 0
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+spawn_herdr_presentation_order_lock_release() {
+  [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ] || return 0
+  HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+  fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+}
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
@@ -303,14 +396,21 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       rc=2
       continue
     elif [ "$KIND" = scout ]; then
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" ${shared_args[@]+"${shared_args[@]}"} --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     else
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" ${shared_args[@]+"${shared_args[@]}"}; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     fi
   done
   exit "$rc"
 fi
 ID=${POS[0]}
+fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
+if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
+  echo "error: another spawn is already creating task $ID" >&2
+  exit 1
+fi
+SPAWN_TASK_LOCK_HELD=1
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -389,9 +489,9 @@ launch_template() {
     opencode) printf '%s' '__ENV____CMD__ __MODELFLAG____ARGS__--prompt "$(cat __BRIEF__)"' ;;
     pi)
       if [ "$kind" = secondmate ]; then
-        printf '%s' '__ENV____CMD__ __MODELFLAG____EFFORTFLAG____ARGS__-e __PITURNEND__ -e __PIWATCH__ "$(cat __BRIEF__)"'
+        printf '%s' '__PIBRIEFENV__ __ENV____CMD__ __MODELFLAG____EFFORTFLAG____ARGS__-e __PITURNEND__ -e __PIWATCH__ "$(cat __BRIEF__)"'
       else
-        printf '%s' '__ENV____CMD__ __MODELFLAG____EFFORTFLAG____ARGS__-e __PIEXT__ "$(cat __BRIEF__)"'
+        printf '%s' '__PIBRIEFENV__ __ENV____CMD__ __MODELFLAG____EFFORTFLAG____ARGS__-e __PIEXT__ "$(cat __BRIEF__)"'
       fi
       ;;
     grok) printf '%s' '__ENV____CMD__ __ARGS____MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
@@ -889,15 +989,23 @@ if [ "$KIND" = secondmate ]; then
   else
     echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
   fi
-  # Inheritable-config propagation: push the primary's declared LOCAL config into
-  # this secondmate home's config/, so the secondmate's OWN crewmates and backlog
-  # backend inherit the primary's settings. config/ is gitignored, so this is a
-  # separate copy from the local-HEAD fast-forward above;
-  # primary-authoritative and re-pushed on every convergence. config/secondmate-harness
-  # is the primary's own knob and is deliberately NOT in the inheritable set
-  # (fm-config-inherit-lib.sh). A primary with no inheritable config set is a no-op.
-  propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" \
-    || echo "warning: secondmate $ID config inheritance failed for $PROJ_ABS/config" >&2
+  mkdir -p "$PROJ_ABS/state" || {
+    echo "error: could not create secondmate state directory for $PROJ_ABS" >&2
+    exit 1
+  }
+  CONFIG_INHERIT_LOCK=$(fm_config_inherit_lock_path "$PROJ_ABS") || {
+    echo "error: could not resolve secondmate inheritance lock for $PROJ_ABS" >&2
+    exit 1
+  }
+  if ! fm_lock_acquire_wait "$CONFIG_INHERIT_LOCK"; then
+    echo "error: could not acquire secondmate inheritance lock for $PROJ_ABS" >&2
+    exit 1
+  fi
+  CONFIG_INHERIT_LOCK_HELD=1
+  # Inheritance propagation: push the primary-authoritative local inheritance
+  # surface into this secondmate home (fm-config-inherit-lib.sh).
+  propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" \
+    || echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
   else
@@ -988,6 +1096,48 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   exit 1
 }
 
+# A stale presentation journal never grants launch authority.
+# When authoritative metadata already exists, require its endpoint to be
+# positively dead before the journal's read-only token inspection may allow a
+# flat fallback.
+herdr_projection_existing_meta_allows_flat() {  # <meta>
+  local meta=$1 old_backend old_target old_session old_pane old_state
+  old_backend=$(fm_backend_of_meta "$meta")
+  old_target=$(fm_backend_target_of_meta "$meta")
+  [ -n "$old_target" ] || {
+    echo "error: existing metadata for $ID has no endpoint; refusing duplicate launch while its herdr presentation journal is quarantined" >&2
+    return 1
+  }
+  if [ "$old_backend" = herdr ]; then
+    fm_backend_herdr_parse_target "$old_target" || {
+      echo "error: existing herdr endpoint for $ID is malformed; refusing duplicate launch" >&2
+      return 1
+    }
+    old_session=$FM_BACKEND_HERDR_SESSION
+    old_pane=$FM_BACKEND_HERDR_PANE
+    fm_backend_herdr_server_ensure "$old_session" || {
+      echo "error: existing herdr endpoint for $ID could not be inspected; refusing duplicate launch" >&2
+      return 1
+    }
+    old_state=$(fm_backend_herdr_pane_agent_state "$old_session" "$old_pane")
+    case "$old_state" in
+      dead|no-agent) return 0 ;;
+      live|unknown)
+        echo "error: existing herdr endpoint for $ID is $old_state; refusing duplicate launch" >&2
+        return 1
+        ;;
+    esac
+  fi
+  old_state=$(fm_backend_agent_alive "$old_backend" "$old_target")
+  case "$old_state" in
+    dead) return 0 ;;
+    alive|unknown)
+      echo "error: existing $old_backend endpoint for $ID is $old_state; refusing duplicate launch" >&2
+      return 1
+      ;;
+  esac
+}
+
 W="fm-$ID"
 case "$BACKEND" in
   tmux)
@@ -1018,21 +1168,71 @@ case "$BACKEND" in
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
     fi
-    HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS") || exit 1
-    # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
-    # (the second field empty when this call ADOPTED a pre-existing workspace
-    # rather than creating a fresh one). Split on the guaranteed single tab
-    # character; the seeded tab id is threaded through to create_task
-    # untouched, which is the only function permitted to prune it (never
-    # re-derived from labels - see docs/herdr-backend.md "Default-tab prune").
-    CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
-    HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
-    HERDR_SES=${CONTAINER%%:*}
-    HERDR_WORKSPACE_ID=${CONTAINER#*:}
-    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
-    read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+    HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+    HERDR_PROJECTED=0
+    if [ "$KIND" != secondmate ] && [ -f "$CONFIG/herdr-presentation-spaces" ]; then
+      if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+        if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+          herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || exit 1
+        fi
+        HERDR_RECOVERY_SESSION=$(fm_backend_herdr_session)
+        fm_backend_herdr_projection_recovery_allows_flat \
+          "$HERDR_RECOVERY_SESSION" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
+      elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+        HERDR_SES=$(fm_backend_herdr_session)
+        HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
+        # Session lock path resolution needs a live named-session socket.
+        # Ensure the server before journal publication so lock failure degrades
+        # to flat without ever creating an unlocked projection.
+        if ! fm_backend_herdr_server_ensure "$HERDR_SES"; then
+          echo "warning: herdr presentation could not ensure its session server; using the ordinary flat layout without projection" >&2
+        elif spawn_herdr_presentation_order_lock_acquire "$HERDR_SES"; then
+          HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
+          HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
+          if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
+            "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+            if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
+              HERDR_PROJECTION_ABORT_CLEANUP=1
+              HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
+              HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+              HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+            fi
+            exit 1
+          fi
+          HERDR_PROJECTED=1
+          HERDR_SES=$FM_BACKEND_HERDR_PROJECTION_SESSION
+          HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
+          HERDR_SEEDED_DEFAULT_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
+          HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+          HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+          HERDR_PROJECTION_ABORT_CLEANUP=1
+          HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
+          HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+          HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+          fm_backend_herdr_projection_order_best_effort \
+            "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL"
+        else
+          echo "warning: herdr presentation focus lock unavailable; using the ordinary flat layout without projection" >&2
+        fi
+      fi
+    fi
+    if [ "$HERDR_PROJECTED" -ne 1 ]; then
+      HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS") || exit 1
+      # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
+      # (the second field empty when this call ADOPTED a pre-existing workspace
+      # rather than creating a fresh one). Split on the guaranteed single tab
+      # character; the seeded tab id is threaded through to create_task
+      # untouched, which is the only function permitted to prune it (never
+      # re-derived from labels - see docs/herdr-backend.md "Default-tab prune").
+      CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
+      HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
+      HERDR_SES=${CONTAINER%%:*}
+      HERDR_WORKSPACE_ID=${CONTAINER#*:}
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
+    fi
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
       echo "error: herdr did not return a tab/pane id for $W" >&2
       exit 1
@@ -1147,20 +1347,30 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # command, a foreground updater), and "any path other than the primary" is
   # not evidence that treehouse ran. Rejected candidates keep the poll alive
   # (the real worktree may still appear) and the last one is reported on
-  # timeout instead of ever being adopted.
+  # timeout instead of ever being adopted. A valid candidate must also appear
+  # in two consecutive reads so a transient stale pane path cannot be recorded.
   # FM_SPAWN_WT_TIMEOUT (seconds, default 60) exists so tests can exercise
   # the refusal path without waiting out the full production window.
   WT_TIMEOUT=${FM_SPAWN_WT_TIMEOUT:-60}
   case "$WT_TIMEOUT" in ''|*[!0-9]*) WT_TIMEOUT=60 ;; esac
   WT_LAST_REJECT=
+  candidate=
   for _ in $(seq 1 "$WT_TIMEOUT"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
       if spawn_worktree_isolated "$p"; then
-        WT="$p"
-        break
+        p_real=$(real_path_or_raw "$p")
+        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
+          WT="$p"
+          break
+        fi
+        candidate="$p_real"
+      else
+        WT_LAST_REJECT="$p"
+        candidate=
       fi
-      WT_LAST_REJECT="$p"
+    else
+      candidate=
     fi
     sleep 1
   done
@@ -1417,6 +1627,8 @@ sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
+PIBRIEFENV=
+[ "$HARNESS" != pi ] || PIBRIEFENV="FM_FIRSTMATE_PI_LAUNCH_BRIEF=$sq_brief"
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 # Overridable axes first (command, args, env prefix), then the firstmate-owned tail.
@@ -1433,6 +1645,7 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+LAUNCH=${LAUNCH//__PIBRIEFENV__/$PIBRIEFENV}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
@@ -1444,6 +1657,19 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
+if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+  HERDR_PROJECTION_ABORT_CLEANUP=0
+  spawn_herdr_presentation_order_lock_release
+fi
 spawn_send_key "$T" Enter
+if [ "$KIND" = secondmate ]; then
+  if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
+    if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
+      echo "CONFIG_REREAD: secondmate $ID: quarantined pre-relaunch generations after cleanup failure (destination=$PROJ_ABS/state/.fm-inherited-config-reread-quarantine source=$FM_HOME/state/.fm-inherited-config-reread-quarantine)" >&2
+    else
+      echo "CONFIG_REREAD: secondmate $ID: cleanup failed; pre-relaunch generations were force-cleared where possible (destination=$PROJ_ABS source=$FM_HOME)" >&2
+    fi
+  fi
+fi
 
 echo "spawned $ID harness=$HARNESS${RESOLVED_LAUNCH_VARIANT:+ launch=$RESOLVED_LAUNCH_VARIANT} kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

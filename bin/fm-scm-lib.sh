@@ -413,17 +413,11 @@ fm_scm_fetch_pr_head() {
   git -C "$worktree" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
-# Echo the commit the PR/MR head points at, fetching it into the worktree first.
-# A recorded head that already resolves locally wins; otherwise GitHub resolves
-# through refs/pull/<n>/head with git alone, and Codebase asks bytedcli for the
-# head commit and its source ref.
+# Echo the current commit the PR/MR head points at, fetching it into the worktree
+# first. The provider's current head wins; a reachable recorded head is only an
+# offline fallback when the provider cannot resolve or fetch the current one.
 fm_scm_resolve_pr_head() {
   local worktree=$1 target=$2 recorded_head=${3:-} parsed provider info head source_ref number
-  if [ -n "$recorded_head" ] \
-    && git -C "$worktree" cat-file -e "$recorded_head^{commit}" 2>/dev/null; then
-    printf '%s\n' "$recorded_head"
-    return 0
-  fi
   [ -n "$target" ] || return 1
   if parsed=$(fm_scm_parse_pr_url "$target" 2>/dev/null); then
     IFS=$'\t' read -r provider _ _ <<EOF
@@ -442,21 +436,30 @@ EOF
 
   case "$provider" in
     github)
-      number=$(fm_scm_target_number "$worktree" "$target") || return 1
-      git -C "$worktree" remote get-url origin >/dev/null 2>&1 || return 1
-      git -C "$worktree" fetch --quiet origin -- "refs/pull/$number/head" >/dev/null 2>&1 || return 1
-      head=$(git -C "$worktree" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null) || return 1
+      if number=$(fm_scm_target_number "$worktree" "$target") \
+        && git -C "$worktree" remote get-url origin >/dev/null 2>&1 \
+        && git -C "$worktree" fetch --quiet origin \
+          "+refs/pull/$number/head:refs/fm-review/pull/$number/head" >/dev/null 2>&1 \
+        && head=$(git -C "$worktree" rev-parse --verify "refs/fm-review/pull/$number/head^{commit}" 2>/dev/null); then
+        :
+      else
+        head=
+      fi
       ;;
     codebase)
-      info=$(fm_scm_pr_info "$worktree" "$target" 2>/dev/null) || return 1
-      IFS=$FM_SCM_FS read -r _ _ head source_ref <<EOF
+      if info=$(fm_scm_pr_info "$worktree" "$target" 2>/dev/null); then
+        IFS=$FM_SCM_FS read -r _ _ head source_ref <<EOF
 $info
 EOF
-      [ -n "$head" ] || return 1
-      fm_scm_fetch_pr_head "$worktree" codebase "$target" "$head" "$source_ref" || return 1
+        [ -n "$head" ] && fm_scm_fetch_pr_head "$worktree" codebase "$target" "$head" "$source_ref" || head=
+      fi
       ;;
     *) return 1 ;;
   esac
+  if [ -z "$head" ] && [ -n "$recorded_head" ] \
+    && git -C "$worktree" cat-file -e "$recorded_head^{commit}" 2>/dev/null; then
+    head=$recorded_head
+  fi
   [ -n "$head" ] || return 1
   printf '%s\n' "$head"
 }

@@ -1,104 +1,126 @@
 #!/usr/bin/env bash
-# Record a PR/MR-ready task: appends pr=<url> and the provider's pr_head=<sha>
-# to state/<id>.meta when available, then arms the watcher's poll by writing
-# state/<id>.check.sh, which prints one line when firstmate must wake
-# (the watcher's check contract: output = wake firstmate, silence = keep sleeping).
-# For a direct-PR task it also arms the richer no-mistakes watch run through
-# bin/fm-nm-watch.sh (CI, unresolved review threads, approval, mergeability),
-# which that script's header owns. Every ready PR already passes through here, so
-# this is the one deterministic place to arm it; the poll below stays armed
-# regardless as the daemon-independent backstop, and a watch that cannot be armed
-# is reported on its own line and never fails the PR record. --no-watch is for the
-# pre-merge caller, which needs the pr= record without a monitor.
-# The generated poll is a SHELL, deliberately: it carries this task's parameters
-# and one call, while every judgement lives in bin/fm-poll-lib.sh, which the poll
-# loads from disk on each cycle. A generated file is frozen at the version that
-# armed it, so anything inlined here would never reach a poll armed earlier; the
-# library reaches all of them. bin/fm-poll-lib.sh's header owns which signals the
-# poll wakes on, its run-id scoping, and its fail-closed behavior.
-# GitHub PRs use gh. Codebase MRs use bytedcli; direct invocations print the
-# helper error if the initial head lookup fails.
+# Record a PR/MR-ready task: store one validated canonical pr=<url> and the
+# provider's exact pr_head=<sha> when available, then atomically arm a static
+# merge poll. The watcher source is byte-for-byte bin/fm-pr-poll.sh; task and
+# PR/MR data live only in a private sidecar and are never interpolated into
+# shell source. GitHub PRs, GitLab MRs, and Codebase MRs are accepted.
+# For direct-PR tasks this also arms the richer no-mistakes watch; --no-watch
+# skips that second watch for a caller that is about to merge immediately.
 # Usage: fm-pr-check.sh <task-id> <pr-url> [--no-watch]
-#   --no-watch  record and arm the poll only, never the no-mistakes watch run.
-#               For a caller that is about to merge (bin/fm-pr-merge.sh), where a
-#               monitor would outlive its subject by seconds.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-"$FM_ROOT/bin/fm-guard.sh" || true
+
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-scm-lib.sh
+. "$SCRIPT_DIR/fm-scm-lib.sh"
+
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+  echo "error: invalid PR check request" >&2
+  exit 2
+fi
 ID=$1
-URL=$2
+RAW_URL=$2
 ARM_WATCH=yes
 case "${3:-}" in
   '') ;;
   --no-watch) ARM_WATCH=no ;;
-  *) echo "fm-pr-check.sh: unknown argument: $3" >&2; exit 2 ;;
+  *) echo "error: invalid PR check request" >&2; exit 2 ;;
 esac
-# shellcheck source=bin/fm-scm-lib.sh
-. "$SCRIPT_DIR/fm-scm-lib.sh"
-
-fm_scm_parse_pr_url "$URL" >/dev/null || exit 1
+if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
+  echo "error: invalid PR check request" >&2
+  exit 2
+fi
+URL=$FM_PR_URL
+PROVIDER=$FM_PR_PROVIDER
+HOST=$FM_PR_HOST
+PROJECT_PATH=$FM_PR_PATH
+NUMBER=$FM_PR_NUMBER
 
 META="$STATE/$ID.meta"
-if [ -f "$META" ]; then
-  WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
-  PR_HEAD=
-  if [ -n "$WT" ] && [ -d "$WT" ]; then
-    if REMOTE_HEAD=$(fm_scm_pr_head "$WT" "$URL"); then
-      PR_HEAD=$REMOTE_HEAD
+if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
+  echo "error: task metadata is unavailable" >&2
+  exit 1
+fi
+
+case "$PROVIDER" in
+  gitlab)
+    command -v glab >/dev/null 2>&1 || { echo "error: watching a GitLab merge request requires glab on PATH" >&2; exit 1; }
+    ;;
+  codebase)
+    fm_scm_require_bytedcli || exit 1
+    fm_scm_require_jq || exit 1
+    ;;
+esac
+
+"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
+"$FM_ROOT/bin/fm-guard.sh" || true
+
+WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+PR_HEAD=
+case "$PROVIDER" in
+  github)
+    if [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
+      if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+        && fm_pr_head_valid "$REMOTE_HEAD"; then
+        PR_HEAD=$REMOTE_HEAD
+      fi
     fi
-  fi
-  if ! grep -qxF "pr=$URL" "$META"; then
-    echo "pr=$URL" >> "$META"
-  fi
-  if [ -n "$PR_HEAD" ] && ! grep -qxF "pr_head=$PR_HEAD" "$META"; then
-    echo "pr_head=$PR_HEAD" >> "$META"
-  fi
-fi
+    ;;
+  codebase)
+    if [ -n "$WT" ] && [ -d "$WT" ]; then
+      if REMOTE_HEAD=$(fm_scm_pr_head "$WT" "$URL" 2>/dev/null) && fm_pr_head_valid "$REMOTE_HEAD"; then
+        PR_HEAD=$REMOTE_HEAD
+      fi
+    fi
+    ;;
+esac
 
-quoted_url=$(printf "%s\n" "$URL" | sed "s/'/'\\\\''/g")
-quoted_lib=$(printf "%s\n" "$FM_ROOT/bin/fm-poll-lib.sh" | sed "s/'/'\\\\''/g")
-quoted_state=$(printf "%s\n" "$STATE" | sed "s/'/'\\\\''/g")
-quoted_id=$(printf "%s\n" "$ID" | sed "s/'/'\\\\''/g")
-quoted_marker=$(printf "%s\n" "$STATE/$ID.check.error" | sed "s/'/'\\\\''/g")
-rm -f "$STATE/$ID.check.error" "$STATE/$ID.check.fails" "$STATE/$ID.check.nm"
-# Everything below the parameters is bootstrap, not judgement: load the library
-# and hand it this task. The one branch that must stay inlined is the library
-# being unloadable, because that is exactly the case where nothing else can
-# speak - and it must wake firstmate rather than let the poll go quiet.
-cat > "$STATE/$ID.check.sh" <<EOF
-# shellcheck shell=bash
-# Generated by bin/fm-pr-check.sh. Parameters only - the poll's logic lives in
-# bin/fm-poll-lib.sh and is re-read on every cycle, so this file never needs to
-# be regenerated to pick up a newer poll.
-fm_poll_lib='$quoted_lib'
-fm_poll_state='$quoted_state'
-fm_poll_id='$quoted_id'
-fm_poll_url='$quoted_url'
-fm_poll_marker='$quoted_marker'
+META_TMP=
+pr_check_cleanup() {
+  fm_pr_poll_cleanup
+  [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
+}
+trap pr_check_cleanup EXIT
+trap 'exit 1' HUP INT TERM
+fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
+  || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
-# shellcheck source=bin/fm-poll-lib.sh
-if [ ! -r "\$fm_poll_lib" ] || ! . "\$fm_poll_lib"; then
-  if [ ! -e "\$fm_poll_marker" ]; then
-    : > "\$fm_poll_marker" 2>/dev/null || true
-    echo "poll broken: cannot load \$fm_poll_lib; merge polling for '\$fm_poll_url' is not running"
-  fi
-  exit 0
-fi
+META_DEVICE=$(fm_pr_file_device "$META") || exit 1
+STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
+[ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
+META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in
+    pr=*|pr_head=*) ;;
+    *) printf '%s\n' "$line" >> "$META_TMP" || exit 1 ;;
+  esac
+done < "$META"
+printf 'pr=%s\n' "$URL" >> "$META_TMP" || exit 1
+[ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
+chmod 0600 "$META_TMP" || exit 1
+fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" || exit 1
+fm_pr_metadata_identity_parse "$META_TMP" || exit 1
+[ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
+  && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
+  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
+fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
+mv -f -- "$META_TMP" "$META" || exit 1
+META_TMP=
+fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || exit 1
+fm_pr_metadata_identity_parse "$META" || exit 1
+[ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
+  && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
+  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
 
-fm_poll_run "\$fm_poll_state" "\$fm_poll_id" "\$fm_poll_url"
-EOF
-echo "armed: state/$ID.check.sh polls $URL"
+fm_pr_poll_publish_prepared || { echo "error: could not publish PR poll" >&2; exit 1; }
+printf 'armed: state/%s.check.sh\n' "$ID"
 
-# The no-mistakes watch is arming a second, richer watcher on the same PR, so it
-# must not be able to take the poll (or the PR record) down with it: it runs last
-# and its outcome line is informational either way. fm-nm-watch.sh refuses any
-# mode but direct-PR, so a no-mistakes-mode task's own pipeline watcher is never
-# replaced by an escalate-only external one.
-if [ "$ARM_WATCH" = yes ] && [ -f "$META" ] &&
-  [ "$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)" = direct-PR ]; then
+if [ "$ARM_WATCH" = yes ] \
+  && [ "$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)" = direct-PR ]; then
   "$FM_ROOT/bin/fm-nm-watch.sh" "$ID" "$URL" || true
 fi

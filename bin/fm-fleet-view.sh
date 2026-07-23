@@ -64,7 +64,7 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   "Schema: \(.schema)",
   "Home: \(.fm_home)",
   "",
-  "## In Flight",
+  "## Under Way",
   (if (.tasks | length) == 0 then
     "No live task metadata found."
    else

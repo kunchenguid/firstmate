@@ -66,7 +66,10 @@ test_return_gate_orders_catchup_before_bearings() {
   date +%s > "$dir/home/state/.afk"
   printf 'repair-task.status: blocked synthetic dependency\n' > "$dir/home/state/.subsuper-escalations"
   printf 'fm away-mode inject WEDGED: 4555s undelivered\n' > "$dir/home/state/.subsuper-inject-wedged"
-  printf '1784074271\t2\tsignal\trepair-task.status\tsignal: synthetic status\n' > "$dir/home/state/.fake-drain"
+  {
+    printf '1784074271\t2\tsignal\trepair-task.status\tsignal: synthetic status\n'
+    printf 'wake annotation: latest wake-EVENT observed at drain, not current state: repair-task.status: blocked synthetic dependency\n'
+  } > "$dir/home/state/.fake-drain"
 
   set +e
   out=$(run_return "$dir" begin)
@@ -77,6 +80,8 @@ test_return_gate_orders_catchup_before_bearings() {
   [ -s "$gate" ] || fail "return begin did not persist its fail-closed catch-up gate"
   assert_contains "$out" 'firstmate-actionable blocker: repair-task [key=synthetic-dependency]' "return output did not assign blocker remediation to Firstmate"
   grep -F $'evidence\twake\t1784074271' "$gate" >/dev/null || fail "drained wake evidence was not retained in the durable gate"
+  grep -F $'evidence\twake\twake annotation: latest wake-EVENT observed at drain, not current state: repair-task.status: blocked synthetic dependency' "$gate" >/dev/null \
+    || fail "the separate drain annotation was not retained as away-return evidence"
   grep -F $'evidence\twedge\tfm away-mode inject WEDGED: 4555s undelivered' "$gate" >/dev/null || fail "wedge evidence was not retained in the durable gate"
   grep -F $'evidence\tescalation\trepair-task.status: blocked synthetic dependency' "$gate" >/dev/null || fail "buffered escalation evidence was not retained in the durable gate"
   [ "$(wc -l < "$dir/home/stop.log" | tr -d ' ')" -eq 1 ] || fail "return begin did not stop away mode exactly once"

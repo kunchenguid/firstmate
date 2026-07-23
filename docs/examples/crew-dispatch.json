@@ -16,9 +16,11 @@
         { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
         { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
       ],
-      "select": "quota-balanced",
-      "why": "Use a strong coding profile for broad design and implementation work."
+      "why": "Arrays are quota-aware automatically, so use a strong coding profile with the most available relevant quota."
     }
   ],
-  "default": { "harness": "codex", "model": "gpt-5.5", "effort": "medium" }
+  "default": [
+    { "harness": "codex", "model": "gpt-5.5", "effort": "medium" },
+    { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium" }
+  ]
 }

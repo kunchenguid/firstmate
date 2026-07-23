@@ -410,6 +410,10 @@ process_secondmate() {
       return 0
     fi
     FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
+    if [ "$nudge_requires_instr" = yes ] && [ -n "$FF_INSTR" ] \
+      && type fm_ff_after_instruction_update >/dev/null 2>&1; then
+      fm_ff_after_instruction_update "$id" "$home_real" "$window" "$FF_INSTR"
+    fi
   fi
 }
 

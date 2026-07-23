@@ -31,19 +31,23 @@ A failed intermediate step leaves the hold open.
 ## Structured read surfaces
 
 `bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)` and `(hold-kind: captain)` metadata alongside existing backlog fields.
-Its secondmate-home summary classifies an active captain hold as `captain_decision` and preserves the owning home.
+It resolves every repeated `blocked-by:` edge against structured Done records, keeps missing blockers unresolved, and classifies only an unblocked captain hold as actionable.
+Its secondmate-home summary classifies an actionable captain hold as `captain_decision` and preserves blocked captain holds as queued work in the owning home.
 
-`bin/fm-bearings-snapshot.sh` projects active captain holds into `decisions_open` and excludes them from ordinary queued gates.
+`bin/fm-bearings-snapshot.sh` projects actionable captain holds into `decisions_open` and leaves blocked captain holds in ordinary queued gates.
 It excludes completed kind `captain` records from Recently Landed.
 The projection remains read-only and does not inspect historical prose.
 
 ## Verification record
 
 Verification date: 2026-07-14.
+Additional quoted `blocked_by` regression verification date: 2026-07-17.
+Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
+A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -55,15 +59,20 @@ ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, an
 ok - completion and verification validate origins before constructing paths
 ok - ended visual review follows the same decision-hold completion owner
 ok - resolved findings and decision-like prose do not create false holds
+ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
+ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
+ok - backlog normalization preserves strict roles and resolves every blocker compatibly
 ok - durable captain-held transfer closes the duplicate live status decision
 ok - snapshot parses tasks-axi rows and respects operational overrides
 
 $ bash tests/fm-bearings-snapshot.test.sh
 ok - a completed scout with decision-like report prose is a pointer, not pending
 ok - action-free items (working/done/queued/landed) do not leak into Captain's Call
+ok - mixed secondmate roles, partial state, and captain readiness project independently
+ok - main and secondmate captain actionability use the same blocker readiness
 
 $ bash tests/fm-brief.test.sh
 ok - fm-brief.sh: investigation and visual-review completions load the shared decision policy
