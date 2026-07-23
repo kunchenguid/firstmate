@@ -81,6 +81,13 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   When config/founder-brief contains telegram-mandatory and its protocol proof
+#   is green, every new task id requires an acknowledged `assignment` receipt
+#   from fm-founder-brief.sh before any backend task/session/worktree creation.
+#   The owner command contains only the affected automation during an incident;
+#   ordinary Telegram conversation remains independently active.
+#   An existing state/<id>.meta marks a recovery and is grandfathered, so this
+#   gate never interrupts already-running work.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -371,6 +378,9 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+if [ ! -f "$STATE/$ID.meta" ]; then
+  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-founder-brief.sh" verify "$ID" assignment
+fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2

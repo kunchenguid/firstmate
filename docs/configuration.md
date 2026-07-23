@@ -51,6 +51,46 @@ Set the local, gitignored `config/backlog-backend` file to `manual` to force man
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
 
+## Telegram founder communications (config/founder-brief)
+
+Telegram founder communications are off when the local, gitignored `config/founder-brief` file is absent.
+One line containing `telegram-conversation` enables only ordinary two-way Telegram conversation.
+One line containing `telegram-mandatory` requests conversation plus the lifecycle and decision lanes.
+Mandatory automation remains contained until the current deterministic regression receipt and the live question, work-request, and correction conversation canary are green.
+Once enabled, that mode requires a validated PRE Telegram delivery acknowledgment before a new task spawn and before a newly authorized phase begins.
+Material milestone, risk, blocker, and proof transitions update one latest-state record per task and produce a combined DURING digest grouped by project only when its canonical content changes.
+Each managed phase or task ends with an acknowledged POST communication containing outcome, proof, remaining limits, and next step; ordinary teardown enforces it while grandfathering work that predates the feature.
+The mode is local to one Firstmate home and is not inherited into secondmate homes because each home must explicitly own its delivery channel and private credentials.
+The expected numeric chat identity, approved numeric user identity, and bot token stay in the home's private `.env` or process environment, never this config file or another tracked file.
+`bin/fm-founder-brief.sh --help` owns the brief schema, commands, exact private paths, validation, rendering, splitting, dedupe, retry, acknowledgment, atomic-write, and permission contracts.
+It renders only fixed owner-generated bold labels as Telegram HTML, escapes all brief-authored markup, and deterministically splits messages at a conservative 4096 decoded UTF-8-byte limit.
+The exact canonical rendered content, rather than incidental source formatting, is the content identity bound into dedupe and acknowledgment records.
+The gate is informational only and never waits for a captain reply or treats silence as approval.
+Ordinary Telegram conversation remains a separate two-way channel: `relay-once` durably preserves authenticated update, message, chat, sender, edit, reply, and thread identifiers, promptly acknowledges each accepted message in-channel, and advances the shared relay offset only after durable classification.
+After merge, the home owner replaces its private legacy poll body with one explicit `FM_HOME=<home> bin/fm-founder-brief.sh relay-once` invocation and never runs both pollers concurrently against the same bot offset.
+Firstmate writes the substantive response through `reply <update-id>`, which binds the response and every split part to the originating message with Telegram reply parameters.
+Firstmate then records the content-appropriate result through `outcome <update-id>` as an answer, work route or completion, approval record or action, suggestion record, conversation answer, or correction steer.
+The conversation inbox and response receipts remain separate from PRE, DURING, POST, decision, and callback records, so no lifecycle renderer consumes ordinary chat.
+Project-grouped decision digests use opaque inline-button identifiers and require the exact approved chat and user, current decision hash, acknowledged message, unexpired binding, and unused decision identity before an atomic receipt can become actionable.
+Decision ids and digest-global option numbers remain stable across repeats.
+Materially changed decision text or options require a higher version, durably supersede the old binding without remapping its numbers, and require a new exact-content selection even when the earlier version was answered.
+Every option also receives a digest-global number; an exact numeric reply is authoritative only when it replies to the currently acknowledged decision message or exactly one unused decision is open, and it must pass the same content, identity, expiry, one-use, stale, and replay checks as its button.
+An unavailable or ambiguous bare number receives clarification, while numeric prose and a reply to an older digest remain ordinary conversation and grant no authority.
+An authenticated button records only the exact selected option and does not change existing merge, ask-user, destructive, irreversible, credential, or security-sensitive authority.
+Every subsequent DURING and POST message appends a compact project-grouped Pending approvals section with each open decision's stable id, version, age, context, recommendation, and numbered options.
+When no lifecycle update refreshes that visibility, the common watcher runs `remind-decisions` after ordinary relay checks and reissues one full batched approval bundle on a bounded cadence.
+The optional private `config/founder-brief-reminder-seconds` file contains one integer from 900 through 43200; absence selects 21600 seconds.
+The cadence and exact current pending-content hash form the reminder dedupe identity, survive watcher restart, stop immediately after resolution, and never advance or inspect the conversation inbox.
+Any reminder failure leaves its delivery evidence durable, contains only decision automation, records a lane incident, and surfaces one bounded deduplicated diagnostic while conversation remains active.
+`ingest-update` claims only this feature's `fmb1:` callbacks and returns ordinary text or foreign updates untouched with exit 3.
+`regression-run`, `conversation-canary-verify`, `canary-delivery`, and `canary-buttons` are explicit firstmate-owned checks after merge; the button canary has no authority and never creates an approval.
+Conversation, lifecycle, and decision are separate durable lanes.
+A lifecycle canary failure contains only PRE/DURING/POST, and a decision canary failure contains only decision automation, while ordinary conversation continues ingesting, acknowledging, replying, and routing normal work.
+A conversation failure is the highest-priority communication incident; every still-working direction and durable inbound/outbound retry remains active while the failure is surfaced through an available channel and repaired immediately.
+Each failure opens a private lane-scoped incident whose only valid progression is containment, diagnosis, repair, revalidation, then resolution.
+Containment is never terminal success and the affected automation cannot be restored until a fresh deterministic regression and fresh conversation, lifecycle, and decision canaries are all green.
+If repair remains incomplete, the incident stays open with its next concrete action and the rollout remains incomplete.
+
 ## Runtime backend (config/backend / FM_BACKEND)
 
 For spawn-capable adapters, the runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.

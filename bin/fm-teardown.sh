@@ -34,6 +34,10 @@
 # device. It refuses and preserves task state when that proof fails; otherwise
 # it removes the task's check, trust record, PR sidecar, publication record, and
 # quarantine entries with the rest of the volatile state.
+# A task first managed under mandatory founder communications also requires its
+# exact current phase's acknowledged POST receipt before ordinary teardown.
+# Pre-existing tasks are grandfathered, and explicit --force discard is not
+# misrepresented as a completed outcome.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -120,6 +124,9 @@ FM_LOCK_LOG_PREFIX=teardown
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+if [ "$FORCE" != --force ]; then
+  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-founder-brief.sh" verify-complete "$ID"
+fi
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)

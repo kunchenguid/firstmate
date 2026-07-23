@@ -513,9 +513,18 @@ exit 1
 SH
   cat >"$repo/$a" <<'SH'
 #!/usr/bin/env bash
-sleep 0.5
+attempt=0
+while [ "$attempt" -lt 500 ]; do
+  attempt=$((attempt + 1))
+  if [ -e "$SCHED_EVIDENCE/replacement-started" ]; then
+    echo "ok - slow fixture observed replacement refill"
+    exit 0
+  fi
+  sleep 0.01
+done
 touch "$SCHED_EVIDENCE/slow-done"
-echo "ok - slow fixture"
+echo "not ok - scheduler never refilled the completed slot"
+exit 1
 SH
   cat >"$repo/$b" <<'SH'
 #!/usr/bin/env bash
@@ -528,6 +537,7 @@ if [ -e "$SCHED_EVIDENCE/slow-done" ]; then
   echo "not ok - scheduler waited for oldest worker"
   exit 1
 fi
+touch "$SCHED_EVIDENCE/replacement-started"
 echo "ok - replacement fixture started before slow fixture finished"
 SH
   chmod +x "$runner" "$repo/$a" "$repo/$b" "$repo/$c" "$fake_bin/stat"

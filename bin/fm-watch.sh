@@ -41,6 +41,11 @@
 #   check: repository-intake
 #                          the daily registered-project scan found new/changed
 #                          GitHub work, an authority gate, blocker, or source gap
+# The slow-check sweep runs ordinary relay checks first, then calls the tracked
+# founder reminder owner last.
+# A due reminder is silent on success, while one bounded deduplicated failure
+# wakes Firstmate and leaves ordinary conversation plus its durable retries
+# independent.
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -489,6 +494,7 @@ FM_ACTIVE_CHECK_PGID=
 FM_CHECK_OUTPUT=
 FM_CHECK_RESULT=
 FM_CHECK_SIGNAL_PENDING=
+FM_FOUNDER_REMINDER_FAILURE=
 
 fm_check_output_cleanup() {
   [ -z "$FM_CHECK_OUTPUT" ] || rm -f -- "$FM_CHECK_OUTPUT"
@@ -546,6 +552,52 @@ run_check_capture() {
   fm_active_check_stop || return 1
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
   fm_check_output_cleanup
+}
+
+founder_reminder_tick() {
+  local mode_file owner output rc marker current tmp
+  FM_FOUNDER_REMINDER_FAILURE=
+  mode_file="$CONFIG/founder-brief"
+  owner="$FM_ROOT/bin/fm-founder-brief.sh"
+  marker="$STATE/.founder-brief-reminder-error"
+  [ -f "$mode_file" ] && [ ! -L "$mode_file" ] || return 0
+  grep -qx 'telegram-mandatory' "$mode_file" 2>/dev/null || return 0
+  if [ ! -f "$owner" ] || [ -L "$owner" ] || [ ! -x "$owner" ]; then
+    output="founder reminder owner is missing or unsafe"
+    rc=1
+  else
+    output=$(FM_HOME="$FM_HOME" FM_ROOT="$FM_ROOT" "$owner" remind-decisions 2>&1)
+    rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    rm -f -- "$marker" 2>/dev/null || true
+    return 0
+  fi
+  output=$(printf '%s\n' "$output" | head -n 1 | cut -c 1-500)
+  [ -n "$output" ] || output="founder reminder failed without a diagnostic"
+  current=$(cat "$marker" 2>/dev/null || true)
+  [ "$current" != "$output" ] || return 0
+  tmp=$(mktemp "$STATE/.founder-brief-reminder-error.XXXXXX") || {
+    FM_FOUNDER_REMINDER_FAILURE="$output"
+    return 1
+  }
+  chmod 0600 "$tmp" || {
+    rm -f -- "$tmp"
+    FM_FOUNDER_REMINDER_FAILURE="$output"
+    return 1
+  }
+  printf '%s\n' "$output" > "$tmp" || {
+    rm -f -- "$tmp"
+    FM_FOUNDER_REMINDER_FAILURE="$output"
+    return 1
+  }
+  mv -f -- "$tmp" "$marker" || {
+    rm -f -- "$tmp"
+    FM_FOUNDER_REMINDER_FAILURE="$output"
+    return 1
+  }
+  FM_FOUNDER_REMINDER_FAILURE="$output"
+  return 1
 }
 
 # Surfaced-marker bookkeeping for the heartbeat backstop. The watcher records the
@@ -923,6 +975,16 @@ while :; do
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
+      touch "$STATE/.last-check"
+      wake "$reason"
+    fi
+    # Ordinary conversation checks above always get the first chance to ingest,
+    # acknowledge, and surface captain messages.
+    # Only after that lane is clear may the bounded pending-decision scheduler
+    # send a due reminder.
+    if ! founder_reminder_tick; then
+      reason="check: founder-brief-reminder: $FM_FOUNDER_REMINDER_FAILURE"
+      fm_wake_append check founder-brief-reminder "$reason" || exit 1
       touch "$STATE/.last-check"
       wake "$reason"
     fi

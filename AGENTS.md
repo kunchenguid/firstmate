@@ -67,6 +67,8 @@ config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "de
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
 config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = default tasks-axi backend, "manual" = force routine backlog updates to hand-editing; inherited by secondmate homes (section 10)
+config/founder-brief  optional Telegram founder-communication mode; LOCAL, gitignored; absent = off, "telegram-conversation" = ordinary two-way chat only, "telegram-mandatory" = chat plus proof-gated PRE/DURING/POST and decision delivery; not inherited (docs/configuration.md "Telegram founder communications")
+config/founder-brief-reminder-seconds  optional pending-approval reminder cadence from 900 through 43200 seconds; LOCAL, gitignored, absent = 21600; not inherited (docs/configuration.md "Telegram founder communications")
 config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend (docs/tmux-backend.md), while herdr, zellij, orca, and cmux are experimental spawn backends (docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - herdr and cmux can also be selected by runtime auto-detection, zellij and orca never are (always explicit), and codex-app is not accepted; see docs/codex-app-backend.md; not inherited into secondmate homes
 config/herdr-presentation-spaces  optional presence flag for Herdr's default-off disposable single-task visual projection; LOCAL, gitignored; inherited by secondmate homes; see docs/herdr-backend.md "Optional disposable single-task presentation spaces"
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
@@ -80,7 +82,13 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   projects.md        thin fleet navigation registry; firstmate-private, parsed by fm-project-mode.sh (section 6)
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
+  <id>/founder-brief.md  private informational pre-work brief input owned by bin/fm-founder-brief.sh
+  <id>/founder-during.md and <id>/founder-post.md  private material-state and completion inputs owned by bin/fm-founder-brief.sh
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
+  founder-brief-decisions/ project-grouped decision digest inputs; private, gitignored, and owned by bin/fm-founder-brief.sh
+  telegram-replies/ substantive ordinary-chat response inputs keyed by Telegram update id; bin/fm-founder-brief.sh
+  telegram-outcomes/ content-appropriate handling records for questions, work, approvals, suggestions, conversation, and corrections; bin/fm-founder-brief.sh
+  telegram-protocol-incidents/ bounded lane-incident diagnostics; bin/fm-founder-brief.sh
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
@@ -97,6 +105,16 @@ state/               volatile runtime signals; gitignored
   .pr-check-migration-scan-v1  private marker proving the non-executing scan disabled every unsafe legacy check; .pr-check-migration-v1 separately records completed private repairs
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
+  founder-brief-outbox/ founder pre-work brief delivery records; private, atomic, and home-scoped; bin/fm-founder-brief.sh
+  founder-brief-responses/ staged Telegram acknowledgments retained for restart-safe recovery; bin/fm-founder-brief.sh
+  founder-brief-receipts/ validated delivery acknowledgments that gate new work phases; bin/fm-founder-brief.sh
+  founder-brief-active/ latest material state per active task for project-grouped DURING digests; bin/fm-founder-brief.sh
+  founder-brief-buttons/ and founder-brief-approvals/ opaque decision bindings and one-use authenticated selections; bin/fm-founder-brief.sh
+  founder-brief-pending-visibility.json  latest acknowledged lifecycle or reminder visibility for the exact current pending-decision set; bin/fm-founder-brief.sh
+  telegram-inbox/ authenticated ordinary Telegram messages and edits with durable update/message/chat/sender/thread bindings; bin/fm-founder-brief.sh
+  telegram-conversation-receipts/ substantive response bindings back to each originating Telegram message; bin/fm-founder-brief.sh
+  telegram-conversation-outcomes/ durable proof that each message received its content-appropriate result; bin/fm-founder-brief.sh
+  telegram-protocol-incidents/ lane-scoped containment, diagnosis, repair, revalidation, and resolution state; bin/fm-founder-brief.sh
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
   x-context/         generated X-mode durable per-request reply context and one-wake offer markers, keyed by request_id; survives inbox cleanup and expires within seven days (section 14; bin/fm-x-lib.sh)
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
@@ -147,6 +165,7 @@ A lock-refused session must not spawn, steer, merge, drain the wake queue, repai
 Bootstrap detects first, asks for consent, and installs only after the captain approves in the current session.
 Do not dispatch until the required tools are present and GitHub authentication is good.
 Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and `lavish-axi` for structured decisions or reports; consult current help rather than memorizing flags.
+Report a browser or email action as successful only after destination-side postcondition evidence confirms the intended durable result; a clicked control, submitted form, transient toast, or accepted request is never sufficient proof by itself.
 A silent bootstrap section needs no action; for any printed actionable diagnostic line, load `bootstrap-diagnostics` and follow its owner procedure.
 `BOOTSTRAP_INFO:` lines are completed no-action facts and do not require loading a skill.
 `secondmate-provisioning` owns startup secondmate sync, liveness, and inherited local-material convergence.
@@ -237,6 +256,10 @@ Load `diagnostic-reasoning` before scoping a reported bug and before acting on a
 Classify work as dispatchable when it does not overlap work under way, or queued and blocked when it touches the same project subsystem or depends on unlanded work.
 Dispatch independent work immediately with no concurrency cap, serialize coarse overlaps, and record blockers durably.
 Write the task-specific brief under section 11 before spawning.
+When `config/founder-brief` enables mandatory delivery and its protocol proof is green, run `bin/fm-founder-brief.sh phase <task-id> <phase>` before every new assignment or newly authorized phase and continue immediately after its Telegram acknowledgment without waiting for a captain response; the command help owns the full contract, while `fm-spawn.sh` and `fm-promote.sh` enforce the mechanically classifiable boundaries.
+At a material milestone, risk, blocker, or proof transition, update the task's DURING input and run `bin/fm-founder-brief.sh during <task-id> <phase>`; it sends one current project-grouped digest and suppresses unchanged chatter.
+Before declaring a managed phase or task complete, update its POST input and run `bin/fm-founder-brief.sh post <task-id> <phase>`; ordinary teardown enforces the acknowledged POST while grandfathering tasks that predate the feature.
+Steer any later captain change into the active work through the ordinary supervision path.
 
 ### Dispatch and supervision handoff
 
@@ -266,6 +289,15 @@ The path's worker, automated gates, and captain approval remain authoritative:
 Delivery mode and `yolo` are orthogonal.
 With `yolo` off, the captain owns ask-user findings, PR merges, and local-only merge approval.
 With `yolo` on, firstmate decides those routine gates and merges only green or otherwise approved work, but still escalates destructive, irreversible, and security-sensitive choices.
+When an explicit captain decision is required and founder communications are enabled, prepare and deliver the project-grouped decision digest through `bin/fm-founder-brief.sh`; act only on its authenticated one-use callback receipt after `ready_to_act=true`, never on message delivery, failure, silence, or an unbound reply.
+Every subsequent DURING or POST includes the compact current pending-decision set, and the common watcher calls `remind-decisions` only after ordinary relay checks so a due project-grouped reminder cannot consume or outrank conversation.
+Decision ids and option numbers stay stable across repeats; changed text or options require a higher version, supersede the old binding, and require a new exact-content choice.
+The callback records an exact option but does not expand existing authority for merges, ask-user findings, destructive or irreversible actions, credentials, or security-sensitive choices.
+Route only `fmb1:` callback updates to `ingest-update`; ordinary text and foreign callbacks remain owned by their existing relay path.
+Run the tracked `relay-once` path for ordinary Telegram conversation, inspect each durable `state/telegram-inbox/<update-id>.json`, send the substantive answer with `reply <update-id>`, act through normal Firstmate handling, and record the content-appropriate result with `outcome <update-id>`; PRE/DURING/POST never replaces or marks this two-way channel answered.
+An exact bare decision number resolves only against its replied-to current decision or the sole open decision; otherwise send clarification and grant no authority.
+A conversation incident is highest priority, while a lifecycle or decision canary failure contains only that affected automation and must never disable or delay conversation ingest, acknowledgment, reply, or normal action.
+Containment is never rollout success; keep the lane incident durable through diagnosis, repair, full deterministic and live revalidation, and restore only after every required proof is green.
 Never merge a red PR.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
@@ -295,6 +327,7 @@ A captain instruction to merge is explicit authority; `yolo` is the only standin
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 
 Tear down a ship task only after landing is confirmed.
+A task managed under mandatory founder communications must also have the current phase's acknowledged POST receipt; pre-existing work is grandfathered and explicit discard is not reported as successful completion.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.

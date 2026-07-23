@@ -13,7 +13,56 @@ WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-watcher-lock-tests.XXXXXX")
+FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT")
+WATCH_LOCK_OWN_PEER_PID=
+WATCH_LOCK_OWN_ARM_PID=
+WATCH_LOCK_OWN_HOME=
+
+stop_watcher_lock_owned_pid() {
+  local pid=$1 signal=$2 i=0
+  [ -n "$pid" ] || return 0
+  if ! is_live_non_zombie "$pid"; then
+    wait "$pid" 2>/dev/null || true
+    return 0
+  fi
+  kill "-$signal" "$pid" 2>/dev/null || true
+  while [ "$i" -lt 20 ] && is_live_non_zombie "$pid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if is_live_non_zombie "$pid"; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+
+watcher_lock_test_cleanup() {
+  local state lock_pid lock_home lock_path lock_identity actual_identity
+  trap - EXIT HUP INT TERM
+  stop_watcher_lock_owned_pid "$WATCH_LOCK_OWN_ARM_PID" TERM
+  stop_watcher_lock_owned_pid "$WATCH_LOCK_OWN_PEER_PID" KILL
+  if [ -n "$WATCH_LOCK_OWN_HOME" ]; then
+    state="$WATCH_LOCK_OWN_HOME/state"
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    lock_home=$(cat "$state/.watch.lock/fm-home" 2>/dev/null || true)
+    lock_path=$(cat "$state/.watch.lock/watcher-path" 2>/dev/null || true)
+    lock_identity=$(cat "$state/.watch.lock/pid-identity" 2>/dev/null || true)
+    actual_identity=
+    if [ -n "$lock_pid" ] && [ "$lock_home" = "$WATCH_LOCK_OWN_HOME" ] && [ "$lock_path" = "$WATCH" ]; then
+      actual_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$lock_pid" 2>/dev/null || true)
+    fi
+    if [ -n "$actual_identity" ] && [ "$actual_identity" = "$lock_identity" ]; then
+      stop_watcher_lock_owned_pid "$lock_pid" TERM
+    fi
+  fi
+  fm_test_cleanup
+}
+
+trap watcher_lock_test_cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 mark_pr_check_migration_complete() {
   local state=$1
@@ -438,14 +487,36 @@ test_watch_restart_rejects_reused_pid() {
 }
 
 test_watch_restart_attaches_to_healthy_peer() {
-  local dir state fakebin out peer identity armpid status i
+  local dir state fakebin out ready peer identity armpid status i lock_pid
   dir=$(make_case restart-healthy-peer)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
+  ready="$dir/peer.ready"
+  WATCH_LOCK_OWN_HOME=$dir
   mark_pr_check_migration_complete "$state"
-  node -e 'process.on("SIGTERM", () => {}); setTimeout(() => {}, 300000)' &
+  node -e '
+    const fs = require("fs");
+    const ready = process.argv[1];
+    process.on("SIGTERM", () => {});
+    const temporary = ready + "." + process.pid + ".tmp";
+    fs.writeFileSync(temporary, process.pid + "\n", { mode: 0o600 });
+    fs.renameSync(temporary, ready);
+    setTimeout(() => {}, 300000);
+  ' "$ready" &
   peer=$!
+  WATCH_LOCK_OWN_PEER_PID=$peer
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$ready" 2>/dev/null || true)" = "$peer" ] && is_live_non_zombie "$peer" && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ "$(cat "$ready" 2>/dev/null || true)" = "$peer" ] && is_live_non_zombie "$peer"; then
+    :
+  else
+    fail "TERM-resistant peer did not publish readiness while live"
+  fi
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
@@ -455,6 +526,7 @@ test_watch_restart_attaches_to_healthy_peer() {
   touch "$state/.last-watcher-beat"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --restart > "$out" &
   armpid=$!
+  WATCH_LOCK_OWN_ARM_PID=$armpid
   i=0
   while [ "$i" -lt 80 ]; do
     grep -qF "watcher: attached pid=$peer" "$out" 2>/dev/null && break
@@ -462,14 +534,20 @@ test_watch_restart_attaches_to_healthy_peer() {
     i=$((i + 1))
   done
   grep -qF "watcher: attached pid=$peer" "$out" || fail "restart did not attach to the verified healthy peer: $(cat "$out")"
+  ! grep -qF 'watcher: started' "$out" || fail "restart started a replacement behind the verified healthy peer: $(cat "$out")"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ "$lock_pid" = "$peer" ] || fail "restart changed the verified healthy peer lock to '$lock_pid'"
   is_live_non_zombie "$armpid" || fail "restart arm exited instead of following the healthy peer"
   is_live_non_zombie "$peer" || fail "restart killed a TERM-resistant peer unexpectedly"
   kill -KILL "$peer" 2>/dev/null || true
   wait "$peer" 2>/dev/null || true
+  WATCH_LOCK_OWN_PEER_PID=
   wait_for_exit "$armpid" 80
   status=$?
+  WATCH_LOCK_OWN_ARM_PID=
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "restart arm did not fail after its attached peer ended without a successor (status $status)"
   grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$out" || fail "restart arm did not surface the attached cycle end"
+  WATCH_LOCK_OWN_HOME=
   pass "watch restart attaches to a verified healthy peer and later surfaces a successor gap"
 }
 

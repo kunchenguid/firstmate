@@ -6,6 +6,10 @@
 # (inventory scratch state, reset to a clean default-branch base, carry over only
 # intended fix changes, create branch fm/<task-id>, implement, then report done
 # according to the project's delivery mode).
+# When config/founder-brief contains telegram-mandatory and its protocol proof is
+# green, promotion first requires an acknowledged `implementation` receipt from
+# fm-founder-brief.sh.
+# This is a delivery-only gate and never waits for a captain reply or approval.
 # Usage: fm-promote.sh <task-id>
 set -eu
 
@@ -18,6 +22,7 @@ ID=$1
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
+FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-founder-brief.sh" verify "$ID" implementation
 
 TMP="$META.tmp"
 grep -v '^kind=' "$META" > "$TMP"
