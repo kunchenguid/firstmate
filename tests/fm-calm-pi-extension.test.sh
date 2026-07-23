@@ -39,6 +39,8 @@ test_static_contract() {
   assert_contains "$text" 'calm = false' "Pi calm extension does not default to visible tool activity"
   assert_contains "$text" 'ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded())' "Pi calm extension does not redraw existing rows while preserving Ctrl+O state"
   assert_contains "$text" 'ctx.ui.onTerminalInput' "Pi calm extension does not scope hiding to interactive rendering"
+  assert_contains "$text" 'getKeybindings().matches(data, "tui.input.submit")' "Pi calm export boundary ignores the active submit keybinding"
+  assert_contains "$text" 'input !== "/share"' "Pi calm export boundary does not cover /share"
   assert_contains "$text" 'renderShell: "self"' "Pi calm extension cannot remove the complete tool shell"
   assert_contains "$text" 'built-in read images and custom/third-party tool rows stay visible' "Pi calm command description does not disclose both visibility boundaries"
   assert_contains "$text" 'built-in read images and custom/third-party tool rows remain visible' "Pi calm enabled status does not disclose both visibility boundaries"
@@ -76,7 +78,7 @@ import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
-const [{ ToolExecutionComponent }, { initTheme, theme }, { Text, setCapabilities }, { createToolHtmlRenderer }] = await Promise.all([
+const [{ ToolExecutionComponent }, { initTheme, theme }, { Text, getKeybindings, setCapabilities }, { createToolHtmlRenderer }] = await Promise.all([
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/tool-execution.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
   import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
@@ -245,29 +247,46 @@ const commandContext = {
 
 await handlers.get("session_start")({ reason: "startup" }, commandContext);
 await calmCommand.handler("", commandContext);
-editorText = "/export calm.html";
+async function assertStockHtmlRendering(command, submitData) {
+  editorText = command;
+  terminalInputHandler(submitData);
+  const htmlRenderer = createToolHtmlRenderer({
+    getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+    theme,
+    cwd: process.cwd(),
+  });
+  for (const [name, args, result] of cases.filter(([toolName]) => toolName === "grep" || toolName === "find")) {
+    const toolCallId = `${command}-${name}`;
+    const callHtml = htmlRenderer.renderCall(toolCallId, name, args);
+    const resultHtml = htmlRenderer.renderResult(
+      toolCallId,
+      name,
+      result.content,
+      result.details,
+      result.isError,
+    );
+    if (!callHtml || !resultHtml?.expanded) {
+      throw new Error(`${name} disappeared from ${command} HTML while calm mode was on`);
+    }
+  }
+  editorText = "";
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+await assertStockHtmlRendering("/export calm.html", "\r");
+getKeybindings().setUserBindings({ "tui.input.submit": "alt+s" });
+editorText = "/export remapped.html";
 terminalInputHandler("\r");
-const htmlRenderer = createToolHtmlRenderer({
+const unmatchedRenderer = createToolHtmlRenderer({
   getToolDefinition: (name) => tools.find((tool) => tool.name === name),
   theme,
   cwd: process.cwd(),
 });
-for (const [name, args, result] of cases.filter(([toolName]) => toolName === "grep" || toolName === "find")) {
-  const toolCallId = `export-${name}`;
-  const callHtml = htmlRenderer.renderCall(toolCallId, name, args);
-  const resultHtml = htmlRenderer.renderResult(
-    toolCallId,
-    name,
-    result.content,
-    result.details,
-    result.isError,
-  );
-  if (!callHtml || !resultHtml?.expanded) {
-    throw new Error(`${name} disappeared from HTML export while calm mode was on`);
-  }
+if (unmatchedRenderer.renderCall("unmatched-submit", "grep", { pattern: "alpha", path: "." })) {
+  throw new Error("ordinary non-submit input activated HTML export rendering");
 }
 editorText = "";
-await new Promise((resolve) => setTimeout(resolve, 0));
+await assertStockHtmlRendering("/share", "\x1bs");
 for (const { name, actual } of rows) {
   const rendered = actual.render(100);
   if (rendered.length !== 0) {
@@ -360,6 +379,7 @@ test_interactive_terminal_e2e() {
   restored_snapshot="$TMP_ROOT/restored.txt"
   mkdir -p "$project/.pi/extensions" "$config"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
+  printf '%s\n' '{"tui.input.submit":"alt+s"}' >"$config/keybindings.json"
   now=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
   cat >"$session_file" <<JSON
 {"type":"session","version":3,"id":"11111111-1111-4111-8111-111111111111","timestamp":"$now","cwd":"$project"}
@@ -386,7 +406,7 @@ JSON
   assert_contains "$(cat "$expanded_snapshot")" "CALM_E2E_OUTPUT" "ordinary Ctrl+O expansion hid tool activity while calm mode was off"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
   wait_for_text "$hidden_snapshot" "Tool activity is hidden where supported; built-in read images and custom/third-party tool rows remain visible." \
     || fail "/calm did not report hidden tool activity and its visibility boundaries"
   assert_not_contains "$(cat "$hidden_snapshot")" "CALM_E2E_OUTPUT" "/calm left tool result output in the transcript"
@@ -397,7 +417,7 @@ JSON
   assert_contains "$(cat "$hidden_snapshot")" "The deterministic tool example is complete." "/calm removed assistant conversation after a tool"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/export $export_file"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
   wait_for_text "$export_snapshot" "Session exported to: $export_file" \
     || fail "/export did not complete while calm mode was on"
   node - "$export_file" <<'JS' || fail "calm-mode HTML export omitted grep or find rendering"
@@ -412,7 +432,7 @@ for (const id of ["call_grep_e2e", "call_find_e2e"]) {
 JS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
   wait_for_text "$restored_snapshot" "Tool activity is visible." \
     || fail "second /calm did not report visible tool activity"
   assert_contains "$(cat "$restored_snapshot")" "CALM_E2E_OUTPUT" "second /calm did not restore tool result output"
@@ -421,8 +441,8 @@ JS
   hash_after=$(shasum -a 256 "$session_file" | awk '{print $1}')
   [ "$hash_before" = "$hash_after" ] || fail "/calm changed the persisted session or context data"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
-  pass "Pi calm text-row E2E proves default-off, hide, redraw restoration, unchanged persistence, and ordinary Ctrl+O behavior"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  pass "Pi calm text-row E2E proves remapped-submit export, default-off, hide, redraw restoration, unchanged persistence, and ordinary Ctrl+O behavior"
 }
 
 test_static_contract

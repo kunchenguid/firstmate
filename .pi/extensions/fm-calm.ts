@@ -19,7 +19,7 @@ import {
   createReadToolDefinition,
   createWriteToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { Box, Container, type Component } from "@earendil-works/pi-tui";
+import { Box, Container, getKeybindings, type Component } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
 
 type DefinitionFactory<TParams extends TSchema, TDetails, TState> = (
@@ -166,10 +166,16 @@ export default function (pi: ExtensionAPI) {
     exportRendering = false;
     removeTerminalInputHandler?.();
     removeTerminalInputHandler = ctx.ui.onTerminalInput((data) => {
-      if (!calm || (data !== "\r" && data !== "\n")) return;
+      if (!calm || !getKeybindings().matches(data, "tui.input.submit")) return;
 
       const input = ctx.ui.getEditorText().trim();
-      if (input !== "/export" && !input.startsWith("/export ")) return;
+      if (
+        input !== "/share" &&
+        input !== "/export" &&
+        !input.startsWith("/export ")
+      ) {
+        return;
+      }
 
       exportRendering = true;
       setTimeout(() => {
