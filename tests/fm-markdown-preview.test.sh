@@ -7,8 +7,13 @@ set -u
 
 HELPER="$ROOT/bin/fm-markdown-preview.py"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-markdown-preview.XXXXXX")
+LONG_LIVED_PID=
 
 cleanup() {
+  if [ -n "$LONG_LIVED_PID" ]; then
+    kill "$LONG_LIVED_PID" 2>/dev/null || true
+    kill -9 "$LONG_LIVED_PID" 2>/dev/null || true
+  fi
   rm -rf "$TMP_ROOT"
 }
 trap cleanup EXIT
@@ -18,6 +23,7 @@ cat >"$OPENER" <<'PY'
 #!/usr/bin/env python3
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -47,11 +53,25 @@ except urllib.error.HTTPError as error:
     (capture / "status").write_text(str(error.code), encoding="utf-8")
     (capture / "body").write_bytes(error.read())
     raise SystemExit(4)
+
+if os.environ.get("FM_PREVIEW_TEST_STAY_OPEN"):
+    (capture / "pid").write_text(str(os.getpid()), encoding="utf-8")
+    while True:
+        time.sleep(1)
 PY
 chmod +x "$OPENER"
 
 assert_present "$HELPER" "Markdown preview helper is missing"
 [ -x "$HELPER" ] || fail "Markdown preview helper must be executable"
+
+wait_for_file() {
+  local path=$1 attempt
+  for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ -e "$path" ] && return 0
+    sleep 0.05
+  done
+  fail "timed out waiting for test artifact $path"
+}
 
 test_safe_render_and_cleanup() {
   local source="$TMP_ROOT/safe.md" capture="$TMP_ROOT/safe-capture"
@@ -80,6 +100,7 @@ MD
     >"$TMP_ROOT/safe.out" 2>"$TMP_ROOT/safe.err" \
     || fail "safe Markdown preview failed: $(cat "$TMP_ROOT/safe.err")"
 
+  wait_for_file "$capture/body"
   assert_grep "http://127.0.0.1:" "$capture/url" \
     "preview did not bind to loopback"
   [ "$(cat "$capture/status")" = 200 ] \
@@ -159,6 +180,95 @@ PY
   pass "Markdown preview bounds serving time and cleans up on timeout"
 }
 
+test_verified_delivery_detaches_long_lived_opener() {
+  local source="$TMP_ROOT/long-lived.md" capture="$TMP_ROOT/long-lived-capture"
+  local attempt
+  printf '# Foreground browser handler\n' >"$source"
+
+  FM_PREVIEW_TEST_CAPTURE="$capture" \
+    FM_PREVIEW_TEST_STAY_OPEN=1 \
+    "$HELPER" --opener "$OPENER" --timeout 2 "$source" \
+    >"$TMP_ROOT/long-lived.out" 2>"$TMP_ROOT/long-lived.err" \
+    || fail "verified delivery waited for or terminated its opener: $(cat "$TMP_ROOT/long-lived.err")"
+
+  wait_for_file "$capture/pid"
+  assert_present "$capture/pid" "long-lived opener did not record its pid"
+  LONG_LIVED_PID=$(cat "$capture/pid")
+  kill -0 "$LONG_LIVED_PID" 2>/dev/null \
+    || fail "verified delivery terminated the foreground browser handler"
+
+  kill "$LONG_LIVED_PID" 2>/dev/null || true
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$LONG_LIVED_PID" 2>/dev/null || break
+    sleep 0.05
+  done
+  if kill -0 "$LONG_LIVED_PID" 2>/dev/null; then
+    kill -9 "$LONG_LIVED_PID" 2>/dev/null || true
+  fi
+  LONG_LIVED_PID=
+  pass "verified delivery succeeds independently of opener lifetime"
+}
+
+test_inline_delimiter_scan_is_bounded() {
+  local source="$TMP_ROOT/delimiters.md" capture="$TMP_ROOT/delimiters-capture"
+  python3 - "$source" <<'PY'
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_bytes(b"# Delimiter load\n\n" + b"[" * (2 * 1024 * 1024) + b"\n")
+PY
+
+  if ! FM_PREVIEW_TEST_CAPTURE="$capture" \
+    python3 - "$HELPER" "$OPENER" "$source" <<'PY'
+import os
+import subprocess
+import sys
+
+try:
+    result = subprocess.run(
+        [sys.argv[1], "--opener", sys.argv[2], "--timeout", "2", sys.argv[3]],
+        capture_output=True,
+        env=os.environ.copy(),
+        text=True,
+        timeout=10,
+    )
+except subprocess.TimeoutExpired:
+    raise SystemExit(124)
+if result.returncode != 0:
+    sys.stderr.write(result.stderr)
+    raise SystemExit(result.returncode)
+PY
+  then
+    fail "delimiter-heavy Markdown exceeded its bounded render time"
+  fi
+  pass "inline delimiter scanning remains bounded"
+}
+
+test_expanded_render_verifies_in_full() {
+  local source="$TMP_ROOT/expanded.md" capture="$TMP_ROOT/expanded-capture"
+  local rendered_size
+  python3 - "$source" <<'PY'
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_bytes(b"# Expanded body\n\n" + b"&" * (2 * 1024 * 1024) + b"\n")
+PY
+
+  FM_PREVIEW_TEST_CAPTURE="$capture" \
+    "$HELPER" --opener "$OPENER" --timeout 2 "$source" \
+    >"$TMP_ROOT/expanded.out" 2>"$TMP_ROOT/expanded.err" \
+    || fail "expanded rendered body was not verified in full: $(cat "$TMP_ROOT/expanded.err")"
+
+  wait_for_file "$capture/body"
+  rendered_size=$(wc -c <"$capture/body" | tr -d ' ')
+  [ "$rendered_size" -gt $((8 * 1024 * 1024)) ] \
+    || fail "expanded render fixture did not exceed the source-byte verification bound"
+  pass "expanded rendered bodies verify against their own bounded length"
+}
+
 test_safe_render_and_cleanup
 test_changed_source_fails_closed
 test_server_wait_is_bounded
+test_verified_delivery_detaches_long_lived_opener
+test_inline_delimiter_scan_is_bounded
+test_expanded_render_verifies_in_full

@@ -9,6 +9,8 @@ Policy, serves only that in-memory result on an ephemeral 127.0.0.1 port, and
 opens the tokenized URL through a local desktop opener.
 The source digest is checked during the browser request so a changed file is
 never answered with the older rendering.
+A verified browser fetch is success independently of the opener process
+lifetime.
 The server exists only for a bounded wait and is shut down on success, failure,
 timeout, or interruption.
 
@@ -48,6 +50,8 @@ from urllib.parse import urlsplit
 
 
 MAX_SOURCE_BYTES = 8 * 1024 * 1024
+MAX_RENDERED_BYTES = 64 * 1024 * 1024
+INLINE_SCAN_FACTOR = 4
 DEFAULT_TIMEOUT = 12.0
 MIN_TIMEOUT = 0.1
 MAX_TIMEOUT = 30.0
@@ -144,11 +148,24 @@ def render_inline(source, depth=0):
     plain = []
     length = len(source)
     index = 0
+    remaining_scan = length * INLINE_SCAN_FACTOR
 
     def flush_plain():
         if plain:
             rendered.append(html.escape("".join(plain), quote=True))
             plain.clear()
+
+    def find_delimiter(marker, start):
+        nonlocal remaining_scan
+        if start >= length or remaining_scan <= 0:
+            return -1
+        stop = min(length, start + remaining_scan)
+        found = source.find(marker, start, stop)
+        if found == -1:
+            remaining_scan -= stop - start
+        else:
+            remaining_scan -= found + len(marker) - start
+        return found
 
     while index < length:
         if source[index] == "\\" and index + 1 < length:
@@ -161,7 +178,7 @@ def render_inline(source, depth=0):
             while marker_end < length and source[marker_end] == "`":
                 marker_end += 1
             marker = source[index:marker_end]
-            close = source.find(marker, marker_end)
+            close = find_delimiter(marker, marker_end)
             if close != -1:
                 flush_plain()
                 code = source[marker_end:close].strip(" ")
@@ -173,8 +190,10 @@ def render_inline(source, depth=0):
         link_start = source[index] == "["
         label_start = index + 2 if image_start else index + 1
         if image_start or link_start:
-            label_end = source.find("](", label_start)
-            target_end = source.find(")", label_end + 2) if label_end != -1 else -1
+            label_end = find_delimiter("](", label_start)
+            target_end = (
+                find_delimiter(")", label_end + 2) if label_end != -1 else -1
+            )
             if label_end != -1 and target_end != -1:
                 flush_plain()
                 label = source[label_start:label_end]
@@ -201,7 +220,7 @@ def render_inline(source, depth=0):
         matched_delimiter = False
         for marker, tag in (("**", "strong"), ("__", "strong"), ("~~", "del")):
             if source.startswith(marker, index):
-                close = source.find(marker, index + len(marker))
+                close = find_delimiter(marker, index + len(marker))
                 if close > index + len(marker):
                     flush_plain()
                     inner = source[index + len(marker) : close]
@@ -216,7 +235,7 @@ def render_inline(source, depth=0):
 
         if source[index] in "*_":
             marker = source[index]
-            close = source.find(marker, index + 1)
+            close = find_delimiter(marker, index + 1)
             if close > index + 1:
                 flush_plain()
                 rendered.append(
@@ -391,7 +410,7 @@ def render_document(source, title):
     lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     body = render_blocks(lines)
     safe_title = html.escape(title, quote=True)
-    return (
+    rendered = (
         "<!doctype html>\n"
         '<html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -410,6 +429,11 @@ def render_document(source, title):
         "</style></head><body>"
         f"{body}</body></html>\n"
     ).encode("utf-8")
+    if len(rendered) > MAX_RENDERED_BYTES:
+        raise PreviewError(
+            f"rendered preview exceeds {MAX_RENDERED_BYTES} bytes"
+        )
+    return rendered
 
 
 class PreviewState:
@@ -512,7 +536,7 @@ def verify_server(url, state):
     )
     try:
         with urllib.request.urlopen(request, timeout=2) as response:
-            body = response.read(MAX_SOURCE_BYTES + 1)
+            body = response.read(len(state.body) + 1)
             digest = response.headers.get("X-Firstmate-Source-SHA256")
     except urllib.error.HTTPError as error:
         if error.code == 409:
@@ -541,43 +565,31 @@ def open_and_wait(command, url, state, timeout):
             [*command, url],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
     except OSError as error:
         raise PreviewError(f"could not start local desktop opener: {error}") from error
 
     deadline = time.monotonic() + timeout
+    delivered = False
     try:
         while True:
             if state.stale.is_set():
                 raise PreviewError("source changed before preview delivery")
             if state.delivered.is_set():
-                break
+                delivered = True
+                return
             return_code = process.poll()
             if return_code not in (None, 0):
-                error = process.stderr.read().strip()
-                detail = f": {error}" if error else ""
-                raise PreviewError(
-                    f"local desktop opener exited {return_code}{detail}"
-                )
+                raise PreviewError(f"local desktop opener exited {return_code}")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise PreviewError("timed out waiting for the browser to fetch the preview")
             state.delivered.wait(min(0.05, remaining))
-
-        try:
-            return_code = process.wait(timeout=1)
-        except subprocess.TimeoutExpired as error:
-            raise PreviewError(
-                "local desktop opener did not exit after opening the preview"
-            ) from error
-        if return_code != 0:
-            error = process.stderr.read().strip()
-            detail = f": {error}" if error else ""
-            raise PreviewError(f"local desktop opener exited {return_code}{detail}")
     finally:
-        stop_process(process)
+        if not delivered:
+            stop_process(process)
 
 
 def parse_args(argv):
