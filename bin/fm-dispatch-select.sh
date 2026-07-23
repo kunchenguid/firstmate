@@ -14,8 +14,12 @@
 #
 # This header is the single owner of quota-aware selection mechanics:
 #   - A profile object resolves to itself for backward compatibility.
-#   - Every profile array is quota-aware, whether or not it carries the legacy
-#     explicit `select: "quota-balanced"` strategy.
+#   - A profile array that declares a `launch` on any of its profiles resolves
+#     to its first element and never consults quota, even under an explicit
+#     `select`: quota readings cannot see a launch identity such as a
+#     gateway-billed account, so they must not choose one.
+#   - Every other profile array is quota-aware, whether or not it carries the
+#     legacy explicit `select: "quota-balanced"` strategy.
 #   - It runs the installed quota-axi --json (or the --quota-json fixture).
 #   - Candidates map to the quota provider and product their model consumes:
 #     direct Claude -> Claude, direct Codex -> Codex, direct Grok -> Grok Build,
@@ -201,6 +205,19 @@ is_array=$(printf '%s\n' "$SPEC_JSON" | jq -r '
 ')
 if [ "$is_array" != true ] && [ -z "$select_strategy" ]; then
   log "selection basis: single profile"
+  clean_profile_at 0
+  exit 0
+fi
+
+# Quota may drive a reminder, never a switch. A launch variant names a concrete
+# launch identity - a gateway-billed account, say - and quota-axi cannot see one
+# at all, so letting quota choose between a launch-carrying profile and a plain
+# one would route billing identity on a reading that is blind to it. An array
+# that offers a launch variant therefore resolves to its first element, and does
+# so even under an explicit select, because the contract is absolute rather than
+# a default. Arrays with no launch stay quota-aware.
+if [ "$(printf '%s\n' "$profiles_json" | jq -r 'any(.[]; (.launch? | type) == "string")')" = true ]; then
+  log "selection basis: first profile (array declares a launch variant; no selector ever picks a launch identity)"
   clean_profile_at 0
   exit 0
 fi

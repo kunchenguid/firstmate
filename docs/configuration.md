@@ -314,9 +314,10 @@ Profile `model`, `effort`, and `launch` fields and rule `why` are optional.
 `use.launch` names a launch variant from `config/harness-overrides.json` for that profile's harness, and is passed straight through to `fm-spawn.sh --launch`; see "Named launch variants" above for what a variant is and why no selector ever chooses one.
 Bootstrap cross-checks every `launch` against the declared variants and reports a stale one as `CREW_DISPATCH: invalid config/crew-dispatch.json - launch names an undeclared harness variant: <harness>.<name>`, because the two files are edited independently and a rename would otherwise only surface as a refused spawn.
 `select` is optional and currently supports `quota-balanced`.
-Absent `select` means use the first array element, or the only object in the single-object form; the first array element is the deterministic tie-break and the ultimate fallback.
+Absent `select`, the single-object form resolves to that object and an array is an implicit quota-aware choice, so an array needs no selector property.
+An array in which any profile declares `launch` is the exception: it resolves to its first element and never consults quota, and that holds even under an explicit `select`, because a quota reading cannot see a launch identity such as a gateway-billed account.
+For every other array, when quota data cannot be read or no candidate can be scored, selection falls back uniformly at random across the valid candidates rather than to the first element.
 An omitted model or effort means the selected harness uses its own default for that axis.
-Every profile array is an implicit quota-aware choice and does not need a selector property.
 `select: "quota-balanced"` remains accepted on rules for compatibility and has the same behavior as an implicit array choice.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array selection path before falling back to `config/crew-harness`.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
