@@ -104,6 +104,25 @@ pi
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so both tracked `.pi/extensions/*.ts` files auto-load.
 
+### Experimental OpenAI server compaction for Pi
+
+Firstmate declares [`pi-openai-server-compaction`](https://github.com/algal/pi-openai-server-compaction) as a project-local Pi package pinned to immutable revision `c6d593087709e9481223dc6c6c2269b371b5e055`.
+The package is experimental and remains inactive through `"autoload": false` because the current Homebrew Pi 0.80.6 is outside its required Pi range of `>=0.80.9 <0.81.0`; Node 22 or newer is also required.
+After project trust is approved, Pi may automatically clone and install the declared package under the ignored `.pi/git/` tree, but it does not execute the extension while autoload is off.
+
+The conservative tracked trial enables direct `openai/*` and `openai-codex/*`, leaves Azure disabled, leaves `previous_response_id` and the custom WebSocket continuation path disabled, and enables activation notifications.
+When activated, direct OpenAI requests still gain `store: true` and `context_management`, and compaction sends conversation context to OpenAI.
+There is no setting that disables `store: true` while keeping the direct OpenAI integration active.
+OpenAI Codex keeps Pi's built-in transport and receives reconstructed remote compaction history only after a compaction boundary.
+Opaque provider artifacts and usage metadata are saved in local Pi session JSONL, while Pi also retains a portable text summary for model switches, tree operations, forks, and no-extension recovery.
+
+Activation requires an explicitly approved compatible Pi runtime, followed by changing the package's `autoload` value in `.pi/settings.json` to `true` and restarting Pi or running `/reload`.
+The approved temporary runtime is npm Pi 0.80.10 invoked explicitly as `~/.npm-global/bin/pi`; do not replace the earlier Homebrew path entry or auto-upgrade this runtime to Pi 0.81.x while the extension requires `<0.81.0`.
+Rollback is the inverse one-line tracked change back to `false`; Pi's normal local compaction remains available, and `--no-extensions` is an emergency bypass that also disables firstmate's Pi watcher and turn-end extensions.
+Return to `/opt/homebrew/bin/pi` and uninstall the temporary npm runtime only after Homebrew offers a version inside the pinned extension's audited Pi range.
+To update the package, audit a new upstream commit first, change the immutable source revision, repeat the isolated validation, and never run the update in the live primary Pi session.
+The dated security and data-flow audit, exact validation commands, provider behavior, residual dependency risk, and rollback mechanics are in [docs/pi-openai-server-compaction.md](docs/pi-openai-server-compaction.md).
+
 ### Talk to it
 
 ```sh
@@ -192,6 +211,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/orca-backend.md](docs/orca-backend.md) - setup guide for the experimental Orca backend, plus its lifecycle notes and known gaps.
 - [docs/cmux-backend.md](docs/cmux-backend.md) - setup guide for the experimental cmux backend, plus its verification notes and known gaps.
 - [docs/codex-app-backend.md](docs/codex-app-backend.md) - Codex App backend boundary, evidence, and rollout contract.
+- [docs/pi-openai-server-compaction.md](docs/pi-openai-server-compaction.md) - the pinned experimental Pi package, privacy and request changes, security audit, activation gate, validation evidence, and rollback procedure.
 - [docs/gitlab-merge-watch.md](docs/gitlab-merge-watch.md) - how the merge watch follows a GitLab merge request on any instance, and the evidence behind it.
 - [docs/turnend-guard.md](docs/turnend-guard.md) - the primary session's structural "no turn ends blind" backstop: verified per-harness hook mechanisms, scoping, loop safety, and fail-open tradeoffs.
 - [docs/supervision-protocols/](docs/supervision-protocols/) - rendered primary-harness watcher protocols for Claude, Codex, OpenCode, Pi, Grok, and unknown harness fallback.

@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "includeAzure": false,
+  "thresholdRatio": 0.7,
+  "compactThreshold": 0,
+  "usePreviousResponseId": false,
+  "notify": true
+}

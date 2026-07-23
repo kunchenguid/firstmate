@@ -3,6 +3,12 @@ state/
 data/
 .no-mistakes/
 .lavish/
+.pi/git/
+.pi/npm/
+.pi/cache/
+.pi/auth.json
+.pi/trust.json
+node_modules/
 .fm-secondmate-home
 .DS_Store
 __pycache__/
