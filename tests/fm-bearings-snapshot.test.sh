@@ -162,7 +162,7 @@ EOF
 
 run() {  # <home> <fakebin> <args...>
   local home=$1 fakebin=$2; shift 2
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" "$@"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SHARED_STATE_OVERRIDE="$home/shared-quota" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" "$@"
 }
 
 # End-to-end Domain Alpha regression fixture.
@@ -984,7 +984,7 @@ test_perl_fallback_bounds_github_call() {
     ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
   done
   started=$(date +%s)
-  json=$(PATH="$fakebin:$toolbin" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
+  json=$(PATH="$fakebin:$toolbin" FM_HOME="$home" FM_SHARED_STATE_OVERRIDE="$home/shared-quota" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
     FM_BEARINGS_PR_TIMEOUT=1 NET_LOG="$home/net.log" FAKE_GH_SLEEP=1 "$BEARINGS" --include-prs --json)
   elapsed=$(( $(date +%s) - started ))
   [ "$elapsed" -lt 10 ] || fail "Perl fallback did not bound a stalled gh call (${elapsed}s)"

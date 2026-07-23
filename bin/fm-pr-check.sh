@@ -12,6 +12,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+GITHUB_ROUTE=${FM_GITHUB_ROUTE:-default}
+
+github_quota_deferred() {
+  local out state
+  out=$("$SCRIPT_DIR/fm-shared-github-quota.sh" check --provider github --route "$GITHUB_ROUTE" 2>/dev/null || true)
+  state=$(printf '%s\n' "$out" | sed -n 's/^state=//p' | tail -1)
+  [ "$state" = defer ]
+}
+
+mark_github_quota_from_file() {
+  local source=$1 file=$2
+  "$SCRIPT_DIR/fm-shared-github-quota.sh" mark-from-text --provider github --route "$GITHUB_ROUTE" \
+    --source "$source" --file "$file" >/dev/null 2>&1 || true
+}
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -64,9 +78,16 @@ fi
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
-  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
-    && fm_pr_head_valid "$REMOTE_HEAD"; then
-    PR_HEAD=$REMOTE_HEAD
+  if ! github_quota_deferred; then
+    GH_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-gh-head.XXXXXXXX") || exit 1
+    if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>"$GH_ERR"); then
+      if fm_pr_head_valid "$REMOTE_HEAD"; then
+        PR_HEAD=$REMOTE_HEAD
+      fi
+    else
+      mark_github_quota_from_file "fm-pr-check:$URL head" "$GH_ERR"
+    fi
+    rm -f "$GH_ERR"
   fi
 fi
 

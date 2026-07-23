@@ -1,0 +1,3 @@
+HTTP 429 Too Many Requests
+rate limit exceeded for provider codex
+Retry-After: 120

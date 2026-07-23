@@ -47,6 +47,12 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
 | `fm-claude-accounts.sh`  | Native Claude Code OAuth rotation helper used by `fm-spawn.sh` when locally opted in |
 | `fm-dispatch-select.sh`  | Resolve a dispatch rule/default to one profile, owning quota-aware arrays and random fallback |
+| `fm-rehome-quota-wall.sh` | Manually rehome a quota-wedged tmux task to an explicit harness while preserving task and PR identity |
+| `fm-capacity-classify.sh` | Classify observed harness/proxy capacity walls into quota, auth, or other from evidence-backed signatures |
+| `fm-capacity-cooldown.sh` | Write and read passive per-harness/account/profile cooldown records under state/ |
+| `fm-capacity-route.sh` | Record classified route walls, select a verified non-cooled route, or print exact escalation evidence |
+| `fm-host-pressure.sh`    | Report opt-in memory, disk, and active-task pressure for capacity-failover spawn backpressure |
+| `fm-shared-github-quota.sh` | Coordinate fleet-wide GitHub API cooldowns and cached gh-heavy reads across homes |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer-content classification for all backends          |
@@ -79,6 +85,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
 | `fm-lock-lib.sh`         | Shared "is this git lock provably abandoned?" proof used by teardown and fleet-sync   |
 | `fm-config-inherit-lib.sh` | Shared primary-to-secondmate inherited local-material propagation and config-reread delivery |
+| `fm-harness-launch-lib.sh` | Shared verified harness launch templates, profile flags, and turn-end hook installation |
+| `fm-capacity-lib.sh`    | Shared passive capacity classification, cooldown, and opposite-harness guard helpers |
+| `fm-pressure-lib.sh`    | Shared passive host-pressure detection and config parsing helpers |
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector and `tasks-axi` compatibility probe                  |
 | `fm-wake-drain.sh`       | Atomically drain queued watcher wakes, emit bounded best-effort status-event annotations, then assert watcher liveness |
 | `fm-wake-lib.sh`         | Shared durable wake queue, portable locks, and watcher identity/health helpers       |

@@ -96,6 +96,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
+GITHUB_ROUTE=${FM_GITHUB_ROUTE:-default}
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -159,7 +160,7 @@ default_branch() {
 
 meta_value() {
   local meta=$1 key=$2
-  fm_meta_get "$meta" "$key"
+  fm_meta_get "$meta" "$key" || true
 }
 
 require_orca_worktree_id() {
@@ -266,12 +267,26 @@ remove_pr_poll_artifacts() {
   fi
 }
 
+github_quota_deferred() {
+  local out state
+  out=$("$SCRIPT_DIR/fm-shared-github-quota.sh" check --provider github --route "$GITHUB_ROUTE" 2>/dev/null || true)
+  state=$(printf '%s\n' "$out" | sed -n 's/^state=//p' | tail -1)
+  [ "$state" = defer ]
+}
+
+mark_github_quota_from_file() {
+  local source=$1 file=$2
+  "$SCRIPT_DIR/fm-shared-github-quota.sh" mark-from-text --provider github --route "$GITHUB_ROUTE" \
+    --source "$source" --file "$file" >/dev/null 2>&1 || true
+}
+
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup failure,
 # so the caller treats it as "no PR found" (fail-safe).
 pr_number_from_branch() {
   local branch=$1 out n
   [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
+  github_quota_deferred && return 1
   out=$( cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
   n=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\),.*/\1/p' | head -1)
   [ -n "$n" ] || return 1
@@ -342,14 +357,21 @@ EOF
 # current work is not contained in the PR head, no PR is found, or any gh error
 # occurs - the caller then falls back to the content check.
 pr_is_merged() {
-  local branch=$1 target view state head current
+  local branch=$1 target view state head current gh_err
+  github_quota_deferred && return 1
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
     target=$(pr_number_from_branch "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
+  gh_err=$(mktemp "${TMPDIR:-/tmp}/fm-gh-teardown-pr.XXXXXXXX") || return 1
+  if ! view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>"$gh_err"); then
+    mark_github_quota_from_file "fm-teardown:$ID pr_is_merged" "$gh_err"
+    rm -f "$gh_err"
+    return 1
+  fi
+  rm -f "$gh_err"
   state=${view%%$'\t'*}
   head=${view#*$'\t'}
   [ "$state" != "$view" ] || return 1

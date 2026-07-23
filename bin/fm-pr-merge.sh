@@ -14,6 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+GITHUB_ROUTE=${FM_GITHUB_ROUTE:-default}
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -38,6 +39,16 @@ PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER
 shift 2
 [ "${1:-}" = "--" ] && shift
+
+github_quota_check() {
+  "$SCRIPT_DIR/fm-shared-github-quota.sh" check --provider github --route "$GITHUB_ROUTE" 2>/dev/null || true
+}
+
+mark_github_quota_from_file() {
+  local source=$1 file=$2
+  "$SCRIPT_DIR/fm-shared-github-quota.sh" mark-from-text --provider github --route "$GITHUB_ROUTE" \
+    --source "$source" --file "$file" >/dev/null 2>&1 || true
+}
 
 caller_has_merge_method() {
   local arg
@@ -76,9 +87,34 @@ grep -qxF "pr=$URL" "$META" || {
   exit 1
 }
 
+quota_out=$(github_quota_check)
+quota_state=$(printf '%s\n' "$quota_out" | sed -n 's/^state=//p' | tail -1)
+if [ "$quota_state" = defer ]; then
+  echo "error: GitHub shared quota cooldown is active; refusing gh-axi pr merge before reset" >&2
+  printf 'escalation=github_shared_quota\n' >&2
+  printf 'provider=github\n' >&2
+  printf 'account=%s\n' "$(printf '%s\n' "$quota_out" | sed -n 's/^account=//p' | tail -1)" >&2
+  printf 'route=%s\n' "$(printf '%s\n' "$quota_out" | sed -n 's/^route=//p' | tail -1)" >&2
+  printf 'reset_at=%s\n' "$(printf '%s\n' "$quota_out" | sed -n 's/^reset_at=//p' | tail -1)" >&2
+  printf 'reset_epoch=%s\n' "$(printf '%s\n' "$quota_out" | sed -n 's/^reset_epoch=//p' | tail -1)" >&2
+  printf 'operation=pr merge %s --repo %s/%s\n' "$PR_NUMBER" "$PR_OWNER" "$PR_REPO" >&2
+  printf 'needed_action=wait until reset or use an alternate verified GitHub account/route with headroom\n' >&2
+  exit 1
+fi
+
 merge_args=()
 if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+merge_err=$(mktemp "${TMPDIR:-/tmp}/fm-gh-merge.XXXXXXXX") || exit 1
+if gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>"$merge_err"; then
+  [ ! -s "$merge_err" ] || cat "$merge_err" >&2
+  rm -f "$merge_err"
+else
+  status=$?
+  [ ! -s "$merge_err" ] || cat "$merge_err" >&2
+  mark_github_quota_from_file "fm-pr-merge:$URL" "$merge_err"
+  rm -f "$merge_err"
+  exit "$status"
+fi

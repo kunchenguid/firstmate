@@ -282,6 +282,15 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 Because the spawn backstop is gated by file presence, any fallback path after a missing match, validation error, or missing `jq` still passes a resolved harness explicitly until the file is fixed or removed.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Capacity failover (config/capacity-failover)
+
+`config/capacity-failover` is reserved for future opt-in automatic capacity failover.
+Absent this file, spawn and dispatch behavior is unchanged.
+The current implementation is substrate only: `bin/fm-capacity-classify.sh`, `bin/fm-capacity-cooldown.sh`, `bin/fm-capacity-route.sh`, `bin/fm-rehome-quota-wall.sh`, `bin/fm-host-pressure.sh`, and `bin/fm-shared-github-quota.sh`.
+`host-pressure=on` enables bounded memory, disk-floor, and active-task spawn backpressure; without that line, even a present config file does not change spawn pressure behavior.
+`route=<harness>|<account-or-provider>|<profile>|<model>|<effort>` lines define optional verified routes for the manual route selector.
+See [`docs/capacity-failover.md`](capacity-failover.md) for the classifier signatures, cooldown record format, route-selection contract, manual rehome contract, host-pressure thresholds, shared GitHub quota guard, and opposite-harness constraint.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
