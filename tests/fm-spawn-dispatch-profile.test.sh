@@ -434,9 +434,12 @@ test_pi_delegated_profile_pins_command_model_effort_and_resources() {
   launch=$(cat "$LAUNCH_LOG")
   pi_real=$(node -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$PI_TEST_COMMAND")
   assert_absent "$preload_marker" "hostile Node preload executed during delegated Pi validation"
-  assert_contains "$launch" "NODE_OPTIONS= NODE_PATH=" "Pi launch did not clear hostile Node runtime injection"
   assert_contains "$launch" "PI_PACKAGE_DIR=" "Pi launch did not clear hostile package resolution"
   assert_contains "$launch" "PI_CODING_AGENT_DIR='$HOME_DIR/pi-agent'" "Pi launch did not override hostile ambient agent-dir resolution"
+  assert_contains "$launch" "NODE_OPTIONS='--require=$ROOT/bin/fm-pi-startup-guard.cjs'" "Pi launch did not preload the controlled startup guard"
+  assert_not_contains "$launch" "$preload" "Pi launch retained hostile ambient Node preload injection"
+  assert_contains "$launch" "PI_CODING_AGENT_SESSION_DIR='$HOME_DIR/pi-agent/sessions/" "Pi launch did not pin controlled session storage"
+  assert_contains "$launch" "FM_PI_DELEGATED_PROJECT_DIR='$PROJ_DIR'" "Pi launch did not bind the startup guard to the delegated project"
   assert_contains "$launch" "'$pi_real' --model 'openai-codex/gpt-5.6-sol' --thinking 'medium'" "Pi launch did not pin the exact model and explicit medium thinking"
   assert_contains "$launch" "--no-approve --no-extensions --models 'openai-codex/gpt-5.6-sol'" "Pi launch did not neutralize project settings, extension discovery, and cycling"
   assert_contains "$launch" "-e '$ROOT/bin/fm-pi-profile-guard.ts'" "Pi launch did not explicitly load the profile guard"

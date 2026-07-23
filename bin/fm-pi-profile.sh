@@ -8,9 +8,11 @@
 # The configured agent directory remains operator-owned and may contain auth,
 # skills, prompts, and themes. Its settings.json must already contain the exact
 # derived compaction values. FirstMate only validates it; it never edits it.
-# Delegated launches use --no-approve and --no-extensions, so project-local Pi
-# settings/resources and every discovered extension are ignored. fm-spawn then
-# explicitly loads only its required extensions, including the profile guard.
+# Delegated launches preload the tracked startup guard before Pi imports its
+# CLI, then use --no-approve and --no-extensions. Project startup settings,
+# legacy command migrations, project resources, and every discovered extension
+# are ignored. fm-spawn then explicitly loads only its required extensions,
+# including the profile guard.
 
 fm_pi_profile_fail() {
   echo "error: delegated Pi profile: $*" >&2
@@ -19,7 +21,7 @@ fm_pi_profile_fail() {
 
 fm_pi_profile_load() { # <config-dir> <project-dir>
   local config_dir=$1 project_dir=$2 file line key value seen expected_keys
-  local pi_real pi_package metadata settings
+  local pi_real pi_package metadata settings project_paths
   file="$config_dir/pi-delegated-profile"
   [ -f "$file" ] || return 2
 
@@ -31,6 +33,8 @@ fm_pi_profile_load() { # <config-dir> <project-dir>
   FM_PI_EFFORT=
   FM_PI_BOUNDARY_PERCENT=
   FM_PI_KEEP_RECENT_TOKENS=
+  FM_PI_PROJECT_DIR=
+  FM_PI_SESSION_DIR=
   seen=' '
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -120,5 +124,18 @@ NODE
   ) || { fm_pi_profile_fail "could not resolve controlled settings"; return 1; }
   [ "$settings" = "true"$'\t'"$FM_PI_RESERVE_TOKENS"$'\t'"$FM_PI_KEEP_RECENT_TOKENS" ] \
     || { fm_pi_profile_fail "controlled compaction mismatch (resolved $settings; expected true, $FM_PI_RESERVE_TOKENS, $FM_PI_KEEP_RECENT_TOKENS)"; return 1; }
+
+  project_paths=$(NODE_OPTIONS='' NODE_PATH='' PI_PACKAGE_DIR='' node --input-type=module - "$project_dir" "$FM_PI_AGENT_DIR" <<'NODE'
+import { realpathSync } from "node:fs";
+import { join, resolve } from "node:path";
+const [projectDir, agentDir] = process.argv.slice(2);
+const project = realpathSync(projectDir);
+const safePath = `--${project.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+process.stdout.write(`${project}\t${join(resolve(agentDir), "sessions", safePath)}`);
+NODE
+  ) || { fm_pi_profile_fail "could not resolve controlled project and session paths"; return 1; }
+  IFS=$'\t' read -r FM_PI_PROJECT_DIR FM_PI_SESSION_DIR <<< "$project_paths"
+  [ -n "$FM_PI_PROJECT_DIR" ] && [ -n "$FM_PI_SESSION_DIR" ] \
+    || { fm_pi_profile_fail "resolved empty controlled project or session path"; return 1; }
   return 0
 }

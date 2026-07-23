@@ -786,8 +786,10 @@ fi
 # A configured delegated Pi profile is proved before any backend creates an
 # endpoint. Omitted axes are filled from the home policy; conflicting caller
 # axes and raw Pi launch commands are refused because their exact profile cannot
-# be proved. --no-approve neutralizes trusted project overrides, while
-# --no-extensions suppresses every ambient cancellation surface before the
+# be proved. The tracked startup guard hides project settings and the legacy
+# commands migration before Pi imports its CLI, and the explicit session
+# directory prevents project redirection. --no-approve and --no-extensions then
+# suppress project resources and every ambient cancellation surface before the
 # required FirstMate extensions are explicitly re-added below.
 PICMD=pi
 PIPROFILE=
@@ -816,7 +818,7 @@ if [ "$HARNESS" = pi ] && [ "$PI_PROFILE_CONFIGURED" -eq 1 ]; then
   fi
   MODEL=$FM_PI_MODEL
   EFFORT=medium
-  PICMD="NODE_OPTIONS='' NODE_PATH='' PI_PACKAGE_DIR='' PI_CODING_AGENT_DIR=$(shell_quote "$FM_PI_AGENT_DIR") FM_PI_DELEGATED_MODEL=$(shell_quote "$FM_PI_MODEL") FM_PI_DELEGATED_CONTEXT_WINDOW=$(shell_quote "$FM_PI_CONTEXT_WINDOW") FM_PI_DELEGATED_AGENT_DIR=$(shell_quote "$FM_PI_AGENT_DIR") FM_PI_DELEGATED_RESERVE_TOKENS=$(shell_quote "$FM_PI_RESERVE_TOKENS") FM_PI_DELEGATED_KEEP_RECENT_TOKENS=$(shell_quote "$FM_PI_KEEP_RECENT_TOKENS") $(shell_quote "$FM_PI_COMMAND")"
+  PICMD="NODE_OPTIONS=$(shell_quote "--require=$FM_ROOT/bin/fm-pi-startup-guard.cjs") NODE_PATH='' PI_PACKAGE_DIR='' PI_CODING_AGENT_DIR=$(shell_quote "$FM_PI_AGENT_DIR") PI_CODING_AGENT_SESSION_DIR=$(shell_quote "$FM_PI_SESSION_DIR") FM_PI_DELEGATED_PROJECT_DIR=$(shell_quote "$FM_PI_PROJECT_DIR") FM_PI_DELEGATED_MODEL=$(shell_quote "$FM_PI_MODEL") FM_PI_DELEGATED_CONTEXT_WINDOW=$(shell_quote "$FM_PI_CONTEXT_WINDOW") FM_PI_DELEGATED_AGENT_DIR=$(shell_quote "$FM_PI_AGENT_DIR") FM_PI_DELEGATED_RESERVE_TOKENS=$(shell_quote "$FM_PI_RESERVE_TOKENS") FM_PI_DELEGATED_KEEP_RECENT_TOKENS=$(shell_quote "$FM_PI_KEEP_RECENT_TOKENS") $(shell_quote "$FM_PI_COMMAND")"
   PIPROFILE="--no-approve --no-extensions --models $(shell_quote "$FM_PI_MODEL") -e $(shell_quote "$FM_ROOT/bin/fm-pi-profile-guard.ts") "
 fi
 
