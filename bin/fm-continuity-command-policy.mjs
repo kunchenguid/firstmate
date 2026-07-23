@@ -3,8 +3,8 @@
 //
 // The shared Lexer, program splitter, and command-position resolver remain owned
 // by fm-arm-command-policy.mjs. This policy only identifies executed firstmate
-// fleet scripts and divides them into recovery commands (wake drain, watcher
-// arm, and fail-closed teardown) versus every other bin/fm-*.sh command. Unparseable or opaque dynamic
+// fleet scripts and divides them into recovery commands, wake-handling
+// commands, and every other bin/fm-*.sh command. Unparseable or opaque dynamic
 // commands fail open so this gate can never become a blanket shell block.
 
 import path from "node:path";
@@ -12,6 +12,13 @@ import { fileURLToPath } from "node:url";
 import { Lexer, commandPosition, splitProgram } from "./fm-arm-command-policy.mjs";
 
 const RECOVERY_SCRIPTS = new Set(["fm-wake-drain.sh", "fm-watch-arm.sh", "fm-teardown.sh"]);
+const WAKE_HANDLING_SCRIPTS = new Set([
+  "fm-topic-inbox.sh",
+  "fm-topic-reply.sh",
+  "fm-crew-state.sh",
+  "fm-pr-check.sh",
+  "fm-check-register.sh",
+]);
 
 function parseArguments(argv) {
   const result = { command: "", root: "" };
@@ -122,10 +129,16 @@ function collectExecutedFleetScripts(command, root, depth = 0) {
 
 export function classifyContinuityCommand(command, root) {
   const scripts = collectExecutedFleetScripts(command, root);
-  const blocked = scripts.find(({ name, unsafeTeardown }) => !RECOVERY_SCRIPTS.has(name) || unsafeTeardown);
-  if (!blocked) return { decision: "allow", script: "" };
-  const code = blocked.unsafeTeardown ? "unsafe-teardown" : "other-fleet";
-  return { decision: "deny", script: blocked.name, code };
+  const blocked = scripts.find(({ name, unsafeTeardown }) => (
+    unsafeTeardown || (!RECOVERY_SCRIPTS.has(name) && !WAKE_HANDLING_SCRIPTS.has(name))
+  ));
+  if (blocked) {
+    const code = blocked.unsafeTeardown ? "unsafe-teardown" : "other-fleet";
+    return { decision: "deny", script: blocked.name, code };
+  }
+  const wakeHandler = scripts.find(({ name }) => WAKE_HANDLING_SCRIPTS.has(name));
+  if (wakeHandler) return { decision: "wake-handling", script: wakeHandler.name, code: "wake-handling" };
+  return { decision: "allow", script: "" };
 }
 
 function main() {
@@ -133,6 +146,7 @@ function main() {
   if (!args.command || !args.root) return;
   const result = classifyContinuityCommand(args.command, args.root);
   if (result.decision === "deny") process.stdout.write(`deny\t${result.script}\t${result.code}\n`);
+  if (result.decision === "wake-handling") process.stdout.write(`wake-handling\t${result.script}\t${result.code}\n`);
 }
 
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";

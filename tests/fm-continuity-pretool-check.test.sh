@@ -67,6 +67,45 @@ test_gate_scope_and_recovery_exceptions() {
   pass "continuity gate allows recovery and ordinary commands but denies only other fleet execution"
 }
 
+test_topic_wake_can_be_handled_after_watcher_exit_and_drain() {
+  local data="$PRIMARY/data/fm-telegram-topics" drain_out="$TMP_ROOT/drain.out" watch_out="$TMP_ROOT/watch.out" rc=0
+  mkdir -p "$data/inbox"
+  cat > "$data/inbox/update-77.json" <<'EOF'
+{"version":1,"update_id":77,"message_id":701,"chat_id":"-1001","thread_id":3,"topic":"Dev","project":"Fixture","route":"main","from_id":"1","content_type":"text","text":"answer me","received_at":"2026-07-23T14:30:00+07:00","status":"pending"}
+EOF
+  printf '%s\t1\tcheck\ttopic-board\tcheck: topic-board: topic-message 1 unanswered\n' "$(date +%s)" > "$STATE/.wake-queue"
+
+  FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+    FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch.sh" > "$watch_out" 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || fail "topic-board fixture watcher exited with $rc: $(cat "$watch_out")"
+  grep -F 'check: topic-board: topic-message 1 unanswered' "$watch_out" >/dev/null \
+    || fail "topic-board fixture did not reproduce the actionable watcher exit"
+  [ ! -e "$STATE/.watch.lock" ] || fail "topic-board watcher retained its lock after the actionable exit"
+
+  FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+    "$ROOT/bin/fm-wake-drain.sh" > "$drain_out" 2>&1 || fail "topic-board fixture wake drain failed"
+  [ ! -s "$STATE/.wake-queue" ] || fail "topic-board fixture wake queue was not drained"
+
+  expect_allow "topic inbox handling after drain" 'bin/fm-topic-inbox.sh claim 77 main'
+  expect_allow "topic reply after drain" 'bin/fm-topic-reply.sh 77 --text-file response.txt'
+  expect_allow "crew reconciliation after drain" 'bin/fm-crew-state.sh task'
+  expect_allow "PR reconciliation after drain" 'bin/fm-pr-check.sh task https://example.test/pr/1'
+  expect_allow "custom-check registration after drain" 'bin/fm-check-register.sh task'
+  expect_deny "wake handler bundled with unrelated mutation" \
+    'bin/fm-topic-inbox.sh show 77; bin/fm-spawn.sh task project ship claude model low' \
+    'fm-spawn.sh'
+  pass "an actionable topic wake remains handleable after its one-shot watcher exits and the queue drains"
+}
+
+test_dead_supervision_still_denies_unrelated_mutation_without_wake() {
+  rm -f "$STATE/.wake-queue"
+  expect_deny "unrelated mutation without a wake in hand" \
+    'bin/fm-spawn.sh task project ship claude model low' \
+    'fm-spawn.sh'
+  pass "dead supervision without a wake still blocks unrelated fleet mutation"
+}
+
 test_live_lock_allows_fleet_command_even_with_stale_beacon() {
   local holder identity rc=0
   sleep 300 &
@@ -120,6 +159,8 @@ test_claude_hook_registration_preserves_stop_backstop() {
 }
 
 test_gate_scope_and_recovery_exceptions
+test_topic_wake_can_be_handled_after_watcher_exit_and_drain
+test_dead_supervision_still_denies_unrelated_mutation_without_wake
 test_live_lock_allows_fleet_command_even_with_stale_beacon
 test_child_worktree_and_malformed_input_fail_open
 test_claude_hook_registration_preserves_stop_backstop

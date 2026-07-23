@@ -19,7 +19,8 @@ After the configured retry bound is exhausted, it delivers the original wake wit
 This is deliberate Option B ordering: the fleet is protected before the model handles the wake whenever restoration succeeds, but the model is never left blind when it does not.
 
 Claude retains its native tracked background-task completion path.
-Its new PreToolUse continuity gate allows wake drain, arm recovery, and independently fail-closed teardown, but refuses other fleet commands while tasks are in flight and no identity-matched live watcher holds the home lock.
+Its PreToolUse continuity gate allows wake drain, arm recovery, independently fail-closed teardown, and the narrow wake-handling toolset while a wake is queued or was recently drained.
+It refuses unrelated fleet commands while tasks are in flight and no identity-matched live watcher holds the home lock, regardless of wake state.
 Allowing an ordinary literal teardown prevents a terminal wake from creating a recovery circle: forced or dynamically constructed teardown remains blocked, ordinary teardown itself still refuses dirty, unlanded, incomplete-scout, and unresolved-decision cases, and the turn-end guard continues to require supervision for any tasks left in flight.
 Codex retains its bounded foreground checkpoint protocol.
 Grok retains its tracked background-task notification protocol.
@@ -47,7 +48,7 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 
 `tests/fm-pi-watch-extension.test.sh` simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
-`tests/fm-continuity-pretool-check.test.sh` proves the Claude gate rejects only non-recovery fleet execution in the precise unhealthy state and preserves the existing Stop registration.
+`tests/fm-continuity-pretool-check.test.sh` reproduces the topic-board watcher-exit deadlock, proves the drained wake remains handleable, proves unrelated mutation remains blocked without a wake, and preserves the existing Stop registration.
 
 ## Sanitized live evidence, 2026-07-17
 

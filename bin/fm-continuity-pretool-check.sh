@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
 # Claude primary watcher-continuity PreToolUse gate.
 #
-# This hook is deliberately narrow. It denies only an executed bin/fm-*.sh fleet
-# command other than bin/fm-wake-drain.sh, bin/fm-watch-arm.sh, or the
-# independently fail-closed bin/fm-teardown.sh, and only when the active primary
-# home has task metadata in flight but no identity-matched live watcher holds the
-# home lock. Ordinary shell commands, recovery commands, healthy supervision,
-# fleet-idle homes, and child worktrees are always allowed.
+# This hook is deliberately narrow.
+#
+# Decision table for a primary home with task metadata in flight:
+#   Live identity-matched watcher                    -> allow every command.
+#   No live watcher, ordinary shell command          -> allow.
+#   No live watcher, wake drain or watcher arm       -> allow.
+#   No live watcher, ordinary literal teardown       -> allow its own fail-closed checks.
+#   No live watcher, forced or dynamic teardown      -> deny.
+#   No live watcher, wake queued or recently drained -> allow only the wake-handling toolset.
+#   No live watcher, no wake in hand                  -> deny wake-handling tools.
+#   No live watcher, unrelated fleet mutation        -> deny regardless of wake state.
+#
+# The wake-handling toolset is fm-topic-inbox.sh, fm-topic-reply.sh,
+# fm-crew-state.sh, fm-pr-check.sh, and fm-check-register.sh. A nonempty durable
+# queue proves a wake is waiting; the recent mtime of an empty queue proves the
+# current turn just drained it. Fleet-idle homes and child worktrees are always
+# allowed.
 #
 # The existing turn-end guard remains the unchanged final backstop. This gate
 # closes the long-turn gap before another fleet mutation, but does not replace or
@@ -70,6 +81,10 @@ FM_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 POLICY="$SCRIPT_DIR/fm-continuity-command-policy.mjs"
+WAKE_HANDLING_GRACE=${FM_CONTINUITY_WAKE_HANDLING_GRACE:-300}
+case "$WAKE_HANDLING_GRACE" in
+  ''|*[!0-9]*|0) WAKE_HANDLING_GRACE=300 ;;
+esac
 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
@@ -91,6 +106,14 @@ command -v node >/dev/null 2>&1 || exit 0
 CLASSIFICATION=$(node "$POLICY" --command "$COMMAND" --root "$FM_ROOT" 2>/dev/null) || exit 0
 case "$CLASSIFICATION" in
   deny*) ;;
+  wake-handling*)
+    if [ -s "$STATE/.wake-queue" ] || {
+      [ -e "$STATE/.wake-queue" ] &&
+        [ "$(fm_path_age "$STATE/.wake-queue")" -lt "$WAKE_HANDLING_GRACE" ]
+    }; then
+      exit 0
+    fi
+    ;;
   *) exit 0 ;;
 esac
 

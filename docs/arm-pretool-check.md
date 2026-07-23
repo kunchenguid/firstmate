@@ -19,10 +19,12 @@ This policy is not a post-arm liveness guarantee.
 
 Claude also registers `bin/fm-continuity-pretool-check.sh` for Bash PreToolUse events.
 This is a separate, tightly bounded recovery gate rather than another watcher-shape policy.
-It runs only in a primary home, and it denies only an executed `bin/fm-*.sh` command other than `bin/fm-wake-drain.sh`, `bin/fm-watch-arm.sh`, or the ordinary literal `bin/fm-teardown.sh` when task metadata is in flight and no identity-matched live watcher holds that home's lock.
+It runs only in a primary home, and its exact decision table lives in the header of `bin/fm-continuity-pretool-check.sh`.
+When a queued wake or recent drain proves that the supervisor is handling a wake, the gate allows only `fm-topic-inbox.sh`, `fm-topic-reply.sh`, `fm-crew-state.sh`, `fm-pr-check.sh`, and `fm-check-register.sh` in addition to the existing recovery commands.
+Unrelated fleet mutations remain denied regardless of wake state when task metadata is in flight and no identity-matched live watcher holds that home's lock.
 Ordinary shell commands, fleet-script names used as data, all commands in an idle fleet, child worktrees, wake drain, watcher arm, and ordinary literal teardown remain allowed.
-The denial gives Claude reason-specific recovery guidance — drain, re-arm via a tracked Claude background task, and use fail-closed `bin/fm-teardown.sh` for completed tasks — per the contract in [`watcher-continuity.md`](watcher-continuity.md).
-`bin/fm-continuity-command-policy.mjs` reuses this document's shell lexer and command-position analysis but owns the recovery-versus-other-fleet classification.
+The denial gives Claude reason-specific recovery guidance - drain, re-arm via a tracked Claude background task, and use fail-closed `bin/fm-teardown.sh` for completed tasks - per the contract in [`watcher-continuity.md`](watcher-continuity.md).
+`bin/fm-continuity-command-policy.mjs` reuses this document's shell lexer and command-position analysis but owns the recovery, wake-handling, and unrelated-fleet classification.
 Malformed transport or opaque dynamic syntax fails open so this narrow gate cannot become a blanket Bash block.
 The existing `bin/fm-turnend-guard.sh` Stop integration is unchanged and remains the final backstop.
 
