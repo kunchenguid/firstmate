@@ -31,9 +31,12 @@
 # The poll's own signal logic lives in bin/fm-poll-lib.sh and is covered by
 # tests/fm-poll-lib.test.sh; the cases here cover only what arming produces.
 #
-# Cases (o) and (p) are gated off while the poll's extra questions have no
-# consumer - tests/lib.sh's fm_extra_poll_questions_have_consumer owns why and
-# what turns them back on.
+# Cases (o), (p), and (q) are gated off while the poll's extra questions have no
+# consumer. (o) and (p) assert behaviour nothing produces today; (q) asserts a
+# failure count resetting, which is trivially true when no count is ever kept, so
+# leaving it running would report a pass that proves nothing.
+# tests/lib.sh's fm_extra_poll_questions_have_consumer owns why and what turns
+# them back on.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -724,6 +727,10 @@ test_merge_poll_wakes_after_repeated_lookup_failures() {
 
 test_merge_poll_failure_count_resets_on_success() {
   local case_dir out
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): one successful lookup resets the merge poll's consecutive-failure count"
+    return
+  fi
   case_dir=$(make_case poll-failure-reset)
   arm_failing_poll "$case_dir"
 

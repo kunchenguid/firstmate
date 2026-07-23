@@ -27,9 +27,12 @@
 #       signals without its file being touched
 #   (k) a re-armed watch (a new run id) can report a park again
 #
-# Cases (c), (d), (f), (h), and (k) are gated off while the watch questions have
-# no consumer - tests/lib.sh's fm_extra_poll_questions_have_consumer owns why and
-# what turns them back on.
+# Cases (c) through (i) and (k) are gated off while the poll's extra questions
+# have no consumer. (c), (d), (f), (h), and (k) assert wakes nothing can produce
+# today; (e), (g), and (i) assert the ABSENCE of such a wake, which is trivially
+# true when nothing asks the question at all, so leaving them running would report
+# passes that prove nothing. tests/lib.sh's fm_extra_poll_questions_have_consumer
+# owns why and what turns them all back on.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -234,6 +237,10 @@ test_park_clearing_rearms_the_one_shot() {
 
 test_another_runs_park_is_never_reported() {
   local case_dir out
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): a park belonging to another run is never read as this task's"
+    return
+  fi
   case_dir=$(make_case park-not-mine)
   arm_poll "$case_dir"
   watch_run "$case_dir" "$MY_RUN"
@@ -279,6 +286,10 @@ test_gone_watch_wakes_once_with_the_rearm() {
 
 test_unknown_status_is_not_reported_as_gone() {
   local case_dir out
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): a run status the poll does not recognize is left undecided, not reported as gone"
+    return
+  fi
   case_dir=$(make_case watch-unknown)
   arm_poll "$case_dir"
   watch_run "$case_dir" "$MY_RUN"
@@ -323,6 +334,10 @@ test_watch_lookup_failure_fails_closed() {
 
 test_no_recorded_run_asks_no_watch_question() {
   local case_dir out
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): a task with no recorded watch run asks no watch question at all"
+    return
+  fi
   case_dir=$(make_case no-run-id)
   arm_poll "$case_dir"
   # No nm_watch_run in the meta, but the captain's own run IS parked.
