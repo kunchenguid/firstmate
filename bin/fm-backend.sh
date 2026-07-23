@@ -737,7 +737,7 @@ fm_backend_target_state() {  # <backend> <target> [expected-label] [recorded-sco
   [ -n "$target" ] || { printf 'unknown'; return 0; }
   if [ "$backend" = orca ]; then
     fm_backend_source orca >/dev/null 2>&1 || { printf 'unknown'; return 0; }
-    fm_backend_orca_terminal_state "$target"
+    fm_backend_orca_terminal_state "$target" "$recorded_scoped_target"
     return 0
   fi
   if fm_backend_target_exists "$backend" "$target" "$expected_label" "$recorded_scoped_target" 2>/dev/null; then

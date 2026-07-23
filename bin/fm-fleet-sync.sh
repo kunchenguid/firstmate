@@ -140,7 +140,7 @@ resolve_project_arg() {
 }
 
 canonical_dir() {
-  [ -d "$1" ] || return 1
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
   (cd "$1" 2>/dev/null && pwd -P)
 }
 
@@ -629,6 +629,11 @@ fi
 [ -d "$PROJECTS" ] || exit 0
 for proj in "$PROJECTS"/*; do
   [ -e "$proj" ] || continue
+  if [ -L "$proj" ]; then
+    printf '%s: skipped: target must be an exact canonical Git repository root\n' "$proj"
+    false
+    continue
+  fi
   [ -d "$proj" ] || continue
   run_sync_project_bounded "$proj"
 done

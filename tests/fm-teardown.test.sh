@@ -3168,6 +3168,90 @@ SH
   pass "retained direct-spawn teardown requires confirmed endpoint quiescence"
 }
 
+test_secondmate_registry_duplicate_home_blocks_removal() {
+  local case_dir home rc
+  case_dir=$(make_case secondmate-registry-duplicate-home)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  home=$(cd "$case_dir/wt" && pwd -P)
+  printf '%s\n' "- other-secondmate - duplicate home (home: $home; scope: test; projects: test; added 2026-07-23)" \
+    >> "$case_dir/data/secondmates.md"
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "duplicate secondmate registry home teardown exit"
+  assert_present "$case_dir/wt" "duplicate registry home allowed secondmate removal"
+  assert_present "$case_dir/state/task-x1.meta" "duplicate registry home allowed metadata removal"
+  assert_grep 'is shared by task-x1 and other-secondmate' "$case_dir/stderr" \
+    "duplicate secondmate registry home was not surfaced"
+  pass "secondmate retirement rejects registry home aliases"
+}
+
+test_secondmate_retirement_serializes_child_spawn() {
+  local case_dir child_project rc teardown_pid spawn_rc waited
+  case_dir=$(make_case secondmate-retirement-child-race)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  child_project="$case_dir/wt/projects/child-project"
+  fm_git_init_commit "$child_project"
+  mkdir -p "$case_dir/wt/data/child"
+  printf '%s\n' 'Do bounded child work.' > "$case_dir/wt/data/child/brief.md"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+state="$(dirname "$0")/.tmux-live"
+started="$(dirname "$0")/.retirement-started"
+release="$(dirname "$0")/.retirement-release"
+case "${1:-}" in
+  display-message) [ -f "$state" ]; exit $? ;;
+  list-windows) [ ! -f "$state" ] || printf '%s\n' fm-task-x1; exit 0 ;;
+  kill-window)
+    : > "$started"
+    while [ ! -f "$release" ]; do sleep 0.05; done
+    rm -f "$state"
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" &
+  teardown_pid=$!
+  waited=0
+  while [ ! -f "$case_dir/fakebin/.retirement-started" ] && [ "$waited" -lt 200 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  [ -f "$case_dir/fakebin/.retirement-started" ] || {
+    : > "$case_dir/fakebin/.retirement-release"
+    wait "$teardown_pid" || true
+    fail "secondmate retirement did not reach the serialized quiescence boundary"
+  }
+  set +e
+  FM_HOME="$case_dir/wt" \
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_CHECKOUT_REFRESH_LOCK_ROOT="$case_dir/checkout-locks" \
+  FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS=0 \
+  FM_SPAWN_NO_GUARD=1 \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" child child-project claude \
+      > "$case_dir/spawn-stdout" 2> "$case_dir/spawn-stderr"
+  spawn_rc=$?
+  set -e
+  : > "$case_dir/fakebin/.retirement-release"
+  set +e
+  wait "$teardown_pid"
+  rc=$?
+  set -e
+  expect_code 1 "$spawn_rc" "child spawn during secondmate retirement exit"
+  assert_grep 'secondmate home lifecycle lock' "$case_dir/spawn-stderr" \
+    "child spawn did not contend on the retiring secondmate home"
+  expect_code 0 "$rc" "serialized secondmate retirement exit"
+  assert_absent "$case_dir/wt" "serialized secondmate retirement retained the home"
+  assert_absent "$case_dir/state/task-x1.meta" "serialized secondmate retirement retained metadata"
+  pass "secondmate retirement serializes child spawn through removal"
+}
+
 if [ "${FM_TEST_FOCUSED:-}" = tasktmp-safety ]; then
   test_teardown_refuses_unsafe_tasktmp_metadata
   exit 0
@@ -3274,6 +3358,12 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-teardown-ownership ]; then
   test_normal_secondmate_retains_untracked_skill_draft
   test_normal_secondmate_retains_unique_detached_head
   test_forced_secondmate_retains_unquiesced_unmanaged_child
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-round-teardown-lifecycle ]; then
+  test_secondmate_registry_duplicate_home_blocks_removal
+  test_secondmate_retirement_serializes_child_spawn
   exit 0
 fi
 

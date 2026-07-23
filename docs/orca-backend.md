@@ -64,6 +64,8 @@ worktree=<absolute path to the Orca-created git worktree>
 `fm-teardown.sh <id>` uses the same recorded fields after loading `state/<id>.meta`.
 For Orca, `window=` keeps the stable firstmate alias while `terminal=` carries the stable Orca terminal handle that backend operations use.
 The recorded `backend=orca` field tells shared call sites to route capture, send, interrupt, and close through `bin/backends/orca.sh` instead of tmux assumptions.
+If spawn cannot prove terminal absence during rollback, it retains every known provider identity with `orca_cleanup_pending=1` and refuses another spawn for that task.
+That quarantine is cleared only by the supported teardown path after Orca resolves any retained worktree identity and proves that no terminal remains.
 
 ## Lifecycle
 
@@ -91,9 +93,11 @@ Teardown:
 - [report-stack.md](report-stack.md) owns the explicit legacy archival path.
 - Ship teardown still refuses dirty or unlanded work before any terminal/worktree cleanup.
 - Ship teardown resolves `orca_worktree_id` back through Orca and verifies it matches the inspected `worktree=` path before removing anything; mismatches or uninspectable paths preserve metadata and fail closed.
+- Before close, teardown requires Orca's authoritative terminal read to bind the recorded terminal to the recorded worktree id; missing or mismatched identity preserves every resource.
 - After the existing firstmate safety checks pass, teardown closes the recorded Orca terminal and requires a `terminal_handle_stale` read result before removal.
 - The final project/worktree identity and landed-work checks, provider removal, and post-removal branch cleanup run under the common checkout lock.
 - Missing terminal identity, a live terminal, an ambiguous read result, or a close failure retains the worktree and metadata.
+- A spawn-abort quarantine without a recorded terminal can proceed only when Orca explicitly reports that the retained worktree has no terminals.
 - Teardown does not raw-delete Orca worktrees.
 
 ## Limitations
@@ -113,12 +117,13 @@ Fake-Orca tests cover:
 
 - helper parsing for repo registration, worktree creation, verified implicit-terminal reuse, terminal creation, terminal sends, and worktree removal;
 - rejection of undocumented terminal-handle result shapes;
+- retention and cleanup of pathless or malformed-create quarantines, including spawn retry refusal while cleanup remains pending;
 - runtime readiness gating through `orca status --json`;
 - eligible legacy `fm-spawn.sh --backend orca` metadata creation and harness launch;
 - `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` routing through recorded Orca metadata;
 - slash-command popup placeholder handling that requires a second Enter before `fm-send.sh` reports submission;
 - scout teardown releasing an Orca worktree through `orca worktree rm`;
-- terminal-state classification for live reads, stale-handle absence on nonzero exit, and ambiguous failures;
+- terminal-state classification for live reads, stale-handle absence on nonzero exit, ambiguous failures, and terminal/worktree identity drift;
 - ship teardown failing closed when the recorded Orca worktree id is missing, cannot resolve to a path, or resolves to a different path than `worktree=`.
 
 Run the focused suite with:

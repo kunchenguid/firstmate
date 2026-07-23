@@ -273,6 +273,45 @@ test_direct_and_batch_sync_reject_nested_repository_paths() {
   pass "direct and batch sync reject nested repository paths"
 }
 
+test_direct_and_batch_sync_reject_symlink_repository_paths() {
+  local home clone alias out before status batch_home batch_clone batch_alias batch_out batch_before batch_status
+  home=$(new_home)
+  clone=$(build_pair "$home" symlink-direct)
+  advance_origin "$home" symlink-direct C1
+  alias="$home/symlink-direct"
+  ln -s "$clone" "$alias"
+  before=$(head_sha "$clone")
+
+  out=$(run_sync "$home" "$alias")
+  status=$?
+
+  assert_contains "$out" "target must be an exact canonical Git repository root" \
+    "direct fleet sync accepted a symlink repository path"
+  [ "$status" -ne 0 ] || fail "direct fleet sync reported success for a symlink repository path"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "direct symlink target mutated its repository"
+
+  batch_home=$(new_home)
+  batch_clone=$(build_pair "$batch_home" symlink-batch-target)
+  advance_origin "$batch_home" symlink-batch-target C1
+  mv "$batch_clone" "$batch_home/symlink-batch-target"
+  batch_clone="$batch_home/symlink-batch-target"
+  batch_alias="$batch_home/projects/symlink-batch"
+  ln -s "$batch_clone" "$batch_alias"
+  batch_before=$(head_sha "$batch_clone")
+
+  set +e
+  batch_out=$(run_sync "$batch_home")
+  batch_status=$?
+  set -e
+
+  assert_contains "$batch_out" "target must be an exact canonical Git repository root" \
+    "batch fleet sync accepted a symlinked projects entry"
+  [ "$batch_status" -ne 0 ] || fail "batch fleet sync reported success for a symlinked projects entry"
+  [ "$(head_sha "$batch_clone")" = "$batch_before" ] \
+    || fail "batch symlink target mutated its external repository"
+  pass "direct and batch sync reject symlink repository paths"
+}
+
 test_detached_clean_ancestor_recovers() {
   local home clone out before after
   home=$(new_home)
@@ -852,8 +891,14 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-followups ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-symlinks ]; then
+  test_direct_and_batch_sync_reject_symlink_repository_paths
+  exit 0
+fi
+
 test_status_failure_is_never_treated_as_clean
 test_direct_and_batch_sync_reject_nested_repository_paths
+test_direct_and_batch_sync_reject_symlink_repository_paths
 test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched

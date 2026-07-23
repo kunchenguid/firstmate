@@ -172,7 +172,7 @@ if managed_account_meta "$META"; then
   MANAGED_ACCOUNT=1
   managed_account_meta "$META" || { echo "error: managed task metadata changed while teardown waited for $ID" >&2; exit 1; }
 fi
-WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
+WT=$(grep '^worktree=' "$META" | cut -d= -f2- || true)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 BACKEND=$(fm_backend_of_meta "$META")
@@ -198,6 +198,18 @@ case "$DIRECT_SPAWN_CLEANUP" in
   ''|pending) ;;
   *) echo "error: invalid direct_spawn_cleanup metadata for $ID" >&2; exit 1 ;;
 esac
+ORCA_CLEANUP_PENDING_COUNT=$(grep -c '^orca_cleanup_pending=' "$META" 2>/dev/null || true)
+ORCA_CLEANUP_PENDING=0
+if [ "$ORCA_CLEANUP_PENDING_COUNT" -ne 0 ]; then
+  if [ "$ORCA_CLEANUP_PENDING_COUNT" -ne 1 ] \
+    || [ "$(fm_meta_get "$META" orca_cleanup_pending)" != 1 ] \
+    || [ "$BACKEND" != orca ] \
+    || [ "$(fm_meta_get "$META" orca_cleanup_phase)" != spawn-abort ]; then
+    echo "error: invalid Orca cleanup quarantine metadata for $ID" >&2
+    exit 1
+  fi
+  ORCA_CLEANUP_PENDING=1
+fi
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -293,15 +305,23 @@ quiesce_secondmate_endpoint() {
 
 quiesce_child_endpoint() {
   local meta=$1 task=$2 owner_home=$3 child_home=${4:-}
-  local backend target kind endpoint_home probe_home='' endpoint_status
+  local backend target kind endpoint_home probe_home='' endpoint_status scoped_target
   backend=$(fm_backend_of_meta "$meta")
   target=$(teardown_backend_target_of_meta "$meta")
   kind=$(meta_value "$meta" kind)
   [ -n "$kind" ] || kind=ship
   endpoint_home=$(fm_backend_endpoint_home "$backend" "$kind" "$owner_home" "$child_home")
   [ "$endpoint_home" = "$FM_HOME" ] || probe_home=$endpoint_home
-  if managed_endpoint_is_gone "$backend" "$target" "fm-$task" "$probe_home" "$(meta_value "$meta" tmux_session_target)"; then
+  scoped_target=$(meta_value "$meta" tmux_session_target)
+  [ "$backend" != orca ] || scoped_target=$(meta_value "$meta" orca_worktree_id)
+  if managed_endpoint_is_gone "$backend" "$target" "fm-$task" "$probe_home" "$scoped_target"; then
     return 0
+  else
+    endpoint_status=$?
+  fi
+  if [ "$endpoint_status" -eq 2 ]; then
+    echo "error: child endpoint identity or state for $task is unknown; refusing destructive cleanup" >&2
+    return 1
   fi
   [ -n "$target" ] || {
     echo "error: child endpoint identity for $task is missing; refusing destructive cleanup" >&2
@@ -318,7 +338,7 @@ quiesce_child_endpoint() {
       return 1
     }
   fi
-  if managed_endpoint_is_gone "$backend" "$target" "fm-$task" "$probe_home" "$(meta_value "$meta" tmux_session_target)"; then
+  if managed_endpoint_is_gone "$backend" "$target" "fm-$task" "$probe_home" "$scoped_target"; then
     return 0
   fi
   endpoint_status=$?
@@ -1330,40 +1350,65 @@ secondmate_registry_for_source() {
 }
 
 require_registered_secondmate_home() {
-  local reg=$1 expected_id=$2 expected_home=$3 line id registered_home registered_abs
-  local expected_abs matches=0
+  local reg=$1 expected_id=$2 expected_home=$3 expected_abs
   [ -f "$reg" ] && [ ! -L "$reg" ] && [ -r "$reg" ] || {
     echo "REFUSED: secondmate registry is missing, unsafe, or unreadable at $reg" >&2
     return 1
   }
   expected_abs=$(removal_target_abs_path "$expected_home") || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      "- "*)
-        id=${line#- }
-        id=${id%% *}
-        [ "$id" = "$expected_id" ] || continue
-        registered_home=$(printf '%s\n' "$line" | registry_home_for_line)
-        [ -n "$registered_home" ] || {
-          echo "REFUSED: secondmate registry entry for $expected_id has no home" >&2
-          return 1
-        }
-        registered_abs=$(removal_target_abs_path "$registered_home" 2>/dev/null) || {
-          echo "REFUSED: secondmate registry home for $expected_id is uninspectable" >&2
-          return 1
-        }
-        [ "$registered_abs" = "$expected_abs" ] || {
-          echo "REFUSED: secondmate registry home for $expected_id is $registered_abs, not $expected_abs" >&2
-          return 1
-        }
-        matches=$(( matches + 1 ))
-        ;;
-    esac
-  done < "$reg"
-  [ "$matches" -eq 1 ] || {
-    echo "REFUSED: expected exactly one secondmate registry entry for $expected_id at $expected_abs" >&2
-    return 1
-  }
+  python3 - "$reg" "$expected_id" "$expected_abs" <<'PY'
+import os
+import re
+import sys
+
+registry, expected_id, expected_home = sys.argv[1:]
+pattern = re.compile(r"^- ([A-Za-z0-9][A-Za-z0-9._-]*) .*?\(home: ([^;\r\n)]+);")
+entries = []
+try:
+    with open(registry, encoding="utf-8") as stream:
+        for number, line in enumerate(stream, 1):
+            if not line.startswith("- "):
+                continue
+            match = pattern.match(line)
+            if match is None:
+                raise ValueError(f"malformed entry on line {number}")
+            item_id, home = match.groups()
+            if not os.path.isabs(home) or any(character in home for character in "\t\r\n"):
+                raise ValueError(f"unsafe home on line {number}")
+            entries.append((item_id, os.path.realpath(home)))
+except (OSError, ValueError) as error:
+    print(f"REFUSED: secondmate registry is unprovable at {registry}: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+seen_ids = set()
+seen_homes = {}
+for item_id, home in entries:
+    if item_id in seen_ids:
+        print(f"REFUSED: duplicate secondmate registry id {item_id}", file=sys.stderr)
+        raise SystemExit(1)
+    seen_ids.add(item_id)
+    if home in seen_homes:
+        print(
+            f"REFUSED: secondmate registry home {home} is shared by {seen_homes[home]} and {item_id}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    seen_homes[home] = item_id
+
+matches = [home for item_id, home in entries if item_id == expected_id]
+if len(matches) != 1:
+    print(
+        f"REFUSED: expected exactly one secondmate registry entry for {expected_id} at {expected_home}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+if matches[0] != expected_home:
+    print(
+        f"REFUSED: secondmate registry home for {expected_id} is {matches[0]}, not {expected_home}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
 }
 
 secondmate_state_metadata() {
@@ -1895,8 +1940,94 @@ remove_secondmate_registry_entry() {
   mv "$tmp" "$reg"
 }
 
+validate_pending_orca_worktree_identity() {
+  local project_root worktree_root project_common worktree_common recorded_root
+  require_safe_task_metadata || return 1
+  require_orca_task_metadata_identity "$META" "$ID" || return 1
+  project_root=$(exact_git_worktree_root "$PROJ") || {
+    echo "error: quarantined Orca project is not an exact repository root: ${PROJ:-<missing>}" >&2
+    return 1
+  }
+  worktree_root=$(exact_git_worktree_root "$WT") || {
+    echo "error: quarantined Orca worktree is not an exact repository root: ${WT:-<missing>}" >&2
+    return 1
+  }
+  project_common=$(fm_checkout_git_common_dir "$project_root") || return 1
+  worktree_common=$(fm_checkout_git_common_dir "$worktree_root") || return 1
+  [ "$project_common" = "$worktree_common" ] || {
+    echo "error: quarantined Orca worktree does not belong to the recorded project" >&2
+    return 1
+  }
+  if [ -n "$(meta_value "$META" worktree)" ] && [ -e "$(meta_value "$META" worktree)" ]; then
+    recorded_root=$(exact_git_worktree_root "$(meta_value "$META" worktree)") || return 1
+    [ "$recorded_root" = "$worktree_root" ] || {
+      echo "error: quarantined Orca worktree path drifted from retained metadata" >&2
+      return 1
+    }
+  fi
+  require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$worktree_root"
+}
+
+pending_orca_endpoint_absent() {
+  local state
+  if [ -n "$T" ]; then
+    state=$(fm_backend_target_state orca "$T" "fm-$ID" "$ORCA_WORKTREE_ID")
+    case "$state" in
+      absent) return 0 ;;
+      present)
+        fm_backend_kill orca "$T" || return 1
+        [ "$(fm_backend_target_state orca "$T" "fm-$ID" "$ORCA_WORKTREE_ID")" = absent ]
+        return
+        ;;
+      *)
+        echo "error: quarantined Orca terminal identity or state is unproven for $ID" >&2
+        return 1
+        ;;
+    esac
+  fi
+  state=$(fm_backend_orca_worktree_terminal_state "$ORCA_WORKTREE_ID")
+  [ "$state" = absent ] || {
+    echo "error: Orca worktree $ORCA_WORKTREE_ID has no proven terminal-free state" >&2
+    return 1
+  }
+}
+
+remove_pending_orca_worktree_locked() {
+  validate_pending_orca_worktree_identity || return 1
+  pending_orca_endpoint_absent || return 1
+  if [ "$FORCE" != "--force" ]; then
+    validate_worktree_teardown_safety || return 1
+    validate_pending_orca_worktree_identity || return 1
+  fi
+  fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID"
+}
+
+if [ "$ORCA_CLEANUP_PENDING" = 1 ]; then
+  [ "$KIND" != secondmate ] || {
+    echo "error: Orca cleanup quarantine cannot describe a secondmate" >&2
+    exit 1
+  }
+  WT=$(fm_backend_worktree_path orca "$ORCA_WORKTREE_ID") || {
+    echo "error: quarantined Orca worktree path remains unprovable for $ID" >&2
+    exit 1
+  }
+  validate_pending_orca_worktree_identity || exit 1
+  pending_orca_endpoint_absent || exit 1
+  fm_checkout_lock_run "$WT" "$CHECKOUT_LOCK_ROOT" remove_pending_orca_worktree_locked || exit 1
+  remove_grok_turnend_auth "$STATE" "$ID"
+  fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+  [ -z "$TASK_TMP" ] || rm -rf "$TASK_TMP"
+  rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+  [ -z "$ACCOUNT_DELETE_LOCK" ] || fm_account_lifecycle_lock_release "$ACCOUNT_DELETE_LOCK" >/dev/null 2>&1 || true
+  ACCOUNT_DELETE_LOCK=
+  echo "teardown $ID complete (Orca cleanup quarantine cleared)"
+  exit 0
+fi
+
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  SECONDMATE_HOME_LIFECYCLE_LOCK=$(fm_secondmate_home_lifecycle_lock_acquire "$CHECKOUT_LOCK_ROOT" "$HOME_PATH") || exit 1
+  TEARDOWN_ACCOUNT_LOCKS+=("$SECONDMATE_HOME_LIFECYCLE_LOCK")
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" "$FM_ROOT" "$SECONDMATE_REG" "$PROJ" >/dev/null || exit 1
   if [ "$FORCE" = "--force" ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
@@ -1932,14 +2063,22 @@ ENDPOINT_HOME=$(fm_backend_endpoint_home "$BACKEND" "$KIND" "$FM_HOME" "$HOME_PA
 [ "$ENDPOINT_HOME" = "$FM_HOME" ] || PROBE_HOME=$ENDPOINT_HOME
 
 quiesce_task_endpoint() {
-  local endpoint_status zellij_tab
+  local endpoint_status zellij_tab scoped_target
   if [ "$MANAGED_ACCOUNT" = 1 ]; then
     quiesce_managed_account_endpoint "$META" "$ID" "$PROBE_HOME"
     return $?
   fi
   zellij_tab=$(meta_value "$META" zellij_tab_id)
-  if managed_endpoint_is_gone "$BACKEND" "$T" "fm-$ID" "$PROBE_HOME" "$(meta_value "$META" tmux_session_target)"; then
+  scoped_target=$(meta_value "$META" tmux_session_target)
+  [ "$BACKEND" != orca ] || scoped_target=$ORCA_WORKTREE_ID
+  if managed_endpoint_is_gone "$BACKEND" "$T" "fm-$ID" "$PROBE_HOME" "$scoped_target"; then
     return 0
+  else
+    endpoint_status=$?
+  fi
+  if [ "$endpoint_status" -eq 2 ]; then
+    echo "error: task endpoint identity or state for $ID is unknown; retaining metadata" >&2
+    return 1
   fi
   if [ -n "$T" ]; then
     if [ -n "$PROBE_HOME" ]; then
@@ -1954,7 +2093,7 @@ quiesce_task_endpoint() {
       }
     fi
   fi
-  if managed_endpoint_is_gone "$BACKEND" "$T" "fm-$ID" "$PROBE_HOME" "$(meta_value "$META" tmux_session_target)"; then
+  if managed_endpoint_is_gone "$BACKEND" "$T" "fm-$ID" "$PROBE_HOME" "$scoped_target"; then
     return 0
   else
     endpoint_status=$?

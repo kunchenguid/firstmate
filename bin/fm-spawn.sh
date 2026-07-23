@@ -435,6 +435,7 @@ RECOVERY_ACCOUNT=0
 RESUME_META=
 LIFECYCLE_LOCK=
 LIFECYCLE_LOCK_OWNED=0
+SECONDMATE_HOME_LIFECYCLE_LOCK=
 LIFECYCLE_LOCK_INHERITED_PID=
 LIFECYCLE_LOCK_INHERITED_START=
 SPAWN_META_PRESENT=0
@@ -452,7 +453,7 @@ spawn_preflight_read_meta() {  # <meta>
 }
 
 spawn_preflight_load_meta() {  # <required:0|1>
-  local required=$1
+  local required=$1 cleanup_count cleanup_value
   RESUME_META="$STATE/$SPAWN_PREFLIGHT_ID.meta"
   if [ -e "$STATE" ] || [ -L "$STATE" ]; then
     [ -d "$STATE" ] && [ ! -L "$STATE" ] || {
@@ -472,6 +473,16 @@ spawn_preflight_load_meta() {  # <required:0|1>
       return 1
     }
     SPAWN_META_PRESENT=1
+    cleanup_count=$(printf '%s\n' "$SPAWN_META_SNAPSHOT" | grep -c '^orca_cleanup_pending=' || true)
+    if [ "$cleanup_count" -ne 0 ]; then
+      cleanup_value=$(spawn_preflight_meta_value orca_cleanup_pending)
+      if [ "$cleanup_count" -eq 1 ] && [ "$cleanup_value" = 1 ]; then
+        echo "error: Orca cleanup is pending for $SPAWN_PREFLIGHT_ID; run fm-teardown.sh $SPAWN_PREFLIGHT_ID before retrying spawn" >&2
+      else
+        echo "error: invalid Orca cleanup metadata for $SPAWN_PREFLIGHT_ID; refusing spawn" >&2
+      fi
+      return 1
+    fi
   elif [ "$required" = 1 ]; then
     echo "error: no metadata for managed recovery at $RESUME_META" >&2
     return 1
@@ -681,6 +692,20 @@ if [ "$BACKEND" = orca ] && [ "$SPAWN_PREFLIGHT_BATCH" = 0 ]; then
   spawn_refuse_report_required_orca || exit 1
 fi
 
+if [ "$SPAWN_PREFLIGHT_BATCH" = 0 ] \
+  && { [ -e "$FM_HOME/$SUB_HOME_MARKER" ] || [ -L "$FM_HOME/$SUB_HOME_MARKER" ]; }; then
+  [ -f "$FM_HOME/$SUB_HOME_MARKER" ] && [ ! -L "$FM_HOME/$SUB_HOME_MARKER" ] || {
+    echo "error: unsafe secondmate home marker at $FM_HOME/$SUB_HOME_MARKER" >&2
+    exit 1
+  }
+  SECONDMATE_HOME_LIFECYCLE_LOCK=$(fm_secondmate_home_lifecycle_lock_acquire "$CHECKOUT_LOCK_ROOT" "$FM_HOME") || exit 1
+  trap '[ -z "${SECONDMATE_HOME_LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$SECONDMATE_HOME_LIFECYCLE_LOCK" >/dev/null 2>&1 || true' EXIT
+  [ -f "$FM_HOME/$SUB_HOME_MARKER" ] && [ ! -L "$FM_HOME/$SUB_HOME_MARKER" ] || {
+    echo "error: secondmate home changed while spawn waited for lifecycle ownership" >&2
+    exit 1
+  }
+fi
+
 if [ -n "${FM_ACCOUNT_LIFECYCLE_LOCK_HELD:-}" ]; then
   [ "${#POS[@]}" -ge 1 ] || { echo "error: inherited account lifecycle lock requires a task id" >&2; exit 1; }
   inherited_lock_id=${POS[0]}
@@ -727,7 +752,7 @@ if [ -n "${FM_ACCOUNT_LIFECYCLE_LOCK_HELD:-}" ]; then
     exit 1
   fi
   LIFECYCLE_LOCK_OWNED=1
-  trap '[ "${LIFECYCLE_LOCK_OWNED:-0}" != 1 ] || [ -z "${LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$LIFECYCLE_LOCK" >/dev/null 2>&1 || true' EXIT
+  trap '[ "${LIFECYCLE_LOCK_OWNED:-0}" != 1 ] || [ -z "${LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$LIFECYCLE_LOCK" >/dev/null 2>&1 || true; [ -z "${SECONDMATE_HOME_LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$SECONDMATE_HOME_LIFECYCLE_LOCK" >/dev/null 2>&1 || true' EXIT
   # The handoff replaces the lock inode while live ownership prevents reclaim until this child releases the replacement.
   if ! fm_account_lifecycle_lock_owned "$LIFECYCLE_LOCK"; then
     echo "error: inherited account lifecycle lock ownership handoff failed for $inherited_lock_id" >&2
@@ -741,7 +766,7 @@ if [ "$RECOVERY_ACCOUNT" = 1 ]; then
     LIFECYCLE_LOCK=$(fm_account_lifecycle_lock_acquire "$STATE" "${POS[0]}") || exit 1
     LIFECYCLE_LOCK_OWNED=1
   fi
-  trap '[ "${LIFECYCLE_LOCK_OWNED:-0}" != 1 ] || [ -z "${LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$LIFECYCLE_LOCK" >/dev/null 2>&1 || true' EXIT
+  trap '[ "${LIFECYCLE_LOCK_OWNED:-0}" != 1 ] || [ -z "${LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$LIFECYCLE_LOCK" >/dev/null 2>&1 || true; [ -z "${SECONDMATE_HOME_LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$SECONDMATE_HOME_LIFECYCLE_LOCK" >/dev/null 2>&1 || true' EXIT
   current_spawn_meta=$(spawn_preflight_read_meta "$RESUME_META") || {
     echo "error: unsafe metadata for managed recovery at $RESUME_META" >&2
     exit 1
@@ -868,6 +893,7 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+ORCA_TERMINAL_PROOF=
 ID=
 ACCOUNT_LEASE_CREATED=0
 FM_ACCOUNT_MUTATION_ACQUIRED=0
@@ -938,19 +964,27 @@ discard_existing_artifact_backup() {
 }
 
 parse_orca_worktree_result() {
-  local raw=$1 rest
+  local raw=$1 rest terminal_rest
   ORCA_WORKTREE_ID=${raw%%$'\t'*}
   if [ "$raw" = "$ORCA_WORKTREE_ID" ]; then
     WT=
     ORCA_TERMINAL=
+    ORCA_TERMINAL_PROOF=
     return 1
   fi
   rest=${raw#*$'\t'}
   WT=${rest%%$'\t'*}
   if [ "$rest" != "$WT" ]; then
-    ORCA_TERMINAL=${rest#*$'\t'}
+    terminal_rest=${rest#*$'\t'}
+    ORCA_TERMINAL=${terminal_rest%%$'\t'*}
+    if [ "$terminal_rest" != "$ORCA_TERMINAL" ]; then
+      ORCA_TERMINAL_PROOF=${terminal_rest#*$'\t'}
+    else
+      ORCA_TERMINAL_PROOF=
+    fi
   else
     ORCA_TERMINAL=
+    ORCA_TERMINAL_PROOF=
   fi
 }
 
@@ -1305,6 +1339,8 @@ spawn_abort_cleanup() {
     ORCA_ABORT_CLEANUP=0
     if [ -n "${ORCA_TERMINAL:-}" ]; then
       fm_backend_orca_quiesce_terminal "$ORCA_TERMINAL" || orca_cleanup_failed=1
+    elif [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+      [ "$(fm_backend_orca_worktree_terminal_state "$ORCA_WORKTREE_ID")" = absent ] || orca_cleanup_failed=1
     fi
     if [ -n "${ORCA_WORKTREE_ID:-}" ] && [ "$orca_cleanup_failed" = 0 ]; then
       fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" || orca_cleanup_failed=1
@@ -1321,7 +1357,7 @@ spawn_abort_cleanup() {
         if [ -n "${orca_meta_tmp:-}" ]; then
           {
             echo "window=${W:-fm-${ID:-unknown}}"
-            echo "worktree=${WT:-}"
+            [ -z "${WT:-}" ] || echo "worktree=$WT"
             echo "project=${PROJ_ABS:-}"
             echo "harness=${HARNESS:-}"
             echo "kind=${KIND:-ship}"
@@ -1334,6 +1370,8 @@ spawn_abort_cleanup() {
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
             echo "orca_cleanup_pending=1"
+            echo "orca_cleanup_phase=spawn-abort"
+            echo "orca_terminal_proof=${ORCA_TERMINAL_PROOF:-unproven}"
           } > "$orca_meta_tmp" 2>/dev/null || true
           if fm_account_safe_file_destination "$STATE/${ID:-unknown}.meta"; then
             mv "$orca_meta_tmp" "$STATE/${ID:-unknown}.meta" 2>/dev/null || true
@@ -1564,8 +1602,10 @@ spawn_abort_cleanup() {
   [ -z "$META_BACKUP" ] || [ -f "$META_BACKUP" ] || META_BACKUP=
   [ -z "$EXISTING_ARTIFACT_BACKUP" ] || [ -d "$EXISTING_ARTIFACT_BACKUP" ] || EXISTING_ARTIFACT_BACKUP=
   [ "${LIFECYCLE_LOCK_OWNED:-0}" != 1 ] || [ -z "${LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$LIFECYCLE_LOCK" >/dev/null 2>&1 || true
+  [ -z "${SECONDMATE_HOME_LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$SECONDMATE_HOME_LIFECYCLE_LOCK" >/dev/null 2>&1 || true
   LIFECYCLE_LOCK=
   LIFECYCLE_LOCK_OWNED=0
+  SECONDMATE_HOME_LIFECYCLE_LOCK=
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
@@ -3302,8 +3342,10 @@ CONTINUATION_PROMPT_FILE=
 META_BACKUP=
 discard_existing_artifact_backup
 [ "$LIFECYCLE_LOCK_OWNED" != 1 ] || [ -z "$LIFECYCLE_LOCK" ] || fm_account_lifecycle_lock_release "$LIFECYCLE_LOCK" || exit 1
+[ -z "$SECONDMATE_HOME_LIFECYCLE_LOCK" ] || fm_account_lifecycle_lock_release "$SECONDMATE_HOME_LIFECYCLE_LOCK" || exit 1
 LIFECYCLE_LOCK=
 LIFECYCLE_LOCK_OWNED=0
+SECONDMATE_HOME_LIFECYCLE_LOCK=
 
 account_summary=
 [ -z "$DIRECT_ACCOUNT_HOME" ] || account_summary=" account_home=$DIRECT_ACCOUNT_HOME"

@@ -48,7 +48,18 @@ case "${1:-} ${2:-}" in
       printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal handle stale"}}\n'
       exit 1
     fi
-    printf '{"ok":true,"result":{"terminal":{"tail":[]}}}\n'
+    terminal=
+    previous=
+    for argument in "$@"; do
+      [ "$previous" != --terminal ] || terminal=$argument
+      previous=$argument
+    done
+    if [ -f "$RESP/.terminal-worktree-override" ]; then
+      worktree=$(cat "$RESP/.terminal-worktree-override")
+    else
+      worktree="wt-${terminal#term-}"
+    fi
+    printf '{"ok":true,"result":{"terminal":{"handle":"%s","worktreeId":"%s","tail":[]}}}\n' "$terminal" "$worktree"
     ;;
   "terminal close")
     : > "$RESP/.terminal-closed"
@@ -596,13 +607,16 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when path parsing and cleanup fail"
   assert_contains "$out" "orca worktree create did not return a path" \
     "pathless worktree failure should explain the missing path"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-pathless-cleanup'$'\x1f''--force'$'\x1f''--json' \
-    "pathless cleanup should attempt helper-backed worktree removal"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "pathless cleanup removed a worktree without terminal-absence proof"
   assert_present "$state/$id.meta" "failed pathless cleanup should preserve metadata"
   assert_grep "window=fm-$id" "$state/$id.meta" "preserved pathless metadata missing stable window alias"
   assert_grep "backend=orca" "$state/$id.meta" "preserved pathless metadata missing backend=orca"
   assert_grep "orca_worktree_id=wt-pathless-cleanup" "$state/$id.meta" "preserved pathless metadata missing Orca worktree id"
   assert_no_grep "terminal=" "$state/$id.meta" "preserved pathless metadata should not invent a terminal handle"
+  assert_no_grep '^worktree=' "$state/$id.meta" "preserved pathless metadata should not record an empty worktree path"
+  assert_grep 'orca_cleanup_pending=1' "$state/$id.meta" "preserved pathless metadata missing cleanup quarantine"
+  assert_grep 'orca_cleanup_phase=spawn-abort' "$state/$id.meta" "preserved pathless metadata missing cleanup phase"
   assert_no_grep "report_required=" "$state/$id.meta" "preserved pathless metadata must keep the legacy no-report contract"
   pass "fm-spawn.sh --backend orca: preserves metadata when pathless cleanup fails"
 }
@@ -997,7 +1011,7 @@ test_spawn_refuses_orca_nonisolated_worktree() {
   pass "fm-spawn.sh --backend orca: refuses non-isolated worktrees and closes implicit terminals"
 }
 
-test_spawn_removes_orca_worktree_when_terminal_create_fails() {
+test_spawn_quarantines_orca_worktree_when_terminal_create_fails() {
   local proj wt data state config id out status
   id="orcatermfailz8"
   proj="$TMP_ROOT/terminal-fail-project"
@@ -1022,16 +1036,18 @@ test_spawn_removes_orca_worktree_when_terminal_create_fails() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when terminal creation fails"
-  assert_grep "window=legacy:fm-$id" "$state/$id.meta" "terminal-create abort must leave the legacy meta unchanged after successful cleanup"
-  assert_no_grep "backend=orca" "$state/$id.meta" "terminal-create abort should not record Orca metadata after successful cleanup"
-  assert_no_grep "orca_worktree_id=" "$state/$id.meta" "terminal-create abort should not record an Orca worktree id after successful cleanup"
+  assert_grep "window=fm-$id" "$state/$id.meta" "terminal-create abort must retain the cleanup alias"
+  assert_grep "backend=orca" "$state/$id.meta" "terminal-create abort should retain Orca cleanup metadata"
+  assert_grep "orca_worktree_id=wt-terminal-fail" "$state/$id.meta" "terminal-create abort should retain the Orca worktree id"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''create'$'\x1f''--worktree'$'\x1f''id:wt-terminal-fail'$'\x1f''--title'$'\x1f'"fm-$id"$'\x1f''--json' \
     "Orca spawn should attempt terminal creation before abort cleanup"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-terminal-fail'$'\x1f''--force'$'\x1f''--json' \
-    "Orca spawn should remove the worktree when terminal creation fails"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "Orca spawn removed a worktree after ambiguous terminal creation"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
     "Orca spawn should not close a terminal when no handle was recorded"
-  pass "fm-spawn.sh --backend orca: removes worktree when terminal creation fails"
+  assert_grep 'orca_cleanup_pending=1' "$state/$id.meta" \
+    "ambiguous terminal creation did not quarantine the worktree"
+  pass "fm-spawn.sh --backend orca: quarantines ambiguous terminal creation"
 }
 
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
@@ -1755,6 +1771,112 @@ test_dispatcher_sources_orca_and_routes_primitives() {
   pass "fm-backend dispatcher: accepts orca and routes capture through bin/backends/orca.sh"
 }
 
+test_spawn_refuses_cleanup_pending_orca_task_before_mutation() {
+  local proj data state config id out status
+  id="orcacleanupblockz9"
+  proj="$TMP_ROOT/cleanup-block-project"
+  data="$TMP_ROOT/cleanup-block-data"
+  state="$TMP_ROOT/cleanup-block-state"
+  config="$TMP_ROOT/cleanup-block-config"
+  fm_git_init_commit "$proj"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "project=$proj" "harness=claude" "kind=ship" "mode=local-only" \
+    "backend=orca" "orca_worktree_id=wt-retained" "terminal=term-retained" \
+    "orca_cleanup_pending=1" "orca_cleanup_phase=spawn-abort" "orca_terminal_proof=recorded"
+  orca_case cleanup-pending-block
+
+  set +e
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "spawn reused an Orca cleanup quarantine"
+  assert_contains "$out" "Orca cleanup is pending for $id" \
+    "cleanup-pending spawn refusal did not explain the supported cleanup path"
+  assert_grep 'orca_worktree_id=wt-retained' "$state/$id.meta" \
+    "cleanup-pending spawn overwrote the retained worktree identity"
+  [ ! -s "$LOG" ] || fail "cleanup-pending spawn reached Orca mutation"
+  pass "Orca cleanup quarantine blocks respawn without identity loss"
+}
+
+test_pathless_orca_quarantine_has_supported_cleanup() {
+  local proj wt data state config id out status neutral
+  id="orcapathcleanupz7"
+  proj="$TMP_ROOT/path-cleanup-project"
+  wt="$TMP_ROOT/path-cleanup-wt"
+  data="$TMP_ROOT/path-cleanup-data"
+  state="$TMP_ROOT/path-cleanup-state"
+  config="$TMP_ROOT/path-cleanup-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "project=$proj" "harness=claude" "kind=ship" "mode=local-only" \
+    "backend=orca" "orca_worktree_id=wt-path-cleanup" "terminal=term-path-cleanup" \
+    "orca_cleanup_pending=1" "orca_cleanup_phase=spawn-abort" "orca_terminal_proof=recorded"
+  orca_case pathless-supported-cleanup
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-path-cleanup","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+
+  set +e
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$CASE_DIR/checkout-state" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1)
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "pathless Orca quarantine cleanup"$'\n'"$out"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-path-cleanup' \
+    "pathless quarantine cleanup did not quiesce the retained terminal"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-path-cleanup' \
+    "pathless quarantine cleanup did not remove the retained provider worktree"
+  assert_absent "$state/$id.meta" "successful pathless quarantine cleanup retained metadata"
+  pass "pathless Orca quarantine has a supported cleanup path"
+}
+
+test_teardown_refuses_orca_terminal_worktree_identity_drift() {
+  local proj wt data state config id out status neutral
+  id="orcatermdriftz5"
+  proj="$TMP_ROOT/terminal-drift-project"
+  wt="$TMP_ROOT/terminal-drift-wt"
+  data="$TMP_ROOT/terminal-drift-data"
+  state="$TMP_ROOT/terminal-drift-state"
+  config="$TMP_ROOT/terminal-drift-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-terminal-drift" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "backend=orca" \
+    "orca_worktree_id=wt-terminal-drift"
+  orca_case terminal-worktree-drift
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-terminal-drift","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  printf 'wt-other\n' > "$RESP/.terminal-worktree-override"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+
+  set +e
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "teardown closed a terminal bound to another Orca worktree"
+  assert_contains "$out" "endpoint identity or state for $id is unknown" \
+    "terminal/worktree identity drift was not surfaced"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "terminal/worktree identity drift closed the recorded terminal"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "terminal/worktree identity drift removed the provider worktree"
+  assert_present "$state/$id.meta" "terminal/worktree identity drift removed metadata"
+  pass "Orca teardown rejects terminal/worktree identity drift"
+}
+
 if [ "${FM_TEST_FOCUSED:-}" = review-round-orca-quiescence ]; then
   test_kill_propagates_close_failure
   test_terminal_state_classifies_closed_live_and_ambiguous_orca
@@ -1770,6 +1892,15 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-orca-final ]; then
   test_spawn_refuses_malformed_legacy_orca_report_metadata
   test_spawn_retains_orca_worktree_when_abort_close_fails
   test_teardown_rejects_symlinked_orca_task_metadata
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-round-orca-quarantine ]; then
+  test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
+  test_spawn_quarantines_orca_worktree_when_terminal_create_fails
+  test_spawn_refuses_cleanup_pending_orca_task_before_mutation
+  test_pathless_orca_quarantine_has_supported_cleanup
+  test_teardown_refuses_orca_terminal_worktree_identity_drift
   exit 0
 fi
 
@@ -1796,6 +1927,9 @@ test_remove_worktree_refuses_empty_id
 test_remove_worktree_rejects_orca_error_json
 test_worktree_path_resolves_id
 test_dispatcher_sources_orca_and_routes_primitives
+test_spawn_refuses_cleanup_pending_orca_task_before_mutation
+test_pathless_orca_quarantine_has_supported_cleanup
+test_teardown_refuses_orca_terminal_worktree_identity_drift
 test_json_get_ignores_undocumented_terminal_id_shapes
 test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing
@@ -1811,7 +1945,7 @@ test_report_required_orca_recovery_preserves_inherited_lifecycle_state
 test_spawn_refuses_orca_secondmate_before_home_mutation
 test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
-test_spawn_removes_orca_worktree_when_terminal_create_fails
+test_spawn_quarantines_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
 test_spawn_retains_orca_worktree_when_abort_close_fails
 test_spawn_refuses_invalid_state_before_orca_resource_creation

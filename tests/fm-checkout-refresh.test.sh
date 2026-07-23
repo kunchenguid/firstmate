@@ -545,7 +545,7 @@ test_treehouse_discovery_failure_invalidates_coverage_health() {
   status=$?
   set -e
   [ "$status" -ne 0 ] || fail "uninspectable declared Treehouse worktree reported healthy coverage"
-  assert_contains "$out" "Treehouse worktree is not inspectable: $missing_path" \
+  assert_contains "$out" "Treehouse worktree identity or registration is not inspectable: $missing_path" \
     "uninspectable declared Treehouse worktree was not surfaced"
   assert_refresh_state "$STATE_ROOT" unhealthy
   rm -rf "$(dirname "$bad_state")"
@@ -574,6 +574,28 @@ test_treehouse_discovery_failure_invalidates_coverage_health() {
     "unreadable Treehouse pool was not surfaced"
   assert_refresh_state "$STATE_ROOT" unhealthy
   pass "unreadable roots, malformed schemas, and uninspectable paths invalidate coverage health"
+}
+
+test_raw_treehouse_root_symlink_invalidates_coverage_health() {
+  local real_root linked_root out status
+  real_root="$TMP_ROOT/treehouse-root-real"
+  linked_root="$TMP_ROOT/treehouse-root-link"
+  mkdir -p "$real_root"
+  ln -s "$real_root" "$linked_root"
+
+  set +e
+  out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_ROOT="$STATE_ROOT" FM_CHECKOUT_REFRESH_LOCK_ROOT="$LOCK_ROOT" \
+    FM_TREEHOUSE_ROOT="$linked_root" FM_CHECKOUT_REFRESH_TEST=1 \
+    "$ROOT/bin/fm-checkout-refresh.sh" run-once --force 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "symlinked raw Treehouse root reported healthy coverage"
+  assert_contains "$out" "configured root is unsafe or unreadable: $linked_root" \
+    "symlinked raw Treehouse root was resolved before rejection"
+  assert_refresh_state "$STATE_ROOT" unhealthy
+  pass "raw Treehouse root symlinks invalidate coverage"
 }
 
 test_skill_inventory_failure_preserves_alert_and_invalidates_coverage() {
@@ -1491,6 +1513,13 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-provenance ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-symlinks ]; then
+  test_discovery_covers_projects_treehouse_external_and_config
+  test_treehouse_discovery_failure_invalidates_coverage_health
+  test_raw_treehouse_root_symlink_invalidates_coverage_health
+  exit 0
+fi
+
 test_discovery_covers_projects_treehouse_external_and_config
 test_uninspectable_active_project_invalidates_coverage_health
 test_nested_active_project_invalidates_coverage_health
@@ -1505,6 +1534,7 @@ test_ignored_skill_files_are_outside_the_collision_guard
 test_pool_preflight_surfaces_dirty_worktrees_without_blocking_clean_selection
 test_bootstrap_relays_hygiene_alerts
 test_treehouse_discovery_failure_invalidates_coverage_health
+test_raw_treehouse_root_symlink_invalidates_coverage_health
 test_skill_inventory_failure_preserves_alert_and_invalidates_coverage
 test_lock_root_failure_invalidates_coverage_before_preparation
 test_reinspection_failure_invalidates_coverage_health

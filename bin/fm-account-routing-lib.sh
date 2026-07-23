@@ -956,6 +956,18 @@ fm_account_lifecycle_lock_acquire() {  # <state-dir> <task>
   fm_account_lock_acquire "$1" "$2" account-lifecycle "account lifecycle" "${FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS:-10}"
 }
 
+fm_secondmate_home_lifecycle_lock_acquire() {
+  local state_base=$1 home=$2 canonical key
+  [ -d "$home" ] && [ ! -L "$home" ] || {
+    echo "error: secondmate home lifecycle target must be a real directory: $home" >&2
+    return 1
+  }
+  canonical=$(cd "$home" 2>/dev/null && pwd -P) || return 1
+  key=$(printf '%s' "$canonical" | shasum -a 256 | awk '{print substr($1,1,24)}') || return 1
+  fm_account_lock_acquire "$state_base/secondmate-home-lifecycle" "home-$key" \
+    secondmate-home-lifecycle "secondmate home lifecycle" "${FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS:-10}"
+}
+
 fm_account_lifecycle_lock_owned() {  # <lock-path>
   fm_account_reclaim_guard_owned "$1"
 }

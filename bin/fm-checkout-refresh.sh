@@ -95,9 +95,15 @@ FM_HOME_KEY=$(printf '%s' "$FM_HOME_CANONICAL" | shasum -a 256 | awk '{print sub
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 CONFIG_FILE="${FM_CHECKOUT_REFRESH_CONFIG:-$CONFIG/checkout-refresh}"
-TREEHOUSE_ROOT="${FM_TREEHOUSE_ROOT:-$HOME/.treehouse}"
+TREEHOUSE_ROOT_RAW="${FM_TREEHOUSE_ROOT:-$HOME/.treehouse}"
+TREEHOUSE_ROOT=$TREEHOUSE_ROOT_RAW
 TREEHOUSE_ROOT_CANONICAL=
-if [ -d "$TREEHOUSE_ROOT" ] \
+TREEHOUSE_ROOT_INVALID=0
+if [ -L "$TREEHOUSE_ROOT_RAW" ]; then
+  TREEHOUSE_ROOT_INVALID=1
+elif [ -e "$TREEHOUSE_ROOT_RAW" ] && [ ! -d "$TREEHOUSE_ROOT_RAW" ]; then
+  TREEHOUSE_ROOT_INVALID=1
+elif [ -d "$TREEHOUSE_ROOT_RAW" ] \
   && TREEHOUSE_ROOT_CANONICAL=$(cd "$TREEHOUSE_ROOT" 2>/dev/null && pwd -P); then
   TREEHOUSE_ROOT=$TREEHOUSE_ROOT_CANONICAL
 else
@@ -236,6 +242,10 @@ parse_config() {
 }
 
 treehouse_worktree_paths() {
+  if [ "$TREEHOUSE_ROOT_INVALID" = 1 ]; then
+    echo "checkout-refresh: skipped: incomplete Treehouse coverage because the configured root is unsafe or unreadable: $TREEHOUSE_ROOT_RAW" >&2
+    return 1
+  fi
   if [ ! -e "$TREEHOUSE_ROOT" ] && [ ! -L "$TREEHOUSE_ROOT" ]; then
     return 0
   fi
