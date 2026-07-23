@@ -12,6 +12,7 @@ DOC_DIR="$REPO_ROOT/docs/supervision-protocols"
 
 HARNESS=
 READ_ONLY=0
+LOCK_STATE=
 AFK=0
 X_MODE=0
 REPAIR_LINE=0
@@ -19,7 +20,7 @@ QUEUE_PENDING=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
+Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--lock-state <result>] [--afk 0|1] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
 
 Print the current primary harness's supervision operating instructions.
 With --repair-line, print one concise repair instruction for guard and hook messages.
@@ -43,6 +44,11 @@ while [ "$#" -gt 0 ]; do
     --read-only)
       [ "$#" -gt 1 ] || { echo "error: --read-only requires 0 or 1" >&2; exit 2; }
       READ_ONLY=$(bool_value "$2")
+      shift 2
+      ;;
+    --lock-state)
+      [ "$#" -gt 1 ] || { echo "error: --lock-state requires a result" >&2; exit 2; }
+      LOCK_STATE=$2
       shift 2
       ;;
     --afk)
@@ -75,6 +81,18 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+if [ -z "$LOCK_STATE" ]; then
+  if [ "$READ_ONLY" -eq 1 ]; then
+    LOCK_STATE=LIVE_OTHER
+  else
+    LOCK_STATE=OWNED
+  fi
+fi
+case "$LOCK_STATE" in
+  OWNED|LIVE_OTHER|STALE_RECLAIMABLE|IDENTITY_UNAVAILABLE) ;;
+  *) echo "error: unsupported lock state: $LOCK_STATE" >&2; exit 2 ;;
+esac
 
 if [ -z "$HARNESS" ]; then
   HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
@@ -115,8 +133,12 @@ render_snippet() {
 }
 
 repair_line() {
-  if [ "$READ_ONLY" -eq 1 ]; then
+  if [ "$LOCK_STATE" = LIVE_OTHER ]; then
     printf '%s\n' 'Watcher repair belongs to the session holding the fleet lock; do not drain, arm, or repair from this read-only session.'
+    return 0
+  fi
+  if [ "$LOCK_STATE" != OWNED ]; then
+    printf '%s\n' 'Watcher repair is disabled because this session did not acquire the fleet lock; resolve the reported lock outcome first.'
     return 0
   fi
   if [ "$AFK" -eq 1 ]; then
@@ -187,8 +209,10 @@ printf '%s\n' "$RULE"
 printf 'SUPERVISION OPERATING INSTRUCTIONS - primary harness: %s\n' "$HARNESS"
 printf '%s\n' "$RULE"
 printf 'Current state:\n'
-if [ "$READ_ONLY" -eq 1 ]; then
+if [ "$LOCK_STATE" = LIVE_OTHER ]; then
   printf '%s\n' '- Lock: read-only; do not drain, arm, spawn, steer, merge, or repair fleet state here.'
+elif [ "$LOCK_STATE" != OWNED ]; then
+  printf '%s\n' "- Lock: not acquired ($LOCK_STATE); do not drain, arm, spawn, steer, merge, or repair fleet state here."
 else
   printf '%s\n' '- Lock: held by this session; this session owns normal supervision unless away mode says otherwise.'
 fi

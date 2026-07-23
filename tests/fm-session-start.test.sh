@@ -5,9 +5,9 @@
 #
 # Coverage:
 #   - absent-file markers vs empty-but-present files in the context digest
-#   - the lock-refusal read-only path: banner leads, every mutating step is
-#     skipped (including bootstrap's five mutating sweeps, verified by their
-#     ABSENCE), the digest still completes
+#   - typed lock outcomes: only LIVE_OTHER enters read-only, unresolved identity
+#     remains non-mutating without asserting a rival, and stale Codex fallback
+#     reclaim continues through wake drain in the same startup
 #   - output section ordering: diagnostics/banners lead, bulk file dumps follow
 #   - context-aware next-step guidance for read-only, AFK, X mode, and normal
 #     watcher ownership
@@ -160,6 +160,15 @@ exit 1
 SH
   chmod +x "$fakebin/ps"
   printf '%s\n' "$harness" > "$fakebin/.harness-name"
+}
+
+make_fake_ps_denied() {
+  local fakebin=$1
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/ps"
 }
 
 make_fake_ps_pi_holder() {
@@ -742,6 +751,59 @@ SH
   [ "$count" -eq 1 ] || fail "concurrent session-lock acquisition produced $count winners"
 
   pass "concurrent session-lock acquisition admits exactly one live harness"
+}
+
+test_identity_unavailable_is_not_live_other_read_only() {
+  local rec root home fakebin holder_pid out status=0
+  rec=$(new_world identity-unavailable)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_denied "$fakebin"
+  append_wake "$home/state" signal task-x "working: must remain queued" || fail "seed wake failed"
+
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+
+  out=$(CODEX_THREAD_ID=current-thread run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  expect_code 0 "$status" "fm-session-start.sh must report an unavailable identity without failing the digest"
+  assert_contains "$out" "LOCK_RESULT=IDENTITY_UNAVAILABLE" "identity-unavailable lock result was not surfaced"
+  assert_contains "$out" "LOCK IDENTITY UNAVAILABLE" "identity-unavailable startup did not get its own clear banner"
+  assert_not_contains "$out" "READ-ONLY SESSION" "identity-unavailable startup was mislabeled as live-other read-only"
+  assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION" "identity-unavailable startup asserted an unproved live rival"
+  assert_contains "$out" "skipped (lock outcome IDENTITY_UNAVAILABLE)" "identity-unavailable startup did not skip wake mutation explicitly"
+  [ -s "$home/state/.wake-queue" ] || fail "identity-unavailable startup drained the wake queue without owning the lock"
+
+  pass "session start enters live-other read-only mode only for a proven LIVE_OTHER result"
+}
+
+test_stale_lock_with_denied_ps_reclaims_and_continues() {
+  local rec root home fakebin out status=0
+  rec=$(new_world stale-reclaim-denied-ps)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_denied "$fakebin"
+  printf '999999\n' > "$home/state/.lock"
+  append_wake "$home/state" signal task-x "working: drain after reclaim" || fail "seed wake failed"
+
+  out=$(CODEX_THREAD_ID=current-thread run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "fm-session-start.sh after stale reclaim"
+  assert_contains "$out" "LOCK_RESULT=OWNED" "stale lock was not reclaimed by the same session start"
+  assert_contains "$out" "$(printf 'signal\ttask-x\tworking: drain after reclaim')" "same session did not continue into wake drain after reclaim"
+  assert_not_contains "$out" "READ-ONLY SESSION" "stale reclaim incorrectly latched session start read-only"
+  assert_not_contains "$out" "LOCK IDENTITY UNAVAILABLE" "dead numeric owner was treated as ambiguous when kill -0 proved it stale"
+  assert_grep "codex-thread:current-thread" "$home/state/.lock" "session start did not install its Codex thread identity"
+  [ ! -s "$home/state/.wake-queue" ] || fail "same session did not drain the wake queue after reclaim"
+
+  pass "stale numeric lock plus denied ps is reclaimed and startup continues in the same session"
 }
 
 # --- output ordering ----------------------------------------------------------
@@ -1359,6 +1421,8 @@ test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_session_lock_concurrent_single_winner
+test_identity_unavailable_is_not_live_other_read_only
+test_stale_lock_with_denied_ps_reclaims_and_continues
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start
 test_session_start_relaunches_missing_pi_secondmate

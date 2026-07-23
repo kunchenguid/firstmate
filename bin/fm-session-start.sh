@@ -58,9 +58,11 @@
 # exists to prevent, so locking first closes the hole outright: only the
 # session that actually wins the lock ever touches shared mutable state.
 #
-# The tradeoff this ordering accepts: a refused (read-only) session must not
-# go dark. So on refusal, bootstrap still runs (in FM_BOOTSTRAP_DETECT_ONLY=1
-# mode) for its read-only detect lines - missing tools, gh auth, the
+# The tradeoff this ordering accepts: a session that does not own the lock must
+# not go dark. A proven LIVE_OTHER outcome is read-only; an unavailable identity
+# is reported separately without asserting another live session. In either
+# case bootstrap still runs (in FM_BOOTSTRAP_DETECT_ONLY=1 mode) for its
+# read-only detect lines - missing tools, gh auth, the
 # worktree-tangle check, the harness override, crew-dispatch validation,
 # tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
 # which mutate shared state and all of which are safe to compute without
@@ -248,8 +250,21 @@ subsection "LOCK"
 LOCK_OUT=$("$SCRIPT_DIR/fm-lock.sh" 2>&1)
 LOCK_RC=$?
 printf '%s\n' "$LOCK_OUT"
+LOCK_RESULT=$(printf '%s\n' "$LOCK_OUT" | sed -n 's/^LOCK_RESULT=//p' | tail -n 1)
+case "$LOCK_RESULT:$LOCK_RC" in
+  OWNED:0) ;;
+  LIVE_OTHER:*|STALE_RECLAIMABLE:*|IDENTITY_UNAVAILABLE:*) ;;
+  *)
+    LOCK_RESULT=IDENTITY_UNAVAILABLE
+    printf 'LOCK_RESULT=IDENTITY_UNAVAILABLE\n'
+    printf 'error: fm-lock.sh returned no valid typed outcome; treating lock ownership as unavailable\n'
+    ;;
+esac
 READ_ONLY=0
-if [ "$LOCK_RC" -ne 0 ]; then
+LOCK_OWNED=0
+if [ "$LOCK_RESULT" = OWNED ]; then
+  LOCK_OWNED=1
+elif [ "$LOCK_RESULT" = LIVE_OTHER ]; then
   READ_ONLY=1
   BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
@@ -263,11 +278,26 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '●  otherwise mutate fleet state from this session.\n'
     printf '%s\n' "$BAR"
   }
+else
+  BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  {
+    printf '%s\n' "$BAR"
+    if [ "$LOCK_RESULT" = STALE_RECLAIMABLE ]; then
+      printf '●  STALE LOCK RECLAIM DID NOT COMPLETE\n'
+    else
+      printf '●  LOCK IDENTITY UNAVAILABLE - FLEET LOCK NOT ACQUIRED\n'
+    fi
+    printf '●  %s\n' "$LOCK_OUT"
+    printf '●  This is not proof of another live session and does not enter the\n'
+    printf '●  LIVE_OTHER read-only mode. Mutating startup steps remain disabled\n'
+    printf '●  because this session has not proven ownership of the fleet lock.\n'
+    printf '%s\n' "$BAR"
+  }
 fi
 
 # --- 2. bootstrap --------------------------------------------------------
 subsection "BOOTSTRAP"
-if [ "$READ_ONLY" -eq 1 ]; then
+if [ "$LOCK_OWNED" -eq 0 ]; then
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 else
   BOOT_OUT=$(
@@ -296,6 +326,11 @@ if [ "$READ_ONLY" -eq 1 ]; then
   printf 'skipped (read-only session) - %s record(s) remain queued because this session lacks verified fleet-lock ownership.\n' "$QLEN"
   GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
+elif [ "$LOCK_OWNED" -eq 0 ]; then
+  QLEN=0
+  [ -s "$STATE/.wake-queue" ] && QLEN=$(grep -c . "$STATE/.wake-queue" 2>/dev/null || printf '0')
+  printf 'skipped (lock outcome %s) - %s record(s) remain queued; no lock owner was assumed.\n' "$LOCK_RESULT" "$QLEN"
+  printf 'guard check skipped because this session did not acquire the fleet lock.\n'
 else
   DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
   if [ -n "$DRAIN_OUT" ]; then
@@ -327,6 +362,7 @@ fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \
   --harness "$PRIMARY_HARNESS" \
   --read-only "$READ_ONLY" \
+  --lock-state "$LOCK_RESULT" \
   --afk "$AFK_PRESENT" \
   --x-mode "$X_MODE_PRESENT"
 
@@ -399,6 +435,13 @@ if [ "$READ_ONLY" -eq 1 ]; then
 This session did not acquire the fleet lock. Stay read-only: do not arm,
 drain, spawn, steer, merge, or repair fleet state from here. Only a session
 with verified fleet-lock ownership may perform mutable follow-up.
+
+EOF
+elif [ "$LOCK_OWNED" -eq 0 ]; then
+  cat <<EOF
+This session did not acquire the fleet lock because the lock outcome was
+$LOCK_RESULT. Do not drain, arm, spawn, steer, merge, or repair fleet state.
+This outcome does not prove that another live session owns the lock.
 
 EOF
 elif [ "$AFK_PRESENT" -eq 1 ]; then
