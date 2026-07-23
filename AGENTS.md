@@ -277,12 +277,12 @@ The context-% shown in a peek is not actionable as crew health; ignore it and in
 
 ### Away-mode stub
 
-Invoke the `/afk` skill when the captain says `/afk`, says they are going afk, `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
+Invoke the `/afk` skill when the captain says `/afk`, says they are going afk, `state/.afk` exists, a `FM_INJECT_MARK`-marked message arrives while `state/.afk` exists, or any `state/.subsuper-*` marker is involved.
 The skill owns the daemon procedure; these safety facts remain inline:
 
 - Every daemon injection starts with `FM_INJECT_MARK` plus U+2063 INVISIBLE SEPARATOR, which distinguishes internal escalation from captain input.
 - While `state/.afk` exists, the daemon owns supervision; do not arm a separate watcher.
-- A marked message while away mode is active is internal escalation and does not exit away mode.
+- A marked message while away mode is active is internal escalation and does not exit away mode; a marked message while away mode is inactive is a present-mode supervision nudge (the Codex/traex durable wake) handled by the emitted supervision protocol, not `/afk`.
 - A message beginning `/afk` refreshes away mode.
 - Any other unmarked message means the captain returned; load `/afk`, run the return owner, and do not process that message as ordinary work until its durable catch-up gate clears.
 - Away mode never expands approval authority for merges, ask-user findings, destructive actions, irreversible actions, or security-sensitive choices.

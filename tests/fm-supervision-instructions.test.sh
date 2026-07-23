@@ -12,8 +12,9 @@ test_selected_harness_block_only() {
   local out
   out=$("$RENDER" --harness codex)
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: codex" "codex heading missing"
-  assert_contains "$out" "Mode: Codex foreground checkpoint." "codex snippet missing"
-  assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex checkpoint helper missing"
+  assert_contains "$out" "Mode: Codex durable-wake supervision" "codex snippet missing"
+  assert_contains "$out" "bin/fm-present-launch.sh start" "codex snippet missing the present-mode daemon primary wake path"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex checkpoint backstop helper missing"
   assert_not_contains "$out" "Mode: Claude background-notify supervision." "renderer printed the claude snippet too"
   assert_not_contains "$out" "Mode: Pi extension background wake." "renderer printed the pi snippet too"
   pass "renderer prints exactly the selected harness block"
@@ -28,20 +29,23 @@ test_unknown_fallback() {
 }
 
 # traex is a verified primary (codex fork), so it must render its OWN snippet, not
-# the unknown fallback, and its repair line is codex's foreground checkpoint.
+# the unknown fallback, and its repair line steers to the present-mode daemon with
+# the foreground checkpoint as the degraded backstop.
 test_traex_selected_block_and_repair() {
   local out home
   out=$("$RENDER" --harness traex)
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: traex" "traex heading missing"
-  assert_contains "$out" "Mode: traex foreground checkpoint." "traex snippet missing"
-  assert_contains "$out" "bin/fm-watch-checkpoint.sh" "traex checkpoint helper missing"
+  assert_contains "$out" "Mode: traex durable-wake supervision" "traex snippet missing"
+  assert_contains "$out" "bin/fm-present-launch.sh start" "traex snippet missing the present-mode daemon primary wake path"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh" "traex checkpoint backstop helper missing"
   assert_not_contains "$out" "Mode: Unknown harness fallback." "traex fell back to the unknown snippet"
 
   home="$TMP_ROOT/traex-repair-home"
   mkdir -p "$home/state" "$home/config"
   out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=9 "$RENDER" --harness traex --repair-line)
-  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 9" "traex repair line did not use the foreground checkpoint helper"
-  pass "renderer prints the traex checkpoint block and repair line"
+  assert_contains "$out" "bin/fm-present-launch.sh start" "traex repair line did not steer to the present-mode daemon primary"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 9" "traex repair line did not name the foreground checkpoint backstop"
+  pass "renderer prints the traex durable-wake block and repair line"
 }
 
 test_conditional_stanzas() {
@@ -54,7 +58,7 @@ test_conditional_stanzas() {
   assert_contains "$out" "- Away mode: active" "afk stanza missing"
   assert_contains "$out" "- X mode: active" "x-mode stanza missing"
   assert_contains "$out" "$config/x-mode.env" "x-mode stanza did not render the effective config path"
-  assert_contains "$out" 'Mode: Codex foreground checkpoint.' "codex snippet missing"
+  assert_contains "$out" 'Mode: Codex durable-wake supervision' "codex snippet missing"
   assert_not_contains "$out" "Source \`config/x-mode.env\`" "snippet kept the repo-relative x-mode config path"
   pass "renderer includes read-only, afk, and effective x-mode current-state stanzas"
 }
@@ -64,7 +68,8 @@ test_repair_lines() {
   home="$TMP_ROOT/repair-home"
   mkdir -p "$home/state" "$home/config"
   out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --repair-line)
-  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 7" "codex repair line did not use checkpoint helper and env override"
+  assert_contains "$out" "bin/fm-present-launch.sh start" "codex repair line did not steer to the present-mode daemon primary"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 7" "codex repair line did not name the checkpoint backstop with env override"
 
   out=$(FM_HOME="$home" "$RENDER" --harness claude --queue-pending 1 --repair-line)
   assert_contains "$out" "After draining queued wakes" "queue-pending prefix missing"

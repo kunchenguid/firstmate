@@ -1725,6 +1725,102 @@ test_inject_msg_defers_on_dead_shell_unknown() {
   pass "inject_msg: defers on a dead-shell/unreadable composer (unknown), never typing the escalation into a shell"
 }
 
+# --- present-mode durable wake (issue #352) --------------------------------
+# Codex/traex cannot wake from background-task completion, so before #352 the
+# only wake path was a foreground checkpoint (bin/fm-watch-checkpoint.sh)
+# exiting and firstmate manually re-arming it. The present-mode daemon
+# (FM_SUPERVISE_PRESENT=1) removes that dependency: on an actionable wake it
+# injects a nudge into the captain's pane while afk is INACTIVE, starting a
+# fresh turn with no checkpoint in the loop. inject_msg's presence gate is the
+# mirror image of away mode - present injects when afk is off and yields when
+# afk is on; away injects when afk is on and defers when afk is off. These
+# lock that mode-dependent gate and the wake-without-checkpoint delivery.
+
+test_inject_msg_present_injects_when_afk_inactive() {
+  local dir state
+  dir=$(make_supercase inject-present-afk-off)
+  state="$dir/state"
+  # afk deliberately NOT set: the captain is present.
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'idle prompt\n'; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() {
+      case "$3" in *"drain"*) : ;; *) fail "present nudge text missing from send_text_submit: $3" ;; esac
+      printf 'empty'
+    }
+    FM_SUPERVISE_PRESENT=1 FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+      inject_msg "drain queued wakes" "$state" \
+      || fail "present-mode inject_msg should SUCCEED while afk is inactive (durable wake)"
+  ) || fail "present-mode afk-inactive inject_msg subshell failed"
+  pass "present mode: inject_msg wakes the pane while afk is inactive, with no foreground checkpoint in the loop"
+}
+
+test_inject_msg_present_defers_when_afk_active() {
+  local dir state
+  dir=$(make_supercase inject-present-afk-on)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'idle prompt\n'; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { fail "present daemon must NOT inject while afk is active (it yields to the away daemon)"; }
+    if FM_SUPERVISE_PRESENT=1 FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+      inject_msg "drain queued wakes" "$state"; then
+      fail "present-mode inject_msg should DEFER while afk is active"
+    fi
+  ) || fail "present-mode afk-active defer subshell unexpectedly failed"
+  pass "present mode: inject_msg yields (defers) while afk is active so the away daemon owns the pane"
+}
+
+test_inject_msg_away_defers_when_afk_inactive() {
+  # Mirror image: the same call in away mode (FM_SUPERVISE_PRESENT unset) must
+  # defer when afk is inactive, proving the presence gate branches on the mode.
+  local dir state
+  dir=$(make_supercase inject-away-afk-off)
+  state="$dir/state"
+  # afk deliberately NOT set.
+  (
+    fm_backend_target_exists() { return 0; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'idle prompt\n'; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { fail "away daemon must NOT inject while afk is inactive"; }
+    if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+      inject_msg "escalation" "$state"; then
+      fail "away-mode inject_msg should defer while afk is inactive"
+    fi
+  ) || fail "away-mode afk-inactive defer subshell unexpectedly failed"
+  pass "away mode: inject_msg defers while afk is inactive (present/away presence gate is mode-dependent)"
+}
+
+test_present_handle_wake_delivers_actionable_wake_without_checkpoint() {
+  local dir state sent
+  dir=$(make_supercase present-handle-wake)
+  state="$dir/state"
+  sent="$dir/nudge.txt"; : > "$sent"
+  # afk inactive: captain present. An actionable wake reason must be converted
+  # to a pane nudge telling firstmate to drain, with no checkpoint re-arm.
+  (
+    LOG="$dir/present.log"  # the daemon always sets this; log() no-ops without it
+    fm_backend_target_exists() { return 0; }
+    fm_backend_busy_state() { printf 'idle'; }
+    fm_backend_capture() { printf 'idle prompt\n'; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { printf '%s' "$3" > "$sent"; printf 'empty'; }
+    FM_SUPERVISE_PRESENT=1 FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+      present_handle_wake "signal: $state/demo.status" "$state"
+  ) || fail "present_handle_wake subshell failed"
+  grep -F "fm-wake-drain.sh" "$sent" >/dev/null \
+    || fail "present_handle_wake did not nudge the pane to drain the queue: $(cat "$sent")"
+  grep -F "signal:" "$sent" >/dev/null \
+    || fail "present_handle_wake nudge did not carry the wake reason: $(cat "$sent")"
+  pass "present_handle_wake converts an actionable wake into a pane drain-nudge with no checkpoint re-arm (issue #352)"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -1823,3 +1919,7 @@ test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_defers_on_dead_shell_unknown
+test_inject_msg_present_injects_when_afk_inactive
+test_inject_msg_present_defers_when_afk_active
+test_inject_msg_away_defers_when_afk_inactive
+test_present_handle_wake_delivers_actionable_wake_without_checkpoint
