@@ -50,12 +50,14 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
-# --- self-cleaning temp root ------------------------------------------------
+# --- self-cleaning temp root and background-process reaping ------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
-# on EXIT/INT/TERM. A test file that needs extra teardown (e.g. killing a
-# daemon) should define its own EXIT trap and call fm_test_cleanup from inside
-# it so registered dirs are still removed.
+# on EXIT/INT/TERM. fm_test_track_pid <pid> registers a background process for
+# reaping on the same EXIT, on the success path AND on every fail() path. A test
+# file that needs extra teardown (e.g. killing a daemon) should define its own
+# EXIT trap and call fm_test_cleanup from inside it so both registries are still
+# drained.
 #
 # The call site is almost always `TMP_ROOT=$(fm_test_tmproot prefix)`, which
 # forks a subshell to capture stdout. Anything that function does to the
@@ -66,10 +68,25 @@ pass() {
 # subshell's - see `man bash` on `$$`), so fm_test_tmproot records the
 # directory in a `$$`-keyed registry file instead, and the trap that reaps
 # that file is armed once, here, at source time - which always runs in the
-# real caller, never a subshell.
+# real caller, never a subshell. The pid registry is the same shape for the
+# same reason: fm_test_track_pid is often called from a subshell too.
+#
+# Both registries are mktemp'd here in the sourcing shell rather than opened at
+# a predictable $$-derived name in a shared /tmp, where another user could
+# pre-create or symlink one and steer the rm -rf in fm_test_cleanup. Every read
+# is existence-guarded so an absent file reads as empty.
+#
+# Reaping is BY REGISTERED PID ONLY, and only while that pid is still a child of
+# this shell. Never reap by process-name pattern: a pattern like the watcher's
+# script path matches every firstmate home on the machine, including a sibling
+# home's real watcher.
 
 FM_TEST_CLEANUP_DIRS=()
 FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || return 1
+FM_TEST_PID_LOG=$(mktemp "${TMPDIR:-/tmp}/.fm-test-pids.$$.XXXXXX") || {
+  rm -f "$FM_TEST_CLEANUP_REGISTRY"
+  return 1
+}
 
 fm_test_pid_identity() {
   local pid=$1
@@ -78,12 +95,66 @@ fm_test_pid_identity() {
 }
 
 FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
-  rm -f "$FM_TEST_CLEANUP_REGISTRY"
+  rm -f "$FM_TEST_CLEANUP_REGISTRY" "$FM_TEST_PID_LOG"
   return 1
+}
+
+# fm_test_pid_is_own_child <pid>: true while <pid> is still a direct child of
+# this shell. This guards every signal the reaper sends: once a pid has been
+# waited on the kernel is free to hand that number to an unrelated process, and
+# a test harness must never signal a process it does not own.
+fm_test_pid_is_own_child() {
+  local pid=$1 parent
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  parent=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]')
+  [ -n "$parent" ] && [ "$parent" = "$$" ]
+}
+
+fm_test_track_pid() {
+  local pid=$1
+  case "$pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  printf '%s\n' "$pid" >> "$FM_TEST_PID_LOG"
+}
+
+# fm_test_live_tracked_pids: print every registered pid still running as a child
+# of this shell. Used both by the reaper and by suites that assert they left
+# nothing behind.
+fm_test_live_tracked_pids() {
+  local pid
+  [ -n "${FM_TEST_PID_LOG:-}" ] && [ -s "$FM_TEST_PID_LOG" ] || return 0
+  while read -r pid; do
+    fm_test_pid_is_own_child "$pid" || continue
+    printf '%s\n' "$pid"
+  done < "$FM_TEST_PID_LOG"
+}
+
+fm_test_reap_tracked_pids() {
+  local pid i
+  for pid in $(fm_test_live_tracked_pids); do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  # Give a TERM-handling child its own teardown (fm-watch-arm.sh tears down the
+  # watcher it forked) a bounded moment before escalating.
+  i=0
+  while [ "$i" -lt 20 ] && [ -n "$(fm_test_live_tracked_pids)" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  for pid in $(fm_test_live_tracked_pids); do
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  [ -f "$FM_TEST_PID_LOG" ] && : > "$FM_TEST_PID_LOG"
+  return 0
 }
 
 fm_test_cleanup() {
   local d
+  fm_test_reap_tracked_pids
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
@@ -93,6 +164,8 @@ fm_test_cleanup() {
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi
+  [ -n "${FM_TEST_PID_LOG:-}" ] && rm -f "$FM_TEST_PID_LOG"
+  return 0
 }
 
 fm_test_tmproot() {
