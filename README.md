@@ -102,7 +102,11 @@ pi
 ```
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
-For Pi, approve the project trust prompt once per clone on first launch so both tracked `.pi/extensions/*.ts` files auto-load.
+For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
+Every Pi session starts with calm mode off and tool activity visible; `/calm` is a session-local toggle that hides all seven built-in call shells and text-result rows, including existing rows.
+Toggling off restores ordinary rendering, and `Ctrl+O` expansion behavior stays unchanged.
+Built-in `read` images on image-capable terminals and custom or third-party tool rows remain visible because Pi 0.80.10 does not expose those rows to supported extension renderers.
+The toggle changes only interactive rendering, not tool execution, model context, session storage, exports, or diagnostics.
 
 ### Talk to it
 
