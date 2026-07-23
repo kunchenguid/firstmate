@@ -46,7 +46,7 @@ Never add an agent name as a commit co-author.
 ### Workflow Rules
 - Whenever you generate or finish updating a Markdown file (e.g., reports or specs), preview it before delivery.
 - Use only a verified local-only Markdown renderer that sends no document content to external APIs.
-- Manage preview servers collision-safely by stopping the previous server or allocating a fresh port, then verify the current file is served before opening it so later previews cannot show stale content.
+- Prefer a one-shot renderer; if a preview server is required, track it explicitly, stop the workflow-owned server before starting any later preview, choose a collision-free port, and verify the current file is served before opening it so repeated previews cannot accumulate processes or show stale content.
 
 ## 2. Layout and state
 
