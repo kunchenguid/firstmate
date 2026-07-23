@@ -63,6 +63,18 @@ run_refresh() {
     "$ROOT/bin/fm-checkout-refresh.sh" "$@"
 }
 
+assert_refresh_state() {
+  local state_root=$1 expected=$2 heartbeat coverage_epoch coverage
+  heartbeat=$(sed -n '1p' "$state_root/heartbeat" 2>/dev/null || true)
+  coverage_epoch=$(sed -n '1p' "$state_root/coverage-health" 2>/dev/null || true)
+  coverage=$(sed -n '2p' "$state_root/coverage-health" 2>/dev/null || true)
+  case "$heartbeat" in ''|*[!0-9]*) fail "refresh liveness heartbeat is missing" ;; esac
+  [ "$coverage_epoch" = "$heartbeat" ] \
+    || fail "coverage health does not describe the latest liveness heartbeat"
+  [ "$coverage" = "$expected" ] \
+    || fail "expected $expected coverage health, found ${coverage:-missing}"
+}
+
 assert_head_matches_origin() {
   local checkout=$1
   [ "$(git -C "$checkout" rev-parse HEAD)" = "$(git -C "$checkout" rev-parse origin/main)" ] \
@@ -111,7 +123,7 @@ test_discovery_covers_projects_treehouse_external_and_config() {
   pass "discovery covers projects, Treehouse backing checkouts, matching-origin clones, and config"
 }
 
-test_uninspectable_active_project_invalidates_heartbeat() {
+test_uninspectable_active_project_invalidates_coverage_health() {
   local project out status
   project="$FM_TEST_HOME/projects/relvino"
   chmod 000 "$project"
@@ -126,12 +138,11 @@ test_uninspectable_active_project_invalidates_heartbeat() {
   [ "$status" -ne 0 ] || fail "uninspectable active-home project reported healthy coverage"
   assert_contains "$out" "incomplete active-home project coverage at $project" \
     "uninspectable active-home project was not surfaced"
-  [ "$(cat "$STATE_ROOT/heartbeat")" = preserved-project-heartbeat ] \
-    || fail "uninspectable active-home project advanced the healthy heartbeat"
-  pass "uninspectable active-home projects invalidate heartbeat health"
+  assert_refresh_state "$STATE_ROOT" unhealthy
+  pass "uninspectable active-home projects invalidate coverage health"
 }
 
-test_nested_active_project_invalidates_heartbeat() {
+test_nested_active_project_invalidates_coverage_health() {
   local container projects nested nested_state out status
   container="$TMP_ROOT/active-project-container"
   fm_git_init_commit "$container"
@@ -154,8 +165,7 @@ test_nested_active_project_invalidates_heartbeat() {
   [ "$status" -ne 0 ] || fail "nested non-repository active project reported healthy coverage"
   assert_contains "$out" "active-home project is not an exact inspectable Git repository root: $nested" \
     "nested non-repository active project was not surfaced"
-  [ "$(cat "$nested_state/heartbeat")" = preserved-nested-heartbeat ] \
-    || fail "nested non-repository active project advanced the healthy heartbeat"
+  assert_refresh_state "$nested_state" unhealthy
   pass "active projects must be exact canonical Git repository roots"
 }
 
@@ -408,7 +418,7 @@ test_bootstrap_relays_hygiene_alerts() {
   pass "session-start bootstrap relays hygiene and discovery diagnostics"
 }
 
-test_treehouse_discovery_failure_invalidates_heartbeat() {
+test_treehouse_discovery_failure_invalidates_coverage_health() {
   local treehouse_root pool_dir bad_state missing_path="$TMP_ROOT/missing-treehouse-worktree" out status
   treehouse_root=$(cd "$TEST_HOME/.treehouse" && pwd -P)
   pool_dir="$treehouse_root/relvino-test"
@@ -425,8 +435,7 @@ test_treehouse_discovery_failure_invalidates_heartbeat() {
   [ "$status" -ne 0 ] || fail "malformed Treehouse state reported healthy checkout coverage"
   assert_contains "$out" "incomplete Treehouse coverage at $bad_state" \
     "malformed Treehouse state was not surfaced"
-  [ "$(cat "$STATE_ROOT/heartbeat")" = preserved-heartbeat ] \
-    || fail "malformed Treehouse state advanced the healthy heartbeat"
+  assert_refresh_state "$STATE_ROOT" unhealthy
 
   printf '%s\n' '{}' > "$bad_state"
   printf '%s\n' preserved-schema-heartbeat > "$STATE_ROOT/heartbeat"
@@ -437,8 +446,7 @@ test_treehouse_discovery_failure_invalidates_heartbeat() {
   [ "$status" -ne 0 ] || fail "Treehouse state without a worktrees field reported healthy coverage"
   assert_contains "$out" "worktrees is required" \
     "missing Treehouse worktrees schema was not surfaced"
-  [ "$(cat "$STATE_ROOT/heartbeat")" = preserved-schema-heartbeat ] \
-    || fail "missing Treehouse worktrees schema advanced the healthy heartbeat"
+  assert_refresh_state "$STATE_ROOT" unhealthy
 
   printf '{"worktrees":[{"path":"%s"}]}\n' "$missing_path" > "$bad_state"
   printf '%s\n' preserved-path-heartbeat > "$STATE_ROOT/heartbeat"
@@ -449,8 +457,7 @@ test_treehouse_discovery_failure_invalidates_heartbeat() {
   [ "$status" -ne 0 ] || fail "uninspectable declared Treehouse worktree reported healthy coverage"
   assert_contains "$out" "Treehouse worktree is not inspectable: $missing_path" \
     "uninspectable declared Treehouse worktree was not surfaced"
-  [ "$(cat "$STATE_ROOT/heartbeat")" = preserved-path-heartbeat ] \
-    || fail "uninspectable Treehouse path advanced the healthy heartbeat"
+  assert_refresh_state "$STATE_ROOT" unhealthy
   rm -rf "$(dirname "$bad_state")"
 
   chmod 000 "$treehouse_root"
@@ -463,8 +470,7 @@ test_treehouse_discovery_failure_invalidates_heartbeat() {
   [ "$status" -ne 0 ] || fail "unreadable Treehouse root reported healthy coverage"
   assert_contains "$out" "Treehouse root is unreadable" \
     "unreadable Treehouse root was not surfaced"
-  [ "$(cat "$STATE_ROOT/heartbeat")" = preserved-root-heartbeat ] \
-    || fail "unreadable Treehouse root advanced the healthy heartbeat"
+  assert_refresh_state "$STATE_ROOT" unhealthy
 
   chmod 000 "$pool_dir"
   printf '%s\n' preserved-pool-heartbeat > "$STATE_ROOT/heartbeat"
@@ -476,12 +482,11 @@ test_treehouse_discovery_failure_invalidates_heartbeat() {
   [ "$status" -ne 0 ] || fail "unreadable Treehouse pool reported healthy coverage"
   assert_contains "$out" "Treehouse pool is unreadable" \
     "unreadable Treehouse pool was not surfaced"
-  [ "$(cat "$STATE_ROOT/heartbeat")" = preserved-pool-heartbeat ] \
-    || fail "unreadable Treehouse pool advanced the healthy heartbeat"
-  pass "unreadable roots, malformed schemas, and uninspectable paths invalidate heartbeat health"
+  assert_refresh_state "$STATE_ROOT" unhealthy
+  pass "unreadable roots, malformed schemas, and uninspectable paths invalidate coverage health"
 }
 
-test_skill_inventory_failure_preserves_alert_and_heartbeat() {
+test_skill_inventory_failure_preserves_alert_and_invalidates_coverage() {
   local project draft key alert prior fakebin real_git out status
   project=$(cd "$FM_TEST_HOME/projects/relvino" && pwd -P)
   draft="$project/.agents/skills/inventory-failure/SKILL.md"
@@ -514,11 +519,10 @@ SH
   assert_contains "$out" "HYGIENE: inventory failed - preserving the prior alert" \
     "skill inventory failure was not surfaced"
   [ "$(cat "$alert")" = "$prior" ] || fail "skill inventory failure changed the prior alert"
-  [ "$(cat "$STATE_ROOT/heartbeat")" = preserved-inventory-heartbeat ] \
-    || fail "skill inventory failure advanced the healthy heartbeat"
+  assert_refresh_state "$STATE_ROOT" unhealthy
   rm -rf "$fakebin" "$project/.agents"
   run_refresh run-once >/dev/null
-  pass "skill inventory failures preserve alerts and invalidate heartbeat health"
+  pass "skill inventory failures preserve alerts and invalidate coverage health"
 }
 
 test_dirty_nondefault_and_diverged_checkouts_are_untouched() {
@@ -715,6 +719,7 @@ SH
   [ "$status" -eq 0 ] || fail "bounded refresh command failed unexpectedly: $out"
   assert_contains "$out" "refresh timed out after 1s" \
     "bounded refresh did not report its timeout"
+  assert_refresh_state "$STATE_ROOT" unhealthy
   parent_pid=$(cat "$TMP_ROOT/fetch-parent.pid")
   child_pid=$(cat "$TMP_ROOT/fetch-child.pid")
   if kill -0 "$parent_pid" 2>/dev/null || kill -0 "$child_pid" 2>/dev/null; then
@@ -761,7 +766,7 @@ SH
 
 test_launch_agent_definition_is_home_scoped_with_scheduler_seam() {
   local fakebin agents log plist second_home second_plist key second_key install_state_base install_state_root
-  local custom_treehouse="$TMP_ROOT/custom-treehouse" other_treehouse="$TMP_ROOT/other-treehouse" out status
+  local custom_treehouse="$TMP_ROOT/custom-treehouse" other_treehouse="$TMP_ROOT/other-treehouse" out status now
   fakebin="$TMP_ROOT/fakebin"
   agents="$TMP_ROOT/LaunchAgents"
   log="$TMP_ROOT/launchctl.log"
@@ -804,7 +809,9 @@ SH
     "LaunchAgent does not use the shared checkout lock root"
   assert_grep 'bootstrap' "$log" "LaunchAgent was not bootstrapped"
   assert_grep 'kickstart' "$log" "LaunchAgent was not started"
-  date +%s > "$install_state_root/heartbeat"
+  now=$(date +%s)
+  printf '%s\n' "$now" > "$install_state_root/heartbeat"
+  printf '%s\n%s\n' "$now" healthy > "$install_state_root/coverage-health"
   HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
     FM_TREEHOUSE_ROOT="$custom_treehouse" \
     FM_CHECKOUT_REFRESH_STATE_BASE="$install_state_base" \
@@ -814,6 +821,23 @@ SH
     FM_FAKE_LAUNCHCTL_LOG="$log" \
     "$ROOT/bin/fm-checkout-refresh.sh" ensure \
     || fail "matching LaunchAgent scheduler configuration was reported unhealthy"
+
+  printf '%s\n%s\n' "$now" unhealthy > "$install_state_root/coverage-health"
+  set +e
+  out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TREEHOUSE_ROOT="$custom_treehouse" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$install_state_base" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_LOG="$log" \
+    "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "LaunchAgent health accepted an unhealthy latest coverage run"
+  assert_contains "$out" "latest coverage run is missing or unhealthy" \
+    "LaunchAgent health did not diagnose the failed coverage run"
+  printf '%s\n%s\n' "$now" healthy > "$install_state_root/coverage-health"
 
   set +e
   out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
@@ -890,8 +914,14 @@ SH
   pass "scheduler ownership is home-scoped and Linux remains an explicit adapter seam"
 }
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-14 ]; then
+  test_bounded_refresh_terminates_descendants
+  test_launch_agent_definition_is_home_scoped_with_scheduler_seam
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = review-round-6 ]; then
-  test_nested_active_project_invalidates_heartbeat
+  test_nested_active_project_invalidates_coverage_health
   test_bounded_refresh_terminates_descendants
   test_acquisition_honors_shared_checkout_lock
   exit 0
@@ -903,8 +933,8 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-7 ]; then
 fi
 
 test_discovery_covers_projects_treehouse_external_and_config
-test_uninspectable_active_project_invalidates_heartbeat
-test_nested_active_project_invalidates_heartbeat
+test_uninspectable_active_project_invalidates_coverage_health
+test_nested_active_project_invalidates_coverage_health
 test_discovery_rejects_nested_configured_and_scanned_paths
 test_upstream_tip_signal_refreshes_between_firstmate_events
 test_periodic_backstop_repairs_drift_without_a_new_tip
@@ -915,8 +945,8 @@ test_treehouse_pool_skill_drafts_are_inventoried
 test_ignored_skill_files_are_outside_the_collision_guard
 test_pool_preflight_surfaces_dirty_worktrees_without_blocking_clean_selection
 test_bootstrap_relays_hygiene_alerts
-test_treehouse_discovery_failure_invalidates_heartbeat
-test_skill_inventory_failure_preserves_alert_and_heartbeat
+test_treehouse_discovery_failure_invalidates_coverage_health
+test_skill_inventory_failure_preserves_alert_and_invalidates_coverage
 test_dirty_nondefault_and_diverged_checkouts_are_untouched
 test_refresh_locks_recover_stale_owners_and_surface_contention
 test_session_mode_preserves_gone_branch_pruning

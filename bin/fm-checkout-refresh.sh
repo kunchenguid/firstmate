@@ -39,8 +39,8 @@
 # Every probe also inventories non-ignored untracked files in both the covered seed
 # checkouts and the Treehouse pool worktrees under repository skill directories
 # (`.agents/skills`, `.claude/skills`, `.codex/skills`, and `skills`).
-# Unreadable or malformed Treehouse state invalidates discovery and suppresses
-# the healthy heartbeat until every pool state file can be inspected.
+# Unreadable or malformed Treehouse state invalidates coverage health while the
+# heartbeat records scheduler liveness independently.
 # A new or changed inventory is surfaced immediately and persisted as a separate
 # hygiene alert, even when no upstream change or backstop refresh is due.
 # Forced/operator-visible runs repeat unresolved hygiene alerts.
@@ -536,6 +536,16 @@ atomic_write() {
   mv -f "$tmp" "$destination"
 }
 
+record_run_result() {
+  local coverage=$1 now write_status=0
+  now=$(date +%s)
+  atomic_write "$STATE_ROOT/heartbeat" "$now" "$SCRIPT_DIR/fm-checkout-refresh.sh" \
+    || write_status=1
+  atomic_write "$STATE_ROOT/coverage-health" "$now" "$coverage" \
+    || write_status=1
+  return "$write_status"
+}
+
 ensure_state_root() {
   mkdir -p "$STATE_ROOT" || return 1
   [ -d "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] \
@@ -648,7 +658,8 @@ record_alert() {
 
 run_once() {
   local force=0 verbose=0 session=0 prune=0 arg lock discovery hygiene checkout key tip_file last_file alert_file
-  local prior_tip now last due probe_ok output_file output line hygiene_failed=0 status=0
+  local prior_tip now last due probe_ok output_file output line hygiene_failed=0 coverage_failed=0 status=0
+  local coverage=healthy
   for arg in "$@"; do
     case "$arg" in
       --force) force=1 ;;
@@ -666,14 +677,24 @@ run_once() {
     return 0
   fi
   trap 'fm_lock_release "$STATE_ROOT/.run-lock"' EXIT
-  discovery=$(mktemp "$STATE_ROOT/.discover.XXXXXX") || return 1
-  hygiene=$(mktemp "$STATE_ROOT/.hygiene-discover.XXXXXX") || { rm -f "$discovery"; return 1; }
+  atomic_write "$STATE_ROOT/coverage-health" "$(date +%s)" running || return 1
+  discovery=$(mktemp "$STATE_ROOT/.discover.XXXXXX") || {
+    record_run_result unhealthy || true
+    return 1
+  }
+  hygiene=$(mktemp "$STATE_ROOT/.hygiene-discover.XXXXXX") || {
+    rm -f "$discovery"
+    record_run_result unhealthy || true
+    return 1
+  }
   if ! discover > "$discovery"; then
     rm -f "$discovery" "$hygiene"
+    record_run_result unhealthy || true
     return 1
   fi
   prepare_hygiene_discovery "$discovery" "$hygiene" || {
     rm -f "$discovery" "$hygiene"
+    record_run_result unhealthy || true
     return 1
   }
   now=$(date +%s)
@@ -707,10 +728,21 @@ run_once() {
       probe_ok=1
       prior_tip=$(sed -n '1,2p' "$tip_file" 2>/dev/null || true)
       [ "$prior_tip" = "$PROBE_BRANCH"$'\n'"$PROBE_TIP" ] || due=1
+    else
+      due=1
     fi
-    [ "$due" -eq 1 ] || continue
+    if [ "$due" -eq 0 ]; then
+      [ ! -f "$alert_file" ] || coverage_failed=1
+      continue
+    fi
 
-    output_file=$(mktemp "$STATE_ROOT/.sync.XXXXXX") || continue
+    output_file=$(mktemp "$STATE_ROOT/.sync.XXXXXX") || {
+      output="$checkout: skipped: cannot allocate refresh output"
+      record_alert "$alert_file" "$checkout" "$output"
+      printf '%s\n' "$output"
+      coverage_failed=1
+      continue
+    }
     if [ "$probe_ok" -eq 1 ]; then
       sync_checkout "$checkout" "$output_file" "$prune"
     else
@@ -727,6 +759,7 @@ run_once() {
       *': STUCK:'*|*': skipped:'*)
         record_alert "$alert_file" "$checkout" "$output"
         printf '%s\n' "$output"
+        coverage_failed=1
         ;;
       *)
         rm -f "$alert_file"
@@ -744,11 +777,12 @@ EOF
   done < "$discovery"
 
   rm -f "$discovery" "$hygiene"
-  if [ "$hygiene_failed" -eq 0 ]; then
-    atomic_write "$STATE_ROOT/heartbeat" "$now" "$SCRIPT_DIR/fm-checkout-refresh.sh" || status=1
-  else
+  if [ "$hygiene_failed" -ne 0 ]; then
+    coverage_failed=1
     status=1
   fi
+  [ "$coverage_failed" -eq 0 ] || coverage=unhealthy
+  record_run_result "$coverage" || status=1
   trap - EXIT
   fm_lock_release "$lock"
   return "$status"
@@ -1004,7 +1038,7 @@ EOF
 }
 
 ensure_launch_agent() {
-  local domain heartbeat now max_age
+  local domain heartbeat coverage_epoch coverage now max_age
   [ "$PLATFORM" = Darwin ] || return 0
   [ -f "$PLIST" ] && [ ! -L "$PLIST" ] \
     || { echo "checkout-refresh LaunchAgent is not installed" >&2; return 1; }
@@ -1032,6 +1066,13 @@ ensure_launch_agent() {
   max_age=$((INTERVAL * 3 + 30))
   [ "$heartbeat" -gt 0 ] && [ "$((now - heartbeat))" -le "$max_age" ] \
     || { echo "checkout-refresh heartbeat is stale or missing" >&2; return 1; }
+  coverage_epoch=$(read_epoch "$STATE_ROOT/coverage-health")
+  coverage=$(sed -n '2p' "$STATE_ROOT/coverage-health" 2>/dev/null || true)
+  [ "$coverage_epoch" -eq "$heartbeat" ] && [ "$coverage" = healthy ] \
+    || {
+      echo "checkout-refresh latest coverage run is missing or unhealthy; inspect $STATE_ROOT for checkout alerts and scheduler diagnostics" >&2
+      return 1
+    }
 }
 
 scheduler_install() {
