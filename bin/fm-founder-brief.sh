@@ -661,6 +661,10 @@ def open_incident(home, lane, canary, consequence=None):
     return value
 
 
+def decision_incident_home(directories):
+    return directories["founder-brief-buttons"].parents[1]
+
+
 def active_incident(home, lane):
     path = incident_path(home, lane)
     if not path.exists():
@@ -2811,10 +2815,32 @@ def acknowledge_callback(dotenv, callback_query_id, acknowledgment_path, text):
     validate_callback_ack(response)
 
 
+def acknowledge_decision_callback(
+    home,
+    dotenv,
+    callback_query_id,
+    directories,
+    acknowledgment_path,
+    text,
+    canary,
+):
+    try:
+        acknowledge_callback(dotenv, callback_query_id, acknowledgment_path, text)
+    except BriefError:
+        open_incident(
+            home,
+            "decision",
+            canary,
+            "ordinary conversation remains active; only decision callbacks are contained",
+        )
+        raise
+
+
 def reject_callback(dotenv, callback_query_id, directories, reason, code):
     digest = hashlib.sha256(callback_query_id.encode("utf-8")).hexdigest()
     ack_path = directories["founder-brief-callback-acks"] / f"rejected-{digest}.json"
-    acknowledge_callback(dotenv, callback_query_id, ack_path, reason)
+    home = decision_incident_home(directories)
+    acknowledge_decision_callback(home, dotenv, callback_query_id, directories, ack_path, reason, code)
     raise CallbackRejected(code)
 
 
@@ -2973,7 +2999,15 @@ def ingest_update(home, update_path, emit=True):
                     "Telegram founder button canary replay was rejected",
                 )
         ack_path = directories["founder-brief-callback-acks"] / f"canary-{opaque}.json"
-        acknowledge_callback(dotenv, callback_query_id, ack_path, "Canary received; no authority granted.")
+        acknowledge_decision_callback(
+            home,
+            dotenv,
+            callback_query_id,
+            directories,
+            ack_path,
+            "Canary received; no authority granted.",
+            "canary-button",
+        )
         canary["callback_acknowledged"] = True
         canary["acknowledged_at"] = now_epoch()
         atomic_write_json(canary_path, canary)
@@ -3051,7 +3085,15 @@ def ingest_update(home, update_path, emit=True):
     if os.environ.get("FM_FOUNDER_BRIEF_TEST_CRASH_AFTER_APPROVAL") == "1":
         os._exit(87)
     ack_path = directories["founder-brief-callback-acks"] / f"{approval_hash}.json"
-    acknowledge_callback(dotenv, callback_query_id, ack_path, "Choice recorded.")
+    acknowledge_decision_callback(
+        home,
+        dotenv,
+        callback_query_id,
+        directories,
+        ack_path,
+        "Choice recorded.",
+        "decision-callback",
+    )
     approval["callback_acknowledged"] = True
     approval["ready_to_act"] = True
     approval["acknowledged_at"] = now_epoch()
@@ -3107,7 +3149,11 @@ def deliver_canary(home, with_button):
         except BriefError:
             open_incident(home, lane, lifecycle)
             raise
-        publish_live_canary_receipt(home, lane, common, attempted_at)
+        try:
+            publish_live_canary_receipt(home, lane, common, attempted_at)
+        except BriefError:
+            open_incident(home, lane, lifecycle)
+            raise
         return
     directories = decision_state_dirs(home)
     plan_path = directories["founder-brief-decision-plans"] / f"{common['dedupe_key']}.json"
@@ -3154,7 +3200,11 @@ def deliver_canary(home, with_button):
     except BriefError:
         open_incident(home, lane, lifecycle)
         raise
-    publish_live_canary_receipt(home, lane, common, attempted_at)
+    try:
+        publish_live_canary_receipt(home, lane, common, attempted_at)
+    except BriefError:
+        open_incident(home, lane, lifecycle)
+        raise
 
 
 def publish_live_canary_receipt(home, lane, common, verified_at):

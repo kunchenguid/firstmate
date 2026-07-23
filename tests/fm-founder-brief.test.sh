@@ -1183,6 +1183,7 @@ test_decision_buttons_callbacks_and_canaries() {
   local home digest start request old_data old_message new_data new_message other_data other_message
   local beta_old_data beta_old_message beta_new_data beta_new_message numeric_path
   local update out rc approval_path before ordinary hash_before hash_after canary_data canary_message
+  local callback_update callback_out callback_rc callback_before callback_after
   local sole_home sole_beta_message sole_path
   home=$(new_home decisions)
   digest=founder-decisions
@@ -1441,6 +1442,105 @@ PY
     || fail "canary receipt recovery resent a duplicate transport"
   assert_present "$lifecycle_canary" "lifecycle canary receipt was not restored"
   assert_present "$decision_canary" "decision canary receipt was not restored"
+
+  lifecycle_delivery_receipt=$(
+    python3 - "$lifecycle_canary" <<'PY'
+import json, pathlib, sys
+receipt = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(receipt["delivery_dedupe_key"])
+PY
+  )
+  rm -f "$lifecycle_canary"
+  mkdir "$lifecycle_canary"
+  rm -f "$home/state/founder-brief-receipts/$lifecycle_delivery_receipt.json"
+  rm -f "$home/state/founder-brief-outbox/$lifecycle_delivery_receipt.json"
+  rm -f "$home/state/founder-brief-responses/$lifecycle_delivery_receipt".*.json
+  canary_failure_before=$(request_count)
+  out=$(run_owner "$home" canary-delivery 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "lifecycle canary receipt failure should fail safely"
+  [ "$(request_count)" -eq $((canary_failure_before + 1)) ] \
+    || fail "lifecycle canary receipt failure did not preserve the original send"
+  assert_contains "$(cat "$home/state/telegram-protocol-incidents/lifecycle.json")" \
+    '"status":"containment"' \
+    "lifecycle canary receipt failure did not contain the lifecycle lane"
+  rm -rf "$lifecycle_canary"
+
+  server_mode rejected
+  callback_before=$(request_count)
+  callback_update=$(write_callback_update "$home" canary-failed cb-canary-failed "$canary_data" "$canary_message" "$CHAT_ID" "$USER_ID")
+  callback_out=$(run_owner "$home" ingest-update "$callback_update" 2>&1); callback_rc=$?
+  [ "$callback_rc" -ne 0 ] || fail "rejected callback should have failed safely"
+  assert_contains "$callback_out" "Telegram did not acknowledge the callback" \
+    "callback acknowledgment failure was not surfaced"
+  assert_contains "$(cat "$home/state/telegram-protocol-incidents/decision.json")" \
+    '"status":"containment"' \
+    "callback acknowledgment failure did not contain only the decision lane"
+  server_mode success
+  ordinary_path=$(write_text_update "$home" callback-ordinary 9208 8208 "Conversation remains active")
+  run_owner "$home" route-update "$ordinary_path" >/dev/null 2>&1 \
+    || fail "decision containment should preserve ordinary conversation"
+  cat > "$home/data/telegram-protocol-incidents/decision.md" <<'EOF'
+# Telegram protocol incident
+
+## Failed canary and consequence
+
+The decision callback transport was rejected, so only the decision lane remained contained while ordinary conversation continued.
+
+## Bounded diagnostics
+
+The callback transport returned a rejected acknowledgment and no message content or credential was copied.
+
+## Root cause
+
+The fake transport was set to reject callback acknowledgments.
+
+## Repair
+
+The transport was restored to accept callback acknowledgments.
+
+## Next concrete action
+
+Rerun deterministic regression, revalidate the callback path, and restore the decision lane.
+EOF
+  chmod 600 "$home/data/telegram-protocol-incidents/decision.md"
+  run_owner "$home" incident-transition decision diagnosis >/dev/null 2>&1 \
+    || fail "decision incident did not transition to diagnosis"
+  run_owner "$home" incident-transition decision repair >/dev/null 2>&1 \
+    || fail "decision incident did not transition to repair"
+  run_owner "$home" incident-transition decision revalidation >/dev/null 2>&1 \
+    || fail "decision incident did not transition to revalidation"
+  rm -f "$lifecycle_canary" "$decision_canary"
+  future=$((TEST_NOW + 10))
+  seed_protocol_green "$home" "$future"
+  run_owner_at "$home" "$future" canary-delivery >/dev/null 2>&1 \
+    || fail "refreshed lifecycle canary did not pass during decision repair"
+  run_owner_at "$home" "$future" canary-buttons >/dev/null 2>&1 \
+    || fail "refreshed decision canary did not pass during decision repair"
+  run_owner "$home" incident-restore decision >/dev/null 2>&1 \
+    || fail "decision incident did not restore after repair"
+  read -r canary_data canary_message < <(
+    python3 - "$home" <<'PY'
+import json, pathlib, sys
+home = pathlib.Path(sys.argv[1])
+receipt = json.loads((home / "state" / "telegram-decision-canary.json").read_text(encoding="utf-8"))
+button = next(
+    json.loads(path.read_text(encoding="utf-8"))
+    for path in (home / "state" / "founder-brief-buttons").glob("*.json")
+    if json.loads(path.read_text(encoding="utf-8")).get("authority") == "none"
+    and json.loads(path.read_text(encoding="utf-8")).get("delivery_dedupe_key") == receipt["delivery_dedupe_key"]
+)
+delivery = json.loads(
+    (home / "state" / "founder-brief-receipts" / f"{receipt['delivery_dedupe_key']}.json").read_text(encoding="utf-8")
+)
+print(button["callback_data"], delivery["telegram_message_ids"][-1])
+PY
+  )
+  callback_update=$(write_callback_update "$home" canary-recovered cb-canary-recovered "$canary_data" "$canary_message" "$CHAT_ID" "$USER_ID")
+  callback_after=$(request_count)
+  run_owner "$home" ingest-update "$callback_update" >/dev/null 2>&1 \
+    || fail "callback retry did not recover after the transport was restored"
+  [ "$(request_count)" -eq $((callback_after + 1)) ] \
+    || fail "callback retry duplicated the callback acknowledgment"
 
   sole_home=$(new_home numeric-sole)
   write_decision_digest "$sole_home" "$digest" v2
@@ -1773,7 +1873,10 @@ EOF
   run_owner_at "$home" "$future" phase "$task" remediation >/dev/null 2>&1 \
     || fail "decision incident incorrectly disabled the separate lifecycle lane"
   update=$(write_text_update "$home" decision-contained-chat 9401 8401 "Conversation still works")
-  run_owner_at "$home" "$future" route-update "$update" >/dev/null 2>&1 \
+  ordinary_before=$(request_count)
+  run_owner_at "$home" "$future" route-update "$update" >/dev/null 2>&1
+  ordinary_after=$(request_count)
+  [ "$ordinary_after" -eq $((ordinary_before + 1)) ] \
     || fail "decision containment disabled ordinary conversation"
   before=$(request_count)
   update=$(write_text_update "$home" decision-contained-number 9402 8402 1)
