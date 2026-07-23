@@ -68,6 +68,8 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it poin
 
 All harnesses were validated on 2026-07-08 in scratch repos or throwaway homes, not against the captain's live primary fleet state.
 Cursor was added 2026-07-23 against cursor-agent 2026.07.20-8cc9c0b in the live firstmate home: detection (`CURSOR_AGENT=1`), lock acquire on MainThread+cursor-agent ancestry, arm-check deny shape (`permission:deny`), sessionStart wrapper smoke, and tracked `.cursor/hooks.json` wiring.
+Crew spawn, project stop-hook install, and teardown are covered by focused Bash lifecycle tests (`tests/fm-cursor-harness.test.sh`); a real Cursor crew spawn + project stop + teardown observation is not yet captured (standards exception accepted 2026-07-23 for this adapter land).
+Live primary `stop` -> `followup_message` into a second model turn remains a residual gap; the typed `turn-end-guard` operational-input contract is unit-tested.
 
 Claude Code 2.1.204 preserved the existing behavior.
 Hook file used: `.claude/settings.json`.
