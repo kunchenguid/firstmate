@@ -311,6 +311,7 @@ It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable sync 
 When a running home advances and its loaded instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) changed, bootstrap sends the re-read nudge itself through the stable `fm-<id>` selector and reports the exact completed send as `BOOTSTRAP_INFO:`.
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a live secondmate endpoint is skipped or respawn fails; already-live and successfully respawned endpoints are handled silently.
+In a home marked with `.fm-secondmate-home`, bootstrap also emits `SECONDMATE_SELF_CHECK:` when routed-work prerequisites are missing, unauthenticated, or too old; firstmate treats that secondmate as unavailable for routed work until the line disappears.
 For a mid-session inherited local-material edit where tracked-file sync and reread nudges are not needed, run `bin/fm-config-push.sh`.
 It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero only for real propagation errors.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.

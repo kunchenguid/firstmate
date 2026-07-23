@@ -1257,7 +1257,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   # call handle_paused_stale before AFK's one-shot daemon handoff.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream tool release' \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "AFK paused changed pane did not hand off a stale wake"
