@@ -36,6 +36,11 @@
 #                          unsafe state checks were refused without execution
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
+#   check: control-plane   registered-source reconciliation found a new or changed
+#                          invariant, authority gate, stuck item, or proof gap
+#   check: repository-intake
+#                          the daily registered-project scan found new/changed
+#                          GitHub work, an authority gate, blocker, or source gap
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -45,6 +50,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 mkdir -p "$STATE"
 
 # shellcheck source=bin/fm-wake-lib.sh
@@ -149,6 +156,11 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
+CONTROL_PLANE_SOURCES=${FM_CONTROL_PLANE_SOURCES:-$CONFIG/control-plane-sources.json}
+CONTROL_PLANE_SURFACED="$STATE/.control-plane-surfaced"
+REPOSITORY_INTAKE_PROJECTS=${FM_REPOSITORY_INTAKE_PROJECTS:-$DATA/projects.md}
+REPOSITORY_INTAKE_CHECKPOINT=${FM_REPOSITORY_INTAKE_CHECKPOINT:-$DATA/repository-intake/checkpoint.json}
+REPOSITORY_INTAKE_SURFACED="$STATE/.repository-intake-surfaced"
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
 # of this watcher process and the loop reverts to pure polling (report section
@@ -585,6 +597,100 @@ heartbeat_scan_finds_actionable() {
     return 0
   done < <(scan_captain_relevant_statuses "$STATE")
   return 1
+}
+
+# Reconcile the explicitly registered control-plane scope only on the existing
+# bounded heartbeat.
+# The command is read-only and emits a stable attention fingerprint; the marker
+# is written only after the wake is durably enqueued, so a restart cannot lose a
+# new finding or duplicate an unchanged one.
+CONTROL_PLANE_FINGERPRINT=
+CONTROL_PLANE_COUNT=0
+CONTROL_PLANE_SEVERITY=none
+control_plane_attention_changed() {
+  local output current
+  CONTROL_PLANE_FINGERPRINT=
+  CONTROL_PLANE_COUNT=0
+  CONTROL_PLANE_SEVERITY=none
+  [ -f "$CONTROL_PLANE_SOURCES" ] || return 1
+  output=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    "$SCRIPT_DIR/fm-control-plane.sh" --sources "$CONTROL_PLANE_SOURCES" --attention-fingerprint 2>/dev/null) || output='reconcile-error	1	critical'
+  IFS=$(printf '\t') read -r CONTROL_PLANE_FINGERPRINT CONTROL_PLANE_COUNT CONTROL_PLANE_SEVERITY <<EOF
+$output
+EOF
+  case "$CONTROL_PLANE_FINGERPRINT" in
+    none|reconcile-error) ;;
+    ''|*[!0-9a-f]*) CONTROL_PLANE_FINGERPRINT=reconcile-error; CONTROL_PLANE_COUNT=1; CONTROL_PLANE_SEVERITY=critical ;;
+    *)
+      if [ "${#CONTROL_PLANE_FINGERPRINT}" -ne 64 ]; then
+        CONTROL_PLANE_FINGERPRINT=reconcile-error
+        CONTROL_PLANE_COUNT=1
+        CONTROL_PLANE_SEVERITY=critical
+      fi
+      ;;
+  esac
+  case "$CONTROL_PLANE_COUNT" in ''|*[!0-9]*) CONTROL_PLANE_FINGERPRINT=reconcile-error; CONTROL_PLANE_COUNT=1; CONTROL_PLANE_SEVERITY=critical ;; esac
+  case "$CONTROL_PLANE_SEVERITY" in critical|high|medium|low|none) ;; *) CONTROL_PLANE_SEVERITY=critical ;; esac
+  current=$(cat "$CONTROL_PLANE_SURFACED" 2>/dev/null || true)
+  if [ "$CONTROL_PLANE_FINGERPRINT" = none ]; then
+    [ "$current" = none ] || printf '%s\n' none > "$CONTROL_PLANE_SURFACED"
+    return 1
+  fi
+  [ "$current" = "$CONTROL_PLANE_FINGERPRINT" ] && return 1
+  return 0
+}
+
+control_plane_attention_mark_surfaced() {
+  [ -n "$CONTROL_PLANE_FINGERPRINT" ] || return 1
+  printf '%s\n' "$CONTROL_PLANE_FINGERPRINT" > "$CONTROL_PLANE_SURFACED"
+}
+
+# Run the daily registered-project intake on the same bounded heartbeat that
+# already owns recovery scans. There is no second watcher and no rapid timer.
+# The intake command owns its Asia/Kolkata due check and durable lock, so two
+# watcher processes or a restart cannot duplicate API work. As with the control
+# plane, enqueue precedes marker advancement.
+REPOSITORY_INTAKE_FINGERPRINT=
+REPOSITORY_INTAKE_COUNT=0
+REPOSITORY_INTAKE_SEVERITY=none
+repository_intake_attention_changed() {
+  local output current
+  REPOSITORY_INTAKE_FINGERPRINT=
+  REPOSITORY_INTAKE_COUNT=0
+  REPOSITORY_INTAKE_SEVERITY=none
+  [ -f "$REPOSITORY_INTAKE_PROJECTS" ] || [ -f "$REPOSITORY_INTAKE_CHECKPOINT" ] || return 1
+  output=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    "$SCRIPT_DIR/fm-repository-intake.sh" --projects "$REPOSITORY_INTAKE_PROJECTS" \
+      --checkpoint "$REPOSITORY_INTAKE_CHECKPOINT" --attention-fingerprint 2>/dev/null) \
+    || output='reconcile-error\t1\tcritical'
+  IFS=$(printf '\t') read -r REPOSITORY_INTAKE_FINGERPRINT REPOSITORY_INTAKE_COUNT REPOSITORY_INTAKE_SEVERITY <<EOF
+$output
+EOF
+  case "$REPOSITORY_INTAKE_FINGERPRINT" in
+    none|reconcile-error) ;;
+    ''|*[!0-9a-f]*) REPOSITORY_INTAKE_FINGERPRINT=reconcile-error; REPOSITORY_INTAKE_COUNT=1; REPOSITORY_INTAKE_SEVERITY=critical ;;
+    *)
+      if [ "${#REPOSITORY_INTAKE_FINGERPRINT}" -ne 64 ]; then
+        REPOSITORY_INTAKE_FINGERPRINT=reconcile-error
+        REPOSITORY_INTAKE_COUNT=1
+        REPOSITORY_INTAKE_SEVERITY=critical
+      fi
+      ;;
+  esac
+  case "$REPOSITORY_INTAKE_COUNT" in ''|*[!0-9]*) REPOSITORY_INTAKE_FINGERPRINT=reconcile-error; REPOSITORY_INTAKE_COUNT=1; REPOSITORY_INTAKE_SEVERITY=critical ;; esac
+  case "$REPOSITORY_INTAKE_SEVERITY" in critical|high|none) ;; *) REPOSITORY_INTAKE_SEVERITY=critical ;; esac
+  current=$(cat "$REPOSITORY_INTAKE_SURFACED" 2>/dev/null || true)
+  if [ "$REPOSITORY_INTAKE_FINGERPRINT" = none ]; then
+    [ "$current" = none ] || printf '%s\n' none > "$REPOSITORY_INTAKE_SURFACED"
+    return 1
+  fi
+  [ "$current" = "$REPOSITORY_INTAKE_FINGERPRINT" ] && return 1
+  return 0
+}
+
+repository_intake_attention_mark_surfaced() {
+  [ -n "$REPOSITORY_INTAKE_FINGERPRINT" ] || return 1
+  printf '%s\n' "$REPOSITORY_INTAKE_FINGERPRINT" > "$REPOSITORY_INTAKE_SURFACED"
 }
 
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
@@ -1050,10 +1156,22 @@ EOF
     # no-change case (advance the schedule and back off exactly as wake() would,
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
-    if afk_present; then
+    if repository_intake_attention_changed; then
+      reason="check: repository-intake: ${REPOSITORY_INTAKE_COUNT} attention items (highest ${REPOSITORY_INTAKE_SEVERITY}); load repository-intake and run bin/fm-repository-intake.sh for evidence"
+      fm_wake_append check repository-intake "$reason" || exit 1
+      touch "$STATE/.last-heartbeat"
+      repository_intake_attention_mark_surfaced || exit 1
+      wake "$reason"
+    elif afk_present; then
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
+    elif control_plane_attention_changed; then
+      reason="check: control-plane: ${CONTROL_PLANE_COUNT} changed attention items (highest ${CONTROL_PLANE_SEVERITY}); run bin/fm-control-plane.sh for source-backed detail"
+      fm_wake_append check control-plane "$reason" || exit 1
+      touch "$STATE/.last-heartbeat"
+      control_plane_attention_mark_surfaced || exit 1
+      wake "$reason"
     elif heartbeat_scan_finds_actionable; then
       # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
       # Enqueue first, then mark every captain-relevant status surfaced so the next

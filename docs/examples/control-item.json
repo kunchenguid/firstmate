@@ -1,0 +1,69 @@
+{
+  "schema": "fm-control-item.v1",
+  "id": "example-task",
+  "title": "Ship the example capability",
+  "purpose": "Make the intended user outcome observable and recoverable",
+  "business_outcome": "A real user can complete the capability in production",
+  "capability": "example-capability",
+  "owner": {
+    "type": "firstmate-task",
+    "id": "example-task",
+    "source": "primary-firstmate-home"
+  },
+  "next_action": {
+    "description": "Run the focused validation fixture and retain its report",
+    "capability": "worker.validate"
+  },
+  "authority": {
+    "level": "worker",
+    "source": "firstmate-task-brief",
+    "delivery": "no-mistakes"
+  },
+  "updated_at": "2026-07-20T08:00:00Z",
+  "freshness_seconds": 86400,
+  "proof_requirements": {
+    "implemented": {
+      "required": true,
+      "description": "A commit contains the bounded implementation"
+    },
+    "validated": {
+      "required": true,
+      "description": "Focused and repository test suites pass"
+    },
+    "release_ready": {
+      "required": true,
+      "description": "The selected project delivery gate is green"
+    },
+    "in_production": {
+      "required": true,
+      "description": "An authorized deployment source proves the running version"
+    },
+    "real_users": {
+      "required": true,
+      "description": "A privacy-safe product source proves real use"
+    },
+    "revenue": {
+      "required": false,
+      "reason": "Revenue is not an objective of this internal capability"
+    }
+  },
+  "proofs": [
+    {
+      "stage": "implemented",
+      "kind": "git_commit",
+      "project_source_id": "firstmate-project",
+      "ref": "HEAD",
+      "source": "git",
+      "observed_at": "2026-07-20T08:00:00Z",
+      "freshness_seconds": 86400
+    },
+    {
+      "stage": "validated",
+      "kind": "file",
+      "pointer": "${FM_HOME}/data/example-task/validation.json",
+      "source": "local-validation",
+      "observed_at": "2026-07-20T08:00:00Z",
+      "freshness_seconds": 86400
+    }
+  ]
+}
