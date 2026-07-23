@@ -863,6 +863,17 @@ test_tmux_composer_state_bordered_and_agent_rows_are_empty() {
   pass "fm_tmux_composer_state: a bordered composer box and bare agent glyphs (❯/›) still read empty"
 }
 
+test_tmux_composer_state_kimi_boxed_slash_text_is_pending() {
+  local dir fakebin capture out
+  dir=$(make_supercase composer-kimi-pending)
+  fakebin="$dir/fakebin"; capture="$dir/pane.txt"
+  printf '%s\n' "│ > /no-mistakes       │" > "$capture"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = pending ] || fail "Kimi's boxed slash text should read pending, got '$out'"
+  pass "fm_tmux_composer_state: Kimi's boxed slash text reads pending"
+}
+
 test_tmux_composer_state_requires_matching_box_borders() {
   local dir fakebin capture line out
   dir=$(make_supercase composer-decorated-shell)
@@ -1614,6 +1625,25 @@ test_pane_is_busy_defaults_to_tmux_when_backend_omitted() {
   pass "pane_is_busy: omitted backend arg defaults to tmux (pre-existing callers unaffected)"
 }
 
+test_pane_is_busy_kimi_signatures() {
+  local signature
+  for signature in 'thinking...' 'working...' 'Running a command'; do
+    (
+      fm_backend_busy_state() { printf 'unknown'; }
+      fm_backend_capture() { printf '%s\n' "$signature"; }
+      pane_is_busy "fakepane" tmux || fail "Kimi signature '$signature' should report busy"
+    ) || fail "Kimi busy-signature subshell failed for '$signature'"
+  done
+  (
+    fm_backend_busy_state() { printf 'unknown'; }
+    fm_backend_capture() { printf 'Tip: /init: generate AGENTS.md\n'; }
+    if pane_is_busy "fakepane" tmux; then
+      fail "Kimi's non-state Tip text should not report busy"
+    fi
+  ) || fail "Kimi non-state signature subshell failed"
+  pass "pane_is_busy: Kimi active verb signatures report busy without matching idle Tip text"
+}
+
 test_pane_input_pending_herdr_dispatch() {
   (
     fm_backend_composer_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected composer_state args: $1 $2"; printf 'pending'; }
@@ -1771,6 +1801,7 @@ test_pane_input_pending_blank_is_not_pending
 test_pane_input_pending_idle_prompt_not_pending
 test_tmux_composer_state_bare_shell_is_unknown
 test_tmux_composer_state_bordered_and_agent_rows_are_empty
+test_tmux_composer_state_kimi_boxed_slash_text_is_pending
 test_tmux_composer_state_requires_matching_box_borders
 test_pane_input_pending_honors_idle_override_after_border_strip
 test_classify_signal_dedup_against_scan
@@ -1815,6 +1846,7 @@ test_pane_is_busy_herdr_native_busy_state
 test_pane_is_busy_herdr_falls_back_to_capture_regex
 test_pane_is_busy_herdr_idle_falls_back_to_capture_regex
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
+test_pane_is_busy_kimi_signatures
 test_pane_input_pending_herdr_dispatch
 test_inject_msg_herdr_busy_guard_defers
 test_inject_msg_herdr_composer_guard_defers

@@ -268,9 +268,14 @@ else
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
+  min_enters=1
+  case "$TARGET_HARNESS:$MESSAGE" in
+    kimi:/*) min_enters=2 ;;
+  esac
   # Type once, submit, verify. Lenient: only a positively-confirmed swallow
   # (text still in the composer) is an error; an unreadable pane is assumed sent.
-  if ! verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
+  if ! verdict=$(FM_SUBMIT_MIN_ENTERS="$min_enters" \
+    fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
     if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
       fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
     fi

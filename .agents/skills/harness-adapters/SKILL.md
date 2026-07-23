@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, and kimi.
 user-invocable: false
 metadata:
   internal: true
@@ -119,6 +119,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-13 on Pi 0.80.6. `pi --help` advertises `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; `pi --print --model openai-codex/gpt-5.6-sol --thinking max 'Reply with exactly OK.'` completed successfully. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
+| kimi | `-m <provider/model>` | none - omit | Verified on Kimi Code CLI 0.29.0 on 2026-07-23; `kimi-code/k3` has a 1M context window and model-default high effort; `--effort` is unknown and `k3:max` is rejected, so firstmate records the requested effort in meta but emits no effort flag. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
@@ -133,6 +134,7 @@ Natural language is acceptable if uncertain.
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) already handles this correctly by reading the cursor row; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
+- kimi: `/<skill>`, for example `/no-mistakes`, with a slash-autocomplete popup, the shared popup settle, and two `fm-send` Enter attempts because tmux 3.6a plus Kimi 0.29.0 consumed the first Enter as popup selection while clearing the visible composer; a live probe activated `/check-kimi-code-docs` and delivered its argument successfully.
 
 ## claude (VERIFIED)
 
@@ -259,6 +261,36 @@ Pi's primary watcher protocol also requires the tracked `.pi/extensions/fm-prima
 The model arms through `fm_watch_arm_pi`, never a foreground bash arm; the watcher tool result and clean-exit fallback are owned by `docs/supervision-protocols/pi.md`.
 `bin/fm-session-start.sh` reports when the live Pi session has not loaded both the turn-end guard and watcher extensions, and points at plain `pi` after project trust as the fix, with `-e` as a trust-free fallback.
 When a secondmate is launched on Pi, `fm-spawn.sh --secondmate` launches Pi with both `-e .pi/extensions/fm-primary-turnend-guard.ts` and `-e .pi/extensions/fm-primary-pi-watch.ts`, both already present in the secondmate home's git worktree.
+
+## kimi (VERIFIED 2026-07-23, Kimi Code CLI 0.29.0)
+
+Kimi Code CLI launches through the `kimi` command and runs as the `kimi-code` process.
+Launch the interactive TUI as `kimi --auto -m kimi-code/k3`, then send a short composer instruction that points at the brief file.
+Kimi rejects a positional prompt as an unknown command, so the brief must never be appended to the launch command.
+`--auto` is the fully autonomous mode and was verified to write a probe file without asking.
+There is no first-run trust dialog.
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `thinking...`, `working...`, or `Running a command`, using ASCII fragments to avoid depending on the changing braille or moon glyph. |
+| Exit command | `/quit`, which prints `Bye!` and `To resume this session: kimi -r session_<uuid>`. |
+| Interrupt | single Escape, which prints `Interrupted by user`. |
+| Skill invocation | `/<skill>`, for example `/no-mistakes`. Slash text opens an autocomplete popup; `fm-send` requires two Enter attempts for Kimi to cover popup selection before submission. |
+| Autonomy | `--auto`, described by the CLI as fully autonomous and verified to write without asking. |
+| Env marker | none; detect Kimi through process ancestry using the `kimi` or `kimi-code` command name and `kimi-code` script path. |
+| Resume | `kimi -r session_<uuid>`; help also advertises `-S/--session [id]` and `-c/--continue`. |
+| Composer | bordered `│ > │`; the shared structural classifier owns the `>`-inside-a-box distinction on tmux and Herdr. |
+
+Kimi K3 advertises `maxContextSize: 1048576`, `supportEfforts: ["low","high","max"]`, and `defaultEffort: "high"`.
+The CLI exposes `-m/--model` but no per-call effort option.
+`k3:max` is not a configured model alias and is rejected.
+
+Kimi supports global `[[hooks]]` entries in `~/.kimi-code/config.toml`, including a `Stop` event.
+Firstmate does not install a Kimi turn-end hook yet because safely and idempotently merging an owned entry into an existing shared TOML file is not verified.
+Do not ship a partial config rewriter.
+Kimi crewmates therefore rely on the watcher busy signatures and stale-pane detection until a guarded global hook installer has its own live safety proof.
+
+The dated commands and exact output excerpts for these facts are in [`docs/kimi-backend.md`](../../../docs/kimi-backend.md).
 
 ## grok (VERIFIED 2026-06-29, grok 0.2.73; slash-submit re-verified 2026-07-03 on 0.2.82; reasoning-effort ceiling re-verified 2026-07-13 on 0.2.99; exit paths re-verified 2026-07-19 on grok 0.2.103)
 

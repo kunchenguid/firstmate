@@ -317,6 +317,9 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
 # popup placeholder fill gets the required second Enter without duplicating text.
 fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sleep> <settle>
   local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 state
+  local min_enters=${FM_SUBMIT_MIN_ENTERS:-1}
+  case "$min_enters" in ''|*[!0-9]*|0) min_enters=1 ;; esac
+  [ "$retries" -ge "$min_enters" ] || retries=$min_enters
   fm_backend_orca_tool_check || { printf 'send-failed'; return 0; }
   fm_backend_orca_send_literal "$terminal" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
@@ -324,8 +327,9 @@ fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sl
     fm_backend_orca_send_key "$terminal" Enter || true
     sleep "$sleep_s"
     state=$(fm_backend_orca_composer_state "$terminal")
-    [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
     i=$((i + 1))
+    [ "$i" -lt "$min_enters" ] && continue
+    [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
     [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
   done
 }

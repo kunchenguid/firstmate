@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|kimi|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -44,6 +44,7 @@ detect_own() {
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
+      kimi|kimi-code|*kimi-code*) echo kimi; return ;;
       pi) echo pi; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
@@ -53,6 +54,7 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
+          *kimi-code*) echo kimi; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac

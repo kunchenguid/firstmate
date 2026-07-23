@@ -456,7 +456,7 @@ secondmate_liveness_sweep() {
     [ -n "$target" ] || target="$window"
     verdict=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null) || verdict="unknown"
     case "$harness" in
-      claude|codex|opencode|pi|grok) ;;
+      claude|codex|opencode|pi|grok|kimi) ;;
       *) [ "$verdict" = dead ] && verdict=unknown ;;
     esac
     case "$verdict" in

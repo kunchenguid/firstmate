@@ -75,12 +75,32 @@ test_harness_resolution() {
 both absent -> own (backward-compat)^-^-^claude^claude
 crew set, secondmate absent -> crew (backward-compat)^codex^-^codex^codex
 crew set, secondmate set -> secondmate wins, crew untouched^codex^grok^grok^codex
+Kimi is accepted as a configured crew harness^kimi^-^kimi^kimi
 crew absent, secondmate set -> secondmate value, crew own^-^grok^grok^claude
 secondmate=default defers to crew^codex^default^codex^codex
 crew=default resolves to own, secondmate follows^default^-^claude^claude
 secondmate=default with crew absent -> own^-^default^claude^claude
 ROWS
   pass "A1 fm-harness.sh secondmate resolves the fallback chain; crew mode unchanged"
+}
+
+test_kimi_process_ancestry_detection() {
+  local fakebin out
+  fakebin=$(fm_fakebin "$TMP_ROOT/kimi-detect")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' kimi-code ;;
+  *"args="*) printf '%s\n' kimi-code ;;
+  *"ppid="*) printf '%s\n' 1 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE='' PI_CODING_AGENT='' GROK_AGENT='' \
+    FM_CONFIG_OVERRIDE="$TMP_ROOT/kimi-detect-config" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = kimi ] || fail "Kimi command-name ancestry detected '$out', expected kimi"
+  pass "A2 fm-harness.sh detects the verified kimi-code process name through ancestry"
 }
 
 # ===========================================================================
@@ -431,7 +451,23 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *"#{cursor_y}"*) printf '0\n' ;;
+      *"#{pane_id}"*) printf '%%1\n' ;;
+      *) printf 'firstmate\n' ;;
+    esac
+    exit 0
+    ;;
+  capture-pane)
+    if [ "${FM_FAKE_KIMI_READY:-0}" = 1 ]; then
+      case " $* " in
+        *" -e "*) printf '│ > │\n' ;;
+        *) printf '│ > │\nauto  K3 thinking: high\ncontext: 0%% (0/1M)\n' ;;
+      esac
+    fi
+    exit 0
+    ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
@@ -632,6 +668,47 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
   assert_not_contains "$launch" "model_reasoning_effort=\"high\"" \
     "explicit-harness-explicit-axes: launch leaked the file's effort token"
   pass "C8 spawn: an explicit --harness still honors explicit model/effort flags"
+}
+
+test_spawn_kimi_launches_tui_then_sends_brief_reference() {
+  local w home proj wt fakebin launchlog id meta launch_line launch_pos brief_pos
+  w="$TMP_ROOT/spawn-kimi"
+  home="$w/home"
+  proj="$w/project"
+  wt="$w/wt"
+  id="kimi-spawn-x1"
+  launchlog="$w/launch.log"
+  fakebin=$(make_launch_capturing_tmux "$w/tmux")
+  fm_git_worktree "$proj" "$wt" "wt-kimi"
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'Kimi integration brief body\n' > "$home/data/$id/brief.md"
+  : > "$launchlog"
+
+  PATH="$fakebin:$BASE_PATH" TMUX="fake,1,0" CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
+    FM_FAKE_KIMI_READY=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --harness kimi --effort xhigh >/dev/null 2>&1
+
+  meta="$home/state/$id.meta"
+  [ "$(meta_field "$meta" harness)" = kimi ] || fail "Kimi spawn did not record harness=kimi"
+  [ "$(meta_field "$meta" model)" = default ] || fail "Kimi spawn should preserve the requested default model in meta"
+  [ "$(meta_field "$meta" effort)" = xhigh ] || fail "Kimi spawn did not record the requested unsupported effort"
+  launch_line=$(grep '^kimi --auto ' "$launchlog" | tail -1)
+  assert_contains "$launch_line" "kimi --auto -m kimi-code/k3" \
+    "Kimi spawn did not launch the autonomous K3 TUI"
+  assert_not_contains "$launch_line" "--effort" "Kimi spawn emitted an unsupported effort flag"
+  assert_not_contains "$launch_line" "Kimi integration brief body" \
+    "Kimi spawn pasted the brief into the launch command"
+  assert_contains "$(cat "$launchlog")" \
+    "Read and follow the complete task brief at $home/data/$id/brief.md. Begin now." \
+    "Kimi spawn did not send the post-TUI brief-file instruction"
+  launch_pos=$(grep -n '^kimi --auto ' "$launchlog" | head -1 | cut -d: -f1)
+  brief_pos=$(grep -n 'Read and follow the complete task brief' "$launchlog" | head -1 | cut -d: -f1)
+  [ "$brief_pos" -gt "$launch_pos" ] || fail "Kimi brief handoff was not sent after the TUI launch"
+  pass "C9 spawn: Kimi launches autonomous K3 without a prompt or effort flag, then receives the brief-file reference"
 }
 
 # The harness fallback chain (secondmate-harness -> crew-harness -> own) still
@@ -2049,6 +2126,7 @@ SH
 }
 
 test_harness_resolution
+test_kimi_process_ancestry_detection
 test_secondmate_model_effort_tokens
 test_propagate_lib
 test_spawn_split_and_inherit
@@ -2063,6 +2141,7 @@ test_spawn_explicit_model_overrides_secondmate_harness_token
 test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
 test_spawn_explicit_harness_uses_explicit_profile_axes
+test_spawn_kimi_launches_tui_then_sends_brief_reference
 test_spawn_fallback_chain_and_crew_scout_unaffected
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current

@@ -49,7 +49,8 @@ fm_backend_tmux_send_key() {  # <target> <key>
 # fm_backend_tmux_send_text_submit: type <text> into <target> once, then
 # submit with Enter, retried (Enter only, never retyped) until the composer
 # clears. Re-exports fm_tmux_submit_core (bin/fm-tmux-lib.sh) verbatim; see
-# that file for the composer-verification contract and echoed verdicts.
+# that file for the composer-verification contract, Kimi slash-popup minimum
+# Enter count, and echoed verdicts.
 fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   fm_tmux_submit_core "$@"
 }
@@ -160,7 +161,7 @@ fm_backend_tmux_agent_alive() {  # <target>
   comm=${comm#-}
   case "$comm" in
     '') printf 'unknown' ;;
-    *claude*|*codex*|*opencode*|*grok*) printf 'alive' ;;
+    *claude*|*codex*|*opencode*|*grok*|kimi|kimi-code|*kimi-code*) printf 'alive' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
     *) printf 'unknown' ;;
   esac

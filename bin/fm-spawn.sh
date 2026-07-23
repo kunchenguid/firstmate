@@ -56,7 +56,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|kimi)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -102,6 +102,8 @@
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# Kimi currently relies on stale-pane detection because safely merging a
+# firstmate-owned Stop hook into Kimi's shared config.toml is not yet verified.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
@@ -384,7 +386,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|kimi)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -445,6 +447,10 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # Kimi Code has no positional interactive prompt argument. Start its TUI in
+    # fully autonomous mode, then the post-launch handoff below sends a compact
+    # instruction to read the brief file through the selected backend.
+    kimi) printf '%s' 'kimi --auto __MODELFLAG__' ;;
     *) return 1 ;;
   esac
 }
@@ -530,9 +536,16 @@ shell_quote() {
 
 model_flag_for_harness() {
   local harness=$1 model=$2
-  [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
+    kimi)
+      if [ -z "$model" ] || [ "$model" = default ]; then
+        printf '%s' '-m kimi-code/k3 '
+      else
+        printf -- '-m %s ' "$(shell_quote "$model")"
+      fi
+      ;;
     claude|codex|opencode|pi|grok)
+      [ -n "$model" ] && [ "$model" != default ] || return 0
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -571,9 +584,10 @@ effort_flag_for_harness() {
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
-    # opencode's interactive `opencode --prompt` launch has a verified --model
-    # flag but no verified effort flag. Its `opencode run --variant` flag belongs
-    # to a different, non-interactive launch mode, so fm-spawn does not pass it.
+    # opencode's interactive `opencode --prompt` launch and Kimi's interactive
+    # launch have no verified per-call effort flag. Kimi K3 uses its model-default
+    # high effort. fm-spawn records a requested effort in meta but passes neither
+    # harness an effort flag.
   esac
 }
 
@@ -1034,6 +1048,34 @@ spawn_send_key() {  # <target> <key>
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
 }
+spawn_wait_for_kimi_tui() {  # <target>
+  local target=$1 capture i=0 polls=${FM_KIMI_STARTUP_POLLS:-60}
+  case "$polls" in ''|*[!0-9]*|0) polls=60 ;; esac
+  while [ "$i" -lt "$polls" ]; do
+    capture=$(fm_backend_capture "$BACKEND" "$target" 30 "$W" 2>/dev/null || true)
+    if printf '%s\n' "$capture" | grep -Fq 'thinking:' \
+       && printf '%s\n' "$capture" | grep -Fq 'context:' \
+       && printf '%s\n' "$capture" | grep -Fq '│ >'; then
+      return 0
+    fi
+    sleep 0.5
+    i=$((i + 1))
+  done
+  echo "error: Kimi TUI did not expose its ready composer within 30s; inspect window $T" >&2
+  return 1
+}
+
+spawn_submit_text() {  # <target> <text>
+  local target=$1 text=$2 verdict
+  verdict=$(fm_backend_send_text_submit "$BACKEND" "$target" "$text" 3 0.4 0.3 "$W") \
+    || { echo "error: Kimi brief handoff failed through the $BACKEND backend" >&2; return 1; }
+  case "$verdict" in
+    pending|send-failed)
+      echo "error: Kimi brief handoff was not submitted through the $BACKEND backend (verdict=$verdict)" >&2
+      return 1
+      ;;
+  esac
+}
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
@@ -1289,6 +1331,10 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$HARNESS" = kimi ]; then
+  spawn_wait_for_kimi_tui "$T" || exit 1
+  spawn_submit_text "$T" "Read and follow the complete task brief at $BRIEF. Begin now." || exit 1
+fi
 if [ "$KIND" = secondmate ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
     if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then

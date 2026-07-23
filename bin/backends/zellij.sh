@@ -505,6 +505,9 @@ fm_backend_zellij_capture() {  # <target> <lines> [expected-label]
 # vocabulary fm-send.sh already branches on for tmux and herdr.
 fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} typed after i=0
+  local min_enters=${FM_SUBMIT_MIN_ENTERS:-1}
+  case "$min_enters" in ''|*[!0-9]*|0) min_enters=1 ;; esac
+  [ "$retries" -ge "$min_enters" ] || retries=$min_enters
   fm_backend_zellij_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   typed=$(fm_backend_zellij_capture "$target" 6 "$expected_label") || { printf 'unknown'; return 0; }
@@ -512,11 +515,11 @@ fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep
     fm_backend_zellij_send_key "$target" Enter "$expected_label" || true
     sleep "$sleep_s"
     after=$(fm_backend_zellij_capture "$target" 6 "$expected_label") || { printf 'unknown'; return 0; }
-    if [ "$after" != "$typed" ]; then
+    i=$((i + 1))
+    if [ "$i" -ge "$min_enters" ] && [ "$after" != "$typed" ]; then
       printf 'empty'
       return 0
     fi
-    i=$((i + 1))
     [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
   done
 }

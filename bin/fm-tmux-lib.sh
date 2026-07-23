@@ -61,9 +61,9 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
-# (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel";
+# Kimi: "thinking...", "working...", and "Running a command".
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|thinking\.\.\.|working\.\.\.|Running a command'
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised
@@ -128,6 +128,10 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
      && printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
     printf 'empty'; return 0
   fi
+  if [ "$bordered" = 1 ]; then
+    fm_composer_classify_bordered_row "$raw" "${FM_COMPOSER_IDLE_RE:-}" insensitive
+    return 0
+  fi
   fm_composer_classify_content "$bordered" "$stripped" "${FM_COMPOSER_IDLE_RE:-}" insensitive "$plain"
 }
 
@@ -166,14 +170,16 @@ fm_pane_is_busy() {  # <target>
 # fm-send's lenient success policies both treat a busy-queued Enter as
 # delivered.
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
-  local target=$1 retries=$2 sleep_s=$3 i=0 state
-  while :; do
+  local target=$1 retries=$2 sleep_s=$3 i=0 state min_enters=${FM_SUBMIT_MIN_ENTERS:-1}
+  case "$min_enters" in ''|*[!0-9]*|0) min_enters=1 ;; esac
+  [ "$retries" -ge "$min_enters" ] || retries=$min_enters
+  while [ "$i" -lt "$retries" ]; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target")
-    [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
     i=$((i + 1))
-    [ "$i" -lt "$retries" ] || break
+    [ "$i" -lt "$min_enters" ] && continue
+    [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
   done
   # Retries exhausted, composer still shows pending.
   # If the pane is busy (agent mid-turn), the harness accepted the Enter

@@ -48,7 +48,10 @@ make_stubs() {  # <dir> -> echoes fakebin dir
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  send-keys) exit 0 ;;
+  send-keys)
+    [ -z "${FM_TMUX_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TMUX_LOG"
+    exit 0
+    ;;
   display-message)
     for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
@@ -136,3 +139,46 @@ first_settle 1.2 'codex /command -> long settle (slash unchanged)' codex '/help'
 
 # Plain text to codex takes the fast path - the codex scope is `$`-prefixed only.
 first_settle 0.3 'codex plain text -> fast path' codex 'just a normal steer'
+
+test_kimi_slash_requires_two_enters() {
+  local dir fb log home rc enters
+  dir="$TMP_ROOT/kimi-min-enters"
+  mkdir -p "$dir/state"
+  fb=$(make_stubs "$dir")
+  log="$dir/tmux.log"
+  home="$dir"
+  fm_write_meta "$home/state/kimi-popup.meta" "window=sess:win" "harness=kimi"
+  : > "$log"
+  env FM_SEND_SETTLE=0 PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SLEEP_LOG="$dir/sleep.log" \
+    FM_TMUX_LOG="$log" \
+    "$SEND" kimi-popup '/no-mistakes' 2>/dev/null
+  rc=$?
+  expect_code 0 "$rc" "Kimi slash send should succeed"
+  enters=$(grep -c 'send-keys.* Enter' "$log" || true)
+  [ "$enters" -eq 2 ] || fail "Kimi slash send should issue exactly two Enter attempts, got $enters"
+  pass "fm-send popup submit: Kimi slash commands require two Enter attempts"
+}
+
+test_kimi_plain_text_uses_one_enter() {
+  local dir fb log home rc enters
+  dir="$TMP_ROOT/kimi-plain-enter"
+  mkdir -p "$dir/state"
+  fb=$(make_stubs "$dir")
+  log="$dir/tmux.log"
+  home="$dir"
+  fm_write_meta "$home/state/kimi-plain.meta" "window=sess:win" "harness=kimi"
+  : > "$log"
+  env FM_SEND_SETTLE=0 PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SLEEP_LOG="$dir/sleep.log" \
+    FM_TMUX_LOG="$log" \
+    "$SEND" kimi-plain 'plain instruction' 2>/dev/null
+  rc=$?
+  expect_code 0 "$rc" "Kimi plain send should succeed"
+  enters=$(grep -c 'send-keys.* Enter' "$log" || true)
+  [ "$enters" -eq 1 ] || fail "Kimi plain send should issue one Enter attempt, got $enters"
+  pass "fm-send popup submit: Kimi minimum Enter override is slash-scoped"
+}
+
+test_kimi_slash_requires_two_enters
+test_kimi_plain_text_uses_one_enter

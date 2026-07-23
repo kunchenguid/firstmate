@@ -585,6 +585,9 @@ fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending
 # SAME vocabulary every existing backend already speaks.
 fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} i=0 state
+  local min_enters=${FM_SUBMIT_MIN_ENTERS:-1}
+  case "$min_enters" in ''|*[!0-9]*|0) min_enters=1 ;; esac
+  [ "$retries" -ge "$min_enters" ] || retries=$min_enters
   fm_backend_cmux_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_cmux_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }
   sleep "$settle"
@@ -592,8 +595,9 @@ fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
     fm_backend_cmux_send_key "$target" Enter "$expected_label" || true
     sleep "$sleep_s"
     state=$(fm_backend_cmux_composer_state "$target" "$expected_label")
-    [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
     i=$((i + 1))
+    [ "$i" -lt "$min_enters" ] && continue
+    [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
     [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
   done
 }

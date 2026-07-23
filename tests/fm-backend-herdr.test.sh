@@ -1549,6 +1549,28 @@ test_composer_state_real_text_is_pending() {
   pass "fm_backend_herdr_composer_state: real composer text reads pending"
 }
 
+test_composer_state_kimi_boxed_prompt_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-kimi-empty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  ╭────────────────────────╮\n  │ >                      │\n  ╰────────────────────────╯\n  auto  K3 thinking: high\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "Kimi's boxed idle prompt should read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: Kimi's boxed > prompt reads empty"
+}
+
+test_composer_state_kimi_boxed_slash_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-kimi-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  ╭────────────────────────╮\n  │ > /no-mistakes         │\n  ╰────────────────────────╯\n  │   → no-mistakes        │\n  auto  K3 thinking: high\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "Kimi's boxed slash text should read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: Kimi's boxed slash text reads pending"
+}
+
 # Live-verified incident (2026-07-03, real grok 0.2.82 on herdr, isolated
 # session): typing "/compact" opens the completion popup; the FIRST Enter
 # closes the popup and EXPANDS the composer into an argument-hint placeholder
@@ -2816,6 +2838,8 @@ test_busy_state_unknown_on_no_agent
 test_composer_state_bare_prompt_is_empty
 test_composer_state_ghost_placeholder_is_empty
 test_composer_state_real_text_is_pending
+test_composer_state_kimi_boxed_prompt_is_empty
+test_composer_state_kimi_boxed_slash_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found

@@ -179,6 +179,44 @@ fm_composer_idle_matches() {
   esac
 }
 
+# fm_composer_classify_bordered_row: classify one complete bordered composer
+# row from its raw ANSI-preserving capture. This is the shared structural owner
+# for boxes such as Kimi's `│ > │`: matching side borders establish that `>` is
+# an agent prompt rather than a dead shell, ghost styling is removed only from
+# the content verdict, and real text after the prompt remains pending.
+fm_composer_classify_bordered_row() {  # <raw-row> [idle_re] [idle_case]
+  local raw=$1 idle_re=${2:-} idle_case=${3:-sensitive} plain content
+  plain=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
+  plain="${plain#"${plain%%[![:space:]]*}"}"
+  plain="${plain%"${plain##*[![:space:]]}"}"
+  content=$(printf '%s\n' "$raw" | fm_composer_strip_ghost)
+  content="${content#"${content%%[![:space:]]*}"}"
+  content="${content%"${content##*[![:space:]]}"}"
+  case "$plain" in
+    '│'*'│')
+      plain=${plain#│}
+      plain=${plain%│}
+      case "$content" in '│'*'│') content=${content#│}; content=${content%│} ;; esac
+      ;;
+    '┃'*'┃')
+      plain=${plain#┃}
+      plain=${plain%┃}
+      case "$content" in '┃'*'┃') content=${content#┃}; content=${content%┃} ;; esac
+      ;;
+    '|'*'|')
+      plain=${plain#|}
+      plain=${plain%|}
+      case "$content" in '|'*'|') content=${content#|}; content=${content%|} ;; esac
+      ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  plain="${plain#"${plain%%[![:space:]]*}"}"
+  plain="${plain%"${plain##*[![:space:]]}"}"
+  content="${content#"${content%%[![:space:]]*}"}"
+  content="${content%"${content##*[![:space:]]}"}"
+  fm_composer_classify_content 1 "$content" "$idle_re" "$idle_case" "$plain"
+}
+
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}

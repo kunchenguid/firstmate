@@ -24,6 +24,17 @@ set -u
 # classify <bordered> <content> [idle_re] -> echoes the verdict.
 classify() { fm_composer_classify_content "$@"; }
 
+test_kimi_bordered_row_structure() {
+  local out
+  out=$(fm_composer_classify_bordered_row '│ > │')
+  [ "$out" = empty ] || fail "Kimi's idle boxed composer must read empty, got '$out'"
+  out=$(fm_composer_classify_bordered_row '│ > /quit │')
+  [ "$out" = pending ] || fail "Kimi's boxed composer with slash text must read pending, got '$out'"
+  out=$(fm_composer_classify_bordered_row '> ')
+  [ "$out" = unknown ] || fail "a bare shell-like Kimi glyph without its box must stay unknown, got '$out'"
+  pass "fm_composer_classify_bordered_row: Kimi's boxed > prompt is structural"
+}
+
 # --- Safety fix: bare shell prompt is NOT an empty agent composer -----------
 
 test_bare_shell_glyphs_are_unknown() {
@@ -126,6 +137,7 @@ test_real_text_is_pending() {
 }
 
 test_bare_shell_glyphs_are_unknown
+test_kimi_bordered_row_structure
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty

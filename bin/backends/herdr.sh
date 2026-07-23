@@ -1593,6 +1593,10 @@ EOF
     found=0
   fi
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
+  if [ "$shape" = bordered ]; then
+    fm_composer_classify_bordered_row "$raw_match" "$FM_BACKEND_HERDR_IDLE_RE"
+    return 0
+  fi
   # Content: extract the real typed text from the raw row with the shared,
   # fleet-wide ghost stripper (bin/fm-composer-lib.sh), which drops dim/faint AND
   # dark-truecolor ghost/placeholder runs. This replaces the former herdr-only
@@ -1604,14 +1608,7 @@ EOF
   stripped=$(printf '%s\n' "$raw_match" | fm_composer_strip_ghost)
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  if [ "$shape" = bordered ]; then
-    bordered=1
-    stripped=${stripped//│/}
-    stripped=${stripped//┃/}
-    stripped=${stripped//|/}
-    stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-    stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  elif [ "$shape" = separated ]; then
+  if [ "$shape" = separated ]; then
     # The native Pi identity plus the complete separator pair is the genuine
     # composer container, equivalent to a bordered box for shared content
     # classification. ANSI stripping keeps real text and drops only styling.
@@ -1687,6 +1684,9 @@ EOF
 # no longer literally "the composer read empty").
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
+  local min_enters=${FM_SUBMIT_MIN_ENTERS:-1}
+  case "$min_enters" in ''|*[!0-9]*|0) min_enters=1 ;; esac
+  [ "$retries" -ge "$min_enters" ] || retries=$min_enters
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
@@ -1702,12 +1702,13 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       sleep "$sleep_s"
       verdict=$(fm_backend_herdr_composer_state "$target")
     fi
+    i=$((i + 1))
+    [ "$i" -lt "$min_enters" ] && continue
     case "$verdict" in
       busy) printf 'empty'; return 0 ;;
       empty) printf 'empty'; return 0 ;;
       unknown) printf 'unknown'; return 0 ;;
     esac
-    i=$((i + 1))
     [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
   done
 }
