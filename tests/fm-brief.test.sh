@@ -250,6 +250,47 @@ test_secondmate_no_projects_charter() {
   pass "fm-brief.sh: --no-projects scaffolds a project-less charter and guards misuse"
 }
 
+test_secondmate_marked_request_reporting_contract() {
+  local home brief
+  home="$TMP_ROOT/marked-request-reporting-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=paused \
+    FM_SECONDMATE_CHARTER='Handle routed domain work.' \
+    "$ROOT/bin/fm-brief.sh" marked-request-reporting --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/marked-request-reporting/brief.md"
+
+  assert_grep 'A marked request requires one correlated answer after the work' "$brief" \
+    "secondmate charter did not require the correlated answer after the work"
+  assert_grep 'does not require a separate receipt or start acknowledgement' "$brief" \
+    "secondmate charter did not reject a separate receipt/start acknowledgement"
+  assert_grep "Never append \`working:\` merely to acknowledge receipt or announce that a marked request has started." "$brief" \
+    "secondmate charter did not forbid a generic working acknowledgement"
+  assert_no_grep "Give every routed-work phase a stable key: open it with \`working" "$brief" \
+    "secondmate charter retained the unconditional working opener"
+  assert_grep 'When a routed-work phase has a supervisor-actionable material change worth reporting under the rule above' "$brief" \
+    "secondmate charter did not limit keyed phases to reportable material changes"
+  assert_grep "If its first reportable event is \`working [key=<work-slug>]: {material phase}\`" "$brief" \
+    "secondmate charter lost keyed working syntax for a reportable material phase"
+  assert_grep "use the same key on its later \`paused\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event" "$brief" \
+    "secondmate charter lost same-key closure for a reportable material phase"
+  assert_grep 'resolved [key=<work-slug>]' "$brief" \
+    "secondmate charter lost resolved closure for a keyed material phase"
+
+  assert_grep 'include that exact token in your parent status reply' "$brief" \
+    "secondmate charter lost correlated parent results"
+  assert_grep 'For a terse result, a status line is the whole answer.' "$brief" \
+    "secondmate charter lost terse result reporting"
+  assert_grep 'append a status line that points to that doc' "$brief" \
+    "secondmate charter lost detailed document pointers"
+  assert_grep 'Report only true captain-relevant outcomes or a declared external wait' "$brief" \
+    "secondmate charter lost declared external waits"
+  assert_grep 'a captain decision, a real blocker, a failure, or work ready for review' "$brief" \
+    "secondmate charter lost decisions, blockers, failures, or ready outcomes"
+  assert_grep 'States: working, needs-decision, blocked, paused, done, failed.' "$brief" \
+    "secondmate charter changed the preserved status vocabulary"
+  pass "fm-brief.sh: marked requests avoid generic acknowledgements and preserve material reporting"
+}
+
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
   local home brief status=0
   home="$TMP_ROOT/herdr-kind-home"
@@ -352,6 +393,7 @@ test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
+test_secondmate_marked_request_reporting_contract
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
