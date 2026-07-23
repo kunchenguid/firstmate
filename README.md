@@ -107,6 +107,7 @@ Every Pi session starts with calm mode off and tool activity visible; `/calm` is
 Toggling off restores ordinary rendering, and `Ctrl+O` expansion behavior stays unchanged.
 Built-in `read` images on image-capable terminals and custom or third-party tool rows remain visible because Pi 0.80.10 does not expose those rows to supported extension renderers.
 The toggle changes only interactive rendering, not tool execution, model context, session storage, exports, or diagnostics.
+The version-scoped feasibility evidence for keeping this feature Pi-only is recorded in [docs/calm-mode-feasibility.md](docs/calm-mode-feasibility.md).
 
 ### Talk to it
 
