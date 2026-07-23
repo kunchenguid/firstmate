@@ -129,13 +129,14 @@ emit() {
   if [ "$G_LOCAL_MERGE" = on ]; then grants="${grants:+$grants,}local-merge"; fi
   [ -n "$grants" ] || grants=none
 
+  # Answer the query from the canonical list built above rather than from a
+  # second enumeration of the grant names, so a name that is not in that list is
+  # structurally denied instead of relying on the caller-side validation alone.
   if [ "$QUERY_SET" = 1 ]; then
-    case "$QUERY" in
-      findings) [ "$G_FINDINGS" = on ] || exit 1 ;;
-      merge) [ "$G_MERGE" = on ] || exit 1 ;;
-      local-merge) [ "$G_LOCAL_MERGE" = on ] || exit 1 ;;
+    case ",$grants," in
+      *",$QUERY,"*) exit 0 ;;
+      *) exit 1 ;;
     esac
-    exit 0
   fi
   echo "$mode $grants"
   exit 0
