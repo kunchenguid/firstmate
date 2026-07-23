@@ -249,8 +249,45 @@ test_treehouse_pool_skill_drafts_are_inventoried() {
   pass "Treehouse pool worktrees participate in skill-draft hygiene detection"
 }
 
+test_ignored_skill_files_are_outside_the_collision_guard() {
+  local source="$TMP_ROOT/ignored-source" worktree="$TMP_ROOT/ignored-worktree" draft out
+  fm_git_worktree "$source" "$worktree" ignored-skill
+  printf '%s\n' '.agents/skills/' >> "$source/.git/info/exclude"
+  draft="$worktree/.agents/skills/intentional/SKILL.md"
+  mkdir -p "$(dirname "$draft")"
+  printf '%s\n' '# intentional ignored material' > "$draft"
+
+  run_refresh verify-worktree "$worktree" "$source" \
+    || fail "an ignored skill file made a clean local acquisition fail"
+  out=$(run_refresh preflight "$worktree") \
+    || fail "preflight rejected an acquisition containing only ignored skill material"
+  assert_not_contains "$out" "HYGIENE:" \
+    "ignored skill material entered the untracked-draft collision inventory"
+  grep -Fq '# intentional ignored material' "$draft" \
+    || fail "ignored skill-file inspection changed its contents"
+  pass "gitignored skill files remain outside the non-ignored collision guard"
+}
+
+test_pool_preflight_surfaces_dirty_worktrees_without_blocking_clean_selection() {
+  local project pool_worktree before out
+  project=$(cd "$FM_TEST_HOME/projects/relvino" && pwd -P)
+  pool_worktree="$TEST_HOME/.treehouse/relvino-test/1/relvino"
+  pool_worktree=$(cd "$pool_worktree" && pwd -P)
+  before=$(cat "$pool_worktree/file.txt")
+  printf '%s\n' dirty-pool-change >> "$pool_worktree/file.txt"
+
+  out=$(run_refresh pool-preflight "$project" 2>&1) \
+    || fail "inspectable dirty pool entries should remain skippable while another clean entry may be selected"
+  assert_contains "$out" "$pool_worktree: skipped: dirty Treehouse pool worktree remains unavailable for acquisition" \
+    "pre-acquisition pool inspection did not surface the dirty entry"
+  grep -Fq dirty-pool-change "$pool_worktree/file.txt" \
+    || fail "pool preflight changed the dirty worktree"
+  printf '%s\n' "$before" > "$pool_worktree/file.txt"
+  pass "pool preflight surfaces dirty entries and leaves them unavailable untouched"
+}
+
 test_bootstrap_relays_hygiene_alerts() {
-  local project draft out config_backup
+  local project draft out config_backup config_real
   project=$(cd "$FM_TEST_HOME/projects/relvino" && pwd -P)
   draft="$project/.agents/skills/bootstrap-draft/SKILL.md"
   mkdir -p "$(dirname "$draft")"
@@ -269,6 +306,18 @@ test_bootstrap_relays_hygiene_alerts() {
     "session-start bootstrap did not relay the unresolved hygiene alert"
   assert_contains "$out" "FLEET_SYNC: checkout-refresh: skipped: unknown config directive 'unexpected'" \
     "session-start bootstrap swallowed checkout discovery diagnostics"
+
+  config_real="$TMP_ROOT/checkout-refresh-real"
+  mv "$FM_TEST_HOME/config/checkout-refresh" "$config_real"
+  ln -s "$config_real" "$FM_TEST_HOME/config/checkout-refresh"
+  out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_ROOT="$STATE_ROOT" FM_TREEHOUSE_ROOT="$TEST_HOME/.treehouse" \
+    FM_CHECKOUT_REFRESH_BOOTSTRAP_TEST=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  rm "$FM_TEST_HOME/config/checkout-refresh"
+  mv "$config_real" "$FM_TEST_HOME/config/checkout-refresh"
+  assert_contains "$out" "FLEET_SYNC: checkout-refresh: skipped: unsafe symlink config" \
+    "session-start bootstrap suppressed the unsafe configuration warning"
   grep -Fq '# bootstrap draft' "$draft" || fail "bootstrap refresh changed the draft"
   rm -rf "$project/.agents"
   run_refresh run-once >/dev/null
@@ -276,7 +325,7 @@ test_bootstrap_relays_hygiene_alerts() {
 }
 
 test_treehouse_discovery_failure_invalidates_heartbeat() {
-  local bad_state="$TEST_HOME/.treehouse/broken/treehouse-state.json" out status
+  local bad_state="$TEST_HOME/.treehouse/broken/treehouse-state.json" missing_path="$TMP_ROOT/missing-treehouse-worktree" out status
   mkdir -p "$(dirname "$bad_state")"
   printf '%s\n' '{"worktrees":[' > "$bad_state"
   printf '%s\n' preserved-heartbeat > "$STATE_ROOT/heartbeat"
@@ -291,8 +340,32 @@ test_treehouse_discovery_failure_invalidates_heartbeat() {
     "malformed Treehouse state was not surfaced"
   [ "$(cat "$STATE_ROOT/heartbeat")" = preserved-heartbeat ] \
     || fail "malformed Treehouse state advanced the healthy heartbeat"
+
+  printf '%s\n' '{}' > "$bad_state"
+  printf '%s\n' preserved-schema-heartbeat > "$STATE_ROOT/heartbeat"
+  set +e
+  out=$(run_refresh run-once --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "Treehouse state without a worktrees field reported healthy coverage"
+  assert_contains "$out" "worktrees is required" \
+    "missing Treehouse worktrees schema was not surfaced"
+  [ "$(cat "$STATE_ROOT/heartbeat")" = preserved-schema-heartbeat ] \
+    || fail "missing Treehouse worktrees schema advanced the healthy heartbeat"
+
+  printf '{"worktrees":[{"path":"%s"}]}\n' "$missing_path" > "$bad_state"
+  printf '%s\n' preserved-path-heartbeat > "$STATE_ROOT/heartbeat"
+  set +e
+  out=$(run_refresh run-once --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "uninspectable declared Treehouse worktree reported healthy coverage"
+  assert_contains "$out" "Treehouse worktree is not inspectable: $missing_path" \
+    "uninspectable declared Treehouse worktree was not surfaced"
+  [ "$(cat "$STATE_ROOT/heartbeat")" = preserved-path-heartbeat ] \
+    || fail "uninspectable Treehouse path advanced the healthy heartbeat"
   rm -rf "$(dirname "$bad_state")"
-  pass "incomplete Treehouse discovery invalidates the healthy heartbeat"
+  pass "malformed schemas and uninspectable Treehouse paths invalidate the healthy heartbeat"
 }
 
 test_skill_inventory_failure_preserves_alert_and_heartbeat() {
@@ -366,7 +439,7 @@ test_dirty_nondefault_and_diverged_checkouts_are_untouched() {
 }
 
 test_refresh_locks_recover_stale_owners_and_surface_contention() {
-  local run_lock="$STATE_ROOT/.run-lock" checkout key checkout_lock out
+  local run_lock="$STATE_ROOT/.run-lock" checkout common key checkout_lock alias out
   mkdir -p "$run_lock"
   touch -t 200001010000 "$run_lock"
 
@@ -383,15 +456,23 @@ test_refresh_locks_recover_stale_owners_and_surface_contention() {
   rm -rf "$run_lock"
 
   checkout=$(cd "$FM_TEST_HOME/projects/relvino" && pwd -P)
-  key=$(printf '%s' "$checkout" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  common=$(git -C "$checkout" rev-parse --git-common-dir)
+  case "$common" in /*) ;; *) common="$checkout/$common" ;; esac
+  common=$(cd "$common" && pwd -P)
+  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
   checkout_lock="$LOCK_ROOT/$key.lock"
   mkdir -p "$checkout_lock"
   printf '%s\n' "$$" > "$checkout_lock/pid"
   out=$(run_refresh run-once --force)
   assert_contains "$out" "$checkout: skipped: refresh already running (pid $$)" \
     "shared-checkout lock contention was not surfaced"
+  alias="$TMP_ROOT/relvino-checkout-alias"
+  ln -s "$checkout" "$alias"
+  out=$(run_refresh preflight "$alias") || true
+  assert_contains "$out" "$alias: skipped: refresh already running (pid $$)" \
+    "a symlink alias bypassed the canonical repository lock"
   rm -rf "$checkout_lock"
-  pass "refresh locks recover abandoned owners and serialize shared checkouts"
+  pass "refresh locks recover abandoned owners and serialize every checkout alias"
 }
 
 test_session_mode_preserves_gone_branch_pruning() {
@@ -595,6 +676,8 @@ test_live_default_change_is_surfaced_without_switching_branches
 test_skill_drafts_surface_on_every_probe_without_log_spam
 test_preflight_rejects_hygiene_without_an_origin
 test_treehouse_pool_skill_drafts_are_inventoried
+test_ignored_skill_files_are_outside_the_collision_guard
+test_pool_preflight_surfaces_dirty_worktrees_without_blocking_clean_selection
 test_bootstrap_relays_hygiene_alerts
 test_treehouse_discovery_failure_invalidates_heartbeat
 test_skill_inventory_failure_preserves_alert_and_heartbeat

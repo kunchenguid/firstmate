@@ -33,7 +33,7 @@
 # disabled, while the explicit session-start mode preserves gone-branch pruning.
 # Dirty, diverged, non-default, and otherwise unsafe checkouts remain untouched
 # and are recorded as durable alerts.
-# Every probe also inventories untracked files in both the covered seed
+# Every probe also inventories non-ignored untracked files in both the covered seed
 # checkouts and the Treehouse pool worktrees under repository skill directories
 # (`.agents/skills`, `.claude/skills`, `.codex/skills`, and `skills`).
 # Unreadable or malformed Treehouse state invalidates discovery and suppresses
@@ -56,6 +56,7 @@
 #   fm-checkout-refresh.sh discover
 #   fm-checkout-refresh.sh run-once [--force] [--verbose] [--session]
 #   fm-checkout-refresh.sh preflight <checkout>
+#   fm-checkout-refresh.sh pool-preflight <expected-source>
 #   fm-checkout-refresh.sh verify-worktree <worktree> <expected-source>
 #   fm-checkout-refresh.sh ensure
 #   fm-checkout-refresh.sh install
@@ -109,7 +110,7 @@ case "$PROBE_TIMEOUT" in ''|*[!0-9]*|0) echo "error: FM_CHECKOUT_REFRESH_PROBE_T
 case "$SYNC_TIMEOUT" in ''|*[!0-9]*|0) echo "error: FM_CHECKOUT_REFRESH_SYNC_TIMEOUT must be a positive integer" >&2; exit 2 ;; esac
 
 usage() {
-  echo "usage: fm-checkout-refresh.sh discover|run-once [--force] [--verbose] [--session]|preflight <checkout>|verify-worktree <worktree> <expected-source>|ensure|install" >&2
+  echo "usage: fm-checkout-refresh.sh discover|run-once [--force] [--verbose] [--session]|preflight <checkout>|pool-preflight <expected-source>|verify-worktree <worktree> <expected-source>|ensure|install" >&2
 }
 
 first_line() {
@@ -136,7 +137,7 @@ config_values() {
   local wanted=$1 line directive value
   [ -f "$CONFIG_FILE" ] || return 0
   [ ! -L "$CONFIG_FILE" ] || {
-    echo "checkout-refresh: skipped unsafe symlink config $CONFIG_FILE" >&2
+    echo "checkout-refresh: skipped: unsafe symlink config $CONFIG_FILE" >&2
     return 0
   }
   while IFS= read -r line || [ -n "$line" ]; do
@@ -178,7 +179,9 @@ for state_path in sorted(glob.glob(os.path.join(sys.argv[1], "*", "treehouse-sta
             state = json.load(stream)
         if not isinstance(state, dict):
             raise TypeError("root must be an object")
-        worktrees = state.get("worktrees", [])
+        if "worktrees" not in state:
+            raise TypeError("worktrees is required")
+        worktrees = state["worktrees"]
         if not isinstance(worktrees, list):
             raise TypeError("worktrees must be an array")
         for entry in worktrees:
@@ -213,7 +216,7 @@ origin_url() {
 }
 
 discover() {
-  local tmp seeds origins scans treehouse_paths path project worktree main root candidate url
+  local tmp seeds origins scans treehouse_paths path project worktree main root candidate url failed=0
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-checkout-refresh-discover.XXXXXX") || return 1
   seeds="$tmp/seeds"
   origins="$tmp/origins"
@@ -247,8 +250,15 @@ discover() {
     [ -n "$worktree" ] || continue
     if main=$(backing_checkout "$worktree" 2>/dev/null); then
       printf '%s\n' "$main" >> "$seeds"
+    else
+      echo "checkout-refresh: skipped: Treehouse worktree is not inspectable: $worktree" >&2
+      failed=1
     fi
   done < "$treehouse_paths"
+  if [ "$failed" -ne 0 ]; then
+    rm -rf "$tmp"
+    return 1
+  fi
 
   sort -u "$seeds" -o "$seeds"
   while IFS= read -r path; do
@@ -291,6 +301,10 @@ discover() {
 run_bounded() {
   local seconds=$1
   shift
+  command -v perl >/dev/null 2>&1 || {
+    echo "error: perl is required for bounded checkout refresh process control" >&2
+    return 127
+  }
   # shellcheck disable=SC2016
   perl -e 'sub tree { my ($root) = @_; my %children; open my $ps, "-|", "ps", "-axo", "pid=,ppid=" or return ($root); while (<$ps>) { my ($pid, $ppid) = /(\d+)\s+(\d+)/; push @{$children{$ppid}}, $pid if defined $pid } close $ps; my @out = ($root); for (my $i = 0; $i < @out; $i++) { push @out, @{$children{$out[$i]} || []} } return @out } sub alive { grep { kill 0, $_ } @_ } sub stop_tree { my ($root) = @_; my @seen = tree($root); kill "TERM", reverse @seen; for (1 .. 20) { last unless alive(@seen); select undef, undef, undef, 0.05 } my %seen; @seen = grep { !$seen{$_}++ } (@seen, tree($root)); my @left = alive(@seen); kill "KILL", reverse @left if @left; waitpid $root, 0; for (1 .. 20) { last unless alive(@seen); select undef, undef, undef, 0.05 } } my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { exec @ARGV; exit 127 } local $SIG{ALRM} = sub { stop_tree($pid); exit 124 }; alarm $t; waitpid $pid, 0; alarm 0; my $status = $?; exit(($status & 127) ? 128 + ($status & 127) : $status >> 8)' "$seconds" "$@"
 }
@@ -319,7 +333,9 @@ EOF
 }
 
 checkout_key() {
-  printf '%s' "$1" | shasum -a 256 | awk '{print substr($1,1,24)}'
+  local identity
+  identity=$(canonical_dir "$1" 2>/dev/null) || identity=$1
+  printf '%s' "$identity" | shasum -a 256 | awk '{print substr($1,1,24)}'
 }
 
 read_epoch() {
@@ -403,7 +419,7 @@ surface_skill_drafts() {
 }
 
 prepare_hygiene_discovery() {
-  local seed_file=$1 hygiene_file=$2 treehouse_paths worktree canonical
+  local seed_file=$1 hygiene_file=$2 treehouse_paths worktree canonical failed=0
   cp "$seed_file" "$hygiene_file" || return 1
   treehouse_paths=$(mktemp "$STATE_ROOT/.treehouse-worktrees.XXXXXX") || return 1
   if ! treehouse_worktree_paths > "$treehouse_paths"; then
@@ -414,9 +430,13 @@ prepare_hygiene_discovery() {
     [ -n "$worktree" ] || continue
     if canonical=$(canonical_dir "$worktree" 2>/dev/null); then
       printf '%s\n' "$canonical" >> "$hygiene_file"
+    else
+      echo "checkout-refresh: skipped: Treehouse worktree is not inspectable: $worktree" >&2
+      failed=1
     fi
   done < "$treehouse_paths"
   rm -f "$treehouse_paths"
+  [ "$failed" -eq 0 ] || return 1
   sort -u "$hygiene_file" -o "$hygiene_file"
 }
 
@@ -433,12 +453,16 @@ clear_stale_hygiene_alerts() {
 
 sync_checkout() {
   local checkout=$1 output_file=$2 prune=${3:-0} live_default=${4:-}
-  local status lock held
+  local status lock held lock_identity
   ensure_lock_roots || {
     printf '%s: skipped: refresh lock setup failed\n' "$checkout" > "$output_file"
     return
   }
-  lock="$LOCK_ROOT/$(checkout_key "$checkout").lock"
+  lock_identity=$(git_common_dir "$checkout") || {
+    printf '%s: skipped: repository lock identity cannot be resolved\n' "$checkout" > "$output_file"
+    return
+  }
+  lock="$LOCK_ROOT/$(checkout_key "$lock_identity").lock"
   if ! fm_lock_try_acquire "$lock"; then
     held=${FM_LOCK_HELD_PID:-unknown}
     printf '%s: skipped: refresh already running (pid %s)\n' "$checkout" "$held" > "$output_file"
@@ -614,6 +638,45 @@ git_common_dir() {
   esac
 }
 
+pool_preflight() {
+  local expected_source=$1 expected_common treehouse_paths worktree canonical common dirty example failed=0
+  [ -d "$expected_source" ] \
+    || { echo "error: expected Treehouse source is not a directory: $expected_source" >&2; return 1; }
+  expected_common=$(git_common_dir "$expected_source") || {
+    echo "error: cannot resolve expected Treehouse repository identity for $expected_source" >&2
+    return 1
+  }
+  treehouse_paths=$(mktemp "${TMPDIR:-/tmp}/fm-checkout-refresh-pool.XXXXXX") || return 1
+  if ! treehouse_worktree_paths > "$treehouse_paths"; then
+    rm -f "$treehouse_paths"
+    return 1
+  fi
+  while IFS= read -r worktree; do
+    [ -n "$worktree" ] || continue
+    canonical=$(canonical_dir "$worktree" 2>/dev/null) || {
+      echo "checkout-refresh: skipped: Treehouse worktree is not inspectable: $worktree" >&2
+      failed=1
+      continue
+    }
+    common=$(git_common_dir "$canonical") || {
+      echo "checkout-refresh: skipped: Treehouse repository identity is not inspectable: $canonical" >&2
+      failed=1
+      continue
+    }
+    [ "$common" = "$expected_common" ] || continue
+    dirty=$(GIT_OPTIONAL_LOCKS=0 git -C "$canonical" status --porcelain=v1 --untracked-files=all 2>/dev/null) || {
+      echo "checkout-refresh: skipped: Treehouse worktree cleanliness is not inspectable: $canonical" >&2
+      failed=1
+      continue
+    }
+    [ -n "$dirty" ] || continue
+    example=$(first_line "$dirty")
+    echo "$canonical: skipped: dirty Treehouse pool worktree remains unavailable for acquisition ($example)" >&2
+  done < "$treehouse_paths"
+  rm -f "$treehouse_paths"
+  [ "$failed" -eq 0 ]
+}
+
 local_default_branch() {
   local checkout=$1 branch
   for branch in main master; do
@@ -698,7 +761,7 @@ remove_matching_legacy_launch_agent() {
 }
 
 install_launch_agent() {
-  local bash_runtime python_runtime runtime_path temp previous domain
+  local bash_runtime python_runtime perl_runtime runtime_path temp previous domain
   [ "$PLATFORM" = Darwin ] || {
     echo "error: checkout-refresh background installation currently requires macOS" >&2
     return 1
@@ -706,8 +769,10 @@ install_launch_agent() {
   command -v "$LAUNCHCTL" >/dev/null 2>&1 || { echo "error: launchctl is unavailable" >&2; return 1; }
   bash_runtime=$(command -v bash) || return 1
   python_runtime=$(command -v python3) || return 1
+  perl_runtime=$(command -v perl) \
+    || { echo "error: perl is unavailable for checkout-refresh process control" >&2; return 1; }
   case "$bash_runtime" in /*) ;; *) echo "error: cannot resolve an absolute Bash runtime" >&2; return 1 ;; esac
-  runtime_path="$(dirname "$python_runtime"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  runtime_path="$(dirname "$python_runtime"):$(dirname "$perl_runtime"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   mkdir -p "$LAUNCH_AGENTS_DIR" "$STATE_ROOT" "$LOCK_ROOT" || return 1
   [ -d "$LAUNCH_AGENTS_DIR" ] && [ ! -L "$LAUNCH_AGENTS_DIR" ] \
     && [ -d "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] \
@@ -829,6 +894,10 @@ case "${1:-}" in
   preflight)
     [ $# -eq 2 ] || { usage; exit 2; }
     preflight "$2"
+    ;;
+  pool-preflight)
+    [ $# -eq 2 ] || { usage; exit 2; }
+    pool_preflight "$2"
     ;;
   verify-worktree)
     [ $# -eq 3 ] || { usage; exit 2; }

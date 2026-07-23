@@ -453,7 +453,7 @@ test_herdr_install_requires_manual_action() {
 
 test_herdr_detach_dependencies_have_manual_guidance() {
   local tool case_dir fakebin bash_env out install_out status instructions
-  instructions="https://github.com/ruby-dlee/firstmate/blob/main/docs/configuration.md#herdr-detached-launcher-prerequisites"
+  instructions="https://github.com/ruby-dlee/firstmate/blob/main/docs/configuration.md#portable-process-control-prerequisites"
   for tool in nohup perl; do
     case_dir="$TMP_ROOT/herdr-missing-$tool"
     mkdir -p "$case_dir/home/config"
@@ -485,6 +485,29 @@ SH
       || fail "install $tool should return actionable manual guidance, got: $install_out"
   done
   pass "bootstrap: Herdr detach dependencies have actionable manual guidance"
+}
+
+test_perl_is_a_universal_process_control_dependency() {
+  local case_dir fakebin bash_env out
+  case_dir="$TMP_ROOT/universal-perl"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  bash_env="$case_dir/no-perl.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = perl ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+SH
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" \
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" 'MISSING_MANUAL: perl' \
+    "a non-Herdr home did not validate the checkout refresher's Perl dependency"
+  pass "bootstrap validates Perl for every backend"
 }
 
 test_cmux_bundled_cli_satisfies_dependency() {
@@ -944,6 +967,11 @@ if [ "${FM_TEST_FOCUSED:-}" = account-directory-cutover ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-40 ]; then
+  test_perl_is_a_universal_process_control_dependency
+  exit 0
+fi
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_git_is_required_with_supported_install_instruction
@@ -952,6 +980,7 @@ test_session_provider_backends_do_not_require_tmux
 test_session_provider_backends_gate_own_cli_not_tmux
 test_herdr_install_requires_manual_action
 test_herdr_detach_dependencies_have_manual_guidance
+test_perl_is_a_universal_process_control_dependency
 test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux

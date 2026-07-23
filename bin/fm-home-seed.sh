@@ -934,7 +934,6 @@ seed_home() {
     SEED_HOME_ACQUIRED=1
     home=$(acquire_treehouse_home "$id")
     SEED_HOME="$home"
-    home=$(verify_firstmate_home "$home")
     freshness_status=0
     "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-worktree "$home" "$FM_ROOT" || freshness_status=$?
     if [ "$freshness_status" -ne 0 ]; then
@@ -942,6 +941,7 @@ seed_home() {
       echo "error: refusing secondmate home acquired from a stale or unverifiable upstream default" >&2
       return 1
     fi
+    home=$(verify_firstmate_home "$home")
   else
     requested_abs=$(abs_path_for_new "$requested_home")
     refuse_active_home_path "$requested_abs" || return 1

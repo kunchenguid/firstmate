@@ -264,6 +264,7 @@ test_home_seed_retains_dirty_treehouse_acquired_home() {
   draft="$acquired/.agents/skills/unlanded/SKILL.md"
   mkdir -p "$(dirname "$draft")"
   printf '%s\n' '# unlanded secondmate work' > "$draft"
+  rm "$acquired/AGENTS.md"
   fakebin=$(make_fake_tmux "$TMP_ROOT/dash-dirty-fake")
   log="$TMP_ROOT/dash-dirty-fake/tmux.log"
 
@@ -283,6 +284,8 @@ test_home_seed_retains_dirty_treehouse_acquired_home() {
   [ -d "$acquired" ] || fail "dirty secondmate-home refusal removed the acquired worktree"
   grep -Fq '# unlanded secondmate work' "$draft" \
     || fail "dirty secondmate-home refusal changed its draft"
+  [ ! -e "$acquired/AGENTS.md" ] \
+    || fail "dirty secondmate-home refusal restored or rewrote its tracked deletion"
   if [ -f "$home/data/secondmates.md" ] && grep -F -- '- dash-dirty ' "$home/data/secondmates.md" >/dev/null; then
     fail "dirty secondmate-home refusal wrote a registry route"
   fi

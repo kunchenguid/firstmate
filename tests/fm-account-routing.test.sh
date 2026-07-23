@@ -122,6 +122,17 @@ case "${1:-}" in
     exit 0
     ;;
   send-keys)
+    if [ -n "${FM_FAKE_TMUX_GATE_SEND_MATCH:-}" ]; then
+      case "$*" in
+        *"$FM_FAKE_TMUX_GATE_SEND_MATCH"*)
+          [ -z "${FM_FAKE_TMUX_GATE_SEND_MARKER:-}" ] || touch "$FM_FAKE_TMUX_GATE_SEND_MARKER"
+          while [ -n "${FM_FAKE_TMUX_GATE_SEND_RELEASE:-}" ] \
+            && [ ! -f "$FM_FAKE_TMUX_GATE_SEND_RELEASE" ]; do
+            sleep 0.05
+          done
+          ;;
+      esac
+    fi
     if [ -n "${FM_FAKE_TMUX_FAIL_SEND_MATCH:-}" ]; then
       case "$*" in *"$FM_FAKE_TMUX_FAIL_SEND_MATCH"*) exit 72 ;; esac
     fi
@@ -180,6 +191,9 @@ SH
 [ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
 [ -z "${FM_FAKE_LIFECYCLE_LOG:-}" ] || printf 'treehouse %s\n' "$*" >> "$FM_FAKE_LIFECYCLE_LOG"
 [ -z "${FM_FAKE_TREEHOUSE_SLEEP:-}" ] || sleep "$FM_FAKE_TREEHOUSE_SLEEP"
+if [ "${1:-}" = get ]; then
+  printf '%s\n' "${FM_FAKE_TREEHOUSE_PATH:?}"
+fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
@@ -378,8 +392,12 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="${FM_TEST_PANE_PATH:-$WT_DIR}" FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
     FM_FAKE_TMUX_LOG="$TMUX_LOG" FM_FAKE_AF_LOG="$AF_LOG" \
     FM_FAKE_TREEHOUSE_LOG="$TREEHOUSE_LOG" FM_FAKE_LIFECYCLE_LOG="$LIFECYCLE_LOG" \
+    FM_FAKE_TREEHOUSE_PATH="$WT_DIR" FM_TREEHOUSE_ROOT="$CASE_DIR/treehouse-pools" \
     FM_FAKE_ORCA_LOG="$ORCA_LOG" \
     FM_FAKE_TMUX_FAIL_SEND_MATCH="${FM_FAKE_TMUX_FAIL_SEND_MATCH:-}" \
+    FM_FAKE_TMUX_GATE_SEND_MATCH="${FM_FAKE_TMUX_GATE_SEND_MATCH:-}" \
+    FM_FAKE_TMUX_GATE_SEND_MARKER="${FM_FAKE_TMUX_GATE_SEND_MARKER:-}" \
+    FM_FAKE_TMUX_GATE_SEND_RELEASE="${FM_FAKE_TMUX_GATE_SEND_RELEASE:-}" \
     FM_CHECKOUT_REFRESH_STATE_ROOT="$CASE_DIR/checkout-refresh-state" \
     FM_CHECKOUT_REFRESH_LOCK_ROOT="$CASE_DIR/checkout-refresh-locks" \
     FM_FAKE_ENDPOINT_FILE="$CASE_DIR/endpoint-live" FM_FAKE_TMUX_LABEL_FILE="$CASE_DIR/tmux-label" \
@@ -479,8 +497,8 @@ test_failed_freshness_proof_rolls_back_unmanaged_resources() {
   [ "$status" -ne 0 ] || fail "stale acquired worktree passed the spawn freshness proof"
   assert_contains "$out" "acquired worktree is stale" \
     "failed freshness proof did not identify the stale acquired worktree"
-  assert_regex '^kill-window ' "$TMUX_LOG" \
-    "failed unmanaged freshness proof retained its prepared endpoint"
+  assert_not_grep '^new-window ' "$TMUX_LOG" \
+    "failed unmanaged freshness proof created an endpoint before verification"
   assert_grep "return --force $WT_DIR" "$TREEHOUSE_LOG" \
     "failed unmanaged freshness proof did not return its acquired worktree"
   assert_absent "$CASE_DIR/endpoint-live" \
@@ -529,6 +547,8 @@ test_dirty_acquisition_is_retained_without_force_return() {
     "dirty acquisition refusal did not identify the retained worktree"
   assert_contains "$out" "retained unsafe acquired worktree" \
     "dirty acquisition cleanup did not surface its retain-only action"
+  assert_grep 'get --lease --lease-holder firstmate-checkout-dirty-retain-z1c' "$TREEHOUSE_LOG" \
+    "dirty acquisition was not durably leased before verification"
   assert_not_grep 'return --force' "$TREEHOUSE_LOG" \
     "dirty acquisition was returned through the destructive Treehouse path"
   grep -Fq '# unlanded work' "$draft" || fail "dirty acquisition cleanup changed its draft"
@@ -577,6 +597,51 @@ test_unmanaged_postinstall_failure_restores_prior_state() {
     "post-metadata unmanaged failure did not return its clean worktree"
   [ -n "$out" ] || true
   pass "unmanaged post-install failures restore prior lifecycle state transactionally"
+}
+
+test_unmanaged_rollback_waits_for_metadata_lock() {
+  local id rec marker release out_file spawn_pid held
+  id=checkout-unmanaged-rollback-lock-z1e
+  rec=$(make_case checkout-unmanaged-rollback-lock pi "$id")
+  read_case "$rec"
+  fm_write_meta "$HOME_DIR/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "worktree=$WT_DIR" \
+    "project=$PROJ_DIR" \
+    "harness=pi" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "custom_extension=retain-me"
+  marker="$CASE_DIR/gotmp-send-started"
+  release="$CASE_DIR/gotmp-send-release"
+  out_file="$CASE_DIR/spawn.out"
+
+  FM_FAKE_TMUX_GATE_SEND_MATCH=GOTMPDIR \
+    FM_FAKE_TMUX_GATE_SEND_MARKER="$marker" \
+    FM_FAKE_TMUX_GATE_SEND_RELEASE="$release" \
+    FM_FAKE_TMUX_FAIL_SEND_MATCH=GOTMPDIR \
+    run_spawn "$id" "$PROJ_DIR" > "$out_file" &
+  spawn_pid=$!
+  for _ in $(seq 1 100); do [ -f "$marker" ] && break; sleep 0.05; done
+  [ -f "$marker" ] \
+    || { kill "$spawn_pid" 2>/dev/null || true; fail "unmanaged rollback-lock test never reached the post-install failure"; }
+  # shellcheck source=bin/fm-account-routing-lib.sh
+  . "$ROOT/bin/fm-account-routing-lib.sh"
+  held=$(fm_account_meta_lock_acquire "$HOME_DIR/state" "$id") \
+    || { kill "$spawn_pid" 2>/dev/null || true; fail "unmanaged rollback-lock test could not acquire the writer lock"; }
+  touch "$release"
+  sleep 0.1
+  printf '%s\n' 'x_request=req-concurrent-rollback' >> "$HOME_DIR/state/$id.meta"
+  fm_account_meta_lock_release "$held" \
+    || { kill "$spawn_pid" 2>/dev/null || true; fail "unmanaged rollback-lock test could not release the writer lock"; }
+  if wait "$spawn_pid"; then
+    fail "unmanaged rollback-lock failure unexpectedly succeeded"
+  fi
+  assert_grep 'custom_extension=retain-me' "$HOME_DIR/state/$id.meta" \
+    "unmanaged rollback lost the prior metadata generation"
+  assert_grep 'x_request=req-concurrent-rollback' "$HOME_DIR/state/$id.meta" \
+    "unmanaged rollback discarded an extension written under the metadata lock"
+  pass "unmanaged rollback serializes generation restoration with metadata writers"
 }
 
 test_completion_contract_upgrade_is_contained_nonfollowing_and_atomic() {
@@ -2033,7 +2098,7 @@ test_reservation_occurs_after_worktree_preparation() {
   rec=$(make_case order claude "$id")
   read_case "$rec"
   run_spawn "$id" "$PROJ_DIR" --account-pool claude-crew >/dev/null || fail "reservation order spawn failed"
-  treehouse_line=$(grep -n '^tmux send-keys .* treehouse get Enter$' "$LIFECYCLE_LOG" | head -1 | cut -d: -f1)
+  treehouse_line=$(grep -n '^treehouse get --lease --lease-holder firstmate-account-order-z14$' "$LIFECYCLE_LOG" | head -1 | cut -d: -f1)
   lease_line=$(grep -n 'agent-fleet .* lease choose ' "$LIFECYCLE_LOG" | head -1 | cut -d: -f1)
   [ -n "$treehouse_line" ] && [ -n "$lease_line" ] && [ "$lease_line" -gt "$treehouse_line" ] \
     || fail "Agent Fleet reservation did not follow worktree preparation: $(tr '\n' '|' < "$LIFECYCLE_LOG")"
@@ -5532,6 +5597,16 @@ if [ "${FM_TEST_FOCUSED:-}" = checkout-freshness-cleanup ]; then
   run_isolated_test test_local_only_spawn_uses_local_default_tip
   run_isolated_test test_dirty_acquisition_is_retained_without_force_return
   run_isolated_test test_unmanaged_postinstall_failure_restores_prior_state
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-round-40 ]; then
+  run_isolated_test test_failed_freshness_proof_rolls_back_unmanaged_resources
+  run_isolated_test test_local_only_spawn_uses_local_default_tip
+  run_isolated_test test_dirty_acquisition_is_retained_without_force_return
+  run_isolated_test test_unmanaged_postinstall_failure_restores_prior_state
+  run_isolated_test test_unmanaged_rollback_waits_for_metadata_lock
+  run_isolated_test test_reservation_occurs_after_worktree_preparation
   exit 0
 fi
 

@@ -35,6 +35,8 @@ test_batch_dispatches_every_pair() {
   out=$(run_spawn nope-batch-a-z1=projects/none-a nope-batch-b-z2=projects/none-b)
   status=$?
   [ "$status" -ne 0 ] || fail "batch with missing briefs should exit non-zero"
+  printf '%s\n' "$out" | grep -F 'unbound variable' >/dev/null \
+    && fail "batch cleanup expanded an uninitialized single-task identity"
   printf '%s\n' "$out" | grep -F 'batch: FAILED to spawn nope-batch-a-z1 (projects/none-a)' >/dev/null \
     || fail "first pair was not dispatched/reported"
   printf '%s\n' "$out" | grep -F 'batch: FAILED to spawn nope-batch-b-z2 (projects/none-b)' >/dev/null \
@@ -53,6 +55,8 @@ test_batch_mode_boundaries() {
     out=$(run_spawn $args)
     status=$?
     [ "$status" -ne 0 ] || fail "$label: expected non-zero exit"
+    printf '%s\n' "$out" | grep -F 'unbound variable' >/dev/null \
+      && fail "$label: batch cleanup expanded an uninitialized task identity"
     if [ -n "$expect" ]; then
       printf '%s\n' "$out" | grep -F "$expect" >/dev/null || fail "$label: missing '$expect'"
     fi

@@ -282,21 +282,23 @@ Any upstream-tip change triggers `fm-fleet-sync.sh` immediately, regardless of w
 The live probe's branch name is authoritative for that refresh instead of a checkout's possibly stale `origin/HEAD`.
 If the upstream default branch changes, a checkout still on the old branch is reported as `STUCK:` and left unchanged under the fast-forward-only posture.
 A full safe refresh runs at least every 15 minutes even when no change signal is observed, so transient network failures, a missed probe, or lost local state cannot create unbounded drift.
-Every probe also inventories untracked files in covered seed checkouts and Treehouse pool worktrees under `.agents/skills`, `.claude/skills`, `.codex/skills`, and `skills`.
+Every probe also inventories non-ignored untracked files in covered seed checkouts and Treehouse pool worktrees under `.agents/skills`, `.claude/skills`, `.codex/skills`, and `skills`.
+Gitignored files are intentional local material and remain outside this collision guard.
 A new or growing inventory produces a durable `HYGIENE:` alert immediately, while forced session-start and spawn-preflight checks repeat any unresolved alert for an operator.
 An inventory read failure preserves the prior hygiene alert and suppresses the healthy heartbeat until a complete scan succeeds.
 Unreadable or malformed Treehouse state likewise surfaces an incomplete-coverage diagnostic and prevents the service from advancing its healthy heartbeat.
-The ordinary safe-refresh warning separately quantifies every untracked file and the subset under those skill directories, so other untracked accumulation is bounded by the same 15-minute backstop.
+The ordinary safe-refresh warning separately quantifies every non-ignored untracked file and the subset under those skill directories, so other untracked accumulation is bounded by the same 15-minute backstop.
 These checks inspect paths only and never delete, move, stash, reset, or edit a draft.
 The signal interval and backstop are configurable through `FM_CHECKOUT_REFRESH_INTERVAL` and `FM_CHECKOUT_REFRESH_BACKSTOP`.
 Every cadence and spawn-preflight refresh disables gone-branch pruning and retains `fm-fleet-sync.sh`'s fail-safe behavior: a dirty, diverged, or non-default checkout is left untouched and recorded as an alert.
 The forced session-start mode preserves the existing gone-branch pruning pass.
 
-Treehouse v2.0 already fetches `origin` before every acquisition and resets an available detached pool worktree to the freshest default ref.
-Firstmate adds a pre-acquisition primary-checkout refresh and accepts an acquired worktree only when it is clean, belongs to the requested repository, has the same origin identity, and its HEAD matches the live upstream default-branch tip.
+Treehouse v2.0 already excludes dirty pool entries, fetches `origin`, and resets only an available clean detached worktree to the freshest default ref.
+Firstmate surfaces matching dirty pool entries, acquires the selected path with `treehouse get --lease`, and verifies the durable lease before creating its endpoint.
+The accepted lease must be clean, belong to the requested repository, have the same origin identity, and match the live upstream default-branch tip.
 Remote-free `local-only` acquisitions use the same repository and cleanliness proof, with the requested checkout's local `main` or `master` tip as their freshness authority.
 Treehouse-acquired secondmate homes receive the same proof before seeding.
-A stale clean acquisition is returned transactionally, while a dirty or uninspectable acquisition is retained without forced return and surfaced for manual recovery.
+A stale clean acquisition is returned transactionally, while a dirty or uninspectable acquisition remains durably leased without forced return and is surfaced for manual recovery.
 If an unmanaged spawn fails after publishing metadata or task artifacts, it restores the prior task generation before returning only a worktree that is still provably clean.
 That makes the acquisition proof explicit even if the background owner was offline.
 Orca is an explicit legacy-recovery-only exception because this change creates no new Orca tasks or acquisitions.
@@ -318,11 +320,11 @@ Scheduler installation and health checks dispatch through an adapter seam, while
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
 It installs automatically supported tools only after you say go; manual-only tools remain for you to install from the printed instructions.
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
-The universal toolchain is node, python3, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi, compatible tasks-axi per "Backlog backend" above, and quota-axi.
+The universal toolchain is node, python3, git, gh with GitHub auth via `gh auth login`, Perl, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi, compatible tasks-axi per "Backlog backend" above, and quota-axi.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 In that list, no-mistakes runs the validation pipeline, gh-axi, chrome-devtools-axi, and lavish-axi cover GitHub, browser, and rich-review operations, and tasks-axi plus quota-axi back backlog mutations and quota-balanced dispatch.
 The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
-That delta is owned in code by `fm_backend_required_tools` in `bin/fm-backend.sh`: the resolved backend's own session-provider CLI (`tmux`, `herdr`, `zellij`, `orca`, or `cmux`), `jq` for the JSON-emitting experimental adapters (`herdr`, `zellij`, `cmux`) whose spawn and liveness paths parse the backend's JSON output, `nohup` and `perl` for Herdr's portable detached `setsid` server launcher, and the `treehouse` worktree provider for every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`).
+That delta is owned in code by `fm_backend_required_tools` in `bin/fm-backend.sh`: the resolved backend's own session-provider CLI (`tmux`, `herdr`, `zellij`, `orca`, or `cmux`), `jq` for the JSON-emitting experimental adapters (`herdr`, `zellij`, `cmux`) whose spawn and liveness paths parse the backend's JSON output, `nohup` for Herdr's portable detached `setsid` server launcher, and the `treehouse` worktree provider for every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`).
 Backend tool availability uses the adapter's own executable resolver, so bootstrap and spawn agree on supported non-`PATH` locations such as cmux's bundled CLI.
 An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead of silently dropping its dependency delta or falling back to tmux.
 For an eligible pre-cutover task, Orca provides both the task worktree and terminal endpoint (see "Runtime backend" above), so `backend=orca` requires only `orca` on top of the universal toolchain and skips both `treehouse` and every other backend's session CLI.
@@ -354,9 +356,10 @@ It uses the same live secondmate discovery and propagation helper as bootstrap, 
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
-### Herdr detached launcher prerequisites
+### Portable process-control prerequisites
 
-Bootstrap requires `nohup` and `perl` to be discoverable on `PATH` as availability gates, while the production Herdr adapter executes only the fixed system binaries documented in [herdr-backend.md](herdr-backend.md#control-plane-and-filesystem-hardening).
+Bootstrap requires `perl` on every backend because checkout refresh and account control use it to bound and reap complete process trees.
+Herdr additionally requires `nohup`, while its production adapter executes only the fixed system binaries documented in [herdr-backend.md](herdr-backend.md#control-plane-and-filesystem-hardening).
 Both commands ship with macOS and are commonly supplied by the platform's coreutils and Perl packages on other Unix-like systems.
 If bootstrap reports either command missing, restore or install the corresponding platform package, confirm it with `command -v nohup` or `command -v perl`, and rerun bootstrap.
 Bootstrap treats these as manual prerequisites because package names and command exposure differ across supported platforms.

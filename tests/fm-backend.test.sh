@@ -186,14 +186,16 @@ test_resolve_base_ref_refuses_unverified_merge_parent() {
   pass "resolve_base_ref: unverified topic merges do not supply a baseline"
 }
 
-test_herdr_required_tools_include_detached_launcher_dependencies() {
+test_herdr_required_tools_include_backend_specific_launcher_dependencies() {
   local required tool
   required=$(fm_backend_required_tools herdr) || fail "Herdr should have a required-tool registry entry"
-  for tool in herdr jq nohup perl treehouse; do
+  for tool in herdr jq nohup treehouse; do
     fm_backend_list_contains "$required" "$tool" \
       || fail "Herdr required tools should include $tool"
   done
-  pass "fm_backend_required_tools: Herdr includes detached launcher dependencies"
+  fm_backend_list_contains "$required" perl \
+    && fail "Herdr backend delta duplicated the universal Perl dependency"
+  pass "fm_backend_required_tools: Herdr owns only its backend-specific launcher delta"
 }
 
 test_backend_name_precedence() {
@@ -1319,7 +1321,7 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-34 ]; then
   test_resolve_base_ref_uses_single_parent_when_main_is_head
-  test_herdr_required_tools_include_detached_launcher_dependencies
+  test_herdr_required_tools_include_backend_specific_launcher_dependencies
   exit 0
 fi
 
@@ -1338,7 +1340,7 @@ fi
 
 test_resolve_base_ref_uses_single_parent_when_main_is_head
 test_resolve_base_ref_refuses_unverified_merge_parent
-test_herdr_required_tools_include_detached_launcher_dependencies
+test_herdr_required_tools_include_backend_specific_launcher_dependencies
 test_backend_name_precedence
 test_backend_detect_precedence
 test_backend_detect_cmux_fallback_bundle_id

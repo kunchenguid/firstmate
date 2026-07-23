@@ -629,7 +629,7 @@ On wake, in order of cheapness:
 
 When a task reaches a terminal state on any of these wakes (a `done`/merge `check:`, a `failed` signal, a scout report, a local-only merge), and X mode is enabled, load `fmx-respond` (section 13) and post the X-mode mention's **final** completion follow-up if that task is X-mode-linked: `bin/fm-x-followup.sh --check <id>` then `bin/fm-x-followup.sh <id> --final --text-file <path>`, so the link always clears here regardless of how many of the up-to-three follow-ups were already spent on earlier milestones.
 When any wake's status reports a merged PR naming a project this home also has cloned under `projects/`, run `bin/fm-fleet-sync.sh <project-name>` for that project as the low-latency fast path.
-The installed home-scoped `fm-checkout-refresh.sh` owner independently detects every tracked upstream-tip change, surfaces new or growing untracked skill-draft inventories, and supplies the periodic backstop across projects, Treehouse backing checkouts, configured paths, and matching-origin top-level clones.
+The installed home-scoped `fm-checkout-refresh.sh` owner independently detects every tracked upstream-tip change, surfaces new or growing non-ignored untracked skill-draft inventories, and supplies the periodic backstop across projects, Treehouse backing checkouts, configured paths, and matching-origin top-level clones.
 
 Never rely on hooks or status files alone; when a heartbeat wake does reach you, the review of every window is mandatory and unconditional.
 Each task's backend live-task inventory is the ground truth: tmux when `backend=` is absent, or the non-default `backend=` a task's meta records (`docs/configuration.md` "Runtime backend" owns the backend set).

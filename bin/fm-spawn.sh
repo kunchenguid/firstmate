@@ -21,8 +21,8 @@
 #   New-task spawn-capable backends are the reference tmux adapter and
 #   experimental herdr, zellij, and cmux. Orca is available only to respawn a
 #   pre-cutover task whose meta has no report_required marker; it owns both the
-#   task worktree and terminal, so an eligible Orca respawn does not run
-#   treehouse get. cmux is a session provider only, exactly like herdr/zellij,
+#   task worktree and terminal, so an eligible Orca respawn does not acquire a
+#   Treehouse lease. cmux is a session provider only, exactly like herdr/zellij,
 #   so it does. An auto-detected herdr or cmux spawn prints a loud stderr notice;
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
@@ -85,12 +85,13 @@
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refresh the primary checkout before Treehouse acquisition,
-#   record ownership as soon as acquisition is validated, then refuse to launch
-#   unless the acquired path is a clean isolated worktree from the requested
-#   repository whose HEAD matches its live upstream or local default-branch tip.
-#   Dirty acquisitions are retained untouched for manual recovery. Other
-#   pre-commit failures close the prepared endpoint, restore prior task state,
-#   and return only a worktree that remains clean after owned hook cleanup.
+#   surface dirty pool entries, and durably lease one available worktree before
+#   creating the endpoint. They refuse to create that endpoint unless the leased
+#   path is a clean isolated worktree from the requested repository whose HEAD
+#   matches its live upstream or local default-branch tip. Dirty acquisitions
+#   remain under their durable lease for manual recovery. Other pre-commit
+#   failures close the prepared endpoint, restore prior task state, and return
+#   only a worktree that remains clean after owned hook cleanup.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -858,6 +859,7 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+ID=
 ACCOUNT_LEASE_CREATED=0
 FM_ACCOUNT_MUTATION_ACQUIRED=0
 ACCOUNT_SPAWN_COMMITTED=0
@@ -1217,7 +1219,7 @@ spawn_return_created_worktree() {
   ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1
 }
 
-spawn_restore_unmanaged_state() {
+spawn_restore_unmanaged_state_locked() {
   local meta="$STATE/$ID.meta" current_generation artifact_backup_name
   [ "${ACCOUNT_EFFECTIVE_MODE:-off}" != enforce ] || return 0
   if [ -n "$EXISTING_ARTIFACT_BACKUP" ]; then
@@ -1242,6 +1244,24 @@ spawn_restore_unmanaged_state() {
     rm -f "$meta" || return 1
   fi
   discard_existing_artifact_backup
+}
+
+spawn_restore_unmanaged_state() {
+  local lock=${1:-} lock_owned=0 status
+  [ -n "${ID:-}" ] || return 0
+  if [ -z "$lock" ]; then
+    lock=$(fm_account_meta_lock_acquire "$STATE" "$ID") || return 1
+    lock_owned=1
+  fi
+  if spawn_restore_unmanaged_state_locked; then
+    status=0
+  else
+    status=$?
+  fi
+  if [ "$lock_owned" = 1 ]; then
+    fm_account_meta_lock_release "$lock" >/dev/null 2>&1 || status=1
+  fi
+  return "$status"
 }
 
 spawn_abort_cleanup() {
@@ -1313,7 +1333,7 @@ spawn_abort_cleanup() {
   fi
   if [ "$ACCOUNT_SPAWN_COMMITTED" != 1 ] && [ "$endpoint_gone" = 1 ] \
     && [ "${ACCOUNT_EFFECTIVE_MODE:-off}" != enforce ]; then
-    spawn_restore_unmanaged_state || state_clean=0
+    spawn_restore_unmanaged_state "$rollback_lock" || state_clean=0
     if [ "$state_clean" = 1 ]; then
       spawn_return_created_worktree || worktree_clean=0
     else
@@ -1561,6 +1581,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" ${shared_args[@]+"${shared_args[@]}"}; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     fi
   done
+  trap - EXIT
   exit "$rc"
 fi
 ID=${POS[0]}
@@ -2482,6 +2503,30 @@ if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then
   validate_direct_recovery_worktree_identity || exit 1
 fi
 
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$RECOVERY_ACCOUNT" != 1 ]; then
+  "$SCRIPT_DIR/fm-checkout-refresh.sh" pool-preflight "$PROJ_ABS" || {
+    echo "error: refusing Treehouse acquisition because pool safety could not be inspected for $PROJ_ABS" >&2
+    exit 1
+  }
+  WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "firstmate-$ID") || {
+    echo "error: treehouse get --lease failed to acquire a task worktree for $ID" >&2
+    exit 1
+  }
+  [ -n "$WT" ] || {
+    echo "error: treehouse get --lease did not report a task worktree for $ID" >&2
+    exit 1
+  }
+  WORKTREE_CREATED=1
+  validate_spawn_worktree "treehouse get --lease" "$PROJ_ABS"
+  freshness_status=0
+  "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-worktree "$WT" "$PROJ_ABS" || freshness_status=$?
+  if [ "$freshness_status" -ne 0 ]; then
+    [ "$freshness_status" -ne 3 ] || WORKTREE_RETAIN_ON_ABORT=1
+    echo "error: refusing to launch fm-$ID from a leased worktree whose repository identity, cleanliness, or default-tip freshness could not be proved" >&2
+    exit 1
+  fi
+fi
+
 if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then
   META_WRITE_LOCK=$(fm_account_meta_lock_acquire "$STATE" "$ID") || exit 1
   direct_recovery_context_matches || {
@@ -2543,8 +2588,7 @@ finally:
 fi
 
 W="fm-$ID"
-SPAWN_CWD=$PROJ_ABS
-[ "$RECOVERY_ACCOUNT" != 1 ] || SPAWN_CWD=$WT
+SPAWN_CWD=${WT:-$PROJ_ABS}
 if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then
   validate_direct_recovery_worktree_identity || exit 1
 fi
@@ -2554,10 +2598,10 @@ case "$BACKEND" in
     T="$SES:$W"
     # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
     # id and pins the window name (automatic-rename/allow-rename off) so a captain's
-    # non-default tmux config cannot rename the window away from fm-<id> once
-    # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
-    # rename-critical worktree-detection steps below; the persisted window= handle
-    # stays $T (the name form), which is safe now that rename is disabled.
+    # non-default tmux config cannot rename the window away from fm-<id>.
+    # WT_TARGET carries that stable id for spawn-time commands below; the
+    # persisted window= handle stays $T (the name form), which is safe now that
+    # rename is disabled.
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_CWD") || exit 1
     ENDPOINT_CREATED=1
     WT_TARGET="$WID"
@@ -2678,11 +2722,10 @@ esac
 if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ]; then
   persist_failed_account_rollback_short || exit 1
 fi
-# #134 robustness: only tmux needs a worktree-detection target distinct from $T -
-# its rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
+# #134 robustness: only tmux needs a command target distinct from $T - its
+# rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
 # Every other backend addresses its pane/surface by the id already in $T, so default
-# WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
-# worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
+# WT_TARGET to $T for them (and for any future backend).
 : "${WT_TARGET:=$T}"
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
@@ -2720,36 +2763,16 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$RECOVERY_ACCOUNT" != 1 ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
-
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  # Target the stable window id, not the name: if the name is ever lost (e.g. an
-  # automatic-rename slips through), display-message -t <bad-name> falls back to the
-  # active client's window, which would misread firstmate's OWN pane path as the
-  # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
+  WT_REAL=$(real_path_or_raw "$WT")
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      WT="$p"
+    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" = "$WT_REAL" ]; then
       break
     fi
     sleep 1
   done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
-    exit 1
-  fi
-
-  validate_spawn_worktree "treehouse get" "$T"
-  WORKTREE_CREATED=1
-  freshness_status=0
-  "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-worktree "$WT" "$PROJ_ABS" || freshness_status=$?
-  if [ "$freshness_status" -ne 0 ]; then
-    [ "$freshness_status" -ne 3 ] || WORKTREE_RETAIN_ON_ABORT=1
-    echo "error: refusing to launch $W from an acquired worktree whose repository identity, cleanliness, or default-tip freshness could not be proved" >&2
+  if [ -z "${p:-}" ] || [ "$(real_path_or_raw "$p")" != "$WT_REAL" ]; then
+    echo "error: task endpoint did not start in leased worktree $WT within 60s; inspect window $T" >&2
     exit 1
   fi
 fi

@@ -20,7 +20,7 @@ Prerequisites:
 
 - `herdr` itself, protocol 14 or newer (0.7.1 and 0.7.3 verified) - see [herdr.dev](https://herdr.dev) for install instructions.
 - `jq`, required to parse herdr's JSON output: `brew install jq` (or your platform's package manager).
-- `nohup` and `perl`, required by the detached server launcher; [`docs/configuration.md`](configuration.md#herdr-detached-launcher-prerequisites) owns the platform-specific recovery guidance.
+- `nohup` and the universal `perl` runtime, required by the detached server launcher; [`docs/configuration.md`](configuration.md#portable-process-control-prerequisites) owns the platform-specific recovery guidance.
 - The universal firstmate prerequisites - a verified crew harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, herdr only provides the session.
 
 Select herdr by putting `herdr` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=herdr` when you launch your harness for a one-off session; telling the first mate in chat to use herdr also works.

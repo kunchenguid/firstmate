@@ -474,7 +474,7 @@ install_cmd() {
 manual_install_url() {
   case "$1" in
     herdr) echo "https://herdr.dev" ;;
-    nohup|perl) echo "https://github.com/ruby-dlee/firstmate/blob/main/docs/configuration.md#herdr-detached-launcher-prerequisites" ;;
+    nohup|perl) echo "https://github.com/ruby-dlee/firstmate/blob/main/docs/configuration.md#portable-process-control-prerequisites" ;;
     agent-fleet) echo "https://github.com/ruby-dlee/firstmate/blob/main/docs/configuration.md#agent-fleet-account-routing" ;;
     *) return 1 ;;
   esac
@@ -494,7 +494,7 @@ missing_tool_diagnostic() {
 # fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
 # never told tmux is missing, and only orca drops treehouse. A backend value with
 # no verified dependency set is reported before the universal checks continue.
-COMMON_TOOLS="node python3 git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+COMMON_TOOLS="node python3 git gh perl no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then

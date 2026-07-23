@@ -310,7 +310,8 @@ fm_backend_validate_spawn() {  # <name>
 #   - jq, for the JSON-emitting experimental adapters (herdr, zellij, cmux) whose
 #     spawn/liveness paths parse the backend's JSON output (see each adapter's
 #     tool check, e.g. fm_backend_herdr_tool_check);
-#   - nohup and perl, for Herdr's portable detached setsid server launcher;
+#   - nohup for Herdr's portable detached setsid server launcher, which also
+#     consumes the universal Perl runtime;
 #   - the treehouse worktree provider for every session-provider-only backend
 #     (tmux, herdr, zellij, cmux); orca owns its own task worktree and terminal,
 #     so it drops both treehouse and any other backend's session CLI.
@@ -319,7 +320,7 @@ fm_backend_validate_spawn() {  # <name>
 fm_backend_required_tools() {  # <backend>
   case "$1" in
     tmux)   printf '%s' 'tmux treehouse' ;;
-    herdr)  printf '%s' 'herdr jq nohup perl treehouse' ;;
+    herdr)  printf '%s' 'herdr jq nohup treehouse' ;;
     zellij) printf '%s' 'zellij jq treehouse' ;;
     cmux)   printf '%s' 'cmux jq treehouse' ;;
     orca)   printf '%s' 'orca' ;;
