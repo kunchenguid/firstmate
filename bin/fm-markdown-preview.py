@@ -33,6 +33,7 @@ Exit status:
 import argparse
 import hashlib
 import html
+import http.client
 import os
 import re
 import secrets
@@ -42,8 +43,6 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -52,6 +51,9 @@ from urllib.parse import urlsplit
 MAX_SOURCE_BYTES = 8 * 1024 * 1024
 MAX_RENDERED_BYTES = 64 * 1024 * 1024
 INLINE_SCAN_FACTOR = 4
+MAX_BLOCKQUOTE_DEPTH = 64
+MAX_TABLE_COLUMNS = 1024
+MAX_TABLE_CELLS = 100000
 DEFAULT_TIMEOUT = 12.0
 MIN_TIMEOUT = 0.1
 MAX_TIMEOUT = 30.0
@@ -70,7 +72,7 @@ CSP = (
     "style-src 'unsafe-inline'"
 )
 
-FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*([^`]*)$")
+FENCE_PREFIX_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
 HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
 UNORDERED_RE = re.compile(r"^\s{0,3}[-+*]\s+(.+)$")
 ORDERED_RE = re.compile(r"^\s{0,3}\d+[.)]\s+(.+)$")
@@ -81,6 +83,32 @@ TABLE_DIVIDER_RE = re.compile(r"^:?-{3,}:?$")
 
 class PreviewError(Exception):
     pass
+
+
+class RenderBuffer:
+    def __init__(self):
+        self.parts = []
+        self.size = 0
+        self.table_cells = 0
+
+    def append(self, value):
+        size = len(value.encode("utf-8"))
+        if self.size + size > MAX_RENDERED_BYTES:
+            raise PreviewError(
+                f"rendered preview exceeds {MAX_RENDERED_BYTES} bytes"
+            )
+        self.parts.append(value)
+        self.size += size
+
+    def add_table_cells(self, count):
+        if self.table_cells + count > MAX_TABLE_CELLS:
+            raise PreviewError(
+                f"Markdown table exceeds {MAX_TABLE_CELLS} rendered cells"
+            )
+        self.table_cells += count
+
+    def finish(self):
+        return "".join(self.parts)
 
 
 def read_source(path):
@@ -185,6 +213,9 @@ def render_inline(source, depth=0):
                 rendered.append(f"<code>{html.escape(code, quote=True)}</code>")
                 index = close + len(marker)
                 continue
+            plain.append(marker)
+            index = marker_end
+            continue
 
         image_start = source.startswith("![", index)
         link_start = source[index] == "["
@@ -251,8 +282,25 @@ def render_inline(source, depth=0):
     return "".join(rendered)
 
 
+def parse_fence(line):
+    match = FENCE_PREFIX_RE.match(line)
+    if not match:
+        return None
+    marker, tail = match.groups()
+    if "`" in tail:
+        return None
+    return marker, tail.strip()
+
+
 def split_table_row(line):
     stripped = line.strip().strip("|")
+    if not stripped:
+        return []
+    columns = stripped.count("|") + 1
+    if columns > MAX_TABLE_COLUMNS:
+        raise PreviewError(
+            f"Markdown table exceeds {MAX_TABLE_COLUMNS} columns"
+        )
     return [cell.strip() for cell in stripped.split("|")]
 
 
@@ -268,7 +316,7 @@ def is_table(lines, index):
 def starts_block(lines, index):
     line = lines[index]
     return (
-        FENCE_RE.match(line)
+        parse_fence(line) is not None
         or HEADING_RE.match(line)
         or UNORDERED_RE.match(line)
         or ORDERED_RE.match(line)
@@ -279,8 +327,10 @@ def starts_block(lines, index):
     )
 
 
-def render_blocks(lines):
-    output = []
+def render_blocks(lines, quote_depth=0, output=None):
+    root = output is None
+    if root:
+        output = RenderBuffer()
     index = 0
     while index < len(lines):
         line = lines[index]
@@ -288,10 +338,10 @@ def render_blocks(lines):
             index += 1
             continue
 
-        fence = FENCE_RE.match(line)
+        fence = parse_fence(line)
         if fence:
-            marker = fence.group(1)
-            info = fence.group(2).strip().split(None, 1)
+            marker, tail = fence
+            info = tail.split(None, 1)
             language = info[0] if info else ""
             index += 1
             code_lines = []
@@ -328,25 +378,34 @@ def render_blocks(lines):
         if is_table(lines, index):
             headings = split_table_row(line)
             divider_count = len(split_table_row(lines[index + 1]))
+            output.add_table_cells(divider_count)
             index += 2
             rows = []
             while index < len(lines) and lines[index].strip() and "|" in lines[index]:
-                rows.append(split_table_row(lines[index]))
+                row = split_table_row(lines[index])
+                output.add_table_cells(divider_count)
+                rows.append(row)
                 index += 1
             headings = (headings + [""] * divider_count)[:divider_count]
             output.append("<table><thead><tr>")
-            output.extend(f"<th>{render_inline(cell)}</th>" for cell in headings)
+            for cell in headings:
+                output.append(f"<th>{render_inline(cell)}</th>")
             output.append("</tr></thead><tbody>")
             for row in rows:
                 row = (row + [""] * divider_count)[:divider_count]
                 output.append("<tr>")
-                output.extend(f"<td>{render_inline(cell)}</td>" for cell in row)
+                for cell in row:
+                    output.append(f"<td>{render_inline(cell)}</td>")
                 output.append("</tr>")
             output.append("</tbody></table>")
             continue
 
         quote = QUOTE_RE.match(line)
         if quote:
+            if quote_depth >= MAX_BLOCKQUOTE_DEPTH:
+                raise PreviewError(
+                    f"blockquote nesting exceeds {MAX_BLOCKQUOTE_DEPTH} levels"
+                )
             quoted = []
             while index < len(lines):
                 match = QUOTE_RE.match(lines[index])
@@ -354,7 +413,9 @@ def render_blocks(lines):
                     break
                 quoted.append(match.group(1))
                 index += 1
-            output.append(f"<blockquote>{render_blocks(quoted)}</blockquote>")
+            output.append("<blockquote>")
+            render_blocks(quoted, quote_depth + 1, output)
+            output.append("</blockquote>")
             continue
 
         unordered = UNORDERED_RE.match(line)
@@ -403,7 +464,9 @@ def render_blocks(lines):
             index += 1
         output.append(f"<p>{render_inline(' '.join(paragraph))}</p>")
 
-    return "".join(output)
+    if root:
+        return output.finish()
+    return None
 
 
 def render_document(source, title):
@@ -526,24 +589,29 @@ def resolve_opener(explicit):
     raise PreviewError("no supported local desktop opener was found")
 
 
-def verify_server(url, state):
-    request = urllib.request.Request(
-        url,
-        headers={
-            VERIFY_HEADER: state.token,
-            "User-Agent": "firstmate-markdown-preview-verifier",
-        },
-    )
+def verify_server(port, state):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
     try:
-        with urllib.request.urlopen(request, timeout=2) as response:
-            body = response.read(len(state.body) + 1)
-            digest = response.headers.get("X-Firstmate-Source-SHA256")
-    except urllib.error.HTTPError as error:
-        if error.code == 409:
-            raise PreviewError("source changed before preview verification") from error
-        raise PreviewError(f"local preview verification returned HTTP {error.code}") from error
-    except OSError as error:
+        connection.request(
+            "GET",
+            state.path,
+            headers={
+                VERIFY_HEADER: state.token,
+                "User-Agent": "firstmate-markdown-preview-verifier",
+            },
+        )
+        response = connection.getresponse()
+        status = response.status
+        body = response.read(len(state.body) + 1)
+        digest = response.getheader("X-Firstmate-Source-SHA256")
+    except (OSError, http.client.HTTPException) as error:
         raise PreviewError(f"local preview verification failed: {error}") from error
+    finally:
+        connection.close()
+    if status == 409:
+        raise PreviewError("source changed before preview verification")
+    if status != 200:
+        raise PreviewError(f"local preview verification returned HTTP {status}")
     if body != state.body or digest != state.digest:
         raise PreviewError("local preview verification did not match the current rendering")
 
@@ -624,6 +692,7 @@ def run(args):
     opener = resolve_opener(args.opener)
     server = None
     thread = None
+    thread_started = False
     try:
         server = PreviewServer(state)
         thread = threading.Thread(
@@ -631,18 +700,25 @@ def run(args):
             name="fm-markdown-preview",
             daemon=True,
         )
-        thread.start()
+        try:
+            thread.start()
+        except RuntimeError as error:
+            raise PreviewError(
+                "local preview server thread could not start"
+            ) from error
+        thread_started = True
         port = server.server_address[1]
         url = f"http://127.0.0.1:{port}{state.path}"
-        verify_server(url, state)
+        verify_server(port, state)
         if not state.is_current():
             raise PreviewError("source changed before preview opening")
         open_and_wait(opener, url, state, args.timeout)
     finally:
         if server is not None:
-            server.shutdown()
+            if thread_started:
+                server.shutdown()
             server.server_close()
-        if thread is not None:
+        if thread_started and thread is not None:
             thread.join(timeout=2)
             if thread.is_alive():
                 raise PreviewError("local preview server did not stop")

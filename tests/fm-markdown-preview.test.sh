@@ -41,8 +41,9 @@ if os.environ.get("FM_PREVIEW_TEST_SKIP_FETCH"):
     raise SystemExit(0)
 
 request = urllib.request.Request(url, headers={"User-Agent": "fm-preview-test"})
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 try:
-    with urllib.request.urlopen(request, timeout=2) as response:
+    with opener.open(request, timeout=2) as response:
         (capture / "status").write_text(str(response.status), encoding="utf-8")
         (capture / "headers").write_text(
             "".join(f"{key}: {value}\n" for key, value in response.headers.items()),
@@ -209,13 +210,92 @@ test_verified_delivery_detaches_long_lived_opener() {
   pass "verified delivery succeeds independently of opener lifetime"
 }
 
+test_verification_bypasses_proxy_environment() {
+  local source="$TMP_ROOT/proxy.md" capture="$TMP_ROOT/proxy-capture"
+  printf '# Direct loopback verification\n' >"$source"
+
+  http_proxy=http://127.0.0.1:9 \
+    HTTP_PROXY=http://127.0.0.1:9 \
+    https_proxy=http://127.0.0.1:9 \
+    HTTPS_PROXY=http://127.0.0.1:9 \
+    ALL_PROXY=http://127.0.0.1:9 \
+    no_proxy= \
+    NO_PROXY= \
+    FM_PREVIEW_TEST_CAPTURE="$capture" \
+    "$HELPER" --opener "$OPENER" --timeout 2 "$source" \
+    >"$TMP_ROOT/proxy.out" 2>"$TMP_ROOT/proxy.err" \
+    || fail "proxy environment intercepted loopback verification: $(cat "$TMP_ROOT/proxy.err")"
+
+  wait_for_file "$capture/body"
+  pass "loopback verification bypasses proxy configuration"
+}
+
+test_unstarted_server_thread_cleans_up_without_deadlock() {
+  local source="$TMP_ROOT/thread-start.md"
+  printf '# Thread start failure\n' >"$source"
+
+  if ! python3 - "$HELPER" "$OPENER" "$source" <<'PY'
+import subprocess
+import sys
+
+code = r'''
+import importlib.util
+import sys
+from types import SimpleNamespace
+
+spec = importlib.util.spec_from_file_location("fm_markdown_preview", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+def fail_start(_thread):
+    raise RuntimeError("injected start failure")
+
+module.threading.Thread.start = fail_start
+args = SimpleNamespace(file=sys.argv[3], opener=sys.argv[2], timeout=0.2)
+try:
+    module.run(args)
+except module.PreviewError as error:
+    if "server thread" not in str(error):
+        raise
+else:
+    raise SystemExit("thread start failure unexpectedly succeeded")
+'''
+
+try:
+    result = subprocess.run(
+        [sys.executable, "-c", code, *sys.argv[1:]],
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+except subprocess.TimeoutExpired:
+    raise SystemExit(124)
+if result.returncode != 0:
+    sys.stderr.write(result.stderr)
+    raise SystemExit(result.returncode)
+PY
+  then
+    fail "server cleanup deadlocked when its thread never started"
+  fi
+  pass "unstarted server thread closes without shutdown deadlock"
+}
+
 test_inline_delimiter_scan_is_bounded() {
   local source="$TMP_ROOT/delimiters.md" capture="$TMP_ROOT/delimiters-capture"
   python3 - "$source" <<'PY'
 import sys
 from pathlib import Path
 
-Path(sys.argv[1]).write_bytes(b"# Delimiter load\n\n" + b"[" * (2 * 1024 * 1024) + b"\n")
+size = 2 * 1024 * 1024
+Path(sys.argv[1]).write_bytes(
+    b"# Delimiter load\n\n"
+    + b"[" * size
+    + b"\n\nx"
+    + b"`" * size
+    + b"\n\n~~~"
+    + b" " * size
+    + b"`\n"
+)
 PY
 
   if ! FM_PREVIEW_TEST_CAPTURE="$capture" \
@@ -230,7 +310,7 @@ try:
         capture_output=True,
         env=os.environ.copy(),
         text=True,
-        timeout=10,
+        timeout=20,
     )
 except subprocess.TimeoutExpired:
     raise SystemExit(124)
@@ -242,6 +322,45 @@ PY
     fail "delimiter-heavy Markdown exceeded its bounded render time"
   fi
   pass "inline delimiter scanning remains bounded"
+}
+
+test_blockquote_nesting_is_bounded() {
+  local source="$TMP_ROOT/blockquote-depth.md" rc=0
+  python3 - "$source" <<'PY'
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text("> " * 128 + "nested\n", encoding="utf-8")
+PY
+
+  "$HELPER" --opener "$OPENER" --timeout 2 "$source" \
+    >"$TMP_ROOT/blockquote-depth.out" 2>"$TMP_ROOT/blockquote-depth.err" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "excessive blockquote nesting was accepted"
+  assert_grep "blockquote nesting exceeds" "$TMP_ROOT/blockquote-depth.err" \
+    "blockquote depth failure was not explained"
+  pass "blockquote nesting fails closed at its configured bound"
+}
+
+test_table_cell_budget_fails_before_wide_render() {
+  local source="$TMP_ROOT/wide-table.md" rc=0
+  python3 - "$source" <<'PY'
+import sys
+from pathlib import Path
+
+columns = 2048
+header = "|" + "x|" * columns
+divider = "|" + "---|" * columns
+Path(sys.argv[1]).write_text(header + "\n" + divider + "\n", encoding="utf-8")
+PY
+
+  "$HELPER" --opener "$OPENER" --timeout 2 "$source" \
+    >"$TMP_ROOT/wide-table.out" 2>"$TMP_ROOT/wide-table.err" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "wide table exceeded the render budget without refusal"
+  assert_grep "table exceeds" "$TMP_ROOT/wide-table.err" \
+    "wide table budget failure was not explained"
+  pass "table cell budgets reject wide renders before accumulation"
 }
 
 test_expanded_render_verifies_in_full() {
@@ -270,5 +389,9 @@ test_safe_render_and_cleanup
 test_changed_source_fails_closed
 test_server_wait_is_bounded
 test_verified_delivery_detaches_long_lived_opener
+test_verification_bypasses_proxy_environment
+test_unstarted_server_thread_cleans_up_without_deadlock
 test_inline_delimiter_scan_is_bounded
+test_blockquote_nesting_is_bounded
+test_table_cell_budget_fails_before_wide_render
 test_expanded_render_verifies_in_full
