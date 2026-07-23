@@ -18,7 +18,7 @@ Only a terminal header under an exact canonical `## Archived YYYY-MM-DD` heading
 It rejects duplicate active identities, duplicate archived identities, active/archive collisions, symlink, non-regular, or unreadable active and archive stores, and archive bytes that change during verification.
 Archive fingerprinting accepts only a successful lowercase SHA-256 digest before any comparison.
 For an archived identity, it extracts only that record into a private single-record `## Done` view and parses it through public `tasks-axi show --full --file` output.
-The extractor rejects non-empty whitespace-only archive lines so the typed parser cannot collapse different stored bytes into the same decision body.
+The extractor rejects carriage returns and non-empty whitespace-only archive lines so the typed parser cannot collapse different stored bytes into the same decision body.
 The archived record is accepted only when its terminal checkbox and typed state, captain kind and hold kind, present hold reason distinct from the raw unquoted missing sentinel, closure date, decision digest, sorted unique routed identities, non-empty decision, and exact routed-work suffix all match the durable bytes written by `resolve`.
 Immediately before acceptance, it rechecks the archive fingerprint and exact identity counts after active-store and structured record validation have both finished, then rechecks the active identity after final archive validation.
 This preserves the historical `Routed work:- <first-id>` writer format without rewriting active or archived records.

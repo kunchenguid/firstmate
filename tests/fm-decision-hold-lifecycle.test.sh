@@ -675,7 +675,7 @@ test_retained_quoted_dash_hold_reason_survives_lifecycle() {
 test_retained_decisions_are_strictly_archive_aware() {
   local home origin older_hold newer_hold archive record unresolved_record heading digest closed variant before after show
   local separator_label separator_code separator
-  local decision_case decision_bytes decision_path encoding_case
+  local decision_case decision_bytes decision_line decision_path encoding_case
   local dependent=sample-retained-dependent
   home=$(make_home retained-decisions)
   origin=sample-retained-review
@@ -903,6 +903,12 @@ Buffer.from(lossyDigest).copy(archive, digestIndex);
 fs.writeFileSync(archivePath, archive);
 NODE
   assert_archive_verify_fails "$variant" "$origin" invalid-utf8-record
+
+  variant=$(clone_home "$home" retained-crlf-decision-line)
+  decision_line=$(printf '%b' '  Use the retained route. \344\270\255\346\226\207')
+  rewrite_once "$variant/data/done-archive.md" \
+    "$decision_line" "${decision_line}"$'\r'
+  assert_archive_verify_fails "$variant" "$origin" crlf-decision-line
 
   variant=$(clone_home "$home" retained-wrong-kind)
   rewrite_once "$variant/data/done-archive.md" "(kind: captain)" "(kind: ship)"

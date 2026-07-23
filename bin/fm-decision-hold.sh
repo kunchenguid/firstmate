@@ -284,6 +284,7 @@ function extractRecord(start) {
     }
     break;
   }
+  if (record.some(line => line.includes("\r"))) process.exit(1);
   return record;
 }
 
