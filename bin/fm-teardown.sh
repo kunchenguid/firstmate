@@ -1836,6 +1836,26 @@ cleanup_stale_lock_for_safety_check() {
   return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
 }
 
+# Check whether a worktree is currently held as an in-use treehouse lease.
+# Fails open: returns 0 (safe to proceed with return) when treehouse is absent,
+# when status fails, or when we cannot determine the state.
+# Returns 1 only when treehouse status confirms the slot is NOT in-use for the
+# given path, meaning the lease is not ours and the return should be skipped.
+teardown_treehouse_lease_is_ours() {
+  local wt=$1 proj=$2 abs_wt wt_tilde out
+  command -v treehouse >/dev/null 2>&1 || return 0
+  abs_wt=$(cd "$wt" 2>/dev/null && pwd -P) || return 0
+  case "$abs_wt" in
+    "$HOME"/*) wt_tilde="~${abs_wt#$HOME}" ;;
+    *) wt_tilde="$abs_wt" ;;
+  esac
+  out=$( ( cd "$proj" 2>/dev/null && treehouse status ) 2>/dev/null ) || return 0
+  [ -n "$out" ] || return 0
+  printf '%s\n' "$out" | awk -v p1="$abs_wt" -v p2="$wt_tilde" \
+    '/in-use/ && (index($0,p1)||index($0,p2)){found=1} END{exit !found}' && return 0
+  return 1
+}
+
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
@@ -3686,18 +3706,22 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$KIND" = scout ] || [ "$FORCE" = "--force" ]; then
     teardown_scrub_scratch_copy "$WT" || exit 1
   fi
-  wt_pool_slot=0
-  fm_treehouse_pool_slot "$PROJ" "$WT" && wt_pool_slot=1
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
-  [ "$wt_pool_slot" = 0 ] || teardown_note_dirty_return "$WT"
-  # The slot is back in the pool, so this task's claim on it is spent. Dropping
-  # it here - and only after a return that succeeded - keeps a returned slot
-  # unclaimed until its next holder claims it, and leaves the claim in place
-  # whenever the return did not actually happen.
-  fm_treehouse_slot_owner_release "$WT" "$ID"
+  if ! teardown_treehouse_lease_is_ours "$WT" "$PROJ"; then
+    echo "warning: worktree $WT is not currently held as an in-use treehouse lease; skipping return to avoid returning an unowned slot" >&2
+  else
+    wt_pool_slot=0
+    fm_treehouse_pool_slot "$PROJ" "$WT" && wt_pool_slot=1
+    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+      exit 1
+    }
+    [ "$wt_pool_slot" = 0 ] || teardown_note_dirty_return "$WT"
+    # The slot is back in the pool, so this task's claim on it is spent. Dropping
+    # it here - and only after a return that succeeded - keeps a returned slot
+    # unclaimed until its next holder claims it, and leaves the claim in place
+    # whenever the return did not actually happen.
+    fm_treehouse_slot_owner_release "$WT" "$ID"
+  fi
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"

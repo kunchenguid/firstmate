@@ -1960,7 +1960,7 @@ elif [ "$KIND" = secondmate ]; then
     ;;
   esac
 else
-  PROJ=${POS[1]}
+  PROJ=${POS[1]:-}
   ARG3=${POS[2]:-}
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
@@ -2955,8 +2955,9 @@ resolved_existing_dir() {
 resolve_project_dir_arg() {
   local path=$1
   case "$path" in
-  projects/*) printf '%s/%s\n' "$PROJECTS" "${path#projects/}" ;;
-  *) printf '%s\n' "$path" ;;
+    projects/*) printf '%s/%s\n' "$PROJECTS" "${path#projects/}" ;;
+    */*) printf '%s\n' "$path" ;;
+    *) printf '%s/%s\n' "$PROJECTS" "$path" ;;
   esac
 }
 
