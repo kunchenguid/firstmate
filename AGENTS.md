@@ -44,8 +44,9 @@ Ship shared tracked changes through this repo's no-mistakes pipeline and PR path
 Never add an agent name as a commit co-author.
 
 ### Workflow Rules
+
 - Whenever you generate or finish updating a Markdown file (e.g., reports or specs), preview it before delivery.
-- Use only a verified local-only Markdown renderer that sends no document content to external APIs.
+- Use only a verified, sanitized local-only Markdown renderer that sends no document content to external APIs, disables raw HTML, and blocks remote subresources before opening the preview.
 - Prefer a one-shot renderer; if a preview server is required, bind it explicitly to `127.0.0.1` on a collision-free port, track the workflow-owned process, verify it serves the current file before opening it, and guarantee its termination after verification and opening and on every failure path so no preview server remains running or serves stale content.
 
 ## 2. Layout and state
