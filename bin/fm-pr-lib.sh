@@ -4,13 +4,13 @@
 # constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub and an
-# arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
-# project can sit at any depth, so no owner/repository pair can address one and
-# the sidecar carries the whole path instead. GitLab also runs on self-hosted
-# instances, so the host is part of that identity rather than a constant. Every
-# consumer re-derives the identity from the stored URL and refuses any record
-# whose parts do not reconstruct that exact URL.
+# "path" is the full project path, which is owner/repository on GitHub and
+# Gitea, and an arbitrarily nested group/subgroup/project namespace on GitLab.
+# A GitLab project can sit at any depth, so no owner/repository pair can address
+# one and the sidecar carries the whole path instead. Self-hosted GitLab and
+# Gitea identities include their canonical host (and Gitea web port, when
+# explicit). Every consumer re-derives the identity from the stored URL and
+# refuses any record whose parts do not reconstruct that exact URL.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -156,17 +156,52 @@ fm_pr_gitlab_path_valid() {
   done
 }
 
+# Gitea commonly serves private-network HTTP and non-default web ports.
+# Keep one canonical authority spelling: lowercase DNS/IPv4 host, optional
+# non-zero decimal port with no leading zero, and no userinfo or trailing dot.
+fm_pr_gitea_authority_valid() {
+  local authority=${1-} host label
+  local port=''
+  local LC_ALL=C
+  local -a labels
+  case "$authority" in
+    *:*)
+      host=${authority%:*}
+      port=${authority##*:}
+      [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$port" -le 65535 ] || return 1
+      ;;
+    *) host=$authority ;;
+  esac
+  [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || return 1
+  [ "$host" != github.com ] || return 1
+  case "$host" in
+    .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
+  esac
+  IFS=. read -ra labels <<< "$host"
+  for label in "${labels[@]}"; do
+    [ "${#label}" -ge 1 ] && [ "${#label}" -le 63 ] || return 1
+    case "$label" in -*|*-) return 1 ;; esac
+  done
+}
+
+fm_pr_gitea_repo_part_valid() {
+  local value=${1-}
+  [ "${#value}" -ge 1 ] && [ "${#value}" -le 255 ] || return 1
+  case "$value" in
+    .|..|*.git|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
 # Parse a canonical PR or MR URL into the provider-tagged identity. Validation
 # is strict and per provider: the GitHub username and repository rules are
-# unchanged, and GitLab gets its own host and namespace rules rather than a
-# loosened GitHub rule.
+# unchanged, GitLab keeps its host and nested-namespace rules, and Gitea gets
+# an exact HTTP(S) authority plus owner/repository path.
 #
-# FM_PR_OWNER and FM_PR_REPO are additionally set for github because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
-# them empty; teaching the merge path about GitLab is a separate change, and
-# until then it refuses a GitLab URL rather than merging anything.
+# FM_PR_OWNER and FM_PR_REPO are additionally set for GitHub and Gitea because
+# both providers use a two-segment repository identity. GitLab leaves them
+# empty because its project namespace has no fixed depth.
 fm_pr_url_parse() {
-  local raw=${1-} pattern host path
+  local raw=${1-} pattern host path scheme owner repo number
   local LC_ALL=C
   FM_PR_PROVIDER=
   FM_PR_URL=
@@ -189,6 +224,28 @@ fm_pr_url_parse() {
     # shellcheck disable=SC2034
     FM_PR_REPO=${BASH_REMATCH[2]}
     FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  pattern='^(https?)://([a-z0-9.-]+(:[1-9][0-9]{0,4})?)/([A-Za-z0-9._-]{1,255})/([A-Za-z0-9._-]{1,255})/pulls/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    scheme=${BASH_REMATCH[1]}
+    host=${BASH_REMATCH[2]}
+    owner=${BASH_REMATCH[4]}
+    repo=${BASH_REMATCH[5]}
+    number=${BASH_REMATCH[6]}
+    fm_pr_gitea_authority_valid "$host" || return 1
+    fm_pr_gitea_repo_part_valid "$owner" || return 1
+    fm_pr_gitea_repo_part_valid "$repo" || return 1
+    FM_PR_PROVIDER=gitea
+    FM_PR_URL="$scheme://$host/$owner/$repo/pulls/$number"
+    [ "$FM_PR_URL" = "$raw" ] || return 1
+    FM_PR_HOST=$host
+    FM_PR_PATH="$owner/$repo"
+    # shellcheck disable=SC2034  # Provider-specific outputs consumed by callers.
+    FM_PR_OWNER=$owner
+    # shellcheck disable=SC2034
+    FM_PR_REPO=$repo
+    FM_PR_NUMBER=$number
     return 0
   fi
   # The path class contains "/" and "-", so this match is greedy to the last

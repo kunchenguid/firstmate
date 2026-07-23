@@ -4,8 +4,10 @@
 # otherwise, including on every error, so a failed lookup can never be read as
 # a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
-# Each provider is read through its own standard CLI, gh for GitHub and glab
-# for GitLab, so an upstream checkout needs no extra tooling to follow either.
+# The tracked watcher invocation delegates provider access to fm-forge.sh,
+# keeping Gitea authentication in one private client. The legacy inline
+# GitHub/GitLab cases remain only for direct execution of an older copied poll;
+# no copied poll can perform a Gitea request on its own.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -45,6 +47,20 @@ case "$number" in
   *[!0-9]*) exit 0 ;;
 esac
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd) || exit 0
+if [ -x "$SCRIPT_DIR/fm-forge.sh" ] && [ -f "$SCRIPT_DIR/fm-pr-lib.sh" ] && [ ! -L "$SCRIPT_DIR/fm-pr-lib.sh" ]; then
+  # shellcheck source=bin/fm-pr-lib.sh
+  . "$SCRIPT_DIR/fm-pr-lib.sh"
+  fm_pr_url_parse "$url" || exit 0
+  [ "$FM_PR_PROVIDER" = "$provider" ] && [ "$FM_PR_HOST" = "$host" ] \
+    && [ "$FM_PR_PATH" = "$path" ] && [ "$FM_PR_NUMBER" = "$number" ] || exit 0
+  result=$("$SCRIPT_DIR/fm-forge.sh" pr-merged "$url" 2>/dev/null) || exit 0
+  [ -z "$result" ] || [ "$result" = merged ] || exit 0
+  [ "$result" = merged ] && printf '%s\n' merged
+  exit 0
+fi
+[ "$provider" != gitea ] || exit 0
+
 # Every component is revalidated here rather than trusted from the sidecar, and
 # the stored URL must then be exactly reconstructible from those components, so
 # a doctored sidecar cannot redirect this poll at another host or project.
@@ -78,20 +94,20 @@ case "$provider" in
     # A GitLab project sits under at least one group at no fixed depth, and
     # GitLab reserves the "-" segment as its route separator.
     rest=$path
-    segments=0
+    segment_count=0
     while [ -n "$rest" ]; do
       case "$rest" in
         */*) segment=${rest%%/*}; rest=${rest#*/} ;;
         *) segment=$rest; rest= ;;
       esac
-      segments=$((segments + 1))
-      [ "$segments" -le 20 ] || exit 0
+      segment_count=$((segment_count + 1))
+      [ "$segment_count" -le 20 ] || exit 0
       [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || exit 0
       case "$segment" in
         .|..|-*|*.git|*.atom|*[!A-Za-z0-9._-]*) exit 0 ;;
       esac
     done
-    [ "$segments" -ge 2 ] || exit 0
+    [ "$segment_count" -ge 2 ] || exit 0
     [ "$url" = "https://$host/$path/-/merge_requests/$number" ] || exit 0
     # glab resolves the instance from the project URL passed to -R, so the host
     # comes from the validated record rather than glab's configured default.

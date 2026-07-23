@@ -23,6 +23,39 @@ Wake, watcher, away-mode, and X-specific state mechanics remain with their named
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Gitea forge account (config/gitea / config/gitea-token)
+
+`bin/fm-forge-lib.sh` is the single implementation owner for forge provider dispatch and every Gitea configuration, authentication, HTTP, and response-validation mechanic.
+`bin/fm-pr-lib.sh` remains the owner of canonical PR identity and private poll provenance for GitHub, GitLab, and Gitea.
+A FirstMate home configures at most one Gitea account through `config/gitea` and `config/gitea-token` under the effective config directory selected by `FM_CONFIG_OVERRIDE`, then `FM_HOME/config`.
+Both files must be ordinary, non-symlink, single-link files with exact mode `0600`.
+`config/gitea` uses one `key=value` record per line, permits blank lines and comments beginning with `#`, requires exactly one `base_url` and one `account`, permits repeated `ssh_alias` records, and permits at most one `ssh_port`.
+Unknown keys, duplicate singleton keys, duplicate aliases, extra path text in the base URL, uppercase or noncanonical hosts, invalid ports, and malformed account values are refused.
+
+```text
+base_url=http://gitea.internal:3000
+account=brad
+ssh_alias=gitea
+ssh_alias=gitea-vpn.internal
+ssh_port=2222
+```
+
+`base_url` must be exactly `http://<lowercase-host>[:port]` or `https://<lowercase-host>[:port]` with no trailing slash or path.
+It is the canonical web and API identity, including an explicit web port when configured.
+`account` names the authenticating Gitea login and does not restrict repositories owned by organizations that account can access.
+Every `ssh_alias` is a lowercase DNS name or IPv4 spelling that may identify the same configured server in a git origin.
+The canonical web host is always accepted as an SSH host even when it is not repeated as an alias.
+An explicit `ssh://` origin port must match `ssh_port`, which defaults to 22 when absent; SCP-shaped origins such as `git@gitea:owner/repo.git` rely on SSH configuration for their port and bind through the alias.
+HTTPS, HTTP, `ssh://`, and SCP-shaped origin recognition all reconstruct the same canonical repository URL before any PR operation.
+
+`config/gitea-token` contains exactly one non-empty token line made only of the client's accepted token characters, with no second line or surrounding prose.
+The token is read only by the private client and is sent to curl through stdin configuration rather than process arguments or environment variables.
+The client discards raw curl and server errors, clears its in-memory shell variable after each request, allows only HTTP(S), limits every request to 30 seconds and 1 MiB, and never writes the token to generated checks, task metadata, reports, or diagnostics.
+Authentication failures, cross-host or cross-project identities, unexpected HTTP codes, malformed JSON, and unknown enum values stop the operation rather than being interpreted as success.
+`bin/fm-forge.sh --help` owns the exact operator commands and points back here for this schema.
+`docs/gitea-forge.md` records mocked verification and the intentionally pending live-verification boundary.
+This foundation does not authorize access to a live Gitea server; live repository verification is a separate captain-approved task.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
@@ -364,7 +397,8 @@ FM_ROOT_OVERRIDE=        # override firstmate repo root, tangle-guard target, an
 FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
-FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
+FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests; also relocates config/gitea and config/gitea-token together
+FM_FORGE_CURL_BIN=curl   # test-only Gitea HTTP fixture seam; production leaves this unset
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for the Linux process-identity read in fm-wake-lib.sh, mainly for tests
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)

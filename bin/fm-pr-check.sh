@@ -3,8 +3,8 @@
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL and a GitLab merge request URL are both accepted,
-# including a merge request on a self-hosted GitLab instance.
+# Canonical GitHub, GitLab, and configured Gitea pull-request URLs are accepted,
+# including self-hosted GitLab and private-network Gitea instances.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -15,6 +15,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-forge-lib.sh
+. "$SCRIPT_DIR/fm-forge-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -55,6 +57,18 @@ if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
   exit 1
 fi
+if [ "$PROVIDER" = gitea ]; then
+  if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    echo "error: watching a Gitea pull request requires curl and jq" >&2
+    exit 1
+  fi
+  if ! fm_forge_gitea_identity_bind "$URL"; then
+    FM_GITEA_TOKEN=
+    echo "error: Gitea pull request does not match valid private configuration" >&2
+    exit 1
+  fi
+  FM_GITEA_TOKEN=
+fi
 
 # Neutralize any pre-fix poll before recording or arming this task. The
 # migration never executes legacy artifacts and holds watcher exclusion while
@@ -62,17 +76,20 @@ fi
 "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
 "$FM_ROOT/bin/fm-guard.sh" || true
 
-# pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head. Both consumers already treat it as optional:
-# bin/fm-teardown.sh reads the head from the forge at teardown rather than from
-# metadata and falls back to its provider-agnostic content check, and
-# bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
+# Record an exact head when the provider abstraction can validate one. GitLab
+# keeps its established optional-head behavior; GitHub still uses gh, while
+# Gitea uses the private API client without exposing its token.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
-if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
-  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+if [ "$PROVIDER" = gitea ]; then
+  if REMOTE_HEAD=$(fm_forge_pr_head "$URL" 2>/dev/null) && fm_pr_head_valid "$REMOTE_HEAD"; then
+    PR_HEAD=$REMOTE_HEAD
+  else
+    echo "error: Gitea pull request head could not be validated" >&2
+    exit 1
+  fi
+elif [ -n "$WT" ] && [ -d "$WT" ]; then
+  if REMOTE_HEAD=$(cd "$WT" && fm_forge_pr_head "$URL" 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
