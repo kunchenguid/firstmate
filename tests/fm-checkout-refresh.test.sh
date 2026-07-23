@@ -19,6 +19,12 @@ LOCK_ROOT="$TMP_ROOT/refresh-locks"
 mkdir -p "$TEST_HOME/.treehouse" "$FM_TEST_HOME/projects" "$FM_TEST_HOME/config" "$STATE_ROOT"
 
 checkout_state_key() {
+  local path
+  path=$(fm_checkout_trusted_dir "$1") || return 1
+  fm_checkout_hash_value "$path" "${2:-24}"
+}
+
+checkout_lock_key() {
   fm_checkout_stable_path_key "$1" directory 0 "${2:-24}"
 }
 
@@ -1084,7 +1090,7 @@ test_refresh_locks_recover_stale_owners_and_surface_contention() {
   common=$(git -C "$checkout" rev-parse --git-common-dir)
   case "$common" in /*) ;; *) common="$checkout/$common" ;; esac
   common=$(cd "$common" && pwd -P)
-  key=$(checkout_state_key "$common")
+  key=$(checkout_lock_key "$common")
   checkout_lock="$LOCK_ROOT/$key.lock"
   mkdir -p "$checkout_lock"
   printf '%s\n' "$$" > "$checkout_lock/pid"
@@ -1093,9 +1099,9 @@ test_refresh_locks_recover_stale_owners_and_surface_contention() {
     "shared-checkout lock contention was not surfaced"
   alias="$TMP_ROOT/relvino-checkout-alias"
   ln -s "$checkout" "$alias"
-  out=$(run_refresh preflight "$alias") || true
-  assert_contains "$out" "$checkout: skipped: refresh already running (pid $$)" \
-    "a symlink alias bypassed the canonical repository lock"
+  out=$(run_refresh preflight "$alias" 2>&1) || true
+  assert_contains "$out" "checkout-refresh preflight target must be an exact inspectable Git repository root: $alias" \
+    "a symlink alias was not rejected before lock resolution"
   rm -rf "$checkout_lock"
   pass "refresh locks recover abandoned owners and serialize every checkout alias"
 }
@@ -1407,7 +1413,7 @@ SH
   common=$(git -C "$source" rev-parse --git-common-dir)
   case "$common" in /*) ;; *) common="$source/$common" ;; esac
   common=$(cd "$common" && pwd -P)
-  key=$(checkout_state_key "$common")
+  key=$(checkout_lock_key "$common")
   lock="$LOCK_ROOT/$key.lock"
   mkdir -p "$lock"
   printf '%s\n' "$$" > "$lock/pid"
@@ -1578,9 +1584,191 @@ SH
   pass "scheduler ownership is home-scoped and Linux remains an explicit adapter seam"
 }
 
+test_logical_home_state_migrates_and_ambiguity_fails_closed() {
+  local home state_base logical_key physical_key logical physical agents fakebin physical_plist logical_plist now out status
+  local rollback_home rollback_logical_key rollback_physical_key rollback_logical rollback_physical rollback_physical_plist rollback_logical_plist
+  home="$TMP_ROOT/state-migration-home"
+  state_base="$TMP_ROOT/state-migration-base"
+  mkdir -p "$home/projects" "$home/config" "$home/user/.treehouse"
+  logical_key=$(checkout_state_key "$home" 16)
+  physical_key=$(fm_checkout_physical_path_key "$home" directory 16)
+  logical="$state_base/homes/$logical_key"
+  physical="$state_base/homes/$physical_key"
+  agents="$TMP_ROOT/state-migration-agents"
+  fakebin="$TMP_ROOT/state-migration-fakebin"
+  physical_plist="$agents/com.firstmate.checkout-refresh.$physical_key.plist"
+  logical_plist="$agents/com.firstmate.checkout-refresh.$logical_key.plist"
+  mkdir -p "$physical" "$agents" "$fakebin"
+  printf 'preserved\n' > "$physical/external-identities"
+  now=$(date +%s)
+  printf '%s\n%s\n' "$now" "$ROOT/bin/fm-checkout-refresh.sh" > "$physical/heartbeat"
+  printf '%s\nhealthy\n' "$now" > "$physical/coverage-health"
+  printf '<plist><string>%s/bin/fm-checkout-refresh.sh</string><key>FM_HOME</key><string>%s</string><key>FM_CHECKOUT_REFRESH_STATE_ROOT</key><string>%s</string></plist>\n' \
+    "$ROOT" "$(cd "$home" && pwd -P)" "$physical" > "$physical_plist"
+  cat > "$fakebin/launchctl" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/launchctl"
+  out=$(HOME="$home/user" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
+    FM_TREEHOUSE_ROOT="$home/user/.treehouse" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
+  [ -f "$logical/external-identities" ] || fail "physical home state was not migrated to the logical namespace"
+  [ ! -e "$physical" ] || fail "physical home state namespace survived migration"
+  [ -f "$logical_plist" ] || fail "physical LaunchAgent was not migrated to the logical label"
+  [ ! -e "$physical_plist" ] || fail "physical LaunchAgent survived logical-label migration"
+
+  rollback_home="$TMP_ROOT/state-migration-rollback-home"
+  mkdir -p "$rollback_home/projects" "$rollback_home/config" "$rollback_home/user/.treehouse"
+  rollback_logical_key=$(checkout_state_key "$rollback_home" 16)
+  rollback_physical_key=$(fm_checkout_physical_path_key "$rollback_home" directory 16)
+  rollback_logical="$state_base/homes/$rollback_logical_key"
+  rollback_physical="$state_base/homes/$rollback_physical_key"
+  rollback_physical_plist="$agents/com.firstmate.checkout-refresh.$rollback_physical_key.plist"
+  rollback_logical_plist="$agents/com.firstmate.checkout-refresh.$rollback_logical_key.plist"
+  mkdir -p "$rollback_physical"
+  printf 'preserved-on-failure\n' > "$rollback_physical/external-identities"
+  printf '<plist><string>%s/bin/fm-checkout-refresh.sh</string><key>FM_HOME</key><string>%s</string><key>FM_CHECKOUT_REFRESH_STATE_ROOT</key><string>%s</string></plist>\n' \
+    "$ROOT" "$(cd "$rollback_home" && pwd -P)" "$rollback_physical" > "$rollback_physical_plist"
+  cat > "$fakebin/launchctl" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  print|bootout|kickstart) exit 0 ;;
+  bootstrap) [ "${3:-}" = "$FM_TEST_PHYSICAL_PLIST" ] ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/launchctl"
+  set +e
+  out=$(HOME="$rollback_home/user" FM_HOME="$rollback_home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
+    FM_TREEHOUSE_ROOT="$rollback_home/user/.treehouse" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_TEST_PHYSICAL_PLIST="$rollback_physical_plist" \
+    "$ROOT/bin/fm-checkout-refresh.sh" install 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "failed logical LaunchAgent activation reported success"
+  [ -f "$rollback_physical/external-identities" ] \
+    || fail "failed LaunchAgent migration did not restore physical state"
+  [ -f "$rollback_physical_plist" ] || fail "failed LaunchAgent migration removed the prior definition"
+  [ ! -e "$rollback_logical" ] || fail "failed LaunchAgent migration left a logical state namespace"
+  [ ! -e "$rollback_logical_plist" ] || fail "failed LaunchAgent migration left a logical definition"
+
+  mkdir -p "$physical"
+  set +e
+  out=$(HOME="$home/user" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
+    FM_TREEHOUSE_ROOT="$home/user/.treehouse" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Linux \
+    "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "ambiguous state namespaces were accepted"
+  assert_contains "$out" "ambiguous checkout-refresh home state namespaces" \
+    "ambiguous state namespaces did not fail closed"
+  pass "logical home state migrates once and ambiguous namespaces fail closed"
+}
+
+test_same_path_replacement_and_manifest_failures_are_unhealthy() {
+  local home state checkout original_checkout first_remote second_remote out status
+  home="$TMP_ROOT/replacement-home"
+  state="$TMP_ROOT/replacement-state"
+  checkout="$TMP_ROOT/replacement-checkout"
+  original_checkout="$TMP_ROOT/replacement-checkout-original"
+  mkdir -p "$home/projects" "$home/config" "$home/user/.treehouse" "$state"
+  first_remote=$(build_origin replacement-first)
+  second_remote=$(build_origin replacement-second)
+  clone_from "$first_remote" "$checkout"
+  printf 'path %s\n' "$checkout" > "$home/config/checkout-refresh"
+  run_isolated_refresh "$home" "$state" run-once --force >/dev/null
+  mv "$checkout" "$original_checkout"
+  clone_from "$second_remote" "$checkout"
+  set +e
+  out=$(run_isolated_refresh "$home" "$state" run-once --force 2>&1)
+  set -e
+  assert_contains "$out" "covered checkout" \
+    "same-path checkout replacement was not tied to prior coverage"
+  assert_contains "$out" "identity drifted" \
+    "same-path checkout replacement was baselined instead of surfaced"
+  assert_refresh_state "$state" unhealthy
+
+  rm -rf "$checkout"
+  clone_from "$first_remote" "$checkout"
+  set +e
+  out=$(run_isolated_refresh "$home" "$state" run-once --force 2>&1)
+  set -e
+  assert_contains "$out" "physical identity drifted" \
+    "same-origin physical replacement was baselined instead of surfaced"
+  assert_refresh_state "$state" unhealthy
+
+  set +e
+  out=$(FM_CHECKOUT_TEST_MANIFEST_FAILURE=append run_isolated_refresh "$home" "$state" run-once --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "manifest append failure remained healthy"
+  assert_refresh_state "$state" unhealthy
+  set +e
+  out=$(FM_CHECKOUT_TEST_MANIFEST_FAILURE=sort run_isolated_refresh "$home" "$state" run-once --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "manifest sort failure remained healthy"
+  assert_refresh_state "$state" unhealthy
+  pass "same-path replacement and manifest failures invalidate coverage"
+}
+
+test_lock_key_failure_cannot_construct_a_shared_lock_path() {
+  local out status
+  set +e
+  out=$(bash -c '
+    set -u
+    . "$1/bin/fm-checkout-lock-lib.sh"
+    fm_checkout_lock_key() { return 1; }
+    fm_checkout_lock_path "$1" "$2"
+  ' bash "$ROOT" "$TMP_ROOT/failed-lock-root" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "failed lock-key derivation returned a lock path"
+  [ -z "$out" ] || fail "failed lock-key derivation emitted a fallback lock path: $out"
+  pass "lock-key derivation failure cannot collapse onto a shared lock path"
+}
+
+test_logical_lock_keys_survive_creation_and_atomic_replacement() {
+  local home registry replacement missing_home_key created_home_key missing_registry_key replaced_registry_key
+  home="$TMP_ROOT/aba-secondmate-home"
+  registry="$TMP_ROOT/aba-data/secondmates.md"
+  mkdir -p "$(dirname "$registry")"
+  missing_home_key=$(fm_checkout_stable_path_key "$home" directory 1 24)
+  missing_registry_key=$(fm_checkout_stable_path_key "$registry" file 1 24)
+  mkdir -p "$home"
+  printf 'initial\n' > "$registry"
+  created_home_key=$(fm_checkout_stable_path_key "$home" directory 1 24)
+  replacement="$registry.replacement"
+  printf 'replacement\n' > "$replacement"
+  mv "$replacement" "$registry"
+  replaced_registry_key=$(fm_checkout_stable_path_key "$registry" file 1 24)
+  [ "$missing_home_key" = "$created_home_key" ] || fail "home lifecycle lock key changed after home creation"
+  [ "$missing_registry_key" = "$replaced_registry_key" ] || fail "registry lock key changed after atomic replacement"
+  pass "logical lifecycle keys survive path creation and replacement"
+}
+
 if [ "${FM_TEST_FOCUSED:-}" = review-round-14 ]; then
   test_bounded_refresh_terminates_descendants
   test_launch_agent_definition_is_home_scoped_with_scheduler_seam
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-round-durable-identity ]; then
+  test_logical_home_state_migrates_and_ambiguity_fails_closed
+  test_same_path_replacement_and_manifest_failures_are_unhealthy
+  test_lock_key_failure_cannot_construct_a_shared_lock_path
+  test_logical_lock_keys_survive_creation_and_atomic_replacement
   exit 0
 fi
 
@@ -1682,3 +1870,7 @@ test_worktree_freshness_verification_fails_closed
 test_bounded_refresh_terminates_descendants
 test_acquisition_honors_shared_checkout_lock
 test_launch_agent_definition_is_home_scoped_with_scheduler_seam
+test_logical_home_state_migrates_and_ambiguity_fails_closed
+test_same_path_replacement_and_manifest_failures_are_unhealthy
+test_lock_key_failure_cannot_construct_a_shared_lock_path
+test_logical_lock_keys_survive_creation_and_atomic_replacement

@@ -73,9 +73,27 @@ FM_LOCK_LOG_PREFIX=fleet-sync
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 FLEET_SYNC_TIMEOUT=${FM_CHECKOUT_REFRESH_SYNC_TIMEOUT:-60}
+EXPECTED_ORIGIN_KIND=${FM_FLEET_SYNC_EXPECTED_ORIGIN_KIND:-}
+EXPECTED_ORIGIN_VALUE=${FM_FLEET_SYNC_EXPECTED_ORIGIN_VALUE:-}
+EXPECTED_PHYSICAL_IDENTITY=${FM_FLEET_SYNC_EXPECTED_PHYSICAL_IDENTITY:-}
 case "$FLEET_SYNC_TIMEOUT" in
   ''|*[!0-9]*|0)
     echo "error: FM_CHECKOUT_REFRESH_SYNC_TIMEOUT must be a positive integer" >&2
+    exit 2
+    ;;
+esac
+case "$EXPECTED_ORIGIN_KIND" in
+  ''|origin|no-origin) ;;
+  *) echo "error: invalid expected checkout origin kind" >&2; exit 2 ;;
+esac
+[ "$EXPECTED_ORIGIN_KIND" != origin ] || [ -n "$EXPECTED_ORIGIN_VALUE" ] || {
+  echo "error: expected origin URL is missing" >&2
+  exit 2
+}
+case "$EXPECTED_PHYSICAL_IDENTITY" in
+  '') ;;
+  *[!A-Za-z0-9:._-]*)
+    echo "error: invalid expected checkout physical identity" >&2
     exit 2
     ;;
 esac
@@ -163,6 +181,43 @@ exact_git_root() {
   printf '%s\n' "$canonical"
 }
 
+inspect_mutation_origin() {
+  local remotes
+  remotes=$(git -C "$PROJ" remote 2>/dev/null) || return 1
+  if printf '%s\n' "$remotes" | grep -Fxq origin; then
+    MUTATION_ORIGIN_VALUE=$(git -C "$PROJ" remote get-url origin 2>/dev/null) || return 1
+    [ -n "$MUTATION_ORIGIN_VALUE" ] || return 1
+    MUTATION_ORIGIN_KIND=origin
+  else
+    MUTATION_ORIGIN_KIND=no-origin
+    MUTATION_ORIGIN_VALUE=
+  fi
+}
+
+verify_mutation_identity() {
+  local root physical
+  if [ "${FM_FLEET_SYNC_TEST:-0}" = 1 ] \
+    && [ -n "${FM_FLEET_SYNC_TEST_DRIFT_ORIGIN_TO:-}" ] \
+    && [ "${FM_FLEET_SYNC_TEST_DRIFTED:-0}" != 1 ]; then
+    git -C "$PROJ" remote set-url origin "$FM_FLEET_SYNC_TEST_DRIFT_ORIGIN_TO" || return 1
+    FM_FLEET_SYNC_TEST_DRIFTED=1
+  fi
+  root=$(exact_git_root "$PROJ") || return 1
+  [ "$root" = "$PROJ" ] || return 1
+  physical=$(fm_checkout_physical_path_identity "$PROJ" directory) || return 1
+  if [ -z "$EXPECTED_PHYSICAL_IDENTITY" ]; then
+    EXPECTED_PHYSICAL_IDENTITY=$physical
+  fi
+  [ "$physical" = "$EXPECTED_PHYSICAL_IDENTITY" ] || return 1
+  inspect_mutation_origin || return 1
+  if [ -z "$EXPECTED_ORIGIN_KIND" ]; then
+    EXPECTED_ORIGIN_KIND=$MUTATION_ORIGIN_KIND
+    EXPECTED_ORIGIN_VALUE=$MUTATION_ORIGIN_VALUE
+  fi
+  [ "$MUTATION_ORIGIN_KIND" = "$EXPECTED_ORIGIN_KIND" ] \
+    && [ "$MUTATION_ORIGIN_VALUE" = "$EXPECTED_ORIGIN_VALUE" ]
+}
+
 LIVE_DEFAULT_BRANCH=
 LIVE_DEFAULT_TIP=
 LIVE_PROBE_OUTPUT=
@@ -214,6 +269,14 @@ packed_refs_lock_path() {
   esac
 }
 
+fetch_expected_origin() {
+  if ! verify_mutation_identity; then
+    FETCH_OUTPUT="checkout repository or origin identity drifted before fetch"
+    return 1
+  fi
+  FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1)
+}
+
 # Run `git -C "$PROJ" fetch origin --prune --quiet`, tolerating an orphaned
 # packed-refs.lock left by a killed ref rewrite. Sets FETCH_OUTPUT to the git
 # command's combined output and returns its exit status. On the packed-refs.lock
@@ -227,7 +290,7 @@ packed_refs_lock_path() {
 # a session-start refresh (which discards fleet-sync stderr) still surfaces it.
 fetch_with_packed_refs_lock_guard() {
   local rc attempt=0 lock lock_desc
-  FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+  if fetch_expected_origin; then rc=0; else rc=$?; fi
   [ "$rc" -eq 0 ] && return 0
   is_packed_refs_lock_error "$FETCH_OUTPUT" || return "$rc"
 
@@ -237,7 +300,7 @@ fetch_with_packed_refs_lock_guard() {
     attempt=$(( attempt + 1 ))
     echo "$label: fetch blocked by packed-refs lock ($lock_desc); waiting ${FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${FLEET_SYNC_PACKED_REFS_LOCK_RETRIES}) (owning process may be exiting)" >&2
     sleep "$FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS"
-    FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+    if fetch_expected_origin; then rc=0; else rc=$?; fi
     if [ "$rc" -eq 0 ]; then
       echo "$label: fetch succeeded on retry; packed-refs lock cleared on its own" >&2
       # One stdout summary so a session-start refresh (which discards fleet-sync
@@ -261,7 +324,7 @@ fetch_with_packed_refs_lock_guard() {
         return "$rc"
       fi
       echo "$label: removed provably-stale packed-refs lock $lock (age >= ${FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS}s, no live holder) and retrying fetch" >&2
-      FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+      if fetch_expected_origin; then rc=0; else rc=$?; fi
       if [ "$rc" -eq 0 ]; then
         echo "$label: fetch succeeded after stale packed-refs lock cleanup" >&2
         echo "$label: recovered: removed a stale packed-refs lock (no live holder)"
@@ -415,11 +478,6 @@ sync_project() (
     echo "$label: skipped: local-only project"
     return 0
   fi
-  if ! git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
-    echo "$label: skipped: no origin remote"
-    return 0
-  fi
-
   if ! fm_checkout_lock_prepare "$CHECKOUT_LOCK_ROOT"; then
     echo "$PROJ: skipped: refresh lock setup failed"
     return 0
@@ -438,6 +496,14 @@ sync_project() (
     return "$FM_CHECKOUT_LOCK_FAILURE_STATUS"
   fi
 
+  if ! verify_mutation_identity; then
+    echo "$label: skipped: checkout repository or origin identity drifted before mutation"
+    return 0
+  fi
+  if [ "$EXPECTED_ORIGIN_KIND" != origin ]; then
+    echo "$label: skipped: no origin remote"
+    return 0
+  fi
   if ! fetch_with_packed_refs_lock_guard; then
     reason="fetch failed"
     if [ -n "$FETCH_OUTPUT" ]; then
@@ -447,6 +513,10 @@ sync_project() (
     return 0
   fi
 
+  if ! verify_mutation_identity; then
+    echo "$label: skipped: checkout repository or origin identity drifted after fetch"
+    return 0
+  fi
   if ! probe_live_default; then
     reason="cannot probe live upstream default branch"
     if [ -n "$LIVE_PROBE_OUTPUT" ]; then
@@ -477,6 +547,10 @@ sync_project() (
     return 0
   fi
   [ -z "$status_raw" ] || dirty=yes
+  if ! verify_mutation_identity; then
+    echo "$label: skipped: checkout repository or origin identity drifted before branch pruning"
+    return 0
+  fi
   prune_gone_branches || return 0
   untracked_count=0
   skill_draft_count=0
@@ -502,6 +576,10 @@ sync_project() (
         && git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null \
         && ! default_checked_out_elsewhere \
         && local_default_safe_for_recovery; then
+      if ! verify_mutation_identity; then
+        echo "$label: skipped: checkout repository or origin identity drifted before checkout"
+        return 0
+      fi
       if ! git -C "$PROJ" checkout --quiet "$DEFAULT" 2>/dev/null; then
         report_stuck "$(stuck_state)"
         return 0
@@ -548,6 +626,10 @@ sync_project() (
     echo "$label: skipped: cannot read local $DEFAULT"
     return 0
   }
+  if ! verify_mutation_identity; then
+    echo "$label: skipped: checkout repository or origin identity drifted before fast-forward"
+    return 0
+  fi
   if ! merge_output=$(git -C "$PROJ" merge --ff-only "$BASE" 2>&1); then
     reason="fast-forward failed"
     if [ -n "$merge_output" ]; then

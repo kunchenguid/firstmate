@@ -1446,29 +1446,6 @@ validate_removal_target() {
   printf '%s\n' "$abs_target"
 }
 
-registered_descendant_home_for_removal() {
-  local reg=$1 target=$2 line id registered_home registered_abs
-  [ -f "$reg" ] || return 1
-  while IFS= read -r line; do
-    case "$line" in
-      "- "*)
-        id=${line#- }
-        id=${id%% *}
-        registered_home=$(printf '%s\n' "$line" | registry_home_for_line)
-        [ -n "$registered_home" ] || continue
-        registered_abs=$(removal_target_abs_path "$registered_home" 2>/dev/null || true)
-        [ -n "$registered_abs" ] || continue
-        [ "$registered_abs" = "$target" ] && continue
-        if path_is_ancestor_of "$target" "$registered_abs"; then
-          printf '%s\t%s\n' "$id" "$registered_abs"
-          return 0
-        fi
-        ;;
-    esac
-  done < "$reg"
-  return 1
-}
-
 secondmate_registry_for_source() {
   local source=$1 source_root root
   source_root=$(exact_git_worktree_root "$source") || return 1
@@ -1774,9 +1751,130 @@ $refs
 EOF
 }
 
+validate_secondmate_project_clone_landed_state() {
+  local clone=$1 dirty stash refs ref tip remote_output remote_status
+  local remote_tips remote_tip remote_commit landed
+  [ "$(exact_git_worktree_root "$clone")" = "$clone" ] || {
+    echo "REFUSED: secondmate project clone is not an exact repository root at $clone" >&2
+    return 1
+  }
+  dirty=$(GIT_OPTIONAL_LOCKS=0 git -C "$clone" status --porcelain=v1 --untracked-files=all 2>/dev/null) || {
+    echo "REFUSED: secondmate project clone cleanliness is uninspectable at $clone" >&2
+    return 1
+  }
+  [ -z "$dirty" ] || {
+    echo "REFUSED: secondmate project clone has unlanded changes at $clone" >&2
+    return 1
+  }
+  stash=$(git -C "$clone" stash list 2>/dev/null) || {
+    echo "REFUSED: secondmate project clone stash state is uninspectable at $clone" >&2
+    return 1
+  }
+  [ -z "$stash" ] || {
+    echo "REFUSED: secondmate project clone has retained stash history at $clone" >&2
+    return 1
+  }
+  if fm_run_bounded_capture --combine-stderr remote_output "$TEARDOWN_UPSTREAM_TIMEOUT" \
+      git -C "$clone" ls-remote origin 'refs/heads/*' 'refs/tags/*'; then
+    remote_status=0
+  else
+    remote_status=$?
+  fi
+  fm_process_tree_cleanup_verified || {
+    echo "REFUSED: secondmate project clone upstream probe cleanup is unverified at $clone" >&2
+    return 1
+  }
+  [ "$remote_status" -eq 0 ] || {
+    echo "REFUSED: secondmate project clone remote refs are uninspectable at $clone" >&2
+    return 1
+  }
+  remote_tips=$(printf '%s\n' "$remote_output" | awk 'NF == 2 { print $1 }' | sort -u) || return 1
+  [ -n "$remote_tips" ] || {
+    echo "REFUSED: secondmate project clone has no live remote refs at $clone" >&2
+    return 1
+  }
+  refs=$(git -C "$clone" for-each-ref --format='%(refname)' 2>/dev/null) || {
+    echo "REFUSED: secondmate project clone refs are uninspectable at $clone" >&2
+    return 1
+  }
+  refs=$(printf '%s\n' "$refs" | awk '$0 !~ /^refs\/remotes\// && $0 != "refs/stash" { print }') || return 1
+  refs=$(printf 'HEAD\n%s\n' "$refs")
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    tip=$(git -C "$clone" rev-parse "$ref^{commit}" 2>/dev/null) || {
+      echo "REFUSED: secondmate project clone ref $ref is uninspectable at $clone" >&2
+      return 1
+    }
+    landed=0
+    while IFS= read -r remote_tip; do
+      [ -n "$remote_tip" ] || continue
+      remote_commit=$(git -C "$clone" rev-parse "$remote_tip^{commit}" 2>/dev/null) || continue
+      if git -C "$clone" merge-base --is-ancestor "$tip" "$remote_commit" 2>/dev/null; then
+        landed=1
+        break
+      fi
+    done <<EOF
+$remote_tips
+EOF
+    [ "$landed" -eq 1 ] || {
+      echo "REFUSED: secondmate project clone ref $ref is not proven on a live remote ref at $clone" >&2
+      return 1
+    }
+  done <<EOF
+$refs
+EOF
+}
+
+validate_secondmate_project_clones() {
+  local home=$1 registry=$2 expected_id=$3 projects_root expected listed project clone
+  expected=$(fm_secondmate_registry_query "$registry" query "$expected_id" projects) || {
+    echo "REFUSED: secondmate project registration is unprovable for $expected_id" >&2
+    return 1
+  }
+  projects_root=$(fm_checkout_trusted_dir "$home/projects") || {
+    echo "REFUSED: secondmate projects directory is missing, redirected, or unreadable at $home/projects" >&2
+    return 1
+  }
+  listed=$(python3 - "$projects_root" <<'PY'
+import os
+import stat
+import sys
+
+root = sys.argv[1]
+try:
+    with os.scandir(root) as entries:
+        for entry in sorted(entries, key=lambda item: item.name):
+            metadata = entry.stat(follow_symlinks=False)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise OSError("unsafe project entry")
+            print(entry.name)
+except OSError:
+    raise SystemExit(1)
+PY
+  ) || {
+    echo "REFUSED: secondmate project clones cannot be safely enumerated at $projects_root" >&2
+    return 1
+  }
+  if [ -n "$expected" ]; then
+    expected=$(printf '%s\n' "$expected" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | sort) || return 1
+  fi
+  listed=$(printf '%s\n' "$listed" | sed '/^$/d' | sort) || return 1
+  [ "$listed" = "$expected" ] || {
+    echo "REFUSED: secondmate project clones do not exactly match the registration for $expected_id" >&2
+    return 1
+  }
+  while IFS= read -r project; do
+    [ -n "$project" ] || continue
+    clone=$(fm_checkout_trusted_dir "$projects_root/$project") || return 1
+    validate_secondmate_project_clone_landed_state "$clone" || return 1
+  done <<EOF
+$listed
+EOF
+}
+
 validate_firstmate_home_for_removal() {
   local home=$1 label=$2 expected_id=${3:-} expected_source=${4:-$FM_ROOT} expected_registry=${5:-} expected_project
-  local abs_home_path metadata_home_root marker_id conflict child_id child_home
+  local abs_home_path metadata_home_root marker_id
   expected_project=${6:-$home}
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
@@ -1807,19 +1905,15 @@ validate_firstmate_home_for_removal() {
     require_treehouse_task_lease "$abs_home_path" "$expected_id" || return 1
   fi
   validate_secondmate_home_landed_state "$abs_home_path" "$expected_source" || return 1
+  if [ -n "$expected_id" ]; then
+    validate_secondmate_project_clones "$abs_home_path" "$expected_registry" "$expected_id" || return 1
+  fi
   validate_firstmate_operational_dirs_for_removal "$abs_home_path" "$label" || return 1
   secondmate_state_metadata "$abs_home_path" >/dev/null || return 1
-  conflict=$(registered_descendant_home_for_removal "${expected_registry:-$SECONDMATE_REG}" "$abs_home_path" || true)
-  if [ -z "$conflict" ]; then
-    conflict=$(registered_descendant_home_for_removal "$abs_home_path/data/secondmates.md" "$abs_home_path" || true)
-  fi
-  if [ -n "$conflict" ]; then
-    IFS=$'\t' read -r child_id child_home <<EOF
-$conflict
-EOF
-    echo "REFUSED: unsafe $label removal target $home contains registered secondmate home $child_home for $child_id" >&2
+  fm_secondmate_registry_query "$abs_home_path/data/secondmates.md" validate >/dev/null || {
+    echo "REFUSED: child secondmate registry is malformed or uninspectable at $abs_home_path/data/secondmates.md" >&2
     return 1
-  fi
+  }
   printf '%s\n' "$abs_home_path"
 }
 
@@ -1864,10 +1958,54 @@ remove_firstmate_home() {
     remove_explicit_firstmate_home_locked "$abs_home_path" "$label" "$expected_id" "$expected_source" "$expected_registry" "$expected_project"
 }
 
+validate_registered_secondmate_children() {
+  local home=$1 entries child_id child_home child_projects child_meta meta_kind meta_home
+  entries=$(fm_secondmate_registry_query "$home/data/secondmates.md" list) || {
+    echo "REFUSED: registered secondmate children are unprovable at $home/data/secondmates.md" >&2
+    return 1
+  }
+  while IFS=$'\t' read -r child_id child_home child_projects; do
+    [ -n "$child_id" ] || continue
+    child_meta="$home/state/$child_id.meta"
+    [ -f "$child_meta" ] && [ ! -L "$child_meta" ] && [ -r "$child_meta" ] || {
+      echo "REFUSED: registered secondmate $child_id has no inspectable child metadata; preserving $child_home" >&2
+      return 1
+    }
+    meta_kind=$(meta_value "$child_meta" kind)
+    [ "$meta_kind" = secondmate ] || {
+      echo "REFUSED: registered secondmate $child_id has mismatched child metadata" >&2
+      return 1
+    }
+    meta_home=$(meta_value "$child_meta" home)
+    [ -n "$meta_home" ] || meta_home=$(meta_value "$child_meta" worktree)
+    meta_home=$(canonical_existing_dir "$meta_home") || return 1
+    child_home=$(canonical_existing_dir "$child_home") || return 1
+    [ "$meta_home" = "$child_home" ] || {
+      echo "REFUSED: registered secondmate $child_id home does not match child metadata" >&2
+      return 1
+    }
+  done <<EOF
+$entries
+EOF
+}
+
+require_empty_secondmate_registry() {
+  local home=$1 entries
+  entries=$(fm_secondmate_registry_query "$home/data/secondmates.md" list) || {
+    echo "REFUSED: child secondmate registry is unprovable at $home/data/secondmates.md" >&2
+    return 1
+  }
+  [ -z "$entries" ] || {
+    echo "REFUSED: secondmate home still registers child homes; preserving $home" >&2
+    return 1
+  }
+}
+
 validate_firstmate_home_children_removal() {
   local home=$1 sub_state child_metas child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
   sub_state="$home/state"
   child_metas=$(secondmate_state_metadata "$home") || return 1
+  validate_registered_secondmate_children "$home" || return 1
   while IFS= read -r child_meta; do
     [ -n "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
@@ -2468,6 +2606,7 @@ if [ "$KIND" = secondmate ]; then
     echo "error: secondmate $ID gained child state before its final removal boundary" >&2
     exit 1
   }
+  require_empty_secondmate_registry "$HOME_PATH" || exit 1
   SECONDMATE_REGISTRY_PREPARED=$(prepare_secondmate_registry_removal "$ID" "$HOME_PATH" "$SECONDMATE_REG" "$SECONDMATE_REGISTRY_LOCK") || exit 1
   IFS=$'\t' read -r SECONDMATE_REGISTRY_UPDATE SECONDMATE_REGISTRY_BACKUP <<EOF
 $SECONDMATE_REGISTRY_PREPARED

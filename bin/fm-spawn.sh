@@ -437,6 +437,7 @@ RESUME_META=
 LIFECYCLE_LOCK=
 LIFECYCLE_LOCK_OWNED=0
 SECONDMATE_HOME_LIFECYCLE_LOCK=
+SECONDMATE_TARGET_HOME_LIFECYCLE_LOCK=
 LIFECYCLE_LOCK_INHERITED_PID=
 LIFECYCLE_LOCK_INHERITED_START=
 SPAWN_META_PRESENT=0
@@ -444,6 +445,15 @@ SPAWN_META_SNAPSHOT=
 SPAWN_PREFLIGHT_ID=${POS[0]:-}
 spawn_idpart=${SPAWN_PREFLIGHT_ID%%=*}
 SPAWN_PREFLIGHT_BATCH=0
+
+release_secondmate_home_lifecycle_locks() {
+  [ -z "${SECONDMATE_TARGET_HOME_LIFECYCLE_LOCK:-}" ] \
+    || fm_account_lifecycle_lock_release "$SECONDMATE_TARGET_HOME_LIFECYCLE_LOCK" >/dev/null 2>&1 || true
+  [ -z "${SECONDMATE_HOME_LIFECYCLE_LOCK:-}" ] \
+    || fm_account_lifecycle_lock_release "$SECONDMATE_HOME_LIFECYCLE_LOCK" >/dev/null 2>&1 || true
+  SECONDMATE_TARGET_HOME_LIFECYCLE_LOCK=
+  SECONDMATE_HOME_LIFECYCLE_LOCK=
+}
 if [ -n "$SPAWN_PREFLIGHT_ID" ] && [ "$SPAWN_PREFLIGHT_ID" != "$spawn_idpart" ] \
   && case "$spawn_idpart" in */*) false ;; *) true ;; esac; then
   SPAWN_PREFLIGHT_BATCH=1
@@ -704,7 +714,7 @@ fi
 
 if [ "$SPAWN_PREFLIGHT_BATCH" = 0 ]; then
   SECONDMATE_HOME_LIFECYCLE_LOCK=$(fm_secondmate_home_lifecycle_lock_acquire "$CHECKOUT_LOCK_ROOT" "$FM_HOME") || exit 1
-  trap '[ -z "${SECONDMATE_HOME_LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$SECONDMATE_HOME_LIFECYCLE_LOCK" >/dev/null 2>&1 || true' EXIT
+  trap 'release_secondmate_home_lifecycle_locks' EXIT
   fm_checkout_trusted_dir "$FM_HOME" >/dev/null || {
     echo "error: active firstmate home was removed or redirected while spawn waited for lifecycle ownership" >&2
     exit 1
@@ -766,7 +776,7 @@ if [ -n "${FM_ACCOUNT_LIFECYCLE_LOCK_HELD:-}" ]; then
     exit 1
   fi
   LIFECYCLE_LOCK_OWNED=1
-  trap '[ "${LIFECYCLE_LOCK_OWNED:-0}" != 1 ] || [ -z "${LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$LIFECYCLE_LOCK" >/dev/null 2>&1 || true; [ -z "${SECONDMATE_HOME_LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$SECONDMATE_HOME_LIFECYCLE_LOCK" >/dev/null 2>&1 || true' EXIT
+  trap '[ "${LIFECYCLE_LOCK_OWNED:-0}" != 1 ] || [ -z "${LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$LIFECYCLE_LOCK" >/dev/null 2>&1 || true; release_secondmate_home_lifecycle_locks' EXIT
   # The handoff replaces the lock inode while live ownership prevents reclaim until this child releases the replacement.
   if ! fm_account_lifecycle_lock_owned "$LIFECYCLE_LOCK"; then
     echo "error: inherited account lifecycle lock ownership handoff failed for $inherited_lock_id" >&2
@@ -780,7 +790,7 @@ if [ "$RECOVERY_ACCOUNT" = 1 ]; then
     LIFECYCLE_LOCK=$(fm_account_lifecycle_lock_acquire "$STATE" "${POS[0]}") || exit 1
     LIFECYCLE_LOCK_OWNED=1
   fi
-  trap '[ "${LIFECYCLE_LOCK_OWNED:-0}" != 1 ] || [ -z "${LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$LIFECYCLE_LOCK" >/dev/null 2>&1 || true; [ -z "${SECONDMATE_HOME_LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$SECONDMATE_HOME_LIFECYCLE_LOCK" >/dev/null 2>&1 || true' EXIT
+  trap '[ "${LIFECYCLE_LOCK_OWNED:-0}" != 1 ] || [ -z "${LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$LIFECYCLE_LOCK" >/dev/null 2>&1 || true; release_secondmate_home_lifecycle_locks' EXIT
   current_spawn_meta=$(spawn_preflight_read_meta "$RESUME_META") || {
     echo "error: unsafe metadata for managed recovery at $RESUME_META" >&2
     exit 1
@@ -1731,10 +1741,9 @@ spawn_abort_cleanup() {
   [ -z "$META_BACKUP" ] || [ -f "$META_BACKUP" ] || META_BACKUP=
   [ -z "$EXISTING_ARTIFACT_BACKUP" ] || [ -d "$EXISTING_ARTIFACT_BACKUP" ] || EXISTING_ARTIFACT_BACKUP=
   [ "${LIFECYCLE_LOCK_OWNED:-0}" != 1 ] || [ -z "${LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$LIFECYCLE_LOCK" >/dev/null 2>&1 || true
-  [ -z "${SECONDMATE_HOME_LIFECYCLE_LOCK:-}" ] || fm_account_lifecycle_lock_release "$SECONDMATE_HOME_LIFECYCLE_LOCK" >/dev/null 2>&1 || true
+  release_secondmate_home_lifecycle_locks
   LIFECYCLE_LOCK=
   LIFECYCLE_LOCK_OWNED=0
-  SECONDMATE_HOME_LIFECYCLE_LOCK=
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
@@ -1787,6 +1796,65 @@ ID=${POS[0]}
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
+SECONDMATE_PROJECTS=
+
+if [ "$RECOVERY_ACCOUNT" = 1 ] && [ "$(spawn_preflight_meta_value kind)" = secondmate ]; then
+  KIND=secondmate
+fi
+
+if [ "$KIND" = secondmate ]; then
+  case "${POS[1]:-}" in
+    ''|claude|codex|opencode|pi|grok)
+      ARG3=${POS[1]:-}
+      ;;
+    *' '*)
+      if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
+        FIRSTMATE_HOME=${POS[1]}
+        ARG3=${POS[2]:-}
+      else
+        ARG3=${POS[1]}
+      fi
+      ;;
+    *)
+      FIRSTMATE_HOME=${POS[1]}
+      ARG3=${POS[2]:-}
+      ;;
+  esac
+  if [ -z "$FIRSTMATE_HOME" ] && [ "$SPAWN_META_PRESENT" = 1 ]; then
+    FIRSTMATE_HOME=$(spawn_preflight_meta_value home)
+  fi
+  REGISTERED_SECONDMATE_HOME=$(fm_secondmate_registry_query "$DATA/secondmates.md" query "$ID" home) || {
+    echo "error: secondmate registry is malformed, missing, or does not uniquely register $ID" >&2
+    exit 1
+  }
+  SECONDMATE_PROJECTS=$(fm_secondmate_registry_query "$DATA/secondmates.md" query "$ID" projects) || {
+    echo "error: secondmate project registration is unprovable for $ID" >&2
+    exit 1
+  }
+  REGISTERED_SECONDMATE_HOME=$(fm_checkout_trusted_dir "$REGISTERED_SECONDMATE_HOME") || {
+    echo "error: registered secondmate home is unavailable or redirected for $ID" >&2
+    exit 1
+  }
+  if [ -n "$FIRSTMATE_HOME" ]; then
+    FIRSTMATE_HOME=$(fm_checkout_trusted_dir "$FIRSTMATE_HOME") || {
+      echo "error: requested secondmate home is unavailable or redirected for $ID" >&2
+      exit 1
+    }
+    [ "$FIRSTMATE_HOME" = "$REGISTERED_SECONDMATE_HOME" ] || {
+      echo "error: requested secondmate home does not match the exact registration for $ID" >&2
+      exit 1
+    }
+  else
+    FIRSTMATE_HOME=$REGISTERED_SECONDMATE_HOME
+  fi
+  ACTIVE_HOME_CANONICAL=$(fm_checkout_trusted_dir "$FM_HOME") || exit 1
+  if [ "$FIRSTMATE_HOME" != "$ACTIVE_HOME_CANONICAL" ]; then
+    SECONDMATE_TARGET_HOME_LIFECYCLE_LOCK=$(fm_secondmate_home_lifecycle_lock_acquire "$CHECKOUT_LOCK_ROOT" "$FIRSTMATE_HOME") || exit 1
+  fi
+else
+  PROJ=${POS[1]:-}
+  ARG3=${POS[2]:-}
+fi
 
 if [ -z "$LIFECYCLE_LOCK" ]; then
   LIFECYCLE_LOCK=$(fm_account_lifecycle_lock_acquire "$STATE" "$ID") || exit 1
@@ -1814,29 +1882,6 @@ if [ -e "$STATE/$ID.check.sh" ] || [ -L "$STATE/$ID.check.sh" ]; then ORIGINAL_C
 if [ -e "$STATE/$ID.pi-ext.ts" ] || [ -L "$STATE/$ID.pi-ext.ts" ]; then ORIGINAL_PI_EXT_PRESENT=1; else ORIGINAL_PI_EXT_PRESENT=0; fi
 if [ -e "$STATE/$ID.grok-turnend-token" ] || [ -L "$STATE/$ID.grok-turnend-token" ]; then ORIGINAL_GROK_TOKEN_PRESENT=1; else ORIGINAL_GROK_TOKEN_PRESENT=0; fi
 if [ -e "/tmp/fm-$ID" ] || [ -L "/tmp/fm-$ID" ]; then ORIGINAL_TASK_TMP_PRESENT=1; else ORIGINAL_TASK_TMP_PRESENT=0; fi
-
-if [ "$KIND" = secondmate ]; then
-  case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
-      ARG3=${POS[1]:-}
-      ;;
-    *' '*)
-      if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
-        FIRSTMATE_HOME=${POS[1]}
-        ARG3=${POS[2]:-}
-      else
-        ARG3=${POS[1]}
-      fi
-      ;;
-    *)
-      FIRSTMATE_HOME=${POS[1]}
-      ARG3=${POS[2]:-}
-      ;;
-  esac
-else
-  PROJ=${POS[1]:-}
-  ARG3=${POS[2]:-}
-fi
 
 if [ "$RECOVERY_ACCOUNT" = 1 ]; then
   RECORDED_KIND=$(fm_meta_get "$RESUME_META" kind)
@@ -1989,7 +2034,15 @@ if [ "$RECOVERY_ACCOUNT" = 1 ]; then
     [ "$MODEL" = default ] && MODEL=
     [ "$EFFORT" = default ] && EFFORT=
     if [ "$KIND" = secondmate ]; then
-      FIRSTMATE_HOME=$(fm_meta_get "$RESUME_META" home)
+      RECORDED_SECONDMATE_HOME=$(fm_meta_get "$RESUME_META" home)
+      RECORDED_SECONDMATE_HOME=$(fm_checkout_trusted_dir "$RECORDED_SECONDMATE_HOME") || {
+        echo "error: managed recovery secondmate home is unavailable or redirected for $ID" >&2
+        exit 1
+      }
+      [ "$RECORDED_SECONDMATE_HOME" = "$FIRSTMATE_HOME" ] || {
+        echo "error: managed recovery secondmate home does not match registration for $ID" >&2
+        exit 1
+      }
     else
       PROJ=$(fm_meta_get "$RESUME_META" project)
     fi
@@ -2500,16 +2553,24 @@ validate_firstmate_operational_dirs() {
 }
 
 if [ "$KIND" = secondmate ]; then
-  if [ -z "$FIRSTMATE_HOME" ] && [ -f "$STATE/$ID.meta" ]; then
-    FIRSTMATE_HOME=$(grep '^home=' "$STATE/$ID.meta" | cut -d= -f2- || true)
-  fi
-  if [ -z "$FIRSTMATE_HOME" ]; then
-    FIRSTMATE_HOME=$(secondmate_registry_value "$ID" home || true)
-  fi
-fi
-
-if [ "$KIND" = secondmate ]; then
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
+  CURRENT_REGISTERED_SECONDMATE_HOME=$(secondmate_registry_value "$ID" home) || {
+    echo "error: secondmate registration became unprovable for $ID" >&2
+    exit 1
+  }
+  CURRENT_REGISTERED_SECONDMATE_HOME=$(fm_checkout_trusted_dir "$CURRENT_REGISTERED_SECONDMATE_HOME") || exit 1
+  [ "$CURRENT_REGISTERED_SECONDMATE_HOME" = "$FIRSTMATE_HOME" ] || {
+    echo "error: secondmate registration changed while spawn waited for lifecycle ownership" >&2
+    exit 1
+  }
+  CURRENT_SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects) || {
+    echo "error: secondmate project registration became unprovable for $ID" >&2
+    exit 1
+  }
+  [ "$CURRENT_SECONDMATE_PROJECTS" = "$SECONDMATE_PROJECTS" ] || {
+    echo "error: secondmate project registration changed while spawn waited for lifecycle ownership" >&2
+    exit 1
+  }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
   WT="$PROJ_ABS"
 else
@@ -3162,14 +3223,12 @@ fi
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
 # merge, so scout teardown ignores mode.
-SECONDMATE_PROJECTS=
 if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then
   MODE=$RECORDED_MODE
   YOLO=$RECORDED_YOLO
 elif [ "$KIND" = secondmate ]; then
   MODE=secondmate
   YOLO=off
-  SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
 else
   PROJ_NAME=$(basename "$PROJ_ABS")
   read -r MODE YOLO <<EOF
@@ -3534,6 +3593,10 @@ CONTINUATION_PROMPT_FILE=
 META_BACKUP=
 discard_existing_artifact_backup
 [ "$LIFECYCLE_LOCK_OWNED" != 1 ] || [ -z "$LIFECYCLE_LOCK" ] || fm_account_lifecycle_lock_release "$LIFECYCLE_LOCK" || exit 1
+if [ -n "$SECONDMATE_TARGET_HOME_LIFECYCLE_LOCK" ]; then
+  fm_account_lifecycle_lock_release "$SECONDMATE_TARGET_HOME_LIFECYCLE_LOCK" || exit 1
+  SECONDMATE_TARGET_HOME_LIFECYCLE_LOCK=
+fi
 [ -z "$SECONDMATE_HOME_LIFECYCLE_LOCK" ] || fm_account_lifecycle_lock_release "$SECONDMATE_HOME_LIFECYCLE_LOCK" || exit 1
 LIFECYCLE_LOCK=
 LIFECYCLE_LOCK_OWNED=0

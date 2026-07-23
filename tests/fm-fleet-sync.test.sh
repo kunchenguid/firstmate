@@ -920,6 +920,24 @@ test_non_signature_fetch_failure_is_not_retried() {
   pass "a non-packed-refs.lock fetch failure keeps today's behavior (no retry)"
 }
 
+test_expected_origin_is_rechecked_inside_mutation_lock() {
+  local home clone original replacement before out
+  home=$(new_home)
+  clone=$(build_pair "$home" origin-lock-proof)
+  replacement=$(build_pair "$home" origin-lock-replacement)
+  original=$(git -C "$clone" remote get-url origin)
+  before=$(head_sha "$clone")
+  out=$(FM_FLEET_SYNC_EXPECTED_ORIGIN_KIND=origin \
+    FM_FLEET_SYNC_EXPECTED_ORIGIN_VALUE="$original" \
+    FM_FLEET_SYNC_TEST=1 \
+    FM_FLEET_SYNC_TEST_DRIFT_ORIGIN_TO="$(git -C "$replacement" remote get-url origin)" \
+    run_sync "$home" "$clone")
+  assert_contains "$out" "checkout repository or origin identity drifted before mutation" \
+    "origin drift under the checkout lock was not surfaced"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "origin drift under lock mutated the checkout"
+  pass "expected origin is rechecked under the checkout mutation lock"
+}
+
 if [ "${FM_TEST_FOCUSED:-}" = review-round-6 ]; then
   test_live_default_probe_overrides_stale_origin_head
   test_direct_sync_honors_shared_checkout_lock
@@ -953,6 +971,11 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-authority ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-durable-identity ]; then
+  test_expected_origin_is_rechecked_inside_mutation_lock
+  exit 0
+fi
+
 test_status_failure_is_never_treated_as_clean
 test_direct_and_batch_sync_reject_nested_repository_paths
 test_direct_and_batch_sync_reject_symlink_repository_paths
@@ -983,3 +1006,4 @@ test_live_packed_refs_lock_is_never_removed
 test_live_git_cwd_in_clone_dir_blocks_removal
 test_transient_packed_refs_lock_self_clears
 test_non_signature_fetch_failure_is_not_retried
+test_expected_origin_is_rechecked_inside_mutation_lock

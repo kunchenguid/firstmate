@@ -90,8 +90,12 @@ FM_HOME_CANONICAL=$(fm_checkout_trusted_dir "$FM_HOME") || {
   echo "error: checkout-refresh home identity is unavailable: $FM_HOME" >&2
   exit 1
 }
-FM_HOME_KEY=$(fm_checkout_stable_path_key "$FM_HOME_CANONICAL" directory 0 16) || {
-  echo "error: checkout-refresh home lock identity is unavailable: $FM_HOME" >&2
+FM_HOME_KEY=$(fm_checkout_hash_value "$FM_HOME_CANONICAL" 16) || {
+  echo "error: checkout-refresh logical home identity is unavailable: $FM_HOME" >&2
+  exit 1
+}
+FM_HOME_PHYSICAL_KEY=$(fm_checkout_physical_path_key "$FM_HOME_CANONICAL" directory 16) || {
+  echo "error: checkout-refresh physical home identity is unavailable: $FM_HOME" >&2
   exit 1
 }
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
@@ -123,10 +127,26 @@ else
   TREEHOUSE_ROOT_INVALID=0
 fi
 STATE_BASE="${FM_CHECKOUT_REFRESH_STATE_BASE:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/checkout-refresh}"
+DEFAULT_STATE_ROOT="$STATE_BASE/homes/$FM_HOME_KEY"
+PHYSICAL_STATE_ROOT="$STATE_BASE/homes/$FM_HOME_PHYSICAL_KEY"
+CUSTOM_STATE_ROOT=0
+USING_PHYSICAL_STATE_ROOT=0
 if [ -n "${FM_CHECKOUT_REFRESH_STATE_ROOT:-}" ]; then
-  STATE_ROOT=$FM_CHECKOUT_REFRESH_STATE_ROOT
+  case "$FM_CHECKOUT_REFRESH_STATE_ROOT" in
+    "$DEFAULT_STATE_ROOT")
+      STATE_ROOT=$DEFAULT_STATE_ROOT
+      ;;
+    "$PHYSICAL_STATE_ROOT")
+      STATE_ROOT=$PHYSICAL_STATE_ROOT
+      USING_PHYSICAL_STATE_ROOT=1
+      ;;
+    *)
+      STATE_ROOT=$FM_CHECKOUT_REFRESH_STATE_ROOT
+      CUSTOM_STATE_ROOT=1
+      ;;
+  esac
 else
-  STATE_ROOT="$STATE_BASE/homes/$FM_HOME_KEY"
+  STATE_ROOT=$DEFAULT_STATE_ROOT
 fi
 LOCK_ROOT=$(fm_checkout_lock_root "$STATE_BASE")
 INTERVAL=${FM_CHECKOUT_REFRESH_INTERVAL:-60}
@@ -137,10 +157,14 @@ ACQUIRE_TIMEOUT=${FM_TREEHOUSE_ACQUIRE_TIMEOUT:-60}
 PLATFORM=${FM_CHECKOUT_REFRESH_PLATFORM:-$(uname)}
 LABEL_BASE=com.firstmate.checkout-refresh
 LABEL=${FM_CHECKOUT_REFRESH_LABEL:-$LABEL_BASE.$FM_HOME_KEY}
+PHYSICAL_LABEL=$LABEL_BASE.$FM_HOME_PHYSICAL_KEY
 LEGACY_LABEL=${FM_CHECKOUT_REFRESH_LEGACY_LABEL:-$LABEL_BASE}
 LAUNCH_AGENTS_DIR=${FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}
 PLIST="$LAUNCH_AGENTS_DIR/$LABEL.plist"
+PHYSICAL_PLIST="$LAUNCH_AGENTS_DIR/$PHYSICAL_LABEL.plist"
 LAUNCHCTL=${FM_CHECKOUT_REFRESH_LAUNCHCTL:-launchctl}
+HOME_STATE_NAMESPACE_MOVED=0
+PHYSICAL_AGENT_STOPPED=0
 
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
@@ -198,8 +222,8 @@ expand_config_path() {
 
 parse_config() {
   local paths_file=$1 scans_file=$2 line directive value expanded failed=0 config_lexical config_parent
-  : > "$paths_file"
-  : > "$scans_file"
+  manifest_create "$paths_file" || return 1
+  manifest_create "$scans_file" || return 1
   config_lexical=$(fm_checkout_lexical_path "$CONFIG_FILE" 1) || {
     echo "checkout-refresh: skipped: unsafe config path $CONFIG_FILE" >&2
     return 1
@@ -236,14 +260,14 @@ parse_config() {
     case "$directive" in
       path)
         if expanded=$(expand_config_path "$value"); then
-          printf '%s\n' "$expanded" >> "$paths_file"
+          manifest_append "$paths_file" "$expanded" || failed=1
         else
           failed=1
         fi
         ;;
       scan)
         if expanded=$(expand_config_path "$value"); then
-          printf '%s\n' "$expanded" >> "$scans_file"
+          manifest_append "$scans_file" "$expanded" || failed=1
         else
           failed=1
         fi
@@ -628,9 +652,38 @@ except OSError:
 PY
 }
 
+manifest_create() {
+  : > "$1"
+}
+
+manifest_append() {
+  [ "${FM_CHECKOUT_REFRESH_TEST:-0}:${FM_CHECKOUT_TEST_MANIFEST_FAILURE:-}" != "1:append" ] || return 1
+  printf '%s\n' "$2" >> "$1"
+}
+
+manifest_append_pair() {
+  [ "${FM_CHECKOUT_REFRESH_TEST:-0}:${FM_CHECKOUT_TEST_MANIFEST_FAILURE:-}" != "1:append" ] || return 1
+  printf '%s\t%s\n' "$2" "$3" >> "$1"
+}
+
+manifest_sort_unique() {
+  local path=$1 sorted
+  [ "${FM_CHECKOUT_REFRESH_TEST:-0}:${FM_CHECKOUT_TEST_MANIFEST_FAILURE:-}" != "1:sort" ] || return 1
+  sorted=$(mktemp "${path}.sorted.XXXXXX") || return 1
+  if ! sort -u "$path" > "$sorted" || ! mv "$sorted" "$path"; then
+    rm -f "$sorted" || true
+    return 1
+  fi
+}
+
+cleanup_discovery_tmp() {
+  [ "${FM_CHECKOUT_REFRESH_TEST:-0}:${FM_CHECKOUT_TEST_MANIFEST_FAILURE:-}" != "1:cleanup" ] || return 1
+  rm -rf "$1"
+}
+
 discover() {
   local tmp seeds origins scans scan_candidates configured_paths configured_scans treehouse_paths project_paths
-  local path project worktree pool treehouse_state main root candidate url failed=0
+  local path project worktree pool treehouse_state main root candidate candidate_output url failed=0
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-checkout-refresh-discover.XXXXXX") || return 1
   seeds="$tmp/seeds"
   origins="$tmp/origins"
@@ -640,26 +693,26 @@ discover() {
   configured_scans="$tmp/configured-scans"
   treehouse_paths="$tmp/treehouse-worktrees"
   project_paths="$tmp/active-projects"
-  : > "$seeds"
-  : > "$origins"
-  : > "$scans"
-  : > "$scan_candidates"
+  manifest_create "$seeds" || { cleanup_discovery_tmp "$tmp" || true; return 1; }
+  manifest_create "$origins" || { cleanup_discovery_tmp "$tmp" || true; return 1; }
+  manifest_create "$scans" || { cleanup_discovery_tmp "$tmp" || true; return 1; }
+  manifest_create "$scan_candidates" || { cleanup_discovery_tmp "$tmp" || true; return 1; }
   if ! parse_config "$configured_paths" "$configured_scans"; then
-    rm -rf "$tmp"
+    cleanup_discovery_tmp "$tmp" || true
     return 1
   fi
   if ! treehouse_worktree_paths > "$treehouse_paths"; then
-    rm -rf "$tmp"
+    cleanup_discovery_tmp "$tmp" || true
     return 1
   fi
   if ! active_project_paths > "$project_paths"; then
-    rm -rf "$tmp"
+    cleanup_discovery_tmp "$tmp" || true
     return 1
   fi
   while IFS= read -r project; do
     [ -n "$project" ] || continue
     if main=$(exact_git_root "$project"); then
-      printf '%s\n' "$main" >> "$seeds"
+      manifest_append "$seeds" "$main" || failed=1
     else
       echo "checkout-refresh: skipped: active-home project is not an exact inspectable Git repository root: $project" >&2
       failed=1
@@ -669,7 +722,7 @@ discover() {
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     if main=$(exact_git_root "$path"); then
-      printf '%s\n' "$main" >> "$seeds"
+      manifest_append "$seeds" "$main" || failed=1
     else
       echo "checkout-refresh: skipped: configured checkout is not an exact inspectable Git repository root: $path" >&2
       failed=1
@@ -679,13 +732,13 @@ discover() {
   while IFS=$'\t' read -r treehouse_state pool worktree; do
     [ -n "$worktree" ] || continue
     if main=$(backing_checkout "$worktree" "$pool" "$treehouse_state" 2>/dev/null); then
-      printf '%s\n' "$main" >> "$seeds"
+      manifest_append "$seeds" "$main" || failed=1
     else
       echo "checkout-refresh: skipped: Treehouse worktree identity or registration is not inspectable: $worktree" >&2
       failed=1
     fi
   done < "$treehouse_paths"
-  sort -u "$seeds" -o "$seeds"
+  manifest_sort_unique "$seeds" || failed=1
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     if ! inspect_checkout_origin "$path"; then
@@ -694,13 +747,13 @@ discover() {
       continue
     fi
     if [ "$CHECKOUT_ORIGIN_KIND" = origin ]; then
-      printf '%s\n' "$CHECKOUT_ORIGIN_VALUE" >> "$origins"
+      manifest_append "$origins" "$CHECKOUT_ORIGIN_VALUE" || failed=1
     fi
   done < "$seeds"
-  sort -u "$origins" -o "$origins"
+  manifest_sort_unique "$origins" || failed=1
 
   if main=$(canonical_dir "$HOME" 2>/dev/null); then
-    printf '%s\n' "$main" >> "$scans"
+    manifest_append "$scans" "$main" || failed=1
   else
     echo "checkout-refresh: skipped: home scan root is not inspectable: $HOME" >&2
     failed=1
@@ -708,20 +761,27 @@ discover() {
   while IFS= read -r root; do
     [ -n "$root" ] || continue
     if main=$(canonical_dir "$root" 2>/dev/null); then
-      printf '%s\n' "$main" >> "$scans"
+      manifest_append "$scans" "$main" || failed=1
     else
       echo "checkout-refresh: skipped: configured scan root is not a directory: $root" >&2
       failed=1
     fi
   done < "$configured_scans"
-  sort -u "$scans" -o "$scans"
+  manifest_sort_unique "$scans" || failed=1
 
   while IFS= read -r root; do
     [ -n "$root" ] || continue
-    if ! scan_root_candidates "$root" >> "$scan_candidates"; then
+    candidate_output=$(scan_root_candidates "$root") || {
       echo "checkout-refresh: skipped: scan root is unreadable or cannot be enumerated: $root" >&2
       failed=1
-    fi
+      continue
+    }
+    while IFS= read -r candidate; do
+      [ -n "$candidate" ] || continue
+      manifest_append "$scan_candidates" "$candidate" || failed=1
+    done <<EOF
+$candidate_output
+EOF
   done < "$scans"
 
   while IFS= read -r candidate; do
@@ -749,21 +809,28 @@ discover() {
     if [ ! -s "$origins" ] || ! grep -Fxq -- "$url" "$origins"; then
       continue
     fi
-    printf '%s\n' "$main" >> "$seeds"
+    manifest_append "$seeds" "$main" || failed=1
     if [ -n "${DISCOVERY_IDENTITIES_FILE:-}" ]; then
-      printf '%s\t%s\n' "$main" "$url" >> "$DISCOVERY_IDENTITIES_FILE"
+      manifest_append_pair "$DISCOVERY_IDENTITIES_FILE" "$main" "$url" || failed=1
     fi
   done < "$scan_candidates"
 
   if [ -n "${DISCOVERY_IDENTITIES_FILE:-}" ]; then
-    sort -u "$DISCOVERY_IDENTITIES_FILE" -o "$DISCOVERY_IDENTITIES_FILE"
+    manifest_sort_unique "$DISCOVERY_IDENTITIES_FILE" || failed=1
   fi
   [ "$failed" -eq 0 ] || {
-    rm -rf "$tmp"
+    cleanup_discovery_tmp "$tmp" || true
     return 1
   }
-  sort -u "$seeds"
-  rm -rf "$tmp"
+  manifest_sort_unique "$seeds" || {
+    cleanup_discovery_tmp "$tmp" || true
+    return 1
+  }
+  cat "$seeds" || {
+    cleanup_discovery_tmp "$tmp" || true
+    return 1
+  }
+  cleanup_discovery_tmp "$tmp"
 }
 
 acquire_worktree() {
@@ -839,7 +906,9 @@ EOF
 }
 
 checkout_key() {
-  fm_checkout_stable_path_key "$1" directory 0 24
+  local checkout
+  checkout=$(exact_git_root "$1") || return 1
+  fm_checkout_hash_value "$checkout" 24
 }
 
 read_epoch() {
@@ -947,6 +1016,94 @@ ensure_state_root() {
     || { echo "error: unsafe checkout-refresh state directory: $STATE_ROOT" >&2; return 1; }
 }
 
+prepare_home_state_namespace() {
+  local parent command=${1:-}
+  [ "$CUSTOM_STATE_ROOT" -eq 0 ] || return 0
+  [ "$DEFAULT_STATE_ROOT" != "$PHYSICAL_STATE_ROOT" ] || return 0
+  parent=${DEFAULT_STATE_ROOT%/*}
+  if { [ -e "$DEFAULT_STATE_ROOT" ] || [ -L "$DEFAULT_STATE_ROOT" ]; } \
+    && { [ -e "$PHYSICAL_STATE_ROOT" ] || [ -L "$PHYSICAL_STATE_ROOT" ]; }; then
+    echo "error: ambiguous checkout-refresh home state namespaces for $FM_HOME_CANONICAL" >&2
+    return 1
+  fi
+  if [ "$USING_PHYSICAL_STATE_ROOT" -eq 1 ]; then
+    [ -d "$PHYSICAL_STATE_ROOT" ] && [ ! -L "$PHYSICAL_STATE_ROOT" ] || {
+      echo "error: unsafe physical checkout-refresh home state namespace: $PHYSICAL_STATE_ROOT" >&2
+      return 1
+    }
+    return 0
+  fi
+  if [ -e "$DEFAULT_STATE_ROOT" ] || [ -L "$DEFAULT_STATE_ROOT" ]; then
+    [ -d "$DEFAULT_STATE_ROOT" ] && [ ! -L "$DEFAULT_STATE_ROOT" ] || {
+      echo "error: unsafe logical checkout-refresh home state namespace: $DEFAULT_STATE_ROOT" >&2
+      return 1
+    }
+  fi
+  if { [ -e "$PHYSICAL_STATE_ROOT" ] || [ -L "$PHYSICAL_STATE_ROOT" ] \
+      || [ -e "$PHYSICAL_PLIST" ] || [ -L "$PHYSICAL_PLIST" ]; } \
+    && [ "$command" != ensure ] && [ "$command" != install ]; then
+    echo "error: checkout-refresh physical state requires an ensure or install migration before use" >&2
+    return 1
+  fi
+  if [ -e "$PHYSICAL_STATE_ROOT" ] || [ -L "$PHYSICAL_STATE_ROOT" ]; then
+    [ -d "$PHYSICAL_STATE_ROOT" ] && [ ! -L "$PHYSICAL_STATE_ROOT" ] || {
+      echo "error: unsafe physical checkout-refresh home state namespace: $PHYSICAL_STATE_ROOT" >&2
+      return 1
+    }
+    mkdir -p "$parent" || return 1
+    [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  fi
+  if [ -e "$PHYSICAL_PLIST" ] || [ -L "$PHYSICAL_PLIST" ]; then
+    if [ ! -e "$PHYSICAL_STATE_ROOT" ] && [ ! -L "$PHYSICAL_STATE_ROOT" ] \
+      && [ ! -e "$DEFAULT_STATE_ROOT" ] && [ ! -L "$DEFAULT_STATE_ROOT" ]; then
+      echo "error: physical checkout-refresh LaunchAgent has no durable state namespace to migrate" >&2
+      return 1
+    fi
+    [ "$PLATFORM" = Darwin ] || {
+      echo "error: checkout-refresh physical LaunchAgent migration requires macOS" >&2
+      return 1
+    }
+    command -v "$LAUNCHCTL" >/dev/null 2>&1 || return 1
+    validate_launch_agent_namespaces || return 1
+    if "$LAUNCHCTL" print "gui/$(id -u)/$PHYSICAL_LABEL" >/dev/null 2>&1; then
+      "$LAUNCHCTL" bootout "gui/$(id -u)/$PHYSICAL_LABEL" >/dev/null 2>&1 || {
+        echo "error: cannot quiesce the physical checkout-refresh LaunchAgent before migration" >&2
+        return 1
+      }
+      PHYSICAL_AGENT_STOPPED=1
+    fi
+  fi
+  if [ -e "$PHYSICAL_STATE_ROOT" ] || [ -L "$PHYSICAL_STATE_ROOT" ]; then
+    mv "$PHYSICAL_STATE_ROOT" "$DEFAULT_STATE_ROOT" || {
+      echo "error: cannot migrate checkout-refresh home state to its logical namespace" >&2
+      rollback_home_state_namespace_migration || true
+      return 1
+    }
+    HOME_STATE_NAMESPACE_MOVED=1
+  fi
+}
+
+rollback_home_state_namespace_migration() {
+  local failed=0
+  if [ "$HOME_STATE_NAMESPACE_MOVED" -eq 1 ]; then
+    if [ -e "$PHYSICAL_STATE_ROOT" ] || [ -L "$PHYSICAL_STATE_ROOT" ] \
+      || ! mv "$DEFAULT_STATE_ROOT" "$PHYSICAL_STATE_ROOT"; then
+      failed=1
+    else
+      HOME_STATE_NAMESPACE_MOVED=0
+    fi
+  fi
+  if [ "$PHYSICAL_AGENT_STOPPED" -eq 1 ]; then
+    if [ -f "$PHYSICAL_PLIST" ] && [ ! -L "$PHYSICAL_PLIST" ] \
+      && "$LAUNCHCTL" bootstrap "gui/$(id -u)" "$PHYSICAL_PLIST" >/dev/null 2>&1; then
+      PHYSICAL_AGENT_STOPPED=0
+    else
+      failed=1
+    fi
+  fi
+  [ "$failed" -eq 0 ]
+}
+
 ensure_lock_roots() {
   ensure_state_root || return 1
   fm_checkout_lock_prepare "$LOCK_ROOT" \
@@ -1020,15 +1177,15 @@ prepare_hygiene_discovery() {
     [ -n "$worktree" ] || continue
     if backing_checkout "$worktree" "$pool" "$treehouse_state" >/dev/null 2>&1 \
         && canonical=$(exact_git_root "$worktree" 2>/dev/null); then
-      printf '%s\n' "$canonical" >> "$hygiene_file"
+      manifest_append "$hygiene_file" "$canonical" || failed=1
     else
       echo "checkout-refresh: skipped: Treehouse worktree identity or registration is not inspectable: $worktree" >&2
       failed=1
     fi
   done < "$treehouse_paths"
-  rm -f "$treehouse_paths"
+  rm -f "$treehouse_paths" || failed=1
   [ "$failed" -eq 0 ] || return 1
-  sort -u "$hygiene_file" -o "$hygiene_file"
+  manifest_sort_unique "$hygiene_file"
 }
 
 clear_stale_hygiene_alerts() {
@@ -1045,10 +1202,17 @@ clear_stale_hygiene_alerts() {
 
 sync_checkout() {
   local checkout=$1 output_file=$2 prune=${3:-0}
-  local status
+  local status physical
+  physical=$(fm_checkout_physical_path_identity "$checkout" directory) || {
+    printf '%s: skipped: refresh physical identity cannot be inspected\n' "$checkout" > "$output_file"
+    return 1
+  }
   if (
     export FM_FLEET_PRUNE="$prune"
     export FM_CHECKOUT_REFRESH_SYNC_TIMEOUT="$SYNC_TIMEOUT"
+    export FM_FLEET_SYNC_EXPECTED_ORIGIN_KIND="$CHECKOUT_ORIGIN_KIND"
+    export FM_FLEET_SYNC_EXPECTED_ORIGIN_VALUE="$CHECKOUT_ORIGIN_VALUE"
+    export FM_FLEET_SYNC_EXPECTED_PHYSICAL_IDENTITY="$physical"
     "$SCRIPT_DIR/fm-fleet-sync.sh" "$checkout"
   ) > "$output_file" 2>&1; then
     status=0
@@ -1093,14 +1257,53 @@ resolve_checkout_refresh_authority() {
   fi
 }
 
+migrate_checkout_identity_state() {
+  local checkout=$1 key=$2 destination="$STATE_ROOT/$key.identity"
+  local candidate source_prefix destination_prefix match= count=0 extension
+  for candidate in "$STATE_ROOT"/*.identity; do
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ -r "$candidate" ] || return 1
+    [ "$(sed -n '1p' "$candidate")" = "$checkout" ] || continue
+    match=$candidate
+    count=$((count + 1))
+  done
+  [ "$count" -le 1 ] || return 1
+  [ "$count" -eq 1 ] || return 0
+  [ "$match" != "$destination" ] || return 0
+  [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 1
+  source_prefix=${match%.identity}
+  destination_prefix="$STATE_ROOT/$key"
+  for extension in identity tip last alert hygiene-alert; do
+    candidate="$source_prefix.$extension"
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ -r "$candidate" ] || return 1
+    [ ! -e "$destination_prefix.$extension" ] && [ ! -L "$destination_prefix.$extension" ] || return 1
+    atomic_copy "$candidate" "$destination_prefix.$extension" || return 1
+  done
+  for extension in identity tip last alert hygiene-alert; do
+    candidate="$source_prefix.$extension"
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+    rm -f "$candidate" || return 1
+  done
+}
+
 validate_covered_checkout_identity() {
-  local checkout=$1 key=$2 tip_file=$3 identity_file current_identity recorded_checkout recorded_identity lines
+  local checkout=$1 key=$2 tip_file=$3 identity_file current_identity current_physical
+  local recorded_checkout recorded_identity recorded_physical lines
   identity_file="$STATE_ROOT/$key.identity"
+  migrate_checkout_identity_state "$checkout" "$key" || {
+    echo "$checkout: skipped: covered checkout identity history is ambiguous or cannot be migrated"
+    return 1
+  }
   if [ "$CHECKOUT_ORIGIN_KIND" = origin ]; then
     current_identity="origin $CHECKOUT_ORIGIN_VALUE"
   else
     current_identity=no-origin
   fi
+  current_physical=$(fm_checkout_physical_path_identity "$checkout" directory) || {
+    echo "$checkout: skipped: covered checkout physical identity cannot be inspected"
+    return 1
+  }
   if [ -e "$identity_file" ] || [ -L "$identity_file" ]; then
     if [ -L "$identity_file" ] || [ ! -f "$identity_file" ] || [ ! -r "$identity_file" ]; then
       echo "$checkout: skipped: covered checkout identity record is unsafe or unreadable"
@@ -1109,7 +1312,9 @@ validate_covered_checkout_identity() {
     lines=$(awk 'END { print NR + 0 }' "$identity_file") || return 1
     recorded_checkout=$(sed -n '1p' "$identity_file") || return 1
     recorded_identity=$(sed -n '2p' "$identity_file") || return 1
-    if [ "$lines" -ne 2 ] || [ "$recorded_checkout" != "$checkout" ] || [ -z "$recorded_identity" ]; then
+    recorded_physical=$(sed -n '3p' "$identity_file") || return 1
+    if { [ "$lines" -ne 2 ] && [ "$lines" -ne 3 ]; } \
+      || [ "$recorded_checkout" != "$checkout" ] || [ -z "$recorded_identity" ]; then
       echo "$checkout: skipped: covered checkout identity record is malformed"
       return 1
     fi
@@ -1117,13 +1322,23 @@ validate_covered_checkout_identity() {
       echo "$checkout: skipped: covered checkout origin identity drifted from $recorded_identity to $current_identity"
       return 1
     fi
+    if [ "$lines" -eq 3 ] && [ "$recorded_physical" != "$current_physical" ]; then
+      echo "$checkout: skipped: covered checkout physical identity drifted at $checkout"
+      return 1
+    fi
+    if [ "$lines" -eq 2 ]; then
+      atomic_write "$identity_file" "$checkout" "$current_identity" "$current_physical" || {
+        echo "$checkout: skipped: covered checkout physical identity cannot be persisted"
+        return 1
+      }
+    fi
     return 0
   fi
   if [ "$current_identity" = no-origin ] && [ -e "$tip_file" ]; then
     echo "$checkout: skipped: covered checkout lost its previously tracked origin identity"
     return 1
   fi
-  atomic_write "$identity_file" "$checkout" "$current_identity" || {
+  atomic_write "$identity_file" "$checkout" "$current_identity" "$current_physical" || {
     echo "$checkout: skipped: covered checkout identity cannot be persisted"
     return 1
   }
@@ -1223,7 +1438,11 @@ run_once() {
     record_run_result unhealthy "$scheduled" || true
     return 1
   }
-  : > "$identities"
+  manifest_create "$identities" || {
+    rm -f "$discovery" "$identities"
+    record_run_result unhealthy "$scheduled" || true
+    return 1
+  }
   hygiene=$(mktemp "$STATE_ROOT/.hygiene-discover.XXXXXX") || {
     rm -f "$discovery" "$identities"
     record_run_result unhealthy "$scheduled" || true
@@ -1245,7 +1464,11 @@ run_once() {
     record_run_result unhealthy "$scheduled" || true
     return 1
   fi
-  rm -f "$identities"
+  if ! rm -f "$identities"; then
+    rm -f "$discovery" "$hygiene" || true
+    record_run_result unhealthy "$scheduled" || true
+    return 1
+  fi
   prepare_hygiene_discovery "$discovery" "$hygiene" || {
     rm -f "$discovery" "$hygiene"
     record_run_result unhealthy "$scheduled" || true
@@ -1417,7 +1640,10 @@ EOF
     esac
   done < "$discovery"
 
-  rm -f "$discovery" "$hygiene"
+  if ! rm -f "$discovery" "$hygiene"; then
+    coverage_failed=1
+    status=1
+  fi
   if [ "$hygiene_failed" -ne 0 ]; then
     coverage_failed=1
     status=1
@@ -1710,6 +1936,38 @@ remove_matching_legacy_launch_agent() {
   rm -f "$legacy_plist"
 }
 
+physical_launch_agent_matches_home() {
+  [ "$PHYSICAL_LABEL" != "$LABEL" ] || return 1
+  [ -f "$PHYSICAL_PLIST" ] && [ ! -L "$PHYSICAL_PLIST" ] || return 1
+  grep -Fq "<string>$(xml_escape "$SCRIPT_DIR/fm-checkout-refresh.sh")</string>" "$PHYSICAL_PLIST" \
+    && grep -Fq "<key>FM_HOME</key><string>$(xml_escape "$FM_HOME_CANONICAL")</string>" "$PHYSICAL_PLIST" \
+    && grep -Fq "<key>FM_CHECKOUT_REFRESH_STATE_ROOT</key><string>$(xml_escape "$PHYSICAL_STATE_ROOT")</string>" "$PHYSICAL_PLIST"
+}
+
+validate_launch_agent_namespaces() {
+  [ "$PHYSICAL_LABEL" != "$LABEL" ] || return 0
+  if { [ -e "$PLIST" ] || [ -L "$PLIST" ]; } \
+    && { [ -e "$PHYSICAL_PLIST" ] || [ -L "$PHYSICAL_PLIST" ]; }; then
+    echo "error: ambiguous logical and physical checkout-refresh LaunchAgents for $FM_HOME_CANONICAL" >&2
+    return 1
+  fi
+  if [ -e "$PHYSICAL_PLIST" ] || [ -L "$PHYSICAL_PLIST" ]; then
+    physical_launch_agent_matches_home || {
+      echo "error: unsafe or mismatched physical checkout-refresh LaunchAgent at $PHYSICAL_PLIST" >&2
+      return 1
+    }
+  fi
+}
+
+remove_matching_physical_launch_agent() {
+  local domain=$1
+  [ "$PHYSICAL_LABEL" != "$LABEL" ] || return 0
+  [ -e "$PHYSICAL_PLIST" ] || [ -L "$PHYSICAL_PLIST" ] || return 0
+  physical_launch_agent_matches_home || return 1
+  "$LAUNCHCTL" bootout "$domain/$PHYSICAL_LABEL" >/dev/null 2>&1 || true
+  rm -f "$PHYSICAL_PLIST"
+}
+
 install_launch_agent() {
   local bash_runtime python_runtime perl_runtime runtime_path temp previous domain
   [ "$PLATFORM" = Darwin ] || {
@@ -1717,6 +1975,7 @@ install_launch_agent() {
     return 1
   }
   command -v "$LAUNCHCTL" >/dev/null 2>&1 || { echo "error: launchctl is unavailable" >&2; return 1; }
+  validate_launch_agent_namespaces || return 1
   bash_runtime=$(command -v bash) || return 1
   python_runtime=$(command -v python3) || return 1
   perl_runtime=$(command -v perl) \
@@ -1769,6 +2028,17 @@ EOF
   "$LAUNCHCTL" bootout "$domain/$LABEL" >/dev/null 2>&1 || true
   if "$LAUNCHCTL" bootstrap "$domain" "$PLIST" \
     && "$LAUNCHCTL" kickstart "$domain/$LABEL"; then
+    if ! remove_matching_physical_launch_agent "$domain"; then
+      "$LAUNCHCTL" bootout "$domain/$LABEL" >/dev/null 2>&1 || true
+      if [ -f "$previous" ]; then
+        mv -f "$previous" "$PLIST" || return 1
+        "$LAUNCHCTL" bootstrap "$domain" "$PLIST" >/dev/null 2>&1 || true
+      else
+        rm -f "$PLIST" || return 1
+      fi
+      echo "error: checkout-refresh physical LaunchAgent cleanup failed; previous definition restored" >&2
+      return 1
+    fi
     rm -f "$previous"
     remove_matching_legacy_launch_agent "$domain"
     return 0
@@ -1786,6 +2056,11 @@ EOF
 ensure_launch_agent() {
   local domain heartbeat coverage_epoch coverage now max_age
   [ "$PLATFORM" = Darwin ] || return 0
+  validate_launch_agent_namespaces || return 1
+  if [ ! -e "$PLIST" ] && [ ! -L "$PLIST" ] \
+    && { [ -e "$PHYSICAL_PLIST" ] || [ -L "$PHYSICAL_PLIST" ]; }; then
+    install_launch_agent || return 1
+  fi
   [ -f "$PLIST" ] && [ ! -L "$PLIST" ] \
     || { echo "checkout-refresh LaunchAgent is not installed" >&2; return 1; }
   grep -Fq "<string>$(xml_escape "$SCRIPT_DIR/fm-checkout-refresh.sh")</string>" "$PLIST" \
@@ -1824,32 +2099,56 @@ ensure_launch_agent() {
 }
 
 scheduler_install() {
+  local status
   case "$PLATFORM" in
-    Darwin) install_launch_agent ;;
+    Darwin)
+      if install_launch_agent; then
+        return 0
+      else
+        status=$?
+      fi
+      rollback_home_state_namespace_migration || true
+      return "$status"
+      ;;
     Linux)
       echo "error: checkout-refresh has no Linux scheduler adapter yet; use run-once from cron or systemd until one is implemented" >&2
+      rollback_home_state_namespace_migration || true
       return 1
       ;;
     *)
       echo "error: checkout-refresh has no scheduler adapter for $PLATFORM" >&2
+      rollback_home_state_namespace_migration || true
       return 1
       ;;
   esac
 }
 
 scheduler_ensure() {
+  local status
   case "$PLATFORM" in
-    Darwin) ensure_launch_agent ;;
+    Darwin)
+      if ensure_launch_agent; then
+        return 0
+      else
+        status=$?
+      fi
+      rollback_home_state_namespace_migration || true
+      return "$status"
+      ;;
     Linux)
       echo "error: checkout-refresh has no Linux scheduler adapter yet" >&2
+      rollback_home_state_namespace_migration || true
       return 1
       ;;
     *)
       echo "error: checkout-refresh has no scheduler adapter for $PLATFORM" >&2
+      rollback_home_state_namespace_migration || true
       return 1
       ;;
   esac
 }
+
+prepare_home_state_namespace "${1:-}" || exit 1
 
 case "${1:-}" in
   discover)

@@ -31,7 +31,7 @@ Hard rules, in priority order:
 2. **Never merge a PR without the captain's explicit word.**
    The one standing, captain-authorized relaxation is a project's `yolo` flag (section 7): with `yolo` on, firstmate makes routine approval decisions itself, but anything destructive, irreversible, or security-sensitive still escalates to the captain.
 3. **Never tear down a worktree that holds unlanded work.**
-   `bin/fm-teardown.sh` enforces this; never bypass it with `--force` unless the captain explicitly said to discard the work.
+   `bin/fm-teardown.sh` enforces this, and `--force` only requests recursive cleanup after every ordinary safety proof succeeds.
    Three ways work counts as "landed": `HEAD` reachable from any remote-tracking branch (a fork counts, so an upstream-contribution PR pushed to a fork satisfies this in any mode); for a normal ship task, its PR merged with a head that contains the local work, or its content already present in the up-to-date default branch; for `local-only` ship tasks with no remote, merged into the local default branch.
    Uncommitted changes are never landed.
    The scout carve-out: a scout task's worktree is declared scratch from the start - its deliverable is the report, and teardown lets the worktree go once the applicable report contract is satisfied (section 7; `docs/report-stack.md`).
@@ -555,7 +555,8 @@ An empty queue is healthy and does not trigger teardown.
 Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or main firstmate explicitly decides to retire that persistent supervisor.
 Load `secondmate-provisioning` before retiring it.
 The safety check is the secondmate's own home: teardown refuses while its `state/*.meta` contains in-flight work.
-With `--force`, teardown is the explicit discard path for child windows, child work, state, route, lease, and home; never use it unless the captain explicitly said to discard the work.
+With `--force`, teardown may recursively retire children only after every identity, endpoint-absence, cleanliness, stash, and landed-work proof succeeds.
+It never authorizes discarding child or parent work.
 
 ### Scout tasks (report instead of PR)
 
@@ -563,7 +564,7 @@ A scout task follows Intake, Spawn, and Supervise exactly as above - scaffold th
 
 - There is no Validate or PR-ready stage. When the crewmate's status says `done`, read `data/<id>/report.md`.
 - Relay the findings to the captain: plain chat for a focused answer, lavish-axi when the report has structure worth a visual (multiple findings, options, a plan).
-- Tear down immediately - no merge gate. For a post-cutover scout, `bin/fm-teardown.sh` requires the report's completion sections and publishes it before discarding the scratch worktree; a missing or incomplete report refuses teardown because the findings are the work product.
+- Tear down immediately - no merge gate. For a post-cutover scout, `bin/fm-teardown.sh` requires the report's completion sections and publishes it before removing the declared scratch worktree; a missing or incomplete report refuses teardown because the findings are the work product.
 - Record it in Done with the report path instead of a PR link using `tasks-axi done` when the default tasks-axi backend is active and compatible, otherwise hand-edit `data/backlog.md` and keep Done to the 10 most recent, then re-evaluate the queue and dispatch only queued work whose blockers are gone and whose time/date gate, if any, has arrived.
 
 When the captain invokes `/reports` or asks to browse, open, search, or summarize completed work, load the `reports` skill.

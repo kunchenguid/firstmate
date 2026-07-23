@@ -104,6 +104,7 @@ prepare_secondmate_home_fixture() {
   git -C "$case_dir/project" remote set-url origin "$ROOT"
   git -C "$case_dir/project" update-ref "refs/remotes/origin/$default" "$root_tip"
   git -C "$case_dir/project" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$default"
+  git clone --quiet "$case_dir/origin.git" "$case_dir/wt/projects/test"
   exclude=$(git -C "$case_dir/wt" rev-parse --git-path info/exclude)
   printf '%s\n' '.fm-secondmate-home' '/data/' '/state/' '/config/' '/projects/' >> "$exclude"
   cat > "$case_dir/fakebin/git" <<'SH'
@@ -3257,6 +3258,49 @@ test_secondmate_registry_duplicate_home_blocks_removal() {
   pass "secondmate retirement rejects registry home aliases"
 }
 
+test_secondmate_retirement_retains_idle_registered_child() {
+  local case_dir child_home parent_home rc
+  case_dir=$(make_case secondmate-idle-registered-child)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  child_home="$case_dir/idle-child-home"
+  mkdir -p "$child_home"
+  parent_home=$(cd "$case_dir/wt" && pwd -P)
+  child_home=$(cd "$child_home" && pwd -P)
+  printf '%s\n' "- idle-child - idle child (home: $child_home; scope: idle; projects: ; added 2026-07-23)" \
+    > "$parent_home/data/secondmates.md"
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "idle registered child must block parent retirement"
+  assert_present "$case_dir/wt" "idle registered child allowed parent home removal"
+  assert_present "$child_home" "idle registered child home was removed"
+  assert_present "$case_dir/state/task-x1.meta" "idle registered child allowed parent metadata removal"
+  assert_grep 'has no inspectable child metadata' "$case_dir/stderr" \
+    "idle registered child was not surfaced"
+  pass "parent retirement retains idle externally registered children"
+}
+
+test_secondmate_retirement_retains_unlanded_project_clone() {
+  local case_dir rc
+  case_dir=$(make_case secondmate-unlanded-project-clone)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  printf 'draft\n' > "$case_dir/wt/projects/test/unlanded.txt"
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "unlanded nested project clone must block retirement"
+  assert_present "$case_dir/wt/projects/test/unlanded.txt" "force retirement discarded nested project work"
+  assert_present "$case_dir/wt" "unlanded nested project clone allowed parent home removal"
+  assert_present "$case_dir/state/task-x1.meta" "unlanded nested project clone allowed metadata removal"
+  assert_grep 'project clone has unlanded changes' "$case_dir/stderr" \
+    "nested project clone work was not surfaced"
+  pass "force retirement retains unlanded nested project clones"
+}
+
 test_secondmate_retirement_serializes_child_spawn() {
   local case_dir child_project rc teardown_pid spawn_rc waited
   case_dir=$(make_case secondmate-retirement-child-race)
@@ -3550,6 +3594,12 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-teardown-lifecycle ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-durable-secondmate ]; then
+  test_secondmate_retirement_retains_idle_registered_child
+  test_secondmate_retirement_retains_unlanded_project_clone
+  exit 0
+fi
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -3585,6 +3635,8 @@ test_forced_secondmate_retains_stash
 test_forced_secondmate_retains_unlanded_child_work
 test_forced_secondmate_retains_unquiesced_unmanaged_child
 test_secondmate_registry_duplicate_home_blocks_removal
+test_secondmate_retirement_retains_idle_registered_child
+test_secondmate_retirement_retains_unlanded_project_clone
 test_secondmate_retirement_serializes_child_spawn
 test_nested_secondmate_cleanup_requires_child_home_lock
 test_secondmate_registry_updates_are_locked_and_literal

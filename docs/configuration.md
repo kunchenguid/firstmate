@@ -552,7 +552,7 @@ FM_CHECKOUT_REFRESH_PROBE_TIMEOUT=15  # seconds allowed for one upstream-tip pro
 FM_CHECKOUT_REFRESH_SYNC_TIMEOUT=60   # seconds allowed for one checkout refresh
 FM_TREEHOUSE_ACQUIRE_TIMEOUT=60       # seconds allowed for one durable task-worktree acquisition
 FM_TREEHOUSE_RETURN_TIMEOUT=60        # seconds allowed for one Treehouse worktree return
-FM_TREEHOUSE_ROOT=                    # optional Treehouse state root override; defaults to ~/.treehouse
+# FM_TREEHOUSE_ROOT is unset by default; setting it empty is malformed, while a non-empty value overrides ~/.treehouse
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature
 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1 # seconds fm-teardown.sh waits before each retry after that signature

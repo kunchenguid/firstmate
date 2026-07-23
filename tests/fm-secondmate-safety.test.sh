@@ -29,6 +29,14 @@ make_live_default_firstmate_worktree() {
   printf '%s\n' "$source"
 }
 
+write_secondmate_registration() {
+  local home=$1 id=$2 target=$3 target_abs
+  mkdir -p "$home/data"
+  target_abs=$(cd "$target" && pwd -P) || return 1
+  printf -- '- %s - test domain (home: %s; scope: test domain; projects: ; added 2026-07-23)\n' \
+    "$id" "$target_abs" > "$home/data/secondmates.md"
+}
+
 
 test_fm_home_parameterization() {
   local brief home_one home_two out
@@ -1463,6 +1471,7 @@ SH
   log="$TMP_ROOT/spawn-validate-fake/tmux.log"
   err="$TMP_ROOT/spawn-validate.err"
 
+  write_secondmate_registration "$home" domain "$subhome"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
     "$ROOT/bin/fm-spawn.sh" domain "$subhome" codex --secondmate >/dev/null 2>"$err"; then
     fail "secondmate spawn accepted an unseeded home"
@@ -1474,6 +1483,7 @@ SH
   grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before validation"
 
   printf 'other\n' > "$wronghome/.fm-secondmate-home"
+  write_secondmate_registration "$home" domain "$wronghome"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
     "$ROOT/bin/fm-spawn.sh" domain "$wronghome" codex --secondmate >/dev/null 2>"$err"; then
     fail "secondmate spawn accepted a home marked for another secondmate"
@@ -1482,6 +1492,7 @@ SH
 
   printf 'domain\n' > "$marker_only/.fm-secondmate-home"
   printf 'charter\n' > "$marker_only/data/charter.md"
+  write_secondmate_registration "$home" domain "$marker_only"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
     "$ROOT/bin/fm-spawn.sh" domain "$marker_only" codex --secondmate >/dev/null 2>"$err"; then
     fail "secondmate spawn accepted a marked home missing AGENTS.md"
@@ -1496,12 +1507,14 @@ SH
   grep -F 'not a firstmate home (missing bin/)' "$err" >/dev/null || fail "spawn did not explain missing bin"
 
   printf 'domain\n' > "$home/.fm-secondmate-home"
+  write_secondmate_registration "$home" domain "$home"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
     "$ROOT/bin/fm-spawn.sh" domain "$home" codex --secondmate >/dev/null 2>"$err"; then
     fail "secondmate spawn accepted the active home"
   fi
   grep -F 'secondmate home cannot be the active firstmate home' "$err" >/dev/null || fail "spawn did not reject active home"
 
+  write_secondmate_registration "$home" domain "$ROOT"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
     "$ROOT/bin/fm-spawn.sh" domain "$ROOT" codex --secondmate >/dev/null 2>"$err"; then
     fail "secondmate spawn accepted the firstmate repo root"
@@ -1510,6 +1523,7 @@ SH
 
   printf 'domain\n' > "$active_descendant/.fm-secondmate-home"
   printf 'charter\n' > "$active_descendant/data/charter.md"
+  write_secondmate_registration "$home" domain "$active_descendant"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
     "$ROOT/bin/fm-spawn.sh" domain "$active_descendant" codex --secondmate >/dev/null 2>"$err"; then
     fail "secondmate spawn accepted a home inside the active firstmate home"
@@ -1518,6 +1532,7 @@ SH
 
   printf 'domain\n' > "$active_ancestor/.fm-secondmate-home"
   printf 'charter\n' > "$active_ancestor/data/charter.md"
+  write_secondmate_registration "$ancestor_active_home" domain "$active_ancestor"
   if PATH="$fakebin:$PATH" FM_HOME="$ancestor_active_home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
     "$ROOT/bin/fm-spawn.sh" domain "$active_ancestor" codex --secondmate >/dev/null 2>"$err"; then
     fail "secondmate spawn accepted a home containing the active firstmate home"
@@ -1526,6 +1541,7 @@ SH
 
   printf 'domain\n' > "$root_descendant/.fm-secondmate-home"
   printf 'charter\n' > "$root_descendant/data/charter.md"
+  write_secondmate_registration "$home" domain "$root_descendant"
   if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fakeroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
     "$ROOT/bin/fm-spawn.sh" domain "$root_descendant" codex --secondmate >/dev/null 2>"$err"; then
     fail "secondmate spawn accepted a home inside the firstmate repo"
@@ -1534,6 +1550,7 @@ SH
 
   printf 'domain\n' > "$root_ancestor/.fm-secondmate-home"
   printf 'charter\n' > "$root_ancestor/data/charter.md"
+  write_secondmate_registration "$home" domain "$root_ancestor"
   if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$root_inside" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-validate-fake/pane.txt" \
     "$ROOT/bin/fm-spawn.sh" domain "$root_ancestor" codex --secondmate >/dev/null 2>"$err"; then
     fail "secondmate spawn accepted a home containing the firstmate repo"
@@ -1563,6 +1580,7 @@ test_secondmate_spawn_refuses_operational_dirs_outside_subhome() {
     if [ "$opdir" = data ]; then
       printf 'charter\n' > "$sink/charter.md"
     fi
+    write_secondmate_registration "$home" domain "$subhome"
     : > "$log"
     if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-opdir-fake/pane.txt" \
       "$ROOT/bin/fm-spawn.sh" domain "$subhome" codex --secondmate >/dev/null 2>"$err"; then
@@ -1573,6 +1591,70 @@ test_secondmate_spawn_refuses_operational_dirs_outside_subhome() {
     grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before unsafe $opdir directory validation"
   done
   pass "secondmate spawn refuses operational directories outside the subhome"
+}
+
+test_secondmate_spawn_requires_exact_registration_and_target_home_lock() {
+  local home target other state_base fakebin log err ready release holder_pid status
+  home="$TMP_ROOT/spawn-registration-home"
+  target="$TMP_ROOT/spawn-registration-target"
+  other="$TMP_ROOT/spawn-registration-other"
+  state_base="$TMP_ROOT/spawn-registration-locks"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/spawn-registration-fake")
+  log="$TMP_ROOT/spawn-registration-fake/tmux.log"
+  err="$TMP_ROOT/spawn-registration.err"
+  ready="$TMP_ROOT/spawn-registration.ready"
+  release="$TMP_ROOT/spawn-registration.release"
+  mkdir -p "$home/data" "$home/state" "$target" "$other"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-registration-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" domain "$target" codex --secondmate >/dev/null 2>"$err"
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "secondmate spawn accepted an unregistered explicit home"
+  grep -F 'registry is malformed, missing, or does not uniquely register domain' "$err" >/dev/null \
+    || fail "unregistered explicit home refusal did not identify registry authority"
+
+  write_secondmate_registration "$home" domain "$other"
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-registration-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" domain "$target" codex --secondmate >/dev/null 2>"$err"
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "secondmate spawn accepted a home different from its registration"
+  grep -F 'does not match the exact registration' "$err" >/dev/null \
+    || fail "explicit registration drift was not surfaced"
+
+  write_secondmate_registration "$home" domain "$target"
+  FM_HOLDER_ROOT="$ROOT" FM_HOLDER_STATE="$state_base" FM_HOLDER_HOME="$target" \
+    FM_HOLDER_READY="$ready" FM_HOLDER_RELEASE="$release" \
+    bash -c '
+      set -eu
+      . "$FM_HOLDER_ROOT/bin/fm-checkout-lock-lib.sh"
+      . "$FM_HOLDER_ROOT/bin/fm-account-routing-lib.sh"
+      lock=$(fm_secondmate_home_lifecycle_lock_acquire "$FM_HOLDER_STATE/locks" "$FM_HOLDER_HOME")
+      : > "$FM_HOLDER_READY"
+      while [ ! -f "$FM_HOLDER_RELEASE" ]; do sleep 0.05; done
+      fm_account_lifecycle_lock_release "$lock"
+    ' &
+  holder_pid=$!
+  while [ ! -f "$ready" ]; do sleep 0.05; done
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
+    FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS=0 \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-registration-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" domain "$target" codex --secondmate >/dev/null 2>"$err"
+  status=$?
+  set -e
+  : > "$release"
+  wait "$holder_pid"
+  [ "$status" -ne 0 ] || fail "secondmate spawn bypassed the declared target home lock"
+  grep -F 'secondmate home lifecycle lock' "$err" >/dev/null \
+    || fail "target home lifecycle lock contention was not surfaced"
+  grep -F 'new-window' "$log" >/dev/null && fail "target home lock contention reached endpoint launch"
+  pass "secondmate spawn proves registration and owns the target home lock"
 }
 
 test_fm_send_refuses_bare_window_without_home_meta() {
@@ -2459,6 +2541,11 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-secondmate-authority ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-durable-secondmate ]; then
+  test_secondmate_spawn_requires_exact_registration_and_target_home_lock
+  exit 0
+fi
+
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
@@ -2505,6 +2592,7 @@ test_home_seed_refuses_operational_dirs_outside_subhome
 test_home_seed_refuses_symlinked_leaf_files
 test_secondmate_spawn_requires_seeded_matching_home
 test_secondmate_spawn_refuses_operational_dirs_outside_subhome
+test_secondmate_spawn_requires_exact_registration_and_target_home_lock
 test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home
 test_secondmate_teardown_refuses_failed_leased_home_return

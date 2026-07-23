@@ -989,7 +989,7 @@ fm_secondmate_registry_query() {
   fm_account_system_perl -MErrno=ENOENT -e '
     my ($registry, $mode, $expected_id, $key) = @ARGV;
     if (!lstat($registry)) {
-      exit 0 if $! == ENOENT && $mode eq q{validate};
+      exit 0 if $! == ENOENT && ($mode eq q{validate} || $mode eq q{list});
       exit 1;
     }
     exit 1 if -l _ || !-f _ || !-r _;
@@ -1029,6 +1029,12 @@ fm_secondmate_registry_query() {
       }
     }
     if ($mode eq q{validate}) {
+      exit 0;
+    }
+    if ($mode eq q{list}) {
+      for my $entry (@entries) {
+        print join(qq{\t}, $entry->[0], $entry->[1], $entry->[2]), qq{\n};
+      }
       exit 0;
     }
     my @matches = grep { $_->[0] eq $expected_id } @entries;

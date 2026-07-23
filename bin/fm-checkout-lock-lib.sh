@@ -175,27 +175,37 @@ fm_checkout_stable_path_key() {
       exit 1 if -l _;
       exit 1 if $expected eq q{directory} && !-d _;
       exit 1 if $expected eq q{file} && !-f _;
-      my @s = stat(_);
-      exit 1 if !@s;
-      my $kind = -d _ ? q{directory} : -f _ ? q{file} : q{other};
-      print join(q{:}, q{existing}, $kind, $s[0], $s[1]);
-      exit 0;
+    } else {
+      exit 1 if $! != ENOENT || $allow_missing ne q{1};
     }
-    exit 1 if $! != ENOENT || $allow_missing ne q{1};
-    my $probe = $path;
-    my @tail;
-    while (!lstat($probe)) {
-      exit 1 if $! != ENOENT || $probe eq q{/};
-      $probe =~ s{/+([^/]+)$}{};
-      unshift @tail, $1;
-      $probe = q{/} if $probe eq q{};
-    }
-    exit 1 if -l _ || !-d _;
-    my @s = stat(_);
-    exit 1 if !@s;
-    print join(q{:}, q{missing}, $s[0], $s[1], map { lc($_) } @tail);
+    print lc($path);
   ' "$lexical" "$expected_type" "$allow_missing") || return 1
   fm_checkout_hash_value "$identity" "$length"
+}
+
+fm_checkout_physical_path_identity() {
+  local path=$1 expected_type=${2:-any} lexical identity
+  lexical=$(fm_checkout_lexical_path "$path" 0) || return 1
+  identity=$(fm_checkout_system_perl -e '
+    my ($path, $expected) = @ARGV;
+    lstat($path) or exit 1;
+    exit 1 if -l _;
+    exit 1 if $expected eq q{directory} && !-d _;
+    exit 1 if $expected eq q{file} && !-f _;
+    my @s = stat(_);
+    exit 1 if !@s;
+    my $kind = -d _ ? q{directory} : -f _ ? q{file} : q{other};
+    print join(q{:}, $kind, $s[0], $s[1]);
+  ' "$lexical" "$expected_type") || return 1
+  [ -n "$identity" ] || return 1
+  case "$identity" in *[!A-Za-z0-9:._-]*) return 1 ;; esac
+  printf '%s\n' "$identity"
+}
+
+fm_checkout_physical_path_key() {
+  local identity
+  identity=$(fm_checkout_physical_path_identity "$1" "${2:-any}") || return 1
+  fm_checkout_hash_value "existing:$identity" "${3:-24}"
 }
 
 fm_checkout_lock_key() {
@@ -203,9 +213,12 @@ fm_checkout_lock_key() {
 }
 
 fm_checkout_lock_path() {
-  local checkout=$1 lock_root=$2 common
+  local checkout=$1 lock_root=$2 common key
   common=$(fm_checkout_git_common_dir "$checkout") || return 1
-  printf '%s/%s.lock\n' "$lock_root" "$(fm_checkout_lock_key "$common")"
+  key=$(fm_checkout_lock_key "$common") || return 1
+  [ "${#key}" -eq 24 ] || return 1
+  case "$key" in *[!0-9a-f]*) return 1 ;; esac
+  printf '%s/%s.lock\n' "$lock_root" "$key"
 }
 
 fm_checkout_lock_prepare() {
