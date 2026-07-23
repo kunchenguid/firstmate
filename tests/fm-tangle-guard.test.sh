@@ -257,9 +257,50 @@ test_spawn_pool_lease_assertion() {
   out=$(run_spawn "$home" lease-stale-jj0 "$proj" "$stale_wt" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn should refuse HEAD not known to be at or before origin/default"
   assert_contains "$out" "is not an ancestor of origin/main" "stale lease refusal did not name the origin/default ancestry guard"
+  assert_contains "$out" "pool slot stays leased and unchanged" "lease refusal should state that the slot is retained untouched"
   assert_absent "$home/state/lease-stale-jj0.meta" "stale lease refusal must not record meta"
 
   pass "fm-spawn: treehouse lease assertion allows treehouse.toml but refuses dirt and non-ancestor HEAD"
+}
+
+# The lease assertion must not turn origin/<default> into a launch prerequisite.
+# Firstmate supports origin-less clones (bin/fm-fleet-sync.sh skips them benignly)
+# and local-only projects whose LOCAL default branch is legitimately ahead of
+# origin after bin/fm-merge-local.sh lands approved work without pushing. Both
+# still hold no leftover work, so both must still launch; only a HEAD that no
+# <default> tip contains is a stale or divergent lease.
+test_spawn_pool_lease_accepts_local_default_tips() {
+  local home proj fakebin wt out status
+  home="$TMP_ROOT/spawn-localdef-home"
+  mkdir -p "$home/data"
+
+  # No origin remote at all: the local default branch is the only tip there is.
+  proj=$(make_repo "$TMP_ROOT/spawn-localdef-proj")
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-localdef-fake")
+  wt="$TMP_ROOT/spawn-localdef-wt"
+  git -C "$proj" worktree add -q --detach "$wt" main >/dev/null 2>&1
+  out=$(run_spawn "$home" lease-noorigin-kk1 "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 0 "$status" "spawn should launch from an origin-less clone"
+  assert_contains "$out" "spawned lease-noorigin-kk1" "origin-less lease did not launch"
+
+  # Local-only landing: local main is ahead of origin/main and never pushed.
+  proj=$(make_repo "$TMP_ROOT/spawn-ahead-proj")
+  add_origin_remote "$proj" "$TMP_ROOT/spawn-ahead-origin.git"
+  git -C "$proj" commit -q --allow-empty -m "locally merged local-only work"
+  wt="$TMP_ROOT/spawn-ahead-wt"
+  git -C "$proj" worktree add -q --detach "$wt" main >/dev/null 2>&1
+  out=$(run_spawn "$home" lease-ahead-ll2 "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 0 "$status" "spawn should launch when local default is ahead of origin"
+  assert_contains "$out" "spawned lease-ahead-ll2" "local-ahead lease did not launch"
+
+  # A HEAD that neither tip contains is still refused.
+  git -C "$wt" commit -q --allow-empty -m "leftover work from a previous task"
+  out=$(run_spawn "$home" lease-leftover-mm3 "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 1 "$status" "spawn should still refuse a HEAD no default tip contains"
+  assert_contains "$out" "stale or divergent pool worktree" "leftover-commit lease refusal did not name the ancestry guard"
+  assert_contains "$out" "refs/heads/main" "refusal should name every default tip it checked"
+
+  pass "fm-spawn: lease ancestry accepts origin-less and locally-ahead default tips, still refuses leftover commits"
 }
 
 # --- GUARD 1c: fm-spawn tmux window construction ----------------------------
@@ -356,4 +397,5 @@ test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawn_pool_lease_assertion
+test_spawn_pool_lease_accepts_local_default_tips
 test_spawn_tmux_window_construction

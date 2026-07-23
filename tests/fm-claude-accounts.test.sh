@@ -254,7 +254,14 @@ test_fm_spawn_leaves_non_claude_harness_alone_when_enabled() {
   expect_code 0 "$status" "codex spawn with Claude rotation enabled should succeed"
   launch=$(cat "$LAUNCH_LOG")
 
-  assert_contains "$launch" "codex --dangerously-bypass-approvals-and-sandbox" "codex launch should still be codex"
+  # Match the codex command and its sandbox flag separately: an absent
+  # config/crew-codex-mcp legitimately inserts the MCP opt-out (-c 'mcp_servers={}')
+  # between them, and this case is about the harness, not that knob.
+  case "$launch" in
+    codex\ *) ;;
+    *) fail "codex launch should still be codex, got: $launch" ;;
+  esac
+  assert_contains "$launch" "--dangerously-bypass-approvals-and-sandbox" "codex launch should keep its codex sandbox flag"
   assert_not_contains "$launch" "fm-claude-accounts.sh" "non-claude launch must not use Claude OAuth helper"
   assert_no_grep "claude_oauth_account" "$HOME_DIR/state/$id.meta" "non-claude meta must not record Claude account"
   pass "fm-spawn does not inject Claude OAuth rotation into non-claude harnesses"

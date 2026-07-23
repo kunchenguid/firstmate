@@ -75,7 +75,9 @@
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
 #          The treehouse dirty-idle-slot audit is read-only and reports only
-#          abandoned dirty slots that treehouse will not hand out or prune.
+#          abandoned dirty slots that treehouse will not hand out or prune. It
+#          sweeps the firstmate repo's pool AND every registered project clone's
+#          pool, reporting each slot path once.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
 #          x_mode_setup, intake_mode_setup, fleet_sync) while still printing
@@ -197,10 +199,11 @@ fleet_sync() {
   rm -f "$tmp"
 }
 
-treehouse_dirty_idle_slot_audit() {
-  command -v treehouse >/dev/null 2>&1 || return 0
-  local out line slot state path rest
-  out=$(cd "$FM_ROOT" && treehouse status 2>/dev/null) || return 0
+TREEHOUSE_AUDIT_SEEN_SLOTS=""
+
+treehouse_pool_dirty_idle_scan() {  # <repo>
+  local repo=$1 out line slot state path rest
+  out=$( (cd "$repo" 2>/dev/null && treehouse status) 2>/dev/null ) || return 0
   while IFS= read -r line; do
     read -r slot state path rest <<EOF_SLOT
 $line
@@ -209,12 +212,37 @@ EOF_SLOT
     case "$slot:$state" in
       [0-9]*:dirty)
         [ -n "$path" ] || path="unknown"
+        case " $TREEHOUSE_AUDIT_SEEN_SLOTS " in
+          *" $path "*) continue ;;
+        esac
+        TREEHOUSE_AUDIT_SEEN_SLOTS="$TREEHOUSE_AUDIT_SEEN_SLOTS $path"
         echo "TREEHOUSE_POOL: dirty idle slot $slot at $path$rest - inspect before cleanup; no changes made"
         ;;
     esac
   done <<EOF
 $out
 EOF
+}
+
+treehouse_dirty_idle_slot_audit() {
+  command -v treehouse >/dev/null 2>&1 || return 0
+  # Pools are per-repo and `treehouse status` resolves the pool from the working
+  # directory, so scanning FM_ROOT alone would only ever report firstmate's own
+  # pool. Crewmate ship and scout slots are leased inside projects/<name>
+  # (bin/fm-spawn.sh), and those are exactly the slots that can strand unlanded
+  # project work, so sweep every registered clone too. Each repo and each slot
+  # path is reported once, so clones that share a pool do not double-report.
+  local repo repo_real seen=""
+  TREEHOUSE_AUDIT_SEEN_SLOTS=""
+  for repo in "$FM_ROOT" "$PROJECTS"/*; do
+    [ -d "$repo" ] || continue
+    repo_real=$( (cd "$repo" && pwd -P) 2>/dev/null ) || continue
+    case " $seen " in
+      *" $repo_real "*) continue ;;
+    esac
+    seen="$seen $repo_real"
+    treehouse_pool_dirty_idle_scan "$repo_real"
+  done
 }
 
 secondmate_sync() {

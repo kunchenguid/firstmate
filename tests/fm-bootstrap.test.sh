@@ -49,7 +49,7 @@ SH
   chmod +x "$fakebin/gh"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-[ -z "${FM_FAKE_TREEHOUSE_CALLS:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_CALLS"
+[ -z "${FM_FAKE_TREEHOUSE_CALLS:-}" ] || printf '%s in %s\n' "$*" "$PWD" >> "$FM_FAKE_TREEHOUSE_CALLS"
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   if [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ]; then
     printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
@@ -59,7 +59,12 @@ if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   exit 0
 fi
 if [ "${1:-}" = status ]; then
-  [ -z "${FM_FAKE_TREEHOUSE_STATUS_FILE:-}" ] || cat "$FM_FAKE_TREEHOUSE_STATUS_FILE"
+  if [ -n "${FM_FAKE_TREEHOUSE_STATUS_BY_DIR:-}" ] \
+    && [ -f "$FM_FAKE_TREEHOUSE_STATUS_BY_DIR/$(basename "$PWD")" ]; then
+    cat "$FM_FAKE_TREEHOUSE_STATUS_BY_DIR/$(basename "$PWD")"
+  elif [ -n "${FM_FAKE_TREEHOUSE_STATUS_FILE:-}" ]; then
+    cat "$FM_FAKE_TREEHOUSE_STATUS_FILE"
+  fi
   exit 0
 fi
 exit 0
@@ -615,6 +620,44 @@ EOF
   pass "bootstrap: dirty idle treehouse slot audit is read-only and actionable"
 }
 
+# Pools are per-repo and `treehouse status` resolves the pool from the working
+# directory, so an audit pinned to FM_ROOT would only ever see firstmate's own
+# pool. Crewmate ship/scout slots - the ones that can strand unlanded project
+# work - are leased inside projects/<name>, so the audit must sweep those too.
+test_treehouse_dirty_idle_slot_audit_sweeps_project_pools() {
+  local case_dir root home fakebin by_dir calls proj_slot root_slot out
+  case_dir="$TMP_ROOT/treehouse-dirty-audit-projects"
+  root="$case_dir/root"
+  home="$case_dir/home"
+  proj_slot="$case_dir/proj-dirty-slot"
+  root_slot="$case_dir/root-dirty-slot"
+  mkdir -p "$root" "$home/config" "$home/projects/alpha" "$home/projects/beta" \
+    "$proj_slot" "$root_slot"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  by_dir="$case_dir/status-by-dir"
+  calls="$case_dir/treehouse-calls.txt"
+  mkdir -p "$by_dir"
+  printf '1     dirty        %s\n' "$root_slot" > "$by_dir/root"
+  printf '4     dirty        %s\n' "$proj_slot" > "$by_dir/alpha"
+  printf '5     available    %s\n' "$case_dir/beta-free" > "$by_dir/beta"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_FAKE_TREEHOUSE_STATUS_BY_DIR="$by_dir" FM_FAKE_TREEHOUSE_CALLS="$calls" \
+    "$ROOT/bin/fm-bootstrap.sh")
+
+  assert_contains "$out" "TREEHOUSE_POOL: dirty idle slot 1 at $root_slot" \
+    "audit should still report the firstmate pool"
+  assert_contains "$out" "TREEHOUSE_POOL: dirty idle slot 4 at $proj_slot" \
+    "audit should report dirty idle slots in a project clone's pool"
+  assert_not_contains "$out" "beta-free" "audit should ignore available project slots"
+  assert_grep "status in $(cd "$home/projects/alpha" && pwd -P)" "$calls" "audit should scan each project clone's pool"
+  assert_no_grep "return" "$calls" "project pool audit must not call treehouse return"
+  assert_no_grep "prune" "$calls" "project pool audit must not call treehouse prune"
+  pass "bootstrap: dirty idle treehouse slot audit sweeps project pools, not just the firstmate pool"
+}
+
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   local case_dir home fakebin fake_root out
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
@@ -865,6 +908,7 @@ test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
 test_treehouse_dirty_idle_slot_audit_reports_read_only
+test_treehouse_dirty_idle_slot_audit_sweeps_project_pools
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins

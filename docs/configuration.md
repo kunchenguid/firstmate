@@ -332,6 +332,7 @@ An absent `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 Bootstrap also runs a read-only `treehouse status` audit and emits `TREEHOUSE_POOL:` for dirty idle slots that need human inspection before cleanup.
+Pools are per-repo, so that audit sweeps the firstmate repo and every registered project clone, reporting each slot path once.
 The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
 It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
 Normal completed runs keep local-only and no-origin skips silent.

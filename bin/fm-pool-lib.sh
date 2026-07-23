@@ -23,5 +23,5 @@ fm_pool_first_real_porcelain_line() {  # <repo>
   local repo=$1 real
   real=$(fm_pool_real_porcelain "$repo") || return 1
   [ -n "$real" ] || return 1
-  printf '%s\n' "$real" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
+  printf '%s\n' "${real%%$'\n'*}"
 }

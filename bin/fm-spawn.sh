@@ -965,27 +965,45 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
+# Refuse a pool lease loudly. The leased slot and its window are deliberately left
+# untouched: a refused lease may hold unlanded work, so firstmate never returns,
+# prunes, or kills it behind the operator's back. Say so, so the retained lease is
+# a stated cost of the refusal rather than a silent one.
+refuse_spawn_pool_lease() {  # <detail> <inspect-target>
+  echo "error: $1; refusing to launch. Inspect target $2 - its pool slot stays leased and unchanged until that window is closed" >&2
+  exit 1
+}
+
 validate_spawn_pool_lease() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 default base dirty head_short
+  local source=$1 inspect_target=$2 default base bases dirty head_short
   if ! fm_pool_worktree_clean "$WT"; then
     dirty=$(fm_pool_first_real_porcelain_line "$WT" 2>/dev/null || printf 'unreadable status')
-    echo "error: $source yielded a dirty pool worktree ($dirty; allowed only a lone untracked treehouse.toml); refusing to launch. Inspect target $inspect_target" >&2
-    exit 1
+    refuse_spawn_pool_lease "$source yielded a dirty pool worktree ($dirty; allowed only a lone untracked treehouse.toml)" "$inspect_target"
   fi
-  default=$(default_branch "$WT") || {
-    echo "error: $source yielded a pool worktree whose default branch cannot be determined; refusing to launch. Inspect target $inspect_target" >&2
-    exit 1
-  }
-  base="origin/$default"
-  if ! git -C "$WT" rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
-    echo "error: $source yielded a pool worktree without $base; refusing to launch. Inspect target $inspect_target" >&2
-    exit 1
+  default=$(default_branch "$WT") || refuse_spawn_pool_lease \
+    "$source yielded a pool worktree whose default branch cannot be determined" "$inspect_target"
+  # A lease is stale or divergent only when its HEAD carries commits that NO
+  # <default> tip already holds - that is leftover work from a previous task, not
+  # a fresh base. origin/<default> is the strongest such tip, but it is not the
+  # only valid one: firstmate supports origin-less clones (bin/fm-fleet-sync.sh
+  # skips them benignly as "no origin remote"), and bin/fm-merge-local.sh lands
+  # approved local-only work by fast-forwarding the clone's LOCAL <default>
+  # without ever pushing, so that branch is legitimately ahead of origin from then
+  # on. Accept a HEAD that is an ancestor of either tip, and refuse only when it
+  # is an ancestor of none of the tips that exist.
+  bases=
+  for base in "origin/$default" "refs/heads/$default"; do
+    git -C "$WT" rev-parse --verify --quiet "$base^{commit}" >/dev/null || continue
+    bases="${bases:+$bases and }$base"
+    ! git -C "$WT" merge-base --is-ancestor HEAD "$base" 2>/dev/null || return 0
+  done
+  if [ -z "$bases" ]; then
+    refuse_spawn_pool_lease \
+      "$source yielded a pool worktree with no $default tip (neither origin/$default nor local $default exists)" "$inspect_target"
   fi
-  if ! git -C "$WT" merge-base --is-ancestor HEAD "$base" 2>/dev/null; then
-    head_short=$(git -C "$WT" rev-parse --short HEAD 2>/dev/null || printf unknown)
-    echo "error: $source yielded a stale or divergent pool worktree (HEAD $head_short is not an ancestor of $base); refusing to launch. Inspect target $inspect_target" >&2
-    exit 1
-  fi
+  head_short=$(git -C "$WT" rev-parse --short HEAD 2>/dev/null || printf unknown)
+  refuse_spawn_pool_lease \
+    "$source yielded a stale or divergent pool worktree (HEAD $head_short is not an ancestor of $bases)" "$inspect_target"
 }
 
 W="fm-$ID"
