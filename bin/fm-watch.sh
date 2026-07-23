@@ -141,6 +141,7 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # has not changed, and it bounds how long the watcher can go without re-reading
 # that evidence.
 WEDGE_ESCALATE_MAX_SECS=${FM_WEDGE_ESCALATE_MAX_SECS:-900}
+case "$WEDGE_ESCALATE_MAX_SECS" in ''|*[!0-9]*|0) WEDGE_ESCALATE_MAX_SECS=900 ;; esac
 # How many CONSECUTIVE unreadable crew-state probes a stale window may absorb
 # before the watcher surfaces the reader failure itself. An unreadable read is
 # not evidence the crew stopped, but a permanently broken reader must not leave
@@ -1019,9 +1020,7 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
-    key=${w//:/_}
-    key=${key//\//_}
-    key=${key//./_}
+    key=$(state_key "$w")
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
@@ -1031,7 +1030,6 @@ EOF
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
-    key=$(state_key "$w")
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
     sf="$STATE/.stale-$key"
