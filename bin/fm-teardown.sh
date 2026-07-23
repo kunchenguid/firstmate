@@ -1782,15 +1782,79 @@ exact_git_repository_root() {
 }
 
 secondmate_remote_identity() {
-  local repository=$1 retiring_home=$2 url path canonical bare git_dir
+  local repository=$1 retiring_home=$2 url parsed kind path canonical bare git_dir
   url=$(git -C "$repository" remote get-url origin 2>/dev/null) || return 1
   [ -n "$url" ] || return 1
-  case "$url" in
-    file://*) path=${url#file://} ;;
-    *://*|*@*:*|[A-Za-z]:*) printf 'network\t%s\n' "$url"; return 0 ;;
-    /*) path=$url ;;
-    *) path="$repository/$url" ;;
-  esac
+  parsed=$(python3 - "$url" "$repository" <<'PY'
+import ipaddress
+import os
+import re
+import sys
+import urllib.parse
+
+url, repository = sys.argv[1:]
+
+def loopback(host):
+    normalized = host.lower().rstrip(".")
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+try:
+    if re.match(r"^[A-Za-z]:", url):
+        raise ValueError
+    if "://" in url:
+        parsed = urllib.parse.urlparse(url)
+        scheme = parsed.scheme.lower()
+        host = parsed.hostname or ""
+        if scheme == "file":
+            if host and not loopback(host):
+                raise ValueError
+            path = urllib.parse.unquote(parsed.path)
+            if not os.path.isabs(path):
+                raise ValueError
+            print("local\t" + path)
+        elif scheme in ("ssh", "git+ssh", "git", "http", "https"):
+            if loopback(host):
+                if scheme not in ("ssh", "git+ssh", "git"):
+                    raise ValueError
+                path = urllib.parse.unquote(parsed.path)
+                if not os.path.isabs(path):
+                    raise ValueError
+                print("local\t" + path)
+            elif host:
+                print("network\t" + url)
+            else:
+                raise ValueError
+        else:
+            raise ValueError
+    else:
+        scp = re.match(r"^(?:[^@/:]+@)?([^/:]+):(.+)$", url)
+        if scp:
+            host, path = scp.groups()
+            if loopback(host):
+                if not os.path.isabs(path):
+                    raise ValueError
+                print("local\t" + path)
+            else:
+                print("network\t" + url)
+        else:
+            path = url if os.path.isabs(url) else os.path.join(repository, url)
+            print("local\t" + path)
+except (OSError, ValueError):
+    raise SystemExit(1)
+PY
+  ) || return 1
+  kind=${parsed%%$'\t'*}
+  path=${parsed#*$'\t'}
+  if [ "$kind" = network ]; then
+    printf 'network\t%s\n' "$path"
+    return 0
+  fi
+  [ "$kind" = local ] || return 1
   canonical=$(fm_checkout_trusted_dir "$path") || return 1
   bare=$(git -C "$canonical" rev-parse --is-bare-repository 2>/dev/null) || return 1
   if [ "$bare" = true ]; then
@@ -1813,28 +1877,29 @@ import stat
 import sys
 
 root = sys.argv[1]
+root = os.path.realpath(root)
 repositories = {"."}
+visited = set()
+symlink_targets = set()
 
-def failed(error):
-    raise error
+def confined(path):
+    try:
+        return os.path.commonpath((root, path)) == root
+    except ValueError:
+        return False
 
-try:
-    for current, directories, _ in os.walk(root, topdown=True, followlinks=False, onerror=failed):
-        relative = os.path.relpath(current, root)
-        safe_directories = []
-        for name in sorted(directories):
-            path = os.path.join(current, name)
-            metadata = os.lstat(path)
-            if stat.S_ISLNK(metadata.st_mode):
-                continue
-            if not stat.S_ISDIR(metadata.st_mode):
-                raise OSError("unsafe project directory")
-            if name == ".git":
-                continue
-            safe_directories.append(name)
-        directories[:] = safe_directories
-        if relative == ".":
-            continue
+def walk(current, ancestors):
+    metadata = os.lstat(current)
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise OSError("unsafe project directory")
+    identity = (metadata.st_dev, metadata.st_ino)
+    if identity in ancestors:
+        raise OSError("project directory cycle")
+    if identity in visited:
+        return
+    visited.add(identity)
+    relative = os.path.relpath(current, root)
+    if relative != ".":
         git_marker = os.path.join(current, ".git")
         if os.path.lexists(git_marker):
             marker = os.lstat(git_marker)
@@ -1843,23 +1908,135 @@ try:
             ):
                 raise OSError("unsafe git marker")
             repositories.add(relative)
+        else:
+            head = os.path.join(current, "HEAD")
+            config = os.path.join(current, "config")
+            objects = os.path.join(current, "objects")
+            refs = os.path.join(current, "refs")
+            if all(os.path.exists(path) for path in (head, config, objects, refs)):
+                if not os.path.isfile(head) or not os.path.isfile(config):
+                    raise OSError("unsafe bare repository")
+                if not os.path.isdir(objects) or not os.path.isdir(refs):
+                    raise OSError("unsafe bare repository")
+                repositories.add(relative)
+                return
+    with os.scandir(current) as entries:
+        ordered = sorted(entries, key=lambda entry: entry.name)
+    for entry in ordered:
+        if entry.name == ".git":
             continue
-        head = os.path.join(current, "HEAD")
-        config = os.path.join(current, "config")
-        objects = os.path.join(current, "objects")
-        refs = os.path.join(current, "refs")
-        if all(os.path.exists(path) for path in (head, config, objects, refs)):
-            if not os.path.isfile(head) or not os.path.isfile(config):
-                raise OSError("unsafe bare repository")
-            if not os.path.isdir(objects) or not os.path.isdir(refs):
-                raise OSError("unsafe bare repository")
-            repositories.add(relative)
-            directories[:] = []
+        path = entry.path
+        entry_metadata = os.lstat(path)
+        if stat.S_ISLNK(entry_metadata.st_mode):
+            target_metadata = os.stat(path)
+            if not stat.S_ISDIR(target_metadata.st_mode):
+                continue
+            target = os.path.realpath(path)
+            if not confined(target):
+                raise OSError("escaping project directory symlink")
+            target_identity = (target_metadata.st_dev, target_metadata.st_ino)
+            if target_identity in ancestors or target_identity == identity:
+                raise OSError("project directory symlink cycle")
+            symlink_targets.add(target_identity)
+            continue
+        if stat.S_ISDIR(entry_metadata.st_mode):
+            walk(path, ancestors | {identity})
+
+try:
+    walk(root, set())
+    if not symlink_targets.issubset(visited):
+        raise OSError("unaccounted project directory symlink")
     for repository in sorted(repositories):
         print(repository)
 except OSError:
     raise SystemExit(1)
 PY
+}
+
+validate_secondmate_repository_worktree_graph() {
+  local repository=$1 retiring_home=$2 repository_container=${3:-$1}
+  local common listed records path kind canonical count=0 bare_repository container_git submodule_admin=0
+  bare_repository=$(git -C "$repository" rev-parse --is-bare-repository 2>/dev/null) || return 1
+  common=$(git -C "$repository" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common" in /*) ;; *) common="$repository/$common" ;; esac
+  common=$(fm_checkout_trusted_dir "$common") || return 1
+  case "$common/" in
+    "$retiring_home/"*) ;;
+    *)
+      echo "REFUSED: secondmate project repository is a linked worktree owned outside the retiring home at $repository" >&2
+      return 1
+      ;;
+  esac
+  if [ -f "$repository/.git" ] && [ ! -L "$repository/.git" ]; then
+    container_git=$(git -C "$repository_container" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+    container_git=$(fm_checkout_trusted_dir "$container_git") || return 1
+    case "$common/" in "$container_git/modules/"*) submodule_admin=1 ;; esac
+  fi
+  listed=$(git -C "$repository" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || {
+    echo "REFUSED: secondmate project linked-worktree graph is uninspectable at $repository" >&2
+    return 1
+  }
+  records=$(printf '%s\n' "$listed" | awk '
+    function emit() {
+      if (path != "") {
+        printf "%s\t%s\n", path, is_bare ? "bare" : "worktree"
+      }
+      path = ""
+      is_bare = 0
+    }
+    /^worktree / {
+      emit()
+      path = substr($0, 10)
+      next
+    }
+    /^bare$/ {
+      is_bare = 1
+      next
+    }
+    /^$/ {
+      emit()
+    }
+    END {
+      emit()
+    }
+  ') || return 1
+  while IFS=$'\t' read -r path kind; do
+    [ -n "$path" ] || continue
+    canonical=$(fm_checkout_trusted_dir "$path") || {
+      echo "REFUSED: secondmate project linked worktree is missing or redirected from $repository" >&2
+      return 1
+    }
+    case "$kind" in
+      bare)
+        [ "$canonical" = "$common" ] || {
+          echo "REFUSED: secondmate project bare worktree identity drifted at $canonical" >&2
+          return 1
+        }
+        if [ "$bare_repository" = true ]; then
+          [ "$canonical" = "$repository" ] || return 1
+          count=$((count + 1))
+        fi
+        ;;
+      worktree)
+        count=$((count + 1))
+        if [ "$canonical" = "$repository" ]; then
+          :
+        elif [ "$submodule_admin" -eq 1 ] && [ "$canonical" = "$common" ]; then
+          :
+        else
+          echo "REFUSED: secondmate project common Git directory owns another linked worktree at $canonical" >&2
+          return 1
+        fi
+        ;;
+      *) return 1 ;;
+    esac
+  done <<EOF
+$records
+EOF
+  [ "$count" -eq 1 ] || {
+    echo "REFUSED: secondmate project linked-worktree ownership is ambiguous at $repository" >&2
+    return 1
+  }
 }
 
 validate_secondmate_declared_submodules() {
@@ -1898,6 +2075,8 @@ validate_secondmate_project_repository_landed_state() {
     echo "REFUSED: registered source project repository is not an exact repository root at $source_repository" >&2
     return 1
   }
+  validate_secondmate_repository_worktree_graph \
+    "$repository" "$retiring_home" "$repository_container" || return 1
   validate_secondmate_declared_submodules "$repository" "$repository_container" || {
     echo "REFUSED: secondmate project submodule state is uninspectable at $repository" >&2
     return 1
@@ -1959,7 +2138,7 @@ validate_secondmate_project_repository_landed_state() {
     echo "REFUSED: secondmate project repository refs are uninspectable at $repository" >&2
     return 1
   }
-  refs=$(printf '%s\n' "$refs" | awk '$0 !~ /^refs\/remotes\// && $0 != "refs/stash" { print }') || return 1
+  refs=$(printf '%s\n' "$refs" | awk '$0 != "refs/stash" { print }') || return 1
   refs=$(printf 'HEAD\n%s\n' "$refs")
   while IFS= read -r ref; do
     [ -n "$ref" ] || continue

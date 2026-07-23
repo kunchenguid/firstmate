@@ -504,6 +504,33 @@ spawn_preflight_meta_value() {  # <key>
   printf '%s\n' "$SPAWN_META_SNAPSHOT" | sed -n "s/^$1=//p" | tail -1
 }
 
+spawn_preflight_kind_value() {
+  local parsed count value
+  parsed=$(printf '%s\n' "$SPAWN_META_SNAPSHOT" | awk '
+    index($0, "kind=") == 1 {
+      count++
+      value = substr($0, 6)
+    }
+    END {
+      printf "%d\t%s\n", count + 0, value
+    }
+  ') || return 1
+  count=${parsed%%$'\t'*}
+  value=${parsed#*$'\t'}
+  case "$count:$value" in
+    0:) printf '%s\n' ship ;;
+    1:ship|1:scout|1:secondmate) printf '%s\n' "$value" ;;
+    1:*)
+      echo "error: managed recovery metadata has invalid kind '$value' for $SPAWN_PREFLIGHT_ID" >&2
+      return 1
+      ;;
+    *)
+      echo "error: managed recovery metadata has duplicate kind records for $SPAWN_PREFLIGHT_ID" >&2
+      return 1
+      ;;
+  esac
+}
+
 spawn_refuse_report_required_orca() {
   local report_count
   if [ "$SPAWN_META_PRESENT" != 1 ]; then
@@ -671,12 +698,7 @@ if [ "$RECOVERY_ACCOUNT" = 1 ]; then
     exit 1
   fi
   spawn_preflight_load_meta 1 || exit 1
-  recorded_kind=$(spawn_preflight_meta_value kind)
-  [ -n "$recorded_kind" ] || recorded_kind=ship
-  case "$recorded_kind" in
-    ship|scout|secondmate) ;;
-    *) echo "error: managed recovery metadata has invalid kind '$recorded_kind' for $SPAWN_PREFLIGHT_ID" >&2; exit 1 ;;
-  esac
+  recorded_kind=$(spawn_preflight_kind_value) || exit 1
   if [ "$KIND" != ship ] && [ "$KIND" != "$recorded_kind" ]; then
     echo "error: account recovery kind '$KIND' does not match recorded kind '$recorded_kind'" >&2
     exit 1
@@ -812,6 +834,11 @@ if [ "$RECOVERY_ACCOUNT" = 1 ]; then
   # serializes recovery, refresh it so a waiter validates the committed
   # replacement generation instead of rejecting that generation as stale.
   SPAWN_META_SNAPSHOT=$current_spawn_meta
+  current_recorded_kind=$(spawn_preflight_kind_value) || exit 1
+  [ "$current_recorded_kind" = "$KIND" ] || {
+    echo "error: managed recovery kind changed before launch for ${POS[0]}" >&2
+    exit 1
+  }
   rm -rf "$STATE/.${POS[0]}.account-native-launch" "$STATE/.${POS[0]}.account-native-ready" "$STATE/.${POS[0]}.account-native-go" || exit 1
   direct_recovery_cleanup=$(fm_account_meta_value "$RESUME_META" direct_recovery_cleanup)
   if [ -n "$direct_recovery_cleanup" ]; then

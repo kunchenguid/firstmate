@@ -130,8 +130,10 @@ STATE_BASE="${FM_CHECKOUT_REFRESH_STATE_BASE:-${XDG_STATE_HOME:-$HOME/.local/sta
 DEFAULT_STATE_ROOT="$STATE_BASE/homes/$FM_HOME_KEY"
 PHYSICAL_STATE_ROOT="$STATE_BASE/homes/$FM_HOME_PHYSICAL_KEY"
 CUSTOM_STATE_ROOT=0
+STATE_ROOT_EXPLICIT=0
 USING_PHYSICAL_STATE_ROOT=0
 if [ -n "${FM_CHECKOUT_REFRESH_STATE_ROOT:-}" ]; then
+  STATE_ROOT_EXPLICIT=1
   case "$FM_CHECKOUT_REFRESH_STATE_ROOT" in
     "$DEFAULT_STATE_ROOT")
       STATE_ROOT=$DEFAULT_STATE_ROOT
@@ -154,6 +156,7 @@ BACKSTOP=${FM_CHECKOUT_REFRESH_BACKSTOP:-900}
 PROBE_TIMEOUT=${FM_CHECKOUT_REFRESH_PROBE_TIMEOUT:-15}
 SYNC_TIMEOUT=${FM_CHECKOUT_REFRESH_SYNC_TIMEOUT:-60}
 ACQUIRE_TIMEOUT=${FM_TREEHOUSE_ACQUIRE_TIMEOUT:-60}
+ACTIVATION_TIMEOUT=${FM_CHECKOUT_REFRESH_ACTIVATION_TIMEOUT:-60}
 PLATFORM=${FM_CHECKOUT_REFRESH_PLATFORM:-$(uname)}
 LABEL_BASE=com.firstmate.checkout-refresh
 LABEL=${FM_CHECKOUT_REFRESH_LABEL:-$LABEL_BASE.$FM_HOME_KEY}
@@ -167,6 +170,18 @@ HOME_STATE_NAMESPACE_STAGED=0
 HOME_MIGRATION_ACTIVE=0
 HOME_MIGRATION_RUN_LOCK=
 PHYSICAL_AGENT_STOPPED=0
+SCHEDULER_GENERATION=${FM_CHECKOUT_REFRESH_GENERATION:-}
+case "$SCHEDULER_GENERATION" in
+  '') ;;
+  *[!0-9a-f]*)
+    echo "error: FM_CHECKOUT_REFRESH_GENERATION must be a 32-character lowercase hexadecimal token" >&2
+    exit 2
+    ;;
+esac
+if [ -n "$SCHEDULER_GENERATION" ] && [ "${#SCHEDULER_GENERATION}" -ne 32 ]; then
+  echo "error: FM_CHECKOUT_REFRESH_GENERATION must be a 32-character lowercase hexadecimal token" >&2
+  exit 2
+fi
 
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
@@ -179,6 +194,7 @@ case "$BACKSTOP" in ''|*[!0-9]*|0) echo "error: FM_CHECKOUT_REFRESH_BACKSTOP mus
 case "$PROBE_TIMEOUT" in ''|*[!0-9]*|0) echo "error: FM_CHECKOUT_REFRESH_PROBE_TIMEOUT must be a positive integer" >&2; exit 2 ;; esac
 case "$SYNC_TIMEOUT" in ''|*[!0-9]*|0) echo "error: FM_CHECKOUT_REFRESH_SYNC_TIMEOUT must be a positive integer" >&2; exit 2 ;; esac
 case "$ACQUIRE_TIMEOUT" in ''|*[!0-9]*|0) echo "error: FM_TREEHOUSE_ACQUIRE_TIMEOUT must be a positive integer" >&2; exit 2 ;; esac
+case "$ACTIVATION_TIMEOUT" in ''|*[!0-9]*|0) echo "error: FM_CHECKOUT_REFRESH_ACTIVATION_TIMEOUT must be a positive integer" >&2; exit 2 ;; esac
 
 usage() {
   echo "usage: fm-checkout-refresh.sh discover|run-once [--force] [--verbose] [--session] [--scheduled]|preflight <checkout>|pool-preflight <expected-source>|acquire-worktree <expected-source> <lease-holder>|verify-worktree <worktree> <expected-source>|verify-home <home> <expected-source>|verify-returnable <worktree> <expected-source> <expected-tip>|ensure|install" >&2
@@ -1009,6 +1025,11 @@ record_run_result() {
   fi
   atomic_write "$STATE_ROOT/coverage-health" "$now" "$coverage" \
     || write_status=1
+  if [ "$write_status" -eq 0 ] && [ "$scheduled" -eq 1 ] \
+      && [ -n "$SCHEDULER_GENERATION" ]; then
+    atomic_write "$STATE_ROOT/scheduler-generation" "$SCHEDULER_GENERATION" \
+      || write_status=1
+  fi
   return "$write_status"
 }
 
@@ -1019,17 +1040,54 @@ ensure_state_root() {
 }
 
 discover_home_launch_agent_namespaces() {
-  local discovered label state count=0 logical_count=0
+  local discovered label state count=0 logical_count=0 logical_state=
   [ -e "$LAUNCH_AGENTS_DIR" ] || [ -L "$LAUNCH_AGENTS_DIR" ] || return 0
   discovered=$(python3 - "$LAUNCH_AGENTS_DIR" "$LABEL_BASE" \
       "$SCRIPT_DIR/fm-checkout-refresh.sh" "$FM_HOME_CANONICAL" "$FM_HOME" "$STATE_BASE" <<'PY'
-import html
 import os
 import re
 import stat
 import sys
+import xml.etree.ElementTree as ET
 
 root, label_base, script, canonical_home, raw_home, state_base = sys.argv[1:]
+
+def dictionary(element):
+    children = list(element)
+    if len(children) % 2:
+        raise OSError("malformed plist dictionary")
+    values = {}
+    for index in range(0, len(children), 2):
+        key = children[index]
+        value = children[index + 1]
+        if key.tag != "key" or not key.text or key.text in values:
+            raise OSError("malformed or duplicate plist key")
+        values[key.text] = value
+    return values
+
+def text_value(values, key):
+    value = values.get(key)
+    if value is None or value.tag != "string" or value.text is None:
+        raise OSError("missing plist string")
+    return value.text
+
+def safe_directory(path):
+    if not os.path.isabs(path) or path == os.path.sep:
+        raise OSError("unsafe state root")
+    normalized = os.path.normpath(path)
+    current = os.path.sep
+    for component in normalized.split(os.path.sep):
+        if not component:
+            continue
+        current = os.path.join(current, component)
+        metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise OSError("redirected state root")
+    metadata = os.lstat(normalized)
+    if not stat.S_ISDIR(metadata.st_mode) or os.path.realpath(normalized) != normalized:
+        raise OSError("unsafe state root")
+    return normalized
+
 try:
     root_meta = os.lstat(root)
     if stat.S_ISLNK(root_meta.st_mode) or not stat.S_ISDIR(root_meta.st_mode):
@@ -1043,34 +1101,52 @@ try:
         meta = entry.stat(follow_symlinks=False)
         if stat.S_ISLNK(meta.st_mode) or not stat.S_ISREG(meta.st_mode):
             raise OSError("unsafe launch agent definition")
-        with open(entry.path, "r", encoding="utf-8") as stream:
-            content = stream.read()
-        strings = [html.unescape(value) for value in re.findall(r"<string>(.*?)</string>", content, re.S)]
-        home_match = re.search(
-            r"<key>FM_HOME</key>\s*<string>(.*?)</string>", content, re.S
-        )
-        state_match = re.search(
-            r"<key>FM_CHECKOUT_REFRESH_STATE_ROOT</key>\s*<string>(.*?)</string>",
-            content,
-            re.S,
-        )
-        parsed_home = html.unescape(home_match.group(1)) if home_match else ""
+        document = ET.parse(entry.path)
+        root_element = document.getroot()
+        plist_dictionary = root_element.find("dict")
+        if plist_dictionary is None:
+            raise OSError("missing plist dictionary")
+        values = dictionary(plist_dictionary)
+        authoritative_label = text_value(values, "Label")
+        arguments = values.get("ProgramArguments")
+        environment = values.get("EnvironmentVariables")
+        if arguments is None or arguments.tag != "array":
+            raise OSError("missing program arguments")
+        if environment is None or environment.tag != "dict":
+            raise OSError("missing environment")
+        program_arguments = [
+            argument.text
+            for argument in list(arguments)
+            if argument.tag == "string" and argument.text is not None
+        ]
+        if len(program_arguments) != len(list(arguments)):
+            raise OSError("malformed program arguments")
+        environment_values = dictionary(environment)
+        parsed_home = text_value(environment_values, "FM_HOME")
         mentions_home = parsed_home in (canonical_home, raw_home)
-        mentions_script = script in strings
         if parsed_home and not mentions_home:
             continue
-        if not mentions_home or not mentions_script or state_match is None:
+        if (
+            not mentions_home
+            or len(program_arguments) != 4
+            or not os.path.isabs(program_arguments[0])
+            or program_arguments[1:] != [script, "run-once", "--scheduled"]
+        ):
             raise OSError("incomplete launch agent identity")
         label = entry.name[:-6]
-        suffix = label[len(label_base) + 1 :]
-        if re.fullmatch(r"[0-9a-f]{16}", suffix) is None:
+        if authoritative_label != label:
+            raise OSError("launch agent filename and Label differ")
+        if label == label_base:
+            suffix = ""
+        else:
+            suffix = label[len(label_base) + 1 :]
+        if suffix and re.fullmatch(r"[0-9a-f]{16}", suffix) is None:
             raise OSError("invalid launch agent label")
-        parsed_state = html.unescape(state_match.group(1))
-        expected_state = os.path.join(state_base, "homes", suffix)
-        if parsed_state != expected_state:
-            raise OSError("launch agent state identity mismatch")
+        parsed_state = safe_directory(
+            text_value(environment_values, "FM_CHECKOUT_REFRESH_STATE_ROOT")
+        )
         print(f"{label}\t{parsed_state}")
-except (OSError, UnicodeError):
+except (ET.ParseError, OSError, UnicodeError):
     raise SystemExit(1)
 PY
   ) || {
@@ -1080,6 +1156,7 @@ PY
   while IFS=$'\t' read -r label state; do
     [ -n "$label" ] || continue
     if [ "$label" = "$LABEL" ]; then
+      logical_state=$state
       logical_count=$((logical_count + 1))
       continue
     fi
@@ -1094,7 +1171,28 @@ EOF
     echo "error: ambiguous checkout-refresh LaunchAgent namespaces for $FM_HOME_CANONICAL" >&2
     return 1
   }
+  if [ "$logical_count" -eq 1 ] && [ "$STATE_ROOT_EXPLICIT" -eq 0 ] \
+      && [ "$logical_state" != "$DEFAULT_STATE_ROOT" ]; then
+    STATE_ROOT=$logical_state
+    CUSTOM_STATE_ROOT=1
+  elif [ "$logical_count" -eq 1 ] && [ "$logical_state" != "$STATE_ROOT" ]; then
+    echo "error: checkout-refresh LaunchAgent state root drifted from the requested namespace" >&2
+    return 1
+  fi
   if [ "$count" -eq 1 ]; then
+    if [ "$STATE_ROOT_EXPLICIT" -eq 1 ] && [ "$STATE_ROOT" != "$PHYSICAL_STATE_ROOT" ]; then
+      echo "error: checkout-refresh legacy LaunchAgent state root conflicts with the requested namespace" >&2
+      return 1
+    fi
+    case "$PHYSICAL_STATE_ROOT" in
+      "$STATE_BASE"/homes/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+        ;;
+      *)
+        STATE_ROOT=$PHYSICAL_STATE_ROOT
+        CUSTOM_STATE_ROOT=1
+        return 0
+        ;;
+    esac
     case "${FM_CHECKOUT_REFRESH_STATE_ROOT:-$DEFAULT_STATE_ROOT}" in
       "$PHYSICAL_STATE_ROOT")
         STATE_ROOT=$PHYSICAL_STATE_ROOT
@@ -1498,9 +1596,315 @@ resolve_checkout_refresh_authority() {
   fi
 }
 
+checkout_identity_migration_transaction() {
+  local checkout=$1 destination_prefix=$2 physical=$3 source_prefix=${4:-} line_count=${5:-}
+  python3 - "$STATE_ROOT" "$checkout" "$destination_prefix" "$physical" \
+    "$source_prefix" "$line_count" <<'PY'
+import hashlib
+import os
+import shutil
+import stat
+import sys
+import tempfile
+
+state_root, checkout, destination_prefix, physical, requested_source, requested_lines = sys.argv[1:]
+journal = destination_prefix + ".identity-migration"
+staging = destination_prefix + ".identity-migration-stage"
+allowed_extensions = ("identity", "tip", "last", "alert", "hygiene-alert")
+journal_preexisting = os.path.lexists(journal)
+
+def fsync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+def regular_file(path):
+    metadata = os.lstat(path)
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise OSError("unsafe state file")
+    return metadata
+
+def payload(source, extension, line_count):
+    regular_file(source)
+    with open(source, "rb") as stream:
+        content = stream.read()
+    if extension == "identity" and line_count == "2":
+        try:
+            values = content.decode("utf-8").splitlines()
+        except UnicodeError as error:
+            raise OSError("invalid identity encoding") from error
+        if len(values) != 2:
+            raise OSError("identity changed during migration")
+        content = ("\n".join(values + [physical]) + "\n").encode("utf-8")
+    return content
+
+def digest(content):
+    return hashlib.sha256(content).hexdigest()
+
+def write_journal(values):
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".identity-migration-journal.", dir=state_root
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            for key, value in values:
+                stream.write(f"{key}={value}\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, journal)
+        fsync_directory(state_root)
+    except OSError:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+def read_journal():
+    regular_file(journal)
+    values = {}
+    with open(journal, "r", encoding="utf-8") as stream:
+        for raw in stream:
+            line = raw.rstrip("\n")
+            if "=" not in line:
+                raise OSError("malformed migration journal")
+            key, value = line.split("=", 1)
+            if not key or key in values:
+                raise OSError("malformed migration journal")
+            values[key] = value
+    return values
+
+def staged_payloads(extensions, publish, line_count):
+    if os.path.lexists(staging):
+        metadata = os.lstat(staging)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise OSError("unsafe migration staging")
+        shutil.rmtree(staging)
+    os.mkdir(staging, 0o700)
+    hashes = {}
+    for extension in extensions:
+        source = source_prefix + "." + extension
+        content = payload(source, extension, line_count)
+        hashes[extension] = digest(content)
+        if extension not in publish:
+            continue
+        target = os.path.join(staging, extension)
+        with open(target, "xb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(target, regular_file(source).st_mode & 0o777)
+    fsync_directory(staging)
+    fsync_directory(state_root)
+    return hashes
+
+def destination_matches(extension, expected_hash):
+    destination = destination_prefix + "." + extension
+    if not os.path.lexists(destination):
+        return False
+    regular_file(destination)
+    with open(destination, "rb") as stream:
+        return digest(stream.read()) == expected_hash
+
+def staged_matches(extension, expected_hash):
+    target = os.path.join(staging, extension)
+    if not os.path.lexists(target):
+        return False
+    regular_file(target)
+    with open(target, "rb") as stream:
+        return digest(stream.read()) == expected_hash
+
+def publish_file(extension):
+    staged = os.path.join(staging, extension)
+    regular_file(staged)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".identity-migration-publish.", dir=state_root
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as output, open(staged, "rb") as source:
+            shutil.copyfileobj(source, output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, os.lstat(staged).st_mode & 0o777)
+        os.replace(temporary, destination_prefix + "." + extension)
+        fsync_directory(state_root)
+    except OSError:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+try:
+    root_metadata = os.lstat(state_root)
+    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
+        raise OSError("unsafe state root")
+    if os.path.dirname(destination_prefix) != state_root:
+        raise OSError("escaping destination")
+    values = None
+    if os.path.lexists(journal):
+        values = read_journal()
+        if values.get("version") != "1" or values.get("checkout") != checkout:
+            raise OSError("migration journal identity mismatch")
+        if values.get("destination") != os.path.basename(destination_prefix):
+            raise OSError("migration destination mismatch")
+        if values.get("physical") != physical:
+            raise OSError("migration physical identity drift")
+        line_count = values.get("lines", "")
+        source_name = values.get("source", "")
+        if (
+            len(source_name) != 24
+            or any(character not in "0123456789abcdef" for character in source_name)
+        ):
+            raise OSError("unsafe migration source")
+        if source_name == os.path.basename(destination_prefix):
+            raise OSError("migration source aliases destination")
+        source_prefix = os.path.join(state_root, source_name)
+        extensions = tuple(filter(None, values.get("extensions", "").split(",")))
+        publish = tuple(filter(None, values.get("publish", "").split(",")))
+        if (
+            not extensions
+            or extensions[0] != "identity"
+            or len(set(extensions)) != len(extensions)
+            or len(set(publish)) != len(publish)
+            or any(extension not in allowed_extensions for extension in extensions)
+            or any(extension not in extensions for extension in publish)
+            or "identity" not in publish
+            or line_count not in ("2", "3")
+        ):
+            raise OSError("malformed migration journal")
+        hashes = {}
+        for extension in extensions:
+            value = values.get("hash." + extension, "")
+            if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+                raise OSError("malformed migration hash")
+            hashes[extension] = value
+    else:
+        if os.path.lexists(staging):
+            raise OSError("orphaned migration staging")
+        if not requested_source:
+            raise SystemExit(0)
+        if os.path.dirname(requested_source) != state_root or requested_lines not in ("2", "3"):
+            raise OSError("unsafe migration request")
+        source_prefix = requested_source
+        line_count = requested_lines
+        extensions = []
+        publish = []
+        for extension in allowed_extensions:
+            source = source_prefix + "." + extension
+            if not os.path.lexists(source):
+                continue
+            regular_file(source)
+            extensions.append(extension)
+            destination = destination_prefix + "." + extension
+            if os.path.lexists(destination):
+                regular_file(destination)
+                if extension not in ("alert", "hygiene-alert"):
+                    raise OSError("destination state exists")
+            else:
+                publish.append(extension)
+        if not extensions or extensions[0] != "identity" or "identity" not in publish:
+            raise OSError("identity state is missing")
+        hashes = staged_payloads(tuple(extensions), tuple(publish), line_count)
+        if os.environ.get("FM_CHECKOUT_REFRESH_TEST") == "1" and os.environ.get(
+            "FM_CHECKOUT_TEST_IDENTITY_MIGRATION_FAILURE"
+        ) == "stage":
+            shutil.rmtree(staging)
+            fsync_directory(state_root)
+            raise OSError("injected staging failure")
+        journal_values = [
+            ("version", "1"),
+            ("checkout", checkout),
+            ("source", os.path.basename(source_prefix)),
+            ("destination", os.path.basename(destination_prefix)),
+            ("physical", physical),
+            ("lines", line_count),
+            ("extensions", ",".join(extensions)),
+            ("publish", ",".join(publish)),
+        ]
+        journal_values.extend(
+            ("hash." + extension, hashes[extension]) for extension in extensions
+        )
+        write_journal(journal_values)
+        if os.environ.get("FM_CHECKOUT_REFRESH_TEST") == "1" and os.environ.get(
+            "FM_CHECKOUT_TEST_IDENTITY_MIGRATION_FAILURE"
+        ) == "publish":
+            os.unlink(journal)
+            shutil.rmtree(staging)
+            fsync_directory(state_root)
+            raise OSError("injected publish failure")
+    complete = all(
+        destination_matches(extension, hashes[extension]) for extension in publish
+    )
+    if not complete:
+        for extension in extensions:
+            source = source_prefix + "." + extension
+            if not os.path.lexists(source) \
+                or digest(payload(source, extension, line_count)) != hashes[extension]:
+                raise OSError("migration source changed")
+        stage_valid = os.path.isdir(staging) and not os.path.islink(staging) and all(
+            staged_matches(extension, hashes[extension]) for extension in publish
+        )
+        if not stage_valid:
+            rebuilt_hashes = staged_payloads(extensions, publish, line_count)
+            if rebuilt_hashes != hashes:
+                raise OSError("migration source changed")
+        for extension in publish:
+            if destination_matches(extension, hashes[extension]):
+                continue
+            if not staged_matches(extension, hashes[extension]):
+                raise OSError("migration staging changed")
+            publish_file(extension)
+            if (
+                os.environ.get("FM_CHECKOUT_REFRESH_TEST") == "1"
+                and os.environ.get("FM_CHECKOUT_TEST_IDENTITY_MIGRATION_CRASH")
+                == "after-first-publish"
+            ):
+                os._exit(86)
+    if not all(
+        destination_matches(extension, hashes[extension]) for extension in publish
+    ):
+        raise OSError("migration publication incomplete")
+    for extension in extensions:
+        source = source_prefix + "." + extension
+        if not os.path.lexists(source):
+            continue
+        if digest(payload(source, extension, line_count)) != hashes[extension]:
+            raise OSError("migration source changed")
+        regular_file(source)
+        os.unlink(source)
+    fsync_directory(state_root)
+    if os.path.lexists(staging):
+        metadata = os.lstat(staging)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise OSError("unsafe migration staging")
+        shutil.rmtree(staging)
+        fsync_directory(state_root)
+    os.unlink(journal)
+    fsync_directory(state_root)
+except (OSError, UnicodeError):
+    if not journal_preexisting and not os.path.lexists(journal) and os.path.lexists(staging):
+        try:
+            metadata = os.lstat(staging)
+            if not stat.S_ISLNK(metadata.st_mode) and stat.S_ISDIR(metadata.st_mode):
+                shutil.rmtree(staging)
+                fsync_directory(state_root)
+        except OSError:
+            pass
+    raise SystemExit(1)
+PY
+}
+
 migrate_checkout_identity_state() {
   local checkout=$1 key=$2 destination="$STATE_ROOT/$key.identity"
   local candidate source_prefix destination_prefix match= count=0 lines current_physical current_physical_key
+  current_physical=$(fm_checkout_physical_path_identity "$checkout" directory) || return 1
+  destination_prefix="$STATE_ROOT/$key"
+  checkout_identity_migration_transaction \
+    "$checkout" "$destination_prefix" "$current_physical" || return 1
   for candidate in "$STATE_ROOT"/*.identity; do
     [ -e "$candidate" ] || [ -L "$candidate" ] || continue
     [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ -r "$candidate" ] || return 1
@@ -1519,11 +1923,9 @@ migrate_checkout_identity_state() {
     return 0
   fi
   { [ "$lines" -eq 2 ] || [ "$lines" -eq 3 ]; } || return 1
-  current_physical=$(fm_checkout_physical_path_identity "$checkout" directory) || return 1
   current_physical_key=$(fm_checkout_physical_path_key "$checkout" directory 24) || return 1
   [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 1
   source_prefix=${match%.identity}
-  destination_prefix="$STATE_ROOT/$key"
   if [ "$lines" -eq 2 ] && [ "${source_prefix##*/}" != "$current_physical_key" ]; then
     echo "$checkout: skipped: legacy checkout identity filename does not match the current physical checkout"
     return 1
@@ -1532,95 +1934,8 @@ migrate_checkout_identity_state() {
     echo "$checkout: skipped: legacy checkout physical identity drifted before migration"
     return 1
   fi
-  python3 - "$source_prefix" "$destination_prefix" "$current_physical" "$lines" <<'PY'
-import os
-import shutil
-import stat
-import sys
-import tempfile
-
-source_prefix, destination_prefix, physical, line_count = sys.argv[1:]
-extensions = ("identity", "tip", "last", "alert", "hygiene-alert")
-state_root = os.path.dirname(destination_prefix)
-staging = ""
-moved_sources = []
-published = []
-try:
-    sources = []
-    for extension in extensions:
-        source = source_prefix + "." + extension
-        destination = destination_prefix + "." + extension
-        if not os.path.lexists(source):
-            continue
-        metadata = os.lstat(source)
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-            raise OSError("unsafe source state")
-        publish = True
-        if os.path.lexists(destination):
-            destination_meta = os.lstat(destination)
-            if extension not in ("alert", "hygiene-alert") or stat.S_ISLNK(
-                destination_meta.st_mode
-            ) or not stat.S_ISREG(destination_meta.st_mode):
-                raise OSError("destination state exists")
-            publish = False
-        sources.append(
-            (extension, source, destination, metadata.st_mode & 0o777, publish)
-        )
-    if not sources or sources[0][0] != "identity":
-        raise OSError("identity state is missing")
-    staging = tempfile.mkdtemp(prefix=".checkout-identity-migration.", dir=state_root)
-    new_root = os.path.join(staging, "new")
-    old_root = os.path.join(staging, "old")
-    os.mkdir(new_root, 0o700)
-    os.mkdir(old_root, 0o700)
-    for extension, source, _, mode, _ in sources:
-        staged = os.path.join(new_root, extension)
-        if extension == "identity" and line_count == "2":
-            with open(source, "r", encoding="utf-8") as stream:
-                values = stream.read().splitlines()
-            if len(values) != 2:
-                raise OSError("identity changed during migration")
-            with open(staged, "w", encoding="utf-8") as stream:
-                stream.write("\n".join(values + [physical]) + "\n")
-        else:
-            shutil.copyfile(source, staged)
-        os.chmod(staged, mode)
-        with open(staged, "rb") as stream:
-            os.fsync(stream.fileno())
-    if os.environ.get("FM_CHECKOUT_REFRESH_TEST") == "1" and os.environ.get(
-        "FM_CHECKOUT_TEST_IDENTITY_MIGRATION_FAILURE"
-    ) == "stage":
-        raise OSError("injected staging failure")
-    for extension, source, _, _, _ in sources:
-        retained = os.path.join(old_root, extension)
-        os.replace(source, retained)
-        moved_sources.append((retained, source))
-    if os.environ.get("FM_CHECKOUT_REFRESH_TEST") == "1" and os.environ.get(
-        "FM_CHECKOUT_TEST_IDENTITY_MIGRATION_FAILURE"
-    ) == "publish":
-        raise OSError("injected publish failure")
-    for extension, _, destination, _, publish in sources:
-        if not publish:
-            continue
-        staged = os.path.join(new_root, extension)
-        os.replace(staged, destination)
-        published.append(destination)
-    shutil.rmtree(staging)
-except (OSError, UnicodeError):
-    for destination in reversed(published):
-        try:
-            os.unlink(destination)
-        except OSError:
-            pass
-    for retained, source in reversed(moved_sources):
-        try:
-            os.replace(retained, source)
-        except OSError:
-            pass
-    if staging:
-        shutil.rmtree(staging, ignore_errors=True)
-    raise SystemExit(1)
-PY
+  checkout_identity_migration_transaction \
+    "$checkout" "$destination_prefix" "$current_physical" "$source_prefix" "$lines"
 }
 
 validate_covered_checkout_identity() {
@@ -2257,6 +2572,7 @@ remove_matching_legacy_launch_agent() {
   local domain=$1 legacy_plist="$LAUNCH_AGENTS_DIR/$LEGACY_LABEL.plist"
   [ "$LABEL" != "$LEGACY_LABEL" ] || return 0
   [ -f "$legacy_plist" ] && [ ! -L "$legacy_plist" ] || return 0
+  grep -Fq "<key>Label</key><string>$(xml_escape "$LEGACY_LABEL")</string>" "$legacy_plist" || return 1
   grep -Fq "<string>$(xml_escape "$SCRIPT_DIR/fm-checkout-refresh.sh")</string>" "$legacy_plist" || return 0
   if ! grep -Fq "<key>FM_HOME</key><string>$(xml_escape "$FM_HOME_CANONICAL")</string>" "$legacy_plist" \
     && ! grep -Fq "<key>FM_HOME</key><string>$(xml_escape "$FM_HOME")</string>" "$legacy_plist"; then
@@ -2269,7 +2585,9 @@ remove_matching_legacy_launch_agent() {
 physical_launch_agent_matches_home() {
   [ "$PHYSICAL_LABEL" != "$LABEL" ] || return 1
   [ -f "$PHYSICAL_PLIST" ] && [ ! -L "$PHYSICAL_PLIST" ] || return 1
-  grep -Fq "<string>$(xml_escape "$SCRIPT_DIR/fm-checkout-refresh.sh")</string>" "$PHYSICAL_PLIST" \
+  grep -Fq "<key>Label</key><string>$(xml_escape "$PHYSICAL_LABEL")</string>" "$PHYSICAL_PLIST" \
+    && grep -Fq "<string>$(xml_escape "$SCRIPT_DIR/fm-checkout-refresh.sh")</string>" "$PHYSICAL_PLIST" \
+    && grep -Fq '<string>--scheduled</string>' "$PHYSICAL_PLIST" \
     && grep -Fq "<key>FM_HOME</key><string>$(xml_escape "$FM_HOME_CANONICAL")</string>" "$PHYSICAL_PLIST" \
     && grep -Fq "<key>FM_CHECKOUT_REFRESH_STATE_ROOT</key><string>$(xml_escape "$PHYSICAL_STATE_ROOT")</string>" "$PHYSICAL_PLIST"
 }
@@ -2299,8 +2617,78 @@ remove_matching_physical_launch_agent() {
   rm -f "$PHYSICAL_PLIST"
 }
 
+launch_agent_environment_value() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+path, requested = sys.argv[1:]
+try:
+    document = ET.parse(path)
+    root = document.getroot().find("dict")
+    if root is None:
+        raise ValueError
+    children = list(root)
+    values = {}
+    for index in range(0, len(children), 2):
+        if index + 1 >= len(children) or children[index].tag != "key":
+            raise ValueError
+        key = children[index].text
+        if not key or key in values:
+            raise ValueError
+        values[key] = children[index + 1]
+    environment = values.get("EnvironmentVariables")
+    if environment is None or environment.tag != "dict":
+        raise ValueError
+    children = list(environment)
+    values = {}
+    for index in range(0, len(children), 2):
+        if index + 1 >= len(children) or children[index].tag != "key":
+            raise ValueError
+        key = children[index].text
+        value = children[index + 1]
+        if not key or key in values:
+            raise ValueError
+        values[key] = value
+    value = values.get(requested)
+    if value is None or value.tag != "string" or value.text is None:
+        raise ValueError
+    print(value.text)
+except (ET.ParseError, OSError, ValueError):
+    raise SystemExit(1)
+PY
+}
+
+wait_for_scheduler_generation() {
+  local generation deadline recorded
+  generation=$(launch_agent_environment_value "$PLIST" FM_CHECKOUT_REFRESH_GENERATION) || return 1
+  deadline=$(( $(date +%s) + ACTIVATION_TIMEOUT ))
+  while [ "$(date +%s)" -le "$deadline" ]; do
+    if [ -f "$STATE_ROOT/scheduler-generation" ] \
+        && [ ! -L "$STATE_ROOT/scheduler-generation" ]; then
+      recorded=$(sed -n '1p' "$STATE_ROOT/scheduler-generation" 2>/dev/null || true)
+      [ "$recorded" != "$generation" ] || return 0
+    fi
+    sleep 1
+  done
+  echo "checkout-refresh active scheduler generation did not complete before activation timeout" >&2
+  return 1
+}
+
+generate_scheduler_generation() {
+  local token_seed token
+  token_seed=$(mktemp "$STATE_ROOT/.scheduler-generation.XXXXXX") || return 1
+  token=$(fm_checkout_hash_value \
+    "$LABEL:$STATE_ROOT:$$:$(date +%s):${RANDOM:-0}:$token_seed" 32) || {
+    rm -f "$token_seed"
+    return 1
+  }
+  rm -f "$token_seed" || return 1
+  printf '%s\n' "$token"
+}
+
 install_launch_agent() {
-  local bash_runtime python_runtime perl_runtime runtime_path temp previous domain
+  local bash_runtime python_runtime perl_runtime runtime_path temp previous domain generation
   [ "$PLATFORM" = Darwin ] || {
     echo "error: checkout-refresh background installation currently requires macOS" >&2
     return 1
@@ -2318,6 +2706,7 @@ install_launch_agent() {
     && [ -d "$STATE_ROOT" ] && [ ! -L "$STATE_ROOT" ] \
     && [ -d "$LOCK_ROOT" ] && [ ! -L "$LOCK_ROOT" ] \
     || { echo "error: unsafe checkout-refresh installation directories" >&2; return 1; }
+  generation=$(generate_scheduler_generation) || return 1
   temp=$(mktemp "$LAUNCH_AGENTS_DIR/.$LABEL.XXXXXX") || return 1
   previous=$(mktemp "$LAUNCH_AGENTS_DIR/.$LABEL.previous.XXXXXX") || { rm -f "$temp"; return 1; }
   rm -f "$previous"
@@ -2346,6 +2735,7 @@ install_launch_agent() {
 <key>FM_CHECKOUT_REFRESH_LOCK_ROOT</key><string>$(xml_escape "$LOCK_ROOT")</string>
 <key>FM_CHECKOUT_REFRESH_INTERVAL</key><string>$(xml_escape "$INTERVAL")</string>
 <key>FM_CHECKOUT_REFRESH_BACKSTOP</key><string>$(xml_escape "$BACKSTOP")</string>
+<key>FM_CHECKOUT_REFRESH_GENERATION</key><string>$generation</string>
 </dict>
 <key>RunAtLoad</key><true/>
 <key>StartInterval</key><integer>$INTERVAL</integer>
@@ -2377,15 +2767,19 @@ EOF
 }
 
 ensure_launch_agent() {
-  local domain heartbeat coverage_epoch coverage now max_age
+  local domain heartbeat coverage_epoch coverage now max_age generation recorded_generation generation_lines installed=0
   [ "$PLATFORM" = Darwin ] || return 0
   validate_launch_agent_namespaces || return 1
   if [ ! -e "$PLIST" ] && [ ! -L "$PLIST" ] \
     && { [ -e "$PHYSICAL_PLIST" ] || [ -L "$PHYSICAL_PLIST" ]; }; then
     install_launch_agent || return 1
+    installed=1
   fi
+  [ "$installed" -eq 0 ] || wait_for_scheduler_generation || return 1
   [ -f "$PLIST" ] && [ ! -L "$PLIST" ] \
     || { echo "checkout-refresh LaunchAgent is not installed" >&2; return 1; }
+  grep -Fq "<key>Label</key><string>$(xml_escape "$LABEL")</string>" "$PLIST" \
+    || { echo "checkout-refresh LaunchAgent Label identity drifted" >&2; return 1; }
   grep -Fq "<string>$(xml_escape "$SCRIPT_DIR/fm-checkout-refresh.sh")</string>" "$PLIST" \
     || { echo "checkout-refresh LaunchAgent points at a different Firstmate checkout" >&2; return 1; }
   grep -Fq '<string>--scheduled</string>' "$PLIST" \
@@ -2404,6 +2798,11 @@ ensure_launch_agent() {
     || { echo "checkout-refresh LaunchAgent uses a different refresh backstop" >&2; return 1; }
   grep -Fq "<key>StartInterval</key><integer>$INTERVAL</integer>" "$PLIST" \
     || { echo "checkout-refresh LaunchAgent uses a different scheduler interval" >&2; return 1; }
+  generation=$(launch_agent_environment_value "$PLIST" FM_CHECKOUT_REFRESH_GENERATION) \
+    || { echo "checkout-refresh LaunchAgent has no authoritative scheduler generation" >&2; return 1; }
+  case "$generation" in *[!0-9a-f]*) return 1 ;; esac
+  [ "${#generation}" -eq 32 ] \
+    || { echo "checkout-refresh LaunchAgent scheduler generation is malformed" >&2; return 1; }
   domain="gui/$(id -u)"
   "$LAUNCHCTL" print "$domain/$LABEL" >/dev/null 2>&1 \
     || { echo "checkout-refresh LaunchAgent is not loaded" >&2; return 1; }
@@ -2419,6 +2818,14 @@ ensure_launch_agent() {
       echo "checkout-refresh latest coverage run is missing or unhealthy; inspect $STATE_ROOT for checkout alerts and scheduler diagnostics" >&2
       return 1
     }
+  [ -f "$STATE_ROOT/scheduler-generation" ] \
+    && [ ! -L "$STATE_ROOT/scheduler-generation" ] \
+    && [ -r "$STATE_ROOT/scheduler-generation" ] \
+    || { echo "checkout-refresh active scheduler generation has not completed a run" >&2; return 1; }
+  generation_lines=$(awk 'END { print NR + 0 }' "$STATE_ROOT/scheduler-generation") || return 1
+  recorded_generation=$(sed -n '1p' "$STATE_ROOT/scheduler-generation") || return 1
+  [ "$generation_lines" -eq 1 ] && [ "$recorded_generation" = "$generation" ] \
+    || { echo "checkout-refresh active scheduler generation has not completed a run" >&2; return 1; }
 }
 
 scheduler_install() {
@@ -2426,6 +2833,7 @@ scheduler_install() {
   case "$PLATFORM" in
     Darwin)
       if install_launch_agent \
+        && { [ "$HOME_MIGRATION_ACTIVE" -ne 1 ] || wait_for_scheduler_generation; } \
         && { [ "$HOME_MIGRATION_ACTIVE" -ne 1 ] || ensure_launch_agent; } \
         && commit_home_state_namespace_migration; then
         return 0

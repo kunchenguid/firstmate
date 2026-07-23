@@ -3402,6 +3402,129 @@ test_secondmate_retirement_recurses_into_ignored_nested_repositories() {
   pass "secondmate retirement recursively proves submodule repositories"
 }
 
+test_secondmate_retirement_rejects_linked_worktree_graphs() {
+  local nested_case nested_source nested_clone nested_worktree nested_exclude external_case external_clone external_worktree rc
+  nested_case=$(make_case secondmate-nested-linked-worktree)
+  prepare_secondmate_home_fixture "$nested_case"
+  write_secondmate_meta "$nested_case"
+  nested_source="$nested_case/source-projects/test"
+  nested_clone="$nested_case/wt/projects/test"
+  nested_worktree="$nested_clone/linked-owned-elsewhere"
+  nested_exclude="$(git -C "$nested_clone" rev-parse --absolute-git-dir)/info/exclude"
+  printf '%s\n' '/linked-owned-elsewhere/' >> "$nested_exclude"
+  git clone --quiet "$nested_case/origin.git" "$nested_source/linked-owned-elsewhere"
+  git -C "$nested_source" worktree add -q -b linked-retirement "$nested_worktree" main
+  set +e
+  run_teardown "$nested_case" --force > "$nested_case/stdout" 2> "$nested_case/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "nested linked worktree must block retirement"
+  assert_present "$nested_worktree" "nested linked worktree was removed without unregistering its owner"
+  assert_present "$nested_case/state/task-x1.meta" "nested linked worktree allowed metadata removal"
+  assert_grep 'linked worktree owned outside the retiring home' "$nested_case/stderr" \
+    "nested linked-worktree ownership was not surfaced"
+
+  external_case=$(make_case secondmate-external-linked-worktree)
+  prepare_secondmate_home_fixture "$external_case"
+  write_secondmate_meta "$external_case"
+  external_clone="$external_case/wt/projects/test"
+  external_worktree="$external_case/external-linked-worktree"
+  git -C "$external_clone" worktree add -q -b external-retirement "$external_worktree" main
+  set +e
+  run_teardown "$external_case" --force > "$external_case/stdout" 2> "$external_case/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "external linked worktree must block common-directory removal"
+  assert_present "$external_worktree" "external linked worktree lost its common Git directory"
+  assert_present "$external_case/state/task-x1.meta" "external linked worktree allowed metadata removal"
+  assert_grep 'owns another linked worktree' "$external_case/stderr" \
+    "external linked worktree was not surfaced"
+  pass "secondmate retirement retains every linked-worktree graph"
+}
+
+test_secondmate_retirement_accounts_for_directory_symlinks() {
+  local escape_case escape_clone escape_exclude external cycle_case cycle_clone cycle_exclude rc
+  escape_case=$(make_case secondmate-project-symlink-escape)
+  prepare_secondmate_home_fixture "$escape_case"
+  write_secondmate_meta "$escape_case"
+  escape_clone="$escape_case/wt/projects/test"
+  external="$escape_case/external-repository"
+  git clone --quiet "$escape_case/origin.git" "$external"
+  ln -s "$external" "$escape_clone/escaping-repository"
+  escape_exclude="$(git -C "$escape_clone" rev-parse --absolute-git-dir)/info/exclude"
+  printf '%s\n' '/escaping-repository' >> "$escape_exclude"
+  set +e
+  run_teardown "$escape_case" --force > "$escape_case/stdout" 2> "$escape_case/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "escaping repository symlink must block retirement"
+  assert_present "$escape_case/wt" "escaping repository symlink allowed home removal"
+  assert_grep 'nested project repositories cannot be safely enumerated' "$escape_case/stderr" \
+    "escaping repository symlink was not surfaced"
+
+  cycle_case=$(make_case secondmate-project-symlink-cycle)
+  prepare_secondmate_home_fixture "$cycle_case"
+  write_secondmate_meta "$cycle_case"
+  cycle_clone="$cycle_case/wt/projects/test"
+  mkdir -p "$cycle_clone/cycle"
+  ln -s .. "$cycle_clone/cycle/back"
+  cycle_exclude="$(git -C "$cycle_clone" rev-parse --absolute-git-dir)/info/exclude"
+  printf '%s\n' '/cycle/' >> "$cycle_exclude"
+  set +e
+  run_teardown "$cycle_case" --force > "$cycle_case/stdout" 2> "$cycle_case/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "repository symlink cycle must block retirement"
+  assert_present "$cycle_case/wt" "repository symlink cycle allowed home removal"
+  assert_grep 'nested project repositories cannot be safely enumerated' "$cycle_case/stderr" \
+    "repository symlink cycle was not surfaced"
+  pass "secondmate retirement accounts for directory symlinks"
+}
+
+test_secondmate_retirement_rejects_loopback_and_stale_tracking_authority() {
+  local loopback_case loopback_clone loopback_source loopback_origin stale_case stale_clone unique_tip rc
+  loopback_case=$(make_case secondmate-loopback-origin)
+  prepare_secondmate_home_fixture "$loopback_case"
+  write_secondmate_meta "$loopback_case"
+  loopback_clone="$loopback_case/wt/projects/test"
+  loopback_source="$loopback_case/source-projects/test"
+  loopback_origin="$loopback_case/wt/data/loopback-origin.git"
+  git clone --quiet --bare "$loopback_case/origin.git" "$loopback_origin"
+  git -C "$loopback_clone" remote set-url origin "ssh://localhost$loopback_origin"
+  git -C "$loopback_source" remote set-url origin "ssh://localhost$loopback_origin"
+  set +e
+  run_teardown "$loopback_case" --force > "$loopback_case/stdout" 2> "$loopback_case/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "in-home loopback origin must block retirement"
+  assert_present "$loopback_origin" "loopback landing authority inside the home was deleted"
+  assert_grep 'does not survive home removal' "$loopback_case/stderr" \
+    "loopback landing authority was assumed durable"
+
+  stale_case=$(make_case secondmate-stale-remote-tracking-ref)
+  prepare_secondmate_home_fixture "$stale_case"
+  write_secondmate_meta "$stale_case"
+  stale_clone="$stale_case/wt/projects/test"
+  git -C "$stale_clone" checkout -q -b stale-only
+  printf 'stale tracking work\n' > "$stale_clone/stale-tracking.txt"
+  git -C "$stale_clone" add stale-tracking.txt
+  git -C "$stale_clone" commit -qm "stale tracking work"
+  unique_tip=$(git -C "$stale_clone" rev-parse HEAD)
+  git -C "$stale_clone" update-ref refs/remotes/origin/deleted "$unique_tip"
+  git -C "$stale_clone" checkout -q main
+  git -C "$stale_clone" branch -D stale-only >/dev/null
+  set +e
+  run_teardown "$stale_case" --force > "$stale_case/stdout" 2> "$stale_case/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "stale remote-tracking ref must block retirement"
+  assert_present "$stale_case/wt" "stale remote-tracking work was discarded"
+  assert_present "$stale_case/state/task-x1.meta" "stale remote-tracking ref allowed metadata removal"
+  assert_grep 'ref refs/remotes/origin/deleted is not proven on a live remote branch' "$stale_case/stderr" \
+    "stale remote-tracking work was not surfaced"
+  pass "loopback and stale remote-tracking authority never prove landing"
+}
+
 test_secondmate_retirement_serializes_child_spawn() {
   local case_dir child_project rc teardown_pid spawn_rc waited
   case_dir=$(make_case secondmate-retirement-child-race)
@@ -3701,6 +3824,9 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-durable-secondmate ]; then
   test_secondmate_project_tags_do_not_prove_landing
   test_secondmate_project_origin_authority_survives_home_removal
   test_secondmate_retirement_recurses_into_ignored_nested_repositories
+  test_secondmate_retirement_rejects_linked_worktree_graphs
+  test_secondmate_retirement_accounts_for_directory_symlinks
+  test_secondmate_retirement_rejects_loopback_and_stale_tracking_authority
   exit 0
 fi
 
@@ -3744,6 +3870,9 @@ test_secondmate_retirement_retains_unlanded_project_clone
 test_secondmate_project_tags_do_not_prove_landing
 test_secondmate_project_origin_authority_survives_home_removal
 test_secondmate_retirement_recurses_into_ignored_nested_repositories
+test_secondmate_retirement_rejects_linked_worktree_graphs
+test_secondmate_retirement_accounts_for_directory_symlinks
+test_secondmate_retirement_rejects_loopback_and_stale_tracking_authority
 test_secondmate_retirement_serializes_child_spawn
 test_nested_secondmate_cleanup_requires_child_home_lock
 test_secondmate_registry_updates_are_locked_and_literal

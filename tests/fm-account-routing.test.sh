@@ -1186,6 +1186,34 @@ test_recovered_secondmate_kind_blocks_unsupported_cmux_backend_early() {
   pass "metadata kind recovery precedes unsupported secondmate backend checks"
 }
 
+test_managed_recovery_rejects_duplicate_kind_metadata() {
+  local id rec meta replacement out status
+  id=acct-duplicate-kind-z9c
+  rec=$(make_case duplicate-kind-recovery claude "$id")
+  read_case "$rec"
+  mkdir -p "$CASE_DIR/treehouse-pools"
+  out=$(FM_FAKE_AF_POOL=claude-crew run_spawn "$id" "$PROJ_DIR" --account-pool claude-crew)
+  status=$?
+  [ "$status" -eq 0 ] || fail "duplicate-kind recovery precondition spawn failed: $out"
+  meta="$HOME_DIR/state/$id.meta"
+  replacement="$meta.replacement"
+  sed '/^kind=/d;/^backend=/d' "$meta" > "$replacement"
+  printf '%s\n' 'kind=secondmate' 'kind=ship' 'backend=cmux' >> "$replacement"
+  mv "$replacement" "$meta"
+  rm -f "$CASE_DIR/endpoint-live"
+  clear_case_logs
+  out=$(run_spawn "$id" --resume-account)
+  status=$?
+  [ "$status" -ne 0 ] || fail "duplicate recovery kind metadata launched"
+  assert_contains "$out" "duplicate kind records" \
+    "duplicate recovery kind metadata was not surfaced"
+  assert_not_grep 'lease recover\|lease choose\|lease acquire' "$AF_LOG" \
+    "duplicate recovery kind metadata reached account mutation"
+  assert_not_grep '^new-window ' "$TMUX_LOG" \
+    "duplicate recovery kind metadata created an endpoint"
+  pass "managed recovery requires exactly one canonical kind record"
+}
+
 test_managed_recovery_accepts_inherited_lifecycle_lock() {
   local id rec out status held account_task
   id=account-inherited-recovery-z9d
@@ -5791,6 +5819,7 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-durable-secondmate ]; then
   run_isolated_test test_recovered_secondmate_kind_blocks_unsupported_cmux_backend_early
+  run_isolated_test test_managed_recovery_rejects_duplicate_kind_metadata
   exit 0
 fi
 
@@ -6213,6 +6242,7 @@ run_isolated_test test_pane_failure_happens_before_account_reservation
 run_isolated_test test_batch_partial_failure_releases_only_failed_item
 run_isolated_test test_resume_uses_sticky_recovery_and_preserves_mapping_on_failure
 run_isolated_test test_recovered_secondmate_kind_blocks_unsupported_cmux_backend_early
+run_isolated_test test_managed_recovery_rejects_duplicate_kind_metadata
 run_isolated_test test_managed_recovery_accepts_inherited_lifecycle_lock
 run_isolated_test test_inherited_lifecycle_handoff_releases_on_child_abort
 run_isolated_test test_inherited_lifecycle_lock_rejects_owner_aba
