@@ -255,6 +255,7 @@ This section is the single owner of the canonical schema and its per-field seman
 Per rule, `when` and `use` are required.
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
+A profile `harness` must be verified for every role, so `cursor` is rejected here as unverified even though it is a verified crewmate/scout adapter; reach it with an explicit `--harness cursor` on `fm-spawn.sh` or through a dispatch-pool account.
 Profile `model` and `effort` fields and rule `why` are optional.
 An omitted model or effort means the selected harness uses its own default for that axis.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.

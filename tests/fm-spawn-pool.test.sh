@@ -273,6 +273,54 @@ test_positional_harness_narrows_the_pool() {
   pass "a positional harness narrows the pool and is never overridden by it"
 }
 
+# An account may pin the model and effort it should run on, and docs/dispatch-pool.md
+# promises an explicit --model/--effort still wins. Both halves are asserted here:
+# the pool's defaults reach the launch when the caller names none, and they are
+# dropped the moment the caller does.
+test_account_model_defaults_yield_to_explicit_flags() {
+  local rec id out meta launch
+  id=pool-model-i1
+  rec=$(make_spawn_case pool-model "$id")
+  read_case_record "$rec"
+  cat > "$HOME_DIR/config/dispatch-pool.json" <<'JSON'
+{
+  "backends": [
+    { "id": "claude-1", "harness": "claude", "model": "opus", "effort": "high" }
+  ]
+}
+JSON
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --pool)
+  expect_code 0 $? "a pooled spawn on a model-pinning account should succeed: $out"
+  meta=$(cat "$HOME_DIR/state/$id.meta")
+  assert_contains "$meta" "model=opus" "the account's model should reach meta"
+  assert_contains "$meta" "effort=high" "the account's effort should reach meta"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'opus'" "the account's model should reach the launch"
+  assert_contains "$launch" "--effort 'high'" "the account's effort should reach the launch"
+
+  id=pool-model-j1
+  rec=$(make_spawn_case pool-model-explicit "$id")
+  read_case_record "$rec"
+  cat > "$HOME_DIR/config/dispatch-pool.json" <<'JSON'
+{
+  "backends": [
+    { "id": "claude-1", "harness": "claude", "model": "opus", "effort": "high" }
+  ]
+}
+JSON
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --pool --model sonnet --effort low)
+  expect_code 0 $? "a pooled spawn with explicit model/effort should succeed: $out"
+  meta=$(cat "$HOME_DIR/state/$id.meta")
+  assert_contains "$meta" "model=sonnet" "an explicit --model must outrank the account's default"
+  assert_contains "$meta" "effort=low" "an explicit --effort must outrank the account's default"
+  assert_not_contains "$meta" "model=opus" "the account's model must not survive an explicit --model"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'sonnet'" "the launch should carry the caller's model"
+  assert_not_contains "$launch" "opus" "the account's model must not reach the launch"
+  pass "an account's model/effort defaults apply, and an explicit flag still wins"
+}
+
 test_pool_rejects_secondmate() {
   local rec id out status
   id=pool-secondmate-g1
@@ -297,6 +345,7 @@ test_pool_rotates_across_spawns
 test_pool_never_puts_a_key_on_the_command_line
 test_pool_refuses_when_every_account_is_cooling
 test_positional_harness_narrows_the_pool
+test_account_model_defaults_yield_to_explicit_flags
 test_pool_rejects_secondmate
 
 echo "# all fm-spawn-pool tests passed"

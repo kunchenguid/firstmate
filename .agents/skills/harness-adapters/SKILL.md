@@ -352,6 +352,8 @@ Cursor's launcher re-execs into node, so `pane_current_command` is the generic `
 The real agent process is `cursor-agent` (hyphenated) with argv containing `index.js agent`, and a long-lived `worker-server` daemon plus unrelated Cursor.app Electron processes are nearby false positives, so any future probe must match the argv, not the command name.
 Turn-end hooks and the busy signature are the working supervision signals for cursor in the meantime.
 
+Regression coverage: `tests/fm-cursor-harness.test.sh` pins the launch command, the model-flag-but-no-effort-flag split, the turn-end hook file (including leaving a project-tracked `.cursor/hooks.json` alone), the `--secondmate` and missing-key refusals, and the busy signature; `tests/fm-teardown.test.sh` pins that teardown removes only an untracked hook file.
+
 ## grok (VERIFIED 2026-06-29, grok 0.2.73; slash-submit re-verified 2026-07-03 on 0.2.82; reasoning-effort ceiling re-verified 2026-07-13 on 0.2.99; exit paths re-verified 2026-07-19 on grok 0.2.103)
 
 Grok Build TUI (`grok`), a Claude-Code-compatible CLI from xAI.
