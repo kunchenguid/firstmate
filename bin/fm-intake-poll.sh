@@ -268,7 +268,7 @@ verify_oncall_label() {
   args=$(jq -nc --arg id "$LINEAR_ONCALL_EXAMPLE" '{id:$id}')
   raw="$TMP/linear-oncall-example.json"
   run_broker_linear linear_get_issue "$args" "$raw" || return 1
-  if jq -e --arg label "$INTAKE_LINEAR_ONCALL_LABEL" '
+  if jq -e --arg wanted_label "$INTAKE_LINEAR_ONCALL_LABEL" '
     def label_names:
       [ if (.labels? | type) == "array" then .labels[]
         elif (.labels? | type) == "object" and (.labels.nodes? | type) == "array" then .labels.nodes[]
@@ -277,7 +277,7 @@ verify_oncall_label() {
           elif type == "object" then (.name? // .label?.name? // empty)
           else empty end
       ];
-    ((.issue? // .data.issue? // .) | label_names | index($label)) != null
+    ((.issue? // .data.issue? // .) | label_names | index($wanted_label)) != null
   ' "$raw" >/dev/null 2>&1; then
     return 0
   fi

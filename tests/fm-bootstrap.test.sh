@@ -322,6 +322,29 @@ ROWS
   pass "bootstrap enforces no-mistakes minimum version"
 }
 
+test_secondmate_self_check_reports_routed_work_readiness() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/secondmate-self-check"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' domain > "$case_dir/home/.fm-secondmate-home"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/quota-axi"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_FAKE_NO_MISTAKES_VERSION="no-mistakes version v1.31.1 (fake)" \
+    "$ROOT/bin/fm-bootstrap.sh")
+
+  assert_contains "$out" "MISSING: quota-axi (install: npm install -g quota-axi)" \
+    "secondmate self-check test setup should still surface the detailed quota diagnostic"
+  assert_contains "$out" "MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)" \
+    "secondmate self-check test setup should still surface the detailed version diagnostic"
+  assert_contains "$out" "SECONDMATE_SELF_CHECK: failed: routed-work prerequisites not ready: quota-axi no-mistakes" \
+    "secondmate self-check should summarize routed-work readiness failures"
+  pass "bootstrap reports secondmate routed-work readiness before accepting work"
+}
+
 test_git_is_required_with_supported_install_instruction() {
   local case_dir fakebin bash_env out expected
   case_dir="$TMP_ROOT/git-required"
@@ -798,6 +821,7 @@ ROWS
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
+test_secondmate_self_check_reports_routed_work_readiness
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux

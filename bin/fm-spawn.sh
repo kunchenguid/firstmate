@@ -84,6 +84,9 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Before any launch side effect, fm-lane-governor.sh reserves capacity for this
+#   home and refuses over-capacity, high-swap, low-RAM, or orphaned-harness starts.
+#   Set FM_SPAWN_NO_GUARD=1 only for test/recovery paths that already own safety.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -250,6 +253,7 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+LANE_LEASE_ID=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -316,6 +320,7 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
+  lane_governor_release
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -325,6 +330,12 @@ spawn_abort_cleanup() {
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
   fi
   return "$status"
+}
+
+lane_governor_release() {
+  [ -n "$LANE_LEASE_ID" ] || return 0
+  "$FM_ROOT/bin/fm-lane-governor.sh" release "$LANE_LEASE_ID" --holder-pid "$$" 2>/dev/null || true
+  LANE_LEASE_ID=
 }
 trap spawn_abort_cleanup EXIT
 
@@ -354,15 +365,32 @@ spawn_herdr_presentation_order_lock_release() {
   fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
 }
 
+idpart=${POS[0]:-}
+idpart=${idpart%%=*}
+BATCH_MODE=0
+if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+  BATCH_MODE=1
+fi
+
+if [ -z "${FM_SPAWN_NO_GUARD:-}" ]; then
+  if [ "$BATCH_MODE" -eq 1 ]; then
+    LANE_LEASE_ID="batch-${idpart:-spawn}-$$"
+    "$FM_ROOT/bin/fm-lane-governor.sh" acquire "$LANE_LEASE_ID" --kind "$KIND" --count "${#POS[@]}" --holder-pid "$$" || exit 1
+  else
+    ID_PRE=${POS[0]:-}
+    fm_task_id_creation_valid "$ID_PRE" || { echo "error: invalid task id" >&2; exit 2; }
+    LANE_LEASE_ID=$ID_PRE
+    "$FM_ROOT/bin/fm-lane-governor.sh" acquire "$LANE_LEASE_ID" --kind "$KIND" --count 1 --holder-pid "$$" || exit 1
+  fi
+fi
+
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
 # the FM_ROOT path (not $0) so it works whatever cwd or relative path invoked us, and reuse
 # the single path verbatim. A failed pair is reported and skipped; the rest still launch;
 # exit is non-zero if any pair failed. Single-task invocations never carry an '=' in arg
 # one (task ids are bare slugs), so they fall straight through to the logic below.
-idpart=${POS[0]:-}
-idpart=${idpart%%=*}
-if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+if [ "$BATCH_MODE" -eq 1 ]; then
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
@@ -1239,6 +1267,8 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+META_PATH="$STATE/$ID.meta"
+META_TMP=$(mktemp "$STATE/$ID.meta.XXXXXXXX") || exit 1
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
@@ -1282,7 +1312,13 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$META_TMP" || { rc=$?; rm -f "$META_TMP"; exit "$rc"; }
+if [ -d "$META_PATH" ] && [ ! -L "$META_PATH" ]; then
+  echo "$META_PATH: Is a directory" >&2
+  rm -f "$META_TMP"
+  exit 1
+fi
+mv -f "$META_TMP" "$META_PATH" || { rc=$?; rm -f "$META_TMP"; exit "$rc"; }
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
