@@ -14,10 +14,11 @@
 #      explicit per-spawn harness arg still wins.
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
-#      config/backlog-backend, and config/herdr-presentation-spaces - down into
-#      each secondmate home's config/, so the secondmate's OWN crewmates,
-#      dispatch profiles, backlog backend, and Herdr presentation opt-in inherit
-#      the primary's settings. It is primary-authoritative (re-pushed at
+#      config/backlog-backend, config/herdr-presentation-spaces, and
+#      config/pi-delegated-profile - down into each secondmate home's config/,
+#      so the secondmate's OWN crewmates, dispatch profiles, backlog backend,
+#      Herdr presentation opt-in, and delegated Pi policy inherit the primary's
+#      settings. It is primary-authoritative (re-pushed at
 #      secondmate spawn, on the bootstrap secondmate sweep, and by config push).
 #      config/secondmate-harness is deliberately NOT inherited (secondmates do
 #      not spawn secondmates). After a successful push that changes allowlisted
