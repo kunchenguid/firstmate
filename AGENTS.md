@@ -235,7 +235,8 @@ Implementation requires a separate request or other clear implementation scope.
 Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
 
 Classify work as dispatchable when it does not overlap work under way, or queued and blocked when it touches the same project subsystem or depends on unlanded work.
-Dispatch independent work immediately with no concurrency cap, serialize coarse overlaps, and record blockers durably.
+Dispatch independent work through the resource admission gate, serialize coarse overlaps, and record blockers durably.
+Three heavy crews are guaranteed, a fourth starts only when the configured headroom probe permits it, and further heavy work remains queued.
 Write the task-specific brief under section 11 before spawning.
 
 ### Dispatch and supervision handoff

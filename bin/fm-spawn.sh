@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--resource-class <heavy|medium|light>] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
@@ -81,6 +81,10 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   --resource-class defaults to heavy.
+#   Resource admission guarantees three concurrent heavy crews, allows a fourth
+#   only when config/resource-admission-probe succeeds, and durably queues later
+#   heavy requests under state/resource-queue/.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -147,10 +151,12 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+RESOURCE_CLASS=heavy
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+RESOURCE_CLASS_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -163,6 +169,7 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      resource-class) RESOURCE_CLASS=$a; RESOURCE_CLASS_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -179,6 +186,8 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --resource-class) want_value=resource-class ;;
+    --resource-class=*) RESOURCE_CLASS=${a#--resource-class=}; RESOURCE_CLASS_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -187,6 +196,10 @@ done
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
+case "$RESOURCE_CLASS" in
+  heavy|medium|light) ;;
+  *) echo "error: --resource-class must be one of heavy, medium, light" >&2; exit 1 ;;
+esac
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
@@ -228,6 +241,8 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+RESOURCE_ADMISSION_LOCK=
+RESOURCE_ADMISSION_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -300,6 +315,10 @@ spawn_abort_cleanup() {
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
+  if [ "$RESOURCE_ADMISSION_LOCK_HELD" = 1 ]; then
+    RESOURCE_ADMISSION_LOCK_HELD=0
+    rmdir "$RESOURCE_ADMISSION_LOCK" 2>/dev/null || true
+  fi
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
@@ -353,6 +372,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  [ "$RESOURCE_CLASS_SET" -eq 0 ] || shared_args+=(--resource-class "$RESOURCE_CLASS")
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -372,6 +392,36 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+# shellcheck source=bin/fm-resource-lib.sh
+. "$SCRIPT_DIR/fm-resource-lib.sh"
+if [ "$KIND" != secondmate ]; then
+  RESOURCE_ADMISSION_LOCK="$STATE/.resource-admission.lock"
+  mkdir -p "$STATE"
+  resource_attempt=0
+  while ! mkdir "$RESOURCE_ADMISSION_LOCK" 2>/dev/null; do
+    resource_attempt=$((resource_attempt + 1))
+    [ "$resource_attempt" -lt 50 ] || {
+      echo "error: resource admission lock remained busy" >&2
+      exit 1
+    }
+    sleep 0.1
+  done
+  RESOURCE_ADMISSION_LOCK_HELD=1
+  status=0
+  fm_resource_admit "$STATE" "$CONFIG" "$RESOURCE_CLASS" "$ID" || status=$?
+  if [ "$status" -eq 75 ]; then
+    if [ -z "${FM_RESOURCE_FROM_QUEUE:-}" ]; then
+      fm_resource_queue_write "$STATE" "$ID" "$@"
+      echo "queued $ID resource_class=$RESOURCE_CLASS reason=memory-capacity"
+    fi
+    rmdir "$RESOURCE_ADMISSION_LOCK"
+    RESOURCE_ADMISSION_LOCK_HELD=0
+    exit 75
+  fi
+  rmdir "$RESOURCE_ADMISSION_LOCK"
+  RESOURCE_ADMISSION_LOCK_HELD=0
+  [ "$status" -eq 0 ] || exit "$status"
+fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2
@@ -1224,6 +1274,7 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  echo "resource_class=$RESOURCE_CLASS"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
