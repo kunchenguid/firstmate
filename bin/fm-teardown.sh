@@ -196,6 +196,39 @@ remove_grok_turnend_auth() {
   rm -f "$hooks_dir/$token"
 }
 
+# Reverse firstmate-installed Cursor turn-end hooks without deleting unrelated
+# project Cursor hooks. Marker modes: created (we wrote hooks.json) or merged
+# (we appended a stop entry to an existing hooks.json).
+remove_cursor_turnend() {
+  local wt=$1 mode tmp
+  [ -n "$wt" ] && [ -d "$wt" ] || return 0
+  rm -f "$wt/.cursor/hooks/fm-turn-end.sh"
+  mode=$(cat "$wt/.fm-cursor-turnend" 2>/dev/null || true)
+  case "$mode" in
+    created)
+      rm -f "$wt/.cursor/hooks.json"
+      ;;
+    merged)
+      if [ -f "$wt/.cursor/hooks.json" ] && command -v jq >/dev/null 2>&1; then
+        tmp=$(mktemp "$wt/.cursor/hooks.json.XXXXXX") || true
+        if [ -n "${tmp:-}" ] \
+          && jq '
+              .hooks.stop = (
+                ((.hooks.stop // [])
+                 | map(select((.command // "") | contains("fm-turn-end.sh") | not)))
+              )
+              | if (.hooks.stop | length) == 0 then del(.hooks.stop) else . end
+            ' "$wt/.cursor/hooks.json" > "$tmp" 2>/dev/null; then
+          mv "$tmp" "$wt/.cursor/hooks.json"
+        else
+          rm -f "${tmp:-}"
+        fi
+      fi
+      ;;
+  esac
+  rm -f "$wt/.fm-cursor-turnend"
+}
+
 validate_pr_poll_cleanup() {
   local state_dir=$1 id=$2 quarantine state_device artifact has_artifact=0
   fm_task_id_path_safe "$id" || return 0
@@ -661,7 +694,7 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-grok-turnend$)' | head -1 || true)
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.cursor/|\.fm-grok-turnend$|\.fm-cursor-turnend$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -992,11 +1025,13 @@ cleanup_firstmate_home_children() {
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
+        remove_cursor_turnend "$child_wt"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
+      remove_cursor_turnend "$child_wt"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
           :
@@ -1104,6 +1139,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       fi
     fi
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
+    remove_cursor_turnend "$WT"
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
@@ -1116,6 +1152,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
+  remove_cursor_turnend "$WT"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks

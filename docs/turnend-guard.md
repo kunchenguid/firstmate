@@ -48,7 +48,8 @@ All verified primary harnesses have a tracked integration:
   The adapter runs the shared guard and, when it returns 2, invokes `grok --resume <sessionId> -p <guard-reason>` with `GROK_TURNEND_GUARD_ACTIVE=1`.
   It does not pass `--permission-mode`, so the passive Stop hook cannot grant stronger tool permissions than Grok's resumed-session default.
 - `cursor`: `.cursor/hooks.json` registers a `stop` hook that invokes `bin/fm-turnend-guard-cursor.sh` with `loop_limit: 1`.
-  The adapter runs the shared guard and, when it returns 2, prints `{"followup_message":"<reason>"}` so Cursor auto-submits one follow-up.
+  The adapter runs the shared guard and, when it returns 2, prints `{"followup_message":"<typed turn-end-guard operational input>"}` so Cursor auto-submits one follow-up.
+  The follow-up body is encoded through `bin/fm-operational-input.sh` (`turn-end-guard`), matching Grok/OpenCode/Pi.
   `loop_count > 0` (and the hooks.json `loop_limit`) is the loop guard.
 
 Claude and Codex support a direct blocking Stop hook.

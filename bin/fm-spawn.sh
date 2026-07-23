@@ -1202,8 +1202,10 @@ EOF
       ;;
     cursor*)
       # Cursor Agent loads project hooks from <worktree>/.cursor/hooks.json
-      # (verified 2026-07-23). A stop hook that only touches the turn-end marker
-      # and returns {} is enough for watcher wake; loop_limit 0 blocks follow-ups.
+      # (verified 2026-07-23). Never clobber an existing hooks.json: merge a stop
+      # entry when one is already present, or create hooks.json only when absent.
+      # Markers let teardown reverse exactly what we did without deleting
+      # unrelated Cursor hooks.
       mkdir -p "$WT/.cursor/hooks"
       cat > "$WT/.cursor/hooks/fm-turn-end.sh" <<EOF
 #!/usr/bin/env bash
@@ -1212,11 +1214,43 @@ touch $(shell_quote "$TURNEND") 2>/dev/null || true
 printf '%s\n' '{}'
 EOF
       chmod +x "$WT/.cursor/hooks/fm-turn-end.sh"
-      cat > "$WT/.cursor/hooks.json" <<'EOF'
+      exclude_path '.cursor/hooks/fm-turn-end.sh'
+      if [ -f "$WT/.cursor/hooks.json" ]; then
+        if command -v jq >/dev/null 2>&1 \
+          && jq -e 'type == "object"' "$WT/.cursor/hooks.json" >/dev/null 2>&1; then
+          if ! jq -e '
+              (.hooks.stop // [])
+              | map(.command // "")
+              | any(contains("fm-turn-end.sh"))
+            ' "$WT/.cursor/hooks.json" >/dev/null 2>&1; then
+            tmp=$(mktemp "$WT/.cursor/hooks.json.XXXXXX") || {
+              echo "error: cannot stage Cursor hooks merge for $ID" >&2
+              exit 1
+            }
+            if ! jq '
+                .version = (.version // 1)
+                | .hooks = (.hooks // {})
+                | .hooks.stop = ((.hooks.stop // []) + [{"command":".cursor/hooks/fm-turn-end.sh","loop_limit":0}])
+              ' "$WT/.cursor/hooks.json" > "$tmp"; then
+              rm -f "$tmp"
+              echo "error: cannot merge Cursor turn-end hook into existing .cursor/hooks.json for $ID" >&2
+              exit 1
+            fi
+            mv "$tmp" "$WT/.cursor/hooks.json"
+          fi
+          printf 'merged\n' > "$WT/.fm-cursor-turnend"
+        else
+          echo "error: existing .cursor/hooks.json is not mergeable JSON; refusing to overwrite Cursor hooks for $ID" >&2
+          exit 1
+        fi
+      else
+        cat > "$WT/.cursor/hooks.json" <<'EOF'
 {"version":1,"hooks":{"stop":[{"command":".cursor/hooks/fm-turn-end.sh","loop_limit":0}]}}
 EOF
-      exclude_path '.cursor/hooks.json'
-      exclude_path '.cursor/hooks/fm-turn-end.sh'
+        printf 'created\n' > "$WT/.fm-cursor-turnend"
+        exclude_path '.cursor/hooks.json'
+      fi
+      exclude_path '.fm-cursor-turnend'
       ;;
   esac
 fi

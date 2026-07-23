@@ -5,8 +5,10 @@
 # {"followup_message":"..."} so Cursor auto-submits one follow-up user message.
 # This adapter still uses the shared primary-scoped predicate in
 # fm-turnend-guard.sh. When that predicate says the primary would end blind,
-# emit one followup_message. loop_count (and hooks.json loop_limit: 1) is the
-# loop guard - never force a second automatic follow-up in the same stop chain.
+# emit one followup_message encoded as a typed turn-end-guard operational input
+# (bin/fm-operational-input.sh), matching Grok/OpenCode/Pi. loop_count (and
+# hooks.json loop_limit: 1) is the loop guard - never force a second automatic
+# follow-up in the same stop chain.
 #
 # Usage: wired from .cursor/hooks.json stop; reads Cursor stop JSON on stdin,
 # prints Cursor stop JSON on stdout.
@@ -24,6 +26,7 @@ ROOT="$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)" || {
   exit 0
 }
 [ -x "$ROOT/bin/fm-turnend-guard.sh" ] || { printf '%s\n' '{}'; exit 0; }
+[ -f "$ROOT/bin/fm-operational-input.sh" ] || { printf '%s\n' '{}'; exit 0; }
 
 command -v jq >/dev/null 2>&1 || { printf '%s\n' '{}'; exit 0; }
 
@@ -48,11 +51,20 @@ RC=$?
 REASON=$(cat "$ERR" 2>/dev/null || true)
 [ -n "$REASON" ] || REASON='tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn'
 
+# shellcheck source=bin/fm-operational-input.sh
+. "$ROOT/bin/fm-operational-input.sh"
+PROMPT=
+fm_operational_input_encode turn-end-guard \
+  "TURN WOULD END BLIND - supervision is off. Repair missing watcher supervision according to the session-start operating block before ending the turn.
+
+$REASON" \
+  PROMPT || { printf '%s\n' '{}'; exit 0; }
+
 json_escape() {
   printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null \
     || printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/$/\\n/' | tr -d '\n' | sed 's/\\n$//' | sed 's/^/"/;s/$/"/'
 }
 
-ESCAPED=$(json_escape "$REASON")
+ESCAPED=$(json_escape "$PROMPT")
 printf '{"followup_message":%s}\n' "$ESCAPED"
 exit 0
