@@ -5788,8 +5788,36 @@ if [ "${FM_TEST_FOCUSED:-}" = packet-rollback-aba ]; then
   exit 0
 fi
 
+test_secondmate_home_lock_key_fails_closed_without_fixed_hasher() {
+  local home state out status
+  home="$TMP_ROOT/secondmate-lock-key-home"
+  state="$TMP_ROOT/secondmate-lock-key-state"
+  mkdir -p "$home" "$state"
+  set +e
+  out=$(FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1 \
+    FM_ACCOUNT_TEST_HOOKS=firstmate-account-tests-v1 \
+    bash -c '
+      . "$1/bin/fm-account-routing-lib.sh"
+      FM_ACCOUNT_SYSTEM_PERL_BIN=
+      fm_secondmate_home_lifecycle_lock_acquire "$2" "$3"
+    ' _ "$ROOT" "$state" "$home" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "secondmate home lock accepted an unavailable fixed hasher"
+  assert_contains "$out" "lock identity is unavailable" \
+    "secondmate home lock hash failure was not surfaced"
+  [ -z "$(find "$state" -mindepth 1 -print -quit)" ] \
+    || fail "secondmate home lock hash failure created a fallback lock"
+  pass "secondmate home lifecycle locks fail closed without fixed hashing"
+}
+
 if [ "${FM_TEST_FOCUSED:-}" = symlink-artifacts ]; then
   run_isolated_test test_task_owned_account_artifacts_reject_symlink_paths
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-races ]; then
+  run_isolated_test test_secondmate_home_lock_key_fails_closed_without_fixed_hasher
   exit 0
 fi
 
@@ -6211,6 +6239,7 @@ run_isolated_test test_account_lock_owner_controls_reject_symlinks
 run_isolated_test test_linux_stat_selection_avoids_filesystem_stat_output
 run_isolated_test test_stale_reclaim_guard_is_owned_before_lock_removal
 run_isolated_test test_task_owned_account_artifacts_reject_symlink_paths
+run_isolated_test test_secondmate_home_lock_key_fails_closed_without_fixed_hasher
 run_isolated_test test_account_lineage_rejects_parent_swap_during_transaction
 run_isolated_test test_agent_fleet_contract_is_validated_before_routing
 run_isolated_test test_agent_fleet_entrypoint_is_physically_pinned_per_operation

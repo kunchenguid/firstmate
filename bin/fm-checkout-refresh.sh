@@ -99,18 +99,22 @@ TREEHOUSE_ROOT_RAW="${FM_TREEHOUSE_ROOT:-$HOME/.treehouse}"
 TREEHOUSE_ROOT=$TREEHOUSE_ROOT_RAW
 TREEHOUSE_ROOT_CANONICAL=
 TREEHOUSE_ROOT_INVALID=0
-if [ -L "$TREEHOUSE_ROOT_RAW" ]; then
+TREEHOUSE_ROOT_EXPLICIT=0
+[ "${FM_TREEHOUSE_ROOT+x}" != x ] || TREEHOUSE_ROOT_EXPLICIT=1
+if ! TREEHOUSE_ROOT=$(fm_checkout_lexical_path "$TREEHOUSE_ROOT_RAW" 1); then
   TREEHOUSE_ROOT_INVALID=1
-elif [ -e "$TREEHOUSE_ROOT_RAW" ] && [ ! -d "$TREEHOUSE_ROOT_RAW" ]; then
+  TREEHOUSE_ROOT=$TREEHOUSE_ROOT_RAW
+elif [ -e "$TREEHOUSE_ROOT" ] && [ ! -d "$TREEHOUSE_ROOT" ]; then
   TREEHOUSE_ROOT_INVALID=1
-elif [ -d "$TREEHOUSE_ROOT_RAW" ] \
-  && TREEHOUSE_ROOT_CANONICAL=$(cd "$TREEHOUSE_ROOT" 2>/dev/null && pwd -P); then
+elif [ -d "$TREEHOUSE_ROOT" ] \
+  && TREEHOUSE_ROOT_CANONICAL=$(fm_checkout_trusted_dir "$TREEHOUSE_ROOT"); then
   TREEHOUSE_ROOT=$TREEHOUSE_ROOT_CANONICAL
+elif [ -e "$TREEHOUSE_ROOT" ]; then
+  TREEHOUSE_ROOT_INVALID=1
+elif [ "$TREEHOUSE_ROOT_EXPLICIT" -eq 1 ]; then
+  TREEHOUSE_ROOT_INVALID=1
 else
-  case "$TREEHOUSE_ROOT" in
-    /*) ;;
-    *) TREEHOUSE_ROOT="$(pwd -P)/$TREEHOUSE_ROOT" ;;
-  esac
+  TREEHOUSE_ROOT_INVALID=0
 fi
 STATE_BASE="${FM_CHECKOUT_REFRESH_STATE_BASE:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/checkout-refresh}"
 if [ -n "${FM_CHECKOUT_REFRESH_STATE_ROOT:-}" ]; then
@@ -153,8 +157,7 @@ first_line() {
 }
 
 canonical_dir() {
-  [ -d "$1" ] && [ ! -L "$1" ] || return 1
-  (cd "$1" 2>/dev/null && pwd -P)
+  fm_checkout_trusted_dir "$1"
 }
 
 exact_git_root() {
@@ -552,6 +555,33 @@ except OSError as error:
 PY
 }
 
+prove_non_git_directory() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$1" <<'PY'
+import os
+import stat
+import sys
+
+candidate = sys.argv[1]
+try:
+    before = os.lstat(candidate)
+    permissions = stat.S_IMODE(before.st_mode)
+    if not stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode):
+        raise OSError("candidate is not a real directory")
+    if not permissions & 0o444 or not permissions & 0o111:
+        raise PermissionError("candidate is unreadable")
+    with os.scandir(candidate) as entries:
+        names = {entry.name for entry in entries}
+    after = os.lstat(candidate)
+    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        raise OSError("candidate identity changed")
+    if ".git" in names:
+        raise OSError("candidate contains Git metadata")
+except OSError:
+    raise SystemExit(1)
+PY
+}
+
 discover() {
   local tmp seeds origins scans scan_candidates configured_paths configured_scans treehouse_paths project_paths
   local path project worktree pool treehouse_state main root candidate url failed=0
@@ -651,10 +681,11 @@ discover() {
   while IFS= read -r candidate; do
     [ -n "$candidate" ] || continue
     if ! git -C "$candidate" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-      if [ -e "$candidate/.git" ] || [ -L "$candidate/.git" ]; then
-        echo "checkout-refresh: skipped: discovered Git identity cannot be inspected: $candidate" >&2
-        failed=1
+      if prove_non_git_directory "$candidate"; then
+        continue
       fi
+      echo "checkout-refresh: skipped: discovered Git identity cannot be inspected or disproved: $candidate" >&2
+      failed=1
       continue
     fi
     if ! main=$(exact_git_root "$candidate"); then

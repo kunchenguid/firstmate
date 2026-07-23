@@ -50,6 +50,16 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # shellcheck source=bin/fm-checkout-lock-lib.sh
 . "$SCRIPT_DIR/fm-checkout-lock-lib.sh"
+PROJECTS=$(fm_checkout_lexical_path "$PROJECTS" 1) || {
+  echo "error: projects root contains an unsafe or uninspectable path component: $PROJECTS" >&2
+  exit 1
+}
+if [ -e "$PROJECTS" ]; then
+  PROJECTS=$(fm_checkout_trusted_dir "$PROJECTS") || {
+    echo "error: projects root must be an exact real directory: $PROJECTS" >&2
+    exit 1
+  }
+fi
 CHECKOUT_STATE_BASE="${FM_CHECKOUT_REFRESH_STATE_BASE:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/checkout-refresh}"
 CHECKOUT_LOCK_ROOT=$(fm_checkout_lock_root "$CHECKOUT_STATE_BASE")
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -140,8 +150,7 @@ resolve_project_arg() {
 }
 
 canonical_dir() {
-  [ -d "$1" ] && [ ! -L "$1" ] || return 1
-  (cd "$1" 2>/dev/null && pwd -P)
+  fm_checkout_trusted_dir "$1"
 }
 
 exact_git_root() {

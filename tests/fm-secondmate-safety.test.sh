@@ -623,6 +623,89 @@ test_home_seed_no_projects_end_to_end() {
   pass "home seeding scaffolds, registers, and spawns a project-less home end to end"
 }
 
+test_home_seed_serializes_with_home_retirement() {
+  local home sub registry_sub state holder_pid waited status
+  home="$TMP_ROOT/seed-retirement-home"
+  sub="$TMP_ROOT/seed-retirement-subhome"
+  state="$TMP_ROOT/seed-retirement-state"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  bash -c '
+    . "$1/bin/fm-account-routing-lib.sh"
+    lock=$(fm_secondmate_home_lifecycle_lock_acquire "$2/locks" "$3") || exit 1
+    : > "$4"
+    while [ ! -f "$5" ]; do sleep 0.05; done
+    fm_account_lifecycle_lock_release "$lock"
+  ' _ "$ROOT" "$state" "$sub" "$TMP_ROOT/seed-retirement-ready" "$TMP_ROOT/seed-retirement-release" &
+  holder_pid=$!
+  waited=0
+  while [ ! -f "$TMP_ROOT/seed-retirement-ready" ] && [ "$waited" -lt 200 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  [ -f "$TMP_ROOT/seed-retirement-ready" ] || {
+    : > "$TMP_ROOT/seed-retirement-release"
+    wait "$holder_pid" || true
+    fail "home lifecycle lock holder did not start"
+  }
+  set +e
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='serialized firstmate domain' \
+    FM_SECONDMATE_SCOPE='serialized firstmate work' \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$state" \
+    FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS=0 \
+    "$ROOT/bin/fm-home-seed.sh" serialized "$sub" --no-projects \
+      > "$TMP_ROOT/seed-retirement.out" 2> "$TMP_ROOT/seed-retirement.err"
+  status=$?
+  set -e
+  : > "$TMP_ROOT/seed-retirement-release"
+  wait "$holder_pid" || fail "home lifecycle lock holder failed to release"
+  [ "$status" -ne 0 ] || fail "home seed ignored concurrent retirement ownership"
+  assert_contains "$(cat "$TMP_ROOT/seed-retirement.err")" "secondmate home lifecycle lock" \
+    "home seed lifecycle contention was not surfaced"
+  assert_absent "$sub" "blocked home seed created a retiring home"
+  if [ -f "$home/data/secondmates.md" ]; then
+    assert_no_grep '^- serialized ' "$home/data/secondmates.md" \
+      "blocked home seed registered a retiring home"
+  fi
+  registry_sub="$TMP_ROOT/seed-registry-subhome"
+  bash -c '
+    . "$1/bin/fm-account-routing-lib.sh"
+    lock=$(fm_secondmate_registry_lock_acquire "$2/locks" "$3") || exit 1
+    : > "$4"
+    while [ ! -f "$5" ]; do sleep 0.05; done
+    fm_account_lifecycle_lock_release "$lock"
+  ' _ "$ROOT" "$state" "$home/data/secondmates.md" \
+    "$TMP_ROOT/seed-registry-ready" "$TMP_ROOT/seed-registry-release" &
+  holder_pid=$!
+  waited=0
+  while [ ! -f "$TMP_ROOT/seed-registry-ready" ] && [ "$waited" -lt 200 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  [ -f "$TMP_ROOT/seed-registry-ready" ] || {
+    : > "$TMP_ROOT/seed-registry-release"
+    wait "$holder_pid" || true
+    fail "registry lifecycle lock holder did not start"
+  }
+  set +e
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='serialized registry domain' \
+    FM_SECONDMATE_SCOPE='serialized registry work' \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$state" \
+    FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS=0 \
+    "$ROOT/bin/fm-home-seed.sh" registrylocked "$registry_sub" --no-projects \
+      > "$TMP_ROOT/seed-registry.out" 2> "$TMP_ROOT/seed-registry.err"
+  status=$?
+  set -e
+  : > "$TMP_ROOT/seed-registry-release"
+  wait "$holder_pid" || fail "registry lifecycle lock holder failed to release"
+  [ "$status" -ne 0 ] || fail "home seed ignored concurrent registry ownership"
+  assert_absent "$registry_sub" "registry-locked seed retained a partially provisioned home"
+  if [ -f "$home/data/secondmates.md" ]; then
+    assert_no_grep '^- registrylocked ' "$home/data/secondmates.md" \
+      "registry-locked seed overwrote the shared registry"
+  fi
+  pass "secondmate home seeding serializes with retirement and registry updates"
+}
+
 test_home_seed_refuses_projectful_reused_charter_for_projectless_home() {
   local home reusable_sub stale_sub stale_brief stale_brief_before err
   home="$TMP_ROOT/no-projects-reused-charter-home"
@@ -2301,6 +2384,11 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-8 ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-refresh-races ]; then
+  test_home_seed_serializes_with_home_retirement
+  exit 0
+fi
+
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
@@ -2320,6 +2408,7 @@ test_home_seed_refuses_missing_filled_charter
 test_home_seed_refuses_placeholder_charter
 test_home_seed_refuses_empty_charter_fields
 test_home_seed_no_projects_end_to_end
+test_home_seed_serializes_with_home_retirement
 test_home_seed_refuses_projectful_reused_charter_for_projectless_home
 test_home_seed_refuses_projectless_conversion_of_populated_home
 test_home_seed_refuses_projectless_home_with_uninspectable_projects

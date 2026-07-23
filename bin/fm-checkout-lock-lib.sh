@@ -35,6 +35,55 @@ fm_checkout_canonical_dir() {
   (cd "$1" 2>/dev/null && pwd -P)
 }
 
+fm_checkout_lexical_path() {
+  local candidate=$1 allow_missing=${2:-0}
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$candidate" "$allow_missing" <<'PY'
+import os
+import stat
+import sys
+
+candidate, allow_missing = sys.argv[1:]
+if not candidate or any(character in candidate for character in "\0\n\r"):
+    raise SystemExit(1)
+if candidate.startswith("/"):
+    absolute = candidate
+else:
+    absolute = os.path.join(os.getcwd(), candidate)
+current = "/"
+missing = False
+for component in absolute.split("/"):
+    if component in ("", "."):
+        continue
+    if component == "..":
+        raise SystemExit(1)
+    current = os.path.join(current, component)
+    if missing:
+        continue
+    try:
+        metadata = os.lstat(current)
+    except FileNotFoundError:
+        missing = True
+        continue
+    except OSError:
+        raise SystemExit(1)
+    if stat.S_ISLNK(metadata.st_mode):
+        raise SystemExit(1)
+if missing and allow_missing != "1":
+    raise SystemExit(1)
+print(os.path.normpath(absolute))
+PY
+}
+
+fm_checkout_trusted_dir() {
+  local candidate=$1 lexical physical
+  lexical=$(fm_checkout_lexical_path "$candidate" 0) || return 1
+  [ -d "$lexical" ] || return 1
+  physical=$(cd "$lexical" 2>/dev/null && pwd -P) || return 1
+  [ "$physical" = "$lexical" ] || return 1
+  printf '%s\n' "$physical"
+}
+
 fm_checkout_git_common_dir() {
   local checkout=$1 common
   common=$(git -C "$checkout" rev-parse --git-common-dir 2>/dev/null) || return 1

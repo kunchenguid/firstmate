@@ -274,7 +274,7 @@ test_direct_and_batch_sync_reject_nested_repository_paths() {
 }
 
 test_direct_and_batch_sync_reject_symlink_repository_paths() {
-  local home clone alias out before status batch_home batch_clone batch_alias batch_out batch_before batch_status
+  local home clone alias ancestor alias_parent out before status batch_home batch_clone batch_alias batch_out batch_before batch_status projects_target projects_link
   home=$(new_home)
   clone=$(build_pair "$home" symlink-direct)
   advance_origin "$home" symlink-direct C1
@@ -289,6 +289,16 @@ test_direct_and_batch_sync_reject_symlink_repository_paths() {
     "direct fleet sync accepted a symlink repository path"
   [ "$status" -ne 0 ] || fail "direct fleet sync reported success for a symlink repository path"
   [ "$(head_sha "$clone")" = "$before" ] || fail "direct symlink target mutated its repository"
+
+  ancestor="$home/ancestor-link"
+  alias_parent=$(dirname "$clone")
+  ln -s "$alias_parent" "$ancestor"
+  set +e
+  out=$(run_sync "$home" "$ancestor/$(basename "$clone")/")
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "direct fleet sync accepted a symlinked ancestor with a trailing slash"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "ancestor-symlinked direct target mutated its repository"
 
   batch_home=$(new_home)
   batch_clone=$(build_pair "$batch_home" symlink-batch-target)
@@ -309,7 +319,21 @@ test_direct_and_batch_sync_reject_symlink_repository_paths() {
   [ "$batch_status" -ne 0 ] || fail "batch fleet sync reported success for a symlinked projects entry"
   [ "$(head_sha "$batch_clone")" = "$batch_before" ] \
     || fail "batch symlink target mutated its external repository"
-  pass "direct and batch sync reject symlink repository paths"
+
+  projects_target="$batch_home/projects-target"
+  projects_link="$batch_home/projects-root-link"
+  mkdir -p "$projects_target"
+  ln -s "$projects_target" "$projects_link"
+  set +e
+  batch_out=$(FM_HOME="$batch_home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_PROJECTS_OVERRIDE="$projects_link/" \
+    "$ROOT/bin/fm-fleet-sync.sh" 2>&1)
+  batch_status=$?
+  set -e
+  [ "$batch_status" -ne 0 ] || fail "batch fleet sync accepted a symlinked projects root"
+  assert_contains "$batch_out" "projects root contains an unsafe" \
+    "symlinked projects root refusal was unclear"
+  pass "direct and batch sync reject leaf, ancestor, and projects-root symlinks"
 }
 
 test_detached_clean_ancestor_recovers() {

@@ -23,6 +23,11 @@ next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
   for a in "$@"; do printf '\x1f%s' "$a"; done
   printf '\n'
 } >> "$LOG"
+if [ "${1:-} ${2:-}" = "worktree create" ] \
+  && [ "${FM_ORCA_QUARANTINE_STATE_READONLY:-0}" = 1 ] \
+  && [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+  chmod 500 "$FM_STATE_OVERRIDE"
+fi
 if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ]; then
   printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
   exit 0
@@ -30,9 +35,61 @@ fi
 n=$next
 echo "$n" > "$COUNT_FILE"
 if [ -f "$RESP/$n.out" ]; then
-  cat "$RESP/$n.out"
   if [ "${1:-} ${2:-}" = "worktree show" ]; then
-    cp "$RESP/$n.out" "$RESP/.worktree-show"
+    worktree_label=
+    worktree_terminal=
+    if [ -n "${FM_STATE_OVERRIDE:-}" ] && [ -d "$FM_STATE_OVERRIDE" ]; then
+      worktree_id=$(node -e '
+const fs = require("fs");
+const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const result = data.result || {};
+const worktree = result.worktree || result.item || result;
+process.stdout.write(String(worktree.id || worktree.worktreeId || result.worktreeId || ""));
+' "$RESP/$n.out")
+      for metadata in "$FM_STATE_OVERRIDE"/*.meta; do
+        [ -f "$metadata" ] || continue
+        if grep -Fxq "orca_worktree_id=$worktree_id" "$metadata"; then
+          worktree_label="fm-$(basename "$metadata" .meta)"
+          worktree_terminal=$(sed -n 's/^terminal=//p' "$metadata" | tail -1)
+          break
+        fi
+      done
+    fi
+    node -e '
+const fs = require("fs");
+const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const result = data.result || {};
+const worktree = result.worktree || result.item || result;
+const label = process.argv[2] || "";
+const terminal = process.argv[3] || "";
+if (label && !worktree.name && !worktree.title && !result.worktreeName) {
+  worktree.name = label;
+}
+if (label && !Array.isArray(worktree.terminals) && !Array.isArray(result.terminals)) {
+  worktree.terminals = terminal ? [{handle: terminal, title: label}] : [];
+}
+process.stdout.write(JSON.stringify(data) + "\n");
+' "$RESP/$n.out" "$worktree_label" "$worktree_terminal" > "$RESP/.worktree-show" || exit 1
+    cat "$RESP/.worktree-show"
+  elif [ "${1:-} ${2:-}" = "worktree create" ]; then
+    requested_name=
+    previous=
+    for argument in "$@"; do
+      [ "$previous" != --name ] || requested_name=$argument
+      previous=$argument
+    done
+    node -e '
+const fs = require("fs");
+const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const result = data.result || {};
+const worktree = result.worktree || result.item || null;
+if (worktree && !worktree.name && !worktree.title && !result.worktreeName) {
+  worktree.name = process.argv[2] || "";
+}
+process.stdout.write(JSON.stringify(data) + "\n");
+' "$RESP/$n.out" "$requested_name" || exit 1
+  else
+    cat "$RESP/$n.out"
   fi
   if [ -f "$RESP/$n.exit" ]; then
     exit "$(cat "$RESP/$n.exit")"
@@ -59,14 +116,42 @@ case "${1:-} ${2:-}" in
     else
       worktree="wt-${terminal#term-}"
     fi
-    printf '{"ok":true,"result":{"terminal":{"handle":"%s","worktreeId":"%s","tail":[]}}}\n' "$terminal" "$worktree"
+    if [ -f "$RESP/.terminal-title" ]; then
+      title=$(cat "$RESP/.terminal-title")
+    elif [ -n "${FM_STATE_OVERRIDE:-}" ] && [ -d "$FM_STATE_OVERRIDE" ]; then
+      title=
+      for metadata in "$FM_STATE_OVERRIDE"/*.meta; do
+        [ -f "$metadata" ] || continue
+        if grep -Fxq "terminal=$terminal" "$metadata"; then
+          title="fm-$(basename "$metadata" .meta)"
+          break
+        fi
+      done
+      [ -n "$title" ] || title="fm-${terminal#term-}"
+    else
+      title="fm-${terminal#term-}"
+    fi
+    printf '{"ok":true,"result":{"terminal":{"handle":"%s","title":"%s","worktreeId":"%s","tail":[]}}}\n' "$terminal" "$title" "$worktree"
     ;;
   "terminal close")
     : > "$RESP/.terminal-closed"
     printf '{"ok":true,"result":{"closed":true}}\n'
     ;;
   "worktree show")
-    [ ! -f "$RESP/.worktree-show" ] || cat "$RESP/.worktree-show"
+    if [ -f "$RESP/.worktree-show" ]; then
+      if [ -f "$RESP/.terminal-closed" ]; then
+        node -e '
+const fs = require("fs");
+const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const result = data.result || {};
+const worktree = result.worktree || result.item || result;
+worktree.terminals = [];
+process.stdout.write(JSON.stringify(data) + "\n");
+' "$RESP/.worktree-show"
+      else
+        cat "$RESP/.worktree-show"
+      fi
+    fi
     ;;
   "worktree rm")
     if [ -n "${FM_ORCA_REMOVE_ERROR:-}" ]; then
@@ -436,7 +521,7 @@ test_terminal_state_classifies_closed_live_and_ambiguous_orca() {
   [ "$out" = absent ] || fail "stale Orca terminal should classify absent even when read exits nonzero, got '$out'"
 
   orca_case terminal-state-live
-  printf '{"ok":true,"result":{"terminal":{"tail":[]}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-live","title":"fm-task","tail":[]}}}\n' > "$RESP/1.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_target_state orca term-live fm-task' "$ROOT" )
   [ "$out" = present ] || fail "valid Orca terminal read should classify present, got '$out'"
@@ -487,7 +572,7 @@ test_worktree_path_resolves_id() {
 }
 
 test_json_get_ignores_undocumented_terminal_id_shapes() {
-  local out status wt_id wt_path term
+  local out status wt_id wt_path rest term
   orca_case parser-pruned-terminal-shapes
 
   set +e
@@ -503,17 +588,18 @@ test_json_get_ignores_undocumented_terminal_id_shapes() {
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create /repo/path fm-task' "$ROOT" )
   wt_id=${out%%$'\t'*}
-  wt_path=${out#*$'\t'}
-  term=${wt_path#*$'\t'}
-  wt_path=${wt_path%%$'\t'*}
+  rest=${out#*$'\t'}
+  wt_path=${rest%%$'\t'*}
+  rest=${rest#*$'\t'}
+  term=${rest%%$'\t'*}
   [ "$wt_id" = wt-123 ] || fail "worktree helper should still print worktree id, got '$wt_id'"
   [ "$wt_path" = /tmp/orca-wt ] || fail "worktree helper should still print worktree path, got '$wt_path'"
-  [ "$term" = "$wt_path" ] || fail "worktree helper should ignore undocumented result.worktree.terminal and omit an implicit terminal, got '$out'"
+  [ -z "$term" ] || fail "worktree helper should ignore undocumented result.worktree.terminal and omit an implicit terminal, got '$out'"
   pass "fm_backend_orca_json_get: ignores undocumented terminal id shapes"
 }
 
 test_worktree_and_terminal_helpers_parse_json() {
-  local out wt_id wt_path term
+  local out wt_id wt_path rest term
   orca_case lifecycle-helpers
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-123"}}}\n' > "$RESP/2.out"
@@ -522,7 +608,8 @@ test_worktree_and_terminal_helpers_parse_json() {
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create /repo/path fm-task' "$ROOT" )
   wt_id=${out%%$'\t'*}
-  wt_path=${out#*$'\t'}
+  rest=${out#*$'\t'}
+  wt_path=${rest%%$'\t'*}
   [ "$wt_id" = wt-123 ] || fail "worktree helper should print worktree id, got '$wt_id'"
   [ "$wt_path" = /tmp/orca-wt ] || fail "worktree helper should print worktree path, got '$wt_path'"
   term=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -539,7 +626,7 @@ test_worktree_and_terminal_helpers_parse_json() {
   pass "Orca lifecycle helpers: register repo, create worktree, create terminal, parse stable ids"
 }
 
-test_worktree_create_removes_worktree_when_path_missing() {
+test_worktree_create_retains_partial_authority_when_path_missing() {
   local out status
   orca_case lifecycle-missing-path
   printf '1\n' > "$RESP/1.exit"
@@ -549,16 +636,18 @@ test_worktree_create_removes_worktree_when_path_missing() {
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create /repo/path fm-task' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "worktree helper should fail when Orca omits the worktree path"
-  assert_contains "$out" "orca worktree create did not return a path for fm-task" \
+  assert_contains "$out" "orca worktree create returned incomplete or unsuccessful authority for fm-task" \
     "worktree helper did not explain the missing path"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-no-path'$'\x1f''--json' \
-    "worktree helper did not close the implicit terminal when path parsing failed"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-no-path'$'\x1f''--force'$'\x1f''--json' \
-    "worktree helper did not remove the pathless Orca worktree"
-  pass "fm_backend_orca_worktree_create: removes created worktree when path is missing"
+  assert_contains "$out" $'wt-no-path\t\tterm-no-path\trecorded\trepo-no-path\tfm-task' \
+    "worktree helper did not return every partial create identity"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "worktree helper closed a terminal before durable quarantine"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "worktree helper removed a pathless worktree before absence proof"
+  pass "fm_backend_orca_worktree_create: returns partial authority without cleanup"
 }
 
-test_worktree_create_retains_resources_when_terminal_close_fails() {
+test_worktree_create_never_cleans_partial_response_inline() {
   local out status
   orca_case lifecycle-close-failure
   printf '1\n' > "$RESP/1.exit"
@@ -570,14 +659,14 @@ test_worktree_create_retains_resources_when_terminal_close_fails() {
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create /repo/path fm-task' "$ROOT" 2>&1 )
   status=$?
   set -e
-  expect_code 2 "$status" "pathless Orca worktree close-failure status"
+  expect_code 2 "$status" "pathless Orca worktree partial-response status"
   assert_contains "$out" $'wt-close-failure\t\tterm-close-failure' \
-    "close failure did not return durable Orca cleanup identity"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-close-failure' \
-    "pathless cleanup did not attempt terminal close"
+    "partial response did not return durable Orca cleanup identity"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "worktree helper attempted cleanup before its caller durably quarantined identity"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
-    "pathless cleanup removed a worktree after terminal close failed"
-  pass "Orca pathless cleanup retains resources when terminal close fails"
+    "worktree helper removed a partial-response worktree"
+  pass "Orca worktree creation delegates partial-response cleanup to quarantine"
 }
 
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
@@ -605,7 +694,7 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when path parsing and cleanup fail"
-  assert_contains "$out" "orca worktree create did not return a path" \
+  assert_contains "$out" "orca worktree create returned incomplete or unsuccessful authority" \
     "pathless worktree failure should explain the missing path"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
     "pathless cleanup removed a worktree without terminal-absence proof"
@@ -651,6 +740,9 @@ test_legacy_respawn_writes_orca_metadata_and_launches_harness() {
   assert_grep "window=fm-$id" "$state/$id.meta" "meta missing stable Orca window alias"
   assert_grep "terminal=term-spawn" "$state/$id.meta" "meta missing terminal handle"
   assert_grep "orca_worktree_id=wt-spawn" "$state/$id.meta" "meta missing Orca worktree id"
+  assert_grep "orca_repo_id=repo-spawn" "$state/$id.meta" "meta missing Orca repo id"
+  assert_grep "orca_expected_task=fm-$id" "$state/$id.meta" "meta missing expected Orca task"
+  assert_grep "orca_provider_task=fm-$id" "$state/$id.meta" "meta missing provider Orca task"
   assert_grep "worktree=$wt" "$state/$id.meta" "meta missing Orca worktree path"
   assert_no_grep "report_required=" "$state/$id.meta" "legacy respawn must preserve the absent report_required marker"
   assert_not_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''create' \
@@ -1076,8 +1168,8 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when terminal creation and abort cleanup fail"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-cleanup-fail'$'\x1f''--force'$'\x1f''--json' \
-    "Orca spawn should attempt helper cleanup before preserving metadata"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "Orca spawn removed a worktree while terminal absence was unknown"
   assert_present "$state/$id.meta" "failed Orca abort cleanup should preserve metadata"
   assert_grep "window=fm-$id" "$state/$id.meta" "preserved metadata missing stable window alias"
   assert_grep "backend=orca" "$state/$id.meta" "preserved metadata missing backend=orca"
@@ -1625,8 +1717,8 @@ test_teardown_refuses_orca_worktree_without_terminal_handle() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "Orca teardown should refuse when terminal identity is missing"
-  assert_contains "$out" "task endpoint state for $id is unknown" \
-    "missing Orca terminal identity should surface unknown quiescence"
+  assert_contains "$out" "missing terminal" \
+    "missing Orca terminal identity was not surfaced"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
     "teardown removed an Orca worktree without proving endpoint absence"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
@@ -1656,7 +1748,8 @@ test_secondmate_force_teardown_removes_orca_child_via_orca() {
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-child-cleanup"
   orca_case secondmate-child-cleanup
-  printf '{"ok":true,"result":{"worktree":{"id":"wt-child-cleanup","path":"%s"}}}\n' "$childwt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-child-cleanup","name":"fm-%s","path":"%s","terminals":[{"handle":"term-child-cleanup","title":"fm-%s"}]}}}\n' \
+    "$child_id" "$childwt" "$child_id" > "$RESP/1.out"
   add_tmux_fake "$FB"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   initialize_secondmate_home_repo "$subhome" "$neutral"
@@ -1817,7 +1910,8 @@ test_pathless_orca_quarantine_has_supported_cleanup() {
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "project=$proj" "harness=claude" "kind=ship" "mode=local-only" \
     "backend=orca" "orca_worktree_id=wt-path-cleanup" "terminal=term-path-cleanup" \
-    "orca_cleanup_pending=1" "orca_cleanup_phase=spawn-abort" "orca_terminal_proof=recorded"
+    "orca_cleanup_pending=1" "orca_cleanup_phase=spawn-abort" "orca_terminal_proof=recorded" \
+    "orca_expected_task=fm-$id"
   orca_case pathless-supported-cleanup
   printf '{"ok":true,"result":{"worktree":{"id":"wt-path-cleanup","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
@@ -1867,7 +1961,7 @@ test_teardown_refuses_orca_terminal_worktree_identity_drift() {
   set -e
 
   [ "$status" -ne 0 ] || fail "teardown closed a terminal bound to another Orca worktree"
-  assert_contains "$out" "endpoint identity or state for $id is unknown" \
+  assert_contains "$out" "task Orca endpoint authority or quiescence is unproven" \
     "terminal/worktree identity drift was not surfaced"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
     "terminal/worktree identity drift closed the recorded terminal"
@@ -1875,6 +1969,214 @@ test_teardown_refuses_orca_terminal_worktree_identity_drift() {
     "terminal/worktree identity drift removed the provider worktree"
   assert_present "$state/$id.meta" "terminal/worktree identity drift removed metadata"
   pass "Orca teardown rejects terminal/worktree identity drift"
+}
+
+test_spawn_quarantines_create_response_without_worktree_id() {
+  local proj data state config id out status
+  id="orcapartialidz8"
+  proj="$TMP_ROOT/partial-id-project"
+  data="$TMP_ROOT/partial-id-data"
+  state="$TMP_ROOT/partial-id-state"
+  config="$TMP_ROOT/partial-id-config"
+  fm_git_init_commit "$proj"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case partial-create-id
+  seed_legacy_task_meta "$state" "$id" "$proj"
+  add_dead_tmux_fake "$FB"
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-partial-id"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"path":"%s"},"terminal":{"handle":"term-partial-id"}}}\n' "$proj" > "$RESP/3.out"
+
+  set +e
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "spawn accepted an Orca create response without a worktree id"
+  assert_grep "worktree=$proj" "$state/$id.meta" \
+    "partial create quarantine dropped the returned worktree path"
+  assert_grep 'terminal=term-partial-id' "$state/$id.meta" \
+    "partial create quarantine dropped the returned terminal"
+  assert_grep 'orca_repo_id=repo-partial-id' "$state/$id.meta" \
+    "partial create quarantine dropped the returned repo identity"
+  assert_grep "orca_expected_task=fm-$id" "$state/$id.meta" \
+    "partial create quarantine dropped expected task identity"
+  assert_grep "orca_provider_task=fm-$id" "$state/$id.meta" \
+    "partial create quarantine dropped provider task identity"
+  assert_no_grep '^orca_worktree_id=' "$state/$id.meta" \
+    "partial create quarantine invented a missing worktree id"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "spawn closed a partial-response terminal without worktree authority"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "spawn removed a partial-response worktree without provider id"
+  pass "Orca partial create responses retain every available identity"
+}
+
+test_orca_quarantine_write_failure_keeps_prearmed_blocker() {
+  local proj data state config id out status
+  id="orcaquarantinewritez2"
+  proj="$TMP_ROOT/quarantine-write-project"
+  data="$TMP_ROOT/quarantine-write-data"
+  state="$TMP_ROOT/quarantine-write-state"
+  config="$TMP_ROOT/quarantine-write-config"
+  fm_git_init_commit "$proj"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case quarantine-write-failure
+  seed_legacy_task_meta "$state" "$id" "$proj"
+  add_dead_tmux_fake "$FB"
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-quarantine-write"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-quarantine-write","path":"%s"}}}\n' "$proj" > "$RESP/3.out"
+
+  set +e
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ORCA_QUARANTINE_STATE_READONLY=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1)
+  status=$?
+  chmod 700 "$state"
+  set -e
+
+  [ "$status" -ne 0 ] || fail "spawn ignored an Orca quarantine update failure"
+  assert_grep 'orca_cleanup_pending=1' "$state/$id.meta" \
+    "quarantine write failure lost the pre-armed retry blocker"
+  assert_grep 'orca_cleanup_phase=spawn-preparing' "$state/$id.meta" \
+    "quarantine write failure replaced the durable pre-create phase"
+  set +e
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "spawn reused a task after quarantine publication failed"
+  assert_contains "$out" "Orca cleanup is pending for $id" \
+    "pre-armed quarantine did not block retry"
+  pass "Orca quarantine publication failures retain a durable retry blocker"
+}
+
+test_teardown_rejects_cross_task_orca_terminal_label() {
+  local proj wt data state config id out status neutral
+  id="orcacrosstaskz4"
+  proj="$TMP_ROOT/cross-task-project"
+  wt="$TMP_ROOT/cross-task-wt"
+  data="$TMP_ROOT/cross-task-data"
+  state="$TMP_ROOT/cross-task-state"
+  config="$TMP_ROOT/cross-task-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-cross-task" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "backend=orca" \
+    "orca_worktree_id=wt-cross-task"
+  orca_case cross-task-terminal
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-cross-task","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  printf 'fm-other-task\n' > "$RESP/.terminal-title"
+  printf 'wt-cross-task\n' > "$RESP/.terminal-worktree-override"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+
+  set +e
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "teardown accepted a terminal labeled for another task"
+  assert_contains "$out" "task Orca endpoint authority or quiescence is unproven" \
+    "cross-task Orca terminal drift was not surfaced"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "cross-task Orca terminal drift closed another task"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "cross-task Orca terminal drift removed the provider worktree"
+  pass "Orca teardown binds terminals to the expected task label"
+}
+
+test_teardown_rejects_cross_task_orca_worktree_label() {
+  local proj wt data state config id out status neutral
+  id="orcaworktreetaskz7"
+  proj="$TMP_ROOT/worktree-task-project"
+  wt="$TMP_ROOT/worktree-task-wt"
+  data="$TMP_ROOT/worktree-task-data"
+  state="$TMP_ROOT/worktree-task-state"
+  config="$TMP_ROOT/worktree-task-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-worktree-task" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "backend=orca" \
+    "orca_worktree_id=wt-worktree-task"
+  orca_case cross-task-worktree
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-worktree-task","name":"fm-other-task","path":"%s","terminals":[{"handle":"term-worktree-task","title":"fm-%s"}]}}}\n' \
+    "$wt" "$id" > "$RESP/1.out"
+  printf "fm-%s\n" "$id" > "$RESP/.terminal-title"
+  printf 'wt-worktree-task\n' > "$RESP/.terminal-worktree-override"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+
+  set +e
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "teardown accepted an Orca worktree labeled for another task"
+  assert_contains "$out" "task Orca endpoint authority or quiescence is unproven" \
+    "cross-task Orca worktree drift was not surfaced"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "cross-task Orca worktree drift closed a terminal"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "cross-task Orca worktree drift removed the provider worktree"
+  pass "Orca teardown binds worktrees to the expected task label"
+}
+
+test_teardown_quiesces_unrecorded_orca_terminals() {
+  local proj wt data state config id out status neutral
+  id="orcaunrecordedz3"
+  proj="$TMP_ROOT/unrecorded-project"
+  wt="$TMP_ROOT/unrecorded-wt"
+  data="$TMP_ROOT/unrecorded-data"
+  state="$TMP_ROOT/unrecorded-state"
+  config="$TMP_ROOT/unrecorded-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-recorded-stale" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "backend=orca" \
+    "orca_worktree_id=wt-unrecorded"
+  orca_case unrecorded-terminal
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-unrecorded","path":"%s","terminals":[{"handle":"term-unrecorded","title":"fm-%s"}]}}}\n' \
+    "$wt" "$id" > "$RESP/1.out"
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal handle stale"}}\n' > "$RESP/2.out"
+  printf '1\n' > "$RESP/2.exit"
+  printf "fm-%s\n" "$id" > "$RESP/.terminal-title"
+  printf 'wt-unrecorded\n' > "$RESP/.terminal-worktree-override"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+
+  set +e
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1)
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "unrecorded Orca terminal cleanup"$'\n'"$out"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-unrecorded' \
+    "teardown did not quiesce the unrecorded terminal"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-unrecorded' \
+    "teardown did not remove the terminal-free worktree"
+  pass "Orca teardown quiesces every terminal attached to the worktree"
 }
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-orca-quiescence ]; then
@@ -1887,8 +2189,8 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-orca-quiescence ]; then
 fi
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-orca-final ]; then
-  test_worktree_create_removes_worktree_when_path_missing
-  test_worktree_create_retains_resources_when_terminal_close_fails
+  test_worktree_create_retains_partial_authority_when_path_missing
+  test_worktree_create_never_cleans_partial_response_inline
   test_spawn_refuses_malformed_legacy_orca_report_metadata
   test_spawn_retains_orca_worktree_when_abort_close_fails
   test_teardown_rejects_symlinked_orca_task_metadata
@@ -1901,6 +2203,16 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-orca-quarantine ]; then
   test_spawn_refuses_cleanup_pending_orca_task_before_mutation
   test_pathless_orca_quarantine_has_supported_cleanup
   test_teardown_refuses_orca_terminal_worktree_identity_drift
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-round-orca-authority ]; then
+  test_worktree_create_retains_partial_authority_when_path_missing
+  test_spawn_quarantines_create_response_without_worktree_id
+  test_orca_quarantine_write_failure_keeps_prearmed_blocker
+  test_teardown_rejects_cross_task_orca_terminal_label
+  test_teardown_rejects_cross_task_orca_worktree_label
+  test_teardown_quiesces_unrecorded_orca_terminals
   exit 0
 fi
 
@@ -1932,8 +2244,8 @@ test_pathless_orca_quarantine_has_supported_cleanup
 test_teardown_refuses_orca_terminal_worktree_identity_drift
 test_json_get_ignores_undocumented_terminal_id_shapes
 test_worktree_and_terminal_helpers_parse_json
-test_worktree_create_removes_worktree_when_path_missing
-test_worktree_create_retains_resources_when_terminal_close_fails
+test_worktree_create_retains_partial_authority_when_path_missing
+test_worktree_create_never_cleans_partial_response_inline
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_legacy_respawn_writes_orca_metadata_and_launches_harness
 test_spawn_refuses_new_report_required_orca_task_before_mutation
@@ -1967,3 +2279,8 @@ test_teardown_rejects_symlinked_orca_task_metadata
 test_secondmate_force_teardown_removes_orca_child_via_orca
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
 test_secondmate_force_teardown_retains_partial_orca_child
+test_spawn_quarantines_create_response_without_worktree_id
+test_orca_quarantine_write_failure_keeps_prearmed_blocker
+test_teardown_rejects_cross_task_orca_terminal_label
+test_teardown_rejects_cross_task_orca_worktree_label
+test_teardown_quiesces_unrecorded_orca_terminals

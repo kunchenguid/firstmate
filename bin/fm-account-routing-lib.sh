@@ -956,16 +956,62 @@ fm_account_lifecycle_lock_acquire() {  # <state-dir> <task>
   fm_account_lock_acquire "$1" "$2" account-lifecycle "account lifecycle" "${FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS:-10}"
 }
 
+fm_account_stable_path_key() {
+  local path=$1 expected_type=$2 key
+  key=$(fm_account_system_perl -MCwd=getcwd -MDigest::SHA=sha256_hex -MErrno=ENOENT -MFile::Spec -e '
+    my ($raw, $expected) = @ARGV;
+    exit 1 if !defined($raw) || $raw eq q{} || $raw =~ /[\0\r\n]/;
+    my $absolute = File::Spec->file_name_is_absolute($raw)
+      ? $raw
+      : File::Spec->catfile(getcwd(), $raw);
+    my $current = File::Spec->rootdir();
+    my $missing = 0;
+    for my $component (File::Spec->splitdir($absolute)) {
+      next if $component eq q{} || $component eq q{.};
+      exit 1 if $component eq q{..};
+      $current = File::Spec->catfile($current, $component);
+      next if $missing;
+      if (lstat($current)) {
+        exit 1 if -l _;
+      } elsif ($! == ENOENT) {
+        $missing = 1;
+      } else {
+        exit 1;
+      }
+    }
+    my $canonical = File::Spec->canonpath($absolute);
+    if (!$missing) {
+      exit 1 if $expected eq q{directory} && !-d $canonical;
+      exit 1 if $expected eq q{file} && !-f $canonical;
+    }
+    print substr(sha256_hex($canonical), 0, 24);
+  ' "$path" "$expected_type") || return 1
+  case "$key" in
+    ????????????????????????) ;;
+    *) return 1 ;;
+  esac
+  case "$key" in *[!0-9a-f]*) return 1 ;; esac
+  printf '%s\n' "$key"
+}
+
 fm_secondmate_home_lifecycle_lock_acquire() {
-  local state_base=$1 home=$2 canonical key
-  [ -d "$home" ] && [ ! -L "$home" ] || {
-    echo "error: secondmate home lifecycle target must be a real directory: $home" >&2
+  local state_base=$1 home=$2 key
+  key=$(fm_account_stable_path_key "$home" directory) || {
+    echo "error: secondmate home lifecycle target is unsafe or its lock identity is unavailable: $home" >&2
     return 1
   }
-  canonical=$(cd "$home" 2>/dev/null && pwd -P) || return 1
-  key=$(printf '%s' "$canonical" | shasum -a 256 | awk '{print substr($1,1,24)}') || return 1
   fm_account_lock_acquire "$state_base/secondmate-home-lifecycle" "home-$key" \
     secondmate-home-lifecycle "secondmate home lifecycle" "${FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS:-10}"
+}
+
+fm_secondmate_registry_lock_acquire() {
+  local state_base=$1 registry=$2 key
+  key=$(fm_account_stable_path_key "$registry" file) || {
+    echo "error: secondmate registry lock identity is unavailable: $registry" >&2
+    return 1
+  }
+  fm_account_lock_acquire "$state_base/secondmate-registry" "registry-$key" \
+    secondmate-registry "secondmate registry" "${FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS:-10}"
 }
 
 fm_account_lifecycle_lock_owned() {  # <lock-path>
@@ -1022,7 +1068,7 @@ fm_account_safe_lineage_value() {
 
 fm_account_meta_key_owned() {  # <key>
   case "$1" in
-    window|worktree|worktree_git_dir|worktree_git_dir_identity|worktree_git_ref|worktree_git_head|worktree_git_setup_ref|worktree_git_setup_head|project|harness|kind|mode|yolo|tasktmp|model|effort|report_required|generation_id|backend|tmux_window_id|tmux_session_target|account_home|direct_spawn_cleanup|direct_spawn_backup|direct_spawn_artifacts|direct_recovery_cleanup|direct_recovery_backup|direct_recovery_artifacts|account_pool|account_profile|account_task|account_attempt|account_predecessor_task|account_predecessor_attempt|account_predecessor_provider|account_predecessor_profile|account_predecessor_pool|account_predecessor_session|account_predecessor_cleanup|account_rollback_cleanup|account_rollback_backup|account_rollback_artifacts|account_rollback_preserve_session|continuation_packet|provider_session_id|herdr_session|herdr_workspace_id|herdr_tab_id|herdr_pane_id|zellij_session|zellij_tab_id|zellij_pane_id|orca_worktree_id|terminal|cmux_workspace_id|cmux_surface_id|home|projects|rollback_pending) return 0 ;;
+    window|worktree|worktree_git_dir|worktree_git_dir_identity|worktree_git_ref|worktree_git_head|worktree_git_setup_ref|worktree_git_setup_head|project|harness|kind|mode|yolo|tasktmp|model|effort|report_required|generation_id|backend|tmux_window_id|tmux_session_target|account_home|direct_spawn_cleanup|direct_spawn_backup|direct_spawn_artifacts|direct_recovery_cleanup|direct_recovery_backup|direct_recovery_artifacts|account_pool|account_profile|account_task|account_attempt|account_predecessor_task|account_predecessor_attempt|account_predecessor_provider|account_predecessor_profile|account_predecessor_pool|account_predecessor_session|account_predecessor_cleanup|account_rollback_cleanup|account_rollback_backup|account_rollback_artifacts|account_rollback_preserve_session|continuation_packet|provider_session_id|herdr_session|herdr_workspace_id|herdr_tab_id|herdr_pane_id|zellij_session|zellij_tab_id|zellij_pane_id|orca_worktree_id|terminal|orca_cleanup_pending|orca_cleanup_phase|orca_terminal_proof|orca_repo_id|orca_expected_task|orca_provider_task|cmux_workspace_id|cmux_surface_id|home|projects|rollback_pending) return 0 ;;
     *) return 1 ;;
   esac
 }

@@ -51,6 +51,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-checkout-lock-lib.sh
 . "$SCRIPT_DIR/fm-checkout-lock-lib.sh"
 CHECKOUT_LOCK_ROOT=$(fm_checkout_lock_root "$CHECKOUT_STATE_BASE")
+# shellcheck source=bin/fm-account-routing-lib.sh
+. "$SCRIPT_DIR/fm-account-routing-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 fm_refuse_if_gate_agent
@@ -610,6 +612,7 @@ SEED_PARENT_BRIEF_DIR_CREATED=0
 SEED_SUB_REG_EXISTED=0
 SEED_CHARTER_EXISTED=0
 SEED_MARKER_EXISTED=0
+SEED_HOME_LIFECYCLE_LOCK=
 
 restore_seed_file() {
   local existed=$1 backup=$2 path=$3
@@ -745,9 +748,20 @@ seed_rollback() {
   fi
 
   if [ -n "${SEED_BACKUP_DIR:-}" ]; then
-    restore_seed_file "$SEED_PARENT_REG_EXISTED" "$SEED_BACKUP_DIR/parent-secondmates.md" "$REG"
     rm -rf -- "$SEED_BACKUP_DIR" 2>/dev/null || true
   fi
+}
+
+seed_release_locks() {
+  if [ -n "${SEED_HOME_LIFECYCLE_LOCK:-}" ]; then
+    fm_account_lifecycle_lock_release "$SEED_HOME_LIFECYCLE_LOCK" >/dev/null 2>&1 || true
+    SEED_HOME_LIFECYCLE_LOCK=
+  fi
+}
+
+seed_exit_cleanup() {
+  seed_rollback
+  seed_release_locks
 }
 
 registry_line_for_project() {
@@ -820,22 +834,59 @@ initialize_no_mistakes_project() {
 }
 
 write_registry() {
-  local id=$1 home=$2 projects_csv=$3 brief=$4 scope summary tmp today
+  local id=$1 home=$2 projects_csv=$3 brief=$4 scope summary tmp today registry_lock status=1
   mkdir -p "$DATA"
   [ -d "$DATA" ] && [ ! -L "$DATA" ] || return 1
   scope=$(registry_scope_for_brief "$brief")
   summary=$(registry_summary_for_brief "$brief")
   today=$(date +%F)
-  if [ -L "$REG" ] || { [ -e "$REG" ] && [ ! -f "$REG" ]; }; then return 1; fi
-  tmp=$(mktemp "$DATA/.secondmates.XXXXXX") || return 1
+  registry_lock=$(fm_secondmate_registry_lock_acquire "$CHECKOUT_LOCK_ROOT" "$REG") || return 1
+  if [ -L "$REG" ] || { [ -e "$REG" ] && [ ! -f "$REG" ]; }; then
+    fm_account_lifecycle_lock_release "$registry_lock" >/dev/null 2>&1 || true
+    return 1
+  fi
+  validate_registry || {
+    fm_account_lifecycle_lock_release "$registry_lock" >/dev/null 2>&1 || true
+    return 1
+  }
+  validate_home_assignment "$id" "$home" || {
+    fm_account_lifecycle_lock_release "$registry_lock" >/dev/null 2>&1 || true
+    return 1
+  }
+  tmp=$(mktemp "$DATA/.secondmates.XXXXXX") || {
+    fm_account_lifecycle_lock_release "$registry_lock" >/dev/null 2>&1 || true
+    return 1
+  }
   if [ -f "$REG" ]; then
-    grep -vE "^- $id( |$)" "$REG" > "$tmp" || true
+    python3 - "$REG" "$tmp" "$id" <<'PY' || {
+import sys
+
+source, destination, expected = sys.argv[1:]
+with open(source, encoding="utf-8") as stream, open(destination, "w", encoding="utf-8") as output:
+    for line in stream:
+        if line.startswith("- "):
+            item = line[2:].split(None, 1)[0] if line[2:].strip() else ""
+            if item == expected:
+                continue
+        output.write(line)
+PY
+      rm -f "$tmp"
+      fm_account_lifecycle_lock_release "$registry_lock" >/dev/null 2>&1 || true
+      return 1
+    }
   else
     : > "$tmp"
   fi
   printf -- '- %s - %s (home: %s; scope: %s; projects: %s; added %s)\n' "$id" "$summary" "$home" "$scope" "$projects_csv" "$today" >> "$tmp"
-  if [ -L "$REG" ] || { [ -e "$REG" ] && [ ! -f "$REG" ]; }; then rm -f "$tmp"; return 1; fi
-  mv "$tmp" "$REG"
+  if ! { [ ! -L "$REG" ] && { [ ! -e "$REG" ] || [ -f "$REG" ]; }; }; then
+    rm -f "$tmp"
+  elif mv "$tmp" "$REG"; then
+    status=0
+  else
+    rm -f "$tmp"
+  fi
+  fm_account_lifecycle_lock_release "$registry_lock" >/dev/null 2>&1 || true
+  return "$status"
 }
 
 refuse_populated_projectless_home() {
@@ -940,17 +991,14 @@ seed_home() {
   SEED_SUB_REG_EXISTED=0
   SEED_CHARTER_EXISTED=0
   SEED_MARKER_EXISTED=0
-  trap seed_rollback EXIT
-  if [ -f "$REG" ]; then
-    SEED_PARENT_REG_EXISTED=1
-    cp "$REG" "$SEED_BACKUP_DIR/parent-secondmates.md"
-  fi
+  trap seed_exit_cleanup EXIT
 
   if [ "$requested_home" = "-" ]; then
     SEED_HOME_ACQUIRED=1
     home=$(acquire_treehouse_home "$id")
     SEED_HOME="$home"
     SEED_HOME_RETAINED=1
+    SEED_HOME_LIFECYCLE_LOCK=$(fm_secondmate_home_lifecycle_lock_acquire "$CHECKOUT_LOCK_ROOT" "$home") || return 1
     freshness_status=0
     "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-worktree "$home" "$FM_ROOT" || freshness_status=$?
     if [ "$freshness_status" -ne 0 ]; then
@@ -962,6 +1010,7 @@ seed_home() {
     home=$(verify_firstmate_home "$home")
   else
     requested_abs=$(abs_path_for_new "$requested_home")
+    SEED_HOME_LIFECYCLE_LOCK=$(fm_secondmate_home_lifecycle_lock_acquire "$CHECKOUT_LOCK_ROOT" "$requested_abs") || return 1
     refuse_active_home_path "$requested_abs" || return 1
     validate_home_assignment "$id" "$requested_abs" || return 1
     "$SCRIPT_DIR/fm-checkout-refresh.sh" preflight "$FM_ROOT" >/dev/null 2>&1 || true
@@ -1050,11 +1099,11 @@ seed_home() {
 
   projects_csv=$(join_projects "$@")
   printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER"
-  write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF"
-  validate_registry
+  write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF" || return 1
   SEED_COMMITTED=1
-  trap - EXIT
   rm -rf -- "$SEED_BACKUP_DIR"
+  seed_release_locks
+  trap - EXIT
   printf 'home=%s\n' "$home"
 }
 

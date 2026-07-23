@@ -14,7 +14,7 @@ TEST_HOME="$TMP_ROOT/user"
 FM_TEST_HOME="$TMP_ROOT/fm-home"
 STATE_ROOT="$TMP_ROOT/refresh-state"
 LOCK_ROOT="$TMP_ROOT/refresh-locks"
-mkdir -p "$TEST_HOME" "$FM_TEST_HOME/projects" "$FM_TEST_HOME/config" "$STATE_ROOT"
+mkdir -p "$TEST_HOME/.treehouse" "$FM_TEST_HOME/projects" "$FM_TEST_HOME/config" "$STATE_ROOT"
 
 commit_file() {
   local dir=$1 file=$2 content=$3 message=$4
@@ -66,6 +66,7 @@ run_refresh() {
 run_isolated_refresh() {
   local home=$1 state_root=$2
   shift 2
+  mkdir -p "$home/user/.treehouse"
   HOME="$home/user" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_CHECKOUT_REFRESH_STATE_ROOT="$state_root" \
     FM_CHECKOUT_REFRESH_LOCK_ROOT="$state_root-locks" \
@@ -288,7 +289,7 @@ SH
   status=$?
   set -e
   [ "$status" -ne 0 ] || fail "uninspectable discovered Git identity reported healthy coverage"
-  assert_contains "$out" "discovered Git identity cannot be inspected:" \
+  assert_contains "$out" "discovered Git identity cannot be inspected or disproved:" \
     "discovered rev-parse failure was classified as a non-Git directory"
   assert_refresh_state "$state" unhealthy
   pass "discovery provenance failures invalidate coverage health"
@@ -558,7 +559,7 @@ test_treehouse_discovery_failure_invalidates_coverage_health() {
   set -e
   chmod 700 "$treehouse_root"
   [ "$status" -ne 0 ] || fail "unreadable Treehouse root reported healthy coverage"
-  assert_contains "$out" "Treehouse root is unreadable" \
+  assert_contains "$out" "configured root is unsafe or unreadable" \
     "unreadable Treehouse root was not surfaced"
   assert_refresh_state "$STATE_ROOT" unhealthy
 
@@ -577,7 +578,7 @@ test_treehouse_discovery_failure_invalidates_coverage_health() {
 }
 
 test_raw_treehouse_root_symlink_invalidates_coverage_health() {
-  local real_root linked_root out status
+  local real_root linked_root linked_parent linked_child missing_root out status
   real_root="$TMP_ROOT/treehouse-root-real"
   linked_root="$TMP_ROOT/treehouse-root-link"
   mkdir -p "$real_root"
@@ -595,7 +596,33 @@ test_raw_treehouse_root_symlink_invalidates_coverage_health() {
   assert_contains "$out" "configured root is unsafe or unreadable: $linked_root" \
     "symlinked raw Treehouse root was resolved before rejection"
   assert_refresh_state "$STATE_ROOT" unhealthy
-  pass "raw Treehouse root symlinks invalidate coverage"
+
+  linked_parent="$TMP_ROOT/treehouse-parent-link"
+  linked_child="$linked_parent/pools"
+  ln -s "$real_root" "$linked_parent"
+  set +e
+  out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_ROOT="$STATE_ROOT" FM_CHECKOUT_REFRESH_LOCK_ROOT="$LOCK_ROOT" \
+    FM_TREEHOUSE_ROOT="$linked_child/" FM_CHECKOUT_REFRESH_TEST=1 \
+    "$ROOT/bin/fm-checkout-refresh.sh" run-once --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "Treehouse root with a symlinked ancestor and trailing slash reported healthy coverage"
+  assert_contains "$out" "configured root is unsafe or unreadable: $linked_child/" \
+    "Treehouse ancestor symlink was hidden by normalization"
+
+  missing_root="$TMP_ROOT/configured-treehouse-missing"
+  set +e
+  out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_ROOT="$STATE_ROOT" FM_CHECKOUT_REFRESH_LOCK_ROOT="$LOCK_ROOT" \
+    FM_TREEHOUSE_ROOT="$missing_root" FM_CHECKOUT_REFRESH_TEST=1 \
+    "$ROOT/bin/fm-checkout-refresh.sh" run-once --force 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "explicitly configured missing Treehouse root reported healthy coverage"
+  assert_contains "$out" "configured root is unsafe or unreadable: $missing_root" \
+    "missing configured Treehouse root was treated as benignly absent"
+  pass "raw, ancestor-symlinked, and missing configured Treehouse roots fail closed"
 }
 
 test_skill_inventory_failure_preserves_alert_and_invalidates_coverage() {
@@ -1092,7 +1119,7 @@ test_config_and_external_identity_fail_closed() {
 }
 
 test_public_entrypoints_reject_nested_repository_paths() {
-  local source worktree nested out status
+  local source worktree nested alias_parent alias_source out status
   source="$TMP_ROOT/exact-entry-source"
   worktree="$TMP_ROOT/exact-entry-worktree"
   fm_git_worktree "$source" "$worktree" exact-entry
@@ -1115,7 +1142,17 @@ test_public_entrypoints_reject_nested_repository_paths() {
   status=$?
   set -e
   [ "$status" -ne 0 ] || fail "worktree verification accepted a nested source path"
-  pass "public refresh entrypoints require exact repository roots"
+  alias_parent="$TMP_ROOT/exact-entry-parent-link"
+  ln -s "$(dirname "$source")" "$alias_parent"
+  alias_source="$alias_parent/$(basename "$source")/"
+  set +e
+  out=$(run_refresh preflight "$alias_source" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "preflight accepted a repository through a symlinked ancestor and trailing slash"
+  assert_contains "$out" "must be an exact inspectable Git repository root" \
+    "ancestor-symlinked preflight refusal was unclear"
+  pass "public refresh entrypoints require lexical and canonical repository roots"
 }
 
 test_explicit_secondmate_home_requires_live_default_tip() {
@@ -1541,6 +1578,7 @@ test_reinspection_failure_invalidates_coverage_health
 test_scheduler_liveness_is_scheduler_owned
 test_unreadable_scan_root_invalidates_coverage_health
 test_unreadable_scanned_origin_invalidates_coverage_health
+test_discovery_provenance_failures_invalidate_coverage
 test_failed_alert_persistence_forces_reinspection
 test_local_authority_is_fully_inspected_and_tracks_origin_identity
 test_dirty_nondefault_and_diverged_checkouts_are_untouched

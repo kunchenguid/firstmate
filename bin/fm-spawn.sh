@@ -634,6 +634,13 @@ reconcile_failed_direct_recovery() {
   echo "fm-spawn: cleaned retained direct recovery endpoint for $task" >&2
 }
 
+spawn_refuse_existing_orca_provider_identity() {
+  [ "$SPAWN_META_PRESENT" != 1 ] || [ "$(spawn_preflight_meta_value backend)" != orca ] || {
+    echo "error: existing Orca provider identity for $SPAWN_PREFLIGHT_ID must be cleared by teardown before respawn" >&2
+    return 1
+  }
+}
+
 if [ "$RECOVERY_ACCOUNT" = 1 ]; then
   [ "${#POS[@]}" -ge 1 ] || { echo "error: account recovery requires a task id" >&2; exit 1; }
   case "$SPAWN_PREFLIGHT_ID" in *=*) echo "error: account recovery does not support batch syntax" >&2; exit 1 ;; esac
@@ -681,6 +688,7 @@ if [ "$BACKEND" = orca ] && [ "$RECOVERY_ACCOUNT" = 0 ] && [ "$SPAWN_PREFLIGHT_B
 fi
 if [ "$BACKEND" = orca ] && [ "$SPAWN_PREFLIGHT_BATCH" = 0 ] && [ "$SPAWN_META_PRESENT" = 1 ]; then
   spawn_refuse_report_required_orca || exit 1
+  [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ] || spawn_refuse_existing_orca_provider_identity || exit 1
 fi
 if [ "$BACKEND" = orca ] && { [ "$RECOVERY_ACCOUNT" = 0 ] || [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; }; then
   fm_backend_orca_runtime_check || exit 1
@@ -690,6 +698,7 @@ if [ "$RECOVERY_ACCOUNT" = 0 ] && [ "$SPAWN_PREFLIGHT_BATCH" = 0 ] && [ "$SPAWN_
 fi
 if [ "$BACKEND" = orca ] && [ "$SPAWN_PREFLIGHT_BATCH" = 0 ]; then
   spawn_refuse_report_required_orca || exit 1
+  [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ] || spawn_refuse_existing_orca_provider_identity || exit 1
 fi
 
 if [ "$SPAWN_PREFLIGHT_BATCH" = 0 ] \
@@ -894,6 +903,9 @@ ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 ORCA_TERMINAL_PROOF=
+ORCA_REPO_ID=
+ORCA_EXPECTED_TASK=
+ORCA_PROVIDER_TASK=
 ID=
 ACCOUNT_LEASE_CREATED=0
 FM_ACCOUNT_MUTATION_ACQUIRED=0
@@ -964,28 +976,122 @@ discard_existing_artifact_backup() {
 }
 
 parse_orca_worktree_result() {
-  local raw=$1 rest terminal_rest
+  local raw=$1 rest
   ORCA_WORKTREE_ID=${raw%%$'\t'*}
-  if [ "$raw" = "$ORCA_WORKTREE_ID" ]; then
-    WT=
-    ORCA_TERMINAL=
-    ORCA_TERMINAL_PROOF=
-    return 1
-  fi
+  [ "$raw" != "$ORCA_WORKTREE_ID" ] || return 1
   rest=${raw#*$'\t'}
   WT=${rest%%$'\t'*}
-  if [ "$rest" != "$WT" ]; then
-    terminal_rest=${rest#*$'\t'}
-    ORCA_TERMINAL=${terminal_rest%%$'\t'*}
-    if [ "$terminal_rest" != "$ORCA_TERMINAL" ]; then
-      ORCA_TERMINAL_PROOF=${terminal_rest#*$'\t'}
-    else
-      ORCA_TERMINAL_PROOF=
-    fi
-  else
-    ORCA_TERMINAL=
-    ORCA_TERMINAL_PROOF=
-  fi
+  [ "$rest" != "$WT" ] || return 1
+  rest=${rest#*$'\t'}
+  ORCA_TERMINAL=${rest%%$'\t'*}
+  [ "$rest" != "$ORCA_TERMINAL" ] || return 1
+  rest=${rest#*$'\t'}
+  ORCA_TERMINAL_PROOF=${rest%%$'\t'*}
+  [ "$rest" != "$ORCA_TERMINAL_PROOF" ] || return 1
+  rest=${rest#*$'\t'}
+  ORCA_REPO_ID=${rest%%$'\t'*}
+  [ "$rest" != "$ORCA_REPO_ID" ] || return 1
+  ORCA_PROVIDER_TASK=${rest#*$'\t'}
+  [ "$ORCA_PROVIDER_TASK" = "$ORCA_EXPECTED_TASK" ]
+}
+
+persist_orca_cleanup_quarantine() {
+  local phase=$1
+  mkdir -p "$STATE" || return 1
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
+  python3 - "$STATE" "$STATE/$ID.meta" "$phase" \
+    "${W:-fm-$ID}" "${WT:-}" "${PROJ_ABS:-}" "${HARNESS:-}" "${KIND:-ship}" \
+    "${MODE:-no-mistakes}" "${YOLO:-off}" "${TASK_TMP:-}" "${MODEL:-default}" \
+    "${EFFORT:-default}" "${ORCA_WORKTREE_ID:-}" "${ORCA_TERMINAL:-}" \
+    "${ORCA_TERMINAL_PROOF:-unproven}" "${ORCA_REPO_ID:-}" "fm-$ID" \
+    "${ORCA_PROVIDER_TASK:-}" <<'PY'
+import os
+import stat
+import sys
+import tempfile
+
+(state, metadata, phase, window, worktree, project, harness, kind, mode, yolo,
+ tasktmp, model, effort, worktree_id, terminal, proof, repo_id, expected_task,
+ provider_task) = sys.argv[1:]
+values = [
+    ("window", window),
+    ("worktree", worktree),
+    ("project", project),
+    ("harness", harness),
+    ("kind", kind),
+    ("mode", mode),
+    ("yolo", yolo),
+    ("tasktmp", tasktmp),
+    ("model", model),
+    ("effort", effort),
+    ("backend", "orca"),
+]
+if worktree_id:
+    values.append(("orca_worktree_id", worktree_id))
+if terminal:
+    values.append(("terminal", terminal))
+values.extend([
+    ("orca_cleanup_pending", "1"),
+    ("orca_cleanup_phase", phase),
+    ("orca_terminal_proof", proof),
+    ("orca_repo_id", repo_id),
+    ("orca_expected_task", expected_task),
+    ("orca_provider_task", provider_task),
+])
+owned = {
+    "window", "worktree", "project", "harness", "kind", "mode", "yolo",
+    "tasktmp", "model", "effort", "backend", "orca_worktree_id", "terminal",
+    "orca_cleanup_pending", "orca_cleanup_phase", "orca_terminal_proof",
+    "orca_repo_id", "orca_expected_task", "orca_provider_task",
+}
+for key, value in values:
+    if any(character in value for character in "\0\r\n"):
+        raise SystemExit(1)
+state_metadata = os.lstat(state)
+if not stat.S_ISDIR(state_metadata.st_mode) or stat.S_ISLNK(state_metadata.st_mode):
+    raise SystemExit(1)
+preserved = []
+try:
+    metadata_state = os.lstat(metadata)
+except FileNotFoundError:
+    metadata_state = None
+if metadata_state is not None:
+    if not stat.S_ISREG(metadata_state.st_mode) or stat.S_ISLNK(metadata_state.st_mode):
+        raise SystemExit(1)
+    with open(metadata, encoding="utf-8") as stream:
+        for line in stream:
+            key = line.split("=", 1)[0]
+            if key not in owned:
+                preserved.append(line)
+descriptor, temporary = tempfile.mkstemp(prefix=".orca-quarantine.", dir=state)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+        output.writelines(preserved)
+        for key, value in values:
+            output.write(f"{key}={value}\n")
+        output.flush()
+        os.fsync(output.fileno())
+    try:
+        destination = os.lstat(metadata)
+    except FileNotFoundError:
+        destination = None
+    if destination is not None and (
+        not stat.S_ISREG(destination.st_mode) or stat.S_ISLNK(destination.st_mode)
+    ):
+        raise OSError("unsafe quarantine destination")
+    os.replace(temporary, metadata)
+    directory = os.open(state, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except BaseException:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+PY
 }
 
 persist_failed_account_rollback() {
@@ -1288,6 +1394,14 @@ spawn_restore_unmanaged_state_locked() {
     current_generation=$(fm_meta_get "$meta" generation_id)
     if [ "$META_INSTALLED" = 1 ]; then
       [ "$current_generation" = "$SPAWN_GENERATION_ID" ] || return 1
+    elif [ "${BACKEND:-tmux}" = orca ] \
+      && [ "$(fm_meta_get "$meta" orca_cleanup_pending)" = 1 ] \
+      && [ "$(fm_meta_get "$meta" orca_expected_task)" = "fm-$ID" ] \
+      && { [ -z "$(fm_meta_get "$meta" orca_worktree_id)" ] \
+        || [ "$(fm_meta_get "$meta" orca_worktree_id)" = "${ORCA_WORKTREE_ID:-}" ]; } \
+      && { [ -z "$(fm_meta_get "$meta" terminal)" ] \
+        || [ "$(fm_meta_get "$meta" terminal)" = "${ORCA_TERMINAL:-}" ]; }; then
+      :
     else
       cmp -s "$meta" "$META_BACKUP" || return 1
     fi
@@ -1322,7 +1436,7 @@ spawn_restore_unmanaged_state() {
 }
 
 spawn_abort_cleanup() {
-  local status=$? endpoint_state endpoint_gone=1 account_clean=1 state_clean=1 worktree_clean=1 rollback_lock='' rollback_tmp restored_existing_meta=0 artifact_backup_name orca_meta_tmp release_status orca_cleanup_failed=0
+  local status=$? endpoint_state endpoint_gone=1 account_clean=1 state_clean=1 worktree_clean=1 rollback_lock='' rollback_tmp restored_existing_meta=0 artifact_backup_name release_status orca_cleanup_failed=0
   trap - EXIT
   # This is an EXIT trap whose job is to attempt every independent cleanup
   # action and then return the original spawn status. The parent script runs
@@ -1338,47 +1452,40 @@ spawn_abort_cleanup() {
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
     if [ -n "${ORCA_TERMINAL:-}" ]; then
-      fm_backend_orca_quiesce_terminal "$ORCA_TERMINAL" || orca_cleanup_failed=1
+      if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+        case "$(fm_backend_orca_terminal_state "$ORCA_TERMINAL" "$ORCA_WORKTREE_ID" "fm-${ID:-unknown}")" in
+          present|absent) ;;
+          *) orca_cleanup_failed=1 ;;
+        esac
+      else
+        orca_cleanup_failed=1
+      fi
     elif [ -n "${ORCA_WORKTREE_ID:-}" ]; then
-      [ "$(fm_backend_orca_worktree_terminal_state "$ORCA_WORKTREE_ID")" = absent ] || orca_cleanup_failed=1
+      case "$(fm_backend_orca_worktree_terminal_state "$ORCA_WORKTREE_ID" "fm-${ID:-unknown}")" in
+        present|absent) ;;
+        *) orca_cleanup_failed=1 ;;
+      esac
+    else
+      orca_cleanup_failed=1
+    fi
+    if [ -n "${ORCA_WORKTREE_ID:-}" ] && [ "$orca_cleanup_failed" = 0 ]; then
+      fm_backend_orca_quiesce_worktree_terminals "$ORCA_WORKTREE_ID" "fm-${ID:-unknown}" || orca_cleanup_failed=1
     fi
     if [ -n "${ORCA_WORKTREE_ID:-}" ] && [ "$orca_cleanup_failed" = 0 ]; then
       fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" || orca_cleanup_failed=1
+    fi
+    if [ "$orca_cleanup_failed" = 0 ]; then
+      spawn_restore_unmanaged_state "$rollback_lock" || {
+        state_clean=0
+        echo "warning: failed to restore prior task state after Orca abort cleanup for ${ID:-unknown}" >&2
+      }
     fi
     if [ "$orca_cleanup_failed" = 1 ]; then
       endpoint_gone=0
       worktree_clean=0
       echo "warning: retaining Orca cleanup metadata for ${ID:-unknown} because endpoint absence or worktree removal is unproven" >&2
-      if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
-        mkdir -p "$STATE" 2>/dev/null || true
-        if [ -d "$STATE" ] && [ ! -L "$STATE" ]; then
-          orca_meta_tmp=$(mktemp "$STATE/.${ID:-unknown}.meta.orca-cleanup.XXXXXX" 2>/dev/null) || orca_meta_tmp=
-        fi
-        if [ -n "${orca_meta_tmp:-}" ]; then
-          {
-            echo "window=${W:-fm-${ID:-unknown}}"
-            [ -z "${WT:-}" ] || echo "worktree=$WT"
-            echo "project=${PROJ_ABS:-}"
-            echo "harness=${HARNESS:-}"
-            echo "kind=${KIND:-ship}"
-            echo "mode=${MODE:-no-mistakes}"
-            echo "yolo=${YOLO:-off}"
-            echo "tasktmp=${TASK_TMP:-}"
-            echo "model=${MODEL:-default}"
-            echo "effort=${EFFORT:-default}"
-            echo "backend=orca"
-            echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-            [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-            echo "orca_cleanup_pending=1"
-            echo "orca_cleanup_phase=spawn-abort"
-            echo "orca_terminal_proof=${ORCA_TERMINAL_PROOF:-unproven}"
-          } > "$orca_meta_tmp" 2>/dev/null || true
-          if fm_account_safe_file_destination "$STATE/${ID:-unknown}.meta"; then
-            mv "$orca_meta_tmp" "$STATE/${ID:-unknown}.meta" 2>/dev/null || true
-          fi
-          [ ! -e "$orca_meta_tmp" ] || rm -f "$orca_meta_tmp"
-        fi
-      fi
+      persist_orca_cleanup_quarantine spawn-abort || \
+        echo "warning: failed to update the pre-armed Orca cleanup quarantine for ${ID:-unknown}" >&2
     fi
   fi
   if [ "$ACCOUNT_SPAWN_COMMITTED" != 1 ] \
@@ -2767,27 +2874,43 @@ EOF
       T="$ORCA_TERMINAL"
       ENDPOINT_CREATED=1
     else
+      ORCA_EXPECTED_TASK="fm-$ID"
+      ORCA_TERMINAL_PROOF=unproven
+      persist_orca_cleanup_quarantine spawn-preparing || {
+        echo "error: cannot durably arm Orca cleanup quarantine for $ID" >&2
+        exit 1
+      }
+      ORCA_ABORT_CLEANUP=1
       set +e
       ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
       ORCA_WT_STATUS=$?
       set -e
       if [ "$ORCA_WT_STATUS" -ne 0 ]; then
         if [ "$ORCA_WT_STATUS" -eq 2 ] && [ -n "$ORCA_WT_RAW" ]; then
-          if parse_orca_worktree_result "$ORCA_WT_RAW" && [ -n "$ORCA_WORKTREE_ID" ]; then
-            ORCA_ABORT_CLEANUP=1
-          fi
+          parse_orca_worktree_result "$ORCA_WT_RAW" || true
+          persist_orca_cleanup_quarantine spawn-abort || {
+            echo "error: cannot durably record partial Orca create authority for $ID" >&2
+          }
         fi
         exit 1
       fi
       parse_orca_worktree_result "$ORCA_WT_RAW" || true
-      ORCA_ABORT_CLEANUP=1
-      if [ -z "$ORCA_WORKTREE_ID" ] || [ -z "$WT" ]; then
-        echo "error: orca did not return a worktree id/path for $W" >&2
+      persist_orca_cleanup_quarantine spawn-abort || {
+        echo "error: cannot durably record Orca create authority for $ID" >&2
+        exit 1
+      }
+      if [ -z "$ORCA_WORKTREE_ID" ] || [ -z "$WT" ] || [ "$ORCA_PROVIDER_TASK" != "$ORCA_EXPECTED_TASK" ]; then
+        echo "error: orca did not return matching worktree id, path, and task authority for $W" >&2
         exit 1
       fi
       validate_spawn_worktree "orca worktree create" "$W"
       if [ -z "$ORCA_TERMINAL" ]; then
         ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
+        ORCA_TERMINAL_PROOF=recorded
+        persist_orca_cleanup_quarantine spawn-abort || {
+          echo "error: cannot durably record the Orca terminal authority for $ID" >&2
+          exit 1
+        }
       fi
       T="$ORCA_TERMINAL"
       ENDPOINT_CREATED=1
@@ -3161,6 +3284,9 @@ META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
   if [ "$BACKEND" = orca ]; then
     echo "orca_worktree_id=$ORCA_WORKTREE_ID"
     echo "terminal=$ORCA_TERMINAL"
+    echo "orca_repo_id=$ORCA_REPO_ID"
+    echo "orca_expected_task=$ORCA_EXPECTED_TASK"
+    echo "orca_provider_task=$ORCA_PROVIDER_TASK"
   fi
   if [ "$BACKEND" = cmux ]; then
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"

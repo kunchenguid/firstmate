@@ -94,6 +94,8 @@ Run `bin/fm-home-seed.sh validate` when checking registry integrity; it refuses 
 
 Seeding is transactional.
 If validation, cloning, no-mistakes initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
+Home provisioning, child spawn, and retirement use one canonical home lifecycle lock.
+The lock order is home lifecycle, task lifecycle, then registry; recursive retirement acquires parent homes before child homes and holds each home lock through its final state check, removal, and registry update.
 
 Secondmate project lists may include `no-mistakes` and `direct-PR` projects only.
 `local-only` projects stay with the main firstmate.

@@ -669,6 +669,20 @@ run_teardown() {
     "$TEARDOWN" task-x1 "$@"
 }
 
+run_teardown_named() {
+  local case_dir=$1 task=$2
+  shift 2
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_CHECKOUT_REFRESH_LOCK_ROOT="$case_dir/checkout-locks" \
+  FM_FAKE_FIRSTMATE_SOURCE="$ROOT" \
+  FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1 \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$TEARDOWN" "$task" "$@"
+}
+
 test_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
@@ -3252,6 +3266,116 @@ SH
   pass "secondmate retirement serializes child spawn through removal"
 }
 
+test_nested_secondmate_cleanup_requires_child_home_lock() {
+  local case_dir nested holder_pid waited rc
+  case_dir=$(make_case nested-secondmate-home-lock)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  nested="$case_dir/nested-home"
+  git clone --quiet "$case_dir/wt" "$nested"
+  mkdir -p "$nested/data" "$nested/state" "$nested/config" "$nested/projects"
+  printf '%s\n' nested > "$nested/.fm-secondmate-home"
+  printf '%s\n' "- nested - nested secondmate (home: $nested; scope: nested; projects: ; added 2026-07-23)" \
+    > "$case_dir/wt/data/secondmates.md"
+  fm_write_meta "$case_dir/wt/state/nested.meta" \
+    'window=fm-nested' \
+    'tmux_session_target=firstmate:fm-nested' \
+    "worktree=$nested" \
+    "project=$nested" \
+    'kind=secondmate' \
+    'mode=secondmate' \
+    "home=$nested"
+  bash -c '
+    . "$1/bin/fm-account-routing-lib.sh"
+    lock=$(fm_secondmate_home_lifecycle_lock_acquire "$2" "$3") || exit 1
+    : > "$4"
+    while [ ! -f "$5" ]; do sleep 0.05; done
+    fm_account_lifecycle_lock_release "$lock"
+  ' _ "$ROOT" "$case_dir/checkout-locks" "$nested" \
+    "$case_dir/nested-lock-ready" "$case_dir/nested-lock-release" &
+  holder_pid=$!
+  waited=0
+  while [ ! -f "$case_dir/nested-lock-ready" ] && [ "$waited" -lt 200 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  [ -f "$case_dir/nested-lock-ready" ] || {
+    : > "$case_dir/nested-lock-release"
+    wait "$holder_pid" || true
+    fail "nested secondmate lock holder did not start"
+  }
+  set +e
+  FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS=0 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  : > "$case_dir/nested-lock-release"
+  wait "$holder_pid" || fail "nested secondmate lock holder failed to release"
+  expect_code 1 "$rc" "nested secondmate home lock teardown exit"
+  assert_present "$nested" "nested lock contention allowed child home removal"
+  assert_present "$case_dir/wt/state/nested.meta" "nested lock contention removed child metadata"
+  assert_present "$case_dir/wt" "nested lock contention allowed parent home removal"
+  assert_grep 'secondmate home lifecycle lock' "$case_dir/stderr" \
+    "nested secondmate home lock contention was not surfaced"
+  pass "recursive secondmate cleanup acquires each child home lock"
+}
+
+test_secondmate_registry_updates_are_locked_and_literal() {
+  local case_dir id other_home holder_pid waited rc
+  case_dir=$(make_case secondmate-registry-locked-literal)
+  id='foo.bar'
+  prepare_secondmate_home_fixture "$case_dir" "$id"
+  fm_write_meta "$case_dir/state/$id.meta" \
+    "window=fm-$id" \
+    "tmux_session_target=firstmate:fm-$id" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/wt" \
+    'kind=secondmate' \
+    'mode=secondmate' \
+    "home=$case_dir/wt"
+  other_home="$case_dir/other-home"
+  mkdir -p "$other_home"
+  printf '%s\n' "- fooxbar - retained neighbor (home: $other_home; scope: neighbor; projects: test; added 2026-07-23)" \
+    >> "$case_dir/data/secondmates.md"
+  bash -c '
+    . "$1/bin/fm-account-routing-lib.sh"
+    lock=$(fm_secondmate_registry_lock_acquire "$2" "$3") || exit 1
+    : > "$4"
+    while [ ! -f "$5" ]; do sleep 0.05; done
+    fm_account_lifecycle_lock_release "$lock"
+  ' _ "$ROOT" "$case_dir/checkout-locks" "$case_dir/data/secondmates.md" \
+    "$case_dir/registry-lock-ready" "$case_dir/registry-lock-release" &
+  holder_pid=$!
+  waited=0
+  while [ ! -f "$case_dir/registry-lock-ready" ] && [ "$waited" -lt 200 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  [ -f "$case_dir/registry-lock-ready" ] || {
+    : > "$case_dir/registry-lock-release"
+    wait "$holder_pid" || true
+    fail "registry lock holder did not start"
+  }
+  set +e
+  FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS=0 \
+    run_teardown_named "$case_dir" "$id" --force > "$case_dir/locked-stdout" 2> "$case_dir/locked-stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "registry-locked teardown exit"
+  assert_present "$case_dir/wt" "registry lock contention allowed home removal"
+  assert_grep 'fooxbar' "$case_dir/data/secondmates.md" \
+    "registry lock contention overwrote a neighboring registration"
+  : > "$case_dir/registry-lock-release"
+  wait "$holder_pid" || fail "registry lock holder failed to release"
+  run_teardown_named "$case_dir" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "dotted-id teardown failed after registry lock release: $(cat "$case_dir/stderr")"
+  assert_grep '- fooxbar ' "$case_dir/data/secondmates.md" \
+    "retiring foo.bar removed the literal neighbor fooxbar"
+  assert_no_grep '- foo.bar ' "$case_dir/data/secondmates.md" \
+    "retiring foo.bar left its exact registry entry"
+  pass "secondmate registry updates are serialized and compare ids literally"
+}
+
 if [ "${FM_TEST_FOCUSED:-}" = tasktmp-safety ]; then
   test_teardown_refuses_unsafe_tasktmp_metadata
   exit 0
@@ -3364,6 +3488,8 @@ fi
 if [ "${FM_TEST_FOCUSED:-}" = review-round-teardown-lifecycle ]; then
   test_secondmate_registry_duplicate_home_blocks_removal
   test_secondmate_retirement_serializes_child_spawn
+  test_nested_secondmate_cleanup_requires_child_home_lock
+  test_secondmate_registry_updates_are_locked_and_literal
   exit 0
 fi
 
@@ -3399,6 +3525,10 @@ test_normal_secondmate_retires_proven_detached_head
 test_normal_secondmate_retains_untracked_skill_draft
 test_normal_secondmate_retains_unique_detached_head
 test_forced_secondmate_retains_unquiesced_unmanaged_child
+test_secondmate_registry_duplicate_home_blocks_removal
+test_secondmate_retirement_serializes_child_spawn
+test_nested_secondmate_cleanup_requires_child_home_lock
+test_secondmate_registry_updates_are_locked_and_literal
 test_teardown_retains_untracked_claude_skill_draft
 test_teardown_refuses_unsafe_tasktmp_metadata
 test_teardown_rejects_malformed_report_requirement

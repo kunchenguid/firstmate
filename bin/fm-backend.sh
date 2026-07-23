@@ -619,6 +619,26 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
   esac
 }
 
+fm_backend_quiesce_terminal() {  # <backend> <terminal-id> [expected-worktree-id] [expected-label]
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    orca) fm_backend_orca_quiesce_terminal "$@" ;;
+    *) echo "error: backend '$backend' has no authoritative terminal-quiescence operation" >&2; return 1 ;;
+  esac
+}
+
+fm_backend_quiesce_worktree_terminals() {  # <backend> <worktree-id> <expected-label>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    orca) fm_backend_orca_quiesce_worktree_terminals "$@" ;;
+    *) echo "error: backend '$backend' does not own task worktrees" >&2; return 1 ;;
+  esac
+}
+
 # fm_backend_busy_state: semantic busy/idle/unknown for backends that expose
 # native agent-state (herdr-addendum "busy state" row - the first backend
 # where this gets real semantics beyond pane-regex). Backends with no such
@@ -737,7 +757,7 @@ fm_backend_target_state() {  # <backend> <target> [expected-label] [recorded-sco
   [ -n "$target" ] || { printf 'unknown'; return 0; }
   if [ "$backend" = orca ]; then
     fm_backend_source orca >/dev/null 2>&1 || { printf 'unknown'; return 0; }
-    fm_backend_orca_terminal_state "$target" "$recorded_scoped_target"
+    fm_backend_orca_terminal_state "$target" "$recorded_scoped_target" "$expected_label"
     return 0
   fi
   if fm_backend_target_exists "$backend" "$target" "$expected_label" "$recorded_scoped_target" 2>/dev/null; then
