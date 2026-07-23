@@ -53,7 +53,7 @@ EOF
 # one of these DOD blocks, since a broken heredoc corrupts or empties the
 # generated brief content, not just the script's own syntax.
 test_ship_modes_generate_clean_briefs() {
-  local home id brief status
+  local home id brief status lane
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
@@ -68,6 +68,16 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    # Every ship brief must state its assigned delivery lane explicitly and
+    # forbid a mid-run lane change without a new captain/firstmate decision.
+    case "$proj" in
+      direct-proj) lane='This project ships **direct-PR**' ;;
+      local-proj)  lane='This project ships **local-only**' ;;
+      *)           lane='This project ships **no-mistakes**' ;;
+    esac
+    assert_grep "$lane" "$brief" "$id: brief must state its assigned delivery lane explicitly"
+    assert_grep "delivery lane is assigned at dispatch and fixed for this task" "$brief" \
+      "$id: brief must forbid a mid-run lane change without a new decision"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"

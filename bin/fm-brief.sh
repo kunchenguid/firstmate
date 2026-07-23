@@ -277,6 +277,11 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
+# Delivery lane is assigned at dispatch and fixed for the task; a worker never
+# downgrades to a faster path mid-run on its own. Shared across every mode DOD so
+# the sentence has a single owner (AGENTS.md section 7 states the same contract).
+LANE_LOCK="Your delivery lane is assigned at dispatch and fixed for this task: never switch lanes or downgrade to a faster path mid-run without a new captain or firstmate decision."
+
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -284,6 +289,7 @@ case "$MODE" in
     DOD=$(cat <<EOF
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
+$LANE_LOCK
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
@@ -296,6 +302,7 @@ EOF
     DOD=$(cat <<EOF
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
+$LANE_LOCK
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
@@ -309,6 +316,8 @@ EOF
     RULE1='1. Never push to the default branch. Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
+This project ships **no-mistakes**: the full validation pipeline runs on your committed branch before the PR is raised and merged.
+$LANE_LOCK
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.

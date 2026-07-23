@@ -236,6 +236,7 @@ Load `diagnostic-reasoning` before scoping a reported bug and before acting on a
 
 Classify work as dispatchable when it does not overlap work under way, or queued and blocked when it touches the same project subsystem or depends on unlanded work.
 Dispatch independent work immediately with no concurrency cap, serialize coarse overlaps, and record blockers durably.
+Choosing or skipping the no-mistakes validation pipeline is a delivery-lane routing decision made here at dispatch time, never a mid-run bypass, and a worker never downgrades its own delivery mode mid-run without a new captain or firstmate decision.
 Write the task-specific brief under section 11 before spawning.
 
 ### Dispatch and supervision handoff
