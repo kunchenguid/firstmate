@@ -10,7 +10,8 @@ We require this to reduce the maintainer's burden of reviewing and merging contr
 Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
 
 A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails if the body is missing the deterministic signature that no-mistakes writes.
-Dependency bots are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
+It evaluates every PR opening and body edit independently, so a later edit cannot replace an earlier pending compliance check.
+GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
 
 ## Workflow
 
