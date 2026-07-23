@@ -47,12 +47,15 @@ All verified primary harnesses have a tracked integration:
 - `grok`: `.grok/hooks/fm-primary-turnend-guard.json` registers a `Stop` hook that invokes `bin/fm-turnend-guard-grok.sh`.
   The adapter runs the shared guard and, when it returns 2, invokes `grok --resume <sessionId> -p <guard-reason>` with `GROK_TURNEND_GUARD_ACTIVE=1`.
   It does not pass `--permission-mode`, so the passive Stop hook cannot grant stronger tool permissions than Grok's resumed-session default.
+- `cursor`: `.cursor/hooks.json` registers a `stop` hook that invokes `bin/fm-turnend-guard-cursor.sh` with `loop_limit: 1`.
+  The adapter runs the shared guard and, when it returns 2, prints `{"followup_message":"<reason>"}` so Cursor auto-submits one follow-up.
+  `loop_count > 0` (and the hooks.json `loop_limit`) is the loop guard.
 
 Claude and Codex support a direct blocking Stop hook.
 For those harnesses, exit status 2 plus stderr from `bin/fm-turnend-guard.sh` blocks the stop and feeds the reason back into the model.
 Both payloads include `stop_hook_active`; when it is true, the shared guard exits 0 so the harness can end after one forced continuation.
 
-OpenCode, Pi, and Grok expose passive lifecycle callbacks for this purpose.
+OpenCode, Pi, Grok, and Cursor expose passive lifecycle callbacks for this purpose.
 Their adapters fail open at the hook boundary to avoid corrupting a user session, but they force one follow-up turn when the shared predicate blocks.
 Those forced user-role prompts use the canonical `turn-end-guard` operational kind after the U+2063 `FIRSTMATE_OP: ` prefix so Ahoy cannot mistake them for captain-authored boundaries.
 Each adapter carries its own in-process or environment loop guard so the forced follow-up does not recursively schedule another follow-up.
@@ -63,6 +66,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it poin
 ## Empirical Validation
 
 All harnesses were validated on 2026-07-08 in scratch repos or throwaway homes, not against the captain's live primary fleet state.
+Cursor was added 2026-07-23 against cursor-agent 2026.07.20-8cc9c0b in the live firstmate home: detection (`CURSOR_AGENT=1`), lock acquire on MainThread+cursor-agent ancestry, arm-check deny shape (`permission:deny`), sessionStart wrapper smoke, and tracked `.cursor/hooks.json` wiring.
 
 Claude Code 2.1.204 preserved the existing behavior.
 Hook file used: `.claude/settings.json`.

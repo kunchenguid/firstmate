@@ -183,7 +183,12 @@ test_tracked_harness_registration() {
   assert_contains "$opencode_plugin" 'fm-sessionstart-nudge.sh' "OpenCode plugin does not invoke the wrapper"
   assert_contains "$opencode_plugin" 'promptAsync' "OpenCode plugin does not prompt the nudge turn"
 
-  pass "all five verified harnesses register the shared session-start nudge"
+  jq -e '.hooks.sessionStart[]?.command | contains("fm-sessionstart-nudge-cursor.sh")' \
+    "$ROOT/.cursor/hooks.json" >/dev/null \
+    || fail "Cursor sessionStart hook does not invoke the cursor nudge wrapper"
+  assert_present "$ROOT/bin/fm-sessionstart-nudge-cursor.sh" "Cursor sessionStart wrapper script missing"
+
+  pass "all six verified harnesses register the shared session-start nudge"
 }
 
 test_genuine_primary_nudges

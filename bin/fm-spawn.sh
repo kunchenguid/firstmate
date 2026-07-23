@@ -56,7 +56,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|cursor)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -383,7 +383,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|cursor)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -444,6 +444,12 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # cursor (Cursor Agent CLI): --force auto-approves tool execution (alias
+    # --yolo); --trust skips the workspace trust prompt so an unattended
+    # crewmate can start. Verified 2026-07-23 on cursor-agent 2026.07.20-8cc9c0b.
+    # Launch as cursor-agent (not bare agent) so process matching stays unambiguous.
+    # Turn-end is a project-local .cursor/hooks.json Stop hook (installed below).
+    cursor) printf '%s' 'cursor-agent --force --trust __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -531,7 +537,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    claude|codex|opencode|pi|grok|cursor)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -573,6 +579,8 @@ effort_flag_for_harness() {
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
+    # cursor embeds effort in the model slug (e.g. cursor-grok-4.5-high); there
+    # is no separate verified effort flag on cursor-agent, so omit it.
   esac
 }
 
@@ -1190,6 +1198,24 @@ EOF
       printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" > "$GROK_HOOKS_DIR/fm-turn-end.json"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
+      ;;
+    cursor*)
+      # Cursor Agent loads project hooks from <worktree>/.cursor/hooks.json
+      # (verified 2026-07-23). A stop hook that only touches the turn-end marker
+      # and returns {} is enough for watcher wake; loop_limit 0 blocks follow-ups.
+      mkdir -p "$WT/.cursor/hooks"
+      cat > "$WT/.cursor/hooks/fm-turn-end.sh" <<EOF
+#!/usr/bin/env bash
+set -u
+touch $(shell_quote "$TURNEND") 2>/dev/null || true
+printf '%s\n' '{}'
+EOF
+      chmod +x "$WT/.cursor/hooks/fm-turn-end.sh"
+      cat > "$WT/.cursor/hooks.json" <<'EOF'
+{"version":1,"hooks":{"stop":[{"command":".cursor/hooks/fm-turn-end.sh","loop_limit":0}]}}
+EOF
+      exclude_path '.cursor/hooks.json'
+      exclude_path '.cursor/hooks/fm-turn-end.sh'
       ;;
   esac
 fi

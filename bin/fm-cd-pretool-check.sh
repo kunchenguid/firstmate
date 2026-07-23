@@ -38,18 +38,21 @@ set -u
 CMD=""
 CMD_SET=0
 CLAUDE_MODE=0
+CURSOR_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-cd-pretool-check.sh [--command <cmd>] [--claude]
+Usage: fm-cd-pretool-check.sh [--command <cmd>] [--claude] [--cursor]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
-toolInput.command, or Claude/Codex tool_input.command).
+toolInput.command, Claude/Codex tool_input.command, or Cursor top-level
+command).
 Fires only in the real primary firstmate checkout; it is a silent no-op in a
 crewmate/scout task worktree or any non-firstmate repo.
 Exits 0 to allow and 2 to deny a persistent top-level cwd change.
 The deny reason is written to stderr, with a Grok decision object on stdout
-unless --claude is supplied.
+unless --claude was supplied; --cursor prints a Cursor permission deny object
+on stdout instead.
 Malformed transport and an unavailable classifier runtime fail open.
 EOF
 }
@@ -71,6 +74,10 @@ while [ "$#" -gt 0 ]; do
       CLAUDE_MODE=1
       shift
       ;;
+    --cursor)
+      CURSOR_MODE=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -87,7 +94,7 @@ if [ "$CMD_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
   [ -n "$PAYLOAD" ] || exit 0
   command -v jq >/dev/null 2>&1 || exit 0
-  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
+  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // .command // empty)' 2>/dev/null) || exit 0
 fi
 
 [ -n "$CMD" ] || exit 0
@@ -162,5 +169,9 @@ json_escape() {
 DETAIL="[$CODE] $REASON"
 ESCAPED=$(json_escape "$DETAIL")
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
-[ "$CLAUDE_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+if [ "$CURSOR_MODE" -eq 1 ]; then
+  printf '{"permission":"deny","agent_message":"%s"}\n' "$ESCAPED"
+elif [ "$CLAUDE_MODE" -eq 0 ]; then
+  printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+fi
 exit 2

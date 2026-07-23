@@ -15,7 +15,10 @@ LOCK="$STATE/.lock"
 mkdir -p "$STATE"
 
 # Known harness command names; extend when a new adapter is verified.
-HARNESS_RE='claude|codex|opencode|grok|^pi$'
+# cursor-agent (not bare "agent") is intentional: "agent" matches too many
+# unrelated processes. Cursor's process name is often MainThread, so argv is
+# also scanned below.
+HARNESS_RE='claude|codex|opencode|grok|cursor-agent|^pi$'
 
 harness_pid() {
   local pid=$$ comm args
@@ -25,10 +28,16 @@ harness_pid() {
     if printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE"; then
       echo "$pid"; return 0
     fi
-    # Bare interpreter (e.g. node): match the harness name in its script path.
+    # Bare interpreter (e.g. node) or Cursor's MainThread wrapper: match the
+    # harness name in its script path / argv.
     case "$comm" in
-      *node*|*python*) printf '%s' "$args" | grep -qE "$HARNESS_RE" && { echo "$pid"; return 0; } ;;
+      *node*|*python*|MainThread)
+        printf '%s' "$args" | grep -qE "$HARNESS_RE" && { echo "$pid"; return 0; }
+        ;;
     esac
+    # Always scan argv for cursor-agent (verified 2026-07-23): Cursor may
+    # report an unexpected short name while argv still carries cursor-agent.
+    printf '%s' "$args" | grep -qE 'cursor-agent' && { echo "$pid"; return 0; }
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
