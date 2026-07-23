@@ -344,7 +344,9 @@ test_pi_threads_model_and_max_effort() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "pi --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
     "pi launch did not thread the requested model and max thinking level"
-  pass "pi receives --model and --thinking max profile flags"
+  assert_contains "$launch" "-e '$ROOT/.pi/extensions/fm-openai-retention-guard.ts'" \
+    "pi crewmate launch bypassed the direct OpenAI retention guard"
+  pass "pi receives profile flags and the direct OpenAI retention guard"
 }
 
 test_quota_selected_default_array_reaches_spawn() {
