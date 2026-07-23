@@ -284,6 +284,11 @@ SELW1_PATH=$(tmux display-message -p -t "=selses:=selw1" '#{pane_current_path}')
 SELW2_PATH=$(tmux display-message -p -t "=selses:=selw2" '#{pane_current_path}')
 [ -n "$SELW1_PATH" ] && [ "$SELW1_PATH" != "$SELW2_PATH" ] \
   || fail "real tmux: the selector-probe windows did not get distinct working directories"
+# Ask tmux for selw2's real index rather than assuming the default base-index:
+# the private -L socket isolates SESSIONS but not the user config, so a captain
+# whose ~/.tmux.conf sets `base-index 1` numbers these windows 1/2/3.
+SELW2_IDX=$(tmux display-message -p -t "=selses:=selw2" '#{window_index}')
+[ -n "$SELW2_IDX" ] || fail "real tmux: could not read back selw2's window index"
 
 for sel in '^' '$' '!' '+' '-' '+1' '-1' '+2' \
   '{start}' '{end}' '{last}' '{next}' '{previous}' '$.0' '{end}.0'; do
@@ -301,8 +306,8 @@ pass "real tmux: the pin leaves tmux's special/relative window selectors resolvi
 # both keep the exact-match pin.
 [ "$(fm_backend_tmux_current_path 'selses:selw2')" = "$SELW2_PATH" ] \
   || fail "an ordinary window name no longer resolves through the pin"
-[ "$(fm_backend_tmux_current_path 'selses:2')" = "$SELW2_PATH" ] \
-  || fail "a window index no longer resolves through the pin"
+[ "$(fm_backend_tmux_current_path "selses:$SELW2_IDX")" = "$SELW2_PATH" ] \
+  || fail "a window index ($SELW2_IDX) no longer resolves through the pin"
 [ "$(fm_tmux_pin_target 'selses:selw2')" = '=selses:=selw2' ] \
   || fail "an ordinary window name lost its exact-match pin"
 [ "$(fm_tmux_pin_target '=selses:$')" = '=selses:$' ] \
