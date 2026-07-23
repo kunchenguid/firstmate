@@ -28,8 +28,8 @@
 #   (k) a re-armed watch (a new run id) can report a park again
 #
 # Cases (c), (d), (f), (h), and (k) are gated off while the watch questions have
-# no consumer - see watch_questions_have_consumer below for why and for what
-# turns them back on.
+# no consumer - tests/lib.sh's fm_extra_poll_questions_have_consumer owns why and
+# what turns them back on.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -40,24 +40,6 @@ TMP_ROOT=$(fm_test_tmproot fm-poll-lib-tests)
 PR_URL=https://github.com/example/repo/pull/7
 MY_RUN=01KRUNMINE0000000000000001
 THEIR_RUN=01KRUNTHEIRS000000000000009
-
-# The watch questions - has THIS task's no-mistakes watch run parked, and is it
-# still alive - lost their only consumer when the upstream poll rewrite replaced
-# the generated per-task poll with the byte-static bin/fm-pr-poll.sh, which
-# answers the merge question alone. fm_poll_check still implements them and is
-# left untouched, but nothing calls it, so the assertions below cannot pass no
-# matter how the mocks are shaped.
-#
-# They stay here verbatim as the executable specification for the follow-up task
-# fm-poll-extra-watch-questions, which restores a consumer at bin/fm-poll-extra.sh.
-# The gate keys on that file rather than a hardcoded skip, so the day the
-# follow-up lands these run again on their own instead of waiting for someone to
-# remember to delete a flag.
-WATCH_QUESTIONS_SKIP='watch questions have no consumer after the upstream poll rewrite; fm-poll-extra-watch-questions restores them and re-enables this'
-
-watch_questions_have_consumer() {
-  [ -x "$ROOT/bin/fm-poll-extra.sh" ] && [ ! -L "$ROOT/bin/fm-poll-extra.sh" ]
-}
 
 # A sandbox with a state dir, a task meta, a git checkout for the run lookup to
 # run in, and mocks for gh, no-mistakes, and the two files that drive them:
@@ -203,8 +185,8 @@ test_merged_wakes_and_clears_state() {
 
 test_park_wakes_once() {
   local case_dir first second
-  if ! watch_questions_have_consumer; then
-    pass "SKIP ($WATCH_QUESTIONS_SKIP): this task's parked watch run wakes firstmate once and stays quiet while it stays parked"
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): this task's parked watch run wakes firstmate once and stays quiet while it stays parked"
     return
   fi
   case_dir=$(make_case park-once)
@@ -226,8 +208,8 @@ test_park_wakes_once() {
 
 test_park_clearing_rearms_the_one_shot() {
   local case_dir first cleared again
-  if ! watch_questions_have_consumer; then
-    pass "SKIP ($WATCH_QUESTIONS_SKIP): a park that clears re-arms the one-shot so a later park wakes firstmate again"
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): a park that clears re-arms the one-shot so a later park wakes firstmate again"
     return
   fi
   case_dir=$(make_case park-rearm)
@@ -269,8 +251,8 @@ test_another_runs_park_is_never_reported() {
 
 test_gone_watch_wakes_once_with_the_rearm() {
   local case_dir first second
-  if ! watch_questions_have_consumer; then
-    pass "SKIP ($WATCH_QUESTIONS_SKIP): a watch run that is gone or ended wakes firstmate once with the re-arm instruction"
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): a watch run that is gone or ended wakes firstmate once with the re-arm instruction"
     return
   fi
   case_dir=$(make_case watch-gone)
@@ -309,8 +291,8 @@ test_unknown_status_is_not_reported_as_gone() {
 
 test_watch_lookup_failure_fails_closed() {
   local case_dir first second third fourth
-  if ! watch_questions_have_consumer; then
-    pass "SKIP ($WATCH_QUESTIONS_SKIP): a watch lookup that cannot answer fails closed instead of inventing a signal"
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): a watch lookup that cannot answer fails closed instead of inventing a signal"
     return
   fi
   case_dir=$(make_case watch-unreadable)
@@ -356,8 +338,8 @@ test_no_recorded_run_asks_no_watch_question() {
 
 test_rearmed_watch_can_park_again() {
   local case_dir first second
-  if ! watch_questions_have_consumer; then
-    pass "SKIP ($WATCH_QUESTIONS_SKIP): a re-armed watch run reports its own park rather than inheriting the answered one"
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): a re-armed watch run reports its own park rather than inheriting the answered one"
     return
   fi
   case_dir=$(make_case park-rearmed-run)

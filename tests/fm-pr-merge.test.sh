@@ -30,6 +30,10 @@
 #
 # The poll's own signal logic lives in bin/fm-poll-lib.sh and is covered by
 # tests/fm-poll-lib.test.sh; the cases here cover only what arming produces.
+#
+# Cases (o) and (p) are gated off while the poll's extra questions have no
+# consumer - tests/lib.sh's fm_extra_poll_questions_have_consumer owns why and
+# what turns them back on.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -74,6 +78,9 @@ case "\${1:-} \${2:-}" in
     case " \$* " in
       *"state,headRefOid"*) printf '%s\t%s\n' 'MERGED' '$head' ; exit 0 ;;
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      # bin/fm-pr-poll.sh asks for the state alone. Without this the static poll
+      # got nothing back and a merged PR read as silence.
+      *"--json state -q"*) printf '%s\n' MERGED ; exit 0 ;;
     esac
     ;;
 esac
@@ -661,6 +668,10 @@ run_poll() {
 
 test_merge_poll_counts_timeout_killed_lookup() {
   local case_dir rc fails
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): a provider timeout leaves the pre-incremented failure count behind"
+    return
+  fi
   case_dir=$(make_case poll-timeout-killed)
   arm_failing_poll "$case_dir"
   cat > "$case_dir/fakebin/gh" <<'SH'
@@ -689,6 +700,10 @@ SH
 
 test_merge_poll_wakes_after_repeated_lookup_failures() {
   local case_dir first second third fourth
+  if ! fm_extra_poll_questions_have_consumer; then
+    pass "SKIP ($FM_EXTRA_POLL_SKIP): a persistent lookup failure wakes firstmate instead of polling silently"
+    return
+  fi
   case_dir=$(make_case poll-lookup-failure)
   arm_failing_poll "$case_dir"
 
