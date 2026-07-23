@@ -1850,7 +1850,7 @@ teardown_treehouse_lease_is_ours() {
   command -v treehouse >/dev/null 2>&1 || return 0
   abs_wt=$(cd "$wt" 2>/dev/null && pwd -P) || return 0
   case "$abs_wt" in
-    "$HOME"/*) wt_tilde="~${abs_wt#$HOME}" ;;
+    "$HOME"/*) wt_tilde="~${abs_wt#"$HOME"}" ;;
     *) wt_tilde="$abs_wt" ;;
   esac
   out=$( ( cd "$proj" 2>/dev/null && treehouse status ) 2>/dev/null ) || return 0
