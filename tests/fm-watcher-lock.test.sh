@@ -975,12 +975,14 @@ test_open_ledger_rows_stay_bounded_under_repeated_kills() {
 # cycle's row open. The next cycle of the SAME arm must retire the stranded row
 # before publishing its own: two unclosed rows for one live arm make the older one
 # read as the untrappable kill the open row exists to report, for the life of the
-# ledger. The stranded row is seeded rather than raced through the real lock
-# budget, because the invariant is the same however the row got stranded - an arm
-# retires its own leftovers and never touches another arm's - while racing the
-# budget would settle the outcome on timing.
+# ledger. Ownership is arm pid AND start stamp, never the pid alone: pids are
+# recycled, so a killed predecessor's row can carry this arm's pid while belonging
+# to a cycle this process never ran, and retiring that row would erase exactly the
+# evidence the open row exists to keep. The rows are seeded rather than raced
+# through the real lock budget, because the invariant holds however a row got
+# stranded while racing the budget would settle the outcome on timing.
 test_arm_retires_its_own_stranded_open_row() {
-  local dir state fakebin armout ledger peer identity armpid foreign i stranded surviving open_rows status
+  local dir state fakebin armout ledger peer identity armpid foreign published i stranded recycled surviving open_rows status
   dir=$(make_case stranded-open-row)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -1012,14 +1014,23 @@ test_arm_retires_its_own_stranded_open_row() {
     sleep 0.1
     i=$((i + 1))
   done
-  grep -q "^arm_pid=$armpid"$'\t' "$ledger" || fail "arm published no ledger row for its first cycle"
-  # The arm is parked waiting for the peer beacon, so nothing writes the ledger
-  # here: one row this arm left open when a close lost the lock, and one an
-  # untrappable kill left behind under a different arm pid.
-  printf 'arm_pid=%s\twatcher_pid=%s\torigin=started\tstarted_at=111\tended_at=0\texit_code=open\tsignal=none\treason=cycle-open\tbeacon_age=0\tlock_before=pid:none|identity:none\tlock_after=pending\tsuccessor=started:4242\n' \
-    "$armpid" "$peer" >> "$ledger"
-  printf 'arm_pid=%s\twatcher_pid=%s\torigin=started\tstarted_at=222\tended_at=0\texit_code=open\tsignal=none\treason=cycle-open\tbeacon_age=0\tlock_before=pid:none|identity:none\tlock_after=pending\tsuccessor=none\n' \
-    "$foreign" "$peer" >> "$ledger"
+  published=$(awk -F'\t' -v target="arm_pid=$armpid" \
+    '$1 == target && $6 == "exit_code=open" { sub(/^started_at=/, "", $4); print $4; exit }' "$ledger")
+  [ -n "$published" ] || fail "arm published no open ledger row for its first cycle"
+  # The arm is parked waiting for the peer beacon, so nothing else writes the
+  # ledger here. Seed three unclosed rows AHEAD of the arm's own row, so the close
+  # rewrite (which takes the last match) closes the arm's row and leaves these:
+  # one this arm published and left open, one carrying its pid under a start stamp
+  # from a predecessor that held the pid before it, and one from another arm.
+  {
+    printf 'arm_pid=%s\twatcher_pid=%s\torigin=started\tstarted_at=%s\tended_at=0\texit_code=open\tsignal=none\treason=cycle-open\tbeacon_age=0\tlock_before=pid:none|identity:none\tlock_after=pending\tsuccessor=started:4242\n' \
+      "$armpid" "$peer" "$published"
+    printf 'arm_pid=%s\twatcher_pid=%s\torigin=started\tstarted_at=111\tended_at=0\texit_code=open\tsignal=none\treason=cycle-open\tbeacon_age=0\tlock_before=pid:none|identity:none\tlock_after=pending\tsuccessor=none\n' \
+      "$armpid" "$peer"
+    printf 'arm_pid=%s\twatcher_pid=%s\torigin=started\tstarted_at=222\tended_at=0\texit_code=open\tsignal=none\treason=cycle-open\tbeacon_age=0\tlock_before=pid:none|identity:none\tlock_after=pending\tsuccessor=none\n' \
+      "$foreign" "$peer"
+    cat "$ledger"
+  } > "$dir/seeded-ledger" && mv "$dir/seeded-ledger" "$ledger"
 
   touch "$state/.last-watcher-beat"
   i=0
@@ -1032,21 +1043,26 @@ test_arm_retires_its_own_stranded_open_row() {
     || fail "arm did not attach to the peer watcher: $(cat "$armout")"
   i=0
   while [ "$i" -lt 80 ]; do
-    grep -q 'started_at=111.*exit_code=superseded' "$ledger" 2>/dev/null && break
+    grep -q 'exit_code=superseded' "$ledger" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
   done
-  stranded=$(grep 'started_at=111' "$ledger" || true)
+  stranded=$(grep 'successor=started:4242' "$ledger" || true)
   case "$stranded" in
     *"exit_code=superseded"*"reason=cycle-superseded"*"successor=started:4242") : ;;
-    *) fail "the next cycle did not retire this arm's stranded open row: $stranded" ;;
+    *) fail "the next cycle did not retire the row this arm left open: $stranded" ;;
   esac
   case "$stranded" in
     *"ended_at=0"$'\t'*) fail "the retired row kept its open ended_at stamp: $stranded" ;;
   esac
   case "$stranded" in
-    "arm_pid=$armpid"$'\t'"watcher_pid=$peer"$'\t'"origin=started"$'\t'"started_at=111"$'\t'*) : ;;
+    "arm_pid=$armpid"$'\t'"watcher_pid=$peer"$'\t'"origin=started"$'\t'"started_at=$published"$'\t'*) : ;;
     *) fail "retiring the stranded row rewrote the cycle it describes: $stranded" ;;
+  esac
+  recycled=$(grep 'started_at=111' "$ledger" || true)
+  case "$recycled" in
+    *"exit_code=open"*"reason=cycle-open"*) : ;;
+    *) fail "a predecessor's kill evidence under this recycled pid was rewritten: $recycled" ;;
   esac
   surviving=$(grep "^arm_pid=$foreign"$'\t' "$ledger" || true)
   case "$surviving" in
@@ -1060,11 +1076,13 @@ test_arm_retires_its_own_stranded_open_row() {
   status=$?
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] \
     || fail "attached arm did not fail after its peer died (status $status): $(cat "$armout")"
-  open_rows=$(grep -c "^arm_pid=$armpid"$'\t'".*exit_code=open" "$ledger" || true)
-  [ "$open_rows" -eq 0 ] || fail "the exited arm left $open_rows unclosed ledger rows behind"
+  open_rows=$(grep "^arm_pid=$armpid"$'\t' "$ledger" | grep 'exit_code=open' | grep -cv 'started_at=111' || true)
+  [ "$open_rows" -eq 0 ] || fail "the exited arm left $open_rows of its own rows unclosed"
+  grep -q 'started_at=111.*exit_code=open' "$ledger" \
+    || fail "the exiting arm rewrote a predecessor's kill evidence under its recycled pid"
   ! grep -v '^arm_pid=.*watcher_pid=.*started_at=.*ended_at=.*exit_code=.*signal=.*reason=.*beacon_age=.*lock_before=.*lock_after=.*successor=' "$ledger" | grep . >/dev/null \
     || fail "retiring a stranded row broke the ledger field order"
-  pass "an arm retires its own stranded open row and leaves another arm's untouched"
+  pass "an arm retires only the open rows it published and leaves other arms' untouched"
 }
 
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {

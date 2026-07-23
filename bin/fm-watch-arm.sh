@@ -57,7 +57,9 @@
 # a row whose arm_pid is still alive is simply the cycle running right now. A row
 # its own arm could not close because the ledger lock was contended is retired as
 # exit_code=superseded reason=cycle-superseded when that arm opens its next cycle,
-# so one arm never leaves a second unclosed row to be read as a kill.
+# so one arm never leaves a second unclosed row to be read as a kill. An arm
+# retires only rows it published itself, matched on arm pid AND start stamp, so a
+# kill recorded under a pid the system has since recycled keeps its open row.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
@@ -108,7 +110,10 @@ cycle_watcher_pid=none
 cycle_origin=unknown
 cycle_started_at=0
 cycle_lock_before='pid:none|identity:none'
-cycle_rows_published=0
+# Space-delimited start stamps THIS process published and has not reconciled yet.
+# A pid is not proof of ownership - it is recycled - so a row is this arm's only
+# when its start stamp is one this process itself wrote.
+cycle_open_stamps=' '
 
 # One record shape for both ends of a cycle: the OPEN row written when the cycle
 # begins and the classified record that replaces it in place when the cycle ends.
@@ -173,29 +178,49 @@ cycle_log_trim() {
 # cycle it describes (arm, watcher, origin, start stamp, lock identity before) and
 # any successor already linked onto it, and carries its own classified reason so it
 # is never confused with a normal close or with a genuine unexplained death.
-# Only rows THIS process published are eligible, so a dead arm's evidence under a
-# recycled pid is never rewritten. Idempotent: a retired row no longer matches.
-# Callers hold CYCLE_LOG_LOCK.
+# A row is eligible only when its arm pid AND its start stamp are this process's
+# own, exactly as the close rewrite below matches, so a dead arm's kill evidence
+# under a recycled pid is never rewritten. Idempotent: a retired row is no longer
+# open, and the reconciled stamps are dropped once the pass has run. Callers hold
+# CYCLE_LOG_LOCK.
 cycle_supersede_stranded_rows() {
-  local tmp
-  [ "$cycle_rows_published" -eq 1 ] || return 0
+  local tmp rc
+  case "$cycle_open_stamps" in
+    *[0-9]*) ;;
+    *) return 0 ;;
+  esac
   [ -f "$CYCLE_LOG" ] || return 0
   tmp="$CYCLE_LOG.supersede.$ARM_PID"
   FM_CYCLE_TARGET="arm_pid=$ARM_PID" \
+    FM_CYCLE_STAMPS="$cycle_open_stamps" \
     FM_CYCLE_ENDED="$(date +%s)" \
     FM_CYCLE_BEACON="$(fm_path_age "$BEAT")" \
     FM_CYCLE_LOCK_AFTER="$(cycle_clean_field "$(lock_snapshot)")" awk '
-    BEGIN { FS = "\t"; OFS = "\t" }
-    NF == 12 && $1 == ENVIRON["FM_CYCLE_TARGET"] && $6 == "exit_code=open" {
+    BEGIN {
+      FS = "\t"
+      OFS = "\t"
+      count = split(ENVIRON["FM_CYCLE_STAMPS"], published, " ")
+      for (i = 1; i <= count; i += 1)
+        if (published[i] != "") mine["started_at=" published[i]] = 1
+    }
+    NF == 12 && $1 == ENVIRON["FM_CYCLE_TARGET"] && $6 == "exit_code=open" && ($4 in mine) {
       $5 = "ended_at=" ENVIRON["FM_CYCLE_ENDED"]
       $6 = "exit_code=superseded"
       $7 = "signal=none"
       $8 = "reason=cycle-superseded"
       $9 = "beacon_age=" ENVIRON["FM_CYCLE_BEACON"]
       $11 = "lock_after=" ENVIRON["FM_CYCLE_LOCK_AFTER"]
+      retired = 1
     }
     { print }
-  ' "$CYCLE_LOG" > "$tmp" 2>/dev/null && mv -f "$tmp" "$CYCLE_LOG" 2>/dev/null
+    END { if (!retired) exit 1 }
+  ' "$CYCLE_LOG" > "$tmp" 2>/dev/null
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    mv -f "$tmp" "$CYCLE_LOG" 2>/dev/null && cycle_open_stamps=' '
+  elif [ "$rc" -eq 1 ]; then
+    cycle_open_stamps=' '
+  fi
   rm -f "$tmp" 2>/dev/null || true
   return 0
 }
@@ -209,7 +234,7 @@ cycle_log_open_row() {
   cycle_log_lock || return 0
   cycle_supersede_stranded_rows
   cycle_record_line 0 open none cycle-open "$(fm_path_age "$BEAT")" pending none >> "$CYCLE_LOG" 2>/dev/null || true
-  cycle_rows_published=1
+  cycle_open_stamps="$cycle_open_stamps$cycle_started_at "
   cycle_log_trim
   fm_lock_release "$CYCLE_LOG_LOCK"
 }

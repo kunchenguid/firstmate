@@ -41,6 +41,7 @@ The record is published open when the cycle begins and rewritten in place with i
 SIGKILL and process-group kills cannot run the arm's signal traps, so a cycle that dies that way leaves its open record behind instead of vanishing from the ledger built to explain exactly that; `bin/fm-watch-arm.sh`'s header owns the open-record fields and the command that lists unclosed cycles.
 Ledger writes stay bounded and best-effort, so a failed or contended write is dropped rather than allowed to stall an otherwise healthy cycle.
 A row whose close was dropped that way is retired under its own classified reason when the same arm opens its next cycle, so one arm never leaves a second unclosed row behind to be misread as an untrappable kill.
+An arm retires only rows it published itself, so a killed cycle recorded under a since-recycled PID keeps the open row that reports it.
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.
 `state/.watch-triage.log` remains only the watcher's bounded absorbed-wake debug log and carries no lifecycle semantics.
 
