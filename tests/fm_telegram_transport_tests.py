@@ -357,6 +357,9 @@ class EnvelopeContractTest(unittest.TestCase):
         for mutation in (
             lambda update: update["message"].__setitem__("message_thread_id", None),
             lambda update: update["message"].__setitem__("message_thread_id", 0),
+            lambda update: update["message"].__setitem__("reply_to_message", None),
+            lambda update: update["message"].__setitem__("reply_to_message", []),
+            lambda update: update["message"].__setitem__("reply_to_message", "bad"),
             lambda update: update["message"].__setitem__("reply_to_message", {}),
             lambda update: update["message"].__setitem__("reply_to_message", {"message_id": None}),
             lambda update: update["message"].__setitem__("reply_to_message", {"message_id": 0}),

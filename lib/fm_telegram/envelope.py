@@ -205,8 +205,10 @@ def _message_fields(message: Mapping[str, Any]) -> Tuple[
         present="message_thread_id" in message,
     )
     reply_id = None
-    reply = message.get("reply_to_message")
-    if isinstance(reply, Mapping):
+    if "reply_to_message" in message:
+        reply = message.get("reply_to_message")
+        if not isinstance(reply, Mapping):
+            raise TelegramEnvelopeError("reply_to_message is invalid")
         reply_id = _optional_integer_string(
             reply.get("message_id"),
             "reply_to_message.message_id",
