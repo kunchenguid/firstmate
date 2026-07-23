@@ -2,7 +2,7 @@
   "packages": [
     {
       "source": "git:github.com/algal/pi-openai-server-compaction@c6d593087709e9481223dc6c6c2269b371b5e055",
-      "autoload": true
+      "autoload": false
     }
   ]
 }
