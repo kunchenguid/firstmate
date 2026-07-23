@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Strict no-emit contract check for both tracked Pi primary extensions.
+# Strict no-emit contract check for the tracked Firstmate Pi extensions.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -12,8 +12,10 @@ if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
   echo "skip: installed @earendil-works/pi-coding-agent package not found"
   exit 0
 fi
-if [ ! -d "$PI_PACKAGE_DIR/node_modules/typebox" ] || [ ! -d "$PI_PACKAGE_DIR/node_modules/@types/node" ]; then
-  echo "not ok - installed Pi package is missing typebox or Node declarations" >&2
+if [ ! -d "$PI_PACKAGE_DIR/node_modules/typebox" ] || \
+   [ ! -d "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" ] || \
+   [ ! -d "$PI_PACKAGE_DIR/node_modules/@types/node" ]; then
+  echo "not ok - installed Pi package is missing pi-tui, typebox, or Node declarations" >&2
   exit 1
 fi
 
@@ -24,9 +26,11 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$TMP_ROOT/node_modules/@earendil-works" "$TMP_ROOT/node_modules/@types"
+cp "$ROOT/.pi/extensions/fm-calm.ts" "$TMP_ROOT/fm-calm.ts"
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$TMP_ROOT/fm-primary-pi-watch.ts"
 cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$TMP_ROOT/fm-primary-turnend-guard.ts"
 ln -s "$PI_PACKAGE_DIR" "$TMP_ROOT/node_modules/@earendil-works/pi-coding-agent"
+ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$TMP_ROOT/node_modules/@earendil-works/pi-tui"
 ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$TMP_ROOT/node_modules/typebox"
 ln -s "$PI_PACKAGE_DIR/node_modules/@types/node" "$TMP_ROOT/node_modules/@types/node"
 
@@ -51,4 +55,4 @@ JSON
 
 tsc -p "$TMP_ROOT/tsconfig.json" || exit 1
 version=$(jq -r '.version' "$PI_PACKAGE_DIR/package.json" 2>/dev/null || printf 'unknown')
-printf 'ok - Pi primary extensions pass strict no-emit typecheck against Pi %s\n' "$version"
+printf 'ok - tracked Pi extensions pass strict no-emit typecheck against Pi %s\n' "$version"
