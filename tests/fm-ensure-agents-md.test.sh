@@ -353,6 +353,76 @@ test_lowercase_agents_md_refuses_case_fragile_pointer() {
   pass "fm-ensure-agents-md.sh: refuses a case-variant lowercase agents.md (issue #389)"
 }
 
+test_pointer_only_claude_md_proceeds() {
+  local repo agents out before_claude
+  repo="$TMP_ROOT/pointer-only-project"
+  mkdir -p "$repo"
+  printf '# Existing agent memory\n\nBuild with make.\n' > "$repo/AGENTS.md"
+  printf '@AGENTS.md\n' > "$repo/CLAUDE.md"
+  agents="$repo/AGENTS.md"
+  before_claude=$(cat "$repo/CLAUDE.md")
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh refused a pointer-only CLAUDE.md"
+  assert_contains "$out" "updated:" "pointer-only project did not report an update"
+  assert_grep "Build with make." "$agents" "pointer-only run dropped existing AGENTS.md content"
+  assert_grep "## Maintaining this file" "$agents" "pointer-only run did not inject the self-governance section"
+  [ ! -L "$repo/CLAUDE.md" ] || fail "pointer-only CLAUDE.md was replaced by a symlink"
+  [ "$(cat "$repo/CLAUDE.md")" = "$before_claude" ] || fail "pointer-only CLAUDE.md was rewritten"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh failed on a pointer-only re-run"
+  assert_contains "$out" "unchanged:" "pointer-only re-run did not report unchanged"
+  pass "fm-ensure-agents-md.sh: pointer-only CLAUDE.md is the convention, not a conflict"
+}
+
+test_incidental_pointer_shapes_proceed() {
+  local repo out
+  repo="$TMP_ROOT/pointer-incidental-project"
+  mkdir -p "$repo"
+  printf '# Existing agent memory\n\n## Maintaining this file\n' > "$repo/AGENTS.md"
+  # BOM, blank lines, CRLF, indentation, and no final newline are all incidental.
+  printf '\xef\xbb\xbf\r\n  @AGENTS.md  \r\n\r\n' > "$repo/CLAUDE.md"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh refused a BOM/CRLF/indented pointer-only CLAUDE.md"
+  assert_contains "$out" "unchanged:" "incidental-shape pointer did not report unchanged"
+  printf '@./AGENTS.md' > "$repo/CLAUDE.md"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh refused a newline-less @./AGENTS.md pointer"
+  assert_contains "$out" "unchanged:" "@./AGENTS.md pointer did not report unchanged"
+  pass "fm-ensure-agents-md.sh: incidental pointer shapes still count as pointer-only"
+}
+
+test_two_real_content_files_still_refuse() {
+  local repo out rc claude_before agents_before
+  repo="$TMP_ROOT/genuine-conflict-project"
+  mkdir -p "$repo"
+  printf '# Agent memory\n\nBuild with make.\n' > "$repo/AGENTS.md"
+  printf '# Claude memory\n\n@AGENTS.md\n\nAlso run the linter first.\n' > "$repo/CLAUDE.md"
+  agents_before=$(cat "$repo/AGENTS.md")
+  claude_before=$(cat "$repo/CLAUDE.md")
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "expected a refusal for two real files with differing content"
+  assert_contains "$out" "conflict:" "genuine conflict did not report a conflict"
+  [ "$(cat "$repo/AGENTS.md")" = "$agents_before" ] || fail "refusal modified AGENTS.md"
+  [ "$(cat "$repo/CLAUDE.md")" = "$claude_before" ] || fail "refusal modified CLAUDE.md"
+  [ ! -L "$repo/CLAUDE.md" ] || fail "refusal replaced CLAUDE.md with a symlink"
+  pass "fm-ensure-agents-md.sh: two real content files still refuse without touching either"
+}
+
+test_empty_claude_md_still_refuses() {
+  local repo out rc
+  repo="$TMP_ROOT/empty-claude-project"
+  mkdir -p "$repo"
+  printf '# Agent memory\n\n## Maintaining this file\n' > "$repo/AGENTS.md"
+  : > "$repo/CLAUDE.md"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "expected a refusal for a CLAUDE.md with no include at all"
+  assert_contains "$out" "conflict:" "contentless non-pointer CLAUDE.md did not report a conflict"
+  assert_present "$repo/CLAUDE.md" "refusal removed the empty CLAUDE.md"
+  pass "fm-ensure-agents-md.sh: a CLAUDE.md with no AGENTS.md include is not a pointer"
+}
+
 test_created_agents_md_includes_self_governance
 test_fresh_setup_writes_real_claude_pointer
 test_promoted_claude_md_includes_self_governance
@@ -369,3 +439,7 @@ test_agents_md_symlink_is_refused
 test_wrong_target_symlink_is_refused
 test_non_regular_claude_md_is_refused
 test_lowercase_agents_md_refuses_case_fragile_pointer
+test_pointer_only_claude_md_proceeds
+test_incidental_pointer_shapes_proceed
+test_two_real_content_files_still_refuse
+test_empty_claude_md_still_refuses
