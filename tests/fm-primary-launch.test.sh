@@ -1,0 +1,432 @@
+#!/usr/bin/env bash
+# Behavior tests for the same-home primary launcher: strict parsing, opaque argv,
+# fixed home/cwd/session routing, compatible attach, lock refusal, and races.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+TMP_ROOT=$(fm_test_tmproot fm-primary-launch)
+NATIVE_ROOT=$(mktemp -d "$ROOT/.fm-primary-native.XXXXXX")
+LAUNCH="$ROOT/bin/fm-primary-launch.sh"
+USER_NAME=$(id -un)
+
+cleanup_tmux() {
+  local marker socket
+  while IFS= read -r marker; do
+    socket=$(cat "$marker")
+    tmux -L "$socket" kill-server 2>/dev/null || true
+  done < <(find "$TMP_ROOT" -name socket-name -type f 2>/dev/null)
+  rm -rf "$NATIVE_ROOT"
+  fm_test_cleanup
+}
+trap cleanup_tmux EXIT
+
+make_case() {
+  local name=$1 dir home fakebin socket harness
+  dir="$TMP_ROOT/$name"
+  home="$dir/home"
+  fakebin="$dir/fakebin"
+  socket="fm-primary-${name//[^a-zA-Z0-9]/}-$$"
+  mkdir -p "$home/bin" "$home/state" "$home/native" "$fakebin"
+  cp "$LAUNCH" "$home/bin/fm-primary-launch.sh"
+  cp "$ROOT/bin/fm-lock.sh" "$home/bin/fm-lock.sh"
+  cp "$ROOT/bin/fm-harness-process.sh" "$home/bin/fm-harness-process.sh"
+  chmod +x "$home/bin/"*.sh
+  printf '%s\n' "$socket" > "$dir/socket-name"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  'daemon status') printf '%s\n' 'daemon running'; exit 0 ;;
+  'daemon start') exit 0 ;;
+esac
+exit 2
+SH
+  chmod +x "$fakebin/no-mistakes"
+  for harness in codex pi grok claude opencode; do
+    mkdir -p "$NATIVE_ROOT/$name/$harness"
+    cp /usr/bin/python3 "$NATIVE_ROOT/$name/$harness/$harness"
+    cat > "$fakebin/$harness" <<SH
+#!/usr/bin/env bash
+set -u
+{
+  printf 'harness=%s\n' '$harness'
+  printf 'user=%s\n' "\$(id -un)"
+  printf 'cwd=%s\n' "\$(pwd -P)"
+  printf 'home=%s\n' "\${FM_HOME:-}"
+  printf 'argc=%s\n' "\$#"
+  i=0
+  for arg in "\$@"; do
+    printf 'argv[%s]=<%s>\n' "\$i" "\$arg"
+    i=\$((i + 1))
+  done
+} > "\${FM_PRIMARY_TEST_LOG:?}"
+'$NATIVE_ROOT/$name/$harness/$harness' -c 'import time; time.sleep(300)' &
+holder=\$!
+printf '%s\n' "\$holder" > "\${FM_HOME:?}/state/.lock"
+wait "\$holder"
+SH
+    chmod +x "$fakebin/$harness" "$NATIVE_ROOT/$name/$harness/$harness"
+  done
+  printf '%s|%s|%s|%s\n' "$dir" "$home" "$fakebin" "$socket"
+}
+
+run_launch() {
+  local home=$1 fakebin=$2 socket=$3 log=$4
+  shift 4
+  FM_PRIMARY_LAUNCH_TESTING=1 \
+    FM_PRIMARY_ROOT_OVERRIDE="$home" \
+    FM_PRIMARY_HOME_OVERRIDE="$home" \
+    FM_PRIMARY_USER_OVERRIDE="$USER_NAME" \
+    FM_PRIMARY_TMUX_SOCKET="$socket" \
+    FM_PRIMARY_NO_ATTACH=1 \
+    FM_PRIMARY_TEST_LOG="$log" \
+    PATH="$fakebin:$PATH" \
+    "$home/bin/fm-primary-launch.sh" "$@"
+}
+
+wait_for_file() {
+  local file=$1
+  local -i attempt=0
+  while [ "$attempt" -lt 100 ]; do
+    [ -f "$file" ] && return 0
+    attempt=$((attempt + 1))
+    sleep 0.02
+  done
+  return 1
+}
+
+kill_case() {
+  tmux -L "$1" kill-server 2>/dev/null || true
+}
+
+assert_rejected() {
+  local home=$1 fakebin=$2 socket=$3 expected=$4
+  shift 4
+  local out status
+  out=$(run_launch "$home" "$fakebin" "$socket" /dev/null "$@" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "launcher accepted rejected arguments: $*"
+  assert_contains "$out" "$expected" "launcher rejection was unclear for: $*"
+}
+
+test_parsing_rejections() {
+  local rec dir home fakebin socket
+  rec=$(make_case parsing)
+  IFS='|' read -r dir home fakebin socket <<EOF
+$rec
+EOF
+  assert_rejected "$home" "$fakebin" "$socket" 'positional prompts' hello
+  assert_rejected "$home" "$fakebin" "$socket" 'unknown option' --raw
+  assert_rejected "$home" "$fakebin" "$socket" 'exactly one harness selector' --pi --codex
+  assert_rejected "$home" "$fakebin" "$socket" 'requires a value' --pi --model
+  assert_rejected "$home" "$fakebin" "$socket" 'explicit harness selector' --model foo
+  assert_rejected "$home" "$fakebin" "$socket" 'must be one of' --pi --effort turbo
+  assert_rejected "$home" "$fakebin" "$socket" 'does not support effort max' --codex --effort max
+  assert_rejected "$home" "$fakebin" "$socket" 'supports effort low' --grok --effort xhigh
+  assert_rejected "$home" "$fakebin" "$socket" 'not verified' --opencode --effort low
+  pass "primary launcher rejects ambiguous and unsupported input"
+}
+
+test_harness_argv_and_invariants() {
+  local harness rec dir home fakebin socket log out expected model
+  # shellcheck disable=SC2016  # literal shell syntax is the hostile model fixture.
+  model='vendor/model $(touch nope); "quoted" * ?'
+  for harness in codex pi grok claude opencode; do
+    rec=$(make_case "argv-$harness")
+    IFS='|' read -r dir home fakebin socket <<EOF
+$rec
+EOF
+    log="$dir/argv.log"
+    case "$harness" in
+      opencode) out=$(run_launch "$home" "$fakebin" "$socket" "$log" "--$harness" --model "$model") ;;
+      grok) out=$(run_launch "$home" "$fakebin" "$socket" "$log" "--$harness" --model "$model" --effort high) ;;
+      *) out=$(run_launch "$home" "$fakebin" "$socket" "$log" "--$harness" --model "$model" --effort xhigh) ;;
+    esac
+    assert_contains "$out" "harness=$harness" "launcher did not publish selected harness"
+    wait_for_file "$log" || fail "$harness fake harness did not run"
+    assert_grep "harness=$harness" "$log" "$harness executable was not selected"
+    assert_grep "user=$USER_NAME" "$log" "$harness changed the Linux user"
+    assert_grep "cwd=$home" "$log" "$harness changed the repository root"
+    assert_grep "home=$home" "$log" "$harness changed FM_HOME"
+    assert_grep "<$model>" "$log" "$harness did not preserve model as one opaque argv element"
+    assert_absent "$home/nope" "hostile model executed shell source"
+    expected=$(tmux -L "$socket" show-options -qv -t firstmate @firstmate_home)
+    [ "$expected" = "$home" ] || fail "$harness session home metadata diverged"
+    expected=$(tmux -L "$socket" show-options -qv -t firstmate @firstmate_harness)
+    [ "$expected" = "$harness" ] || fail "$harness session harness metadata missing"
+    case "$harness" in
+      codex)
+        assert_grep '<--dangerously-bypass-approvals-and-sandbox>' "$log" "bare Codex autonomy posture was not preserved"
+        assert_grep '<model_reasoning_effort="xhigh">' "$log" "Codex effort argv was wrong"
+        ;;
+      pi) assert_grep '<--thinking>' "$log" "Pi thinking flag missing" ;;
+      grok)
+        assert_grep '<--trust>' "$log" "Grok normal project trust flag missing"
+        assert_grep '<--reasoning-effort>' "$log" "Grok reasoning effort flag missing"
+        assert_grep '<Run bin/fm-session-start.sh exactly once before doing anything else.>' "$log" "Grok fixed startup instruction missing"
+        ;;
+      claude) assert_grep '<--effort>' "$log" "Claude effort flag missing" ;;
+      opencode) assert_no_grep 'effort' "$log" "OpenCode received an effort flag" ;;
+    esac
+    kill_case "$socket"
+  done
+  pass "all primary selectors preserve identity and map only model and effort argv"
+}
+
+test_bare_and_matching_attach_divergent_refusal() {
+  local rec dir home fakebin socket log out status
+  rec=$(make_case attach)
+  IFS='|' read -r dir home fakebin socket <<EOF
+$rec
+EOF
+  log="$dir/argv.log"
+  out=$(run_launch "$home" "$fakebin" "$socket" "$log")
+  assert_contains "$out" 'harness=codex' "bare launch was not Codex"
+  wait_for_file "$log" || fail "bare Codex did not start"
+
+  out=$(run_launch "$home" "$fakebin" "$socket" "$dir/ignored.log" --codex)
+  assert_contains "$out" 'attached:' "matching selector did not attach"
+  [ ! -e "$dir/ignored.log" ] || fail "matching attach launched a second harness"
+
+  out=$(run_launch "$home" "$fakebin" "$socket" "$dir/model-mismatch.log" --codex --model another-model 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "different explicit model attached to the existing Codex session"
+  assert_contains "$out" 'different model profile' "model-profile refusal was unclear"
+
+  out=$(run_launch "$home" "$fakebin" "$socket" "$dir/divergent.log" --pi 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "divergent selector attached to Codex"
+  assert_contains "$out" 'already running on Codex' "divergent refusal did not name the live harness"
+  assert_contains "$out" 'no state was changed' "divergent refusal omitted mutation guarantee"
+  [ ! -e "$dir/divergent.log" ] || fail "divergent selector launched Pi"
+  kill_case "$socket"
+  pass "bare and matching selectors attach while divergent selectors refuse"
+}
+
+test_live_and_stale_lock_behavior() {
+  local rec dir home fakebin socket log out status holder
+  rec=$(make_case locks)
+  IFS='|' read -r dir home fakebin socket <<EOF
+$rec
+EOF
+  log="$dir/argv.log"
+  "$NATIVE_ROOT/locks/codex/codex" -c 'import time; time.sleep(300)' & holder=$!
+  printf '%s\n' "$holder" > "$home/state/.lock"
+  out=$(run_launch "$home" "$fakebin" "$socket" "$log" --codex 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "live same-home lock without tmux was ignored"
+  assert_contains "$out" 'live' "live-lock refusal was unclear"
+  [ "$(cat "$home/state/.lock")" = "$holder" ] || fail "launcher changed a live lock"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  printf '999999\n' > "$home/state/.lock"
+  out=$(run_launch "$home" "$fakebin" "$socket" "$log" --pi)
+  assert_contains "$out" 'harness=pi' "stale lock did not hand off to normal session start"
+  wait_for_file "$log" || fail "Pi did not launch after stale lock"
+  [ "$(cat "$home/state/.lock")" != 999999 ] || fail "Pi did not acquire the stale session lock"
+  kill_case "$socket"
+  pass "live locks refuse and stale locks remain for session-start authority"
+}
+
+test_concurrent_launch_serialization() {
+  local rec dir home fakebin socket log1 log2 out1 out2 pid1 pid2 count
+  rec=$(make_case race)
+  IFS='|' read -r dir home fakebin socket <<EOF
+$rec
+EOF
+  log1="$dir/one.log"
+  log2="$dir/two.log"
+  run_launch "$home" "$fakebin" "$socket" "$log1" --pi >"$dir/out1" 2>&1 & pid1=$!
+  run_launch "$home" "$fakebin" "$socket" "$log2" --pi >"$dir/out2" 2>&1 & pid2=$!
+  wait "$pid1" || fail "first concurrent launch failed"
+  wait "$pid2" || fail "second concurrent launch failed"
+  out1=$(cat "$dir/out1")
+  out2=$(cat "$dir/out2")
+  assert_contains "$out1$out2" 'attached:' "one concurrent caller did not attach"
+  count=0
+  [ -f "$log1" ] && count=$((count + 1))
+  [ -f "$log2" ] && count=$((count + 1))
+  [ "$count" -eq 1 ] || fail "concurrent launches created $count harness processes"
+  [ "$(tmux -L "$socket" list-sessions -F '#{session_name}' | grep -c '^firstmate$')" -eq 1 ] || fail "concurrent launch created multiple sessions"
+  kill_case "$socket"
+  pass "concurrent launch attempts serialize to one primary session"
+}
+
+test_lock_live_pid_query_is_read_only() {
+  local rec dir home fakebin socket out status holder harness
+  rec=$(make_case lock-query)
+  IFS='|' read -r dir home fakebin socket <<EOF
+$rec
+EOF
+  rm -rf "$home/state"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-lock.sh" live-pid 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "live-pid reported a missing lock as live"
+  assert_absent "$home/state" "read-only live-pid query created state"
+
+  mkdir -p "$home/state"
+  for harness in codex pi; do
+    "$NATIVE_ROOT/lock-query/$harness/$harness" -c 'import time; time.sleep(300)' & holder=$!
+    printf '%s\n' "$holder" > "$home/state/.lock"
+    out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-lock.sh" live-pid)
+    [ "$out" = "$holder" ] || fail "live-pid did not recognize a native $harness holder"
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+  done
+  pass "fm-lock live-pid recognizes supported harnesses without mutation"
+}
+
+test_tracked_scripts_are_executable() {
+  [ -x "$ROOT/bin/fm-primary-launch.sh" ] || fail "primary launcher is not executable"
+  [ -x "$ROOT/bin/fm-lock.sh" ] || fail "session lock helper is not executable"
+  [ -x "$ROOT/bin/fm-harness-process.sh" ] || fail "harness process helper is not executable"
+  pass "tracked primary launcher and ownership helpers are executable"
+}
+
+test_interpreter_hosted_process_identity() {
+  local harness relative rec dir home fakebin socket out pane_pid entrypoint
+  while IFS='|' read -r harness relative; do
+    rec=$(make_case "node-${harness}-${relative//[^a-zA-Z0-9]/-}")
+    IFS='|' read -r dir home fakebin socket <<EOF
+$rec
+EOF
+    entrypoint="$home/node_modules/$relative"
+    mkdir -p "$(dirname "$entrypoint")"
+    printf '%s\n' 'setInterval(() => {}, 300000)' > "$entrypoint"
+    tmux -L "$socket" new-session -d -s firstmate "exec node '$entrypoint'"
+    tmux -L "$socket" set-option -q -t firstmate @firstmate_home "$home"
+    tmux -L "$socket" set-option -q -t firstmate @firstmate_harness "$harness"
+    pane_pid=$(tmux -L "$socket" display-message -p -t firstmate:0.0 '#{pane_pid}')
+    printf '%s\n' "$pane_pid" > "$home/state/.lock"
+    out=$(run_launch "$home" "$fakebin" "$socket" "$dir/unused.log" "--$harness")
+    assert_contains "$out" "harness=$harness" "Node-hosted $harness package entrypoint was misclassified"
+    [ ! -e "$dir/unused.log" ] || fail "Node-hosted $harness attach launched another harness"
+    kill_case "$socket"
+  done <<'EOF'
+claude|@anthropic-ai/claude-code/cli.js
+claude|@anthropic-ai/claude-code/bin/claude.js
+codex|@openai/codex/bin/codex.js
+pi|@mariozechner/pi-coding-agent/dist/cli.js
+pi|@earendil-works/pi-coding-agent/dist/cli.js
+opencode|opencode-ai/bin/opencode.js
+EOF
+  pass "verified interpreter-hosted package entrypoints preserve harness identities"
+}
+
+test_interpreter_hosted_process_rejects_lookalikes() {
+  local relative rec dir home fakebin socket out status pane_pid entrypoint
+  while IFS= read -r relative; do
+    rec=$(make_case "node-lookalike-${relative//[^a-zA-Z0-9]/-}")
+    IFS='|' read -r dir home fakebin socket <<EOF
+$rec
+EOF
+    entrypoint="$home/$relative"
+    mkdir -p "$(dirname "$entrypoint")"
+    printf '%s\n' 'setInterval(() => {}, 300000)' > "$entrypoint"
+    tmux -L "$socket" new-session -d -s firstmate "exec node '$entrypoint'"
+    tmux -L "$socket" set-option -q -t firstmate @firstmate_home "$home"
+    tmux -L "$socket" set-option -q -t firstmate @firstmate_harness claude
+    pane_pid=$(tmux -L "$socket" display-message -p -t firstmate:0.0 '#{pane_pid}')
+    printf '%s\n' "$pane_pid" > "$home/state/.lock"
+    out=$(run_launch "$home" "$fakebin" "$socket" "$dir/unused.log" --claude 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "interpreter lookalike was accepted: $relative"
+    assert_contains "$out" 'no authoritative live lock' "interpreter lookalike rejection was unclear: $relative"
+    kill_case "$socket"
+  done <<'EOF'
+opt/claude-utils/index.js
+node_modules/@anthropic-ai/claude-code-extra/bin/claude.js
+node_modules/vendor/codex/bin/codex.js
+node_modules/@mariozechner/pi-coding-agent-tools/dist/cli.js
+node_modules/opencode-ai-utils/bin/opencode.js
+packages/grok-client/dist/cli.js
+EOF
+  pass "interpreter-hosted lookalikes do not satisfy harness ownership"
+}
+
+test_native_process_rejects_spoofed_argv() {
+  local rec dir home fakebin socket out status holder
+  rec=$(make_case native-spoof)
+  IFS='|' read -r dir home fakebin socket <<EOF
+$rec
+EOF
+  bash -c 'exec -a codex sleep 300' & holder=$!
+  printf '%s\n' "$holder" > "$home/state/.lock"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$home/bin/fm-lock.sh" live-pid 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "caller-controlled argv authenticated an unrelated executable: $out"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "native harness ownership rejects spoofed argv names"
+}
+
+test_native_harness_rejects_windows_symlink() {
+  local rec dir home fakebin socket out status windows_target
+  rec=$(make_case native-symlink)
+  IFS='|' read -r dir home fakebin socket <<EOF
+$rec
+EOF
+  windows_target="/mnt/c/Users/user/AppData/Local/Temp/fm-fake-codex.exe"
+  rm -f "$fakebin/codex"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$windows_target"
+  chmod +x "$windows_target"
+  ln -s "$windows_target" "$fakebin/codex"
+  out=$(run_launch "$home" "$fakebin" "$socket" "$dir/unused.log" --codex 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "Windows executable hidden behind a Linux symlink was accepted"
+  assert_contains "$out" 'native WSL/Linux' "Windows-symlink rejection was unclear"
+  rm -f "$windows_target"
+  pass "native harness validation follows symlinks before rejecting Windows targets"
+}
+
+test_existing_session_requires_positive_identity() {
+  local rec dir home fakebin socket out status log pane_pid holder
+  rec=$(make_case session-identity)
+  IFS='|' read -r dir home fakebin socket <<EOF
+$rec
+EOF
+  tmux -L "$socket" new-session -d -s firstmate 'sleep 300'
+  out=$(run_launch "$home" "$fakebin" "$socket" "$dir/untagged.log" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "untagged generic session was adopted"
+  assert_contains "$out" 'not verified' "untagged session rejection was unclear"
+  kill_case "$socket"
+
+  log="$dir/codex.log"
+  run_launch "$home" "$fakebin" "$socket" "$log" --codex >/dev/null
+  wait_for_file "$log" || fail "Codex fixture did not start"
+  tmux -L "$socket" respawn-pane -k -t firstmate:0.0 "exec '$NATIVE_ROOT/session-identity/pi/pi' -c 'import time; time.sleep(300)'"
+  pane_pid=$(tmux -L "$socket" display-message -p -t firstmate:0.0 '#{pane_pid}')
+  printf '%s\n' "$pane_pid" > "$home/state/.lock"
+  out=$(run_launch "$home" "$fakebin" "$socket" "$dir/replaced.log" --codex 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "stale Codex metadata authorized a replacement Pi process"
+  assert_contains "$out" 'already running on Pi' "replacement-process refusal did not use live harness identity"
+
+  tmux -L "$socket" set-option -q -t firstmate @firstmate_harness pi
+  "$NATIVE_ROOT/session-identity/codex/codex" -c 'import time; time.sleep(300)' & holder=$!
+  printf '%s\n' "$holder" > "$home/state/.lock"
+  out=$(run_launch "$home" "$fakebin" "$socket" "$dir/masked.log" --pi 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "tmux session masked a different live same-home lock"
+  assert_contains "$out" 'does not own the authoritative live lock' "different-lock refusal was unclear"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  kill_case "$socket"
+  pass "existing sessions require matching home, lock, metadata, and live process"
+}
+
+test_tracked_scripts_are_executable
+test_parsing_rejections
+test_harness_argv_and_invariants
+test_bare_and_matching_attach_divergent_refusal
+test_live_and_stale_lock_behavior
+test_concurrent_launch_serialization
+test_lock_live_pid_query_is_read_only
+test_interpreter_hosted_process_identity
+test_interpreter_hosted_process_rejects_lookalikes
+test_native_process_rejects_spoofed_argv
+test_native_harness_rejects_windows_symlink
+test_existing_session_requires_positive_identity

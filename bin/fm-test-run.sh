@@ -123,7 +123,7 @@ family_for_basename() {
     fm-dispatch-select.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-herdr-lab.test.sh|fm-instruction-owners.test.sh|fm-lint.test.sh|\
     fm-install-herdr.test.sh|fm-nm-test-contract.test.sh|fm-no-mistakes-ownership.test.sh|\
-    fm-pi-primary-types.test.sh|\
+    fm-pi-primary-types.test.sh|fm-primary-windows.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|fm-stow-contract.test.sh|\
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-tmux-submit-busy.test.sh|fm-transition-lib.test.sh|\
@@ -148,7 +148,7 @@ family_for_basename() {
       printf '%s\n' secondmate
       ;;
     fm-bootstrap.test.sh|fm-fleet-sync.test.sh|fm-gate-refuse.test.sh|fm-gotmp.test.sh|\
-    fm-session-start.test.sh|fm-sessionstart-nudge.test.sh|fm-tangle-guard.test.sh|\
+    fm-primary-launch.test.sh|fm-session-start.test.sh|fm-sessionstart-nudge.test.sh|fm-tangle-guard.test.sh|\
     fm-update.test.sh)
       printf '%s\n' session-bootstrap
       ;;
@@ -603,6 +603,9 @@ families_for_changed_path() {
     tests/fm-test-run.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
+    tests/fm-primary-windows.test.ps1|windows/firstmate.ps1|windows/firstmate.cmd)
+      printf '%s\n' pure-contract-unit
+      ;;
     tests/fm-backend-herdr-eventwait.test.py)
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
@@ -655,7 +658,7 @@ families_for_changed_path() {
       printf '%s\n' secondmate
       ;;
     bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
-    bin/fm-sessionstart-nudge.sh|bin/fm-tangle*|bin/fm-update.sh|\
+    bin/fm-sessionstart-nudge.sh|bin/fm-primary-launch.sh|bin/fm-tangle*|bin/fm-update.sh|\
     bin/fm-gate-refuse*|bin/fm-lock*)
       printf '%s\n' session-bootstrap
       ;;

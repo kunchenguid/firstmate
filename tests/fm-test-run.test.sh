@@ -92,7 +92,7 @@ test_changed_file_selection_is_conservative() {
 
 init_changed_fixture_repo() {
   local repo=$1 script
-  mkdir -p "$repo/bin" "$repo/tests"
+  mkdir -p "$repo/bin" "$repo/tests" "$repo/windows"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
@@ -103,6 +103,8 @@ init_changed_fixture_repo() {
     fm-backend-herdr-smoke.test.sh \
     fm-secondmate-safety.test.sh \
     fm-session-start.test.sh \
+    fm-primary-launch.test.sh \
+    fm-primary-windows.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
     fm-pr-merge.test.sh \
@@ -117,6 +119,9 @@ init_changed_fixture_repo() {
   done
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
+  : >"$repo/tests/fm-primary-windows.test.ps1"
+  : >"$repo/windows/firstmate.ps1"
+  : >"$repo/windows/firstmate.cmd"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .agents/skills/example/SKILL.md\n' >>"$repo/tests/fm-captain-translation-contract.test.sh"
@@ -161,6 +166,20 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-afk-return.test.sh" "supervisor target selects afk coverage"
   git -C "$repo" add bin/fm-supervisor-target-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
+
+  : >"$repo/bin/fm-primary-launch.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-primary-launch.test.sh" "primary launcher selects its behavior coverage"
+  git -C "$repo" add bin/fm-primary-launch.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm primary-launch-change
+
+  printf '\n' >>"$repo/windows/firstmate.ps1"
+  printf '\n' >>"$repo/windows/firstmate.cmd"
+  printf '\n' >>"$repo/tests/fm-primary-windows.test.ps1"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-primary-windows.test.sh" "Windows wrappers select portable contract coverage"
+  git -C "$repo" add windows tests/fm-primary-windows.test.ps1
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm primary-windows-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"
