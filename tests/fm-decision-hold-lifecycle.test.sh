@@ -594,7 +594,8 @@ assert_archive_verify_fails() {  # <home> <origin> <case>
 }
 
 test_retained_decisions_are_strictly_archive_aware() {
-  local home origin older_hold newer_hold archive record heading digest closed variant before after
+  local home origin older_hold newer_hold archive record heading digest closed variant before after show
+  local separator_label separator_code separator
   local dependent=sample-retained-dependent
   home=$(make_home retained-decisions)
   origin=sample-retained-review
@@ -767,10 +768,93 @@ EOF
   rewrite_once "$variant/data/done-archive.md" "$heading" "$heading extra"
   assert_archive_verify_fails "$variant" "$origin" malformed-section
 
-  variant=$(clone_home "$home" retained-tab-heading)
+  while IFS=' ' read -r separator_label separator_code; do
+    separator=$(node -e \
+      'process.stdout.write(String.fromCodePoint(Number.parseInt(process.argv[1], 16)))' \
+      "$separator_code") || fail "could not build $separator_label heading separator"
+    variant=$(clone_home "$home" "retained-heading-$separator_label")
+    rewrite_once "$variant/data/done-archive.md" "$heading" \
+      "${heading}"$'\n\n##'"${separator}Done"
+    assert_archive_verify_fails "$variant" "$origin" "$separator_label-heading-section-escape"
+  done <<'EOF'
+tab 0009
+vertical-tab 000B
+form-feed 000C
+carriage-return 000D
+space 0020
+no-break-space 00A0
+ogham-space 1680
+en-quad 2000
+em-quad 2001
+en-space 2002
+em-space 2003
+three-per-em-space 2004
+four-per-em-space 2005
+six-per-em-space 2006
+figure-space 2007
+punctuation-space 2008
+thin-space 2009
+hair-space 200A
+line-separator 2028
+paragraph-separator 2029
+narrow-no-break-space 202F
+medium-mathematical-space 205F
+ideographic-space 3000
+byte-order-mark FEFF
+EOF
+
+  separator=$(node -e 'process.stdout.write(String.fromCodePoint(0x85))') \
+    || fail "could not build non-ECMAScript whitespace control"
+  variant=$(clone_home "$home" retained-heading-nel-control)
   rewrite_once "$variant/data/done-archive.md" "$heading" \
-    "${heading}"$'\n\n##\tDone'
-  assert_archive_verify_fails "$variant" "$origin" tab-heading-section-escape
+    "${heading}"$'\n\n##'"${separator}Done"
+  run_decisions "$variant" verify "$origin" >/dev/null \
+    || fail "archive verification treated non-ECMAScript whitespace as a heading"
+
+  variant=$(clone_home "$home" retained-bold-neighbor)
+  printf '\n## In flight\n\n- **%s-neighbor** - Nearby active identity (repo: sample) (kind: captain)\n' \
+    "$older_hold" >> "$variant/data/backlog.md"
+  show=$(tasks_in "$variant" show "$older_hold-neighbor" --full) \
+    || fail "bold near-identity positive control was not tasks-axi-readable"
+  assert_contains "$show" "state: in_flight" \
+    "bold near-identity positive control was not in flight"
+  run_decisions "$variant" verify "$origin" >/dev/null \
+    || fail "bold near-identity positive control collided with the archived decision"
+
+  variant=$(clone_home "$home" retained-bold-collision)
+  printf '\n## In flight\n\n- **%s** - Colliding active identity (repo: sample) (kind: captain)\n' \
+    "$older_hold" >> "$variant/data/backlog.md"
+  show=$(tasks_in "$variant" show "$older_hold" --full) \
+    || fail "bold collision fixture was not tasks-axi-readable"
+  assert_contains "$show" "state: in_flight" "bold collision fixture was not in flight"
+  assert_archive_verify_fails "$variant" "$origin" bold-active-archive-collision
+  assert_grep "exists in both active backlog and archive" \
+    "$variant/bold-active-archive-collision.err" \
+    "bold active/archive collision did not report the exact identity conflict"
+
+  variant=$(clone_home "$home" retained-active-hash-failure)
+  rewrite_once "$variant/state/$origin.meta" "decision_keys=newer,older" "decision_keys=newer"
+  cat > "$variant/fakebin/shasum" <<'EOF'
+#!/usr/bin/env bash
+exit 73
+EOF
+  chmod +x "$variant/fakebin/shasum"
+  assert_archive_verify_fails "$variant" "$origin" active-hash-command-failure
+  assert_grep "could not fingerprint decision archive" \
+    "$variant/active-hash-command-failure.err" \
+    "active lookup did not reject a failed archive hash command"
+
+  variant=$(clone_home "$home" retained-archive-hash-malformed)
+  rewrite_once "$variant/state/$origin.meta" "decision_keys=newer,older" "decision_keys=older"
+  cat > "$variant/fakebin/shasum" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' 'not-a-sha256  archive'
+EOF
+  chmod +x "$variant/fakebin/shasum"
+  assert_archive_verify_fails "$variant" "$origin" archived-hash-malformed
+  assert_grep "could not fingerprint decision archive" \
+    "$variant/archived-hash-malformed.err" \
+    "archived lookup did not reject malformed hash output"
 
   variant=$(clone_home "$home" retained-symlink)
   mv "$variant/data/done-archive.md" "$variant/data/archive-target.md"
@@ -807,7 +891,7 @@ EOF
   printf '\n%s\n' "$record" >> "$variant/data/backlog.md"
   assert_archive_verify_fails "$variant" "$origin" active-archive-collision
 
-  pass "retained LF decisions verify after archival while CRLF, tab-heading, malformed, forged, duplicate, and unsafe records are rejected"
+  pass "retained LF decisions verify while CRLF, grammar escapes, bold collisions, hash failures, and unsafe records are rejected"
 }
 
 test_uninventoried_report_decision_refuses_completion

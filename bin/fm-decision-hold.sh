@@ -49,7 +49,6 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 ARCHIVE_VIEW=''
-TASKS_AXI_SECTION_HEADING_RE='^##[[:space:]]+'
 
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
@@ -98,24 +97,38 @@ validate_one_line() {  # <label> <value>
   esac
 }
 
+sha256_digest_from_output() {  # <hash-output>
+  local output=$1 digest
+  digest=${output%%[[:space:]]*}
+  [ "${#digest}" -eq 64 ] || return 1
+  case "$digest" in
+    ''|*[!0-9a-f]*) return 1 ;;
+  esac
+  printf '%s\n' "$digest"
+}
+
 sha256_text() {  # <text>
+  local output
   if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+    output=$(printf '%s' "$1" | shasum -a 256) || return 1
   elif command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$1" | sha256sum | awk '{print $1}'
+    output=$(printf '%s' "$1" | sha256sum) || return 1
   else
     fail "shasum or sha256sum is required"
   fi
+  sha256_digest_from_output "$output"
 }
 
 sha256_file() {  # <path>
+  local output
   if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{print $1}'
+    output=$(shasum -a 256 -- "$1") || return 1
   elif command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
+    output=$(sha256sum -- "$1") || return 1
   else
     fail "shasum or sha256sum is required"
   fi
+  sha256_digest_from_output "$output"
 }
 
 hold_id() {  # <origin-id> <decision-key>
@@ -173,13 +186,113 @@ valid_date() {  # <YYYY-MM-DD>
   ' "$1"
 }
 
+scan_decision_identity() {  # <mode> <path> <id> [archive-view]
+  command -v node >/dev/null 2>&1 || fail "node is required to inspect decision identities"
+  node - "$@" <<'NODE'
+const fs = require("fs");
+
+const [mode, path, id, view] = process.argv.slice(2);
+if (!["active-count", "archive-count", "archive-extract"].includes(mode) || !path || !id) {
+  process.exit(2);
+}
+
+let source;
+try {
+  source = fs.readFileSync(path, "utf8");
+} catch (_) {
+  process.exit(1);
+}
+const body = source.endsWith("\n") ? source.slice(0, -1) : source;
+const lines = body === "" ? [] : body.split("\n");
+const semanticLine = line => line.endsWith("\r") ? line.slice(0, -1) : line;
+const idChars = "[A-Za-z0-9][A-Za-z0-9._-]*";
+const inFlight = new RegExp(`^- \\*\\*(${idChars})\\*\\* - (.*)$`);
+const queued = new RegExp(`^- \\[ \\] (${idChars}) - (.*)$`);
+const done = new RegExp(`^- \\[x\\] (${idChars}) - (.*)$`);
+
+function sectionState(line) {
+  const match = semanticLine(line).match(/^##\s+(.*?)\s*$/);
+  if (!match) return undefined;
+  const text = match[1].toLowerCase();
+  if (text === "in flight") return "in_flight";
+  if (text === "queued") return "queued";
+  if (text.startsWith("done")) return "done";
+  return undefined;
+}
+
+function taskIdentity(line, state) {
+  const semantic = semanticLine(line);
+  let match;
+  if (state === "done") match = semantic.match(done);
+  if (state === "queued") match = semantic.match(queued);
+  if (state === "in_flight") match = semantic.match(inFlight) || semantic.match(queued);
+  return match ? match[1] : undefined;
+}
+
+function isSectionHeading(line) {
+  return /^##\s+/.test(semanticLine(line));
+}
+
+function isCanonicalArchiveHeading(line) {
+  return /^## Archived [0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(line);
+}
+
+function extractRecord(start) {
+  const record = [lines[start]];
+  for (let index = start + 1; index < lines.length; index++) {
+    const line = lines[index];
+    const semantic = semanticLine(line);
+    if (isSectionHeading(line) || taskIdentity(line, "done") !== undefined) break;
+    if (semantic.trim().length === 0 || semantic.startsWith("  ")) {
+      record.push(line);
+      continue;
+    }
+    break;
+  }
+  return record;
+}
+
+let state;
+let archived = false;
+let total = 0;
+let valid = 0;
+let record;
+for (let index = 0; index < lines.length; index++) {
+  const line = lines[index];
+  if (isSectionHeading(line)) {
+    archived = isCanonicalArchiveHeading(line);
+    state = archived ? "done" : sectionState(line);
+    continue;
+  }
+  if (taskIdentity(line, state) !== id) continue;
+  total++;
+  if (archived) {
+    valid++;
+    if (record === undefined) record = extractRecord(index);
+  }
+}
+
+if (mode === "active-count") {
+  process.stdout.write(`${total}\n`);
+  process.exit(0);
+}
+if (mode === "archive-count") {
+  process.stdout.write(`${total} ${valid}\n`);
+  process.exit(0);
+}
+if (!view || valid !== 1 || record === undefined) process.exit(1);
+try {
+  fs.writeFileSync(view, ["## Done", "", ...record].join("\n") + "\n", "utf8");
+} catch (_) {
+  process.exit(1);
+}
+NODE
+}
+
 active_identity_count() {  # <id>
   local id=$1 backlog="$DATA/backlog.md"
   [ -f "$backlog" ] || { printf '0\n'; return 0; }
-  awk -v id="$id" '
-    index($0, "- [ ] " id " - ") == 1 || index($0, "- [x] " id " - ") == 1 { count++ }
-    END { print count + 0 }
-  ' "$backlog"
+  scan_decision_identity active-count "$backlog" "$id"
 }
 
 archive_is_safe() {  # <archive>
@@ -192,19 +305,7 @@ archive_is_safe() {  # <archive>
 
 archive_identity_counts() {  # <archive> <id>
   local archive=$1 id=$2
-  awk -v id="$id" -v section_heading_re="$TASKS_AXI_SECTION_HEADING_RE" '
-    function target(line) {
-      return index(line, "- [ ] " id " - ") == 1 || index(line, "- [x] " id " - ") == 1
-    }
-    $0 ~ section_heading_re {
-      archived = ($0 ~ /^## Archived [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/)
-    }
-    target($0) {
-      total++
-      if (archived) valid++
-    }
-    END { print total + 0, valid + 0 }
-  ' "$archive"
+  scan_decision_identity archive-count "$archive" "$id"
 }
 
 verify_archive_unchanged() {  # <archive> <expected-digest>
@@ -227,34 +328,13 @@ extract_archive_record() {  # <archive> <id>
     umask 077
     mktemp "$DATA/.fm-decision-hold-archive.XXXXXX"
   ) || fail "could not create private archive parser view"
-  awk -v id="$id" -v section_heading_re="$TASKS_AXI_SECTION_HEADING_RE" '
-    BEGIN {
-      print "## Done"
-      print ""
-    }
-    capturing {
-      if ($0 ~ /^- \[[ x]\] / || $0 ~ section_heading_re) exit
-      if ($0 == "" || substr($0, 1, 2) == "  ") {
-        print
-        next
-      }
-      exit
-    }
-    $0 ~ section_heading_re {
-      archived = ($0 ~ /^## Archived [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/)
-    }
-    archived && (index($0, "- [ ] " id " - ") == 1 || index($0, "- [x] " id " - ") == 1) {
-      found++
-      capturing = 1
-      print
-    }
-    END { if (found != 1) exit 1 }
-  ' "$archive" > "$ARCHIVE_VIEW" || fail "could not extract exact archived decision $id"
+  scan_decision_identity archive-extract "$archive" "$id" "$ARCHIVE_VIEW" \
+    || fail "could not extract exact archived decision $id"
 }
 
 verify_archived_resolution() {  # <id> <show-output> <raw-header>
   local id=$1 show=$2 header=$3 parsed_id state kind hold_kind hold_reason closed body_json body
-  local marker rest digest routes route sorted_routes route_suffix expected_prefix decision
+  local marker rest digest routes route sorted_routes route_suffix expected_prefix decision recomputed_digest
   case "$header" in
     "- [x] $id - "*) : ;;
     *) fail "archived captain decision $id is not an exact terminal record" ;;
@@ -330,7 +410,9 @@ EOF
     *) fail "archived captain decision $id has an invalid resolution body" ;;
   esac
   [ -n "$decision" ] || fail "archived captain decision $id has an empty captain decision"
-  [ "$(sha256_text "$decision")" = "$digest" ] \
+  recomputed_digest=$(sha256_text "$decision") \
+    || fail "could not recompute archived captain decision digest: $id"
+  [ "$recomputed_digest" = "$digest" ] \
     || fail "archived captain decision $id does not match its decision digest"
 }
 
@@ -673,7 +755,7 @@ command_resolve() {
   [ -n "$routed" ] || fail "at least one --routed-to task is required"
   routed=$(printf '%s\n' "$routed" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd' ' -)
   routed_csv=$(printf '%s\n' "$routed" | tr ' ' ',')
-  decision_digest=$(sha256_text "$decision")
+  decision_digest=$(sha256_text "$decision") || fail "could not digest captain decision"
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
   if verify_hold_resolved "$id"; then

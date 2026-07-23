@@ -13,8 +13,9 @@ The `hold` subcommand maps an originating work id and stable decision key to `<o
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
 It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
 
-Every decision lookup resets archive membership at every tasks-axi-recognized level-two heading and counts the exact identity only in canonical `## Archived YYYY-MM-DD` sections in `data/done-archive.md`.
+One shared scanner mirrors tasks-axi's task-header forms and ECMAScript level-two heading boundary while counting exact identities in the active backlog and canonical `## Archived YYYY-MM-DD` sections in `data/done-archive.md`.
 It rejects duplicate active identities, duplicate archived identities, active/archive collisions, symlink or non-regular archives, unreadable archives, and archive bytes that change during verification.
+Archive fingerprinting accepts only a successful lowercase SHA-256 digest before any comparison.
 For an archived identity, it extracts only that record into a private single-record `## Done` view and parses it through public `tasks-axi show --full --file` output.
 The archived record is accepted only when its terminal checkbox and typed state, captain kind and hold kind, closure date, decision digest, sorted unique routed identities, non-empty decision, and exact routed-work suffix all match the durable bytes written by `resolve`.
 This preserves the historical `Routed work:- <first-id>` writer format without rewriting active or archived records.
@@ -70,7 +71,7 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
-ok - retained LF decisions verify after archival while CRLF, tab-heading, malformed, forged, duplicate, and unsafe records are rejected
+ok - retained LF decisions verify while CRLF, grammar escapes, bold collisions, hash failures, and unsafe records are rejected
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly
