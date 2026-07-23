@@ -24,6 +24,13 @@ set -u
 # classify <bordered> <content> [idle_re] -> echoes the verdict.
 classify() { fm_composer_classify_content "$@"; }
 
+# classify_c: classify, but pinned to the C/POSIX locale (the fleet daemon's own
+# environment) in a fresh subshell, where bash's `?` matches a single BYTE.
+classify_c() {
+  LC_ALL=C bash -c '. "$1"; shift; fm_composer_classify_content "$@"' \
+    fm-classify-c "$ROOT/bin/fm-composer-lib.sh" "$@"
+}
+
 # --- Safety fix: bare shell prompt is NOT an empty agent composer -----------
 
 test_bare_shell_glyphs_are_unknown() {
@@ -105,6 +112,17 @@ test_idle_placeholder_is_empty() {
   pass "fm_composer_classify_content: a known idle placeholder reads empty, before and after glyph stripping"
 }
 
+test_glyph_strip_is_bytewise_safe_under_c_locale() {
+  local idle='^Type a message\.\.\.$' out
+  out=$(classify_c 0 '❯ Type a message...' "$idle")
+  [ "$out" = empty ] || fail "LC_ALL=C: '❯ Type a message...' must strip the whole 3-byte glyph (not a two-byte \${content#??} slice) and read empty, got '$out'"
+  out=$(classify_c 0 '› Type a message...' "$idle")
+  [ "$out" = empty ] || fail "LC_ALL=C: '› Type a message...' must strip the whole 3-byte glyph and read empty, got '$out'"
+  out=$(classify_c 0 '❯'); [ "$out" = empty ] || fail "LC_ALL=C: a bare claude '❯' should read empty, got '$out'"
+  out=$(classify_c 0 '›'); [ "$out" = empty ] || fail "LC_ALL=C: a bare codex '›' should read empty, got '$out'"
+  pass "fm_composer_classify_content: the leading agent-glyph strip is bytewise-safe under a C/POSIX locale"
+}
+
 test_idle_placeholder_case_mode_is_explicit() {
   local idle='^Type a message\.\.\.$' out
   out=$(classify 1 'type a message...' "$idle")
@@ -132,5 +150,6 @@ test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
+test_glyph_strip_is_bytewise_safe_under_c_locale
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
