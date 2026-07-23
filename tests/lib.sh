@@ -63,6 +63,9 @@ pass() {
 # the follow-up task fm-poll-extra-watch-questions, which restores a consumer at
 # bin/fm-poll-extra.sh, and are gated on that file existing rather than on a
 # hardcoded flag so they resume by themselves the day it lands.
+# Consumed by sourcing test files, not by this library, so it reads as "unused"
+# here - same as ROOT above.
+# shellcheck disable=SC2034
 FM_EXTRA_POLL_SKIP='extra poll questions have no consumer after the upstream poll rewrite; fm-poll-extra-watch-questions restores them and re-enables this'
 
 fm_extra_poll_questions_have_consumer() {
