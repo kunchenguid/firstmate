@@ -78,6 +78,8 @@ case "$scenario" in
       */pulls/7/reviews)
         if [ "$scenario" = malformed-reviews ]; then
           body='[{"id":1,"state":"UNRECOGNIZED","user":{"login":"reviewer"}}]'
+        elif [ "$scenario" = reflected-review ]; then
+          body='[{"id":1,"state":"APPROVED","user":{"login":"fixture-secret-token-ABC123"},"commit_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]'
         else
           body='[{"id":1,"state":"APPROVED","user":{"login":"reviewer"},"commit_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]'
         fi
@@ -85,6 +87,8 @@ case "$scenario" in
       */commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/statuses)
         if [ "$scenario" = malformed-checks ]; then
           body='[{"id":2,"status":"unknown","context":"ci/test"}]'
+        elif [ "$scenario" = reflected-check ]; then
+          body='[{"id":2,"status":"success","context":"ci/test","target_url":"http://ci.invalid/fixture-secret-token-ABC123","description":"passed"}]'
         else
           body='[{"id":2,"status":"success","context":"ci/test","target_url":"http://ci.invalid/2","description":"passed"}]'
         fi
@@ -105,7 +109,11 @@ case "$scenario" in
         state=open; merged=false
         [ "$scenario" = closed ] && state=closed
         if [ "$scenario" = merged ] || [ -e "$FM_TEST_CURL_MERGED" ]; then state=closed; merged=true; fi
-        body=$(printf '{"number":7,"html_url":"http://gitea.lan:3000/Brad/Test-Repo/pulls/7","base":{"repo":{"full_name":"Brad/Test-Repo"}},"head":{"sha":"%s"},"state":"%s","merged":%s}' "$fixture_head" "$state" "$merged")
+        if [ "$scenario" = reflected-pr ]; then
+          body=$(printf '{"number":7,"html_url":"http://gitea.lan:3000/Brad/Test-Repo/pulls/7","base":{"repo":{"full_name":"Brad/Test-Repo"}},"head":{"sha":"%s"},"state":"%s","merged":%s,"title":"fixture-secret-token-ABC123"}' "$fixture_head" "$state" "$merged")
+        else
+          body=$(printf '{"number":7,"html_url":"http://gitea.lan:3000/Brad/Test-Repo/pulls/7","base":{"repo":{"full_name":"Brad/Test-Repo"}},"head":{"sha":"%s"},"state":"%s","merged":%s}' "$fixture_head" "$state" "$merged")
+        fi
         ;;
       *) code=404; body='{"message":"not found"}' ;;
     esac
@@ -212,7 +220,7 @@ test_origin_alias_and_port_binding() {
 }
 
 test_private_configuration_and_token_custody() {
-  local dir out rc
+  local dir out rc scenario_command scenario command_name
   dir="$TMP_ROOT/custody"
   write_config "$dir"
   make_fake_curl "$dir"
@@ -271,8 +279,20 @@ test_private_configuration_and_token_custody() {
   out=$(FM_TEST_GITEA_SCENARIO=auth-fail run_forge "$dir" pr-state "$PR_URL" 2>&1); rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "Gitea auth failure was accepted"
-  assert_contains "$out" 'authentication or authorization failed' "auth failure was not fixed and safe"
+  assert_contains "$out" 'response contained private authentication data' "reflected auth failure was not fixed and safe"
   case "$out" in *"$TOKEN"*) fail "reflected auth error exposed the token" ;; esac
+
+  for scenario_command in reflected-pr:pr-state reflected-review:pr-reviews reflected-check:pr-checks; do
+    scenario=${scenario_command%%:*}
+    command_name=${scenario_command##*:}
+    set +e
+    out=$(FM_TEST_GITEA_SCENARIO=$scenario run_forge "$dir" "$command_name" "$PR_URL" 2>&1); rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$scenario Gitea response was accepted"
+    assert_contains "$out" 'response contained private authentication data' \
+      "$scenario refusal was unclear"
+    case "$out" in *"$TOKEN"*) fail "$scenario response exposed the token" ;; esac
+  done
   assert_token_absent_tree "$dir"
   pass "Gitea config permissions and stdin-only token custody fail safely"
 }

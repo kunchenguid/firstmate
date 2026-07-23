@@ -305,6 +305,7 @@ fm_forge_gitea_identity_bind() {
 # discarded so an untrusted response cannot reflect the credential into logs.
 fm_forge_gitea_request() {
   local method=$1 endpoint=$2 body=${3-} expected=$4 curl_bin response body_file code rc=0 size
+  local response_read_rc=0 token_reflected=false
   local tmp_dir
   FM_GITEA_RESPONSE=
   command -v jq >/dev/null 2>&1 \
@@ -336,10 +337,23 @@ fm_forge_gitea_request() {
           --request "$method" --url "$FM_GITEA_BASE_URL/api/v1$endpoint" 2>/dev/null) || rc=$?
     fi
   fi
+  size=$(wc -c < "$response" 2>/dev/null) || size=1048577
+  if [ "$size" -le 1048576 ]; then
+    FM_GITEA_RESPONSE=$(cat "$response") || response_read_rc=1
+    case "$FM_GITEA_RESPONSE" in
+      *"$FM_GITEA_TOKEN"*) token_reflected=true ;;
+    esac
+  fi
   FM_GITEA_TOKEN=
   if [ "$rc" -ne 0 ]; then
     rm -rf "$tmp_dir"
     fm_forge_fail "Gitea request failed"
+    return 1
+  fi
+  if [ "$token_reflected" = true ]; then
+    FM_GITEA_RESPONSE=
+    rm -rf "$tmp_dir"
+    fm_forge_fail "Gitea response contained private authentication data"
     return 1
   fi
   case "$code" in
@@ -349,10 +363,10 @@ fm_forge_gitea_request() {
     *" $code "*) ;;
     *) rm -rf "$tmp_dir"; fm_forge_fail "Gitea returned an unsupported HTTP response"; return 1 ;;
   esac
-  size=$(wc -c < "$response" 2>/dev/null) || size=1048577
   [ "$size" -le 1048576 ] \
     || { rm -rf "$tmp_dir"; fm_forge_fail "Gitea response exceeded the safety limit"; return 1; }
-  FM_GITEA_RESPONSE=$(cat "$response") || { rm -rf "$tmp_dir"; fm_forge_fail "Gitea response could not be read"; return 1; }
+  [ "$response_read_rc" -eq 0 ] \
+    || { rm -rf "$tmp_dir"; fm_forge_fail "Gitea response could not be read"; return 1; }
   rm -rf "$tmp_dir"
 }
 
