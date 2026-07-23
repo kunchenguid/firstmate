@@ -482,12 +482,11 @@ test_watch_restart_rejects_reused_pid() {
 }
 
 test_watch_restart_attaches_to_healthy_peer() {
-  local dir state fakebin out peer_ready peer identity armpid status i
+  local dir state fakebin out peer identity armpid status i
   dir=$(make_case restart-healthy-peer)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
-  peer_ready="$dir/peer.ready"
   mark_pr_check_migration_complete "$state"
   # --restart TERMs the pid this home's lock records before it forks anything, so
   # the stand-in peer must already be ignoring TERM when its pid is published.
