@@ -144,9 +144,10 @@ def _optional_integer_string(
     value: Any,
     field: str,
     *,
+    present: bool,
     positive: bool = True,
 ) -> Optional[str]:
-    if value is None:
+    if not present:
         return None
     return _integer_string(value, field, positive=positive)
 
@@ -199,12 +200,18 @@ def _message_fields(message: Mapping[str, Any]) -> Tuple[
     if isinstance(sender_chat, Mapping):
         sender_chat_id = _integer_string(sender_chat.get("id"), "sender_chat_id")
     thread_id = _optional_integer_string(
-        message.get("message_thread_id"), "message_thread_id"
+        message.get("message_thread_id"),
+        "message_thread_id",
+        present="message_thread_id" in message,
     )
     reply_id = None
     reply = message.get("reply_to_message")
     if isinstance(reply, Mapping):
-        reply_id = _optional_integer_string(reply.get("message_id"), "reply_to_message.message_id")
+        reply_id = _optional_integer_string(
+            reply.get("message_id"),
+            "reply_to_message.message_id",
+            present=True,
+        )
     message_date = _timestamp(message.get("date"), "message date", required=True)
     edit_date = _timestamp(message.get("edit_date"), "edit date")
     text = _normalized_text(message.get("text"))
@@ -300,7 +307,9 @@ def normalize_update(
             message.get("message_id"), "message_id", positive=True
         )
         thread_id = _optional_integer_string(
-            message.get("message_thread_id"), "message_thread_id"
+            message.get("message_thread_id"),
+            "message_thread_id",
+            present="message_thread_id" in message,
         )
         message_date = _timestamp(message.get("date"), "message date", required=True)
         callback_data = query.get("data")

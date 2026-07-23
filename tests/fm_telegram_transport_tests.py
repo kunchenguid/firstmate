@@ -345,9 +345,20 @@ class EnvelopeContractTest(unittest.TestCase):
         with self.assertRaises(TelegramEnvelopeError):
             normalize_update(update, self.bot, self.auth)
 
+    def test_omitted_thread_and_reply_identifiers_remain_optional(self):
+        update = self.message_update()
+        del update["message"]["message_thread_id"]
+        del update["message"]["reply_to_message"]
+        envelope = normalize_update(update, self.bot, self.auth)
+        self.assertIsNone(envelope.thread_id)
+        self.assertIsNone(envelope.reply_to_message_id)
+
     def test_present_thread_and_reply_ids_are_rejected_when_malformed(self):
         for mutation in (
+            lambda update: update["message"].__setitem__("message_thread_id", None),
             lambda update: update["message"].__setitem__("message_thread_id", 0),
+            lambda update: update["message"].__setitem__("reply_to_message", {}),
+            lambda update: update["message"].__setitem__("reply_to_message", {"message_id": None}),
             lambda update: update["message"].__setitem__("reply_to_message", {"message_id": 0}),
         ):
             update = self.message_update()
@@ -355,6 +366,24 @@ class EnvelopeContractTest(unittest.TestCase):
             with self.subTest(update=update):
                 with self.assertRaises(TelegramEnvelopeError):
                     normalize_update(update, self.bot, self.auth)
+
+    def test_callback_thread_identifier_is_rejected_when_present_but_null(self):
+        update = {
+            "update_id": 511294430,
+            "callback_query": {
+                "id": "callback-secret-id",
+                "from": {"id": 31337},
+                "message": {
+                    "message_id": 7002,
+                    "date": 2000000002,
+                    "chat": {"id": 424242},
+                    "message_thread_id": None,
+                },
+                "data": "opaque:private-choice",
+            },
+        }
+        with self.assertRaises(TelegramEnvelopeError):
+            normalize_update(update, self.bot, self.auth)
 
     def test_callback_envelope_retains_private_payload_for_later_lane(self):
         update = {
