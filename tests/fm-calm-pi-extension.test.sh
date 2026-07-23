@@ -7,6 +7,7 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-calm-pi-extension)
 EXT="$ROOT/.pi/extensions/fm-calm.ts"
+ASSISTANT_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
 VISIBILITY="$ROOT/.pi/extensions/lib/fm-calm-visibility.ts"
 WATCH_EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 OPERATIONAL_INPUT="$ROOT/bin/fm-operational-input.sh"
@@ -56,10 +57,12 @@ find_chrome() {
 }
 
 test_static_contract() {
-  local text visibility watch operational
+  local text assistant_layout visibility watch operational
   assert_present "$EXT" "tracked Pi calm extension is missing"
+  assert_present "$ASSISTANT_LAYOUT" "tracked Pi Calm assistant-layout adapter is missing"
   assert_present "$VISIBILITY" "tracked Pi calm visibility policy is missing"
   text=$(cat "$EXT")
+  assistant_layout=$(cat "$ASSISTANT_LAYOUT")
   visibility=$(cat "$VISIBILITY")
   watch=$(cat "$WATCH_EXT")
   operational=$(cat "$PI_OPERATIONAL_INPUT")
@@ -76,6 +79,9 @@ test_static_contract() {
   assert_contains "$text" 'ctx.ui.setWorkingVisible(true)' "Pi calm extension does not preserve Pi's live working row"
   assert_not_contains "$text" 'ctx.ui.setWorkingVisible(!active)' "Pi calm extension still hides Pi's live working row"
   assert_contains "$text" 'ctx.ui.setHiddenThinkingLabel(active ? "" : undefined)' "Pi calm extension does not hide collapsed thinking labels"
+  assert_contains "$text" 'installCalmAssistantLayout()' "Pi Calm extension does not install its zero-height assistant layout"
+  assert_contains "$assistant_layout" 'AssistantMessageComponent.prototype.updateContent' "Pi Calm assistant layout does not control the exported component presentation path"
+  assert_contains "$assistant_layout" 'block.type !== "thinking"' "Pi Calm assistant layout does not remove thinking from its presentation copy"
   assert_not_contains "$text" 'calm transcript' "Pi calm extension still adds a persistent Calm status row"
   assert_not_contains "$text" 'pi.on("input"' "Pi calm extension still intercepts semantic input"
   assert_not_contains "$text" 'sendMessage' "Pi calm extension still replaces user-role input with custom context"
@@ -119,6 +125,7 @@ test_home_resolution() {
     "$fixture/override" \
     "$fixture/launch-cwd"
   cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
@@ -222,6 +229,7 @@ test_rendering_and_session_lifecycle() {
   fixture="$TMP_ROOT/renderer"
   mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/lib/fm-operational-input.ts"
   cp "$WATCH_EXT" "$fixture/fm-primary-pi-watch.ts"
@@ -235,7 +243,8 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
-const [{ CustomEntryComponent }, { ToolExecutionComponent }, { initTheme, theme }, { Text, getKeybindings, setCapabilities }, { createToolHtmlRenderer }] = await Promise.all([
+const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionComponent }, { initTheme, theme }, { Text, getKeybindings, setCapabilities }, { createToolHtmlRenderer }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/assistant-message.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/custom-entry.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/tool-execution.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
@@ -456,6 +465,46 @@ if (!imageVisibleBefore.join("\n").includes("\x1b]1337;File=")) {
   throw new Error("image-capable Pi fixture did not render the built-in read image boundary");
 }
 
+const assistantBase = {
+  role: "assistant",
+  api: "calm-render-test",
+  provider: "calm-render-test",
+  model: "deterministic",
+  usage: {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  },
+  stopReason: "stop",
+  timestamp: 1,
+};
+const assistantTextOnly = new AssistantMessageComponent({
+  ...assistantBase,
+  content: [{ type: "text", text: "VISIBLE_ASSISTANT_TEXT" }],
+}, true);
+const assistantThinkingText = new AssistantMessageComponent({
+  ...assistantBase,
+  content: [
+    { type: "thinking", thinking: "HIDDEN_FINAL_THINKING" },
+    { type: "text", text: "VISIBLE_ASSISTANT_TEXT" },
+  ],
+}, true);
+const assistantThinkingTool = new AssistantMessageComponent({
+  ...assistantBase,
+  content: [
+    { type: "thinking", thinking: "HIDDEN_TOOL_THINKING" },
+    { type: "toolCall", id: "assistant-layout-tool", name: "read", arguments: { path: "sample.txt" } },
+  ],
+  stopReason: "toolUse",
+}, true);
+if (!assistantThinkingText.render(100).join("\n").includes("Thinking...")) {
+  throw new Error("stock collapsed-thinking fixture did not render before Calm was active");
+}
+
+const assistantComponents = [assistantTextOnly, assistantThinkingText, assistantThinkingTool];
 let expanded = true;
 let editorText = "";
 let terminalInputHandler;
@@ -477,6 +526,9 @@ const commandContext = {
     },
     setHiddenThinkingLabel(value) {
       hiddenThinkingLabel = value;
+      for (const component of assistantComponents) {
+        component.setHiddenThinkingLabel(value ?? "Thinking...");
+      }
     },
     setStatus(key, value) {
       statuses.set(key, value);
@@ -592,6 +644,20 @@ if (!customRow.render(100).join("\n").includes("CUSTOM_CALL")) {
 if (watchActual.render(100).length !== 0) {
   throw new Error("Calm left the fm_watch_arm_pi call/result shell visible");
 }
+if (assistantThinkingTool.render(100).length !== 0) {
+  throw new Error("Calm-hidden thinking beside a tool call retained vertical height");
+}
+if (JSON.stringify(assistantThinkingText.render(100)) !== JSON.stringify(assistantTextOnly.render(100))) {
+  throw new Error("Calm-hidden thinking changed final assistant row geometry");
+}
+assistantThinkingTool.setHideThinkingBlock(false);
+if (!assistantThinkingTool.render(100).join("\n").includes("HIDDEN_TOOL_THINKING")) {
+  throw new Error("expanding thinking did not restore the original reasoning content");
+}
+assistantThinkingTool.setHideThinkingBlock(true);
+if (assistantThinkingTool.render(100).length !== 0) {
+  throw new Error("collapsing thinking again restored residual Calm rows");
+}
 if (JSON.stringify(sessionEntries) !== entriesBefore) {
   throw new Error("calm mode changed session entries or model context");
 }
@@ -618,6 +684,9 @@ if (JSON.stringify(watchActual.render(100)) !== JSON.stringify(watchBaseline.ren
 }
 if (workingVisible !== true || hiddenThinkingLabel !== undefined || statuses.get("firstmate-calm") !== undefined) {
   throw new Error("turning Calm off did not restore stock presentation controls");
+}
+if (!assistantThinkingTool.render(100).join("\n").includes("Thinking...")) {
+  throw new Error("turning Calm off did not restore the collapsed thinking label");
 }
 if (readFileSync(`${process.env.FM_HOME}/config/calm`, "utf8") !== "off\n") {
   throw new Error("Calm did not persist the inactive choice in the effective Firstmate home");
@@ -680,6 +749,7 @@ test_operational_followup_turn_e2e() {
   mkdir -p "$project/.pi/extensions/lib" "$home/config" "$config" "$sessions"
   fm_git_init_commit "$project"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
   printf '%s\n' '{"followUpMode":"all"}' >"$config/settings.json"
@@ -925,6 +995,245 @@ JS
   pass "Pi operational follow-up E2E preserves one captain answer, exact user-role monitoring turns, Calm on/off/absent behavior, adjacent coalescing, genuine prompts, and restart persistence"
 }
 
+test_hidden_block_geometry_e2e() {
+  local project home config sessions session_file snapshot expanded_snapshot calm_off_snapshot restarted_snapshot
+  local version skill_line final_line gap i
+  if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
+    echo "skip: pi or tmux not found for Pi Calm hidden-block geometry E2E"
+    return 0
+  fi
+  version=$(pi --version 2>/dev/null || true)
+  [ "$version" = "0.81.1" ] || fail "Pi Calm hidden-block geometry E2E requires Pi 0.81.1, found $version"
+
+  project="$TMP_ROOT/geometry-project"
+  home="$TMP_ROOT/geometry-home"
+  config="$TMP_ROOT/geometry-config"
+  sessions="$TMP_ROOT/geometry-sessions"
+  snapshot="$TMP_ROOT/geometry-calm-on.txt"
+  expanded_snapshot="$TMP_ROOT/geometry-expanded.txt"
+  calm_off_snapshot="$TMP_ROOT/geometry-calm-off.txt"
+  restarted_snapshot="$TMP_ROOT/geometry-restarted.txt"
+  mkdir -p \
+    "$project/.agents/skills/ahoy" \
+    "$project/.pi/extensions/lib" \
+    "$home/config" \
+    "$config" \
+    "$sessions"
+  fm_git_init_commit "$project"
+  cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
+  printf '%s\n' on >"$home/config/calm"
+  printf '%s\n' '{"hideThinkingBlock":true,"terminal":{"clearOnShrink":false}}' >"$config/settings.json"
+  printf '%s\n' 'tool result one' >"$project/probe-one.txt"
+  printf '%s\n' 'tool result two' >"$project/probe-two.txt"
+  cat >"$project/.agents/skills/ahoy/SKILL.md" <<'MD'
+---
+name: ahoy
+description: Deterministic Calm hidden-block geometry probe.
+---
+
+# Ahoy
+
+Read both probe files, then return the final response.
+MD
+  cat >"$project/geometry-provider.ts" <<'TS'
+import {
+  createFauxCore,
+  fauxAssistantMessage,
+  fauxThinking,
+  fauxText,
+  fauxToolCall,
+} from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+export default function (pi: ExtensionAPI): void {
+  const faux = createFauxCore({
+    api: "calm-geometry-e2e-api",
+    provider: "calm-geometry-e2e",
+    models: [{
+      id: "deterministic",
+      name: "Calm hidden-block geometry E2E",
+      reasoning: true,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 128,
+    }],
+    tokenSize: { min: 1, max: 1 },
+  });
+  faux.setResponses([
+    fauxAssistantMessage([
+      fauxThinking("CALM_GEOMETRY_THINKING_ONE"),
+      fauxToolCall("read", { path: "probe-one.txt" }, { id: "calm_geometry_read_one" }),
+    ], { stopReason: "toolUse" }),
+    fauxAssistantMessage([
+      fauxThinking("CALM_GEOMETRY_THINKING_TWO"),
+      fauxToolCall("read", { path: "probe-two.txt" }, { id: "calm_geometry_read_two" }),
+    ], { stopReason: "toolUse" }),
+    fauxAssistantMessage([
+      fauxThinking("CALM_GEOMETRY_FINAL_THINKING"),
+      fauxText("CALM_GEOMETRY_FINAL\n\n- visible row one\n- visible row two"),
+    ]),
+  ]);
+  pi.registerProvider("calm-geometry-e2e", {
+    baseUrl: "http://127.0.0.1/unused",
+    apiKey: "test-only",
+    api: faux.api,
+    models: faux.models,
+    streamSimple: faux.streamSimple,
+  });
+  pi.registerCommand("calm-geometry-e2e", {
+    description: "Select the deterministic Calm hidden-block geometry model.",
+    handler: async (_args, ctx) => {
+      const model = ctx.modelRegistry.find("calm-geometry-e2e", "deterministic");
+      if (!model || !(await pi.setModel(model))) {
+        throw new Error("Calm hidden-block geometry model unavailable");
+      }
+    },
+  });
+}
+TS
+
+  start_geometry_pi() {
+    local session_arg=$1
+    tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 100 -y 44 \
+      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --no-context-files --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./geometry-provider.ts $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
+  }
+
+  capture_geometry_viewport() {
+    local file=$1
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$file" 2>/dev/null
+  }
+
+  wait_for_geometry_text() {
+    local file=$1 text=$2 attempt=0
+    while [ "$attempt" -lt 120 ]; do
+      capture_geometry_viewport "$file" || true
+      grep -Fq "$text" "$file" 2>/dev/null && return 0
+      sleep 0.05
+      attempt=$((attempt + 1))
+    done
+    return 1
+  }
+
+  wait_for_geometry_transition() {
+    local file=$1 transient_text=$2 final_text=$3 attempt=0 saw_transient=0
+    while [ "$attempt" -lt 600 ]; do
+      capture_geometry_viewport "$file" || true
+      if grep -Fq "$transient_text" "$file" 2>/dev/null; then
+        saw_transient=1
+      elif [ "$saw_transient" -eq 1 ] && grep -Fq "$final_text" "$file" 2>/dev/null; then
+        return 0
+      fi
+      sleep 0.01
+      attempt=$((attempt + 1))
+    done
+    return 1
+  }
+
+  assert_geometry_gap() {
+    local file=$1 label=$2
+    skill_line=$(grep -n -m1 '\[skill\] ahoy' "$file" | cut -d: -f1)
+    final_line=$(grep -n -m1 'CALM_GEOMETRY_FINAL' "$file" | cut -d: -f1)
+    [ -n "$skill_line" ] && [ -n "$final_line" ] \
+      || fail "$label did not render the collapsed skill row and final assistant response"
+    gap=$((final_line - skill_line - 1))
+    [ "$gap" -eq 2 ] \
+      || fail "$label left $gap rows between the collapsed skill row and final response instead of the two standard visible-row separators"
+  }
+
+  start_geometry_pi "--session-dir '$sessions'"
+  wait_for_geometry_text "$snapshot" "geometry-provider.ts" \
+    || fail "Pi Calm hidden-block geometry E2E did not reach the ready composer"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm-geometry-e2e'
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  sleep 0.1
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/skill:ahoy'
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  wait_for_geometry_text "$snapshot" "visible row two" \
+    || fail "Pi Calm hidden-block geometry E2E did not complete the /skill:ahoy turn"
+  i=0
+  while [ "$i" -lt 120 ]; do
+    capture_geometry_viewport "$snapshot"
+    tail -12 "$snapshot" | grep -Fq "Working..." || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  assert_contains "$(cat "$snapshot")" "[skill] ahoy" "Calm hid the collapsed skill header"
+  assert_contains "$(cat "$snapshot")" "CALM_GEOMETRY_FINAL" "Calm hid the final assistant response"
+  assert_not_contains "$(cat "$snapshot")" "Thinking..." "Calm left a collapsed thinking label visible"
+  assert_not_contains "$(cat "$snapshot")" "probe-one.txt" "Calm left a tool-call row visible"
+  assert_not_contains "$(cat "$snapshot")" "tool result one" "Calm left a tool-result row visible"
+  assert_geometry_gap "$snapshot" "completed native Calm /skill:ahoy turn"
+
+  session_file=$(find "$sessions" -type f -name '*.jsonl' -exec grep -l 'CALM_GEOMETRY_FINAL' {} + 2>/dev/null | head -1 || true)
+  [ -n "$session_file" ] || fail "Pi Calm hidden-block geometry E2E did not persist its session"
+  grep -Fq 'CALM_GEOMETRY_THINKING_ONE' "$session_file" \
+    || fail "Calm removed hidden thinking from persisted history"
+  grep -Fq 'tool result one' "$session_file" \
+    || fail "Calm removed hidden tool results from persisted history"
+
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/reload'
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  wait_for_geometry_transition \
+    "$snapshot" \
+    "Reloading keybindings, extensions, skills, prompts, themes, and context files..." \
+    "CALM_GEOMETRY_FINAL" \
+    || fail "Pi Calm hidden-block geometry E2E did not complete the /reload viewport transition"
+  assert_geometry_gap "$snapshot" "reloaded native Calm transcript"
+
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
+  wait_for_geometry_text "$expanded_snapshot" "CALM_GEOMETRY_THINKING_ONE" \
+    || fail "thinking expansion did not restore Calm-hidden reasoning"
+  assert_not_contains "$(cat "$expanded_snapshot")" "probe-one.txt" "thinking expansion restored Calm-hidden tool rows"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
+  i=0
+  while [ "$i" -lt 120 ]; do
+    capture_geometry_viewport "$snapshot"
+    grep -Fq "CALM_GEOMETRY_THINKING_ONE" "$snapshot" || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  assert_not_contains "$(cat "$snapshot")" "CALM_GEOMETRY_THINKING_ONE" "collapsing thinking restored hidden-row output"
+  assert_geometry_gap "$snapshot" "re-collapsed native Calm transcript"
+
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm'
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  wait_for_geometry_text "$calm_off_snapshot" "probe-one.txt" \
+    || fail "turning Calm off did not restore the tool-call row"
+  assert_contains "$(cat "$calm_off_snapshot")" "Thinking..." "turning Calm off did not restore collapsed thinking labels"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm'
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  i=0
+  while [ "$i" -lt 120 ]; do
+    capture_geometry_viewport "$snapshot"
+    if ! grep -Fq "probe-one.txt" "$snapshot" && ! grep -Fq "Thinking..." "$snapshot"; then
+      break
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  assert_geometry_gap "$snapshot" "Calm redraw of existing transcript"
+
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/quit'
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  sleep 0.2
+  tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+  start_geometry_pi "--session '$session_file'"
+  wait_for_geometry_text "$restarted_snapshot" "visible row two" \
+    || fail "Pi did not restore the Calm hidden-block geometry session"
+  assert_not_contains "$(cat "$restarted_snapshot")" "Thinking..." "restart restored a collapsed thinking label under Calm"
+  assert_not_contains "$(cat "$restarted_snapshot")" "probe-one.txt" "restart restored a tool-call row under Calm"
+  assert_geometry_gap "$restarted_snapshot" "restarted native Calm transcript"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/quit'
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  sleep 0.2
+  tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+  pass "Pi Calm native /skill:ahoy geometry keeps every collapsed thinking and tool block at zero height while preserving expansion, history, restart, and Calm-off rendering"
+}
+
 test_interactive_terminal_e2e() {
   local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
@@ -955,6 +1264,7 @@ test_interactive_terminal_e2e() {
   fm_git_init_commit "$project"
   : > "$project/AGENTS.md"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$project/.pi/extensions/lib/fm-operational-input.ts"
   cp "$WATCH_EXT" "$project/.pi/extensions/fm-primary-pi-watch.ts"
@@ -1409,4 +1719,5 @@ test_static_contract
 test_home_resolution
 test_rendering_and_session_lifecycle
 test_operational_followup_turn_e2e
+test_hidden_block_geometry_e2e
 test_interactive_terminal_e2e
