@@ -901,13 +901,19 @@ test_pid_identity_is_locale_invariant() {
   # fm_pid_identity, so its output must be byte-identical regardless of the caller's
   # exported LC_ALL/LC_TIME. This stays deterministic on CI even where an alternate
   # locale like ko_KR.UTF-8 is not installed (the equality then holds trivially).
-  local live no_proc baseline via_lc_all via_lc_time
+  local live portable_bin baseline via_lc_all via_lc_time
   sleep 300 &
   live=$!
-  no_proc="$TMP_ROOT/no-proc"
-  baseline=$(FM_PROC_ROOT_OVERRIDE="$no_proc" LC_ALL=C bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
-  via_lc_all=$(FM_PROC_ROOT_OVERRIDE="$no_proc" LC_ALL=ko_KR.UTF-8 bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
-  via_lc_time=$(FM_PROC_ROOT_OVERRIDE="$no_proc" LC_TIME=ko_KR.UTF-8 bash -c 'unset LC_ALL; . "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  portable_bin="$TMP_ROOT/portable-uname"
+  mkdir -p "$portable_bin"
+  cat > "$portable_bin/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+SH
+  chmod +x "$portable_bin/uname"
+  baseline=$(PATH="$portable_bin:$PATH" LC_ALL=C bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  via_lc_all=$(PATH="$portable_bin:$PATH" LC_ALL=ko_KR.UTF-8 bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  via_lc_time=$(PATH="$portable_bin:$PATH" LC_TIME=ko_KR.UTF-8 bash -c 'unset LC_ALL; . "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
   kill "$live" 2>/dev/null || true
   wait "$live" 2>/dev/null || true
   [ -n "$baseline" ] || fail "fm_pid_identity produced no baseline identity under LC_ALL=C"
@@ -917,13 +923,53 @@ test_pid_identity_is_locale_invariant() {
 }
 
 write_fake_proc_identity() {
-  local proc_root=$1 pid=$2 starttime=$3
+  local proc_root=$1 pid=$2 starttime=$3 comm=${4:-watcher}
   mkdir -p "$proc_root/$pid"
-  printf '%s\n' "$pid (watcher ) with spaces) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 $starttime 20 21 22" > "$proc_root/$pid/stat"
+  printf '%s\n' "$pid ($comm) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 $starttime 20 21 22" > "$proc_root/$pid/stat"
   printf 'bash\0/path with spaces/fm-watch.sh\0--flag\0' > "$proc_root/$pid/cmdline"
 }
 
-test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
+test_pid_identity_rejects_invalid_and_missing_pids() {
+  local missing pid
+  missing=999999
+  while kill -0 "$missing" 2>/dev/null; do missing=$((missing + 1)); done
+  if FM_STATE_OVERRIDE="$TMP_ROOT/invalid-pid-state" bash -u -c '. "$1"; fm_pid_identity' _ "$LIB" >/dev/null 2>&1; then
+    fail "fm_pid_identity accepted an omitted pid argument"
+  fi
+  for pid in '' invalid 0 "$missing"; do
+    if FM_STATE_OVERRIDE="$TMP_ROOT/invalid-pid-state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid" >/dev/null 2>&1; then
+      fail "fm_pid_identity accepted invalid or missing pid '$pid'"
+    fi
+  done
+  pass "fm_pid_identity rejects invalid and missing pids"
+}
+
+test_linux_pid_identity_never_falls_back_without_proc_data() {
+  local dir state fakebin pid
+  [ "$(uname)" = Linux ] || {
+    pass "Linux missing proc identity regression skipped on non-Linux host"
+    return
+  }
+  dir=$(make_case linux-missing-proc-identity)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  pid=4241
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+touch "$FM_FAKE_PS_CALLED"
+printf 'Thu Jul 23 07:09:22 2026 bash /home/example/firstmate/bin/fm-watch.sh\n'
+SH
+  chmod +x "$fakebin/ps"
+
+  if FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_FAKE_PS_CALLED="$dir/ps-called" PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid" >/dev/null 2>&1; then
+    fail "Linux process identity fell back to drift-prone ps without proc data"
+  fi
+  [ ! -e "$dir/ps-called" ] || fail "Linux process identity consulted ps without proc data"
+  pass "Linux process identity fails closed instead of falling back without proc data"
+}
+
+test_linux_pid_identity_is_stable_across_reads() {
   local dir state proc_root pid before after_time_jump after_pid_reuse
   [ "$(uname)" = Linux ] || {
     pass "Linux process identity clock-step regression skipped on non-Linux host"
@@ -956,9 +1002,145 @@ test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
   pass "Linux process identity detects pid reuse"
 }
 
+test_linux_pid_identity_splits_on_final_comm_parenthesis() {
+  local dir state proc_root pid identity
+  [ "$(uname)" = Linux ] || {
+    pass "Linux process identity comm parsing regression skipped on non-Linux host"
+    return
+  }
+  dir=$(make_case linux-pid-comm-parenthesis)
+  state="$dir/state"
+  proc_root="$dir/proc"
+  pid=4243
+  write_fake_proc_identity "$proc_root" "$pid" 876543 'watcher ) with spaces'
+
+  identity=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not parse fake Linux identity with a closing parenthesis in comm"
+  [ "$identity" = 'linux-starttime=876543 cmdline-hex=62617368002f706174682077697468207370616365732f666d2d77617463682e7368002d2d666c616700' ] \
+    || fail "Linux process identity did not split stat on the final comm parenthesis ('$identity')"
+  pass "Linux process identity splits proc stat on the final comm parenthesis"
+}
+
+test_linux_watcher_identity_survives_flapping_ps_lstart() {
+  local dir state fakebin live identity first_lstart second_lstart
+  [ "$(uname)" = Linux ] || {
+    pass "Linux watcher identity lstart-flap regression skipped on non-Linux host"
+    return
+  }
+  dir=$(make_case linux-watcher-lstart-flap)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+count=$(cat "$FM_FAKE_PS_COUNT" 2>/dev/null || echo 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_FAKE_PS_COUNT"
+if [ $((count % 2)) -eq 1 ]; then
+  printf 'Thu Jul 23 07:09:22 2026 bash /home/example/firstmate/bin/fm-watch.sh\n'
+else
+  printf 'Thu Jul 23 07:09:33 2026 bash /home/example/firstmate/bin/fm-watch.sh\n'
+fi
+SH
+  chmod +x "$fakebin/ps"
+  sleep 300 &
+  live=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+    || fail "could not identify live Linux watcher fixture"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+
+  first_lstart=$(FM_FAKE_PS_COUNT="$dir/ps-count" PATH="$fakebin:$PATH" ps -p "$live" -o lstart= -o command=)
+  FM_FAKE_PS_COUNT="$dir/ps-count" PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' _ "$LIB" "$state" "$WATCH" "$live" "$dir" \
+    || fail "watcher lock stopped matching after the first simulated lstart read"
+  second_lstart=$(FM_FAKE_PS_COUNT="$dir/ps-count" PATH="$fakebin:$PATH" ps -p "$live" -o lstart= -o command=)
+  FM_FAKE_PS_COUNT="$dir/ps-count" PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' _ "$LIB" "$state" "$WATCH" "$live" "$dir" \
+    || fail "watcher lock stopped matching after the second simulated lstart read"
+
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ "$first_lstart" != "$second_lstart" ] || fail "fake ps did not simulate lstart drift"
+  [ "$(cat "$dir/ps-count")" -eq 2 ] || fail "fm_pid_identity consulted drift-prone ps on Linux"
+  pass "Linux watcher identity stays matched while ps lstart flaps"
+}
+
+test_linux_old_identity_mismatches_then_restart_repairs() {
+  local dir state fakebin watch_out arm_out old_watcher arm_pid new_watcher i
+  [ "$(uname)" = Linux ] || {
+    pass "Linux old identity format regression skipped on non-Linux host"
+    return
+  }
+  dir=$(make_case linux-old-pid-identity)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  watch_out="$dir/watch.out"
+  arm_out="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$watch_out" &
+  old_watcher=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$old_watcher" ] \
+      && [ -s "$state/.watch.lock/pid-identity" ] \
+      && [ -e "$state/.last-watcher-beat" ] \
+      && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$old_watcher" ] \
+    || fail "old-format migration fixture watcher did not acquire its lock"
+  printf '%s\n' 'Thu Jul 23 07:09:22 2026 bash /home/example/firstmate/bin/fm-watch.sh' > "$state/.watch.lock/pid-identity"
+
+  if FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
+    _ "$LIB" "$state" "$WATCH" "$old_watcher" "$dir"; then
+    fail "old lstart identity falsely matched the new Linux identity format"
+  fi
+  if FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' \
+    _ "$LIB" "$state" "$WATCH" "$dir"; then
+    fail "old lstart identity falsely classified the watcher as healthy"
+  fi
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$arm_out" &
+  arm_pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$arm_out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  new_watcher=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  if [ -z "$new_watcher" ] || [ "$new_watcher" = "$old_watcher" ] || ! kill -0 "$new_watcher" 2>/dev/null; then
+    fail "restart arm did not replace the old-format lock with a fresh watcher"
+  fi
+  grep -qF "watcher: started pid=$new_watcher" "$arm_out" \
+    || fail "restart arm did not confirm the replacement watcher"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"' \
+    _ "$LIB" "$state" "$WATCH" "$new_watcher" "$dir" \
+    || fail "watcher lock did not match after restart arm rewrote the identity"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' \
+    _ "$LIB" "$state" "$WATCH" "$dir" \
+    || fail "restart arm did not restore healthy watcher classification"
+
+  wait_for_exit "$old_watcher" 80 || fail "old-format watcher did not self-evict after restart arm replaced its lock"
+  kill "$arm_pid" "$new_watcher" 2>/dev/null || true
+  wait "$arm_pid" 2>/dev/null || true
+  pass "old Linux identity mismatches safely and restart arm repairs it"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
-test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse
+test_pid_identity_rejects_invalid_and_missing_pids
+test_linux_pid_identity_never_falls_back_without_proc_data
+test_linux_pid_identity_is_stable_across_reads
+test_linux_pid_identity_splits_on_final_comm_parenthesis
+test_linux_watcher_identity_survives_flapping_ps_lstart
+test_linux_old_identity_mismatches_then_restart_repairs
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings

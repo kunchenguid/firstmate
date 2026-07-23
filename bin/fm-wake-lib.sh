@@ -24,17 +24,19 @@ fm_pid_alive() {
 }
 
 fm_pid_identity() {
-  local pid=$1 out proc_root stat_line starttime cmdline_hex
+  local pid=${1:-} out proc_root stat_line starttime cmdline_hex
   local -a stat_fields
   case "$pid" in
-    ''|*[!0-9]*) return 1 ;;
+    ''|*[!0-9]*|0) return 1 ;;
   esac
   proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
   # Prefer /proc on Linux: stat field 22 (starttime, clock ticks since boot) is
   # immune to the wall-clock steps that re-render the ps lstart fallback's date
   # (observed as WSL2 btime drift) and would evict a live watcher; combining the
   # full NUL-separated cmdline keeps PID reuse a mismatch even on a tick collision.
-  if [ "$(uname)" = Linux ] && [ -r "$proc_root/$pid/stat" ] && [ -r "$proc_root/$pid/cmdline" ]; then
+  # Fail closed instead of falling back to lstart when Linux proc data is missing.
+  if [ "$(uname)" = Linux ]; then
+    [ -r "$proc_root/$pid/stat" ] && [ -r "$proc_root/$pid/cmdline" ] || return 1
     stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
     # After the final comm delimiter, array index 19 is proc stat field 22.
     read -r -a stat_fields <<< "${stat_line##*)}"
