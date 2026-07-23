@@ -355,6 +355,7 @@ make_case() {
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
+  git -C "$wt" checkout --quiet --detach
   fm_git_add_origin "$proj" "$case_dir/origin.git"
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
@@ -393,6 +394,8 @@ run_spawn() {
     FM_FAKE_TMUX_LOG="$TMUX_LOG" FM_FAKE_AF_LOG="$AF_LOG" \
     FM_FAKE_TREEHOUSE_LOG="$TREEHOUSE_LOG" FM_FAKE_LIFECYCLE_LOG="$LIFECYCLE_LOG" \
     FM_FAKE_TREEHOUSE_PATH="$WT_DIR" FM_TREEHOUSE_ROOT="$CASE_DIR/treehouse-pools" \
+    FM_FAKE_TREEHOUSE_SLEEP="${FM_FAKE_TREEHOUSE_SLEEP:-}" \
+    FM_TREEHOUSE_ACQUIRE_TIMEOUT="${FM_TREEHOUSE_ACQUIRE_TIMEOUT:-60}" \
     FM_FAKE_ORCA_LOG="$ORCA_LOG" \
     FM_FAKE_TMUX_FAIL_SEND_MATCH="${FM_FAKE_TMUX_FAIL_SEND_MATCH:-}" \
     FM_FAKE_TMUX_GATE_SEND_MATCH="${FM_FAKE_TMUX_GATE_SEND_MATCH:-}" \
@@ -499,13 +502,15 @@ test_failed_freshness_proof_rolls_back_unmanaged_resources() {
     "failed freshness proof did not identify the stale acquired worktree"
   assert_not_grep '^new-window ' "$TMUX_LOG" \
     "failed unmanaged freshness proof created an endpoint before verification"
-  assert_grep "return --force $WT_DIR" "$TREEHOUSE_LOG" \
-    "failed unmanaged freshness proof did not return its acquired worktree"
+  assert_not_grep 'return --force' "$TREEHOUSE_LOG" \
+    "failed unmanaged freshness proof force-returned an unverified acquired worktree"
+  assert_contains "$out" "retained unsafe acquired worktree" \
+    "failed unmanaged freshness proof did not surface retain-only cleanup"
   assert_absent "$CASE_DIR/endpoint-live" \
     "failed unmanaged freshness proof left its endpoint alive"
   assert_absent "$HOME_DIR/state/$id.meta" \
     "failed unmanaged freshness proof published task metadata"
-  pass "failed freshness proofs unwind endpoints and worktrees in unmanaged mode"
+  pass "failed freshness proofs unwind endpoints and retain unverified worktrees"
 }
 
 test_local_only_spawn_uses_local_default_tip() {
@@ -557,6 +562,64 @@ test_dirty_acquisition_is_retained_without_force_return() {
   assert_absent "$HOME_DIR/state/$id.meta" \
     "dirty acquisition refusal published task metadata"
   pass "dirty pool acquisitions are diagnosed and retained untouched"
+}
+
+test_treehouse_acquisition_timeout_is_bounded_before_endpoint_creation() {
+  local id rec out status
+  id=checkout-acquire-timeout-z1f
+  rec=$(make_case checkout-acquire-timeout claude "$id")
+  read_case "$rec"
+
+  if out=$(FM_FAKE_TREEHOUSE_SLEEP=3 FM_TREEHOUSE_ACQUIRE_TIMEOUT=1 run_spawn "$id" "$PROJ_DIR"); then
+    status=0
+  else
+    status=$?
+  fi
+
+  [ "$status" -ne 0 ] || fail "hung Treehouse acquisition unexpectedly completed"
+  assert_contains "$out" "Treehouse worktree acquisition timed out after 1s" \
+    "bounded Treehouse acquisition did not surface its distinct timeout"
+  assert_not_grep '^new-window ' "$TMUX_LOG" \
+    "timed-out Treehouse acquisition created an endpoint"
+  assert_not_grep 'return --force' "$TREEHOUSE_LOG" \
+    "timed-out Treehouse acquisition returned a path it never acquired"
+  pass "Treehouse acquisition is process-tree bounded before endpoint creation"
+}
+
+test_changed_acquisition_is_retained_during_unmanaged_rollback() {
+  local id rec marker release out_file spawn_pid
+  id=checkout-changed-rollback-z1g
+  rec=$(make_case checkout-changed-rollback pi "$id")
+  read_case "$rec"
+  marker="$CASE_DIR/gotmp-send-started"
+  release="$CASE_DIR/gotmp-send-release"
+  out_file="$CASE_DIR/spawn.out"
+
+  FM_FAKE_TMUX_GATE_SEND_MATCH=GOTMPDIR \
+    FM_FAKE_TMUX_GATE_SEND_MARKER="$marker" \
+    FM_FAKE_TMUX_GATE_SEND_RELEASE="$release" \
+    FM_FAKE_TMUX_FAIL_SEND_MATCH=GOTMPDIR \
+    run_spawn "$id" "$PROJ_DIR" > "$out_file" &
+  spawn_pid=$!
+  for _ in $(seq 1 100); do [ -f "$marker" ] && break; sleep 0.05; done
+  [ -f "$marker" ] \
+    || { kill "$spawn_pid" 2>/dev/null || true; fail "changed-acquisition test never reached the post-install failure"; }
+  printf '%s\n' retained-commit > "$WT_DIR/retained-commit.txt"
+  git -C "$WT_DIR" add retained-commit.txt
+  git -C "$WT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm retained-commit
+  touch "$release"
+  if wait "$spawn_pid"; then
+    fail "changed-acquisition rollback unexpectedly succeeded"
+  fi
+
+  assert_not_grep 'return --force' "$TREEHOUSE_LOG" \
+    "rollback force-returned an acquired worktree whose detached tip changed"
+  assert_grep 'retained-commit' "$WT_DIR/retained-commit.txt" \
+    "rollback changed work committed after acquisition"
+  assert_grep 'expected detached tip' "$out_file" \
+    "rollback did not diagnose the changed acquired tip"
+  pass "unmanaged rollback retains acquisitions whose detached tip changed"
 }
 
 test_unmanaged_postinstall_failure_restores_prior_state() {
@@ -5610,6 +5673,14 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-40 ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-4 ]; then
+  run_isolated_test test_failed_freshness_proof_rolls_back_unmanaged_resources
+  run_isolated_test test_treehouse_acquisition_timeout_is_bounded_before_endpoint_creation
+  run_isolated_test test_changed_acquisition_is_retained_during_unmanaged_rollback
+  run_isolated_test test_unmanaged_postinstall_failure_restores_prior_state
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = continuation-status-timeout ]; then
   run_isolated_test test_continuation_bounds_no_mistakes_status_snapshot
   exit 0
@@ -5942,6 +6013,8 @@ run_isolated_test test_off_is_byte_compatible_and_never_calls_agent_fleet
 run_isolated_test test_failed_freshness_proof_rolls_back_unmanaged_resources
 run_isolated_test test_local_only_spawn_uses_local_default_tip
 run_isolated_test test_dirty_acquisition_is_retained_without_force_return
+run_isolated_test test_treehouse_acquisition_timeout_is_bounded_before_endpoint_creation
+run_isolated_test test_changed_acquisition_is_retained_during_unmanaged_rollback
 run_isolated_test test_unmanaged_postinstall_failure_restores_prior_state
 run_isolated_test test_completion_contract_upgrade_is_contained_nonfollowing_and_atomic
 run_isolated_test test_completion_contract_ignores_raw_html_headings

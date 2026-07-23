@@ -295,13 +295,23 @@ The forced session-start mode preserves the existing gone-branch pruning pass.
 
 Treehouse v2.0 already excludes dirty pool entries, fetches `origin`, and resets only an available clean detached worktree to the freshest default ref.
 Firstmate surfaces matching dirty pool entries, acquires the selected path with `treehouse get --lease`, and verifies the durable lease before creating its endpoint.
+That synchronous acquisition is process-tree bounded by `FM_TREEHOUSE_ACQUIRE_TIMEOUT`, which defaults to 60 seconds.
 The accepted lease must be clean, belong to the requested repository, have the same origin identity, and match the live upstream default-branch tip.
 Remote-free `local-only` acquisitions use the same repository and cleanliness proof, with the requested checkout's local `main` or `master` tip as their freshness authority.
 Treehouse-acquired secondmate homes receive the same proof before seeding.
-A stale clean acquisition is returned transactionally, while a dirty or uninspectable acquisition remains durably leased without forced return and is surfaced for manual recovery.
-If an unmanaged spawn fails after publishing metadata or task artifacts, it restores the prior task generation before returning only a worktree that is still provably clean.
+A stale, dirty, or uninspectable acquisition remains durably leased without forced return and is surfaced for manual recovery.
+If an unmanaged spawn fails after publishing metadata or task artifacts, it restores the prior task generation before returning only a worktree whose repository identity, cleanliness, and expected detached tip are re-proven.
 That makes the acquisition proof explicit even if the background owner was offline.
 Orca is an explicit legacy-recovery-only exception because this change creates no new Orca tasks or acquisitions.
+
+### Limitations / deferred
+
+- A checkout without `origin` still uses the local default-tip proof without first proving that its registered project mode is explicitly `local-only`.
+- Home-scoped refresh owners still enumerate the shared user-level Treehouse root without filtering pool entries by owning `FM_HOME`.
+- Secondmate home acquisition still relies on Treehouse's dirty-entry skip and does not run Firstmate's `pool-preflight` before requesting its durable lease.
+
+One consolidated follow-up should tighten explicit local-only mode proof, add home-filtered pool ownership, and apply pool preflight to secondmate acquisition.
+These are bounded completeness limitations: coverage health fails closed when Treehouse enumeration cannot be proved, and rollback retains any worktree whose repository identity and expected detached tip cannot be re-proven, so the deferred formalization does not create a false healthy-coverage signal or a destructive data-loss path.
 
 On macOS, bootstrap reports `MISSING: checkout-refresh` until that home's per-user LaunchAgent is installed.
 After the captain approves the background owner, install it with:
@@ -312,6 +322,7 @@ bin/fm-bootstrap.sh install checkout-refresh
 
 The locked session-start sweep still runs the same broad discovery and a forced refresh, so the service has an operator-visible backstop.
 The LaunchAgent is intentionally independent of the Firstmate watcher and continues polling when no fleet task or Firstmate session is active.
+Its definition persists the configured Treehouse root, refresh interval, and backstop, and health validation rejects any installed value that no longer matches the current configuration.
 macOS launchd is the primary fleet scheduler in this release.
 Scheduler installation and health checks dispatch through an adapter seam, while a future Linux cron or systemd adapter remains explicit follow-up work rather than silently claiming coverage today.
 
@@ -523,6 +534,7 @@ FM_CHECKOUT_REFRESH_INTERVAL=60       # seconds between background upstream-tip 
 FM_CHECKOUT_REFRESH_BACKSTOP=900      # maximum seconds between full safe refresh attempts
 FM_CHECKOUT_REFRESH_PROBE_TIMEOUT=15  # seconds allowed for one upstream-tip probe
 FM_CHECKOUT_REFRESH_SYNC_TIMEOUT=60   # seconds allowed for one checkout refresh
+FM_TREEHOUSE_ACQUIRE_TIMEOUT=60       # seconds allowed for one durable task-worktree acquisition
 FM_TREEHOUSE_ROOT=                    # optional Treehouse state root override; defaults to ~/.treehouse
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature

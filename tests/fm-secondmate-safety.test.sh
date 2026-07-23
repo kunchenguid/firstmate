@@ -214,7 +214,7 @@ test_home_seed_uses_treehouse_acquired_home() {
 }
 
 test_home_seed_rejects_stale_treehouse_acquired_home() {
-  local home acquired acquired_abs fakebin log err source
+  local home acquired acquired_abs fakebin log err source before
   home="$TMP_ROOT/dash-stale-home"
   acquired="$TMP_ROOT/dash-stale-acquired-home"
   err="$TMP_ROOT/dash-stale.err"
@@ -223,6 +223,7 @@ test_home_seed_rejects_stale_treehouse_acquired_home() {
   fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/dash-stale-alpha.git"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
   source=$(make_live_default_firstmate_worktree "$acquired" dash-stale-firstmate)
+  before=$(git -C "$acquired" rev-parse HEAD)
   printf '%s\n' upstream > "$source/upstream.txt"
   git -C "$source" add upstream.txt
   git -C "$source" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
@@ -241,13 +242,17 @@ test_home_seed_rejects_stale_treehouse_acquired_home() {
 
   grep -F 'acquired worktree is stale' "$err" >/dev/null \
     || fail "stale secondmate-home refusal did not identify the upstream mismatch"
+  grep -F 'retaining unsafe treehouse-acquired home' "$err" >/dev/null \
+    || fail "stale secondmate-home refusal did not surface retain-only cleanup"
   grep -F "treehouse return --force $acquired_abs" "$log" >/dev/null \
-    || fail "stale secondmate-home refusal did not return its lease"
-  [ ! -e "$acquired" ] || fail "stale secondmate-home refusal retained the acquired worktree"
+    && fail "stale secondmate-home refusal force-returned an unverifiable lease"
+  [ -d "$acquired" ] || fail "stale secondmate-home refusal removed the acquired worktree"
+  [ "$(git -C "$acquired" rev-parse HEAD)" = "$before" ] \
+    || fail "stale secondmate-home refusal changed the acquired tip"
   if [ -f "$home/data/secondmates.md" ] && grep -F -- '- dash-stale ' "$home/data/secondmates.md" >/dev/null; then
     fail "stale secondmate-home refusal wrote a registry route"
   fi
-  pass "secondmate acquisition proves the live upstream default before seeding"
+  pass "stale secondmate acquisitions remain leased without destructive rollback"
 }
 
 test_home_seed_retains_dirty_treehouse_acquired_home() {
@@ -277,7 +282,7 @@ test_home_seed_retains_dirty_treehouse_acquired_home() {
 
   grep -F 'acquired worktree is dirty' "$err" >/dev/null \
     || fail "dirty secondmate-home refusal did not identify the unlanded work"
-  grep -F 'retaining dirty treehouse-acquired home' "$err" >/dev/null \
+  grep -F 'retaining unsafe treehouse-acquired home' "$err" >/dev/null \
     || fail "dirty secondmate-home refusal did not surface retain-only cleanup"
   grep -F "treehouse return --force $acquired_abs" "$log" >/dev/null \
     && fail "dirty secondmate-home refusal used destructive Treehouse return"
@@ -290,6 +295,39 @@ test_home_seed_retains_dirty_treehouse_acquired_home() {
     fail "dirty secondmate-home refusal wrote a registry route"
   fi
   pass "dirty secondmate acquisitions are retained untouched for recovery"
+}
+
+test_home_seed_retains_repository_mismatch_acquisition() {
+  local home expected_acquired acquired expected_source fakebin log err acquired_abs
+  home="$TMP_ROOT/dash-mismatch-home"
+  expected_acquired="$TMP_ROOT/dash-mismatch-expected-worktree"
+  acquired="$TMP_ROOT/dash-mismatch-acquired-home"
+  err="$TMP_ROOT/dash-mismatch.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/dash-mismatch-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  expected_source=$(make_live_default_firstmate_worktree "$expected_acquired" dash-mismatch-expected)
+  make_live_default_firstmate_worktree "$acquired" dash-mismatch-unrelated >/dev/null
+  acquired_abs=$(cd "$acquired" && pwd -P)
+  fakebin=$(make_fake_tmux "$TMP_ROOT/dash-mismatch-fake")
+  log="$TMP_ROOT/dash-mismatch-fake/tmux.log"
+
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_ROOT_OVERRIDE="$expected_source" \
+    FM_SECONDMATE_CHARTER='dash mismatch scope' FM_SECONDMATE_SCOPE='dash mismatch scope' \
+    "$ROOT/bin/fm-home-seed.sh" dash-mismatch - alpha >/dev/null 2>"$err"; then
+    fail "seed accepted an acquired home from an unrelated repository"
+  fi
+
+  grep -F 'acquired worktree repository mismatch' "$err" >/dev/null \
+    || fail "repository-mismatch acquisition was not diagnosed"
+  grep -F 'retaining unsafe treehouse-acquired home' "$err" >/dev/null \
+    || fail "repository-mismatch acquisition did not surface retain-only cleanup"
+  grep -F "treehouse return --force $acquired_abs" "$log" >/dev/null \
+    && fail "repository-mismatch acquisition was force-returned"
+  [ -d "$acquired" ] || fail "repository-mismatch acquisition was removed"
+  pass "repository-mismatch secondmate acquisitions remain durably retained"
 }
 
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
@@ -2199,6 +2237,7 @@ EOF
 if [ "${FM_TEST_FOCUSED:-}" = checkout-freshness ]; then
   test_home_seed_rejects_stale_treehouse_acquired_home
   test_home_seed_retains_dirty_treehouse_acquired_home
+  test_home_seed_retains_repository_mismatch_acquisition
   exit 0
 fi
 
@@ -2211,6 +2250,7 @@ test_home_seed_validate_rejects_nested_homes
 test_home_seed_uses_treehouse_acquired_home
 test_home_seed_rejects_stale_treehouse_acquired_home
 test_home_seed_retains_dirty_treehouse_acquired_home
+test_home_seed_retains_repository_mismatch_acquisition
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure
 test_home_seed_warns_when_acquired_home_return_fails
 test_home_seed_does_not_return_unsafe_acquired_home

@@ -252,6 +252,7 @@ test_treehouse_pool_skill_drafts_are_inventoried() {
 test_ignored_skill_files_are_outside_the_collision_guard() {
   local source="$TMP_ROOT/ignored-source" worktree="$TMP_ROOT/ignored-worktree" draft out
   fm_git_worktree "$source" "$worktree" ignored-skill
+  git -C "$worktree" checkout --quiet --detach
   printf '%s\n' '.agents/skills/' >> "$source/.git/info/exclude"
   draft="$worktree/.agents/skills/intentional/SKILL.md"
   mkdir -p "$(dirname "$draft")"
@@ -325,7 +326,10 @@ test_bootstrap_relays_hygiene_alerts() {
 }
 
 test_treehouse_discovery_failure_invalidates_heartbeat() {
-  local bad_state="$TEST_HOME/.treehouse/broken/treehouse-state.json" missing_path="$TMP_ROOT/missing-treehouse-worktree" out status
+  local treehouse_root pool_dir bad_state missing_path="$TMP_ROOT/missing-treehouse-worktree" out status
+  treehouse_root=$(cd "$TEST_HOME/.treehouse" && pwd -P)
+  pool_dir="$treehouse_root/relvino-test"
+  bad_state="$treehouse_root/broken/treehouse-state.json"
   mkdir -p "$(dirname "$bad_state")"
   printf '%s\n' '{"worktrees":[' > "$bad_state"
   printf '%s\n' preserved-heartbeat > "$STATE_ROOT/heartbeat"
@@ -365,7 +369,33 @@ test_treehouse_discovery_failure_invalidates_heartbeat() {
   [ "$(cat "$STATE_ROOT/heartbeat")" = preserved-path-heartbeat ] \
     || fail "uninspectable Treehouse path advanced the healthy heartbeat"
   rm -rf "$(dirname "$bad_state")"
-  pass "malformed schemas and uninspectable Treehouse paths invalidate the healthy heartbeat"
+
+  chmod 000 "$treehouse_root"
+  printf '%s\n' preserved-root-heartbeat > "$STATE_ROOT/heartbeat"
+  set +e
+  out=$(run_refresh run-once --force 2>&1)
+  status=$?
+  set -e
+  chmod 700 "$treehouse_root"
+  [ "$status" -ne 0 ] || fail "unreadable Treehouse root reported healthy coverage"
+  assert_contains "$out" "Treehouse root is unreadable" \
+    "unreadable Treehouse root was not surfaced"
+  [ "$(cat "$STATE_ROOT/heartbeat")" = preserved-root-heartbeat ] \
+    || fail "unreadable Treehouse root advanced the healthy heartbeat"
+
+  chmod 000 "$pool_dir"
+  printf '%s\n' preserved-pool-heartbeat > "$STATE_ROOT/heartbeat"
+  set +e
+  out=$(run_refresh run-once --force 2>&1)
+  status=$?
+  set -e
+  chmod 700 "$pool_dir"
+  [ "$status" -ne 0 ] || fail "unreadable Treehouse pool reported healthy coverage"
+  assert_contains "$out" "Treehouse pool is unreadable" \
+    "unreadable Treehouse pool was not surfaced"
+  [ "$(cat "$STATE_ROOT/heartbeat")" = preserved-pool-heartbeat ] \
+    || fail "unreadable Treehouse pool advanced the healthy heartbeat"
+  pass "unreadable roots, malformed schemas, and uninspectable paths invalidate heartbeat health"
 }
 
 test_skill_inventory_failure_preserves_alert_and_heartbeat() {
@@ -501,7 +531,7 @@ test_session_mode_preserves_gone_branch_pruning() {
 }
 
 test_worktree_freshness_verification_fails_closed() {
-  local remote primary worktree unrelated local_source local_worktree before status dirty
+  local remote primary worktree unrelated local_source local_worktree before status dirty tip
   remote=$(build_origin verify)
   primary="$TMP_ROOT/verify-primary"
   worktree="$TMP_ROOT/verify-worktree"
@@ -524,6 +554,16 @@ test_worktree_freshness_verification_fails_closed() {
     FM_CHECKOUT_REFRESH_STATE_ROOT="$STATE_ROOT" \
     "$ROOT/bin/fm-checkout-refresh.sh" verify-worktree "$worktree" "$primary" \
     || fail "fresh acquired worktree failed verification"
+  tip=$(git -C "$worktree" rev-parse HEAD)
+  run_refresh verify-returnable "$worktree" "$primary" "$tip" \
+    || fail "unchanged detached acquisition failed return-safety verification"
+  git -C "$worktree" switch --quiet -c return-unsafe
+  set +e
+  run_refresh verify-returnable "$worktree" "$primary" "$tip" >/dev/null 2>&1
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "an attached acquired worktree passed return-safety verification"
+  git -C "$worktree" checkout --quiet --detach "$tip"
 
   unrelated="$TMP_ROOT/verify-unrelated"
   fm_git_init_commit "$unrelated"
@@ -536,6 +576,7 @@ test_worktree_freshness_verification_fails_closed() {
   local_source="$TMP_ROOT/verify-local-source"
   local_worktree="$TMP_ROOT/verify-local-worktree"
   fm_git_worktree "$local_source" "$local_worktree" local-acquisition
+  git -C "$local_worktree" checkout --quiet --detach
   run_refresh verify-worktree "$local_worktree" "$local_source" \
     || fail "clean remote-free worktree failed its local default-tip proof"
   commit_file "$local_source" local.txt advanced advance-local-default
@@ -601,12 +642,15 @@ SH
 }
 
 test_launch_agent_definition_is_home_scoped_with_scheduler_seam() {
-  local fakebin agents log plist second_home second_plist key second_key install_state_base out status
+  local fakebin agents log plist second_home second_plist key second_key install_state_base install_state_root
+  local custom_treehouse="$TMP_ROOT/custom-treehouse" other_treehouse="$TMP_ROOT/other-treehouse" out status
   fakebin="$TMP_ROOT/fakebin"
   agents="$TMP_ROOT/LaunchAgents"
   log="$TMP_ROOT/launchctl.log"
   install_state_base="$TMP_ROOT/install-state"
-  mkdir -p "$fakebin" "$agents"
+  mkdir -p "$fakebin" "$agents" "$custom_treehouse" "$other_treehouse"
+  custom_treehouse=$(cd "$custom_treehouse" && pwd -P)
+  other_treehouse=$(cd "$other_treehouse" && pwd -P)
   cat > "$fakebin/launchctl" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FM_FAKE_LAUNCHCTL_LOG:?}"
@@ -615,6 +659,7 @@ SH
   chmod +x "$fakebin/launchctl"
 
   HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TREEHOUSE_ROOT="$custom_treehouse" \
     FM_CHECKOUT_REFRESH_STATE_BASE="$install_state_base" \
     FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
     FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
@@ -624,6 +669,7 @@ SH
 
   key=$(printf '%s' "$(cd "$FM_TEST_HOME" && pwd -P)" | shasum -a 256 | awk '{print substr($1,1,16)}')
   plist="$agents/com.firstmate.checkout-refresh.$key.plist"
+  install_state_root="$install_state_base/homes/$key"
   assert_grep '<key>StartInterval</key><integer>60</integer>' "$plist" \
     "LaunchAgent does not carry the upstream signal cadence"
   assert_grep '<key>FM_CHECKOUT_REFRESH_BACKSTOP</key><string>900</string>' "$plist" \
@@ -632,12 +678,69 @@ SH
     "LaunchAgent does not invoke the checkout refresher"
   assert_grep "<key>FM_HOME</key><string>$(cd "$FM_TEST_HOME" && pwd -P)</string>" "$plist" \
     "LaunchAgent does not bind the active Firstmate home"
+  assert_grep "<key>FM_TREEHOUSE_ROOT</key><string>$custom_treehouse</string>" "$plist" \
+    "LaunchAgent does not persist the configured Treehouse root"
   assert_grep "<key>FM_CHECKOUT_REFRESH_STATE_ROOT</key><string>$install_state_base/homes/$key</string>" "$plist" \
     "LaunchAgent does not use home-scoped state"
   assert_grep "<key>FM_CHECKOUT_REFRESH_LOCK_ROOT</key><string>$install_state_base/locks</string>" "$plist" \
     "LaunchAgent does not use the shared checkout lock root"
   assert_grep 'bootstrap' "$log" "LaunchAgent was not bootstrapped"
   assert_grep 'kickstart' "$log" "LaunchAgent was not started"
+  date +%s > "$install_state_root/heartbeat"
+  HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TREEHOUSE_ROOT="$custom_treehouse" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$install_state_base" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_LOG="$log" \
+    "$ROOT/bin/fm-checkout-refresh.sh" ensure \
+    || fail "matching LaunchAgent scheduler configuration was reported unhealthy"
+
+  set +e
+  out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TREEHOUSE_ROOT="$other_treehouse" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$install_state_base" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_LOG="$log" \
+    "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "LaunchAgent health accepted a different Treehouse root"
+  assert_contains "$out" "different Treehouse root" \
+    "LaunchAgent Treehouse-root drift was not diagnosed"
+
+  set +e
+  out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TREEHOUSE_ROOT="$custom_treehouse" FM_CHECKOUT_REFRESH_INTERVAL=61 \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$install_state_base" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_LOG="$log" \
+    "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "LaunchAgent health accepted a different refresh interval"
+  assert_contains "$out" "different refresh interval" \
+    "LaunchAgent refresh-interval drift was not diagnosed"
+
+  set +e
+  out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TREEHOUSE_ROOT="$custom_treehouse" FM_CHECKOUT_REFRESH_BACKSTOP=901 \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$install_state_base" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_LOG="$log" \
+    "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "LaunchAgent health accepted a different refresh backstop"
+  assert_contains "$out" "different refresh backstop" \
+    "LaunchAgent refresh-backstop drift was not diagnosed"
 
   second_home="$TMP_ROOT/fm-home-two"
   mkdir -p "$second_home/projects" "$second_home/config"

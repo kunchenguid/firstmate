@@ -91,7 +91,8 @@
 #   matches its live upstream or local default-branch tip. Dirty acquisitions
 #   remain under their durable lease for manual recovery. Other pre-commit
 #   failures close the prepared endpoint, restore prior task state, and return
-#   only a worktree that remains clean after owned hook cleanup.
+#   only a worktree whose repository identity, cleanliness, and expected detached
+#   tip are re-proven before and after owned hook cleanup.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -878,6 +879,7 @@ CONTINUATION_PACKET=
 ENDPOINT_CREATED=0
 WORKTREE_CREATED=0
 WORKTREE_RETAIN_ON_ABORT=0
+WORKTREE_EXPECTED_TIP=
 META_INSTALLED=0
 META_BACKUP=
 EXISTING_ARTIFACT_BACKUP=
@@ -1199,7 +1201,6 @@ cleanup_continuation_launch_transport() {
 }
 
 spawn_return_created_worktree() {
-  local dirty
   [ "$WORKTREE_CREATED" = 1 ] || return 0
   [ "${BACKEND:-tmux}" != orca ] || return 0
   [ -n "${WT:-}" ] && [ -d "$WT" ] || return 0
@@ -1207,13 +1208,14 @@ spawn_return_created_worktree() {
     echo "warning: retained unsafe acquired worktree $WT for manual recovery" >&2
     return 1
   fi
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
-  if ! dirty=$(GIT_OPTIONAL_LOCKS=0 git -C "$WT" status --porcelain=v1 --untracked-files=all 2>/dev/null); then
-    echo "warning: retained acquired worktree $WT because post-failure cleanliness could not be proved" >&2
+  if [ -z "$WORKTREE_EXPECTED_TIP" ] \
+    || ! "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-returnable "$WT" "$PROJ_ABS" "$WORKTREE_EXPECTED_TIP"; then
+    echo "warning: retained acquired worktree $WT because repository identity and its expected detached tip could not be re-proven" >&2
     return 1
   fi
-  if [ -n "$dirty" ]; then
-    echo "warning: retained dirty acquired worktree $WT after failed spawn; recover its unlanded work manually" >&2
+  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
+  if ! "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-returnable "$WT" "$PROJ_ABS" "$WORKTREE_EXPECTED_TIP"; then
+    echo "warning: retained acquired worktree $WT because post-cleanup repository safety could not be re-proven" >&2
     return 1
   fi
   ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1
@@ -2508,23 +2510,31 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$RECOVERY_ACCOUNT" 
     echo "error: refusing Treehouse acquisition because pool safety could not be inspected for $PROJ_ABS" >&2
     exit 1
   }
-  WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "firstmate-$ID") || {
-    echo "error: treehouse get --lease failed to acquire a task worktree for $ID" >&2
+  acquire_status=0
+  WT=$("$SCRIPT_DIR/fm-checkout-refresh.sh" acquire-worktree "$PROJ_ABS" "firstmate-$ID") || acquire_status=$?
+  if [ "$acquire_status" -ne 0 ]; then
+    if [ "$acquire_status" -eq 124 ]; then
+      echo "error: refusing to spawn $ID after the bounded Treehouse acquisition timed out" >&2
+    else
+      echo "error: treehouse get --lease failed to acquire a task worktree for $ID" >&2
+    fi
     exit 1
-  }
+  fi
   [ -n "$WT" ] || {
     echo "error: treehouse get --lease did not report a task worktree for $ID" >&2
     exit 1
   }
   WORKTREE_CREATED=1
+  WORKTREE_RETAIN_ON_ABORT=1
   validate_spawn_worktree "treehouse get --lease" "$PROJ_ABS"
   freshness_status=0
   "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-worktree "$WT" "$PROJ_ABS" || freshness_status=$?
   if [ "$freshness_status" -ne 0 ]; then
-    [ "$freshness_status" -ne 3 ] || WORKTREE_RETAIN_ON_ABORT=1
     echo "error: refusing to launch fm-$ID from a leased worktree whose repository identity, cleanliness, or default-tip freshness could not be proved" >&2
     exit 1
   fi
+  WORKTREE_EXPECTED_TIP=$(git -C "$WT" rev-parse HEAD) || exit 1
+  WORKTREE_RETAIN_ON_ABORT=0
 fi
 
 if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then

@@ -9,9 +9,10 @@
 #       no live process and is never recycled until the lease is released with
 #       "treehouse return". The acquired home is accepted only when its HEAD
 #       belongs to the Firstmate repository, is clean, and matches the live
-#       upstream default-branch tip. A dirty acquired home is retained without
-#       force-return so its unlanded work remains untouched. Projects are cloned
-#       from the active home into the secondmate home's projects/ directory.
+#       upstream default-branch tip. An unsafe or unverifiable acquired home is
+#       retained without force-return so its unlanded work remains untouched.
+#       Projects are cloned from the active home into the secondmate home's
+#       projects/ directory.
 #       That project list is non-exclusive provisioning data. Pass --no-projects
 #       instead of a project list to seed a project-less home for a domain whose
 #       subject is the firstmate repo itself; it is mutually exclusive with a
@@ -24,8 +25,8 @@
 #       Seeding is transactional: on validation, clone, init, or registry failure,
 #       generated briefs, new homes, new project clones, and registry edits are
 #       rolled back. Clean Treehouse-acquired homes are returned only when the
-#       rollback target is safe; a failed return warns because the lease may still
-#       be held.
+#       rollback target, repository identity, and expected detached tip are
+#       re-proven; a failed return warns because the lease may still be held.
 #       Set FM_SECONDMATE_CHARTER='<charter>' to seed from inline charter text
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
 #       to override the registry routing scope. Otherwise the registry summary
@@ -589,6 +590,7 @@ SEED_COMMITTED=0
 SEED_HOME=
 SEED_HOME_ACQUIRED=0
 SEED_HOME_RETAINED=0
+SEED_HOME_EXPECTED_TIP=
 SEED_HOME_CREATED=0
 SEED_HOME_BACKED_UP=0
 SEED_BACKUP_DIR=
@@ -648,6 +650,11 @@ seed_rollback_target() {
 seed_return_treehouse_home() {
   local home=$1 abs_home
   abs_home=$(seed_rollback_target "$home" "treehouse-acquired home") || return 0
+  if [ -z "$SEED_HOME_EXPECTED_TIP" ] \
+    || ! "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-returnable "$abs_home" "$FM_ROOT" "$SEED_HOME_EXPECTED_TIP"; then
+    echo "warning: retaining unsafe treehouse-acquired home $abs_home because repository identity and its expected detached tip could not be re-proven" >&2
+    return 0
+  fi
   if ! command -v treehouse >/dev/null 2>&1; then
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
@@ -708,7 +715,7 @@ seed_rollback() {
   if [ -n "${SEED_HOME:-}" ] && [ "$SEED_HOME" != "/" ]; then
     if [ "$SEED_HOME_ACQUIRED" = 1 ]; then
       if [ "$SEED_HOME_RETAINED" = 1 ]; then
-        echo "warning: retaining dirty treehouse-acquired home $SEED_HOME for manual recovery" >&2
+        echo "warning: retaining unsafe treehouse-acquired home $SEED_HOME for manual recovery" >&2
       else
         seed_return_treehouse_home "$SEED_HOME"
       fi
@@ -912,6 +919,7 @@ seed_home() {
   SEED_HOME=
   SEED_HOME_ACQUIRED=0
   SEED_HOME_RETAINED=0
+  SEED_HOME_EXPECTED_TIP=
   SEED_HOME_CREATED=0
   SEED_HOME_BACKED_UP=0
   SEED_BACKUP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-home-seed.XXXXXX")
@@ -934,13 +942,15 @@ seed_home() {
     SEED_HOME_ACQUIRED=1
     home=$(acquire_treehouse_home "$id")
     SEED_HOME="$home"
+    SEED_HOME_RETAINED=1
     freshness_status=0
     "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-worktree "$home" "$FM_ROOT" || freshness_status=$?
     if [ "$freshness_status" -ne 0 ]; then
-      [ "$freshness_status" -ne 3 ] || SEED_HOME_RETAINED=1
       echo "error: refusing secondmate home acquired from a stale or unverifiable upstream default" >&2
       return 1
     fi
+    SEED_HOME_EXPECTED_TIP=$(git -C "$home" rev-parse HEAD) || return 1
+    SEED_HOME_RETAINED=0
     home=$(verify_firstmate_home "$home")
   else
     requested_abs=$(abs_path_for_new "$requested_home")

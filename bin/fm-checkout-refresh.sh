@@ -28,6 +28,8 @@
 # mutation of the same clone.
 # Bounded child commands stay inside the refresher's process group, so the
 # aggregate session-start timeout still owns every nested fetch and fast-forward.
+# FM_TREEHOUSE_ACQUIRE_TIMEOUT applies the same process-tree ownership to the
+# synchronous durable lease acquired before a task endpoint is created.
 #
 # Cadence and spawn-preflight refreshes delegate to fm-fleet-sync.sh with pruning
 # disabled, while the explicit session-start mode preserves gone-branch pruning.
@@ -57,7 +59,9 @@
 #   fm-checkout-refresh.sh run-once [--force] [--verbose] [--session]
 #   fm-checkout-refresh.sh preflight <checkout>
 #   fm-checkout-refresh.sh pool-preflight <expected-source>
+#   fm-checkout-refresh.sh acquire-worktree <expected-source> <lease-holder>
 #   fm-checkout-refresh.sh verify-worktree <worktree> <expected-source>
+#   fm-checkout-refresh.sh verify-returnable <worktree> <expected-source> <expected-tip>
 #   fm-checkout-refresh.sh ensure
 #   fm-checkout-refresh.sh install
 #
@@ -80,6 +84,16 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 CONFIG_FILE="${FM_CHECKOUT_REFRESH_CONFIG:-$CONFIG/checkout-refresh}"
 TREEHOUSE_ROOT="${FM_TREEHOUSE_ROOT:-$HOME/.treehouse}"
+TREEHOUSE_ROOT_CANONICAL=
+if [ -d "$TREEHOUSE_ROOT" ] \
+  && TREEHOUSE_ROOT_CANONICAL=$(cd "$TREEHOUSE_ROOT" 2>/dev/null && pwd -P); then
+  TREEHOUSE_ROOT=$TREEHOUSE_ROOT_CANONICAL
+else
+  case "$TREEHOUSE_ROOT" in
+    /*) ;;
+    *) TREEHOUSE_ROOT="$(pwd -P)/$TREEHOUSE_ROOT" ;;
+  esac
+fi
 STATE_BASE="${FM_CHECKOUT_REFRESH_STATE_BASE:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/checkout-refresh}"
 if [ -n "${FM_CHECKOUT_REFRESH_STATE_ROOT:-}" ]; then
   STATE_ROOT=$FM_CHECKOUT_REFRESH_STATE_ROOT
@@ -92,6 +106,7 @@ INTERVAL=${FM_CHECKOUT_REFRESH_INTERVAL:-60}
 BACKSTOP=${FM_CHECKOUT_REFRESH_BACKSTOP:-900}
 PROBE_TIMEOUT=${FM_CHECKOUT_REFRESH_PROBE_TIMEOUT:-15}
 SYNC_TIMEOUT=${FM_CHECKOUT_REFRESH_SYNC_TIMEOUT:-60}
+ACQUIRE_TIMEOUT=${FM_TREEHOUSE_ACQUIRE_TIMEOUT:-60}
 PLATFORM=${FM_CHECKOUT_REFRESH_PLATFORM:-$(uname)}
 LABEL_BASE=com.firstmate.checkout-refresh
 LABEL=${FM_CHECKOUT_REFRESH_LABEL:-$LABEL_BASE.$FM_HOME_KEY}
@@ -108,9 +123,10 @@ case "$INTERVAL" in ''|*[!0-9]*|0) echo "error: FM_CHECKOUT_REFRESH_INTERVAL mus
 case "$BACKSTOP" in ''|*[!0-9]*|0) echo "error: FM_CHECKOUT_REFRESH_BACKSTOP must be a positive integer" >&2; exit 2 ;; esac
 case "$PROBE_TIMEOUT" in ''|*[!0-9]*|0) echo "error: FM_CHECKOUT_REFRESH_PROBE_TIMEOUT must be a positive integer" >&2; exit 2 ;; esac
 case "$SYNC_TIMEOUT" in ''|*[!0-9]*|0) echo "error: FM_CHECKOUT_REFRESH_SYNC_TIMEOUT must be a positive integer" >&2; exit 2 ;; esac
+case "$ACQUIRE_TIMEOUT" in ''|*[!0-9]*|0) echo "error: FM_TREEHOUSE_ACQUIRE_TIMEOUT must be a positive integer" >&2; exit 2 ;; esac
 
 usage() {
-  echo "usage: fm-checkout-refresh.sh discover|run-once [--force] [--verbose] [--session]|preflight <checkout>|pool-preflight <expected-source>|verify-worktree <worktree> <expected-source>|ensure|install" >&2
+  echo "usage: fm-checkout-refresh.sh discover|run-once [--force] [--verbose] [--session]|preflight <checkout>|pool-preflight <expected-source>|acquire-worktree <expected-source> <lease-holder>|verify-worktree <worktree> <expected-source>|verify-returnable <worktree> <expected-source> <expected-tip>|ensure|install" >&2
 }
 
 first_line() {
@@ -161,19 +177,64 @@ config_values() {
 }
 
 treehouse_worktree_paths() {
-  [ -d "$TREEHOUSE_ROOT" ] || return 0
+  if [ ! -e "$TREEHOUSE_ROOT" ] && [ ! -L "$TREEHOUSE_ROOT" ]; then
+    return 0
+  fi
+  [ -d "$TREEHOUSE_ROOT" ] || {
+    echo "checkout-refresh: skipped: incomplete Treehouse coverage because the root is not a directory: $TREEHOUSE_ROOT" >&2
+    return 1
+  }
   command -v python3 >/dev/null 2>&1 || {
     echo "checkout-refresh: skipped: incomplete Treehouse coverage because python3 is unavailable" >&2
     return 1
   }
   python3 - "$TREEHOUSE_ROOT" <<'PY'
-import glob
 import json
 import os
+import stat
 import sys
 
 failed = False
-for state_path in sorted(glob.glob(os.path.join(sys.argv[1], "*", "treehouse-state.json"))):
+
+
+def directory_entries(path, label):
+    metadata = os.stat(path)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise NotADirectoryError(path)
+    permissions = stat.S_IMODE(metadata.st_mode)
+    if not permissions & 0o444 or not permissions & 0o111:
+        raise PermissionError(f"{label} is unreadable")
+    with os.scandir(path) as entries:
+        return sorted(entries, key=lambda entry: entry.name)
+
+
+root = sys.argv[1]
+try:
+    pool_entries = directory_entries(root, "Treehouse root")
+except OSError as error:
+    failed = True
+    pool_entries = []
+    print(
+        f"checkout-refresh: skipped: incomplete Treehouse coverage at {root}: {error}",
+        file=sys.stderr,
+    )
+
+state_paths = []
+for pool_entry in pool_entries:
+    try:
+        if not pool_entry.is_dir(follow_symlinks=True):
+            continue
+        entries = directory_entries(pool_entry.path, "Treehouse pool")
+        if any(entry.name == "treehouse-state.json" for entry in entries):
+            state_paths.append(os.path.join(pool_entry.path, "treehouse-state.json"))
+    except OSError as error:
+        failed = True
+        print(
+            f"checkout-refresh: skipped: incomplete Treehouse coverage at {pool_entry.path}: {error}",
+            file=sys.stderr,
+        )
+
+for state_path in state_paths:
     try:
         with open(state_path, encoding="utf-8") as stream:
             state = json.load(stream)
@@ -307,6 +368,26 @@ run_bounded() {
   }
   # shellcheck disable=SC2016
   perl -e 'sub tree { my ($root) = @_; my %children; open my $ps, "-|", "ps", "-axo", "pid=,ppid=" or return ($root); while (<$ps>) { my ($pid, $ppid) = /(\d+)\s+(\d+)/; push @{$children{$ppid}}, $pid if defined $pid } close $ps; my @out = ($root); for (my $i = 0; $i < @out; $i++) { push @out, @{$children{$out[$i]} || []} } return @out } sub alive { grep { kill 0, $_ } @_ } sub stop_tree { my ($root) = @_; my @seen = tree($root); kill "TERM", reverse @seen; for (1 .. 20) { last unless alive(@seen); select undef, undef, undef, 0.05 } my %seen; @seen = grep { !$seen{$_}++ } (@seen, tree($root)); my @left = alive(@seen); kill "KILL", reverse @left if @left; waitpid $root, 0; for (1 .. 20) { last unless alive(@seen); select undef, undef, undef, 0.05 } } my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { exec @ARGV; exit 127 } local $SIG{ALRM} = sub { stop_tree($pid); exit 124 }; alarm $t; waitpid $pid, 0; alarm 0; my $status = $?; exit(($status & 127) ? 128 + ($status & 127) : $status >> 8)' "$seconds" "$@"
+}
+
+acquire_worktree() {
+  local expected_source=$1 lease_holder=$2 status=0
+  [ -d "$expected_source" ] \
+    || { echo "error: Treehouse acquisition source is not a directory: $expected_source" >&2; return 1; }
+  (
+    cd "$expected_source" || exit 1
+    run_bounded "$ACQUIRE_TIMEOUT" treehouse get --lease --lease-holder "$lease_holder"
+  ) || status=$?
+  case "$status" in
+    0) return 0 ;;
+    124)
+      echo "error: Treehouse worktree acquisition timed out after ${ACQUIRE_TIMEOUT}s and terminated its process tree" >&2
+      ;;
+    *)
+      echo "error: Treehouse worktree acquisition failed for $lease_holder (exit $status)" >&2
+      ;;
+  esac
+  return "$status"
 }
 
 PROBE_BRANCH=
@@ -688,9 +769,9 @@ local_default_branch() {
   return 1
 }
 
-verify_worktree() {
+verify_worktree_safety() {
   local worktree=$1 expected_source=$2 dirty dirty_example worktree_common source_common
-  local worktree_origin source_origin default tip head expected
+  local worktree_origin source_origin branch
   [ -d "$worktree" ] || { echo "error: worktree freshness target is not a directory: $worktree" >&2; return 1; }
   [ -d "$expected_source" ] || { echo "error: expected worktree source is not a directory: $expected_source" >&2; return 1; }
   if ! dirty=$(GIT_OPTIONAL_LOCKS=0 git -C "$worktree" status --porcelain=v1 --untracked-files=all 2>/dev/null); then
@@ -720,6 +801,17 @@ verify_worktree() {
     echo "error: acquired worktree origin mismatch: $worktree does not match $expected_source" >&2
     return 1
   fi
+  if branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null); then
+    echo "error: acquired worktree is attached to branch $branch at $worktree; retain it for manual recovery" >&2
+    return 3
+  fi
+  return 0
+}
+
+verify_worktree() {
+  local worktree=$1 expected_source=$2 source_origin default tip head expected
+  verify_worktree_safety "$worktree" "$expected_source" || return $?
+  source_origin=$(git -C "$expected_source" remote get-url origin 2>/dev/null || true)
   if [ -n "$source_origin" ]; then
     probe_upstream "$expected_source" || {
       echo "error: cannot verify the upstream default-branch tip for $expected_source" >&2
@@ -739,6 +831,24 @@ verify_worktree() {
   if [ "$head" != "$tip" ]; then
     echo "error: acquired worktree is stale: HEAD $head does not match $expected $tip" >&2
     return 1
+  fi
+  return 0
+}
+
+verify_returnable_worktree() {
+  local worktree=$1 expected_source=$2 expected_tip=$3 head expected_commit
+  verify_worktree_safety "$worktree" "$expected_source" || return $?
+  expected_commit=$(git -C "$worktree" rev-parse --verify "$expected_tip^{commit}" 2>/dev/null) || {
+    echo "error: expected acquired worktree tip cannot be resolved: $expected_tip" >&2
+    return 1
+  }
+  head=$(git -C "$worktree" rev-parse HEAD 2>/dev/null) || {
+    echo "error: acquired worktree HEAD cannot be resolved at $worktree" >&2
+    return 1
+  }
+  if [ "$head" != "$expected_commit" ]; then
+    echo "error: acquired worktree changed from expected detached tip $expected_commit to $head; retain it for manual recovery" >&2
+    return 3
   fi
   return 0
 }
@@ -800,6 +910,7 @@ install_launch_agent() {
 <key>HOME</key><string>$(xml_escape "$HOME")</string>
 <key>PATH</key><string>$(xml_escape "$runtime_path")</string>
 <key>FM_HOME</key><string>$(xml_escape "$FM_HOME_CANONICAL")</string>
+<key>FM_TREEHOUSE_ROOT</key><string>$(xml_escape "$TREEHOUSE_ROOT")</string>
 <key>FM_CHECKOUT_REFRESH_STATE_ROOT</key><string>$(xml_escape "$STATE_ROOT")</string>
 <key>FM_CHECKOUT_REFRESH_LOCK_ROOT</key><string>$(xml_escape "$LOCK_ROOT")</string>
 <key>FM_CHECKOUT_REFRESH_INTERVAL</key><string>$(xml_escape "$INTERVAL")</string>
@@ -840,10 +951,18 @@ ensure_launch_agent() {
     || { echo "checkout-refresh LaunchAgent points at a different Firstmate checkout" >&2; return 1; }
   grep -Fq "<key>FM_HOME</key><string>$(xml_escape "$FM_HOME_CANONICAL")</string>" "$PLIST" \
     || { echo "checkout-refresh LaunchAgent belongs to a different Firstmate home" >&2; return 1; }
+  grep -Fq "<key>FM_TREEHOUSE_ROOT</key><string>$(xml_escape "$TREEHOUSE_ROOT")</string>" "$PLIST" \
+    || { echo "checkout-refresh LaunchAgent uses a different Treehouse root" >&2; return 1; }
   grep -Fq "<key>FM_CHECKOUT_REFRESH_STATE_ROOT</key><string>$(xml_escape "$STATE_ROOT")</string>" "$PLIST" \
     || { echo "checkout-refresh LaunchAgent uses a different home-scoped state root" >&2; return 1; }
   grep -Fq "<key>FM_CHECKOUT_REFRESH_LOCK_ROOT</key><string>$(xml_escape "$LOCK_ROOT")</string>" "$PLIST" \
     || { echo "checkout-refresh LaunchAgent uses a different shared lock root" >&2; return 1; }
+  grep -Fq "<key>FM_CHECKOUT_REFRESH_INTERVAL</key><string>$(xml_escape "$INTERVAL")</string>" "$PLIST" \
+    || { echo "checkout-refresh LaunchAgent uses a different refresh interval" >&2; return 1; }
+  grep -Fq "<key>FM_CHECKOUT_REFRESH_BACKSTOP</key><string>$(xml_escape "$BACKSTOP")</string>" "$PLIST" \
+    || { echo "checkout-refresh LaunchAgent uses a different refresh backstop" >&2; return 1; }
+  grep -Fq "<key>StartInterval</key><integer>$INTERVAL</integer>" "$PLIST" \
+    || { echo "checkout-refresh LaunchAgent uses a different scheduler interval" >&2; return 1; }
   domain="gui/$(id -u)"
   "$LAUNCHCTL" print "$domain/$LABEL" >/dev/null 2>&1 \
     || { echo "checkout-refresh LaunchAgent is not loaded" >&2; return 1; }
@@ -899,9 +1018,17 @@ case "${1:-}" in
     [ $# -eq 2 ] || { usage; exit 2; }
     pool_preflight "$2"
     ;;
+  acquire-worktree)
+    [ $# -eq 3 ] || { usage; exit 2; }
+    acquire_worktree "$2" "$3"
+    ;;
   verify-worktree)
     [ $# -eq 3 ] || { usage; exit 2; }
     verify_worktree "$2" "$3"
+    ;;
+  verify-returnable)
+    [ $# -eq 4 ] || { usage; exit 2; }
+    verify_returnable_worktree "$2" "$3" "$4"
     ;;
   ensure)
     [ $# -eq 1 ] || { usage; exit 2; }
