@@ -30,7 +30,8 @@
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
-#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
+#   direct-PR    implement -> codex review gate -> push + open PR via gh-axi
+#                (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
@@ -285,7 +286,18 @@ case "$MODE" in
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+
+When it is implemented and committed, run the pre-push review gate on your own diff before you push:
+\`\`\`bash
+codex review --base <default-branch> -c model_reasoning_effort="xhigh" \\
+  "Intent: <what this task set out to accomplish>. Acceptance criteria: <the acceptance criteria from the task above>"
+\`\`\`
+Replace \`<default-branch>\` with the default branch of this project, and fill the prompt from the Task section so the review covers the spec as well as the coding standards.
+Fix every P0 and P1 finding it reports, and note any P2 or P3 you are leaving in the PR body.
+If the codex account is out of credits or its weekly window is exhausted, do not skip the gate: run the review on \`opencode run --model "opencode/grok-4.5"\` instead, driving it with the \`code-review\` skill or a plain review-this-diff prompt, because opencode has no \`review\` subcommand.
+That model string takes a dot - \`opencode/grok-4.5\`, never \`grok-4-5\`, which fails with an opaque server error.
+
+With the gate findings addressed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
 )

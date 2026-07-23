@@ -96,6 +96,34 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
+# The direct-PR path has no pipeline, so its only pre-push review is the codex
+# review gate. Pin the invocation, the credit fallback, and the fact that the
+# gate belongs to direct-PR alone.
+test_direct_pr_review_gate() {
+  local home id brief
+  home="$TMP_ROOT/review-gate-home"
+  write_registry "$home"
+  id="brief-direct-gate-a5"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep 'codex review --base <default-branch> -c model_reasoning_effort="xhigh"' "$brief" \
+    "direct-PR brief lost the pre-push review gate invocation"
+  assert_grep "Fix every P0 and P1 finding" "$brief" \
+    "direct-PR brief lost the finding-severity contract"
+  assert_grep "opencode/grok-4.5" "$brief" \
+    "direct-PR brief lost the out-of-credits review fallback"
+  assert_grep "never \`grok-4-5\`" "$brief" \
+    "direct-PR brief lost the warning against the dashed model string"
+
+  for id_proj in "brief-nomistakes-gate-a5:no-registry-proj" "brief-localonly-gate-a5:local-proj"; do
+    id=${id_proj%%:*}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "${id_proj##*:}" >/dev/null 2>&1
+    assert_no_grep "codex review" "$home/data/$id/brief.md" \
+      "$id: review gate leaked into a delivery mode that does not own it"
+  done
+  pass "fm-brief.sh: direct-PR briefs carry the codex review gate and its fallback"
+}
+
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
@@ -345,6 +373,7 @@ test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
+test_direct_pr_review_gate
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
