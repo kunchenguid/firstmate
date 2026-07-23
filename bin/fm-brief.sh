@@ -30,7 +30,7 @@
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
-#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
+#   direct-PR    implement -> push + open PR via the registered forge (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
@@ -244,7 +244,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use gh-axi for GitHub operations, \`$FM_ROOT/bin/fm-forge.sh\` for configured Gitea PR operations, and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -280,16 +280,26 @@ fi
 read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+FORGE_PROVIDER=unknown
+if [ -d "$PROJECTS/$REPO" ]; then
+  FORGE_PROVIDER=$("$FM_ROOT/bin/fm-forge.sh" provider "$PROJECTS/$REPO" 2>/dev/null || echo unknown)
+fi
 
 case "$MODE" in
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    if [ "$FORGE_PROVIDER" = gitea ]; then
+      DIRECT_PR_OPEN="open the PR through \`$FM_ROOT/bin/fm-forge.sh pr-create\` after consulting its current \`--help\`; do not use GitHub-only PR tooling"
+    else
+      DIRECT_PR_OPEN="open the PR with \`gh-axi\` for GitHub, or the registered forge helper named in \`$FM_ROOT/bin/fm-forge.sh --help\` for another recognized provider"
+    fi
     DOD=$(cat <<EOF
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and $DIRECT_PR_OPEN, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
 )
@@ -353,7 +363,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use gh-axi for GitHub operations, \`$FM_ROOT/bin/fm-forge.sh\` for configured Gitea PR operations, and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

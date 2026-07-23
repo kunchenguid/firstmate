@@ -68,7 +68,7 @@ test_project_management_owner_covers_guarded_operations() {
     '`direct-PR`' \
     '`local-only`' \
     'Default it off' \
-    'Creating a GitHub repository is outward-facing.' \
+    'Creating any remote repository is outward-facing.' \
     "captain's explicit consent" \
     'Never issue a raw removal command from Firstmate.' \
     'no-mistakes init && no-mistakes doctor'; do
