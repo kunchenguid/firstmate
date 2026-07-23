@@ -52,6 +52,18 @@ export default function (pi: ExtensionAPI) {
 		AgentSession.prototype.setThinkingLevel = guardedSetThinkingLevel;
 	}
 
+	const setAutoCompactionEnabled =
+		AgentSession.prototype.setAutoCompactionEnabled as typeof AgentSession.prototype.setAutoCompactionEnabled & {
+			fmDelegatedProfileGuard?: boolean;
+		};
+	if (!setAutoCompactionEnabled.fmDelegatedProfileGuard) {
+		const guardedSetAutoCompactionEnabled: typeof AgentSession.prototype.setAutoCompactionEnabled & {
+			fmDelegatedProfileGuard?: boolean;
+		} = function () {};
+		guardedSetAutoCompactionEnabled.fmDelegatedProfileGuard = true;
+		AgentSession.prototype.setAutoCompactionEnabled = guardedSetAutoCompactionEnabled;
+	}
+
 	const compactionIsValid = (ctx: ExtensionContext) => {
 		if (!expectedAgentDir || !Number.isSafeInteger(expectedReserve) || !Number.isSafeInteger(expectedKeepRecent)) {
 			return false;

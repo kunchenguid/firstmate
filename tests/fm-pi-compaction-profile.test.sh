@@ -162,6 +162,7 @@ const ctx = { cwd, ui: { notify() {} }, shutdown() { shutdowns += 1; } };
 await handlers.get("session_start")({}, ctx);
 if (shutdowns !== 0) process.exit(1);
 let persistentWrites = 0;
+let compactionEnabled = true;
 const expectedModel = {
   provider: "openai-codex",
   id: "gpt-5.6-sol",
@@ -177,6 +178,11 @@ const guardedSession = {
   settingsManager: {
     setDefaultModelAndProvider() { persistentWrites += 1; },
     setDefaultThinkingLevel() { persistentWrites += 1; },
+    setCompactionEnabled(enabled) {
+      compactionEnabled = enabled;
+      persistentWrites += 1;
+    },
+    getCompactionEnabled() { return compactionEnabled; },
   },
   getAvailableThinkingLevels() { return ["off", "low", "medium", "high"]; },
   supportsThinking() { return true; },
@@ -197,7 +203,17 @@ try {
 if (!modelRejected) process.exit(1);
 if (await AgentSession.prototype.cycleModel.call(guardedSession) !== undefined) process.exit(1);
 AgentSession.prototype.setThinkingLevel.call(guardedSession, "high");
-if (transientState.model !== expectedModel || transientState.thinkingLevel !== "medium" || persistentWrites !== 0) {
+AgentSession.prototype.setAutoCompactionEnabled.call(guardedSession, false);
+const effectiveCompaction = Object.getOwnPropertyDescriptor(
+  AgentSession.prototype,
+  "autoCompactionEnabled",
+).get.call(guardedSession);
+if (
+  transientState.model !== expectedModel ||
+  transientState.thinkingLevel !== "medium" ||
+  effectiveCompaction !== true ||
+  persistentWrites !== 0
+) {
   process.exit(1);
 }
 writeFileSync(`${agentDir}/settings.json`, '{"compaction":{"enabled":false,"reserveTokens":108800,"keepRecentTokens":20000}}\n');
@@ -243,6 +259,7 @@ assert_grep 'fm-pi-profile-guard.ts' "$ROOT/bin/fm-spawn.sh" "delegated Pi comma
 assert_grep 'AgentSession.prototype.setModel = guardedSetModel' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not prevent model selection before mutation"
 assert_grep 'AgentSession.prototype.cycleModel = guardedCycleModel' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not prevent model cycling before mutation"
 assert_grep 'AgentSession.prototype.setThinkingLevel = guardedSetThinkingLevel' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not keep medium stable before mutation"
+assert_grep 'AgentSession.prototype.setAutoCompactionEnabled = guardedSetAutoCompactionEnabled' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not preserve compaction before mutation"
 assert_grep 'session_before_compact' "$ROOT/bin/fm-pi-profile-guard.ts" "profile guard does not validate runtime compaction"
 assert_grep 'pi-delegated-profile' "$ROOT/bin/fm-config-inherit-lib.sh" "secondmate homes do not inherit the delegated Pi profile"
 pass "hostile project and extension surfaces are neutralized while explicit FirstMate extensions remain supported"
