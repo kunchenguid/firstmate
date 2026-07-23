@@ -10,6 +10,7 @@ if [ "${FM_PI_LIVE_E2E:-0}" != 1 ]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+unset NO_MISTAKES_GATE
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
@@ -24,8 +25,15 @@ SOCKET="fm-pi-live-e2e-$$"
 SESSION=pi-live-e2e
 LAB="$ROOT/.pi-live-e2e.$$"
 PROJECT="$LAB/project"
+AHOY_PROJECT="$LAB/ahoy-project"
 HOME_DIR="$LAB/fmhome"
 PI_VERSION=$(pi --version)
+# shellcheck disable=SC2016 # Backticks are literal prompt markup.
+LEGACY_START='Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.'
+LEGACY_AWAY=$'\xE2\x81\xA3Supervisor escalate (1 event(s)): done: legacy rollout'
+MARKER_NEAR_MISS=$'\xE2\x81\xA3Captain note: this invisible separator is intentional.'
+# shellcheck disable=SC2016 # Backticks are literal prompt markup.
+START_NEAR_MISS='Captain quote: Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.'
 
 capture() {
   "$TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION" -S -600 2>/dev/null || true
@@ -103,8 +111,133 @@ wait_pid_dead() {
   return 1
 }
 
+run_ahoy_case() {
+  local label=$1 preceding=$2 expected=$3 out status=0
+  out=$(
+    cd "$PROJECT" &&
+      pi --print --approve --no-session --no-context-files --no-extensions \
+        --no-skills --skill .agents/skills --tools read \
+        --model openai-codex/gpt-5.6-sol --thinking low \
+        "$preceding" "/ahoy"
+  ) || status=$?
+  [ "$status" -eq 0 ] || fail "Pi Ahoy $label case exited $status: $out"
+  case "$expected" in
+    bearings)
+      printf '%s\n' "$out" | grep -Fq "AHOY_BEARINGS_BRANCH" \
+        || fail "Pi Ahoy $label case did not take Bearings: $out"
+      ;;
+    boundary)
+      printf '%s\n' "$out" | grep -Fq "AHOY_BEARINGS_BRANCH" \
+        && fail "Pi Ahoy $label near miss was treated as operational: $out"
+      ;;
+  esac
+}
+
+run_ahoy_transcript_regressions() {
+  mkdir -p "$PROJECT/.agents/skills/ahoy" "$PROJECT/.agents/skills/bearings"
+  cp "$ROOT/.agents/skills/ahoy/SKILL.md" "$PROJECT/.agents/skills/ahoy/SKILL.md"
+  # shellcheck disable=SC2016 # Backticks are literal prompt markup.
+  printf '%s\n' \
+    '---' \
+    'name: bearings' \
+    'description: Test-only Bearings branch sentinel.' \
+    '---' \
+    '' \
+    '# bearings' \
+    '' \
+    'Respond exactly `AHOY_BEARINGS_BRANCH`.' \
+    > "$PROJECT/.agents/skills/bearings/SKILL.md"
+
+  run_ahoy_case legacy-start "$LEGACY_START" bearings
+  run_ahoy_case legacy-away "$LEGACY_AWAY" bearings
+  run_ahoy_case marker-near-miss "$MARKER_NEAR_MISS" boundary
+  run_ahoy_case startup-near-miss "$START_NEAR_MISS" boundary
+}
+
+run_native_ahoy_regressions() {
+  local first_home="$LAB/pi-ahoy-first-home"
+  local later_home="$LAB/pi-ahoy-later-home"
+  local first_out later_out
+
+  mkdir -p \
+    "$AHOY_PROJECT/.pi/extensions" \
+    "$AHOY_PROJECT/.agents/skills/ahoy" \
+    "$AHOY_PROJECT/.agents/skills/bearings" \
+    "$AHOY_PROJECT/bin" \
+    "$first_home/state" "$first_home/config" \
+    "$later_home/state" "$later_home/config"
+  git init -q "$AHOY_PROJECT"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$AHOY_PROJECT/.pi/extensions/"
+  cp \
+    "$ROOT/bin/fm-sessionstart-nudge.sh" \
+    "$ROOT/bin/fm-primary-scope-lib.sh" \
+    "$ROOT/bin/fm-gate-refuse-lib.sh" \
+    "$AHOY_PROJECT/bin/"
+  cp "$ROOT/.agents/skills/ahoy/SKILL.md" "$AHOY_PROJECT/.agents/skills/ahoy/SKILL.md"
+  chmod +x "$AHOY_PROJECT/bin/fm-sessionstart-nudge.sh"
+  # shellcheck disable=SC2016 # Variables expand in the generated script, not this test shell.
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -u' \
+    'file="${FM_HOME:?}/state/session-start-count"' \
+    'count=0' \
+    '[ ! -f "$file" ] || count=$(sed -n "1p" "$file")' \
+    'count=$((count + 1))' \
+    'printf "%s\n" "$count" > "$file"' \
+    'printf "SESSION_START_DONE count=%s\n" "$count"' \
+    > "$AHOY_PROJECT/bin/fm-session-start.sh"
+  chmod +x "$AHOY_PROJECT/bin/fm-session-start.sh"
+  # shellcheck disable=SC2016 # Backticks are literal prompt markup.
+  printf '%s\n' \
+    '---' \
+    'name: bearings' \
+    'description: Test-only Bearings branch sentinel.' \
+    '---' \
+    '' \
+    '# bearings' \
+    '' \
+    'Respond exactly `AHOY_BEARINGS_BRANCH`.' \
+    > "$AHOY_PROJECT/.agents/skills/bearings/SKILL.md"
+  # shellcheck disable=SC2016 # Backticks are literal prompt markup.
+  printf '%s\n' \
+    '# Native Pi Ahoy regression fixture' \
+    '' \
+    'Run `bin/fm-session-start.sh` exactly once at session start.' \
+    > "$AHOY_PROJECT/AGENTS.md"
+
+  first_out=$(
+    cd "$AHOY_PROJECT" &&
+      FM_HOME="$first_home" pi --print --approve --no-session --no-context-files --no-extensions \
+        -e .pi/extensions/fm-primary-turnend-guard.ts \
+        --no-skills --skill .agents/skills \
+        --model openai-codex/gpt-5.6-sol --thinking low \
+        "/ahoy"
+  )
+  printf '%s\n' "$first_out" | grep -Fq "AHOY_BEARINGS_BRANCH" \
+    || fail "Pi native first-message Ahoy did not take Bearings: $first_out"
+  [ "$(sed -n '1p' "$first_home/state/session-start-count")" = 1 ] \
+    || fail "Pi native first-message Ahoy did not preserve one session-start execution"
+
+  later_out=$(
+    cd "$AHOY_PROJECT" &&
+      FM_HOME="$later_home" pi --print --approve --no-session --no-context-files --no-extensions \
+        -e .pi/extensions/fm-primary-turnend-guard.ts \
+        --no-skills --skill .agents/skills \
+        --model openai-codex/gpt-5.6-sol --thinking low \
+        "Respond exactly PRIOR_BOUNDARY_ACK." "/ahoy"
+  )
+  printf '%s\n' "$later_out" | grep -Fq "PRIOR_BOUNDARY_ACK" \
+    || fail "Pi native later-message setup did not preserve the genuine captain boundary: $later_out"
+  printf '%s\n' "$later_out" | grep -Fq "AHOY_BEARINGS_BRANCH" \
+    && fail "Pi native later-message Ahoy gathered Bearings: $later_out"
+  [ "$(sed -n '1p' "$later_home/state/session-start-count")" = 1 ] \
+    || fail "Pi native later-message Ahoy reran session start"
+}
+
 mkdir -p "$LAB"
 git clone -q "$ROOT" "$PROJECT"
+run_ahoy_transcript_regressions
+run_native_ahoy_regressions
 mkdir -p "$PROJECT/.pi/extensions/lib"
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$PROJECT/.pi/extensions/fm-primary-pi-watch.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$PROJECT/.pi/extensions/lib/fm-calm-visibility.ts"
@@ -165,4 +298,4 @@ wait_for_text "PI_EXIT=0" 60 || fail "Pi did not exit cleanly"
 wait_pid_dead "$watcher_pid" || fail "watcher child survived clean Pi exit"
 wait_pid_dead "$arm_pid" || fail "arm child survived clean Pi exit"
 
-printf 'ok - Pi %s live E2E used shared Codex auth, auto-started one successor before turn end, and cleaned up\n' "$PI_VERSION"
+printf 'ok - Pi %s live E2E covered native Ahoy first/later messages, legacy transcripts, near misses, and watcher continuity\n' "$PI_VERSION"

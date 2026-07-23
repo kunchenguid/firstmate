@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
+const OPERATIONAL_PREFIX = "\u2063FIRSTMATE_OP: ";
 const ARM_READY_TIMEOUT_MS = Number(process.env.FM_OPENCODE_ARM_READY_TIMEOUT_MS || 12000);
 const ARM_RETIRE_TIMEOUT_MS = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const REARM_RETRY_BASE_MS = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
@@ -185,7 +186,7 @@ async function sendPrompt(client, sessionID, text) {
       parts: [
         {
           type: "text",
-          text,
+          text: `${OPERATIONAL_PREFIX}${text}`,
         },
       ],
     },

@@ -15,6 +15,7 @@ const root = resolve(extensionDir, "../..");
 const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const marker = `${state}/.pi-turnend-extension-loaded`;
+const operationalPrefix = "\u2063FIRSTMATE_OP: ";
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 
 function parentPid(pid: string): string {
@@ -141,7 +142,8 @@ export default function (pi: ExtensionAPI) {
     guardFollowupActive = true;
     try {
       await pi.sendUserMessage(
-        "TURN WOULD END BLIND - supervision is off. " +
+        operationalPrefix +
+          "TURN WOULD END BLIND - supervision is off. " +
           "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
           result.stderr,
         { deliverAs: "followUp" },

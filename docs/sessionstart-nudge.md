@@ -2,7 +2,8 @@
 
 AGENTS.md section 3 remains the single authoritative behavioral contract for session start.
 The tracked native adapters are an enforcement layer that injects one instruction and never runs the digest, lock acquisition, bootstrap sweeps, wake drain, or supervision arm itself.
-The injected line is exactly ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.``
+The payload starts with U+2063 and the stable `FIRSTMATE_OP: ` label, followed by exactly ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.``
+The Ahoy skill owns the rule that this explicitly marked operational input is never a captain-authored session boundary.
 
 ## Shared wrapper and safety
 
@@ -103,9 +104,38 @@ The corrected live smoke command was `pi -p -e .pi/extensions/fm-primary-turnend
 Observed output was `PI_SMOKE_DONE`, and `session-start-ran` was present, proving the injected custom message reached the model and was obeyed before the positional prompt.
 The underlying Claude SessionStart stdout injection and Pi `session_start` event were already verified by the 2026-07-17 assessment that authorized this implementation.
 
+## Ahoy boundary validation on 2026-07-22
+
+The initiating trigger was `/ahoy` as the first real captain message.
+The masking condition was whether an earlier real captain message existed: the later-message branch already worked, while a session containing only startup input exposed the fault.
+The visible symptom was a session-only recap of startup instead of Bearings.
+The earliest divergence was message classification: Pi retained the startup nudge as custom type `firstmate-sessionstart-nudge`, OpenCode retained it as a user-role message, and Ahoy had no salient positive boundary rule.
+
+The smallest counterfactual was tested on Pi 0.81.1 with `pi --mode rpc --approve --no-session --no-extensions -e .pi/extensions/fm-primary-turnend-guard.ts --no-skills --skill .agents/skills --model openai-codex/gpt-5.6-sol --thinking low`.
+A bare U+2063 marker did not change the wrong response.
+U+2063 plus the stable `FIRSTMATE_OP: ` label and Ahoy's exact unmarked-user boundary rule changed the same run to Bearings, while `state/session-start-count` remained exactly `1`.
+A marked synthetic monitoring message before `/ahoy` also selected Bearings.
+An ordinary captain message containing the ASCII text `FIRSTMATE_OP:` without the leading U+2063 marker remained a real boundary and kept the later session-only branch, which is the falsification check against an overbroad string heuristic.
+Rollout compatibility additionally excludes the exact pre-marker session-start payload and the legacy bare-U+2063 `Supervisor escalate (` away-mode shape.
+Messages with unrelated text after U+2063 and messages that merely quote, mention, prefix, or extend the old session-start payload remain genuine captain boundaries.
+
+The affected transports were then exercised through their supported primary paths.
+Pi 0.81.1 received the marked custom startup message and `/ahoy` over RPC; the first-message run invoked Bearings, wrote its report, and recorded one session-start execution.
+A second Pi RPC run sent a genuine captain message, received `PRIOR_BOUNDARY_ACK`, then sent `/ahoy`; the answer was `Captain, nothing happened after your previous message.`, no Bearings artifact appeared, and the session-start count stayed `1`.
+OpenCode 1.17.18 started in its interactive mini TUI so `session.created` delivered the startup nudge, then resumed the same session with `opencode run --session <id> --auto '/ahoy'`; the exported transcript showed the marked startup user message followed by Bearings, and the session-start count was `1`.
+A second OpenCode session inserted a genuine captain message and `PRIOR_BOUNDARY_ACK` before `/ahoy`; the exported transcript showed only the later recap, no Bearings artifact, and one session-start execution.
+
+Claude Code 2.1.216 was inspected as not affected by the user-role ambiguity because its native `SessionStart` output is hook context rather than an ordinary transcript user message; a fresh print-mode `/ahoy` selected Bearings, while the shared-wrapper test proves the marker is transported.
+Codex 0.144.6 was inspected as not affected for the same hook-context reason; `codex exec --ephemeral --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox '/ahoy'` ran session start once and selected Bearings with the marked wrapper payload.
+Grok 0.2.106 remains not applicable because its project `SessionStart` stdout still does not enter model context, as the 2026-07-17 validation above proves.
+A fresh Grok run was attempted on 2026-07-22 but stopped at `402 Payment Required: Grok Build usage balance exhausted`, so no stronger live claim is made.
+
 ## Regression coverage
 
 `tests/fm-sessionstart-nudge.test.sh` proves wrapper silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock.
-It proves exact one-line output for a plain primary and a marked linked secondmate primary.
+It proves exact U+2063 `FIRSTMATE_OP:`-prefixed one-line output for a plain primary and a marked linked secondmate primary.
 It also verifies tracked wrapper registration for Claude, Codex, OpenCode, Pi, and Grok.
-`tests/fm-turnend-guard.test.sh` continues to cover the same shared primary scope through the turn-end path.
+`tests/fm-captain-translation-contract.test.sh` proves Ahoy's current marker rule, narrow legacy compatibility exclusions, genuine captain-message near misses, and the shared marker on every supported user-role operational injection.
+`tests/fm-pi-primary-live-e2e.test.sh` sends the exact legacy startup and bare-marker away-mode rows through a persistent model transcript, invokes Ahoy, and contrasts both with unrelated-marker and altered-startup captain near misses.
+`tests/fm-pi-primary-live-e2e.test.sh` and `tests/fm-opencode-primary-live-e2e.test.sh` also exercise their genuine native startup paths with first-message and later-message Ahoy regressions.
+`tests/fm-turnend-guard.test.sh`, `tests/fm-pi-watch-extension.test.sh`, and `tests/fm-daemon.test.sh` cover marked guard, monitoring, and away-mode delivery without changing their behavior.

@@ -9,7 +9,9 @@ unset NO_MISTAKES_GATE
 
 TMP_ROOT=$(fm_test_tmproot fm-sessionstart-nudge)
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
-NUDGE_LINE="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
+OPERATIONAL_PREFIX=$'\xE2\x81\xA3FIRSTMATE_OP: '
+NUDGE_TEXT="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
+NUDGE_LINE="${OPERATIONAL_PREFIX}${NUDGE_TEXT}"
 fm_git_identity fmtest fmtest@example.invalid
 
 make_primary() {
@@ -35,12 +37,14 @@ expect_silent_zero() {
 }
 
 test_genuine_primary_nudges() {
-  local root="$TMP_ROOT/primary" out status=0
+  local root="$TMP_ROOT/primary" out prefix_hex status=0
   make_primary "$root"
   out=$(run_nudge "$root") || status=$?
   expect_code 0 "$status" "genuine primary nudge"
   [ "$out" = "$NUDGE_LINE" ] || fail "genuine primary printed unexpected output: $out"
-  pass "fm-sessionstart-nudge: a genuine primary gets exactly one instruction line"
+  prefix_hex=$(printf '%s' "$out" | head -c 3 | od -An -tx1 | tr -d ' \n')
+  [ "$prefix_hex" = e281a3 ] || fail "genuine primary nudge lost its U+2063 operational marker: $prefix_hex"
+  pass "fm-sessionstart-nudge: a genuine primary gets one explicitly marked instruction line"
 }
 
 test_gate_env_is_silent() {
