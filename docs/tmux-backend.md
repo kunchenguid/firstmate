@@ -135,8 +135,27 @@ A bare session name with no exact match falls back to PREFIX matching, then fnma
 With only `firstmate2` present, `tmux has-session -t firstmate` exited 0, and with only `fm-afk-daemon-x` present, `tmux kill-session -t fm-afk` killed it.
 The `=` prefix (`-t '=firstmate'`) forces exact-name resolution and instead failed with `can't find session: firstmate` (exit 1); the compound form `-t '=1:'` combines both pins and worked for `new-window` and `list-windows` alike.
 
-`bin/backends/tmux.sh` therefore targets sessions as `=$ses` / `=$ses:`, and `bin/fm-afk-launch.sh` resolves its recorded daemon session with `=`.
-`tests/fm-backend-tmux-smoke.test.sh` (numeric session name, prefix-sibling container-ensure) and `tests/fm-afk-launch.test.sh` (prefix-sibling close/liveness) pin both behaviors against a real tmux.
+The WINDOW half of a two-part target resolves the same loose way.
+With `firstmate2:fm-abcd` the only live window, `tmux display-message -p -t firstmate:fm-abc` printed `firstmate2:fm-abcd` and `tmux kill-session`'s window equivalent, `tmux kill-window -t firstmate:fm-abc`, destroyed it.
+Pinning both halves (`-t '=firstmate:=fm-abc'`) instead fails with `can't find session: firstmate` (exit 1); when the session exists but the window does not, `-t '=firstmate2:=fm-abc'` fails with `can't find window: fm-abc`.
+A `=` on the window half does not break index targeting: `-t '=sesA:=1'` still resolves window index 1.
+
+`bin/backends/tmux.sh` therefore targets sessions as `=$ses` / `=$ses:` at container-ensure and create-task time, and `bin/fm-afk-launch.sh` resolves its recorded daemon session with `=`.
+
+### Where the pin is applied for a recorded endpoint
+
+A task's endpoint is persisted (`window=` in `<state>/<id>.meta`) as the PLAIN `<session>:<window>` name pair, because that string is also the task's identity key - `window_to_task`, `fm_backend_meta_for_window` and the human-facing target column all read it back, and a `=`-decorated handle would break them and every record written before the pin existed.
+
+The exact-match pin is therefore applied at the BOUNDARY where a recorded endpoint is handed to tmux, by `fm_tmux_pin_target` (`bin/fm-tmux-lib.sh`), which rewrites `<a>:<b>` to `=<a>:=<b>` and leaves stable object ids (`@window`, `%pane`, `$session`), already-pinned halves, and non-two-part targets alone.
+Every tmux primitive routes its target through it: the adapter's capture / send_key / send_text_line / send_literal / current_path / current_command / kill / target_exists, the shared composer, busy and submit primitives in `bin/fm-tmux-lib.sh`, `fm-crew-state.sh`'s `pane_readable`, and the away-mode daemon's status-line flash.
+This covers stale records, records written before the pin, and targets typed on the command line alike.
+
+`fm_backend_tmux_resolve_bare_selector` compares the listed window name LITERALLY rather than as a `grep` regex, so a selector containing a metacharacter cannot resolve to a different live window.
+
+`tests/fm-backend-tmux-smoke.test.sh` (numeric session name, prefix-sibling container-ensure, and a stale `firstmate:fm-abc` record against a live `firstmate2:fm-abcd`) and `tests/fm-afk-launch.test.sh` (prefix-sibling close/liveness) pin these behaviors against a real tmux.
+
+Caveat recorded, not fixed here: `tmux display-message` exits 0 even when its target does not resolve (it falls back to the current session's pane and prints empty fields for a missing session), so `fm_backend_target_exists`'s tmux arm is a pane-readability probe rather than a strict endpoint-identity check.
+The pin removes the dangerous case - a stale record can no longer read a STRANGER session's pane - but a window that has closed inside a still-live session is still reported as present.
 
 ## Limitations
 

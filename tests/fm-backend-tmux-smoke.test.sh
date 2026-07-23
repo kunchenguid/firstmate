@@ -213,5 +213,44 @@ tmux has-session -t "=firstmate" 2>/dev/null \
   || fail "container-ensure did not create the exact 'firstmate' session (bare probe prefix-matched 'firstmate2'?)"
 pass "real tmux: fm_backend_tmux_container_ensure creates the exact 'firstmate' session even when a prefix-sibling exists"
 
+# --- a STALE recorded target must never reach into a stranger session --------
+# The recorded endpoint is the plain "<session>:<window>" name pair, and tmux
+# resolves BOTH halves by exact name, then prefix, then fnmatch. Verified live
+# (tmux 3.6): with only session "firstmate2" holding window "fm-abcd",
+# `display-message -p -t firstmate:fm-abc` reported "firstmate2:fm-abcd" and
+# `kill-window -t firstmate:fm-abc` destroyed it. fm_tmux_pin_target pins every
+# target the tmux primitives compose, so the stale record must now read as gone
+# and leave the stranger's window standing.
+tmux kill-session -t "=$NUMSES" 2>/dev/null || true
+tmux kill-session -t "=firstmate" 2>/dev/null || true
+tmux kill-session -t "=firstmate2" 2>/dev/null || true
+tmux new-session -d -s firstmate2 -x 200 -y 50 \
+  || fail "real tmux: could not create the stranger session firstmate2"
+fm_backend_tmux_create_task firstmate2 fm-abcd "$HOME" >/dev/null \
+  || fail "real tmux: could not create the stranger window firstmate2:fm-abcd"
+STALE="firstmate:fm-abc"
+
+[ "$(fm_backend_tmux_current_path "$STALE")" = "" ] \
+  || fail "a stale record resolved to a live pane (bare target prefix-matched firstmate2:fm-abcd?)"
+[ "$(fm_backend_tmux_current_command "$STALE")" = "" ] \
+  || fail "a stale record read a live pane's foreground command (bare target prefix-matched?)"
+if fm_backend_tmux_send_text_line "$STALE" "echo intruder" 2>/dev/null; then
+  fail "a stale record accepted a send (bare target prefix-matched a stranger's pane?)"
+fi
+fm_backend_tmux_kill "$STALE"
+tmux list-windows -a -F '#{session_name}:#{window_name}' | grep -qx "firstmate2:fm-abcd" \
+  || fail "killing a stale record destroyed the stranger's window firstmate2:fm-abcd"
+pass "real tmux: a stale '$STALE' record neither reads, writes to, nor kills the stranger window firstmate2:fm-abcd"
+
+# The pin must not cost the exact target anything: the same primitives still
+# reach the real window by its recorded name pair.
+[ -n "$(fm_backend_tmux_current_path "firstmate2:fm-abcd")" ] \
+  || fail "the exact recorded target no longer resolves its own pane's cwd"
+fm_backend_tmux_kill "firstmate2:fm-abcd"
+if tmux list-windows -a -F '#{session_name}:#{window_name}' | grep -qx "firstmate2:fm-abcd"; then
+  fail "the exact recorded target no longer kills its own window"
+fi
+pass "real tmux: the exact-match pin still resolves and kills a target by its recorded name pair"
+
 cleanup_all
 trap - EXIT

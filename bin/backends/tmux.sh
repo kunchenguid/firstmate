@@ -26,24 +26,46 @@
 # through meta - an ad hoc window name with no recorded task. Mirrors the
 # `tmux list-windows -a ... | grep` pipeline that used to live inline in
 # fm-send.sh's and fm-peek.sh's own (until now duplicated) resolve().
+#
+# The window name is compared LITERALLY, not as a regex: the selector is
+# caller-supplied, so a `grep ":$name\$"` would let a metacharacter in it match
+# a DIFFERENT live window (`fm-a.c` matching `fm-abc`) and hand back a stranger's
+# endpoint - the same wrong-window class as the unpinned session targets below.
+# tmux forbids `:` in a session name, so everything after the FIRST colon is the
+# window name even when the window name itself contains one.
 fm_backend_tmux_resolve_bare_selector() {  # <name>
-  local name=$1
-  tmux list-windows -a -F '#{session_name}:#{window_name}' | grep -m1 ":$name\$" \
-    || { echo "error: no window named $name" >&2; return 1; }
+  local name=$1 line
+  while IFS= read -r line; do
+    [ "${line#*:}" = "$name" ] || continue
+    printf '%s\n' "$line"
+    return 0
+  done < <(tmux list-windows -a -F '#{session_name}:#{window_name}')
+  echo "error: no window named $name" >&2
+  return 1
 }
 
 # fm_backend_tmux_capture: bounded plain-text pane capture. Mirrors
 # fm-peek.sh's and fm-watch.sh's `tmux capture-pane -p -t "$T" -S -"$N"`.
 fm_backend_tmux_capture() {  # <target> <lines>
-  tmux capture-pane -p -t "$1" -S -"$2"
+  tmux capture-pane -p -t "$(fm_tmux_pin_target "$1")" -S -"$2"
 }
 
 # fm_backend_tmux_send_key: one named key. Mirrors fm-send.sh's --key path:
 # `tmux display-message -p -t "$T" '#{pane_id}' >/dev/null`, then
 # `tmux send-keys -t "$T" "$2"`.
 fm_backend_tmux_send_key() {  # <target> <key>
-  tmux display-message -p -t "$1" '#{pane_id}' >/dev/null
-  tmux send-keys -t "$1" "$2"
+  local target
+  target=$(fm_tmux_pin_target "$1")
+  tmux display-message -p -t "$target" '#{pane_id}' >/dev/null
+  tmux send-keys -t "$target" "$2"
+}
+
+# fm_backend_tmux_target_exists: cheap, read-only presence check for <target>'s
+# pane. The tmux arm of fm_backend_target_exists (bin/fm-backend.sh) and of
+# fm-crew-state.sh's pane_readable, kept here so the exact-match pin cannot be
+# forgotten by an inline caller.
+fm_backend_tmux_target_exists() {  # <target>
+  tmux display-message -p -t "$(fm_tmux_pin_target "$1")" '#{pane_id}' >/dev/null 2>&1
 }
 
 # fm_backend_tmux_send_text_submit: type <text> into <target> once, then
@@ -113,7 +135,7 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
 # empty on any tmux error. Mirrors fm-spawn.sh's worktree-discovery poll:
 # `tmux display-message -p -t "$T" '#{pane_current_path}'`.
 fm_backend_tmux_current_path() {  # <target>
-  tmux display-message -p -t "$1" '#{pane_current_path}' 2>/dev/null
+  tmux display-message -p -t "$(fm_tmux_pin_target "$1")" '#{pane_current_path}' 2>/dev/null
 }
 
 # fm_backend_tmux_send_text_line: send one line of TEXT then Enter, with no
@@ -121,7 +143,7 @@ fm_backend_tmux_current_path() {  # <target>
 # (`treehouse get`, the GOTMPDIR export) that already ran this exact sequence
 # inline in fm-spawn.sh. Mirrors `tmux send-keys -t "$T" "<text>" Enter`.
 fm_backend_tmux_send_text_line() {  # <target> <text>
-  tmux send-keys -t "$1" "$2" Enter
+  tmux send-keys -t "$(fm_tmux_pin_target "$1")" "$2" Enter
 }
 
 # fm_backend_tmux_send_literal: send TEXT as literal bytes with no
@@ -129,13 +151,13 @@ fm_backend_tmux_send_text_line() {  # <target> <text>
 # send pauses between the literal send and Enter for the harness to settle).
 # Mirrors `tmux send-keys -t "$T" -l "<text>"`.
 fm_backend_tmux_send_literal() {  # <target> <text>
-  tmux send-keys -t "$1" -l "$2"
+  tmux send-keys -t "$(fm_tmux_pin_target "$1")" -l "$2"
 }
 
 # fm_backend_tmux_kill: remove the task's window, best-effort. Mirrors
 # fm-teardown.sh's `tmux kill-window -t "$T" 2>/dev/null || true`.
 fm_backend_tmux_kill() {  # <target>
-  tmux kill-window -t "$1" 2>/dev/null || true
+  tmux kill-window -t "$(fm_tmux_pin_target "$1")" 2>/dev/null || true
 }
 
 # fm_backend_tmux_current_command: <target>'s live foreground process name -
@@ -148,7 +170,7 @@ fm_backend_tmux_kill() {  # <target>
 # own name throughout; the value reverts to the shell's own name only once
 # the foreground command actually exits). Empty on any tmux error.
 fm_backend_tmux_current_command() {  # <target>
-  tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
+  tmux display-message -p -t "$(fm_tmux_pin_target "$1")" '#{pane_current_command}' 2>/dev/null
 }
 
 # fm_backend_tmux_agent_alive: CONFIDENT liveness of a live harness-agent
