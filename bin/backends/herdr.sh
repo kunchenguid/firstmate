@@ -1941,8 +1941,13 @@ fm_backend_herdr_socket_path() {  # <session>
 # and both `events.subscribe` and `pane.agent_status_changed` present in `herdr
 # api schema`. FM_BACKEND_HERDR_EVENTS_FORCE overrides the whole verdict for
 # tests (1 = capable, 0 = incapable) without touching the real binary. The
-# `api schema` read is ~220KB, so callers (the watcher) memoize this per session
-# for a process lifetime rather than probing every poll.
+# `api schema` read is large (248KB at herdr 0.7.5), so callers (the watcher)
+# memoize this per session for a process lifetime rather than probing every
+# poll. That payload also dwarfs the 64KB pipe buffer, so the two token checks
+# match it in-shell with `case`: piping it into a short-circuiting reader like
+# `grep -Fq` leaves the writer blocked mid-payload when the reader exits on the
+# match, and every probe then prints `printf: write error: Broken pipe` to
+# stderr wherever SIGPIPE is ignored (the watcher's inherited disposition).
 fm_backend_herdr_events_capable() {  # <session>
   local session=$1 protocol schema
   case "${FM_BACKEND_HERDR_EVENTS_FORCE:-}" in
@@ -1957,8 +1962,8 @@ fm_backend_herdr_events_capable() {  # <session>
   case "$protocol" in ''|*[!0-9]*) return 1 ;; esac
   [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL" ] || return 1
   schema=$(herdr api schema --json 2>/dev/null) || return 1
-  printf '%s' "$schema" | grep -Fq 'events.subscribe' || return 1
-  printf '%s' "$schema" | grep -Fq 'pane.agent_status_changed' || return 1
+  case "$schema" in *'events.subscribe'*) ;; *) return 1 ;; esac
+  case "$schema" in *'pane.agent_status_changed'*) ;; *) return 1 ;; esac
   return 0
 }
 
