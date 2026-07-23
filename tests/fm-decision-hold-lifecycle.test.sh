@@ -594,7 +594,7 @@ assert_archive_verify_fails() {  # <home> <origin> <case>
 }
 
 test_retained_decisions_are_strictly_archive_aware() {
-  local home origin older_hold newer_hold archive record heading digest closed variant before after show
+  local home origin older_hold newer_hold archive record unresolved_record heading digest closed variant before after show
   local separator_label separator_code separator
   local dependent=sample-retained-dependent
   home=$(make_home retained-decisions)
@@ -708,12 +708,18 @@ EOF
 
   record=$(archive_record "$archive" "$older_hold")
   [ -n "$record" ] || fail "could not extract the retained synthetic record"
+  unresolved_record=${record/"- [x] $older_hold -"/"- [ ] $older_hold -"}
+  [ "$unresolved_record" != "$record" ] || fail "could not build the unresolved duplicate fixture"
   heading=$(sed -n '/^## Archived /{p;q;}' "$archive")
   [ -n "$heading" ] || fail "retained archive has no canonical section heading"
   digest=$(printf '%s\n' "$record" | sed -n 's/^  Decision digest: //p' | head -1)
   [ -n "$digest" ] || fail "retained record has no decision digest"
   closed=$(printf '%s\n' "$record" | sed -n 's/.*(done \([0-9][0-9-]*\)).*/\1/p' | head -1)
   [ -n "$closed" ] || fail "retained record has no closure date"
+
+  variant=$(clone_home "$home" retained-single-canonical)
+  run_decisions "$variant" verify "$origin" >/dev/null \
+    || fail "a single canonical archived decision did not verify"
 
   variant=$(clone_home "$home" retained-truncated)
   rewrite_once "$variant/data/done-archive.md" \
@@ -763,6 +769,28 @@ EOF
   variant=$(clone_home "$home" retained-duplicate)
   printf '\n## Archived 2026-07-24\n%s\n' "$record" >> "$variant/data/done-archive.md"
   assert_archive_verify_fails "$variant" "$origin" duplicate-record
+
+  variant=$(clone_home "$home" retained-canonical-malformed-duplicate)
+  printf '\n%s extra\n%s\n' "$heading" "$record" >> "$variant/data/done-archive.md"
+  assert_archive_verify_fails "$variant" "$origin" canonical-malformed-duplicate
+  assert_grep "appears outside a canonical archive section" \
+    "$variant/canonical-malformed-duplicate.err" \
+    "a malformed duplicate was hidden from exact identity counting"
+
+  variant=$(clone_home "$home" retained-canonical-unresolved-duplicate)
+  printf '\n%s\n%s\n' "$heading" "$unresolved_record" >> "$variant/data/done-archive.md"
+  assert_archive_verify_fails "$variant" "$origin" canonical-unresolved-duplicate
+  assert_grep "appears outside a canonical archive section" \
+    "$variant/canonical-unresolved-duplicate.err" \
+    "an unresolved duplicate was hidden from exact identity counting"
+
+  variant=$(clone_home "$home" retained-duplicate-invalid)
+  rewrite_once "$variant/data/done-archive.md" "$heading" "$heading extra"
+  printf '\n## Unknown\n%s\n' "$record" >> "$variant/data/done-archive.md"
+  assert_archive_verify_fails "$variant" "$origin" duplicate-invalid-records
+  assert_grep "appears outside a canonical archive section" \
+    "$variant/duplicate-invalid-records.err" \
+    "duplicate invalid identities were hidden from exact identity counting"
 
   variant=$(clone_home "$home" retained-malformed-section)
   rewrite_once "$variant/data/done-archive.md" "$heading" "$heading extra"
@@ -891,7 +919,7 @@ EOF
   printf '\n%s\n' "$record" >> "$variant/data/backlog.md"
   assert_archive_verify_fails "$variant" "$origin" active-archive-collision
 
-  pass "retained LF decisions verify while CRLF, grammar escapes, bold collisions, hash failures, and unsafe records are rejected"
+  pass "one canonical retained decision verifies while CRLF, grammar escapes, invalid duplicates, hash failures, and unsafe records are rejected"
 }
 
 test_uninventoried_report_decision_refuses_completion

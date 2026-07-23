@@ -13,7 +13,8 @@ The `hold` subcommand maps an originating work id and stable decision key to `<o
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
 It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
 
-One shared scanner mirrors tasks-axi's task-header forms and ECMAScript level-two heading boundary while counting exact identities in the active backlog and canonical `## Archived YYYY-MM-DD` sections in `data/done-archive.md`.
+One shared scanner mirrors tasks-axi's lexical task-header forms and ECMAScript level-two heading boundary while counting every exact identity independently of section validity across the active backlog and archive.
+Only a terminal header under an exact canonical `## Archived YYYY-MM-DD` heading is eligible for structured archive verification.
 It rejects duplicate active identities, duplicate archived identities, active/archive collisions, symlink or non-regular archives, unreadable archives, and archive bytes that change during verification.
 Archive fingerprinting accepts only a successful lowercase SHA-256 digest before any comparison.
 For an archived identity, it extracts only that record into a private single-record `## Done` view and parses it through public `tasks-axi show --full --file` output.
@@ -71,7 +72,7 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
-ok - retained LF decisions verify while CRLF, grammar escapes, bold collisions, hash failures, and unsafe records are rejected
+ok - one canonical retained decision verifies while CRLF, grammar escapes, invalid duplicates, hash failures, and unsafe records are rejected
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly

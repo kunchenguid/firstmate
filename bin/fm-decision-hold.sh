@@ -210,23 +210,15 @@ const inFlight = new RegExp(`^- \\*\\*(${idChars})\\*\\* - (.*)$`);
 const queued = new RegExp(`^- \\[ \\] (${idChars}) - (.*)$`);
 const done = new RegExp(`^- \\[x\\] (${idChars}) - (.*)$`);
 
-function sectionState(line) {
-  const match = semanticLine(line).match(/^##\s+(.*?)\s*$/);
-  if (!match) return undefined;
-  const text = match[1].toLowerCase();
-  if (text === "in flight") return "in_flight";
-  if (text === "queued") return "queued";
-  if (text.startsWith("done")) return "done";
-  return undefined;
-}
-
-function taskIdentity(line, state) {
+function taskHeader(line) {
   const semantic = semanticLine(line);
-  let match;
-  if (state === "done") match = semantic.match(done);
-  if (state === "queued") match = semantic.match(queued);
-  if (state === "in_flight") match = semantic.match(inFlight) || semantic.match(queued);
-  return match ? match[1] : undefined;
+  let match = semantic.match(inFlight);
+  if (match) return { id: match[1], form: "in_flight" };
+  match = semantic.match(queued);
+  if (match) return { id: match[1], form: "queued" };
+  match = semantic.match(done);
+  if (match) return { id: match[1], form: "done" };
+  return undefined;
 }
 
 function isSectionHeading(line) {
@@ -242,7 +234,7 @@ function extractRecord(start) {
   for (let index = start + 1; index < lines.length; index++) {
     const line = lines[index];
     const semantic = semanticLine(line);
-    if (isSectionHeading(line) || taskIdentity(line, "done") !== undefined) break;
+    if (isSectionHeading(line) || taskHeader(line) !== undefined) break;
     if (semantic.trim().length === 0 || semantic.startsWith("  ")) {
       record.push(line);
       continue;
@@ -252,7 +244,6 @@ function extractRecord(start) {
   return record;
 }
 
-let state;
 let archived = false;
 let total = 0;
 let valid = 0;
@@ -261,12 +252,12 @@ for (let index = 0; index < lines.length; index++) {
   const line = lines[index];
   if (isSectionHeading(line)) {
     archived = isCanonicalArchiveHeading(line);
-    state = archived ? "done" : sectionState(line);
     continue;
   }
-  if (taskIdentity(line, state) !== id) continue;
+  const header = taskHeader(line);
+  if (!header || header.id !== id) continue;
   total++;
-  if (archived) {
+  if (archived && header.form === "done") {
     valid++;
     if (record === undefined) record = extractRecord(index);
   }
@@ -280,7 +271,7 @@ if (mode === "archive-count") {
   process.stdout.write(`${total} ${valid}\n`);
   process.exit(0);
 }
-if (!view || valid !== 1 || record === undefined) process.exit(1);
+if (!view || total !== 1 || valid !== 1 || record === undefined) process.exit(1);
 try {
   fs.writeFileSync(view, ["## Done", "", ...record].join("\n") + "\n", "utf8");
 } catch (_) {
