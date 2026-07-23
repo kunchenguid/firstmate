@@ -277,7 +277,7 @@ Optional `path` and shallow `scan` directives in the gitignored `config/checkout
 Every declared checkout and matching-origin scan result must resolve to its exact canonical Git worktree root, so nested directories can never redirect refresh to an enclosing repository.
 
 Each `FM_HOME` owns a distinct background identity and state directory, so primary and secondmate homes can cover their own projects without displacing one another.
-Checkout-level owner locks are held by the shared `fm-fleet-sync.sh` mutation path and around Treehouse acquisition, so home-scoped services, spawn, secondmate seeding, teardown, and merged-PR wake handling serialize overlapping checkouts safely.
+Checkout-level owner locks are held by the shared `fm-fleet-sync.sh` mutation path, Treehouse acquisition, and every authorized Treehouse return, so home-scoped services, spawn, secondmate seeding, teardown, and merged-PR wake handling serialize overlapping checkouts safely.
 Each background owner probes every covered checkout's remote default-branch tip every 60 seconds.
 Any upstream-tip change triggers `fm-fleet-sync.sh` immediately, regardless of who pushed or merged it.
 Every `fm-fleet-sync.sh` invocation repeats the live upstream-default probe after fetching and proves that the fetched ref matches the live tip instead of trusting a checkout's possibly stale `origin/HEAD`.

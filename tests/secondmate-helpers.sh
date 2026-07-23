@@ -94,6 +94,12 @@ case "${1:-}" in
     exit 0
     ;;
   return)
+    if [ -n "${FM_EXPECT_CHECKOUT_LOCK:-}" ]; then
+      [ -e "$FM_EXPECT_CHECKOUT_LOCK" ] || [ -L "$FM_EXPECT_CHECKOUT_LOCK" ] || exit 91
+      lock_pid=$(cat "$FM_EXPECT_CHECKOUT_LOCK/pid" 2>/dev/null || true)
+      kill -0 "$lock_pid" 2>/dev/null || exit 92
+      [ -z "${FM_EXPECT_CHECKOUT_LOCK_MARKER:-}" ] || touch "$FM_EXPECT_CHECKOUT_LOCK_MARKER"
+    fi
     shift
     target=
     while [ $# -gt 0 ]; do

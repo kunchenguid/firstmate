@@ -27,7 +27,8 @@
 #       generated briefs, new homes, new project clones, and registry edits are
 #       rolled back. Clean Treehouse-acquired homes are returned only when the
 #       rollback target, repository identity, and expected detached tip are
-#       re-proven; a failed return warns because the lease may still be held.
+#       re-proven, and the return holds the common checkout mutation lock; a
+#       failed return warns because the lease may still be held.
 #       Set FM_SECONDMATE_CHARTER='<charter>' to seed from inline charter text
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
 #       to override the registry routing scope. Otherwise the registry summary
@@ -42,8 +43,12 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+CHECKOUT_STATE_BASE="${FM_CHECKOUT_REFRESH_STATE_BASE:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/checkout-refresh}"
 REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
+# shellcheck source=bin/fm-checkout-lock-lib.sh
+. "$SCRIPT_DIR/fm-checkout-lock-lib.sh"
+CHECKOUT_LOCK_ROOT=$(fm_checkout_lock_root "$CHECKOUT_STATE_BASE")
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 fm_refuse_if_gate_agent
@@ -660,10 +665,16 @@ seed_return_treehouse_home() {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
   fi
-  ( cd "$FM_ROOT" && treehouse return --force "$abs_home" >/dev/null ) || {
+  fm_checkout_lock_run "$abs_home" "$CHECKOUT_LOCK_ROOT" \
+    seed_treehouse_return_locked "$abs_home" >/dev/null || {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
   }
+}
+
+seed_treehouse_return_locked() {
+  local home=$1
+  ( cd "$FM_ROOT" && treehouse return --force "$home" )
 }
 
 seed_remove_created_home() {

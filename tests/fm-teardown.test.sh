@@ -81,6 +81,12 @@ make_case() {
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 # `treehouse return --force <wt>`: succeed silently.
+[ -z "${FM_EXPECT_CHECKOUT_LOCK:-}" ] || {
+  [ -e "$FM_EXPECT_CHECKOUT_LOCK" ] || [ -L "$FM_EXPECT_CHECKOUT_LOCK" ] || exit 91
+  lock_pid=$(cat "$FM_EXPECT_CHECKOUT_LOCK/pid" 2>/dev/null || true)
+  kill -0 "$lock_pid" 2>/dev/null || exit 92
+  [ -z "${FM_EXPECT_CHECKOUT_LOCK_MARKER:-}" ] || touch "$FM_EXPECT_CHECKOUT_LOCK_MARKER"
+}
 [ -z "${FM_EXPECT_CHILD_LINEAGE_PATH:-}" ] || [ -f "$FM_EXPECT_CHILD_LINEAGE_PATH" ] || {
   echo "child lineage missing before home removal: $FM_EXPECT_CHILD_LINEAGE_PATH" >&2
   exit 96
@@ -525,6 +531,8 @@ run_teardown() {
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   FM_CHECKOUT_REFRESH_LOCK_ROOT="${FM_CHECKOUT_REFRESH_LOCK_ROOT:-$case_dir/checkout-locks}" \
+  FM_EXPECT_CHECKOUT_LOCK="${FM_EXPECT_CHECKOUT_LOCK:-}" \
+  FM_EXPECT_CHECKOUT_LOCK_MARKER="${FM_EXPECT_CHECKOUT_LOCK_MARKER:-}" \
   FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1 \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
@@ -1001,7 +1009,7 @@ SH
 }
 
 test_content_in_default_fallback_allows() {
-  local case_dir rc
+  local case_dir rc common key expected_lock lock_marker
   case_dir=$(make_case content-landed)
   write_meta "$case_dir" no-mistakes ship
   # No pr= recorded and the default gh-axi mock reports no PR, so the merged-PR path
@@ -1009,14 +1017,24 @@ test_content_in_default_fallback_allows() {
   # the same net change has independently landed on origin/main via a squash commit.
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   land_on_origin_main "$case_dir" feature.txt hello
+  common=$(git -C "$case_dir/wt" rev-parse --git-common-dir)
+  case "$common" in /*) ;; *) common="$case_dir/wt/$common" ;; esac
+  common=$(cd "$common" && pwd -P)
+  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  expected_lock="$case_dir/checkout-locks/$key.lock"
+  lock_marker="$case_dir/checkout-return-held-lock"
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  FM_EXPECT_CHECKOUT_LOCK="$expected_lock" \
+    FM_EXPECT_CHECKOUT_LOCK_MARKER="$lock_marker" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
   expect_code 0 "$rc" "content-landed: teardown should succeed when content is already in the default branch"
   ! grep -q REFUSED "$case_dir/stderr" || fail "content-landed: teardown printed a REFUSED line"
+  assert_present "$lock_marker" \
+    "normal teardown did not hold the common checkout lock during Treehouse return"
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
 }
 
@@ -2303,6 +2321,11 @@ fi
 if [ "${FM_TEST_FOCUSED:-}" = review-round-7 ]; then
   test_content_fallback_reprobes_live_default_after_fetch
   test_content_fallback_honors_shared_checkout_lock
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-round-8 ]; then
+  test_content_in_default_fallback_allows
   exit 0
 fi
 

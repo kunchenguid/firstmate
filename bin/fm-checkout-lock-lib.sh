@@ -2,6 +2,8 @@
 # Shared common-Git-directory lock identity and ownership for checkout mutation.
 # Usage: source this file, call fm_checkout_lock_prepare <lock-root>, derive the
 # lock with fm_checkout_lock_path <checkout> <lock-root>, then use fm_lock_*.
+# Use fm_checkout_lock_run <checkout> <lock-root> <command> [args...] when the
+# complete checkout mutation can execute inside one shared lock scope.
 
 FM_CHECKOUT_LOCK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_CHECKOUT_LOCK_HELPERS_LOADED=0
@@ -58,4 +60,26 @@ fm_checkout_lock_prepare() {
     . "$FM_CHECKOUT_LOCK_LIB_DIR/fm-wake-lib.sh" || return 1
     FM_CHECKOUT_LOCK_HELPERS_LOADED=1
   fi
+}
+
+fm_checkout_lock_run() {
+  local checkout=$1 lock_root=$2
+  shift 2
+  (
+    local checkout_lock
+    fm_checkout_lock_prepare "$lock_root" || {
+      echo "error: cannot prepare shared checkout mutation lock at $lock_root" >&2
+      return 1
+    }
+    checkout_lock=$(fm_checkout_lock_path "$checkout" "$lock_root") || {
+      echo "error: cannot resolve shared checkout mutation lock identity for $checkout" >&2
+      return 1
+    }
+    if ! fm_lock_try_acquire "$checkout_lock"; then
+      echo "error: checkout mutation already running for $checkout (pid ${FM_LOCK_HELD_PID:-unknown})" >&2
+      return 1
+    fi
+    trap 'fm_lock_release "$checkout_lock"' EXIT
+    "$@"
+  )
 }

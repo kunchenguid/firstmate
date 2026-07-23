@@ -92,7 +92,8 @@
 #   remain under their durable lease for manual recovery. Other pre-commit
 #   failures close the prepared endpoint, restore prior task state, and return
 #   only a worktree whose repository identity, cleanliness, and expected detached
-#   tip are re-proven before and after owned hook cleanup.
+#   tip are re-proven before and after owned hook cleanup, with the return held
+#   under the common checkout mutation lock.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -133,7 +134,11 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+CHECKOUT_STATE_BASE="${FM_CHECKOUT_REFRESH_STATE_BASE:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/checkout-refresh}"
 SUB_HOME_MARKER=".fm-secondmate-home"
+# shellcheck source=bin/fm-checkout-lock-lib.sh
+. "$SCRIPT_DIR/fm-checkout-lock-lib.sh"
+CHECKOUT_LOCK_ROOT=$(fm_checkout_lock_root "$CHECKOUT_STATE_BASE")
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
@@ -1218,7 +1223,13 @@ spawn_return_created_worktree() {
     echo "warning: retained acquired worktree $WT because post-cleanup repository safety could not be re-proven" >&2
     return 1
   fi
-  ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1
+  fm_checkout_lock_run "$WT" "$CHECKOUT_LOCK_ROOT" \
+    spawn_treehouse_return_locked "$WT" "$PROJ_ABS" >/dev/null 2>&1
+}
+
+spawn_treehouse_return_locked() {
+  local worktree=$1 project=$2
+  ( cd "$project" && treehouse return --force "$worktree" )
 }
 
 spawn_restore_unmanaged_state_locked() {

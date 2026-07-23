@@ -370,7 +370,7 @@ test_home_seed_retains_repository_mismatch_acquisition() {
 }
 
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
-  local home acquired acquired_abs fakebin log err source
+  local home acquired acquired_abs fakebin log err source common key lock_root expected_lock lock_marker
   home="$TMP_ROOT/dash-fail-home"
   acquired="$TMP_ROOT/dash-fail-acquired-home"
   err="$TMP_ROOT/dash-fail.err"
@@ -380,11 +380,20 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
   source=$(make_live_default_firstmate_worktree "$acquired" dash-fail-firstmate)
   acquired_abs=$(cd "$acquired" && pwd -P)
+  common=$(git -C "$acquired" rev-parse --git-common-dir)
+  case "$common" in /*) ;; *) common="$acquired/$common" ;; esac
+  common=$(cd "$common" && pwd -P)
+  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  lock_root="$TMP_ROOT/dash-fail-locks"
+  expected_lock="$lock_root/$key.lock"
+  lock_marker="$TMP_ROOT/dash-fail-return-held-lock"
   printf 'other\n' > "$acquired/.fm-secondmate-home"
   fakebin=$(make_fake_tmux "$TMP_ROOT/dash-fail-fake")
   log="$TMP_ROOT/dash-fail-fake/tmux.log"
 
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_CHECKOUT_REFRESH_LOCK_ROOT="$lock_root" \
+    FM_EXPECT_CHECKOUT_LOCK="$expected_lock" FM_EXPECT_CHECKOUT_LOCK_MARKER="$lock_marker" \
     FM_ROOT_OVERRIDE="$source" \
     FM_SECONDMATE_CHARTER='dash acquired scope' FM_SECONDMATE_SCOPE='dash acquired scope' \
     "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
@@ -393,6 +402,8 @@ test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
   grep -F 'already marked for other' "$err" >/dev/null || fail "seed did not explain acquired marked-home rejection"
   grep -F "treehouse return --force $acquired_abs" "$log" >/dev/null \
     || fail "failed acquired seed did not return the home through treehouse"
+  [ -f "$lock_marker" ] \
+    || fail "secondmate rollback did not hold the common checkout lock during Treehouse return"
   if [ -f "$home/data/secondmates.md" ] && grep -F -- '- dash ' "$home/data/secondmates.md" >/dev/null; then
     fail "failed acquired seed left a registry route"
   fi
@@ -2282,6 +2293,11 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-6 ]; then
   test_home_seed_acquisition_honors_shared_checkout_lock
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-round-8 ]; then
+  test_home_seed_returns_treehouse_acquired_home_on_assignment_failure
   exit 0
 fi
 

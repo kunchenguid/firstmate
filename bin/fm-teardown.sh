@@ -23,6 +23,8 @@
 # teardown refuses rather than risk discarding unlanded work.
 # Origin-backed content checks hold the shared checkout lock and require bounded
 # remote HEAD probes before and after fetch to agree before comparing trees.
+# Every authorized Treehouse return holds the same common checkout mutation lock
+# across its retry and stale-index-lock recovery sequence.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge on the captain's approval) as a fallback
@@ -789,7 +791,7 @@ cleanup_stale_lock_for_safety_check() {
 
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
-teardown_treehouse_return() {
+teardown_treehouse_return_locked() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
   local out lock attempt=0 max_retries lock_desc
 
@@ -863,6 +865,11 @@ teardown_treehouse_return() {
 
   echo "teardown: $label return failed: git index.lock signature persisted across ${max_retries} retries (waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s each) even after the lock file disappeared" >&2
   return 1
+}
+
+teardown_treehouse_return() {
+  local dir=$1
+  fm_checkout_lock_run "$dir" "$CHECKOUT_LOCK_ROOT" teardown_treehouse_return_locked "$@"
 }
 
 validate_worktree_teardown_safety() {
