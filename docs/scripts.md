@@ -11,7 +11,7 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-autocompact.sh`      | Bridge Claude context compaction through a durable anchor and session-start recovery |
 | `fm-bootstrap.sh`        | Detect toolchain and fleet problems, run the locked session-start sweeps, and install approved tools |
 | `fm-checkout-refresh.sh` | Discover worktree seed checkouts, react to live upstream-default changes, surface untracked skill drafts, enforce the timed backstop, and manage the home-scoped scheduler |
-| `fm-fleet-sync.sh`       | Refresh project clones with safe fast-forwards, self-heals, `STUCK:` reports, branch pruning, and bounded recovery from an orphaned `.git/packed-refs.lock` |
+| `fm-fleet-sync.sh`       | Serialize live-default-proven project refreshes with safe fast-forwards, `STUCK:` reports, branch pruning, and orphaned-lock recovery |
 | `fm-fleet-snapshot.sh`   | Print the read-only structured fleet snapshot JSON (schema `fm-fleet-snapshot.v1`)   |
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-bearings-snapshot.sh` | Project the fleet snapshot to the compact TOON bearings view; local-only unless `--include-prs` |

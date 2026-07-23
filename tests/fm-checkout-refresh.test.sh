@@ -111,6 +111,26 @@ test_discovery_covers_projects_treehouse_external_and_config() {
   pass "discovery covers projects, Treehouse backing checkouts, matching-origin clones, and config"
 }
 
+test_uninspectable_active_project_invalidates_heartbeat() {
+  local project out status
+  project="$FM_TEST_HOME/projects/relvino"
+  chmod 000 "$project"
+  printf '%s\n' preserved-project-heartbeat > "$STATE_ROOT/heartbeat"
+
+  set +e
+  out=$(run_refresh run-once --force 2>&1)
+  status=$?
+  set -e
+  chmod 700 "$project"
+
+  [ "$status" -ne 0 ] || fail "uninspectable active-home project reported healthy coverage"
+  assert_contains "$out" "incomplete active-home project coverage at $project" \
+    "uninspectable active-home project was not surfaced"
+  [ "$(cat "$STATE_ROOT/heartbeat")" = preserved-project-heartbeat ] \
+    || fail "uninspectable active-home project advanced the healthy heartbeat"
+  pass "uninspectable active-home projects invalidate heartbeat health"
+}
+
 test_upstream_tip_signal_refreshes_between_firstmate_events() {
   local project external remote out
   project="$FM_TEST_HOME/projects/relvino"
@@ -148,7 +168,7 @@ test_live_default_change_is_surfaced_without_switching_branches() {
 
   out=$(run_refresh run-once --force)
 
-  assert_contains "$out" "$project: STUCK: on branch main" \
+  assert_contains "$out" "relvino: STUCK: on branch main" \
     "a live upstream default-branch change was not surfaced as an unsafe checkout"
   [ "$(git -C "$project" rev-parse HEAD)" = "$before" ] \
     || fail "default-branch change moved the checkout"
@@ -773,6 +793,7 @@ SH
 }
 
 test_discovery_covers_projects_treehouse_external_and_config
+test_uninspectable_active_project_invalidates_heartbeat
 test_upstream_tip_signal_refreshes_between_firstmate_events
 test_periodic_backstop_repairs_drift_without_a_new_tip
 test_live_default_change_is_surfaced_without_switching_branches

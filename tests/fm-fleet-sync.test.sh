@@ -11,6 +11,8 @@
 #     instead of a quiet skip.
 # The pre-existing fast-forward / already-current / local-only / no-origin paths
 # must be unchanged, and bootstrap must relay the new outcomes as FLEET_SYNC lines.
+# Every origin-backed path must use the live upstream default and the shared
+# canonical repository lock, including callers outside checkout-refresh.
 #
 # It also pins the orphaned .git/packed-refs.lock recovery in the fetch step
 # (fetch_with_packed_refs_lock_guard, backed by bin/fm-lock-lib.sh's shared
@@ -81,13 +83,25 @@ advance_origin() {
   git -C "$work" push -q origin main
 }
 
+switch_origin_default() {
+  local home=$1 name=$2 work remote
+  work="$home/work-$name"
+  remote="$home/remotes/$name.git"
+  git -C "$work" checkout -q -b trunk
+  commit_file "$work" trunk.txt trunk default-trunk
+  git -C "$work" push -q -u origin trunk
+  git -C "$remote" symbolic-ref HEAD refs/heads/trunk
+}
+
 head_sha() { git -C "$1" rev-parse HEAD; }
 
 # run_sync <home> [args...]: run fleet-sync against an isolated home, stdout only.
 run_sync() {
   local home=$1
   shift
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-fleet-sync.sh" "$@" 2>/dev/null
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$home/checkout-refresh-state" \
+    "$ROOT/bin/fm-fleet-sync.sh" "$@" 2>/dev/null
 }
 
 # --- packed-refs.lock fixtures ----------------------------------------------
@@ -191,6 +205,7 @@ run_sync_guarded() {
   realgit=$(command -v git)
   PATH="$fakebin:$PATH" REAL_GIT_FOR_TEST="$realgit" \
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_CHECKOUT_REFRESH_STATE_BASE="$home/checkout-refresh-state" \
     "$ROOT/bin/fm-fleet-sync.sh" "$@" >"$outf" 2>"$errf"
 }
 
@@ -329,6 +344,55 @@ test_on_default_clean_behind_fast_forwards() {
   assert_not_contains "$out" "STUCK" "ordinary fast-forward is not flagged STUCK"
   [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] || fail "clone was not fast-forwarded"
   pass "on-default clean behind clone still fast-forwards"
+}
+
+test_live_default_probe_overrides_stale_origin_head() {
+  local home clone out before stale
+  home=$(new_home)
+  clone=$(build_pair "$home" live-default)
+  advance_origin "$home" live-default C1
+  switch_origin_default "$home" live-default
+  before=$(head_sha "$clone")
+  stale=$(git -C "$clone" symbolic-ref --short refs/remotes/origin/HEAD)
+  [ "$stale" = "origin/main" ] || fail "live-default fixture did not retain stale origin/HEAD"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "live-default: STUCK: on branch main" \
+    "direct fleet sync did not use the live upstream default"
+  assert_contains "$out" "commits behind origin/trunk" \
+    "live-default warning did not identify the authoritative branch"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "former default branch was fast-forwarded"
+  [ "$(git -C "$clone" branch --show-current)" = "main" ] || fail "former default checkout was switched"
+  [ "$(git -C "$clone" symbolic-ref --short refs/remotes/origin/HEAD)" = "origin/main" ] \
+    || fail "fixture's stale origin/HEAD unexpectedly changed"
+  pass "direct sync proves the live upstream default and leaves the former default untouched"
+}
+
+test_direct_sync_honors_shared_checkout_lock() {
+  local home clone before common key lock_root lock out
+  home=$(new_home)
+  clone=$(build_pair "$home" shared-lock)
+  advance_origin "$home" shared-lock C1
+  before=$(head_sha "$clone")
+  common=$(git -C "$clone" rev-parse --git-common-dir)
+  case "$common" in /*) ;; *) common="$clone/$common" ;; esac
+  common=$(cd "$common" && pwd -P)
+  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  lock_root="$home/checkout-locks"
+  lock="$lock_root/$key.lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$$" > "$lock/pid"
+
+  out=$(FM_CHECKOUT_REFRESH_LOCK_ROOT="$lock_root" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-fleet-sync.sh" "$clone" 2>/dev/null)
+
+  assert_contains "$out" "$clone: skipped: refresh already running (pid $$)" \
+    "direct fleet sync bypassed the shared checkout lock"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "direct sync mutated a contended checkout"
+  rm -rf "$lock"
+  pass "direct sync serializes through the shared canonical checkout lock"
 }
 
 test_already_current_unchanged() {
@@ -636,6 +700,8 @@ test_dirty_is_stuck_untouched
 test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
+test_live_default_probe_overrides_stale_origin_head
+test_direct_sync_honors_shared_checkout_lock
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped

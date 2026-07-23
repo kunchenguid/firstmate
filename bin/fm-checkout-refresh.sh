@@ -18,14 +18,15 @@
 # metadata immediately before handoff.
 #
 # `run-once` probes each tracked upstream default-branch tip with `git ls-remote`.
-# A changed tip triggers an immediate safe refresh.
+# A changed tip triggers an immediate safe refresh, and fm-fleet-sync.sh repeats
+# that live proof while owning the shared per-checkout mutation lock.
 # FM_CHECKOUT_REFRESH_BACKSTOP seconds without a refresh triggers one anyway, so
 # missed signals and lost state remain bounded.
 # The home-scoped per-user LaunchAgent installed by `install` runs this probe
 # every FM_CHECKOUT_REFRESH_INTERVAL seconds while that Firstmate home is idle.
 # Its default state is under checkout-refresh/homes/<FM_HOME hash>, while
-# checkout-refresh/locks remains shared so overlapping home coverage serializes
-# mutation of the same clone.
+# checkout-refresh/locks remains shared so every fm-fleet-sync.sh caller
+# serializes mutation of the same clone.
 # Bounded child commands stay inside the refresher's process group, so the
 # aggregate session-start timeout still owns every nested fetch and fast-forward.
 # FM_TREEHOUSE_ACQUIRE_TIMEOUT applies the same process-tree ownership to the
@@ -263,6 +264,66 @@ if failed:
 PY
 }
 
+active_project_paths() {
+  if [ ! -e "$PROJECTS" ] && [ ! -L "$PROJECTS" ]; then
+    return 0
+  fi
+  [ -d "$PROJECTS" ] || {
+    echo "checkout-refresh: skipped: incomplete active-home project coverage because the projects root is not a directory: $PROJECTS" >&2
+    return 1
+  }
+  command -v python3 >/dev/null 2>&1 || {
+    echo "checkout-refresh: skipped: incomplete active-home project coverage because python3 is unavailable" >&2
+    return 1
+  }
+  python3 - "$PROJECTS" <<'PY'
+import os
+import stat
+import sys
+
+failed = False
+
+
+def directory_entries(path, label):
+    metadata = os.stat(path)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise NotADirectoryError(path)
+    permissions = stat.S_IMODE(metadata.st_mode)
+    if not permissions & 0o444 or not permissions & 0o111:
+        raise PermissionError(f"{label} is unreadable")
+    with os.scandir(path) as entries:
+        return sorted(entries, key=lambda entry: entry.name)
+
+
+root = sys.argv[1]
+try:
+    project_entries = directory_entries(root, "active-home projects root")
+except OSError as error:
+    failed = True
+    project_entries = []
+    print(
+        f"checkout-refresh: skipped: incomplete active-home project coverage at {root}: {error}",
+        file=sys.stderr,
+    )
+
+for project_entry in project_entries:
+    try:
+        if not project_entry.is_dir(follow_symlinks=True):
+            continue
+        directory_entries(project_entry.path, "active-home project")
+        print(project_entry.path)
+    except OSError as error:
+        failed = True
+        print(
+            f"checkout-refresh: skipped: incomplete active-home project coverage at {project_entry.path}: {error}",
+            file=sys.stderr,
+        )
+
+if failed:
+    raise SystemExit(1)
+PY
+}
+
 backing_checkout() {
   local worktree=$1 main
   [ -d "$worktree" ] || return 1
@@ -277,12 +338,13 @@ origin_url() {
 }
 
 discover() {
-  local tmp seeds origins scans treehouse_paths path project worktree main root candidate url failed=0
+  local tmp seeds origins scans treehouse_paths project_paths path project worktree main root candidate url failed=0
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-checkout-refresh-discover.XXXXXX") || return 1
   seeds="$tmp/seeds"
   origins="$tmp/origins"
   scans="$tmp/scans"
   treehouse_paths="$tmp/treehouse-worktrees"
+  project_paths="$tmp/active-projects"
   : > "$seeds"
   : > "$origins"
   : > "$scans"
@@ -290,13 +352,19 @@ discover() {
     rm -rf "$tmp"
     return 1
   fi
-
-  if [ -d "$PROJECTS" ]; then
-    for project in "$PROJECTS"/*; do
-      [ -d "$project" ] || continue
-      canonical_dir "$project" >> "$seeds" 2>/dev/null || true
-    done
+  if ! active_project_paths > "$project_paths"; then
+    rm -rf "$tmp"
+    return 1
   fi
+  while IFS= read -r project; do
+    [ -n "$project" ] || continue
+    if main=$(canonical_dir "$project" 2>/dev/null); then
+      printf '%s\n' "$main" >> "$seeds"
+    else
+      echo "checkout-refresh: skipped: active-home project is not canonically inspectable: $project" >&2
+      failed=1
+    fi
+  done < "$project_paths"
 
   while IFS= read -r path; do
     [ -n "$path" ] || continue
@@ -533,36 +601,16 @@ clear_stale_hygiene_alerts() {
 }
 
 sync_checkout() {
-  local checkout=$1 output_file=$2 prune=${3:-0} live_default=${4:-}
-  local status lock held lock_identity
-  ensure_lock_roots || {
-    printf '%s: skipped: refresh lock setup failed\n' "$checkout" > "$output_file"
-    return
-  }
-  lock_identity=$(git_common_dir "$checkout") || {
-    printf '%s: skipped: repository lock identity cannot be resolved\n' "$checkout" > "$output_file"
-    return
-  }
-  lock="$LOCK_ROOT/$(checkout_key "$lock_identity").lock"
-  if ! fm_lock_try_acquire "$lock"; then
-    held=${FM_LOCK_HELD_PID:-unknown}
-    printf '%s: skipped: refresh already running (pid %s)\n' "$checkout" "$held" > "$output_file"
-    return
-  fi
+  local checkout=$1 output_file=$2 prune=${3:-0}
+  local status
   if (
     export FM_FLEET_PRUNE="$prune"
-    if [ -n "$live_default" ]; then
-      export FM_FLEET_DEFAULT_BRANCH="$live_default"
-    else
-      unset FM_FLEET_DEFAULT_BRANCH
-    fi
     run_bounded "$SYNC_TIMEOUT" "$SCRIPT_DIR/fm-fleet-sync.sh" "$checkout"
   ) > "$output_file" 2>&1; then
     status=0
   else
     status=$?
   fi
-  fm_lock_release "$lock"
   if [ "$status" -eq 124 ]; then
     printf '%s: skipped: refresh timed out after %ss\n' "$checkout" "$SYNC_TIMEOUT" > "$output_file"
   elif [ "$status" -ne 0 ]; then
@@ -641,7 +689,7 @@ run_once() {
 
     output_file=$(mktemp "$STATE_ROOT/.sync.XXXXXX") || continue
     if [ "$probe_ok" -eq 1 ]; then
-      sync_checkout "$checkout" "$output_file" "$prune" "$PROBE_BRANCH"
+      sync_checkout "$checkout" "$output_file" "$prune"
     else
       printf '%s: skipped: cannot probe live upstream default branch\n' "$checkout" > "$output_file"
     fi
@@ -684,7 +732,7 @@ EOF
 }
 
 preflight() {
-  local checkout=$1 output key output_file hygiene_found=0 live_default=
+  local checkout=$1 output key output_file hygiene_found=0
   [ -d "$checkout" ] || { echo "error: checkout-refresh preflight target is not a directory: $checkout" >&2; return 1; }
   ensure_lock_roots || return 1
   key=$(checkout_key "$checkout")
@@ -693,8 +741,7 @@ preflight() {
   output_file=$(mktemp "$STATE_ROOT/.preflight.XXXXXX") || return 1
   if git -C "$checkout" remote get-url origin >/dev/null 2>&1; then
     if probe_upstream "$checkout"; then
-      live_default=$PROBE_BRANCH
-      sync_checkout "$checkout" "$output_file" 0 "$live_default"
+      sync_checkout "$checkout" "$output_file" 0
     else
       printf '%s: skipped: cannot probe live upstream default branch\n' "$checkout" > "$output_file"
     fi

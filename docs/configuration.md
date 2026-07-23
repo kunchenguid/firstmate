@@ -276,17 +276,17 @@ Matching by origin discovers parallel clones such as `~/relvino` without embeddi
 Optional `path` and shallow `scan` directives in the gitignored `config/checkout-refresh` file extend that set.
 
 Each `FM_HOME` owns a distinct background identity and state directory, so primary and secondmate homes can cover their own projects without displacing one another.
-Checkout-level owner locks are shared across those home-scoped services, so overlapping Treehouse backing checkouts or configured external clones are serialized safely.
+Checkout-level owner locks are held by the shared `fm-fleet-sync.sh` mutation path, so home-scoped services, spawn preflight, teardown, and merged-PR wake handling serialize overlapping checkouts safely.
 Each background owner probes every covered checkout's remote default-branch tip every 60 seconds.
 Any upstream-tip change triggers `fm-fleet-sync.sh` immediately, regardless of who pushed or merged it.
-The live probe's branch name is authoritative for that refresh instead of a checkout's possibly stale `origin/HEAD`.
+Every `fm-fleet-sync.sh` invocation repeats the live upstream-default probe after fetching and proves that the fetched ref matches the live tip instead of trusting a checkout's possibly stale `origin/HEAD`.
 If the upstream default branch changes, a checkout still on the old branch is reported as `STUCK:` and left unchanged under the fast-forward-only posture.
 A full safe refresh runs at least every 15 minutes even when no change signal is observed, so transient network failures, a missed probe, or lost local state cannot create unbounded drift.
 Every probe also inventories non-ignored untracked files in covered seed checkouts and Treehouse pool worktrees under `.agents/skills`, `.claude/skills`, `.codex/skills`, and `skills`.
 Gitignored files are intentional local material and remain outside this collision guard.
 A new or growing inventory produces a durable `HYGIENE:` alert immediately, while forced session-start and spawn-preflight checks repeat any unresolved alert for an operator.
 An inventory read failure preserves the prior hygiene alert and suppresses the healthy heartbeat until a complete scan succeeds.
-Unreadable or malformed Treehouse state likewise surfaces an incomplete-coverage diagnostic and prevents the service from advancing its healthy heartbeat.
+Unreadable active-home project directories or unreadable or malformed Treehouse state surface an incomplete-coverage diagnostic and prevent the service from advancing its healthy heartbeat.
 The ordinary safe-refresh warning separately quantifies every non-ignored untracked file and the subset under those skill directories, so other untracked accumulation is bounded by the same 15-minute backstop.
 These checks inspect paths only and never delete, move, stash, reset, or edit a draft.
 The signal interval and backstop are configurable through `FM_CHECKOUT_REFRESH_INTERVAL` and `FM_CHECKOUT_REFRESH_BACKSTOP`.

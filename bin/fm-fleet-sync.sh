@@ -18,9 +18,13 @@
 # and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
-# Set FM_FLEET_DEFAULT_BRANCH to a branch name already proven by a live
-# `ls-remote --symref origin HEAD` probe when a caller must not trust the
-# checkout's possibly stale refs/remotes/origin/HEAD.
+# Every origin-backed invocation probes `ls-remote --symref origin HEAD` after
+# fetching and proves the fetched ref matches that live tip before any local
+# branch or worktree mutation, so cached refs/remotes/origin/HEAD is never an
+# authority.
+# The common mutation path owns a cooperative lock keyed by the canonical Git
+# common directory, so scheduler, preflight, teardown, and merge-wake callers
+# serialize every fetch, prune, checkout, and fast-forward of the same clone.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
@@ -41,6 +45,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+CHECKOUT_STATE_BASE="${FM_CHECKOUT_REFRESH_STATE_BASE:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/checkout-refresh}"
+if [ -n "${FM_CHECKOUT_REFRESH_STATE_ROOT:-}" ]; then
+  CHECKOUT_LOCK_ROOT="${FM_CHECKOUT_REFRESH_LOCK_ROOT:-$FM_CHECKOUT_REFRESH_STATE_ROOT/locks}"
+else
+  CHECKOUT_LOCK_ROOT="${FM_CHECKOUT_REFRESH_LOCK_ROOT:-$CHECKOUT_STATE_BASE/locks}"
+fi
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 fm_refuse_if_gate_agent
@@ -118,25 +128,57 @@ resolve_project_arg() {
   printf '%s\n' "$arg"
 }
 
-default_branch() {
-  local ref branch
-  if [ -n "${FM_FLEET_DEFAULT_BRANCH:-}" ]; then
-    git check-ref-format --branch "$FM_FLEET_DEFAULT_BRANCH" >/dev/null 2>&1 || return 1
-    printf '%s\n' "$FM_FLEET_DEFAULT_BRANCH"
-    return 0
-  fi
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
-  fi
-  for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
-      echo "$branch"
-      return 0
-    fi
-  done
-  return 1
+canonical_dir() {
+  [ -d "$1" ] || return 1
+  (cd "$1" 2>/dev/null && pwd -P)
+}
+
+git_common_dir() {
+  local common
+  common=$(git -C "$PROJ" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common" in
+    /*) canonical_dir "$common" ;;
+    *) canonical_dir "$PROJ/$common" ;;
+  esac
+}
+
+checkout_key() {
+  printf '%s' "$1" | shasum -a 256 | awk '{print substr($1,1,24)}'
+}
+
+ensure_checkout_lock_helpers() {
+  local FM_STATE_OVERRIDE="$CHECKOUT_LOCK_ROOT" STATE='' FM_WAKE_LIB_DIR='' FM_WAKE_DEFAULT_ROOT=''
+  local FM_WAKE_QUEUE='' FM_WAKE_QUEUE_LOCK='' FM_ROOT="$FM_ROOT" FM_HOME="$FM_HOME"
+  mkdir -p "$CHECKOUT_LOCK_ROOT" || return 1
+  [ -d "$CHECKOUT_LOCK_ROOT" ] && [ ! -L "$CHECKOUT_LOCK_ROOT" ] || return 1
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+}
+
+LIVE_DEFAULT_BRANCH=
+LIVE_DEFAULT_TIP=
+LIVE_PROBE_OUTPUT=
+probe_live_default() {
+  local line ref
+  LIVE_DEFAULT_BRANCH=
+  LIVE_DEFAULT_TIP=
+  LIVE_PROBE_OUTPUT=$(git -C "$PROJ" ls-remote --symref origin HEAD 2>&1) || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      "ref: refs/heads/"*$'\t'"HEAD")
+        ref=${line#ref: refs/heads/}
+        LIVE_DEFAULT_BRANCH=${ref%$'\t'HEAD}
+        ;;
+      *$'\t'"HEAD")
+        LIVE_DEFAULT_TIP=${line%$'\t'HEAD}
+        ;;
+    esac
+  done <<EOF
+$LIVE_PROBE_OUTPUT
+EOF
+  [ -n "$LIVE_DEFAULT_BRANCH" ] \
+    && [ -n "$LIVE_DEFAULT_TIP" ] \
+    && git check-ref-format --branch "$LIVE_DEFAULT_BRANCH" >/dev/null 2>&1
 }
 
 first_line() {
@@ -314,7 +356,7 @@ report_stuck() {
   echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention"
 }
 
-sync_project() {
+sync_project() (
   PROJ=$1
   label=$(project_label)
   registry_name=$(basename "$PROJ")
@@ -338,6 +380,21 @@ sync_project() {
     return 0
   fi
 
+  if ! ensure_checkout_lock_helpers; then
+    echo "$PROJ: skipped: refresh lock setup failed"
+    return 0
+  fi
+  lock_identity=$(git_common_dir) || {
+    echo "$PROJ: skipped: repository lock identity cannot be resolved"
+    return 0
+  }
+  checkout_lock="$CHECKOUT_LOCK_ROOT/$(checkout_key "$lock_identity").lock"
+  if ! fm_lock_try_acquire "$checkout_lock"; then
+    echo "$PROJ: skipped: refresh already running (pid ${FM_LOCK_HELD_PID:-unknown})"
+    return 0
+  fi
+  trap 'fm_lock_release "$checkout_lock"' EXIT
+
   if ! fetch_with_packed_refs_lock_guard; then
     reason="fetch failed"
     if [ -n "$FETCH_OUTPUT" ]; then
@@ -347,17 +404,30 @@ sync_project() {
     return 0
   fi
 
-  prune_gone_branches || true
-
-  DEFAULT=$(default_branch) || {
-    echo "$label: skipped: cannot determine default branch"
+  if ! probe_live_default; then
+    reason="cannot probe live upstream default branch"
+    if [ -n "$LIVE_PROBE_OUTPUT" ]; then
+      reason="$reason: $(first_line "$LIVE_PROBE_OUTPUT")"
+    fi
+    echo "$label: skipped: $reason"
     return 0
-  }
+  fi
+  DEFAULT=$LIVE_DEFAULT_BRANCH
   BASE="origin/$DEFAULT"
   if ! git -C "$PROJ" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
     echo "$label: skipped: $BASE does not exist"
     return 0
   fi
+  remote_rev=$(git -C "$PROJ" rev-parse "$BASE^{commit}") || {
+    echo "$label: skipped: cannot read $BASE"
+    return 0
+  }
+  if [ "$remote_rev" != "$LIVE_DEFAULT_TIP" ]; then
+    echo "$label: skipped: fetched $BASE does not match live upstream HEAD - retry later"
+    return 0
+  fi
+
+  prune_gone_branches || true
 
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
   dirty=no
@@ -450,7 +520,7 @@ sync_project() {
     echo "$label: synced $before..$after"
   fi
   return 0
-}
+)
 
 if [ $# -eq 1 ]; then
   sync_project "$(resolve_project_arg "$1")"
