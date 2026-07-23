@@ -58,6 +58,7 @@ printf 'done: old run must not be attributed\n' > "$STATE/observe-feature.status
 for spec in \
   '2026-01-01T00:01:00Z working implementing' \
   '2026-01-01T00:02:00Z needs-decision choose' \
+  '2026-01-01T00:02:30Z needs-decision reminder' \
   '2026-01-01T00:03:00Z resolved chosen' \
   '2026-01-01T00:04:00Z done complete'; do
   IFS=' ' read -r stamp verb note <<EOF
@@ -143,12 +144,12 @@ assert r['tokens_input'] == 110 and r['tokens_output'] == 25, dict(r)
 assert r['tokens_cache_read'] == 32 and r['tokens_cache_write'] == 4, dict(r)
 assert r['tokens_total'] == 171, dict(r)
 assert abs(r['cost_usd'] - 0.42) < 0.00001, dict(r)
-assert r['intervention_count'] == 1 and r['wait_seconds'] == 60, dict(r)
+assert r['intervention_count'] == 2 and r['wait_seconds'] == 60, dict(r)
 assert r['first_pass_quality'] == 0, dict(r)
 assert r['quality_findings'] == 1 and r['quality_unresolved'] == 0, dict(r)
 assert c.execute('SELECT COUNT(*) FROM sessions').fetchone()[0] == 2
 event_rows = [tuple(row) for row in c.execute('SELECT state,observed_at,source_line FROM events ORDER BY source_line')]
-assert len(event_rows) == 4, event_rows
+assert len(event_rows) == 5, event_rows
 assert c.execute("SELECT COUNT(*) FROM evidence WHERE kind='commit' AND ref=?", (head,)).fetchone()[0] == 1
 assert tuple(c.execute('SELECT finding_id,severity,resolved FROM quality_findings').fetchone()) == ('Q1','medium',1)
 assert set(row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'")) >= {
@@ -165,7 +166,7 @@ if ! python3 - "$DATA/observability.sqlite3" <<'PY'
 import sqlite3, sys
 c=sqlite3.connect(sys.argv[1])
 assert c.execute('SELECT COUNT(*) FROM runs').fetchone()[0] == 1
-assert c.execute('SELECT COUNT(*) FROM events').fetchone()[0] == 4
+assert c.execute('SELECT COUNT(*) FROM events').fetchone()[0] == 5
 assert c.execute('SELECT COUNT(*) FROM sessions').fetchone()[0] == 2
 assert c.execute('SELECT COUNT(*) FROM quality_findings').fetchone()[0] == 1
 PY
@@ -173,6 +174,20 @@ then
   fail "idempotent database assertions failed"
 fi
 pass "fm-observe: repeated collection is idempotent"
+
+mv "$NM_DB" "$NM_DB.unavailable"
+run_collect >/dev/null || fail "collection without no-mistakes database failed"
+if ! python3 - "$DATA/observability.sqlite3" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+r = c.execute("SELECT first_pass_quality FROM runs WHERE task_id='observe-feature'").fetchone()
+assert r == (0,), r
+PY
+then
+  fail "unavailable no-mistakes database erased preserved first-pass quality"
+fi
+mv "$NM_DB.unavailable" "$NM_DB"
+pass "fm-observe: unavailable quality evidence preserves earliest first pass"
 
 python3 - "$STATE/observe-feature.status" <<'PY'
 import sys
@@ -187,7 +202,7 @@ run_collect >/dev/null || fail "truncated status collection failed"
 events_after_tail=$(python3 - "$DATA/observability.sqlite3" <<'PY'
 import sqlite3, sys
 c = sqlite3.connect(sys.argv[1])
-assert c.execute("SELECT COUNT(*) FROM events WHERE state='needs-decision'").fetchone()[0] == 1
+assert c.execute("SELECT COUNT(*) FROM events WHERE state='needs-decision'").fetchone()[0] == 2
 assert c.execute("SELECT COUNT(*) FROM events WHERE observed_at=1767225960").fetchone()[0] == 1
 print(c.execute('SELECT COUNT(*) FROM events').fetchone()[0])
 PY

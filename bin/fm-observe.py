@@ -872,7 +872,7 @@ def outcome_and_interventions(
         stamp = int(row["observed_at"])
         if state in {"needs-decision", "blocked"}:
             intervention_count += 1
-            open_waits[key] = stamp
+            open_waits.setdefault(key, stamp)
         elif state in {"resolved", "captain-held"}:
             if key in open_waits:
                 wait_seconds += max(0, stamp - open_waits.pop(key))
@@ -919,7 +919,8 @@ def summarize_run(
     connection.execute(
         """UPDATE runs SET tokens_input=?,tokens_output=?,tokens_cache_read=?,
              tokens_cache_write=?,tokens_reasoning=?,tokens_total=?,cost_usd=?,turns=?,
-             retries=?,first_pass_quality=?,quality_findings=?,quality_unresolved=?,
+             retries=?,first_pass_quality=COALESCE(?,first_pass_quality),
+             quality_findings=?,quality_unresolved=?,
              no_mistakes_runs=? WHERE run_id=?""",
         (
             totals["ti"], totals["tout"], totals["tcr"], totals["tcw"],
