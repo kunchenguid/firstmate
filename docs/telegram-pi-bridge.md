@@ -37,11 +37,12 @@ A second offer while one adoption awaits persistence returns `BUSY`.
 An unbound, replaced, unsupported, or shut-down session returns `UNAVAILABLE`.
 
 Ordinary messages always use `followUp`.
-The bridge uses `steer` only for an authenticated correction whose `supersedesExternalId` is the exact external turn currently active in Pi.
+When the active session is busy, the bridge uses `steer` only for an authenticated correction whose `supersedesExternalId` is the exact external turn currently active in Pi.
 
 `session_shutdown` removes the input listener, clears the active route, pending adoption, current external turn, and every session-bound closure before emitting unavailability.
 The next `session_start` creates a fresh bridge instance around the new session manager and requires a fresh explicit route and epoch binding.
 Reload, replacement, fork, and restart therefore cannot reuse the prior session object.
+Any post-event result from a prior generation is ignored, so a stale acknowledgement cannot revive a replaced or shut-down session.
 
 ## Conformance evidence
 
