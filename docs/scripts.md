@@ -62,6 +62,7 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
 | `fm-lock-lib.sh`         | Shared "is this git lock provably abandoned?" proof used by teardown and fleet-sync   |
+| `fm-checkout-lock-lib.sh` | Shared common-Git-directory lock identity and ownership for checkout mutation       |
 | `fm-process-tree-lib.sh` | Shared bounded command runner that terminates and reaps complete process trees         |
 | `fm-config-inherit-lib.sh` | Shared primary-to-secondmate inheritable-config propagation                        |
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector and `tasks-axi` compatibility probe                  |

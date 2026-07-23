@@ -231,14 +231,14 @@ Generalizable firstmate knowledge goes to shared tracked docs through the normal
 
 The installed checkout-refresh owner polls tracked upstream default-branch tips independently of Firstmate tasks and reacts to changes from any contributor.
 A 15-minute full-refresh backstop bounds drift when a signal is missed, while the locked session-start sweep, PR-based teardown, and merged-PR wake handling remain additional refresh paths.
-The covered set includes the active home's project clones, Treehouse backing checkouts, configured paths, and matching-origin top-level clones such as a parallel checkout under `$HOME`.
+The covered set includes exact Git roots for the active home's project clones, Treehouse backing checkouts, configured paths, and matching-origin top-level clones such as a parallel checkout under `$HOME`.
 Uninspectable active-home projects, malformed or unreadable Treehouse state, and failed skill inventories invalidate the healthy coverage heartbeat until discovery and hygiene inspection complete.
 Treehouse skips dirty pool entries and fetches origin when Firstmate requests a durable task lease.
 Firstmate verifies each task lease or leased secondmate home is clean, belongs to the requested repository, and matches the upstream tip before creating an endpoint or seeding.
 Remote-free local-only acquisitions use the requested repository's local default tip, while stale, dirty, changed, or unverifiable acquisitions are diagnosed and remain leased without destructive return.
 Rollback returns a task lease only after re-proving its repository identity, cleanliness, and expected detached tip.
 Clean default-branch clones fast-forward to `origin/<default>`, and a clean detached HEAD that holds no unique commits is re-attached to the default branch before the same fast-forward path runs.
-The shared mutation path holds one canonical repository lock and proves the fetched default ref against the live upstream `HEAD`, so scheduler, preflight, teardown, and merged-PR wake callers neither race nor trust stale `origin/HEAD`.
+The shared mutation path holds one canonical repository lock and proves the fetched default ref against the live upstream `HEAD`, while teardown requires its locked pre-fetch and post-fetch probes to agree, so scheduler, preflight, teardown, and merged-PR wake callers neither race nor trust stale `origin/HEAD`.
 Every signal probe also surfaces a new or growing inventory of non-ignored untracked files under repository skill directories in covered seed checkouts and Treehouse pool worktrees, while each full safe refresh quantifies all non-ignored untracked files in any dirty-checkout alarm.
 That early hygiene signal prevents local skill drafts from silently accumulating until an upstream commit claims the same paths.
 Dirty clones, non-default branches, detached HEADs with unique commits, diverged defaults, and default branches checked out in another worktree are reported as `STUCK:` with their behind count and left untouched.

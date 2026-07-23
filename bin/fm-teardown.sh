@@ -21,8 +21,8 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
-# Origin-backed content checks prove the live upstream default with a bounded
-# remote HEAD probe before fetching or comparing trees.
+# Origin-backed content checks hold the shared checkout lock and require bounded
+# remote HEAD probes before and after fetch to agree before comparing trees.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge on the captain's approval) as a fallback
@@ -85,8 +85,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+CHECKOUT_STATE_BASE="${FM_CHECKOUT_REFRESH_STATE_BASE:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/checkout-refresh}"
 SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
+# shellcheck source=bin/fm-checkout-lock-lib.sh
+. "$SCRIPT_DIR/fm-checkout-lock-lib.sh"
+CHECKOUT_LOCK_ROOT=$(fm_checkout_lock_root "$CHECKOUT_STATE_BASE")
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -521,46 +525,11 @@ pr_is_merged() {
   unpushed_patches_are_in_pr_head "$head"
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
-content_in_default() {
-  local name ref default_tree merged_tree fetched fetch_output reason
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    if ! probe_live_origin_default; then
-      reason=$(printf '%s\n' "$LIVE_DEFAULT_OUTPUT" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p')
-      echo "teardown: cannot prove the live origin default for $PROJ${reason:+: $reason}; retaining $WT" >&2
-      return 1
-    fi
-    name=$LIVE_DEFAULT_BRANCH
-    if ! fetch_output=$(fm_run_bounded "$TEARDOWN_UPSTREAM_TIMEOUT" \
-        git -C "$WT" fetch --quiet origin \
-        "+refs/heads/$name:refs/remotes/origin/$name" 2>&1); then
-      reason=$(printf '%s\n' "$fetch_output" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p')
-      echo "teardown: cannot fetch live origin/$name for landing proof${reason:+: $reason}; retaining $WT" >&2
-      return 1
-    fi
-    ref="refs/remotes/origin/$name"
-    fetched=$(git -C "$WT" rev-parse --quiet --verify "$ref^{commit}" 2>/dev/null) || {
-      echo "teardown: cannot inspect fetched live origin/$name; retaining $WT" >&2
-      return 1
-    }
-    if [ "$fetched" != "$LIVE_DEFAULT_TIP" ]; then
-      echo "teardown: fetched origin/$name does not match live origin HEAD; retaining $WT" >&2
-      return 1
-    fi
-  else
-    name=$(default_branch) || return 1
-    if git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
-      ref="refs/heads/$name"
-    else
-      return 1
-    fi
-  fi
+# Is the branch's content already present in the up-to-date default branch?
+# Origin-backed proof holds the common checkout lock across probe, fetch,
+# unchanged branch-and-tip re-probe, and tree comparison.
+content_matches_ref() {
+  local ref=$1 default_tree merged_tree
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
   merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
@@ -570,6 +539,74 @@ content_in_default() {
     return 1
   fi
   return 0
+}
+
+content_in_origin_default() {
+  local initial_branch initial_tip ref fetched fetch_output reason
+  if ! probe_live_origin_default; then
+    reason=$(printf '%s\n' "$LIVE_DEFAULT_OUTPUT" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p')
+    echo "teardown: cannot prove the live origin default for $PROJ${reason:+: $reason}; retaining $WT" >&2
+    return 1
+  fi
+  initial_branch=$LIVE_DEFAULT_BRANCH
+  initial_tip=$LIVE_DEFAULT_TIP
+  if ! fetch_output=$(fm_run_bounded "$TEARDOWN_UPSTREAM_TIMEOUT" \
+      git -C "$WT" fetch --quiet origin \
+      "+refs/heads/$initial_branch:refs/remotes/origin/$initial_branch" 2>&1); then
+    reason=$(printf '%s\n' "$fetch_output" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p')
+    echo "teardown: cannot fetch live origin/$initial_branch for landing proof${reason:+: $reason}; retaining $WT" >&2
+    return 1
+  fi
+  if ! probe_live_origin_default; then
+    reason=$(printf '%s\n' "$LIVE_DEFAULT_OUTPUT" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p')
+    echo "teardown: cannot re-prove the live origin default after fetch${reason:+: $reason}; retaining $WT" >&2
+    return 1
+  fi
+  if [ "$LIVE_DEFAULT_BRANCH" != "$initial_branch" ] || [ "$LIVE_DEFAULT_TIP" != "$initial_tip" ]; then
+    echo "teardown: live origin default changed during landing proof ($initial_branch@$initial_tip -> $LIVE_DEFAULT_BRANCH@$LIVE_DEFAULT_TIP); retaining $WT" >&2
+    return 1
+  fi
+  ref="refs/remotes/origin/$initial_branch"
+  fetched=$(git -C "$WT" rev-parse --quiet --verify "$ref^{commit}" 2>/dev/null) || {
+    echo "teardown: cannot inspect fetched live origin/$initial_branch; retaining $WT" >&2
+    return 1
+  }
+  if [ "$fetched" != "$initial_tip" ]; then
+    echo "teardown: fetched origin/$initial_branch does not match live origin HEAD; retaining $WT" >&2
+    return 1
+  fi
+  content_matches_ref "$ref"
+}
+
+content_in_default() {
+  local name ref
+  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+    (
+      local checkout_lock
+      if ! fm_checkout_lock_prepare "$CHECKOUT_LOCK_ROOT"; then
+        echo "teardown: cannot prepare the shared checkout lock at $CHECKOUT_LOCK_ROOT; retaining $WT" >&2
+        return 1
+      fi
+      checkout_lock=$(fm_checkout_lock_path "$WT" "$CHECKOUT_LOCK_ROOT") || {
+        echo "teardown: cannot resolve the shared checkout lock identity for $WT; retaining it" >&2
+        return 1
+      }
+      if ! fm_lock_try_acquire "$checkout_lock"; then
+        echo "teardown: checkout mutation already running for $WT (pid ${FM_LOCK_HELD_PID:-unknown}); retaining it" >&2
+        return 1
+      fi
+      trap 'fm_lock_release "$checkout_lock"' EXIT
+      content_in_origin_default
+    )
+    return
+  fi
+  name=$(default_branch) || return 1
+  if git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+    ref="refs/heads/$name"
+  else
+    return 1
+  fi
+  content_matches_ref "$ref"
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not

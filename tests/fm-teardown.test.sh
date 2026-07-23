@@ -524,6 +524,7 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_CHECKOUT_REFRESH_LOCK_ROOT="${FM_CHECKOUT_REFRESH_LOCK_ROOT:-$case_dir/checkout-locks}" \
   FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1 \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
@@ -1061,6 +1062,77 @@ test_content_fallback_uses_live_default() {
   assert_grep "task content is not present in authoritative refs/remotes/origin/trunk" \
     "$case_dir/stderr" "live-default teardown did not identify the authoritative branch"
   pass "teardown landing proof uses the live upstream default"
+}
+
+test_content_fallback_reprobes_live_default_after_fetch() {
+  local case_dir rc baseline
+  case_dir=$(make_case content-default-race)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  baseline=$(git --git-dir="$case_dir/origin.git" rev-parse main^)
+  git --git-dir="$case_dir/origin.git" update-ref refs/heads/trunk "$baseline"
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+is_fetch=0
+for arg in "$@"; do
+  [ "$arg" = fetch ] && is_fetch=1
+done
+if [ "$is_fetch" -eq 1 ]; then
+  "$real" "$@"
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    "$real" --git-dir="${FM_TEST_ORIGIN:?}" symbolic-ref HEAD refs/heads/trunk
+  fi
+  exit "$status"
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+
+  set +e
+  FM_TEST_ORIGIN="$case_dir/origin.git" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "default rename during landing proof must refuse teardown"
+  assert_present "$case_dir/wt" "default-rename race discarded the task worktree"
+  assert_present "$case_dir/state/task-x1.meta" "default-rename race removed task metadata"
+  assert_grep "live origin default changed during landing proof" "$case_dir/stderr" \
+    "default-rename race did not surface the changed live authority"
+  pass "teardown re-probes live default after fetching"
+}
+
+test_content_fallback_honors_shared_checkout_lock() {
+  local case_dir rc common key lock_root lock
+  case_dir=$(make_case content-shared-lock)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  common=$(git -C "$case_dir/wt" rev-parse --git-common-dir)
+  case "$common" in /*) ;; *) common="$case_dir/wt/$common" ;; esac
+  common=$(cd "$common" && pwd -P)
+  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  lock_root="$case_dir/checkout-locks"
+  lock="$lock_root/$key.lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$$" > "$lock/pid"
+
+  set +e
+  FM_CHECKOUT_REFRESH_LOCK_ROOT="$lock_root" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "contended checkout lock must refuse teardown landing proof"
+  assert_present "$case_dir/wt" "lock contention discarded the task worktree"
+  assert_present "$case_dir/state/task-x1.meta" "lock contention removed task metadata"
+  assert_grep "checkout mutation already running for $case_dir/wt (pid $$)" \
+    "$case_dir/stderr" "teardown did not surface shared checkout lock contention"
+  rm -rf "$lock"
+  pass "teardown landing proof holds the shared checkout lock"
 }
 
 test_dirty_worktree_refuses() {
@@ -2228,6 +2300,12 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-6 ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-7 ]; then
+  test_content_fallback_reprobes_live_default_after_fetch
+  test_content_fallback_honors_shared_checkout_lock
+  exit 0
+fi
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -2262,6 +2340,8 @@ test_pr_check_rejects_reused_task_generation
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_content_fallback_uses_live_default
+test_content_fallback_reprobes_live_default_after_fetch
+test_content_fallback_honors_shared_checkout_lock
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds

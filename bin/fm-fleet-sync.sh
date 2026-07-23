@@ -47,12 +47,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+# shellcheck source=bin/fm-checkout-lock-lib.sh
+. "$SCRIPT_DIR/fm-checkout-lock-lib.sh"
 CHECKOUT_STATE_BASE="${FM_CHECKOUT_REFRESH_STATE_BASE:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/checkout-refresh}"
-if [ -n "${FM_CHECKOUT_REFRESH_STATE_ROOT:-}" ]; then
-  CHECKOUT_LOCK_ROOT="${FM_CHECKOUT_REFRESH_LOCK_ROOT:-$FM_CHECKOUT_REFRESH_STATE_ROOT/locks}"
-else
-  CHECKOUT_LOCK_ROOT="${FM_CHECKOUT_REFRESH_LOCK_ROOT:-$CHECKOUT_STATE_BASE/locks}"
-fi
+CHECKOUT_LOCK_ROOT=$(fm_checkout_lock_root "$CHECKOUT_STATE_BASE")
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 fm_refuse_if_gate_agent
@@ -143,28 +141,6 @@ resolve_project_arg() {
 canonical_dir() {
   [ -d "$1" ] || return 1
   (cd "$1" 2>/dev/null && pwd -P)
-}
-
-git_common_dir() {
-  local common
-  common=$(git -C "$PROJ" rev-parse --git-common-dir 2>/dev/null) || return 1
-  case "$common" in
-    /*) canonical_dir "$common" ;;
-    *) canonical_dir "$PROJ/$common" ;;
-  esac
-}
-
-checkout_key() {
-  printf '%s' "$1" | shasum -a 256 | awk '{print substr($1,1,24)}'
-}
-
-ensure_checkout_lock_helpers() {
-  local FM_STATE_OVERRIDE="$CHECKOUT_LOCK_ROOT" STATE='' FM_WAKE_LIB_DIR='' FM_WAKE_DEFAULT_ROOT=''
-  local FM_WAKE_QUEUE='' FM_WAKE_QUEUE_LOCK='' FM_ROOT="$FM_ROOT" FM_HOME="$FM_HOME"
-  mkdir -p "$CHECKOUT_LOCK_ROOT" || return 1
-  [ -d "$CHECKOUT_LOCK_ROOT" ] && [ ! -L "$CHECKOUT_LOCK_ROOT" ] || return 1
-  # shellcheck source=bin/fm-wake-lib.sh
-  . "$SCRIPT_DIR/fm-wake-lib.sh"
 }
 
 LIVE_DEFAULT_BRANCH=
@@ -392,15 +368,14 @@ sync_project() (
     return 0
   fi
 
-  if ! ensure_checkout_lock_helpers; then
+  if ! fm_checkout_lock_prepare "$CHECKOUT_LOCK_ROOT"; then
     echo "$PROJ: skipped: refresh lock setup failed"
     return 0
   fi
-  lock_identity=$(git_common_dir) || {
+  checkout_lock=$(fm_checkout_lock_path "$PROJ" "$CHECKOUT_LOCK_ROOT") || {
     echo "$PROJ: skipped: repository lock identity cannot be resolved"
     return 0
   }
-  checkout_lock="$CHECKOUT_LOCK_ROOT/$(checkout_key "$lock_identity").lock"
   if ! fm_lock_try_acquire "$checkout_lock"; then
     echo "$PROJ: skipped: refresh already running (pid ${FM_LOCK_HELD_PID:-unknown})"
     return 0

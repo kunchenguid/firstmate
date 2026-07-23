@@ -7,12 +7,12 @@
 #
 #   - projects/* under the active FM_HOME;
 #   - backing checkouts discovered from Treehouse's state under ~/.treehouse;
-#   - explicit `path <checkout>` entries in config/checkout-refresh;
+#   - exact Git worktree roots from `path <checkout>` entries in config/checkout-refresh;
 #   - top-level clones under $HOME, plus explicit `scan <directory>` roots, whose
 #     origin URL matches one of the checkouts above.
 #
-# Matching-origin discovery is what covers a second clone such as ~/relvino
-# without hard-coding a captain-specific path.
+# Matching-origin discovery covers exact top-level clone roots such as ~/relvino
+# without hard-coding a captain-specific path or inheriting an enclosing repository.
 # Treehouse pool entries resolve back to their backing checkout because Treehouse
 # fetches origin and resets an acquired detached worktree from that shared Git
 # metadata immediately before handoff.
@@ -75,6 +75,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+# shellcheck source=bin/fm-checkout-lock-lib.sh
+. "$SCRIPT_DIR/fm-checkout-lock-lib.sh"
 if FM_HOME_CANONICAL=$(cd "$FM_HOME" 2>/dev/null && pwd -P); then
   :
 else
@@ -98,11 +100,10 @@ fi
 STATE_BASE="${FM_CHECKOUT_REFRESH_STATE_BASE:-${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/checkout-refresh}"
 if [ -n "${FM_CHECKOUT_REFRESH_STATE_ROOT:-}" ]; then
   STATE_ROOT=$FM_CHECKOUT_REFRESH_STATE_ROOT
-  LOCK_ROOT="${FM_CHECKOUT_REFRESH_LOCK_ROOT:-$STATE_ROOT/locks}"
 else
   STATE_ROOT="$STATE_BASE/homes/$FM_HOME_KEY"
-  LOCK_ROOT="${FM_CHECKOUT_REFRESH_LOCK_ROOT:-$STATE_BASE/locks}"
 fi
+LOCK_ROOT=$(fm_checkout_lock_root "$STATE_BASE")
 INTERVAL=${FM_CHECKOUT_REFRESH_INTERVAL:-60}
 BACKSTOP=${FM_CHECKOUT_REFRESH_BACKSTOP:-900}
 PROBE_TIMEOUT=${FM_CHECKOUT_REFRESH_PROBE_TIMEOUT:-15}
@@ -379,10 +380,10 @@ discover() {
 
   while IFS= read -r path; do
     [ -n "$path" ] || continue
-    if main=$(canonical_dir "$path" 2>/dev/null); then
+    if main=$(exact_git_root "$path"); then
       printf '%s\n' "$main" >> "$seeds"
     else
-      echo "checkout-refresh: skipped: configured checkout is not a directory: $path" >&2
+      echo "checkout-refresh: skipped: configured checkout is not an exact inspectable Git repository root: $path" >&2
     fi
   done < <(config_values path)
 
@@ -424,12 +425,15 @@ discover() {
       [ -n "$root" ] || continue
       for candidate in "$root"/*; do
         [ -d "$candidate" ] || continue
-        git -C "$candidate" rev-parse --is-inside-work-tree >/dev/null 2>&1 || continue
         url=$(origin_url "$candidate" || true)
         if [ -z "$url" ] || ! grep -Fxq -- "$url" "$origins"; then
           continue
         fi
-        canonical_dir "$candidate" >> "$seeds" 2>/dev/null || true
+        if main=$(exact_git_root "$candidate"); then
+          printf '%s\n' "$main" >> "$seeds"
+        else
+          echo "checkout-refresh: skipped: discovered clone is not an exact inspectable Git repository root: $candidate" >&2
+        fi
       done
     done < "$scans"
   fi
@@ -443,13 +447,12 @@ acquire_worktree() {
   [ -d "$expected_source" ] \
     || { echo "error: Treehouse acquisition source is not a directory: $expected_source" >&2; return 1; }
   (
-    local expected_common checkout_lock
+    local checkout_lock
     ensure_lock_roots || exit 1
-    expected_common=$(git_common_dir "$expected_source") || {
+    checkout_lock=$(fm_checkout_lock_path "$expected_source" "$LOCK_ROOT") || {
       echo "error: cannot resolve Treehouse acquisition lock identity for $expected_source" >&2
       exit 1
     }
-    checkout_lock="$LOCK_ROOT/$(checkout_key "$expected_common").lock"
     if ! fm_lock_try_acquire "$checkout_lock"; then
       echo "error: Treehouse acquisition already running for $expected_source (pid ${FM_LOCK_HELD_PID:-unknown})" >&2
       exit 1
@@ -521,19 +524,10 @@ ensure_state_root() {
     || { echo "error: unsafe checkout-refresh state directory: $STATE_ROOT" >&2; return 1; }
 }
 
-CHECKOUT_LOCK_HELPERS_LOADED=0
 ensure_lock_roots() {
-  local FM_STATE_OVERRIDE="$STATE_ROOT" STATE='' FM_WAKE_LIB_DIR='' FM_WAKE_DEFAULT_ROOT=''
-  local FM_WAKE_QUEUE='' FM_WAKE_QUEUE_LOCK='' FM_ROOT="$FM_ROOT" FM_HOME="$FM_HOME"
   ensure_state_root || return 1
-  mkdir -p "$LOCK_ROOT" || return 1
-  [ -d "$LOCK_ROOT" ] && [ ! -L "$LOCK_ROOT" ] \
+  fm_checkout_lock_prepare "$LOCK_ROOT" \
     || { echo "error: unsafe checkout-refresh lock directory: $LOCK_ROOT" >&2; return 1; }
-  if [ "$CHECKOUT_LOCK_HELPERS_LOADED" -eq 0 ]; then
-    # shellcheck source=bin/fm-wake-lib.sh
-    . "$SCRIPT_DIR/fm-wake-lib.sh" || return 1
-    CHECKOUT_LOCK_HELPERS_LOADED=1
-  fi
 }
 
 skill_draft_inventory() {
@@ -768,20 +762,11 @@ preflight() {
   return 0
 }
 
-git_common_dir() {
-  local checkout=$1 common
-  common=$(git -C "$checkout" rev-parse --git-common-dir 2>/dev/null) || return 1
-  case "$common" in
-    /*) canonical_dir "$common" ;;
-    *) canonical_dir "$checkout/$common" ;;
-  esac
-}
-
 pool_preflight() {
   local expected_source=$1 expected_common treehouse_paths worktree canonical common dirty example failed=0
   [ -d "$expected_source" ] \
     || { echo "error: expected Treehouse source is not a directory: $expected_source" >&2; return 1; }
-  expected_common=$(git_common_dir "$expected_source") || {
+  expected_common=$(fm_checkout_git_common_dir "$expected_source") || {
     echo "error: cannot resolve expected Treehouse repository identity for $expected_source" >&2
     return 1
   }
@@ -797,7 +782,7 @@ pool_preflight() {
       failed=1
       continue
     }
-    common=$(git_common_dir "$canonical") || {
+    common=$(fm_checkout_git_common_dir "$canonical") || {
       echo "checkout-refresh: skipped: Treehouse repository identity is not inspectable: $canonical" >&2
       failed=1
       continue
@@ -841,11 +826,11 @@ verify_worktree_safety() {
     echo "error: acquired worktree is dirty at $worktree; retain it for manual recovery without reset, clean, stash, or forced return ($dirty_example)" >&2
     return 3
   fi
-  worktree_common=$(git_common_dir "$worktree") || {
+  worktree_common=$(fm_checkout_git_common_dir "$worktree") || {
     echo "error: cannot resolve acquired worktree repository identity for $worktree" >&2
     return 1
   }
-  source_common=$(git_common_dir "$expected_source") || {
+  source_common=$(fm_checkout_git_common_dir "$expected_source") || {
     echo "error: cannot resolve expected repository identity for $expected_source" >&2
     return 1
   }

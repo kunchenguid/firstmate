@@ -274,6 +274,7 @@ Its header owns the exact discovery, configuration-file, cadence, state, and com
 The default covered set is every clone under the active home's `projects/`, every backing checkout referenced by a Treehouse pool under `~/.treehouse`, and every top-level clone under `$HOME` whose `origin` URL matches one of those tracked checkouts.
 Matching by origin discovers parallel clones such as `~/relvino` without embedding a captain-specific path in shared code.
 Optional `path` and shallow `scan` directives in the gitignored `config/checkout-refresh` file extend that set.
+Every declared checkout and matching-origin scan result must resolve to its exact canonical Git worktree root, so nested directories can never redirect refresh to an enclosing repository.
 
 Each `FM_HOME` owns a distinct background identity and state directory, so primary and secondmate homes can cover their own projects without displacing one another.
 Checkout-level owner locks are held by the shared `fm-fleet-sync.sh` mutation path and around Treehouse acquisition, so home-scoped services, spawn, secondmate seeding, teardown, and merged-PR wake handling serialize overlapping checkouts safely.
@@ -281,6 +282,7 @@ Each background owner probes every covered checkout's remote default-branch tip 
 Any upstream-tip change triggers `fm-fleet-sync.sh` immediately, regardless of who pushed or merged it.
 Every `fm-fleet-sync.sh` invocation repeats the live upstream-default probe after fetching and proves that the fetched ref matches the live tip instead of trusting a checkout's possibly stale `origin/HEAD`.
 Each shared checkout mutation is process-tree bounded by `FM_CHECKOUT_REFRESH_SYNC_TIMEOUT`, including direct teardown and merged-PR wake calls.
+Teardown holds that same checkout lock while its landed-content fallback probes, fetches, re-probes, and compares the live default, and it retains the worktree unless both live branch identity and tip remain unchanged.
 If the upstream default branch changes, a checkout still on the old branch is reported as `STUCK:` and left unchanged under the fast-forward-only posture.
 A full safe refresh runs at least every 15 minutes even when no change signal is observed, so transient network failures, a missed probe, or lost local state cannot create unbounded drift.
 Every probe also inventories non-ignored untracked files in covered seed checkouts and Treehouse pool worktrees under `.agents/skills`, `.claude/skills`, `.codex/skills`, and `skills`.

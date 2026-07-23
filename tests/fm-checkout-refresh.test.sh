@@ -159,6 +159,41 @@ test_nested_active_project_invalidates_heartbeat() {
   pass "active projects must be exact canonical Git repository roots"
 }
 
+test_discovery_rejects_nested_configured_and_scanned_paths() {
+  local remote seed outer configured_child scan_root scanned_child scanned_canonical out err
+  remote=$(build_origin exact-discovery)
+  seed="$FM_TEST_HOME/projects/exact-discovery"
+  outer="$TMP_ROOT/exact-discovery-outer"
+  configured_child="$outer/configured-child"
+  scan_root="$outer/scan-root"
+  scanned_child="$scan_root/scanned-child"
+  out="$TMP_ROOT/exact-discovery.out"
+  err="$TMP_ROOT/exact-discovery.err"
+  clone_from "$remote" "$seed"
+  clone_from "$remote" "$outer"
+  mkdir -p "$configured_child" "$scanned_child"
+  scanned_canonical=$(cd "$scanned_child" && pwd -P)
+  {
+    printf 'path %s\n' "$configured_child"
+    printf 'scan %s\n' "$scan_root"
+  } > "$FM_TEST_HOME/config/checkout-refresh"
+
+  run_refresh discover > "$out" 2> "$err" \
+    || fail "exact-root discovery fixture failed"
+
+  assert_no_grep "^$configured_child$" "$out" \
+    "configured nested directory was emitted as a checkout"
+  assert_no_grep "^$scanned_canonical$" "$out" \
+    "scanned nested directory was emitted as a clone"
+  assert_grep "configured checkout is not an exact inspectable Git repository root: $configured_child" \
+    "$err" "configured nested directory was not surfaced"
+  assert_grep "discovered clone is not an exact inspectable Git repository root: $scanned_canonical" \
+    "$err" "scanned nested directory was not surfaced"
+  rm -f "$FM_TEST_HOME/config/checkout-refresh"
+  rm -rf "$seed" "$outer"
+  pass "configured and scanned checkouts require exact Git roots"
+}
+
 test_upstream_tip_signal_refreshes_between_firstmate_events() {
   local project external remote out
   project="$FM_TEST_HOME/projects/relvino"
@@ -862,9 +897,15 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-6 ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-7 ]; then
+  test_discovery_rejects_nested_configured_and_scanned_paths
+  exit 0
+fi
+
 test_discovery_covers_projects_treehouse_external_and_config
 test_uninspectable_active_project_invalidates_heartbeat
 test_nested_active_project_invalidates_heartbeat
+test_discovery_rejects_nested_configured_and_scanned_paths
 test_upstream_tip_signal_refreshes_between_firstmate_events
 test_periodic_backstop_repairs_drift_without_a_new_tip
 test_live_default_change_is_surfaced_without_switching_branches
