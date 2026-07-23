@@ -6,6 +6,19 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 command -v npm >/dev/null 2>&1 || { echo "skip: npm not found for Pi extension typecheck"; exit 0; }
 command -v tsc >/dev/null 2>&1 || { echo "skip: tsc not found for Pi extension typecheck"; exit 0; }
+TSC_VERSION=$(tsc --version 2>/dev/null || true)
+TSC_MAJOR=${TSC_VERSION#Version }
+TSC_MAJOR=${TSC_MAJOR%%.*}
+case "$TSC_MAJOR" in
+  ''|*[!0-9]*)
+    echo "skip: compatible tsc version could not be determined"
+    exit 0
+    ;;
+esac
+if [ "$TSC_MAJOR" -lt 5 ]; then
+  echo "skip: TypeScript 5 or newer required for Pi extension typecheck"
+  exit 0
+fi
 
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g)/@earendil-works/pi-coding-agent"}
 if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
