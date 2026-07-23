@@ -48,7 +48,7 @@
 # Why lock first: the old documented order (bootstrap, THEN lock) let a
 # SECOND concurrent session run bootstrap's mutating sweeps - fast-forwarding
 # secondmate homes, reconciling report-retention ownership, writing X-mode
-# artifacts, fetching/fast-forwarding every project clone - before ever
+# artifacts, fetching/fast-forwarding every covered checkout - before ever
 # discovering another session already holds the lock. Two sessions racing
 # those sweeps is exactly the hazard the lock exists to prevent, so locking
 # first closes the hole outright: only the session that actually wins the

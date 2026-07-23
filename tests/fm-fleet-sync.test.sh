@@ -259,20 +259,26 @@ test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched() {
 }
 
 test_dirty_is_stuck_untouched() {
-  local home clone out before
+  local home clone out before draft
   home=$(new_home)
   clone=$(build_pair "$home" gamma)
   advance_origin "$home" gamma C1
   before=$(head_sha "$clone")
   printf 'uncommitted edit\n' >> "$clone/file.txt"
+  draft="$clone/.agents/skills/local-draft/SKILL.md"
+  mkdir -p "$(dirname "$draft")"
+  printf '%s\n' '# local draft' > "$draft"
 
   out=$(run_sync "$home" "$clone")
 
   assert_contains "$out" "gamma: STUCK:" "dirty clone reports STUCK"
   assert_contains "$out" "uncommitted changes" "STUCK names the dirty state"
+  assert_contains "$out" "1 untracked, 1 under repository skill directories" \
+    "STUCK quantifies untracked skill drafts"
   assert_contains "$out" "1 commits behind origin/main" "STUCK quantifies how far behind"
   [ "$(head_sha "$clone")" = "$before" ] || fail "dirty clone HEAD was moved"
   grep -q "uncommitted edit" "$clone/file.txt" || fail "dirty working-tree change was discarded"
+  grep -q "# local draft" "$draft" || fail "untracked skill draft was discarded"
   pass "dirty working tree is reported STUCK and left untouched"
 }
 
@@ -368,6 +374,26 @@ test_local_only_skipped() {
   assert_contains "$out" "iota: skipped: local-only project" "local-only clone is skipped as before"
   assert_not_contains "$out" "STUCK" "local-only skip is not escalated to STUCK"
   pass "local-only clone is skipped (benign), not flagged STUCK"
+}
+
+test_external_path_honors_basename_delivery_mode() {
+  local home clone external out before remote
+  home=$(new_home)
+  clone=$(build_pair "$home" external-mode)
+  remote=$(git -C "$clone" remote get-url origin)
+  external="$home/outside/external-mode"
+  mkdir -p "$(dirname "$external")"
+  git clone --quiet "$remote" "$external"
+  advance_origin "$home" external-mode C1
+  mkdir -p "$home/data"
+  printf -- '- external-mode [local-only] - test project (added 2026-07-23)\n' > "$home/data/projects.md"
+  before=$(head_sha "$external")
+
+  out=$(run_sync "$home" "$external")
+
+  assert_contains "$out" "skipped: local-only project" "external clone ignored the basename registry mode"
+  [ "$(head_sha "$external")" = "$before" ] || fail "external local-only clone was advanced"
+  pass "external clone paths honor the basename project delivery mode"
 }
 
 test_single_project_by_bare_name_resolves() {
@@ -613,6 +639,7 @@ test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped
+test_external_path_honors_basename_delivery_mode
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves

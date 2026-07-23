@@ -10,6 +10,7 @@ __pycache__/
 .env
 config/crew-harness
 config/crew-dispatch.json
+config/checkout-refresh
 config/account-routing-mode
 config/secondmate-account-pool
 config/secondmate-harness

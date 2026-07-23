@@ -11,6 +11,9 @@
 # is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
 # ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
 # stashed, or discarded.
+# Dirty warnings quantify untracked files and call out those under repository
+# skill directories, so local skill drafts cannot accumulate invisibly until
+# they collide with paths that later become tracked upstream.
 # Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
 # and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
@@ -23,6 +26,8 @@
 # The single-project form accepts either a path (absolute, or relative to the
 # caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
 # this home's projects dir ($FM_HOME/projects, or $FM_PROJECTS_OVERRIDE).
+# Delivery mode lookup always uses the checkout directory's basename, so a
+# discovered parallel clone still honors the registry entry for that project.
 # Bare names and "projects/<name>" forms prefer this home's projects dir before
 # falling back to an explicit path. Example: from anywhere,
 # `fm-fleet-sync.sh dotfiles-private` syncs just that one clone, same as
@@ -279,7 +284,16 @@ stuck_state() {
   else
     s="detached HEAD"
   fi
-  [ "$dirty" = no ] || s="$s with uncommitted changes"
+  if [ "$dirty" = yes ]; then
+    s="$s with uncommitted changes"
+    if [ "$untracked_count" -gt 0 ]; then
+      s="$s ($untracked_count untracked"
+      if [ "$skill_draft_count" -gt 0 ]; then
+        s="$s, $skill_draft_count under repository skill directories"
+      fi
+      s="$s)"
+    fi
+  fi
   printf '%s\n' "$s"
 }
 
@@ -295,6 +309,7 @@ report_stuck() {
 sync_project() {
   PROJ=$1
   label=$(project_label)
+  registry_name=$(basename "$PROJ")
 
   if [ ! -d "$PROJ" ]; then
     echo "$label: skipped: not a directory"
@@ -304,7 +319,7 @@ sync_project() {
     echo "$label: skipped: not a git repo"
     return 0
   fi
-  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off")
+  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$registry_name" 2>/dev/null || echo "no-mistakes off")
   mode=${mode_line%% *}
   if [ "$mode" = "local-only" ]; then
     echo "$label: skipped: local-only project"
@@ -339,6 +354,15 @@ sync_project() {
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
   dirty=no
   [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
+  untracked_count=0
+  skill_draft_count=0
+  if [ "$dirty" = yes ]; then
+    untracked_count=$(git -C "$PROJ" ls-files --others --exclude-standard -- 2>/dev/null \
+      | awk 'END { print NR + 0 }')
+    skill_draft_count=$(git -C "$PROJ" ls-files --others --exclude-standard -- \
+      .agents/skills .claude/skills .codex/skills skills 2>/dev/null \
+      | awk 'END { print NR + 0 }')
+  fi
   recovered=no
 
   if [ "$cur" != "$DEFAULT" ]; then

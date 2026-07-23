@@ -267,6 +267,38 @@ If no dispatch rule fits, firstmate uses the dispatch profile `default` when pre
 Because the spawn backstop is gated by file presence, any fallback path after a missing match, validation error, or missing `jq` still passes a resolved harness explicitly until the file is fixed or removed.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Checkout refresh
+
+`bin/fm-checkout-refresh.sh` keeps worktree seed checkouts current independently of Firstmate's own PR lifecycle.
+Its header owns the exact discovery, configuration-file, cadence, state, and command contracts.
+The default covered set is every clone under the active home's `projects/`, every backing checkout referenced by a Treehouse pool under `~/.treehouse`, and every top-level clone under `$HOME` whose `origin` URL matches one of those tracked checkouts.
+Matching by origin discovers parallel clones such as `~/relvino` without embedding a captain-specific path in shared code.
+Optional `path` and shallow `scan` directives in the gitignored `config/checkout-refresh` file extend that set.
+
+The background owner probes each checkout's remote default-branch tip every 60 seconds.
+Any upstream-tip change triggers `fm-fleet-sync.sh` immediately, regardless of who pushed or merged it.
+A full safe refresh runs at least every 15 minutes even when no change signal is observed, so transient network failures, a missed probe, or lost local state cannot create unbounded drift.
+Every probe also inventories untracked files in covered seed checkouts and Treehouse pool worktrees under `.agents/skills`, `.claude/skills`, `.codex/skills`, and `skills`.
+A new or growing inventory produces a durable `HYGIENE:` alert immediately, while forced session-start and spawn-preflight checks repeat any unresolved alert for an operator.
+The ordinary safe-refresh warning separately quantifies every untracked file and the subset under those skill directories, so other untracked accumulation is bounded by the same 15-minute backstop.
+These checks inspect paths only and never delete, move, stash, reset, or edit a draft.
+The signal interval and backstop are configurable through `FM_CHECKOUT_REFRESH_INTERVAL` and `FM_CHECKOUT_REFRESH_BACKSTOP`.
+Every scheduled refresh disables gone-branch pruning and retains `fm-fleet-sync.sh`'s fail-safe behavior: a dirty, diverged, or non-default checkout is left untouched and recorded as an alert.
+
+Treehouse v2.0 already fetches `origin` before every acquisition and resets an available detached pool worktree to the freshest default ref.
+Firstmate adds a pre-acquisition primary-checkout refresh and refuses the launch after acquisition unless the worktree HEAD matches the upstream default-branch tip.
+That makes the acquisition proof explicit even if the background owner was offline.
+
+On macOS, bootstrap reports `MISSING: checkout-refresh` until the per-user LaunchAgent is installed.
+After the captain approves the background owner, install it with:
+
+```sh
+bin/fm-bootstrap.sh install checkout-refresh
+```
+
+The locked session-start sweep still runs the same broad discovery and a forced refresh, so the service has an operator-visible backstop.
+The LaunchAgent is intentionally independent of the Firstmate watcher and continues polling when no fleet task or Firstmate session is active.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
@@ -291,10 +323,10 @@ An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm 
 An absent `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; `bin/fm-dispatch-select.sh` still degrades to the first profile at runtime when quota data is unavailable.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
-The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
+The locked session-start bootstrap step also runs a best-effort covered-checkout refresh through `fm-checkout-refresh.sh`, which delegates individual safe updates to `fm-fleet-sync.sh`.
 It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
 Normal completed runs keep local-only and no-origin skips silent.
-If bootstrap kills a timed-out refresh, it replays any completed `fm-fleet-sync.sh` output before the aggregate timeout skip so no finished result is lost.
+If bootstrap kills a timed-out refresh, it replays any completed checkout-refresh output before the aggregate timeout skip so no finished result is lost.
 A killed refresh (or a teardown process kill) can leave an orphaned `.git/packed-refs.lock` in a clone, which makes the next refresh's fetch fail with Git's `Unable to create '...packed-refs.lock': File exists`.
 On that signature only, `fm-fleet-sync.sh` retries the fetch with a bounded wait for the lock to self-clear, then removes the lock and retries once more only when it can prove the lock stale, exactly like the `fm-teardown.sh` `index.lock` recovery.
 It never removes a live lock, leaves any other failure shape untouched, and prints every wait, retry, and removal to stderr plus a one-line `recovered:` summary to stdout on success so that this session-start relay still surfaces the recovery.
@@ -469,6 +501,11 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive unchanged wedge or permission-s
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
+FM_CHECKOUT_REFRESH_INTERVAL=60       # seconds between background upstream-tip probes
+FM_CHECKOUT_REFRESH_BACKSTOP=900      # maximum seconds between full safe refresh attempts
+FM_CHECKOUT_REFRESH_PROBE_TIMEOUT=15  # seconds allowed for one upstream-tip probe
+FM_CHECKOUT_REFRESH_SYNC_TIMEOUT=60   # seconds allowed for one checkout refresh
+FM_TREEHOUSE_ROOT=                    # optional Treehouse state root override; defaults to ~/.treehouse
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature
 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1 # seconds fm-teardown.sh waits before each retry after that signature

@@ -229,13 +229,17 @@ Generalizable firstmate knowledge goes to shared tracked docs through the normal
 
 ## Local clones stay fresh
 
-The locked session-start bootstrap step, PR-based teardown, and merged-PR wake handling refresh remote-backed project clones when the clone is safe to move.
-Wake-time refreshes can target a single clone by project name, so the primary home also catches up when a secondmate reports a merge from its own home.
+The installed checkout-refresh owner polls tracked upstream default-branch tips independently of Firstmate tasks and reacts to changes from any contributor.
+A 15-minute full-refresh backstop bounds drift when a signal is missed, while the locked session-start sweep, PR-based teardown, and merged-PR wake handling remain additional refresh paths.
+The covered set includes the active home's project clones, Treehouse backing checkouts, configured paths, and matching-origin top-level clones such as a parallel checkout under `$HOME`.
+Treehouse fetches origin when it acquires a pool worktree, and `fm-spawn.sh` verifies the acquired HEAD against that upstream tip before launching the agent.
 Clean default-branch clones fast-forward to `origin/<default>`, and a clean detached HEAD that holds no unique commits is re-attached to the default branch before the same fast-forward path runs.
+Every signal probe also surfaces a new or growing inventory of untracked files under repository skill directories in covered seed checkouts and Treehouse pool worktrees, while each full safe refresh quantifies all untracked files in any dirty-checkout alarm.
+That early hygiene signal prevents local skill drafts from silently accumulating until an upstream commit claims the same paths.
 Dirty clones, non-default branches, detached HEADs with unique commits, diverged defaults, and default branches checked out in another worktree are reported as `STUCK:` with their behind count and left untouched.
 Fetches blocked by an orphaned `.git/packed-refs.lock` use bounded retries and remove the lock only when the shared staleness proof can prove it abandoned; [configuration.md](configuration.md#toolchain) owns the recovery details and tuning knobs.
 Local-only projects, clones without an origin remote, and fetch failures remain benign skips.
-The refresh also prunes local branches whose remote is gone and that no worktree still needs.
+The session-start and direct refresh paths may prune local branches whose remote is gone and that no worktree still needs; the independent cadence disables pruning.
 
 ## Self-updates stay safe
 

@@ -11,6 +11,7 @@
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "CREW_DISPATCH: active config/crew-dispatch.json" plus indented rules,
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
+#                 "MISSING: checkout-refresh (install: bin/fm-bootstrap.sh install checkout-refresh)",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: fm-<id>...",
@@ -57,8 +58,15 @@
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
-#          Fleet sync fetches, fast-forwards safe default-branch states, reports
-#          recovered and STUCK clone drift, and prunes gone local branches; it is
+#          Fleet sync discovers projects/, Treehouse backing checkouts,
+#          configured checkouts, and matching-origin top-level clones, then
+#          fetches and fast-forwards safe default-branch states and reports
+#          recovered and STUCK clone drift plus untracked skill-draft hygiene.
+#          Session-start refresh keeps the existing gone-branch prune behavior;
+#          the independent checkout-refresh cadence disables pruning.
+#          The cadence needs the checkout-refresh background service installed
+#          with explicit captain approval through the MISSING diagnostic.
+#          Session-start fleet sync is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
 #          numeric override, while non-numeric values fall back to 20s.
 #          When the override is unset or blank, the timeout is
@@ -75,7 +83,7 @@
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
 #          report-retention installation state, secondmate homes, X-mode
-#          artifacts, project clones, or repair instructions. Unset/0 (the
+#          artifacts, covered checkouts, or repair instructions. Unset/0 (the
 #          default) runs every sweep exactly as before - this flag is purely
 #          additive.
 #        fm-bootstrap.sh install <tool>...
@@ -117,8 +125,28 @@ report_retention_ensure() {
   fi
 }
 
+checkout_refresh_ensure() {
+  local out
+  [ "$(uname)" = Darwin ] || return 0
+  [ -x "$SCRIPT_DIR/fm-checkout-refresh.sh" ] || return 0
+  if [ "${FM_GATE_REFUSE_BYPASS:-0}" = 1 ] && [ "${FM_CHECKOUT_REFRESH_BOOTSTRAP_TEST:-0}" != 1 ]; then
+    return 0
+  fi
+  if ! out=$("$SCRIPT_DIR/fm-checkout-refresh.sh" ensure 2>&1); then
+    [ -n "$out" ] || out="background owner did not start"
+    echo "MISSING: checkout-refresh (install: bin/fm-bootstrap.sh install checkout-refresh)"
+    echo "FLEET_SYNC: background: skipped: ${out%%$'\n'*}"
+  fi
+}
+
 fleet_sync_origin_backed_project_count() {
   local count proj
+  if [ -x "$FM_ROOT/bin/fm-checkout-refresh.sh" ] \
+    && { [ "${FM_GATE_REFUSE_BYPASS:-0}" != 1 ] || [ "${FM_CHECKOUT_REFRESH_BOOTSTRAP_TEST:-0}" = 1 ]; }; then
+    count=$("$FM_ROOT/bin/fm-checkout-refresh.sh" discover 2>/dev/null | awk 'NF { n += 1 } END { print n + 0 }')
+    echo "$count"
+    return 0
+  fi
   count=0
   [ -d "$PROJECTS" ] || { echo 0; return 0; }
   for proj in "$PROJECTS"/*; do
@@ -154,6 +182,7 @@ fleet_sync_relay_filtered_output() {
       *': skipped: no origin remote') ;;
       *': skipped:'*) echo "FLEET_SYNC: $line" ;;
       *': STUCK:'*) echo "FLEET_SYNC: $line" ;;
+      *': HYGIENE:'*) echo "FLEET_SYNC: $line" ;;
       *': recovered:'*) echo "FLEET_SYNC: $line" ;;
     esac
   done < "$tmp"
@@ -169,14 +198,19 @@ fleet_sync_relay_all_output() {
 
 fleet_sync() {
   [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
-  [ -d "$PROJECTS" ] || return 0
 
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-fleet-sync.XXXXXX" 2>/dev/null) || return 0
   timeout=$(fleet_sync_bootstrap_timeout)
   monitor_was_on=0
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
-  "$FM_ROOT/bin/fm-fleet-sync.sh" >"$tmp" 2>/dev/null &
+  if [ -x "$FM_ROOT/bin/fm-checkout-refresh.sh" ] \
+    && { [ "${FM_GATE_REFUSE_BYPASS:-0}" != 1 ] || [ "${FM_CHECKOUT_REFRESH_BOOTSTRAP_TEST:-0}" = 1 ]; }; then
+    "$FM_ROOT/bin/fm-checkout-refresh.sh" run-once --force --verbose >"$tmp" 2>/dev/null &
+  else
+    [ -d "$PROJECTS" ] || { rm -f "$tmp"; return 0; }
+    "$FM_ROOT/bin/fm-fleet-sync.sh" >"$tmp" 2>/dev/null &
+  fi
   pid=$!
 
   start=$SECONDS
@@ -775,6 +809,11 @@ if [ "${1:-}" = "install" ]; then
       "$SCRIPT_DIR/fm-report-retention.sh" install
       continue
     fi
+    if [ "$t" = checkout-refresh ]; then
+      echo "installing checkout-refresh LaunchAgent"
+      "$SCRIPT_DIR/fm-checkout-refresh.sh" install
+      continue
+    fi
     if ! cmd=$(install_cmd "$t"); then
       instructions=$(manual_install_url "$t") || { echo "error: unknown tool $t" >&2; exit 1; }
       echo "error: $t requires manual installation (instructions: $instructions)" >&2
@@ -832,6 +871,7 @@ account_routing_dependency_preflight
 if ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "TASKS_AXI: available"
 fi
+checkout_refresh_ensure
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   report_retention_ensure
   secondmate_sync

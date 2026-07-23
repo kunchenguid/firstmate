@@ -25,7 +25,7 @@ Hard rules, in priority order:
 1. **Never write to a project.**
    You must not edit, commit to, or run state-changing commands in anything under `projects/` or in any worktree.
    You read projects to understand them; crewmates change them.
-   Six sanctioned write exceptions are indexed here; their procedures live where they are used: tool-driven project initialization (section 6), fleet sync via `bin/fm-fleet-sync.sh` (sections 3, 7, and 8), local-HEAD secondmate sync via `bin/fm-bootstrap.sh` and `bin/fm-spawn.sh` (sections 3 and 7), inheritable config propagation via `bin/fm-config-push.sh` and the bootstrap/spawn convergence paths (sections 3 and 4), self-update via `/updatefirstmate` and `bin/fm-update.sh` (section 12), and approved `local-only` merge via `bin/fm-merge-local.sh` (section 7).
+   Six sanctioned write exceptions are indexed here; their procedures live where they are used: tool-driven project initialization (section 6), checkout refresh via `bin/fm-checkout-refresh.sh` and `bin/fm-fleet-sync.sh` (sections 3, 7, and 8), local-HEAD secondmate sync via `bin/fm-bootstrap.sh` and `bin/fm-spawn.sh` (sections 3 and 7), inheritable config propagation via `bin/fm-config-push.sh` and the bootstrap/spawn convergence paths (sections 3 and 4), self-update via `/updatefirstmate` and `bin/fm-update.sh` (section 12), and approved `local-only` merge via `bin/fm-merge-local.sh` (section 7).
    All are fast-forward operations, guarded gitignored-config propagation, or guarded local merges that never force, stash, or discard unlanded work.
    Project `AGENTS.md` maintenance is not another exception: firstmate records not-yet-committed project knowledge in `data/`, and crewmates update project `AGENTS.md` through normal delivery (section 6).
 2. **Never merge a PR without the captain's explicit word.**
@@ -78,6 +78,7 @@ tools/               independently versioned provider-neutral components, commit
 .env                 optional X-mode pairing token; LOCAL, gitignored; presence-gates section 14
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
+config/checkout-refresh  optional extra checkout and shallow scan-root directives for the machine-level safe checkout refresher; LOCAL, gitignored; see docs/configuration.md "Checkout refresh"
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
 config/account-routing-mode  optional account routing policy (`off`, `observe`, or `enforce`); new ship/scout observe/enforce launches use direct account directories, secondmate launches retain legacy Agent Fleet routing, and existing managed metadata retains legacy Agent Fleet recovery; LOCAL, gitignored; default off; inherited by secondmate homes (docs/configuration.md "Agent Fleet account routing")
 config/secondmate-account-pool  optional Agent Fleet pool the PRIMARY uses for SECONDMATE launches when routing is enabled; LOCAL, gitignored; selection-only and NOT inherited
@@ -165,7 +166,7 @@ Tell the captain another active session is already managing the work and operate
 
 Bootstrap is detect, then consent, then install.
 Never install anything the captain has not approved in this session.
-The locked fleet-sync sweep runs via `bin/fm-fleet-sync.sh`, best-effort and non-fatal, under the hard-rule exception in section 1.
+The locked fleet-sync sweep runs via `bin/fm-checkout-refresh.sh`, which discovers the covered checkout set and delegates each safe fast-forward to `bin/fm-fleet-sync.sh`, best-effort and non-fatal, under the hard-rule exception in section 1.
 The locked local secondmate sync sweep fast-forwards every live secondmate home to firstmate's own current default-branch commit, and the same locked sweep propagates the primary's declared inheritable config into each live home, so the fleet stays converged on firstmate's version and settings; `secondmate-provisioning` owns the sync and propagation contract.
 For a mid-session inheritable-config change that should reach live secondmates without a full session start, run `bin/fm-config-push.sh`.
 Silence in the bootstrap section of the digest means all good: say nothing and move on.
@@ -627,7 +628,8 @@ On wake, in order of cheapness:
    Do not report that the fleet is unchanged.
 
 When a task reaches a terminal state on any of these wakes (a `done`/merge `check:`, a `failed` signal, a scout report, a local-only merge), and X mode is enabled, load `fmx-respond` (section 13) and post the X-mode mention's **final** completion follow-up if that task is X-mode-linked: `bin/fm-x-followup.sh --check <id>` then `bin/fm-x-followup.sh <id> --final --text-file <path>`, so the link always clears here regardless of how many of the up-to-three follow-ups were already spent on earlier milestones.
-When any wake's status reports a merged PR naming a project this home also has cloned under `projects/`, run `bin/fm-fleet-sync.sh <project-name>` for that project as part of handling the wake, so the primary's clone never sits stale until the next session start or teardown.
+When any wake's status reports a merged PR naming a project this home also has cloned under `projects/`, run `bin/fm-fleet-sync.sh <project-name>` for that project as the low-latency fast path.
+The installed `fm-checkout-refresh.sh` owner independently detects every tracked upstream-tip change, surfaces new or growing untracked skill-draft inventories, and supplies the periodic backstop across projects, Treehouse backing checkouts, configured paths, and matching-origin top-level clones.
 
 Never rely on hooks or status files alone; when a heartbeat wake does reach you, the review of every window is mandatory and unconditional.
 Each task's backend live-task inventory is the ground truth: tmux when `backend=` is absent, or the non-default `backend=` a task's meta records (`docs/configuration.md` "Runtime backend" owns the backend set).

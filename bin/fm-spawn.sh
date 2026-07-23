@@ -84,8 +84,9 @@
 #   provisioned firstmate home; the default is kind=ship.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
-#   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
+#   Ship/scout spawns refresh the primary checkout before Treehouse acquisition,
+#   then refuse to launch unless the acquired path is a real isolated worktree
+#   whose HEAD matches the tracked upstream default-branch tip.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -2364,6 +2365,22 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# Refresh the checkout that will seed Treehouse before creating an endpoint.
+# A dirty, off-default, or diverged checkout stays untouched and warns here, but
+# does not make the acquisition unsafe: Treehouse fetches origin independently
+# and resets the selected clean pool worktree from that remote-tracking ref.
+# The post-acquisition verification below is the fail-closed freshness proof.
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$RECOVERY_ACCOUNT" != 1 ]; then
+  if CHECKOUT_PREFLIGHT_OUT=$("$SCRIPT_DIR/fm-checkout-refresh.sh" preflight "$PROJ_ABS" 2>&1); then
+    CHECKOUT_PREFLIGHT_STATUS=0
+  else
+    CHECKOUT_PREFLIGHT_STATUS=$?
+  fi
+  if [ "$CHECKOUT_PREFLIGHT_STATUS" -ne 0 ]; then
+    echo "warning: checkout refresh could not advance $PROJ_ABS before worktree acquisition: $(first_line "$CHECKOUT_PREFLIGHT_OUT")" >&2
+  fi
+fi
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -2664,6 +2681,10 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$RECOVERY_ACCOUNT" 
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  if ! "$SCRIPT_DIR/fm-checkout-refresh.sh" verify-worktree "$WT"; then
+    echo "error: refusing to launch $W from an acquired worktree whose upstream freshness could not be proved" >&2
+    exit 1
+  fi
   WORKTREE_CREATED=1
 fi
 if [ -z "$WT" ] && [ "$BACKEND" = orca ]; then
