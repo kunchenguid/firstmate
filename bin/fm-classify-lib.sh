@@ -167,8 +167,14 @@ status_is_paused_or_captain_held() {  # <status-line>
 # carry it after the colon. Reading only the prefix folded every such line onto
 # the key "default", where a second concurrent decision silently dropped the
 # first from the open set. The trailing position is deliberately the ONLY other
-# accepted position: a token that is quoted mid-sentence stays prose, so an
-# incidental "[key=" in a note cannot change or close a real decision.
+# accepted position, so a "[key=" quoted mid-sentence stays prose and cannot
+# change or close a real decision; a token that genuinely ends the line is read
+# as a key even when the author meant it as prose, which is the accepted cost of
+# reading files already written that way. A trailing token whose contents are
+# not a valid slug is prose too and keys "default", unlike the canonical
+# position, which rejects a malformed slug outright: a malformed key before the
+# colon is a broken key, while an incidental bracket at the end of a note must
+# not drop the event from the fold.
 #
 # Reading the trailing position changes how already-written files fold, and one
 # consequence is accepted deliberately: a decision opened with a TRAILING key and
