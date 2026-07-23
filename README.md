@@ -107,10 +107,22 @@ For Pi, approve the project trust prompt once per clone on first launch so both 
 ### Experimental OpenAI server compaction for Pi
 
 Firstmate declares [`pi-openai-server-compaction`](https://github.com/algal/pi-openai-server-compaction) as a project-local Pi package pinned to immutable revision `c6d593087709e9481223dc6c6c2269b371b5e055`.
-The package is experimental and remains inactive through `"autoload": false` because the current Homebrew Pi 0.80.6 is outside its required Pi range of `>=0.80.9 <0.81.0`.
-If explicitly activated, direct OpenAI requests still receive `store: true`.
+The package is experimental and remains inactive through `"autoload": false` because the current Homebrew Pi 0.80.6 is outside its required Pi range of `>=0.80.9 <0.81.0`; Node 22 or newer is also required.
+After project trust is approved, Pi may automatically clone and install the declared package under the ignored `.pi/git/` tree, but it does not execute the extension while autoload is off.
+
+The conservative tracked trial enables direct `openai/*` and `openai-codex/*`, leaves Azure disabled, leaves `previous_response_id` and the custom WebSocket continuation path disabled, and enables activation notifications.
+When activated, direct OpenAI requests still gain `store: true` and `context_management`, and compaction sends conversation context to OpenAI.
 There is no setting that disables `store: true` while keeping the direct OpenAI integration active.
-Use the captain-approved temporary npm Pi 0.80.10 explicitly as `~/.npm-global/bin/pi` only after following the activation, privacy, validation, update, and rollback contract in [docs/pi-openai-server-compaction.md](docs/pi-openai-server-compaction.md).
+OpenAI Codex keeps Pi's built-in transport and receives reconstructed remote compaction history only after a compaction boundary.
+Opaque provider artifacts and usage metadata are saved in local Pi session JSONL, while Pi also retains a portable text summary for model switches, tree operations, forks, and no-extension recovery.
+
+Activation requires an explicitly approved compatible Pi runtime, followed by changing the package's `autoload` value in `.pi/settings.json` to `true` and restarting Pi or running `/reload`.
+The approved temporary runtime is npm Pi 0.80.10 invoked explicitly as `~/.npm-global/bin/pi`; do not replace the earlier Homebrew path entry or auto-upgrade this runtime to Pi 0.81.x while the extension requires `<0.81.0`.
+Verify activation with a new non-sensitive synthetic session and the configured notifications.
+Rollback is the inverse one-line tracked change back to `false`; Pi's normal local compaction remains available, and `--no-extensions` is an emergency bypass that also disables firstmate's Pi watcher and turn-end extensions.
+Return to `/opt/homebrew/bin/pi` and uninstall the temporary npm runtime only after Homebrew offers a version inside the pinned extension's audited Pi range.
+To update the package, audit a new upstream commit first, change the immutable source revision, repeat the isolated validation, and never run the update in the live primary Pi session.
+The dated security and data-flow audit, exact validation commands, provider behavior, residual dependency risk, and rollback mechanics are in [docs/pi-openai-server-compaction.md](docs/pi-openai-server-compaction.md).
 
 ### Talk to it
 
