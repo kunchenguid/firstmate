@@ -81,6 +81,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
+  <id>/palautus.md   ship/scout return proposal for firstmate review; exact contract: bin/fm-brief.sh
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
@@ -432,10 +433,8 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 `bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
 Use its scaffold as the contract, then replace every `{TASK}` placeholder with a clear task description, acceptance criteria, constraints, and necessary context before dispatch or seeding.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
-Ship and scout briefs carry `## Lainauspaketti` and `## Palautusehdotus`.
-Firstmate fills `{LOAN_GIVEN}`, `{LOAN_NOT_GIVEN}`, and `{LOAN_EXTRA_SEARCH}` as path reference lists (default: paths, not copied card bodies).
-Gate library writes from a return proposal against injection canaries, conflict with an existing card, and FAKTA/ARVIO with sources.
-Home `data/learnings.md` muistihygienia owns the full hygiene practice.
+Ship and scout tasks use the loan-and-return contract owned by `bin/fm-brief.sh`; secondmate charters do not.
+Home `data/learnings.md` muistihygienia owns the full hygiene practice referenced by that contract.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.

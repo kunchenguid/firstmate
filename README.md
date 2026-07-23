@@ -154,7 +154,7 @@ Setup guides for tmux (the default) and every other supported backend (herdr, ze
      │
      ├─ ship: project mode ► PR/local merge ► teardown
      │
-     └─ scout: report at data/<id>/report.md ► decision inventory ► relay findings ► teardown
+     └─ scout: report-and-return contract ► decision inventory ► relay findings ► teardown
 ```
 
 You chat with the first mate.
