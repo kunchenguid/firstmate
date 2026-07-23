@@ -70,6 +70,10 @@ A backend is unhealthy when it is explicitly disabled, when its key file is miss
 Every skipped backend is reported on stderr with its concrete reason, so a rotation that quietly narrows to one account is visible rather than silent.
 
 When no healthy backend remains, `select` exits 4 and names the earliest reset time and the account it belongs to, rather than handing work to a dead account.
+A `fm-spawn.sh --pool` that hits that exit refuses the launch; an exit 2 (malformed config, unknown account, or missing `jq`) is reported separately as a configuration error, because a broken config is not exhausted capacity.
+
+Only crewmate and scout spawns rotate: `--pool` and `--pool-backend` are refused on a `--secondmate` spawn, whose account is pinned by its own home configuration.
+A per-task harness override outranks the pool's spread: an explicit `--harness` or positional adapter name narrows rotation to accounts of that harness, while a raw launch command names no account harness and so only suppresses the account's harness default.
 
 ## Limit detection and cooldown
 
@@ -127,4 +131,4 @@ Putting that account into cooldown stops new spawns from being sent to it; it do
 
 `tests/fm-pool.test.sh` covers rotation, cooldown skipping, self-expiry, limit parsing, key-file health, and the all-cooling refusal.
 `tests/fm-pool-failover.test.sh` covers the dirty-worktree refusal (including work appearing during the old agent's shutdown), the clean-worktree path, the RESUME NOTE, and same-harness-first replacement selection with the cross-harness model/effort drop.
-`tests/fm-spawn-pool.test.sh` covers `--pool` metadata, the pooled launch prefix, secret non-disclosure, and the byte-identical unpooled path.
+`tests/fm-spawn-pool.test.sh` covers `--pool` metadata, the pooled launch prefix, secret non-disclosure, rotation across successive spawns, the all-cooling refusal, positional-harness narrowing, the `--secondmate` refusal, and the byte-identical unpooled path.

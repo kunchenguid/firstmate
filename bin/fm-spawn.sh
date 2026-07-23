@@ -14,7 +14,12 @@
 #   applies that account's env for this launch only, and records
 #   `pool_backend=<id>` in state/<id>.meta so supervision knows which account the
 #   task is on. --pool-backend <id> pins one named account instead of rotating
-#   (used by bin/fm-pool-failover.sh) and implies --pool.
+#   (used by bin/fm-pool-failover.sh) and implies --pool. Both are refused on a
+#   --secondmate spawn: a secondmate's account is pinned by its own home config.
+#   An explicit harness (--harness or the positional adapter name) narrows rotation
+#   to accounts of that harness and always outranks the account's own harness; a
+#   raw launch command names no account harness, so it only suppresses the pool's
+#   harness default. Explicit --model/--effort likewise beat an account's defaults.
 #   The pool is a DIFFERENT axis from --backend: --backend selects the runtime
 #   session provider (tmux/herdr/...) and is recorded as `backend=`, while the
 #   pool selects which agent account the harness authenticates as and is recorded
@@ -72,7 +77,8 @@
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
-#   overrides it for this spawn (either kind). A non-flag string containing
+#   overrides it for this spawn (either kind); `cursor` is also accepted, but for a
+#   crewmate/scout spawn only and only with an API key. A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
 #   config/secondmate-harness may also carry an optional model and effort as extra
