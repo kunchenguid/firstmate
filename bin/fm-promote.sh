@@ -5,7 +5,8 @@
 # again. After promoting, send the crewmate its ship instructions via fm-send.sh
 # (inventory scratch state, reset to a clean default-branch base, carry over only
 # intended fix changes, create branch fm/<task-id>, implement, then report done
-# according to the project's delivery mode).
+# according to the recorded delivery mode and fixed-lane contract rendered by
+# fm-brief.sh).
 # Usage: fm-promote.sh <task-id>
 set -eu
 
@@ -19,11 +20,30 @@ META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 
+MODE=$(sed -n 's/^mode=//p' "$META")
+case "$MODE" in
+  no-mistakes|direct-PR|local-only) ;;
+  *) echo "error: task $ID has missing, duplicate, or unsupported recorded mode" >&2; exit 1 ;;
+esac
+SHIP_CONTRACT=$("$FM_ROOT/bin/fm-brief.sh" --ship-contract "$ID" "$MODE")
+HANDOFF=$(cat <<EOF
+The scout task is now promoted to a ship task.
+Review scratch state with git status and git log.
+Return to a clean default-branch base.
+Carry over only intended fix changes.
+Create branch fm/$ID and implement the authorized change.
+Follow the recorded delivery contract below.
+
+$SHIP_CONTRACT
+EOF
+)
+
 TMP="$META.tmp"
 grep -v '^kind=' "$META" > "$TMP"
 echo "kind=ship" >> "$TMP"
 mv "$TMP" "$META"
 
 HOME_Q=$(printf '%q' "$FM_HOME")
+HANDOFF_Q=$(printf '%q' "$HANDOFF")
 echo "promoted $ID to ship (teardown protection restored)"
-echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"
+echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID $HANDOFF_Q"

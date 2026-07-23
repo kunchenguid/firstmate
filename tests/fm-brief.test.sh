@@ -83,6 +83,65 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+test_promoted_scouts_reuse_recorded_ship_contract() {
+  local home id meta out status lane
+  home="$TMP_ROOT/promote-home"
+  mkdir -p "$home/state"
+  touch "$home/state/.last-watcher-beat"
+
+  for mode in no-mistakes direct-PR local-only; do
+    id="promote-${mode//[^a-zA-Z0-9]/-}"
+    meta="$home/state/$id.meta"
+    fm_write_meta "$meta" \
+      "window=firstmate:fm-$id" \
+      "worktree=$home/worktree-$id" \
+      "project=$home/project-$id" \
+      "harness=codex" \
+      "kind=scout" \
+      "mode=$mode" \
+      "yolo=off"
+    out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-promote.sh" "$id" 2>&1); status=$?
+    expect_code 0 "$status" "fm-promote.sh $id should exit 0"
+    case "$mode" in
+      direct-PR) lane='This project ships **direct-PR**' ;;
+      local-only) lane='This project ships **local-only**' ;;
+      *) lane='This project ships **no-mistakes**' ;;
+    esac
+    assert_contains "$out" "$lane" "$id: promotion handoff must name its recorded delivery lane"
+    assert_contains "$out" "delivery lane is assigned at dispatch and fixed for this task" \
+      "$id: promotion handoff must carry the fixed-lane contract"
+    assert_grep "mode=$mode" "$meta" "$id: promotion must preserve the recorded delivery mode"
+    assert_grep "kind=ship" "$meta" "$id: promotion must restore ship teardown protection"
+    assert_no_grep "kind=scout" "$meta" "$id: promotion must replace the scout kind"
+  done
+  pass "fm-promote.sh: promoted scouts reuse their recorded ship contract"
+}
+
+test_promotion_refuses_invalid_recorded_mode_before_mutation() {
+  local home id meta out status
+  home="$TMP_ROOT/promote-invalid-home"
+  id="promote-invalid-mode"
+  meta="$home/state/$id.meta"
+  mkdir -p "$home/state"
+  touch "$home/state/.last-watcher-beat"
+  fm_write_meta "$meta" \
+    "window=firstmate:fm-$id" \
+    "worktree=$home/worktree-$id" \
+    "project=$home/project-$id" \
+    "harness=codex" \
+    "kind=scout" \
+    "mode=scout" \
+    "yolo=off"
+  status=0
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-promote.sh" "$id" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "fm-promote.sh accepted an unsupported recorded mode"
+  assert_contains "$out" "missing, duplicate, or unsupported recorded mode" \
+    "invalid promotion refusal must explain the recorded-mode defect"
+  assert_grep "kind=scout" "$meta" "invalid promotion must preserve scout teardown semantics"
+  assert_no_grep "kind=ship" "$meta" "invalid promotion mutated kind before validating its handoff"
+  pass "fm-promote.sh: invalid recorded mode refuses before task mutation"
+}
+
 test_faster_paths_use_configured_authority_without_stacked_review() {
   local home id brief
   home="$TMP_ROOT/configured-authority-home"
@@ -354,6 +413,8 @@ test_scout_and_secondmate_scaffold() {
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_promoted_scouts_reuse_recorded_ship_contract
+test_promotion_refuses_invalid_recorded_mode_before_mutation
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording

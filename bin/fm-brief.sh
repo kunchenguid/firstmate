@@ -8,6 +8,7 @@
 # of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#        fm-brief.sh --ship-contract <task-id> <mode>
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -57,8 +58,82 @@ usage() {
   ' "$0"
 }
 
+LANE_LOCK="Your delivery lane is assigned at dispatch and fixed for this task: never switch lanes or downgrade to a faster path mid-run without a new captain or firstmate decision."
+
+shape_ship_contract() {
+  local mode=$1 id=$2
+
+  case "$mode" in
+    direct-PR)
+      SETUP2=""
+      RULE1='1. Never push to the default branch (push only your `fm/'"$id"'` branch). Never merge a PR.'
+      DOD=$(cat <<EOF
+# Definition of done
+This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
+$LANE_LOCK
+The task is complete only when committed on your branch.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+Do NOT run /no-mistakes.
+The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+EOF
+)
+      ;;
+    local-only)
+      SETUP2=""
+      RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into local \`main\`."
+      DOD=$(cat <<EOF
+# Definition of done
+This project ships **local-only**: no remote, no PR, no pipeline.
+$LANE_LOCK
+The task is complete only when committed on your branch \`fm/$id\`.
+Do NOT push, do NOT open a PR, do NOT merge.
+Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
+The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
+EOF
+)
+      ;;
+    no-mistakes)
+      SETUP2="
+2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+      RULE1='1. Never push to the default branch. Never merge a PR.'
+      DOD=$(cat <<EOF
+# Definition of done
+This project ships **no-mistakes**: the full validation pipeline runs on your committed branch before the PR is raised and merged.
+$LANE_LOCK
+The task is complete only when committed on your branch.
+When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+
+You drive no-mistakes by responding to its gates, not by implementing fixes.
+Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
+
+Two firstmate-specific rules layer on top of that guidance:
+- ask-user findings are not yours to answer: escalate to firstmate (rule 6) and stop.
+  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
+- Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
+
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop.
+You are finished.
+EOF
+)
+      ;;
+    *)
+      echo "error: unsupported delivery mode: $mode" >&2
+      return 2
+      ;;
+  esac
+}
+
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
+  --ship-contract)
+    [ "$#" -eq 3 ] || { echo "error: usage: fm-brief.sh --ship-contract <task-id> <mode>" >&2; exit 2; }
+    shape_ship_contract "$3" "$2"
+    printf '%s\n' "$DOD"
+    exit 0
+    ;;
 esac
 
 # shellcheck source=bin/fm-marker-lib.sh
@@ -277,65 +352,7 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
-# Delivery lane is assigned at dispatch and fixed for the task; a worker never
-# downgrades to a faster path mid-run on its own. Shared across every mode DOD so
-# the sentence has a single owner (AGENTS.md section 7 states the same contract).
-LANE_LOCK="Your delivery lane is assigned at dispatch and fixed for this task: never switch lanes or downgrade to a faster path mid-run without a new captain or firstmate decision."
-
-case "$MODE" in
-  direct-PR)
-    SETUP2=""
-    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-    DOD=$(cat <<EOF
-# Definition of done
-This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-$LANE_LOCK
-The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
-EOF
-)
-    ;;
-  local-only)
-    SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
-    DOD=$(cat <<EOF
-# Definition of done
-This project ships **local-only**: no remote, no PR, no pipeline.
-$LANE_LOCK
-The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
-EOF
-)
-    ;;
-  *)  # no-mistakes (default)
-    SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
-    RULE1='1. Never push to the default branch. Never merge a PR.'
-    DOD=$(cat <<EOF
-# Definition of done
-This project ships **no-mistakes**: the full validation pipeline runs on your committed branch before the PR is raised and merged.
-$LANE_LOCK
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
-
-You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
-
-Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are not yours to answer: escalate to firstmate (rule 6) and stop.
-  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
-
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
-EOF
-)
-    ;;
-esac
+shape_ship_contract "$MODE" "$ID"
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
