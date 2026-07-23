@@ -1470,6 +1470,8 @@ PY
   callback_update=$(write_callback_update "$home" canary-failed cb-canary-failed "$canary_data" "$canary_message" "$CHAT_ID" "$USER_ID")
   callback_out=$(run_owner "$home" ingest-update "$callback_update" 2>&1); callback_rc=$?
   [ "$callback_rc" -ne 0 ] || fail "rejected callback should have failed safely"
+  [ "$(request_count)" -eq "$callback_before" ] \
+    || fail "rejected callback should not have sent a transport"
   assert_contains "$callback_out" "Telegram did not acknowledge the callback" \
     "callback acknowledgment failure was not surfaced"
   assert_contains "$(cat "$home/state/telegram-protocol-incidents/decision.json")" \
