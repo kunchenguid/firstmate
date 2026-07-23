@@ -1549,6 +1549,17 @@ test_composer_state_cursor_bare_placeholder_is_empty() {
   pass "fm_backend_herdr_composer_state: Cursor Agent's bare idle composer reads empty"
 }
 
+test_composer_state_cursor_busy_hint_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-cursor-busy"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  ⠞ Working\n\n  → Add a follow-up                          ctrl+c to stop\n\n  Cursor Grok 4.5 Low\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "Cursor's busy composer row (ctrl+c to stop) must read empty so the composer fallback never re-sends Enter into a live turn, got '$out'"
+  pass "fm_backend_herdr_composer_state: Cursor Agent's busy stop hint reads empty, not pending"
+}
+
 test_composer_state_real_text_is_pending() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -2827,6 +2838,7 @@ test_busy_state_unknown_on_no_agent
 test_composer_state_bare_prompt_is_empty
 test_composer_state_ghost_placeholder_is_empty
 test_composer_state_cursor_bare_placeholder_is_empty
+test_composer_state_cursor_busy_hint_is_empty
 test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure

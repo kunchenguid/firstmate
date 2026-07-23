@@ -66,7 +66,7 @@ All supported runtime backend integration surfaces were reviewed before enabling
 - tmux uses the shared busy regex and cursor-row composer classifier.
   Cursor's foreground command is the generic `node`, so process-level liveness remains conservatively `unknown`; `docs/tmux-backend.md` records the empirical process evidence.
 - Herdr prefers native registered-agent state when available and falls back to the shared busy regex and structural composer classifier when it is not.
-  Its bare composer set now includes `→` and the two Cursor placeholders.
+  Its bare composer set now includes `→` and the two Cursor placeholders, and its classifier short-circuits Cursor's on-row `ctrl+c to stop` busy hint to `empty` like the other backends, so the plain-capture composer fallback never re-sends Enter into a live turn.
 - Orca has no native semantic busy state and uses capture plus the shared regex.
   Its structural composer classifier now accepts Cursor's bare `→` composer row specifically, short-circuits Cursor's on-row `ctrl+c to stop` busy hint to `empty` (a landed submit, no duplicate Enter), and retains bare-shell refusal - the generic `❯`/`›` glyphs are not accepted bare, so a `❯`-prompt dead shell stays `unknown`.
 - cmux has the same capture and structural-classifier posture as Orca and recognizes the Cursor composer shape under the same Cursor-only bare-glyph and busy-hint rules.
