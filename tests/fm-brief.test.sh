@@ -341,6 +341,73 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# V0 loan package: ship and scout get Lainauspaketti + Palautusehdotus;
+# secondmate does not. Existing brief shape (Task, Setup, Rules, Definition of done)
+# must remain intact.
+test_loan_package_on_ship_and_scout_not_secondmate() {
+  local home ship scout charter help
+  home="$TMP_ROOT/loan-package-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" loan-ship alpha >/dev/null 2>&1 \
+    || fail "ship scaffold for loan package exited non-zero"
+  ship="$home/data/loan-ship/brief.md"
+  assert_grep "## Lainauspaketti" "$ship" "ship brief missing ## Lainauspaketti"
+  assert_grep "### Annettu" "$ship" "ship brief missing ### Annettu"
+  assert_grep "### Ei annettu" "$ship" "ship brief missing ### Ei annettu"
+  assert_grep "### Sallittu lisähaku" "$ship" "ship brief missing ### Sallittu lisähaku"
+  assert_grep "### Palautusvelvollisuus" "$ship" "ship brief missing ### Palautusvelvollisuus"
+  assert_grep "## Palautusehdotus" "$ship" "ship brief missing ## Palautusehdotus"
+  assert_grep "{LOAN_GIVEN}" "$ship" "ship brief missing {LOAN_GIVEN} placeholder"
+  assert_grep "{LOAN_NOT_GIVEN}" "$ship" "ship brief missing {LOAN_NOT_GIVEN} placeholder"
+  assert_grep "{LOAN_EXTRA_SEARCH}" "$ship" "ship brief missing {LOAN_EXTRA_SEARCH} placeholder"
+  assert_grep "path reference list" "$ship" "ship brief missing path-reference-list default"
+  assert_grep "injection-pattern canaries" "$ship" "ship brief missing gate canary pointer"
+  assert_grep "data/learnings.md" "$ship" "ship brief must point at learnings hygiene, not restate it"
+  assert_grep "# Task" "$ship" "ship brief lost # Task section"
+  assert_grep "# Setup" "$ship" "ship brief lost # Setup section"
+  assert_grep "# Rules" "$ship" "ship brief lost # Rules section"
+  assert_grep "# Definition of done" "$ship" "ship brief lost # Definition of done section"
+  assert_grep "{TASK}" "$ship" "ship brief lost {TASK} placeholder"
+  assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$ship" \
+    "ship brief lost nonterminal working: gate protection"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" loan-scout alpha --scout >/dev/null 2>&1 \
+    || fail "scout scaffold for loan package exited non-zero"
+  scout="$home/data/loan-scout/brief.md"
+  assert_grep "## Lainauspaketti" "$scout" "scout brief missing ## Lainauspaketti"
+  assert_grep "### Annettu" "$scout" "scout brief missing ### Annettu"
+  assert_grep "### Ei annettu" "$scout" "scout brief missing ### Ei annettu"
+  assert_grep "### Sallittu lisähaku" "$scout" "scout brief missing ### Sallittu lisähaku"
+  assert_grep "### Palautusvelvollisuus" "$scout" "scout brief missing ### Palautusvelvollisuus"
+  assert_grep "## Palautusehdotus" "$scout" "scout brief missing ## Palautusehdotus"
+  assert_grep "{LOAN_GIVEN}" "$scout" "scout brief missing {LOAN_GIVEN} placeholder"
+  assert_grep "Include the \`## Palautusehdotus\` return proposal in the report before done." "$scout" \
+    "scout DOD must require the return proposal in the report"
+  assert_grep "SCOUT task" "$scout" "scout brief lost SCOUT task declaration"
+  assert_grep "report.md" "$scout" "scout brief lost report deliverable"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='loan domain' \
+    "$ROOT/bin/fm-brief.sh" loan-sm --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "secondmate scaffold for loan-package negative test exited non-zero"
+  charter="$home/data/loan-sm/brief.md"
+  assert_no_grep "## Lainauspaketti" "$charter" \
+    "secondmate charter must not carry ## Lainauspaketti"
+  assert_no_grep "## Palautusehdotus" "$charter" \
+    "secondmate charter must not carry ## Palautusehdotus"
+  assert_no_grep "{LOAN_GIVEN}" "$charter" \
+    "secondmate charter must not carry loan placeholders"
+
+  help=$("$ROOT/bin/fm-brief.sh" --help)
+  assert_contains "$help" "## Lainauspaketti" \
+    "fm-brief.sh --help must document the loan package"
+  assert_contains "$help" "{LOAN_GIVEN}" \
+    "fm-brief.sh --help must document loan placeholders"
+  assert_contains "$help" "data/learnings.md" \
+    "fm-brief.sh --help must point at learnings for gate hygiene"
+  pass "fm-brief.sh: loan package on ship/scout only; secondmate excluded; shapes intact"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
@@ -355,3 +422,4 @@ test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_loan_package_on_ship_and_scout_not_secondmate

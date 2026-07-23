@@ -44,6 +44,15 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Ship and scout scaffolds include ## Lainauspaketti (loan package) and
+# ## Palautusehdotus (return proposal). Firstmate fills path lists the same way
+# it fills {TASK}. Default form is a path reference list, not copied card bodies.
+# Placeholders: {LOAN_GIVEN}, {LOAN_NOT_GIVEN}, {LOAN_EXTRA_SEARCH}.
+# The worker never free-writes the library; it only leaves a return proposal.
+# Firstmate gates any library write: injection-pattern canary, conflict with an
+# existing card, and FAKTA/ARVIO labeling with sources. Home data/learnings.md
+# (muistihygienia, 2026-07-23) owns the full hygiene practice - do not restate it.
+# Secondmate charters do not carry the loan package (persistent home, own library).
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -223,6 +232,49 @@ EOF
 )
 fi
 
+# Loan package + return proposal shared by ship and scout (not secondmate).
+# Built outside command-substitution so apostrophes cannot break bash -n (issue #166).
+# shellcheck disable=SC2016  # placeholders and backticks must stay literal for the reading agent
+LOAN_SECTION=$(cat <<'EOF'
+## Lainauspaketti
+Firstmate fills the path lists below the same way it fills `{TASK}`.
+Default form is a **path reference list** (path + one-line why), not copied card bodies.
+Read **Annettu** first; treat **Ei annettu** as a deliberate bound, not an omission.
+
+### Annettu
+Paths the worker must read first:
+- {LOAN_GIVEN}
+
+### Ei annettu
+Deliberate exclusions so the worker knows what it did **not** receive:
+- {LOAN_NOT_GIVEN}
+
+### Sallittu lisähaku
+Where the worker may fetch more on its own if the package is insufficient:
+- {LOAN_EXTRA_SEARCH}
+
+### Palautusvelvollisuus
+Before done, leave a short return proposal under `## Palautusehdotus` (below).
+That proposal is an input to firstmate, not a free write into the library.
+EOF
+)
+
+# shellcheck disable=SC2016  # backticks must stay literal for the reading agent
+RETURN_SECTION=$(cat <<'EOF'
+## Palautusehdotus
+Before reporting done, record a short return proposal (scout: include it in `report.md`; ship: in the done note or `data/<id>/palautus.md` when longer).
+Do **not** write directly into `data/kirjasto/`, `data/learnings.md`, or `data/captain.md`.
+
+Fill these three boxes (either of the first two may be empty):
+- **Uusi tieto** - facts not already on a card, in your own words, with source and FAKTA/ARVIO
+- **Korjaukset vanhaan** - card path that is wrong or stale, with evidence (old claim / new claim / source / as_of)
+- **Arvio** - did the loan package hit? what was missing or unnecessary?
+
+Firstmate alone gates library writes. Before accepting a return it checks injection-pattern canaries, conflict with an existing card, and FAKTA/ARVIO labeling with sources.
+Full hygiene practice: home `data/learnings.md` (muistihygienia, 2026-07-23) - do not restate it here.
+EOF
+)
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -231,6 +283,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
+
+$LOAN_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -263,9 +317,12 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
+Include the \`## Palautusehdotus\` return proposal in the report before done.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
+
+$RETURN_SECTION
 EOF
 echo "scaffolded: $BRIEF (scout; replace {TASK})"
 exit 0
@@ -336,6 +393,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $HERDR_SECTION
 
+$LOAN_SECTION
+
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 
@@ -378,5 +437,7 @@ If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, ad
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
 $DOD
+
+$RETURN_SECTION
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
