@@ -420,6 +420,29 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_stale_pi_secondmate_uses_parent_retention_guard() {
+  local rec id sm out status launch
+  id=profile-stale-pi-secondmate-z18
+  rec=$(make_spawn_case profile-stale-pi-secondmate pi "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "stale Pi secondmate spawn should preserve launch compatibility"
+  assert_contains "$out" "spawned $id harness=pi kind=secondmate" "stale Pi secondmate did not launch"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "-e '$ROOT/.pi/extensions/fm-openai-retention-guard.ts'" \
+    "stale Pi secondmate did not fall back to the parent retention guard"
+  assert_not_contains "$launch" "-e '$sm/.pi/extensions/fm-openai-retention-guard.ts'" \
+    "stale Pi secondmate retained a nonexistent guard path"
+  assert_contains "$launch" "FM_HOME='$sm'" \
+    "parent retention guard fallback did not preserve secondmate configuration ownership"
+  pass "stale Pi secondmates use the parent retention guard"
+}
+
 test_no_profile_keeps_claude_launch_unchanged
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
@@ -437,5 +460,6 @@ test_pi_threads_model_and_max_effort
 test_quota_selected_default_array_reaches_spawn
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_stale_pi_secondmate_uses_parent_retention_guard
 
 echo "# all fm-spawn-dispatch-profile tests passed"

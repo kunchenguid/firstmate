@@ -1259,7 +1259,9 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 if [ "$KIND" = secondmate ]; then
-  sq_piretention=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-openai-retention-guard.ts")
+  piretention="$PROJ_ABS/.pi/extensions/fm-openai-retention-guard.ts"
+  [ -f "$piretention" ] || piretention="$FM_ROOT/.pi/extensions/fm-openai-retention-guard.ts"
+  sq_piretention=$(shell_quote "$piretention")
 else
   sq_piretention=$(shell_quote "$FM_ROOT/.pi/extensions/fm-openai-retention-guard.ts")
 fi
