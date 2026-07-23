@@ -1026,6 +1026,67 @@ EOF
   pass "Pi process-exit cleanup stops the attached arm child"
 }
 
+test_pi_session_start_clears_shutdown_latch() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-session-resume-root"
+  home="$TMP_ROOT/pi-session-resume-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let tool = null;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {},
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const before = process.listenerCount("exit");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (!tool) throw new Error("Pi watch tool was not registered");
+
+await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
+if (process.listenerCount("exit") !== before) {
+  throw new Error("session_shutdown did not remove the process-exit fallback");
+}
+
+const latched = await tool.execute("tool-call-latched", {}, undefined, undefined, {});
+if (latched.details?.ok !== false || latched.details.message !== "watcher: not armed - Pi session is shutting down") {
+  throw new Error(`arm did not observe the shutdown latch before resume: ${JSON.stringify(latched.details)}`);
+}
+
+await handlers.get("session_start")?.({ type: "session_start" }, {});
+if (process.listenerCount("exit") !== before + 1) {
+  throw new Error("session_start after a prior shutdown did not restore the process-exit fallback");
+}
+
+const resumed = await tool.execute("tool-call-resumed", {}, undefined, undefined, {});
+if (resumed.details?.ok !== true || !resumed.details.message.includes("started Pi extension arm child")) {
+  throw new Error(`resumed session_start left the shutdown latch stuck: ${JSON.stringify(resumed.details)}`);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi extension must clear the shutdown latch on a resumed session_start so re-arming works again"
+  [ -z "$out" ] || fail "Pi session-resume latch test printed output: $out"
+  pass "Pi extension clears a stale shutdown latch when the session resumes"
+}
+
 test_opencode_primary_watch_plugin_static_wiring() {
   local plugin module_boundary text
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -2009,6 +2070,7 @@ test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
+test_pi_session_start_clears_shutdown_latch
 test_opencode_primary_watch_plugin_static_wiring
 test_opencode_plugin_package_boundary_is_explicit_esm
 test_opencode_primary_watch_plugin_uses_effective_state_home

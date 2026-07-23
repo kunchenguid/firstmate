@@ -406,6 +406,10 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on?.("session_start", () => {
+    if (stopping) {
+      stopping = false;
+      process.once("exit", cleanupOnProcessExit);
+    }
     markLoaded();
   });
   pi.on?.("session_shutdown", () => {
