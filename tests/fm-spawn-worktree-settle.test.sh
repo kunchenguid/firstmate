@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Regression test for the fm-spawn.sh treehouse-get worktree-detection settle
-# loop (bin/fm-spawn.sh, the `for _ in $(seq 1 60)` loop after `treehouse get`).
+# Regression test for the fm-spawn.sh treehouse-get worktree-detection loop
+# (bin/fm-spawn.sh, the `for _ in $(seq 1 "$WT_TIMEOUT")` loop after
+# `treehouse get`), covering both how it settles on a worktree and how long it
+# is willing to wait for one.
 #
 # On some tmux/WSL setups a brand-new window's pane_current_path transiently
 # reports a stale, unrelated-but-real path on the very first poll, before the
@@ -54,8 +56,29 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  # With FM_FAKE_INSTANT_SLEEP=1 this collapses the loop's inter-poll sleep, so a
+  # whole wait budget's worth of polls runs in milliseconds. Unset, it defers to
+  # the real sleep so the timing assertion below stays honest.
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${FM_FAKE_INSTANT_SLEEP:-0}" = 1 ] && exit 0
+for d in /bin /usr/bin; do
+  [ -x "$d/sleep" ] && exec "$d/sleep" "$@"
+done
+exit 0
+SH
+  chmod +x "$fakebin/sleep"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
+}
+
+# pane_reads echoes how many times the fake tmux was asked for the pane's cwd,
+# i.e. how many times the wait loop polled before giving up or settling.
+pane_reads() {
+  local n=0
+  [ -f "$COUNTFILE" ] && n=$(cat "$COUNTFILE")
+  printf '%s\n' "$n"
 }
 
 # make_settle_case <name> <id> <stale_reads> builds a home, a primary project
@@ -141,7 +164,117 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+# --- wait budget (FM_SPAWN_WORKTREE_TIMEOUT) --------------------------------
+#
+# A pane that never leaves the project directory models `treehouse get` still
+# provisioning a first-ever worktree: every read equals the project, so the loop
+# polls its whole budget and then refuses. Pointing the fake's "stale" path at
+# the project itself and asking for effectively unlimited stale reads produces
+# exactly that, and the poll counter reports the budget actually in effect.
+run_never_settles_spawn() {
+  local id=$1
+  STALE_DIR=$PROJ_DIR
+  STALE_READS=999999
+  FM_FAKE_INSTANT_SLEEP=1 run_settle_spawn "$id"
+}
+
+# Unset - and, like the fleet's other numeric knobs, blank - the budget must stay
+# exactly what it has always been: 60 one-second polls, reported as 60s.
+test_default_budget_is_sixty_seconds() {
+  local rec id out status
+  id=settle-budget-default-z3
+  rec=$(make_settle_case settle-budget-default "$id" 0)
+  read_settle_record "$rec"
+
+  out=$(run_never_settles_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "spawn should refuse when the pane never enters a worktree"
+  assert_contains "$out" "did not enter a worktree within 60s" \
+    "timeout error did not report the default 60s budget"
+  [ "$(pane_reads)" = 60 ] || fail "default budget polled $(pane_reads) times, expected 60"
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn must not record task metadata"
+
+  id=settle-budget-blank-z3b
+  rec=$(make_settle_case settle-budget-blank "$id" 0)
+  read_settle_record "$rec"
+
+  out=$(FM_SPAWN_WORKTREE_TIMEOUT='' run_never_settles_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "a blank budget should behave like an unset one, not refuse"
+  assert_contains "$out" "did not enter a worktree within 60s" \
+    "a blank FM_SPAWN_WORKTREE_TIMEOUT did not fall back to the 60s default"
+  [ "$(pane_reads)" = 60 ] || fail "blank budget polled $(pane_reads) times, expected 60"
+  pass "the wait budget defaults to 60 one-second polls when FM_SPAWN_WORKTREE_TIMEOUT is unset or blank"
+}
+
+# Set, the budget replaces the default in both the loop and the message, and the
+# message names the override so the operator knows which knob to raise.
+test_budget_override_is_honored_and_reported() {
+  local rec id out status
+  id=settle-budget-short-z4
+  rec=$(make_settle_case settle-budget-short "$id" 0)
+  read_settle_record "$rec"
+
+  out=$(FM_SPAWN_WORKTREE_TIMEOUT=3 run_never_settles_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "spawn should still refuse when the shortened budget expires"
+  assert_contains "$out" "did not enter a worktree within 3s" \
+    "timeout error did not report the budget actually in effect"
+  assert_contains "$out" "FM_SPAWN_WORKTREE_TIMEOUT" \
+    "timeout error did not name the override that raises the budget"
+  [ "$(pane_reads)" = 3 ] || fail "overridden budget polled $(pane_reads) times, expected 3"
+  pass "FM_SPAWN_WORKTREE_TIMEOUT replaces the default in both the loop and the timeout message"
+}
+
+# The reported incident: a first-ever `treehouse get` that keeps the pane in the
+# project past 60s and only then lands in the worktree. A raised budget must
+# carry it through to a recorded worktree instead of aborting.
+test_raised_budget_survives_a_slow_first_worktree() {
+  local rec id out status
+  id=settle-budget-slow-z5
+  rec=$(make_settle_case settle-budget-slow "$id" 70)
+  read_settle_record "$rec"
+  STALE_DIR=$PROJ_DIR
+
+  out=$(FM_SPAWN_WORKTREE_TIMEOUT=120 FM_FAKE_INSTANT_SLEEP=1 run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "a raised budget should outlast a slow first-ever treehouse get"
+  assert_contains "$out" "spawned $id" "spawn did not report success"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the worktree the slow treehouse get eventually entered"
+  [ "$(pane_reads)" -gt 60 ] || \
+    fail "spawn settled after only $(pane_reads) polls, so it never passed the old 60-poll ceiling"
+  pass "a raised FM_SPAWN_WORKTREE_TIMEOUT carries a slow first-ever treehouse get to a recorded worktree"
+}
+
+# An unusable budget is refused by name and by value, before any window exists -
+# never silently reset to the default and never left to poll forever.
+test_invalid_budget_is_refused_before_spawning() {
+  local rec id bad out status n=0
+  for bad in abc 0 -5 '3s' 6.5; do
+    n=$((n + 1))
+    id="settle-budget-invalid-$n-z6"
+    rec=$(make_settle_case "settle-budget-invalid-$n" "$id" 0)
+    read_settle_record "$rec"
+
+    out=$(FM_SPAWN_WORKTREE_TIMEOUT="$bad" run_settle_spawn "$id")
+    status=$?
+    expect_code 1 "$status" "spawn should refuse FM_SPAWN_WORKTREE_TIMEOUT='$bad'"
+    assert_contains "$out" "FM_SPAWN_WORKTREE_TIMEOUT must be a positive whole number of seconds (got '$bad')" \
+      "refusal did not name the offending FM_SPAWN_WORKTREE_TIMEOUT value '$bad'"
+    assert_absent "$HOME_DIR/state/$id.meta" \
+      "a refused budget must not leave task metadata behind for '$bad'"
+    [ "$(pane_reads)" = 0 ] || \
+      fail "spawn polled the pane $(pane_reads) times before refusing '$bad', expected 0"
+  done
+  pass "a non-numeric, fractional, zero, or negative FM_SPAWN_WORKTREE_TIMEOUT is refused by value before any window is created"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_default_budget_is_sixty_seconds
+test_budget_override_is_honored_and_reported
+test_raised_budget_survives_a_slow_first_worktree
+test_invalid_budget_is_refused_before_spawning
 
 echo "# all fm-spawn-worktree-settle tests passed"

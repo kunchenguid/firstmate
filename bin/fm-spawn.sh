@@ -190,6 +190,20 @@ case "$EFFORT" in
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
 
+# Seconds the worktree-detection loop below waits for `treehouse get` to move the
+# pane into its worktree. The default suits an already-warm treehouse pool; a
+# first-ever worktree for a project can legitimately need longer, and a spawn
+# that gives up early leaves an orphaned window and a half-provisioned pool slot
+# behind. Validated HERE, before any window exists, so a bad value refuses with
+# nothing to clean up rather than aborting mid-spawn or polling forever.
+WT_TIMEOUT=${FM_SPAWN_WORKTREE_TIMEOUT:-60}   # seconds allowed for treehouse get to enter the worktree
+case "$WT_TIMEOUT" in
+  ''|*[!0-9]*|0)
+    echo "error: FM_SPAWN_WORKTREE_TIMEOUT must be a positive whole number of seconds (got '$WT_TIMEOUT')" >&2
+    exit 1
+    ;;
+esac
+
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
 # default tmux (fm_backend_name). fm_backend_validate_spawn refuses unknown or
@@ -1056,7 +1070,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
   candidate=""
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 "$WT_TIMEOUT"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
@@ -1075,7 +1089,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within ${WT_TIMEOUT}s; a first-ever worktree for this project can need longer, so raise FM_SPAWN_WORKTREE_TIMEOUT and respawn. Inspect window $T" >&2
     exit 1
   fi
 
