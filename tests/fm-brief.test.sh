@@ -137,6 +137,7 @@ test_direct_pr_review_gate() {
   # it may run in a fresh shell.
   assert_grep "git fetch origin \"\${BASE#origin/}\" &&" "$brief" \
     "direct-PR gate stopped chaining the review onto a successful base refresh"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the brief carries this text literally
   [ "$(grep -Fc 'BASE=$(git symbolic-ref --short refs/remotes/origin/HEAD)' "$brief")" = 2 ] \
     || fail "direct-PR fallback stopped resolving its own review base"
   assert_grep "never \`grok-4-5\`" "$brief" \
