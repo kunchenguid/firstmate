@@ -132,6 +132,13 @@ test_direct_pr_review_gate() {
     "direct-PR brief lost the out-of-credits review fallback"
   assert_grep "Use the code-review skill on this branch against" "$brief" \
     "direct-PR brief left the fallback without a review prompt"
+  # Both blocks chain on && so a failed base refresh stops before the review
+  # runs against the wrong ref, and the fallback resolves its own BASE because
+  # it may run in a fresh shell.
+  assert_grep "git fetch origin \"\${BASE#origin/}\" &&" "$brief" \
+    "direct-PR gate stopped chaining the review onto a successful base refresh"
+  [ "$(grep -Fc 'BASE=$(git symbolic-ref --short refs/remotes/origin/HEAD)' "$brief")" = 2 ] \
+    || fail "direct-PR fallback stopped resolving its own review base"
   assert_grep "never \`grok-4-5\`" "$brief" \
     "direct-PR brief lost the warning against the dashed model string"
 

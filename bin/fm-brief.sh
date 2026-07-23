@@ -289,9 +289,9 @@ The task is complete only when committed on your branch.
 
 When it is implemented and committed, run the pre-push review gate on your own diff before you push:
 \`\`\`bash
-git remote set-head origin --auto >/dev/null
-BASE=\$(git symbolic-ref --short refs/remotes/origin/HEAD)
-git fetch origin "\${BASE#origin/}"
+git remote set-head origin --auto >/dev/null &&
+BASE=\$(git symbolic-ref --short refs/remotes/origin/HEAD) &&
+git fetch origin "\${BASE#origin/}" &&
 codex review -c model_reasoning_effort="xhigh" \\
   "Review this branch against \$BASE. Intent: <what this task set out to accomplish>. Acceptance criteria: <the acceptance criteria from the task above>"
 \`\`\`
@@ -300,6 +300,7 @@ The prompt is what buys the spec review axis on top of the coding-standards one,
 Fix every P0 and P1 finding it reports, commit the fixes, and rerun the same review until it comes back clean; note any P2 or P3 you are leaving in the PR body.
 If the codex account is out of credits or its weekly window is exhausted, do not skip the gate: opencode has no \`review\` subcommand, so drive the same review through a prompt instead.
 \`\`\`bash
+BASE=\$(git symbolic-ref --short refs/remotes/origin/HEAD) &&
 opencode run --model "opencode/grok-4.5" \\
   "Use the code-review skill on this branch against \$BASE. Intent: <the same intent>. Acceptance criteria: <the same criteria>. Report findings by severity, P0 to P3."
 \`\`\`
