@@ -818,7 +818,7 @@ if [ "$HARNESS" = pi ] && [ "$PI_PROFILE_CONFIGURED" -eq 1 ]; then
   fi
   MODEL=$FM_PI_MODEL
   EFFORT=medium
-  PICMD="NODE_OPTIONS=$(shell_quote "--require=$FM_ROOT/bin/fm-pi-startup-guard.cjs") NODE_PATH='' PI_PACKAGE_DIR='' PI_CODING_AGENT_DIR=$(shell_quote "$FM_PI_AGENT_DIR") PI_CODING_AGENT_SESSION_DIR=$(shell_quote "$FM_PI_SESSION_DIR") FM_PI_DELEGATED_PROJECT_DIR=$(shell_quote "$FM_PI_PROJECT_DIR") FM_PI_DELEGATED_MODEL=$(shell_quote "$FM_PI_MODEL") FM_PI_DELEGATED_CONTEXT_WINDOW=$(shell_quote "$FM_PI_CONTEXT_WINDOW") FM_PI_DELEGATED_AGENT_DIR=$(shell_quote "$FM_PI_AGENT_DIR") FM_PI_DELEGATED_RESERVE_TOKENS=$(shell_quote "$FM_PI_RESERVE_TOKENS") FM_PI_DELEGATED_KEEP_RECENT_TOKENS=$(shell_quote "$FM_PI_KEEP_RECENT_TOKENS") $(shell_quote "$FM_PI_COMMAND")"
+  PICMD="NODE_OPTIONS='' NODE_PATH='' PI_PACKAGE_DIR='' PI_CODING_AGENT_DIR=$(shell_quote "$FM_PI_AGENT_DIR") PI_CODING_AGENT_SESSION_DIR=$(shell_quote "$FM_PI_SESSION_DIR") FM_PI_DELEGATED_PROJECT_DIR=$(shell_quote "$FM_PI_PROJECT_DIR") FM_PI_DELEGATED_MODEL=$(shell_quote "$FM_PI_MODEL") FM_PI_DELEGATED_CONTEXT_WINDOW=$(shell_quote "$FM_PI_CONTEXT_WINDOW") FM_PI_DELEGATED_AGENT_DIR=$(shell_quote "$FM_PI_AGENT_DIR") FM_PI_DELEGATED_RESERVE_TOKENS=$(shell_quote "$FM_PI_RESERVE_TOKENS") FM_PI_DELEGATED_KEEP_RECENT_TOKENS=$(shell_quote "$FM_PI_KEEP_RECENT_TOKENS") node --require $(shell_quote "$FM_ROOT/bin/fm-pi-startup-guard.cjs") $(shell_quote "$FM_PI_COMMAND")"
   PIPROFILE="--no-approve --no-extensions --models $(shell_quote "$FM_PI_MODEL") -e $(shell_quote "$FM_ROOT/bin/fm-pi-profile-guard.ts") "
 fi
 

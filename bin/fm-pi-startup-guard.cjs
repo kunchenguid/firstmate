@@ -12,7 +12,9 @@ if (!projectDirValue || !path.isAbsolute(projectDirValue)) {
 const projectDir = fs.realpathSync(projectDirValue);
 const hiddenPaths = new Set([
   path.join(projectDir, ".pi", "commands"),
+  path.join(projectDir, ".pi", "hooks"),
   path.join(projectDir, ".pi", "settings.json"),
+  path.join(projectDir, ".pi", "tools"),
 ]);
 const originalExistsSync = fs.existsSync;
 
