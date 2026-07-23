@@ -186,12 +186,45 @@ valid_date() {  # <YYYY-MM-DD>
   ' "$1"
 }
 
-decision_lines_are_canonical() {  # <text>
+read_canonical_decision_file() {  # <path>
+  local path=$1 status
   command -v node >/dev/null 2>&1 || fail "node is required to validate captain decision text"
-  node -e '
-    const lines = process.argv[1].split("\n");
-    if (lines.some(line => line.length > 0 && line.trim().length === 0)) process.exit(1);
-  ' -- "$1"
+  if node -e '
+    const fs = require("fs");
+    const { TextDecoder } = require("util");
+    let bytes;
+    try {
+      bytes = fs.readFileSync(process.argv[1]);
+    } catch (_) {
+      process.exit(2);
+    }
+    if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+      process.exit(3);
+    }
+    if (bytes.includes(0)) process.exit(4);
+    let text;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch (_) {
+      process.exit(1);
+    }
+    if (text.split("\n").some(line => line.length > 0 && line.trim().length === 0)) {
+      process.exit(5);
+    }
+    process.stdout.write(bytes);
+  ' -- "$path"; then
+    return 0
+  else
+    status=$?
+  fi
+  case "$status" in
+    1) fail "decision file must contain valid UTF-8" ;;
+    2) fail "could not read decision file: $path" ;;
+    3) fail "decision file must not start with a UTF-8 BOM" ;;
+    4) fail "decision file must not contain NUL bytes" ;;
+    5) fail "decision file contains a whitespace-only line; remove its whitespace or use an empty line" ;;
+    *) fail "could not validate decision file: $path" ;;
+  esac
 }
 
 scan_decision_identity() {  # <mode> <path> <id> [archive-view]
@@ -757,13 +790,11 @@ command_resolve() {
   validate_slug decision-key "$key"
   [ -n "$decision_file" ] || fail "--decision-file is required"
   [ -f "$decision_file" ] || fail "decision file does not exist: $decision_file"
-  decision=$(cat "$decision_file")
+  decision=$(read_canonical_decision_file "$decision_file") || exit 1
   case "$decision" in *$'\r'*) fail "decision file must use LF line endings" ;; esac
   [ -n "$decision" ] || fail "decision file must not be empty"
   [ "$(printf '%s' "$decision" | LC_ALL=C wc -c | tr -d ' ')" -le 8192 ] \
     || fail "decision file exceeds 8192 bytes"
-  decision_lines_are_canonical "$decision" \
-    || fail "decision file contains a whitespace-only line; remove its whitespace or use an empty line"
   [ -n "$routed" ] || fail "at least one --routed-to task is required"
   routed=$(printf '%s\n' "$routed" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd' ' -)
   routed_csv=$(printf '%s\n' "$routed" | tr ' ' ',')

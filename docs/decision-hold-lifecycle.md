@@ -33,7 +33,8 @@ Scout teardown calls the script's read-only `verify` subcommand after checking f
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
 The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
-It rejects carriage-return line endings and non-empty whitespace-only lines before any backlog mutation so accepted decision bytes remain recomputable after structured Markdown retention while canonical empty lines remain unchanged.
+It reads one raw decision-file snapshot and rejects invalid UTF-8, a UTF-8 BOM, NUL bytes, carriage-return line endings, and non-empty whitespace-only lines before any backlog mutation.
+Accepted Unicode is neither normalized nor rewritten, so its exact bytes remain recomputable after structured Markdown retention while canonical empty lines remain unchanged.
 It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
 A failed intermediate step leaves the hold open.
@@ -73,7 +74,7 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
-ok - canonical LF decisions survive retention while whitespace-only inputs, late mutations, invalid duplicates, and unsafe archives are rejected
+ok - canonical Unicode survives retention while malformed bytes, lossy whitespace, late mutations, duplicates, and unsafe archives are rejected
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly

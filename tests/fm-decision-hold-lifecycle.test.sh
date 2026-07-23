@@ -611,7 +611,7 @@ EOF
 test_retained_decisions_are_strictly_archive_aware() {
   local home origin older_hold newer_hold archive record unresolved_record heading digest closed variant before after show
   local separator_label separator_code separator
-  local decision_case decision_bytes decision_path
+  local decision_case decision_bytes decision_path encoding_case
   local dependent=sample-retained-dependent
   home=$(make_home retained-decisions)
   origin=sample-retained-review
@@ -643,6 +643,49 @@ test_retained_decisions_are_strictly_archive_aware() {
   assert_grep "decision file must use LF line endings" "$home/crlf-decision.err" \
     "CRLF rejection did not report the canonical decision-file requirement"
 
+  for encoding_case in lone-continuation truncated overlong surrogate out-of-range; do
+    decision_path="$home/$encoding_case-decision.txt"
+    case "$encoding_case" in
+      lone-continuation) printf '%s' $'\x80' > "$decision_path" ;;
+      truncated) printf '%s' $'\xe2\x82' > "$decision_path" ;;
+      overlong) printf '%s' $'\xc0\xaf' > "$decision_path" ;;
+      surrogate) printf '%s' $'\xed\xa0\x80' > "$decision_path" ;;
+      out-of-range) printf '%s' $'\xf4\x90\x80\x80' > "$decision_path" ;;
+    esac
+    if run_decisions "$home" resolve "$origin" older \
+      --decision-file "$decision_path" --routed-to "$dependent" \
+      > "$home/$encoding_case-decision.out" 2> "$home/$encoding_case-decision.err"; then
+      fail "resolve accepted the $encoding_case malformed UTF-8 fixture"
+    fi
+    after=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+    [ "$before" = "$after" ] || fail "$encoding_case rejection mutated the backlog"
+    assert_grep "decision file must contain valid UTF-8" \
+      "$home/$encoding_case-decision.err" \
+      "$encoding_case rejection did not report the strict UTF-8 requirement"
+  done
+
+  printf '%s' $'\xef\xbb\xbfUse the retained route.\n' > "$home/bom-decision.txt"
+  if run_decisions "$home" resolve "$origin" older \
+    --decision-file "$home/bom-decision.txt" --routed-to "$dependent" \
+    > "$home/bom-decision.out" 2> "$home/bom-decision.err"; then
+    fail "resolve accepted a UTF-8 BOM"
+  fi
+  after=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "UTF-8 BOM rejection mutated the backlog"
+  assert_grep "decision file must not start with a UTF-8 BOM" "$home/bom-decision.err" \
+    "UTF-8 BOM rejection did not report the canonical byte requirement"
+
+  printf 'Use the retained route.\0' > "$home/nul-decision.txt"
+  if run_decisions "$home" resolve "$origin" older \
+    --decision-file "$home/nul-decision.txt" --routed-to "$dependent" \
+    > "$home/nul-decision.out" 2> "$home/nul-decision.err"; then
+    fail "resolve accepted a NUL byte"
+  fi
+  after=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "NUL-byte rejection mutated the backlog"
+  assert_grep "decision file must not contain NUL bytes" "$home/nul-decision.err" \
+    "NUL-byte rejection did not report the shell-safe byte requirement"
+
   for decision_case in internal-space internal-tab internal-mixed all-space all-tab all-mixed; do
     case "$decision_case" in
       internal-space) decision_bytes=$'Use the retained route.\n   \nKeep the fallback available.\n' ;;
@@ -666,7 +709,7 @@ test_retained_decisions_are_strictly_archive_aware() {
       "$decision_case rejection did not report how to make the decision canonical"
   done
 
-  printf 'Use the retained route.\n\nKeep the fallback available.\n' > "$home/retained-decision.txt"
+  printf '%b' 'Use the retained route. \344\270\255\346\226\207\n\nCombining: e\314\201\nNon-BMP: \360\237\232\200\n' > "$home/retained-decision.txt"
   run_decisions "$home" resolve "$origin" older --decision-file "$home/retained-decision.txt" \
     --routed-to "$dependent" >/dev/null \
     || fail "could not resolve the decision before retention"
@@ -975,7 +1018,7 @@ EOF
   printf '\n%s\n' "$record" >> "$variant/data/backlog.md"
   assert_archive_verify_fails "$variant" "$origin" active-archive-collision
 
-  pass "canonical LF decisions survive retention while whitespace-only inputs, late mutations, invalid duplicates, and unsafe archives are rejected"
+  pass "canonical Unicode survives retention while malformed bytes, lossy whitespace, late mutations, duplicates, and unsafe archives are rejected"
 }
 
 test_uninventoried_report_decision_refuses_completion
