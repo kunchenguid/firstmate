@@ -97,6 +97,21 @@ OpenCode uses `.opencode/plugins/fm-primary-watch-arm.js`, which coordinates wit
 Pi uses the tracked `.pi/extensions/fm-primary-turnend-guard.ts` plus the tracked `.pi/extensions/fm-primary-pi-watch.ts`, both project-local extensions Pi auto-discovers once trusted.
 When changing any primary watcher adapter, update `docs/supervision-protocols/`, `docs/turnend-guard.md` if a shared idle or turn-end hook changed, and the relevant concise fact below.
 
+## Spawned credential-config directories
+
+`bin/fm-spawn.sh` prefixes the final interactive launch command with the primary session's config-directory selection, so a fresh backend shell cannot silently fall back to another identity.
+For `pi`, it passes `PI_CODING_AGENT_DIR` from the spawning environment or Pi's verified 0.81.1 default of `$HOME/.pi/agent`.
+For `claude`, it passes `CLAUDE_CONFIG_DIR` from the spawning environment or the standard `$HOME/.claude` default.
+The assignment is inline on the command submitted after every backend creates its pane or terminal, so it applies equally to crewmates, scouts, and secondmates on tmux, herdr, zellij, Orca, and cmux.
+It does not copy config files or credential bytes, change `$HOME`, or select a provider or model.
+Codex, OpenCode, and Grok were reviewed at their launch-template integration surface and have no corresponding Claude or Pi config-directory variable to forward.
+
+**Verification (2026-07-23).**
+On this host, the primary Pi process had no `PI_CODING_AGENT_DIR` export and Pi 0.81.1 reported `PI_CODING_AGENT_DIR - Config directory (default: ~/.pi/agent)` from `pi --help`, resolving the active store to `/Users/jfmcoronel/.pi/agent`.
+A disposable real tmux spawn using the Pi launch template printed `PI_CODING_AGENT_DIR=</Users/jfmcoronel/.pi/agent>` inside the spawned pane, matching the primary selection.
+A matching disposable tmux Claude launch printed `CLAUDE_CONFIG_DIR=</Users/jfmcoronel/.claude>` inside its spawned pane, matching the primary selection.
+The probes used harness stand-ins that printed only directory paths and `$HOME`, never credential contents, and the disposable sessions were removed afterward.
+
 ## Launch profile axes
 
 `bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, and `--effort` values chosen by firstmate at intake.

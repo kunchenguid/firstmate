@@ -528,6 +528,23 @@ shell_quote() {
   printf "'"
 }
 
+credential_config_prefix() {  # <verified-harness> -> shell assignments for the launched agent only
+  local harness=$1 dir
+  case "$harness" in
+    pi)
+      # Pi 0.81.1 documents ~/.pi/agent as its default config directory.
+      # An inline assignment reaches a shell created by every backend even when
+      # that shell did not inherit the primary process's exported environment.
+      dir=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
+      printf 'PI_CODING_AGENT_DIR=%s ' "$(shell_quote "$dir")"
+      ;;
+    claude)
+      dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+      printf 'CLAUDE_CONFIG_DIR=%s ' "$(shell_quote "$dir")"
+      ;;
+  esac
+}
+
 model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
@@ -1262,6 +1279,7 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 PIBRIEFENV=
 [ "$HARNESS" != pi ] || PIBRIEFENV="FM_FIRSTMATE_PI_LAUNCH_BRIEF=$sq_brief"
+CREDENTIAL_CONFIG_PREFIX=$(credential_config_prefix "$HARNESS")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -1273,6 +1291,7 @@ LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 LAUNCH=${LAUNCH//__PIBRIEFENV__/$PIBRIEFENV}
+LAUNCH="$CREDENTIAL_CONFIG_PREFIX$LAUNCH"
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
