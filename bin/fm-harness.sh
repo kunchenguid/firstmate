@@ -35,6 +35,10 @@ detect_own() {
   # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
   # is unambiguous when firstmate runs natively on grok.
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # agy (Antigravity CLI) sets ANTIGRAVITY_AGENT=1 in every tool/child process
+  # (verified, cli-1.1.5, alongside ANTIGRAVITY_AGENTAPI_EXE and
+  # ANTIGRAVITY_LS_VERSION=cli-<v>). Unambiguous when firstmate runs on agy.
+  [ "${ANTIGRAVITY_AGENT:-}" = "1" ] && { echo agy; return; }
   # Layer 2: walk the parent chain and match the command name.
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
@@ -44,6 +48,7 @@ detect_own() {
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
+      agy) echo agy; return ;;
       pi) echo pi; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
@@ -53,6 +58,7 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
+          *agy*|*antigravity*) echo agy; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac
