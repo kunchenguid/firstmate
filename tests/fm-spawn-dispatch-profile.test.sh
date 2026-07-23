@@ -344,6 +344,8 @@ test_pi_threads_model_and_max_effort() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "pi --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
     "pi launch did not thread the requested model and max thinking level"
+  assert_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF='" \
+    "pi launch did not identify the unchanged positional brief for Calm"
   pass "pi receives --model and --thinking max profile flags"
 }
 

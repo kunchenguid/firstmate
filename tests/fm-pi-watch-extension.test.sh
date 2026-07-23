@@ -14,8 +14,35 @@ export NODE_NO_WARNINGS=1
 
 install_pi_watch_extension_fixture() {
   local repo=$1
-  mkdir -p "$repo/.pi/extensions" "$repo/node_modules/typebox"
+  mkdir -p \
+    "$repo/.pi/extensions/lib" \
+    "$repo/node_modules/@earendil-works/pi-coding-agent" \
+    "$repo/node_modules/@earendil-works/pi-tui" \
+    "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
+  cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
+{"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
+JSON
+  cat > "$repo/node_modules/@earendil-works/pi-coding-agent/index.js" <<'JS'
+export function getMarkdownTheme() { return {}; }
+export class UserMessageComponent {
+  render() { return []; }
+  invalidate() {}
+}
+JS
+  cat > "$repo/node_modules/@earendil-works/pi-tui/package.json" <<'JSON'
+{"name":"@earendil-works/pi-tui","type":"module","exports":"./index.js"}
+JSON
+  cat > "$repo/node_modules/@earendil-works/pi-tui/index.js" <<'JS'
+export class Box {
+  addChild() {}
+  clear() {}
+  setBgFn() {}
+}
+export class Container {}
+export class Text {}
+JS
   cat > "$repo/node_modules/typebox/package.json" <<'JSON'
 {"name":"typebox","type":"module","exports":"./index.js"}
 JSON
