@@ -244,6 +244,35 @@ test_pool_refuses_when_every_account_is_cooling() {
   pass "a spawn is refused, not silently mis-routed, when every account is cooling"
 }
 
+# The back-compat POSITIONAL harness is as explicit an override as --harness, so
+# it must narrow rotation the same way. Rotation starts at claude-1 here, so a
+# pool that ignored the positional would launch claude and silently drop the
+# caller's "cursor".
+test_positional_harness_narrows_the_pool() {
+  local rec id out backend launch
+  id=pool-positional-h1
+  rec=$(make_spawn_case pool-positional "$id")
+  read_case_record "$rec"
+  write_pool_config "$HOME_DIR"
+  printf 'k\n' > "$HOME_DIR/keys/cursor-1.key"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" cursor --pool)
+  expect_code 0 $? "a pooled spawn with a positional harness should succeed: $out"
+
+  backend=$(sed -n 's/^pool_backend=//p' "$HOME_DIR/state/$id.meta")
+  [ "$backend" = cursor-1 ] || fail "the positional harness should narrow rotation to a cursor account, got $backend"
+  case "$(sed -n 's/^harness=//p' "$HOME_DIR/state/$id.meta")" in
+    cursor) ;;
+    *) fail "meta should record the caller's harness, got: $(cat "$HOME_DIR/state/$id.meta")" ;;
+  esac
+  launch=$(cat "$LAUNCH_LOG")
+  case "$launch" in
+    *'cursor agent '*) ;;
+    *) fail "the launch should be the caller's harness, not the pool's default, got: $launch" ;;
+  esac
+  pass "a positional harness narrows the pool and is never overridden by it"
+}
+
 test_pool_rejects_secondmate() {
   local rec id out status
   id=pool-secondmate-g1
@@ -267,6 +296,7 @@ test_pool_records_account_and_applies_its_env
 test_pool_rotates_across_spawns
 test_pool_never_puts_a_key_on_the_command_line
 test_pool_refuses_when_every_account_is_cooling
+test_positional_harness_narrows_the_pool
 test_pool_rejects_secondmate
 
 echo "# all fm-spawn-pool tests passed"
