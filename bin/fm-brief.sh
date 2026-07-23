@@ -289,11 +289,13 @@ The task is complete only when committed on your branch.
 
 When it is implemented and committed, run the pre-push review gate on your own diff before you push:
 \`\`\`bash
-codex review --base <default-branch> -c model_reasoning_effort="xhigh" \\
-  "Intent: <what this task set out to accomplish>. Acceptance criteria: <the acceptance criteria from the task above>"
+git fetch origin <default-branch>
+codex review -c model_reasoning_effort="xhigh" \\
+  "Review this branch against origin/<default-branch>. Intent: <what this task set out to accomplish>. Acceptance criteria: <the acceptance criteria from the task above>"
 \`\`\`
-Replace \`<default-branch>\` with the default branch of this project, and fill the prompt from the Task section so the review covers the spec as well as the coding standards.
-Fix every P0 and P1 finding it reports, and note any P2 or P3 you are leaving in the PR body.
+Name the base inside the prompt rather than with \`--base\`, which codex refuses to combine with a prompt, and fetch first because a pooled clone keeps a stale local default branch.
+The prompt is what buys the spec review axis on top of the coding-standards one, so fill it from the Task section.
+Fix every P0 and P1 finding it reports, commit the fixes, and rerun the same review until it comes back clean; note any P2 or P3 you are leaving in the PR body.
 If the codex account is out of credits or its weekly window is exhausted, do not skip the gate: run the review on \`opencode run --model "opencode/grok-4.5"\` instead, driving it with the \`code-review\` skill or a plain review-this-diff prompt, because opencode has no \`review\` subcommand.
 That model string takes a dot - \`opencode/grok-4.5\`, never \`grok-4-5\`, which fails with an opaque server error.
 

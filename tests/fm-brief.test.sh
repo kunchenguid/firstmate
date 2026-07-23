@@ -106,10 +106,15 @@ test_direct_pr_review_gate() {
   id="brief-direct-gate-a5"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep 'codex review --base <default-branch> -c model_reasoning_effort="xhigh"' "$brief" \
+  assert_grep 'codex review -c model_reasoning_effort="xhigh"' "$brief" \
     "direct-PR brief lost the pre-push review gate invocation"
-  assert_grep "Fix every P0 and P1 finding" "$brief" \
-    "direct-PR brief lost the finding-severity contract"
+  # codex 0.145.0 refuses --base together with a prompt, so the base belongs in
+  # the prompt text; a brief that reintroduces the flag generates a command the
+  # crewmate cannot run.
+  assert_no_grep "codex review --base" "$brief" \
+    "direct-PR brief used the --base form that codex rejects alongside a prompt"
+  assert_grep "Fix every P0 and P1 finding it reports, commit the fixes, and rerun the same review" "$brief" \
+    "direct-PR brief lost the fix, commit, and re-review loop"
   assert_grep "opencode/grok-4.5" "$brief" \
     "direct-PR brief lost the out-of-credits review fallback"
   assert_grep "never \`grok-4-5\`" "$brief" \
