@@ -172,6 +172,16 @@ wait_for_file() {
   return 1
 }
 
+wait_for_process_exit() {
+  local pid=$1 limit=${2:-50} i=0
+  while [ "$i" -lt "$limit" ]; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 test_fast_wake_signals_only_verified_home_watcher() {
   local home fakebin response log watch_out watcher
   home=$(make_home fast-wake)
@@ -195,10 +205,53 @@ test_fast_wake_signals_only_verified_home_watcher() {
     wait "$watcher" 2>/dev/null || true
     fail "listener failed while signaling the watcher"
   }
+  if ! wait_for_process_exit "$watcher" 50; then
+    kill "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    fail "watcher did not exit within one poll interval through the USR1 fast path"
+  fi
   wait "$watcher" || fail "watcher did not exit cleanly through the USR1 fast path"
   assert_grep 'check: topic-board: external event queued' "$watch_out" "watcher did not report the queued topic event"
   assert_grep "$(printf '\tcheck\ttopic-board\t')" "$home/state/.wake-queue" "fast wake lost its durable queue record"
   pass "listener queues first, then returns the identity-verified home watcher immediately"
+}
+
+test_queued_topic_wake_survives_unhandled_usr1() {
+  local home fakebin response log watch_out watcher
+  home=$(make_home queued-wake-fallback)
+  fakebin=$(make_fake_curl "$home")
+  response="$home/updates.json"
+  log="$home/curl.log"
+  watch_out="$home/watch.out"
+  : > "$log"
+  write_updates "$response" \
+    '{"update_id":41,"message":{"message_id":402,"message_thread_id":3,"from":{"id":953048088},"chat":{"id":-1004497246253},"text":"wake even if signal is masked"}}'
+
+  (
+    trap '' USR1
+    exec env FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$ROOT/bin/fm-watch.sh"
+  ) > "$watch_out" 2>&1 &
+  watcher=$!
+  if ! wait_for_file "$home/state/.watch.lock/pid" || ! wait_for_file "$home/state/.last-watcher-beat"; then
+    kill "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    fail "fallback test watcher did not become healthy"
+  fi
+  listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 || {
+    kill "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    fail "listener failed while queueing the fallback topic wake"
+  }
+  if ! wait_for_process_exit "$watcher" 30; then
+    kill "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    fail "watcher left an actionable topic-board record queued after USR1 was not handled"
+  fi
+  wait "$watcher" || fail "watcher did not exit cleanly through the queued topic fallback"
+  assert_grep 'check: topic-board: topic-message 1 unanswered' "$watch_out" "queued fallback did not emit the durable topic reason"
+  assert_grep "$(printf '\tcheck\ttopic-board\t')" "$home/state/.wake-queue" "queued fallback lost its durable topic record"
+  pass "a queued topic wake exits within one poll even when USR1 is not handled"
 }
 
 test_claim_reply_idempotency_and_ambiguous_delivery() {
@@ -325,5 +378,6 @@ EOF
 test_listener_is_lossless_and_topic_aware
 test_boundary_offset_and_failed_persistence
 test_fast_wake_signals_only_verified_home_watcher
+test_queued_topic_wake_survives_unhandled_usr1
 test_claim_reply_idempotency_and_ambiguous_delivery
 test_service_and_supervision_integration

@@ -13,6 +13,7 @@ If the listener stops after advancing the offset but before notifying firstmate,
 
 The listener appends a `topic-board` record to firstmate's durable wake queue before sending `USR1` to the identity-verified watcher for the same `FM_HOME`.
 The signal returns the active harness supervision cycle immediately, while the queued record remains the authority for recovery after a crash or restart.
+The watcher also checks for a queued topic-board record at each poll boundary, so an ignored or missed signal cannot strand an actionable message behind benign wake absorption.
 No state check or 300 second check sweep participates in the delivery path.
 The listener repeats unanswered notifications on a bounded default 300 second cadence so a crash after a queue drain cannot strand an inbox item.
 

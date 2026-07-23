@@ -36,7 +36,8 @@
 #                          unsafe state checks were refused without execution
 #   check: topic-board: external event queued
 #                          the durable topic listener appended its own check
-#                          record, then used the home-scoped USR1 fast path
+#                          record, then used the home-scoped USR1 fast path;
+#                          poll-boundary queue checks recover a missed signal
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
@@ -314,6 +315,34 @@ wake() {
   esac
   echo "$1"
   exit 0
+}
+
+# Return the latest durable topic-board reason without consuming the queue.
+# USR1 is a latency hint, while the queue record is the delivery authority, so
+# every poll boundary also checks for this always-actionable wake. This prevents
+# an ignored, coalesced, or otherwise unhandled signal from leaving a topic
+# message queued behind benign wake absorption forever.
+queued_topic_board_reason() {
+  [ -s "$FM_WAKE_QUEUE" ] || return 1
+  awk -F '\t' '
+    NF >= 5 && $3 == "check" && $4 == "topic-board" {
+      found = 1
+      reason = $5
+    }
+    END {
+      if (!found) exit 1
+      print reason
+    }
+  ' "$FM_WAKE_QUEUE"
+}
+
+surface_queued_topic_board_wake() {
+  local reason
+  reason=$(queued_topic_board_reason) || return 0
+  case "$reason" in
+    'check: topic-board:'*) wake "$reason" ;;
+    *) wake "check: topic-board: external event queued" ;;
+  esac
 }
 
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
@@ -829,6 +858,10 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  # The listener queues before signaling, so this is both a startup recovery
+  # check and the bounded fallback when USR1 was not handled by this process.
+  surface_queued_topic_board_wake
+
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.
@@ -1141,5 +1174,8 @@ EOF
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
   # else the blind poll sleep. See event_wait_or_sleep.
+  # Recheck the durable topic queue first so a message that arrived during this
+  # cycle is not sent through another full wait after its USR1 was missed.
+  surface_queued_topic_board_wake
   event_wait_or_sleep
 done
