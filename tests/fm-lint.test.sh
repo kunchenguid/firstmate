@@ -335,6 +335,82 @@ SH
   pass "jobs=1 and jobs=2 preserve deterministic diagnostics, failures, cleanup bounds, and quiet telemetry"
 }
 
+test_worker_trees_stop_on_signal() {
+  local tmp fakebin fixture jobs telemetry lint_tmp pid_file out_file telemetry_file
+  local parent_pid shellcheck_pid i parent_rc survivor
+  tmp=$(fm_test_tmproot fm-lint-signal)
+  mkdir -p "$tmp"
+  fakebin=$(fm_fakebin "$tmp")
+  fixture="$tmp/good.sh"
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+  cat > "$fakebin/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+printf '%s\n' "$$" > "$FM_TEST_SHELLCHECK_PID"
+trap 'exit 143' HUP INT TERM
+while :; do
+  sleep 1
+done
+SH
+  chmod +x "$fakebin/shellcheck"
+
+  for jobs in 1 2; do
+    for telemetry in off on; do
+      lint_tmp="$tmp/lint-$jobs-$telemetry"
+      pid_file="$tmp/shellcheck-$jobs-$telemetry.pid"
+      out_file="$tmp/output-$jobs-$telemetry"
+      telemetry_file=
+      mkdir -p "$lint_tmp"
+      if [ "$telemetry" = on ]; then
+        telemetry_file="$tmp/telemetry-$jobs.tsv"
+      fi
+      PATH="$fakebin:$PATH" TMPDIR="$lint_tmp" FM_LINT_JOBS="$jobs" \
+        FM_LINT_TELEMETRY="$telemetry_file" FM_TEST_SHELLCHECK_PID="$pid_file" \
+        "$LINT" "$fixture" > "$out_file" 2>&1 &
+      parent_pid=$!
+      i=0
+      while [ "$i" -lt 500 ] && [ ! -s "$pid_file" ]; do
+        kill -0 "$parent_pid" 2>/dev/null || break
+        sleep 0.01
+        i=$((i + 1))
+      done
+      [ -s "$pid_file" ] || {
+        kill -TERM "$parent_pid" 2>/dev/null || true
+        wait "$parent_pid" 2>/dev/null || true
+        fail "jobs=$jobs telemetry=$telemetry did not start ShellCheck"
+      }
+      shellcheck_pid=$(cat "$pid_file")
+      kill -TERM "$parent_pid" 2>/dev/null \
+        || fail "jobs=$jobs telemetry=$telemetry parent could not be interrupted"
+      parent_rc=0
+      wait "$parent_pid" 2>/dev/null || parent_rc=$?
+      survivor=0
+      i=0
+      while [ "$i" -lt 100 ] && kill -0 "$shellcheck_pid" 2>/dev/null; do
+        sleep 0.01
+        i=$((i + 1))
+      done
+      if kill -0 "$shellcheck_pid" 2>/dev/null; then
+        survivor=1
+        kill -KILL "$shellcheck_pid" 2>/dev/null || true
+      fi
+      [ "$parent_rc" -eq 143 ] \
+        || fail "jobs=$jobs telemetry=$telemetry signal exit was $parent_rc, expected 143"
+      [ "$survivor" -eq 0 ] \
+        || fail "jobs=$jobs telemetry=$telemetry left ShellCheck running"
+      [ -z "$(find "$lint_tmp" -mindepth 1 -maxdepth 1 -name 'fm-lint.*' -print -quit)" ] \
+        || fail "jobs=$jobs telemetry=$telemetry left temporary worker state"
+    done
+  done
+  pass "jobs=1 and jobs=2 stop complete worker trees with and without telemetry"
+}
+
 test_seeded_module_boundary_parity() {
   if ! pinned_ready; then
     pass "SKIP (ShellCheck $REQUIRED not resolved): seeded source-boundary parity check"
@@ -419,4 +495,5 @@ test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
 test_source_graph_boundaries_keep_every_owner
 test_jobs_are_deterministic_and_complete
+test_worker_trees_stop_on_signal
 test_seeded_module_boundary_parity

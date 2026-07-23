@@ -134,6 +134,10 @@ if ! command -v shellcheck >/dev/null 2>&1; then
 fi
 unset SHELLCHECK_OPTS
 SHELLCHECK_BIN=$(command -v shellcheck)
+if ! PERL_BIN=$(command -v perl); then
+  printf 'fm-lint.sh: perl is required for bounded worker cleanup.\n' >&2
+  exit 127
+fi
 resolved=$("$SHELLCHECK_BIN" --version | awk '/^version:/ {print $2; exit}')
 printf 'fm-lint.sh: ShellCheck %s (pinned %s)\n' "$resolved" "$REQUIRED_SHELLCHECK" >&2
 if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
@@ -165,7 +169,14 @@ ACTIVE_PIDS=()
 fm_lint_cleanup() {
   local pid
   for pid in "${ACTIVE_PIDS[@]:-}"; do
-    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    [ -n "$pid" ] || continue
+    kill -TERM -- "-$pid" 2>/dev/null || true
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  for pid in "${ACTIVE_PIDS[@]:-}"; do
+    [ -n "$pid" ] || continue
+    kill -KILL -- "-$pid" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
   done
   for pid in "${ACTIVE_PIDS[@]:-}"; do
     [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
@@ -266,38 +277,52 @@ fm_lint_run_worker() {  # <worker-index>
   timing="$TMP_ROOT/timing.$worker_index"
   if [ -n "$TELEMETRY" ] && [ -x /usr/bin/time ]; then
     if [ "$(uname)" = Darwin ]; then
-      /usr/bin/time -lp -o "$timing" \
+      exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
+        /usr/bin/time -lp -o "$timing" \
         env FM_LINT_INTERNAL=1 FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     else
-      /usr/bin/time -f 'wall_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M' -o "$timing" \
+      exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
+        /usr/bin/time -f 'wall_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M' -o "$timing" \
         env FM_LINT_INTERNAL=1 FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     fi
   else
     [ -z "$TELEMETRY" ] || printf 'timing_unavailable=1\n' > "$timing"
-    env FM_LINT_INTERNAL=1 FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+    exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
+      env FM_LINT_INTERNAL=1 FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
       "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
   fi
+}
+
+fm_lint_start_worker() {
+  fm_lint_run_worker "$1" &
+  ACTIVE_PIDS+=("$!")
+}
+
+fm_lint_wait_workers() {
+  local pid
+  while [ "${#ACTIVE_PIDS[@]}" -gt 0 ]; do
+    pid=${ACTIVE_PIDS[0]}
+    wait "$pid" 2>/dev/null || true
+    ACTIVE_PIDS=("${ACTIVE_PIDS[@]:1}")
+  done
 }
 
 if [ "$JOBS" -eq 1 ]; then
   worker=0
   while [ "$worker" -lt "$SHARD_COUNT" ]; do
-    fm_lint_run_worker "$worker" || true
+    fm_lint_start_worker "$worker"
+    fm_lint_wait_workers
     worker=$((worker + 1))
   done
 else
   worker=0
   while [ "$worker" -lt "$SHARD_COUNT" ]; do
-    fm_lint_run_worker "$worker" &
-    ACTIVE_PIDS+=("$!")
+    fm_lint_start_worker "$worker"
     worker=$((worker + 1))
   done
-  for pid in "${ACTIVE_PIDS[@]}"; do
-    wait "$pid" 2>/dev/null || true
-  done
-  ACTIVE_PIDS=()
+  fm_lint_wait_workers
 fi
 
 # Replay both stable shards in deterministic order and select the first nonzero
