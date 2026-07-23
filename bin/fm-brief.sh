@@ -303,7 +303,7 @@ If the codex account is out of credits or its weekly window is exhausted, do not
 git remote set-head origin --auto >/dev/null &&
 BASE=\$(git symbolic-ref --short refs/remotes/origin/HEAD) &&
 git fetch origin "\${BASE#origin/}" &&
-opencode run --model "opencode/grok-4.5" \\
+OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode run --model "opencode/grok-4.5" \\
   "Use the code-review skill on this branch against \$BASE. Intent: <the same intent>. Acceptance criteria: <the same criteria>. Report findings by severity, P0 to P3."
 \`\`\`
 That model string takes a dot - \`opencode/grok-4.5\`, never \`grok-4-5\`, which fails with an opaque server error.

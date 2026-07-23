@@ -128,8 +128,8 @@ test_direct_pr_review_gate() {
     "direct-PR brief lost the fix, commit, and re-review loop"
   # opencode has no review subcommand, so a promptless `opencode run` reviews
   # nothing; the fallback is only a gate if it carries the review instruction.
-  assert_grep 'opencode run --model "opencode/grok-4.5"' "$brief" \
-    "direct-PR brief lost the out-of-credits review fallback"
+  assert_grep "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode run --model \"opencode/grok-4.5\"" "$brief" \
+    "direct-PR brief lost the unattended out-of-credits review fallback"
   assert_grep "Use the code-review skill on this branch against" "$brief" \
     "direct-PR brief left the fallback without a review prompt"
   # Both blocks chain on && so a failed base refresh stops before the review
