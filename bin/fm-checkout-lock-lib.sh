@@ -150,8 +150,6 @@ fm_checkout_treehouse_return_locked() {
   [ "$status" -ne 0 ] || return 0
   if [ "$status" -eq "$FM_CHECKOUT_TREEHOUSE_RETURN_TIMEOUT_STATUS" ]; then
     echo "error: Treehouse return timed out after ${timeout}s for $checkout" >&2
-  elif [ "$status" -eq "$FM_PROCESS_TREE_CLEANUP_FAILURE_STATUS" ]; then
-    echo "error: Treehouse return process cleanup could not be verified for $checkout; retained for inspection" >&2
   fi
   return "$status"
 }
@@ -168,6 +166,5 @@ fm_checkout_treehouse_return_requires_retention() {
     || [ "$1" -eq "$FM_CHECKOUT_LOCK_CONTENTION_STATUS" ] \
     || [ "$1" -eq "$FM_CHECKOUT_PROCESS_CLEANUP_FAILURE_STATUS" ] \
     || [ "$1" -eq "$FM_CHECKOUT_TREEHOUSE_RETURN_TIMEOUT_STATUS" ] \
-    || [ "$1" -eq "$FM_PROCESS_TREE_CLEANUP_FAILURE_STATUS" ] \
     || [ "$1" -eq "$FM_CHECKOUT_TREEHOUSE_RETURN_UNAVAILABLE_STATUS" ]
 }
