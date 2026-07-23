@@ -165,7 +165,9 @@ run_no_mistakes_init() {
   mkdir -p "$context_dir" || return 1
   context_file=$(mktemp "$context_dir/no-mistakes.XXXXXX") || return 1
   binding_file=$(mktemp "$context_dir/no-mistakes-binding.XXXXXX") || { rm -f "$context_file" 2>/dev/null || true; return 1; }
-  trap "rm -f -- $(fm_github_shell_quote "$context_file") $(fm_github_shell_quote "$binding_file")" EXIT HUP INT TERM
+  FM_GITHUB_NO_MISTAKES_CONTEXT_FILE=$context_file
+  FM_GITHUB_NO_MISTAKES_BINDING_FILE=$binding_file
+  trap 'rm -f -- "$FM_GITHUB_NO_MISTAKES_CONTEXT_FILE" "$FM_GITHUB_NO_MISTAKES_BINDING_FILE"' EXIT HUP INT TERM
   fm_github_no_mistakes_context_file "$context_file" || return 1
   fm_github_node - "$context_file" "$binding_file" "$fork_url" <<'NODE' || return 1
 const fs = require("node:fs");
@@ -198,6 +200,8 @@ NODE
     cp "$binding_file" "$captured_binding" && chmod 0600 "$captured_binding" || return 1
   fi
   rm -f -- "$context_file" "$binding_file"
+  FM_GITHUB_NO_MISTAKES_CONTEXT_FILE=
+  FM_GITHUB_NO_MISTAKES_BINDING_FILE=
   trap - EXIT HUP INT TERM
 }
 
@@ -241,7 +245,7 @@ no_mistakes_status_is_absent() {
 
 no_mistakes_run_details() {
   local binary=$1 output current_branch current_head status
-  NM_RUN_ID= NM_RUN_BRANCH= NM_RUN_STATUS= NM_RUN_HEAD= NM_RUN_STATE=inactive
+  NM_RUN_ID='' NM_RUN_BRANCH='' NM_RUN_STATUS='' NM_RUN_HEAD='' NM_RUN_STATE=inactive
   current_branch=$(command "$FM_GITHUB_GIT_BINARY" -C "$repository" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
   current_head=$(command "$FM_GITHUB_GIT_BINARY" -C "$repository" rev-parse HEAD 2>/dev/null) || return 1
   if output=$(cd "$repository" && LC_ALL=C command "$binary" axi status 2>&1); then
@@ -294,7 +298,7 @@ NODE
 }
 
 run_no_mistakes_command() {
-  local marker lock capture= arg has_intent=0 prior_id= command_status=0 detail_status
+  local marker lock capture='' arg has_intent=0 prior_id='' command_status=0 detail_status
   FM_GITHUB_NO_MISTAKES_BINARY=$(fm_github_resolve_no_mistakes_binary 2>/dev/null || true)
   [ -n "$FM_GITHUB_NO_MISTAKES_BINARY" ] && [ -f "$FM_GITHUB_NO_MISTAKES_BINARY" ] && [ -x "$FM_GITHUB_NO_MISTAKES_BINARY" ] || {
     echo "error: no-mistakes command not found" >&2

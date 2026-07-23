@@ -299,7 +299,7 @@ fm_github_path_shim_body() {
   quoted_home=$(fm_github_shell_quote "$home")
   quoted_executable=$(fm_github_shell_quote "$executable")
   quoted_name=$(fm_github_shell_quote "$name")
-  printf '#!/usr/bin/env bash\nset -eu\n: "${FM_GITHUB_PROJECT:?}" "${FM_GITHUB_REPOSITORY:?}" "${FM_GITHUB_PROFILE_ID:?}"\nexport FM_HOME=%s\nexec %s exec --project "$FM_GITHUB_PROJECT" --repository "${FM_GITHUB_PROJECT_PATH:-$FM_GITHUB_REPOSITORY}" --profile "$FM_GITHUB_PROFILE_ID" -- %s "$@"\n' \
+  printf "#!/usr/bin/env bash\nset -eu\n: \"\${FM_GITHUB_PROJECT:?}\" \"\${FM_GITHUB_REPOSITORY:?}\" \"\${FM_GITHUB_PROFILE_ID:?}\"\nexport FM_HOME=%s\nexec %s exec --project \"\$FM_GITHUB_PROJECT\" --repository \"\${FM_GITHUB_PROJECT_PATH:-\$FM_GITHUB_REPOSITORY}\" --profile \"\$FM_GITHUB_PROFILE_ID\" -- %s \"\$@\"\n" \
     "$quoted_home" "$quoted_executable" "$quoted_name"
 }
 
@@ -328,14 +328,14 @@ fm_github_path_identity() {
 }
 
 fm_github_lock_stale() {
-  local lock=$1 version pid recorded owner_tmp extra current lock_dir
+  local lock=$1 version pid recorded owner_tmp _extra current lock_dir
   [ -f "$lock" ] && [ ! -L "$lock" ] && [ "$(fm_github_file_mode "$lock")" = 600 ] || return 1
   {
     IFS= read -r version
     IFS= read -r pid
     IFS= read -r recorded
     IFS= read -r owner_tmp
-    ! IFS= read -r extra
+    ! IFS= read -r _extra
   } < "$lock" || return 1
   [ "$version" = fm-github-lock-v1 ] || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
@@ -353,7 +353,7 @@ fm_github_lock_stale() {
 fm_github_lock_acquire() {
   local lock=$1 attempts=${2:-100} owner_tmp identity pid count=0 lock_identity stale_identity stale_tmp
   owner_tmp=$(mktemp "${lock%/*}/.lock-owner.XXXXXX") || return 1
-  fm_github_node -e 'require("node:fs").writeFileSync(process.argv[1], `${process.ppid}\n`)' "$owner_tmp" \
+  fm_github_node -e 'require("node:fs").writeFileSync(process.argv[1], String(process.ppid) + "\n")' "$owner_tmp" \
     || { rm -f "$owner_tmp" 2>/dev/null || true; return 1; }
   IFS= read -r pid < "$owner_tmp" || { rm -f "$owner_tmp" 2>/dev/null || true; return 1; }
   identity=$(fm_github_process_identity "$pid") || { rm -f "$owner_tmp" 2>/dev/null || true; return 1; }
@@ -451,7 +451,8 @@ else {
 `, {mode: 0o500});
 NODE
   chmod 0500 "$client" || { rm -rf "$shim_dir" 2>/dev/null || true; return 1; }
-  trap "chmod -R u+rwx -- $(fm_github_shell_quote "$shim_dir") 2>/dev/null || true; rm -rf -- $(fm_github_shell_quote "$shim_dir") 2>/dev/null || true" EXIT HUP INT TERM
+  FM_GITHUB_GH_AXI_SHIM_DIR=$shim_dir
+  trap 'chmod -R u+rwx -- "$FM_GITHUB_GH_AXI_SHIM_DIR" 2>/dev/null || true; rm -rf -- "$FM_GITHUB_GH_AXI_SHIM_DIR" 2>/dev/null || true' EXIT HUP INT TERM
   if fm_github_node - "$binary" "$FM_GITHUB_GH_BINARY" "$(fm_github_lib_dir)/fm-github-config.mjs" \
     "$(fm_github_lib_dir)/fm-github-operation-schema.json" \
     "$target_repository" "$destination_repository" "$FM_GITHUB_REPOSITORY" "$shim_dir" "$issue_numbers" "$resource_numbers" "$@" 9<&0 <<'NODE'
@@ -891,12 +892,13 @@ NODE
   fi
   chmod -R u+rwx "$shim_dir" 2>/dev/null || true
   rm -rf "$shim_dir" || status=1
+  FM_GITHUB_GH_AXI_SHIM_DIR=
   trap - EXIT HUP INT TERM
   return "$status"
 }
 
 fm_github_install_path_shims() {
-  local home state base directory executable lock tmp= name
+  local home state base directory executable lock tmp='' name
   home=$(cd "$(fm_github_home)" 2>/dev/null && pwd -P) || return 1
   state="$home/state"
   if [ ! -e "$state" ]; then
@@ -1547,7 +1549,6 @@ fm_github_validate_gh_value() {
     repo)
       canonical=$(fm_github_repository_allowed "$value") || return 1
       fm_github_set_gh_target_repository "$canonical" || return 1
-      FM_GITHUB_GH_EXPLICIT_REPOSITORY=1
       ;;
     destination_repo)
       canonical=$(fm_github_repository_allowed "$value") || return 1
@@ -1555,7 +1556,6 @@ fm_github_validate_gh_value() {
       ;;
     owner)
       fm_github_owner_allowed "$value" || return 1
-      FM_GITHUB_GH_EXPLICIT_REPOSITORY=1
       ;;
     head)
       case "$value" in
@@ -1584,11 +1584,9 @@ fm_github_validate_gh_positional() {
     repo:create:1|repo:clone:1|repo:view:1|label:clone:1)
       canonical=$(fm_github_repository_allowed "$value") || return 1
       fm_github_set_gh_target_repository "$canonical" || return 1
-      FM_GITHUB_GH_EXPLICIT_REPOSITORY=1
       ;;
     repo:list:1)
       fm_github_owner_allowed "$value" || return 1
-      FM_GITHUB_GH_EXPLICIT_REPOSITORY=1
       ;;
     attestation:download:1|attestation:verify:1)
       case "$value" in oci://*) return 1 ;; esac
@@ -1600,7 +1598,6 @@ fm_github_validate_gh_positional() {
         https://github.com/*)
           canonical=$(fm_github_repository_allowed "$value") || return 1
           fm_github_set_gh_target_repository "$canonical" || return 1
-          FM_GITHUB_GH_EXPLICIT_REPOSITORY=1
           ;;
       esac
       ;;
@@ -1664,7 +1661,6 @@ fm_github_validate_gh_resource() {
   FM_GITHUB_GH_TARGET_REPOSITORY=
   FM_GITHUB_GH_SOURCE_REPOSITORY=
   FM_GITHUB_GH_DESTINATION_REPOSITORY=
-  FM_GITHUB_GH_EXPLICIT_REPOSITORY=0
   FM_GITHUB_GH_ISSUE_NUMBERS=
   FM_GITHUB_GH_RESOURCE_NUMBERS=
   FM_GITHUB_GH_REPO_OPTION_SEEN=0

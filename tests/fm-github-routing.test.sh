@@ -613,7 +613,7 @@ test_schema_and_resolution_strictness() {
   write_config "$d"
   node -e '
     const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p));
-    const token=`ghp_${"A".repeat(36)}`;
+    const token="ghp_"+"A".repeat(36);
     v.profiles[token]=v.profiles["profile-a"];
     delete v.profiles["profile-a"];
     v.bindings.projects["repo-a"]=token;
@@ -885,7 +885,7 @@ test_forbidden_commands_and_access_diagnostics() {
   rc=$?
   set -e
   expect_code 1 "$rc" "raw API escape"
-  FM_TEST_GH_AXI_TYPED_API=read run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
+  FM_TEST_GH_AXI_TYPED_API='read' run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
     gh-axi pr view 1 >/dev/null \
     || fail "verified gh-axi descendant could not perform its typed internal API operation"
   for kind in inline reviews review-pair; do
@@ -1228,7 +1228,7 @@ test_pinned_config_and_fork_bindings() {
   cp "$d/home/config/github-accounts.json" "$alternate_home/config/github-accounts.json"
   node -e 'const fs=require("fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p)); v.profiles["profile-a"].expected_login="wrong-login"; fs.writeFileSync(p,JSON.stringify(v)); fs.chmodSync(p,0o600)' "$alternate_home/config/github-accounts.json"
   run_exec "$d" exec --project repo-a --repository "$d/home/projects/repo-a" -- \
-    bash -c 'FM_HOME="$1" gh pr view 1' _ "$alternate_home" >/dev/null \
+    bash -c "FM_HOME=\"\$1\" gh pr view 1" _ "$alternate_home" >/dev/null \
     || fail "descendant FM_HOME redirected the authoritative routing context"
 
   git -C "$d/home/projects/repo-a" remote add fork https://github.com/account-a/repo-a.git
@@ -1413,7 +1413,7 @@ SH
 }
 
 test_no_mistakes_context_handoff_is_typed_and_secret_free() {
-  local d fake_nm captured log refresh_count rc err expected_pwd marker marker_before override_marker p1 p2 status current_branch current_head descendant_head mature_runs= n
+  local d fake_nm captured log refresh_count rc err expected_pwd marker marker_before override_marker p1 p2 status current_branch current_head descendant_head mature_runs='' n
   d=$(make_fixture no-mistakes)
   fake_nm="$d/exact/no-mistakes"
   captured="$d/nm-context.json"

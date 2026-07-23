@@ -303,7 +303,7 @@ fm_pr_metadata_identity_parse() {
 # number, and profile layout so delayed polls remain compatible across the
 # routing upgrade. The first line distinguishes the two layouts deterministically.
 fm_pr_poll_data_parse() {
-  local file=$1 first provider url host path number profile= owner repo
+  local file=$1 first provider url host path number profile='' owner repo
   FM_PR_DATA_PROVIDER=
   FM_PR_DATA_URL=
   FM_PR_DATA_HOST=
@@ -465,7 +465,7 @@ fm_pr_poll_revoke_final() {
 }
 
 fm_pr_poll_prepare() {
-  local state=$1 id=$2 provider url host path number template profile= registration_version
+  local state=$1 id=$2 provider url host path number template profile='' registration_version
   local owner repo legacy_layout=0
   case "$3" in
     github|gitlab)
