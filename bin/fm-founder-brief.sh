@@ -2573,6 +2573,23 @@ def arm_decision_pointers(home, digest, digest_hash, common, plan, directories):
             raise BriefError("founder numbered-option message binding collision")
 
 
+def reply_to_message_is_non_decision(home, reply_to_message_id):
+    directories = decision_state_dirs(home)
+    if (directories["founder-brief-number-replies"] / f"{reply_to_message_id}.json").exists():
+        return False
+    for path in sorted((home / "state" / "founder-brief-receipts").glob("*.json")):
+        receipt = read_json(path, "founder brief receipt")
+        message_ids = receipt.get("telegram_message_ids")
+        if not isinstance(message_ids, list):
+            continue
+        for message_id in message_ids:
+            if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id <= 0:
+                continue
+            if message_id == reply_to_message_id:
+                return True
+    return False
+
+
 def deliver_decisions(home, digest_id):
     require_decision(home)
     digest, digest_hash = validate_decision_digest(home, digest_id)
@@ -3158,7 +3175,13 @@ def publish_live_canary_receipt(home, lane, common, verified_at):
         "delivery_content_sha256": common["content_sha256"],
         "verified_at": verified_at,
     }
-    atomic_write_json(home / "state" / f"telegram-{lane}-canary.json", value)
+    path = home / "state" / f"telegram-{lane}-canary.json"
+    if path.exists():
+        existing = read_json(path, f"telegram-{lane} canary receipt")
+        if existing != value:
+            raise BriefError("live canary receipt binding mismatch")
+        return
+    atomic_write_json(path, value)
 
 
 def conversation_dirs(home):
@@ -3339,20 +3362,25 @@ def token_for_numbered_reply(home, record):
     text = record["text"].strip()
     if not re.fullmatch(r"[1-9][0-9]*", text):
         return None, None
+    if not decision_enabled(home):
+        return "ordinary", None
     reply_to = record.get("reply_to_message_id")
     directories = decision_state_dirs(home)
     if reply_to is not None:
+        if reply_to_message_is_non_decision(home, reply_to):
+            return "ordinary", None
         mapping_path = directories["founder-brief-number-replies"] / f"{reply_to}.json"
         if not mapping_path.exists():
-            return "ambiguous", None
-        mapping = read_json(mapping_path, "founder numbered-option mapping")
-        opaque = mapping.get("numbers", {}).get(text)
-        if not isinstance(opaque, str):
-            return "ambiguous", None
-        token_path = directories["founder-brief-buttons"] / f"{opaque}.json"
-        token = read_json(token_path, "founder numbered-option binding")
-        token["_numeric_message_id"] = reply_to
-        return "bound", token
+            reply_to = None
+        else:
+            mapping = read_json(mapping_path, "founder numbered-option mapping")
+            opaque = mapping.get("numbers", {}).get(text)
+            if not isinstance(opaque, str):
+                return "ambiguous", None
+            token_path = directories["founder-brief-buttons"] / f"{opaque}.json"
+            token = read_json(token_path, "founder numbered-option binding")
+            token["_numeric_message_id"] = reply_to
+            return "bound", token
     open_pointers = []
     for pointer_path in sorted(directories["founder-brief-decision-current"].glob("*.json")):
         pointer = read_json(pointer_path, "current founder decision binding")
@@ -3372,6 +3400,8 @@ def token_for_numbered_reply(home, record):
         ):
             continue
         open_pointers.append(pointer)
+    if not open_pointers:
+        return "ordinary", None
     if len(open_pointers) != 1:
         return "ambiguous", None
     matches = []
@@ -3571,10 +3601,7 @@ def route_update_value(home, update, emit=True):
         record = existing
     else:
         atomic_write_json(inbox_path, record)
-    if re.fullmatch(r"[1-9][0-9]*", record["text"].strip()) and not decision_enabled(home):
-        numeric_state, token = "ambiguous", None
-    else:
-        numeric_state, token = token_for_numbered_reply(home, record)
+    numeric_state, token = token_for_numbered_reply(home, record)
     if numeric_state == "bound":
         approval_state, approval = record_numeric_approval(home, record, token)
         if approval_state in ("recorded", "idempotent"):

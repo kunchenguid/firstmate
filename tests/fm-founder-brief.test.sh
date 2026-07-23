@@ -1018,6 +1018,15 @@ PY
   )
   [ "$send_after" -eq "$send_before" ] || fail "relay replay duplicated a prompt acknowledgment"
 
+  bare_path=$(write_text_update "$home" numeric-ordinary 511294435 7005 7)
+  before=$(request_count)
+  run_owner "$home" route-update "$bare_path" >/dev/null 2>&1 \
+    || fail "bare numeric conversation should stay ordinary when decision automation is off"
+  after=$(request_count)
+  [ "$after" -eq $((before + 1)) ] || fail "bare numeric conversation did not receive a normal acknowledgment"
+  assert_not_contains "$(cat "$home/state/telegram-inbox/511294435.json")" '"handled_as"' \
+    "bare numeric conversation was misrouted as decision automation"
+
   for id in 511294429 511294430 511294431 511294432; do
     run_owner "$home" reply-create "$id" >/dev/null 2>&1 \
       || fail "conversation reply template failed for update $id"
@@ -1223,6 +1232,19 @@ PY
   [ -z "$(find "$home/state/founder-brief-approvals" -type f -print -quit)" ] \
     || fail "decision delivery alone created an approval"
 
+  ordinary_before=$(request_count)
+  ordinary_path=$(write_text_update "$home" decision-ordinary 9206 8206 "Please keep this conversation ordinary")
+  run_owner "$home" route-update "$ordinary_path" >/dev/null 2>&1 \
+    || fail "ordinary conversation should still acknowledge while decisions are open"
+  ordinary_after=$(request_count)
+  [ "$ordinary_after" -eq $((ordinary_before + 1)) ] \
+    || fail "ordinary conversation did not receive a normal acknowledgment while decisions were open"
+  reply_path=$(write_text_update "$home" decision-bare-ordinary 9207 8207 7 "$ordinary_after")
+  run_owner "$home" route-update "$reply_path" >/dev/null 2>&1 \
+    || fail "bare numeric reply to an ordinary message should stay conversational"
+  assert_not_contains "$(cat "$home/state/telegram-inbox/9207.json")" '"handled_as"' \
+    "bare numeric reply to an ordinary message was misrouted as decision automation"
+
   read -r old_data old_message < <(decision_binding "$home" alpha-task staged)
   read -r beta_old_data beta_old_message < <(decision_binding "$home" beta-task repair)
   update=$(write_callback_update "$home" wrong-user cb-wrong "$old_data" "$old_message" "$CHAT_ID" 99999)
@@ -1405,6 +1427,20 @@ PY
     || fail "button canary did not publish its non-authority receipt"
   [ "$(find "$home/state/founder-brief-approvals" -type f | wc -l | tr -d ' ')" -eq 2 ] \
     || fail "button canary created authority"
+  lifecycle_canary="$home/state/telegram-lifecycle-canary.json"
+  decision_canary="$home/state/telegram-decision-canary.json"
+  assert_present "$lifecycle_canary" "lifecycle canary receipt was not published"
+  assert_present "$decision_canary" "decision canary receipt was not published"
+  rm "$lifecycle_canary" "$decision_canary"
+  canary_before=$(request_count)
+  run_owner "$home" canary-delivery >/dev/null 2>&1 \
+    || fail "lifecycle canary receipt should be restorable without a resend"
+  run_owner "$home" canary-buttons >/dev/null 2>&1 \
+    || fail "decision canary receipt should be restorable without a resend"
+  [ "$(request_count)" -eq "$canary_before" ] \
+    || fail "canary receipt recovery resent a duplicate transport"
+  assert_present "$lifecycle_canary" "lifecycle canary receipt was not restored"
+  assert_present "$decision_canary" "decision canary receipt was not restored"
 
   sole_home=$(new_home numeric-sole)
   write_decision_digest "$sole_home" "$digest" v2
@@ -1739,12 +1775,15 @@ EOF
   update=$(write_text_update "$home" decision-contained-chat 9401 8401 "Conversation still works")
   run_owner_at "$home" "$future" route-update "$update" >/dev/null 2>&1 \
     || fail "decision containment disabled ordinary conversation"
+  before=$(request_count)
   update=$(write_text_update "$home" decision-contained-number 9402 8402 1)
   run_owner_at "$home" "$future" route-update "$update" >/dev/null 2>&1 \
-    || fail "contained decision number did not receive clarification"
-  assert_contains "$(cat "$home/state/telegram-inbox/9402.json")" \
-    '"handled_as":"numbered-invalid"' \
-    "decision containment allowed a bare number to become authority"
+    || fail "contained decision number should remain an ordinary conversation"
+  after=$(request_count)
+  [ "$after" -eq $((before + 1)) ] \
+    || fail "contained decision number did not receive a normal acknowledgment"
+  assert_not_contains "$(cat "$home/state/telegram-inbox/9402.json")" '"handled_as"' \
+    "decision containment misrouted a bare number as authority"
   [ -z "$(find "$home/state/founder-brief-approvals" -type f -print -quit)" ] \
     || fail "decision containment created an approval"
   update=$(write_text_update "$home" decision-unclaimed-text 9403 8403 "Ordinary text is not a callback")
