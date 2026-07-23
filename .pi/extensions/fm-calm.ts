@@ -15,6 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type {
   ExtensionAPI,
   ToolDefinition,
@@ -69,12 +70,16 @@ type StandardShellState = {
   result?: Component;
 };
 
+const extensionFile = fileURLToPath(import.meta.url);
+const extensionDir = dirname(extensionFile);
+const root = resolve(extensionDir, "../..");
+
 export default function (pi: ExtensionAPI) {
   let exportRendering = false;
   let launchBriefContent: string | undefined;
   let removeTerminalInputHandler: (() => void) | undefined;
 
-  const fmHome = process.env.FM_HOME || process.cwd();
+  const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
   const configDirectory = process.env.FM_CONFIG_OVERRIDE || resolve(fmHome, "config");
   const calmPreferencePath = resolve(configDirectory, "calm");
   const loadCalmPreference = (): boolean => {

@@ -99,6 +99,113 @@ test_static_contract() {
   pass "Pi calm extension has one persisted visibility choice, no Calm status row, native working visibility, supported redraw controls, and the Firstmate watcher-tool integration"
 }
 
+test_home_resolution() {
+  local fixture out status version
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi calm home-resolution test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+  version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
+  [ "$version" = "0.81.1" ] || fail "Pi calm compatibility assumptions require Pi 0.81.1, found $version"
+
+  fixture="$TMP_ROOT/home-resolution"
+  mkdir -p \
+    "$fixture/project/.pi/extensions/lib" \
+    "$fixture/project/node_modules/@earendil-works" \
+    "$fixture/override" \
+    "$fixture/launch-cwd"
+  cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
+  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+
+  out=$(cd "$fixture/launch-cwd" && \
+    EXT="$fixture/project/.pi/extensions/fm-calm.ts" \
+    OVERRIDE_HOME="$fixture/override" \
+    EXTENSION_HOME="$fixture/project" \
+    node --input-type=module 2>&1 <<'JS'
+import { existsSync, readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?home=${Date.now()}`);
+
+function registerCalm() {
+  const handlers = new Map();
+  let calmCommand;
+  const pi = {
+    events: {
+      emit() {},
+      on() {},
+    },
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand(name, command) {
+      if (name === "calm") calmCommand = command;
+    },
+    registerEntryRenderer() {},
+    registerTool() {},
+  };
+  extension.default(pi);
+  if (!calmCommand || !handlers.has("session_start")) {
+    throw new Error("Calm extension did not register its command and session handler");
+  }
+  return { calmCommand, sessionStart: handlers.get("session_start") };
+}
+
+const context = {
+  ui: {
+    getEditorText() {
+      return "";
+    },
+    getToolsExpanded() {
+      return false;
+    },
+    onTerminalInput() {
+      return () => {};
+    },
+    setHiddenThinkingLabel() {},
+    setStatus() {},
+    setToolsExpanded() {},
+    setWorkingVisible() {},
+  },
+};
+
+delete process.env.FM_HOME;
+delete process.env.FM_CONFIG_OVERRIDE;
+process.env.FM_ROOT_OVERRIDE = process.env.OVERRIDE_HOME;
+let calm = registerCalm();
+calm.sessionStart({ reason: "startup" }, context);
+await calm.calmCommand.handler("", context);
+if (readFileSync(`${process.env.OVERRIDE_HOME}/config/calm`, "utf8") !== "on\n") {
+  throw new Error("Calm ignored FM_ROOT_OVERRIDE when FM_HOME was unset");
+}
+
+delete process.env.FM_ROOT_OVERRIDE;
+calm = registerCalm();
+calm.sessionStart({ reason: "startup" }, context);
+await calm.calmCommand.handler("", context);
+if (readFileSync(`${process.env.EXTENSION_HOME}/config/calm`, "utf8") !== "on\n") {
+  throw new Error("Calm did not derive the Firstmate home from its extension path");
+}
+if (existsSync(`${process.cwd()}/config/calm`)) {
+  throw new Error("Calm wrote its preference under Pi's launch directory");
+}
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi calm home resolution failed: $out"
+  [ -z "$out" ] || fail "Pi calm home-resolution test printed output: $out"
+  pass "Pi calm resolves its persistent home independently of Pi's launch directory"
+}
+
 test_rendering_and_session_lifecycle() {
   local fixture out status version
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
@@ -1179,5 +1286,6 @@ JS
 }
 
 test_static_contract
+test_home_resolution
 test_rendering_and_session_lifecycle
 test_interactive_terminal_e2e
