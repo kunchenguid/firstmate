@@ -55,6 +55,9 @@
 #
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
+# Set FM_SNAPSHOT_NO_BACKEND=1 for a metadata-only observation that does not
+# query runtime endpoints; current state and endpoint existence then remain
+# explicitly unknown instead of being guessed from historical status events.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -94,6 +97,8 @@ FM_SNAPSHOT_REGISTRY_LINES=${FM_SNAPSHOT_REGISTRY_LINES:-256}
 FM_SNAPSHOT_REGISTRY_BYTES=${FM_SNAPSHOT_REGISTRY_BYTES:-65536}
 FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-40}
 FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
+FM_SNAPSHOT_NO_BACKEND=${FM_SNAPSHOT_NO_BACKEND:-0}
+case "$FM_SNAPSHOT_NO_BACKEND" in 0|1) ;; *) echo "fm-fleet-snapshot: FM_SNAPSHOT_NO_BACKEND must be 0 or 1" >&2; exit 2 ;; esac
 validate_positive_bound() {  # <name> <value>
   case "$2" in
     ''|*[!0-9]*|0)
@@ -196,6 +201,10 @@ last_nonempty_line() {  # <file>
 
 crew_state_json() {  # <id>
   local id=$1 raw rest state source detail sep
+  if [ "$FM_SNAPSHOT_NO_BACKEND" = 1 ]; then
+    jq -n '{raw:"",state:"unknown",source:"observation-disabled",detail:"runtime endpoint observation disabled by source policy"}'
+    return 0
+  fi
   raw=$(
     FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_HOME="$FM_HOME" \
@@ -468,7 +477,7 @@ task_json_lines() {
     blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
 
     endpoint_exists=null
-    if [ -n "$target" ]; then
+    if [ "$FM_SNAPSHOT_NO_BACKEND" != 1 ] && [ -n "$target" ]; then
       if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
         endpoint_exists=true
       else
@@ -476,7 +485,7 @@ task_json_lines() {
       fi
     fi
     agent_alive=not_checked
-    if [ "$kind" = secondmate ] && [ -n "$target" ]; then
+    if [ "$FM_SNAPSHOT_NO_BACKEND" != 1 ] && [ "$kind" = secondmate ] && [ -n "$target" ]; then
       agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
     fi
 

@@ -1,0 +1,103 @@
+{
+  "schema": "fm-control-plane-sources.v1",
+  "scope": {
+    "id": "software-fleet",
+    "description": "Registered software delivery work only",
+    "trust_domain": "software"
+  },
+  "capabilities": [
+    {
+      "id": "observe.reconcile",
+      "access": "read-only",
+      "outcome": "Return a fresh normalized inventory and invariant result"
+    },
+    {
+      "id": "observe.proof",
+      "access": "read-only",
+      "outcome": "Verify registered proof pointers without changing their source"
+    }
+  ],
+  "sources": [
+    {
+      "id": "primary-firstmate-home",
+      "kind": "firstmate-home",
+      "path": "${FM_HOME}",
+      "trust_domain": "software-operations",
+      "access": "read-only",
+      "retention": "metadata-and-pointers",
+      "freshness_seconds": 900,
+      "backend_observation": false,
+      "capabilities": ["observe.reconcile"]
+    },
+    {
+      "id": "firstmate-project",
+      "kind": "git-project",
+      "path": "${FM_ROOT}",
+      "trust_domain": "software-source",
+      "access": "read-only",
+      "retention": "git-identities-and-pointers",
+      "freshness_seconds": 900,
+      "capabilities": ["observe.reconcile", "observe.proof"]
+    },
+    {
+      "id": "codex-discovery",
+      "kind": "codex-transcript-root",
+      "path": "${HOME}/.codex/sessions",
+      "project_source_ids": ["firstmate-project"],
+      "lookback_seconds": 86400,
+      "max_files": 200,
+      "trust_domain": "software-agent-metadata",
+      "access": "metadata-read-only",
+      "retention": "native-id-path-time-cwd-only",
+      "freshness_seconds": 900,
+      "capabilities": ["observe.reconcile"]
+    },
+    {
+      "id": "claude-discovery",
+      "kind": "claude-transcript-root",
+      "path": "${HOME}/.claude/projects",
+      "project_source_ids": ["firstmate-project"],
+      "lookback_seconds": 86400,
+      "max_files": 200,
+      "trust_domain": "software-agent-metadata",
+      "access": "metadata-read-only",
+      "retention": "native-id-path-time-cwd-only",
+      "freshness_seconds": 900,
+      "capabilities": ["observe.reconcile"]
+    }
+  ],
+  "connectors": [
+    {
+      "id": "mail",
+      "kind": "gmail-or-zoho-mail",
+      "status": "unregistered",
+      "trust_domain": "communications",
+      "capabilities": [],
+      "reason": "No authorized metadata connector is registered"
+    },
+    {
+      "id": "documents",
+      "kind": "google-drive-or-icloud-drive",
+      "status": "unregistered",
+      "trust_domain": "documents",
+      "capabilities": [],
+      "reason": "No authorized metadata connector is registered"
+    },
+    {
+      "id": "calendar",
+      "kind": "calendar",
+      "status": "unregistered",
+      "trust_domain": "calendar",
+      "capabilities": [],
+      "reason": "No authorized metadata connector is registered"
+    },
+    {
+      "id": "business-outcomes",
+      "kind": "business-system",
+      "status": "unregistered",
+      "trust_domain": "finance",
+      "capabilities": [],
+      "reason": "No authorized production, user, or revenue connector is registered"
+    }
+  ]
+}
