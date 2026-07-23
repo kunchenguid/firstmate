@@ -59,16 +59,18 @@
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters.
+#   new adapters. An active config/pi-delegated-profile refuses every raw launch
+#   command because its runtime cannot be proved.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
 #   harness from config/secondmate-harness. An explicit per-spawn --harness,
-#   positional harness arg, or raw launch command starts with clean model/effort
-#   defaults unless the caller also passes explicit --model/--effort flags. When
-#   the file governs the spawn, its model/effort tokens are re-resolved on every
-#   respawn exactly like the harness axis, and explicit --model/--effort flags
-#   still win over the file's tokens.
+#   or positional harness arg starts with clean model/effort defaults unless the
+#   caller also passes explicit --model/--effort flags. A raw launch does the same
+#   only when no delegated Pi profile is active. When the file governs the spawn,
+#   its model/effort tokens are re-resolved on every respawn exactly like the
+#   harness axis, and explicit --model/--effort flags still win over the file's
+#   tokens.
 #   A --secondmate spawn also propagates the primary's declared inherited local
 #   material, so the secondmate's OWN crewmates inherit primary config and the
 #   secondmate receives the primary's read-only shared captain-preference file
@@ -98,6 +100,9 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+#     __PIBRIEFENV__ shell assignment identifying the unchanged Pi positional brief
+#     __PICMD__      controlled delegated Pi command and environment, or pi by default
+#     __PIPROFILE__  delegated Pi isolation and profile-guard flags, or empty by default
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
