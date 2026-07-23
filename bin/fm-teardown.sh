@@ -3686,19 +3686,6 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-    fi
-  fi
-  # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
-  # Kills remaining processes in the worktree (including the agent), resets, returns
-  # to pool. treehouse resolves the pool from the working directory, so run it from
-  # the project. teardown_treehouse_return tolerates transient and stale git locks
-  # left by a killed crew process; see the script header for retry and stale-lock proof.
   post_lock_cleanup_check=
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
@@ -3709,6 +3696,19 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if ! teardown_treehouse_lease_is_ours "$WT" "$PROJ"; then
     echo "warning: worktree $WT is not currently held as an in-use treehouse lease; skipping return to avoid returning an unowned slot" >&2
   else
+    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    if [ "$branch" != "HEAD" ]; then
+      if git -C "$WT" checkout --detach -q 2>/dev/null; then
+        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
+    fi
+    # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
+    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+    # Kills remaining processes in the worktree (including the agent), resets, returns
+    # to pool. treehouse resolves the pool from the working directory, so run it from
+    # the project. teardown_treehouse_return tolerates transient and stale git locks
+    # left by a killed crew process; see the script header for retry and stale-lock proof.
     wt_pool_slot=0
     fm_treehouse_pool_slot "$PROJ" "$WT" && wt_pool_slot=1
     teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
