@@ -84,7 +84,7 @@ test_ship_modes_generate_clean_briefs() {
 }
 
 test_promoted_scouts_reuse_recorded_ship_contract() {
-  local home id meta handoff out status lane next_line next_count
+  local home id meta handoff out status lane rule rule2 done_line next_line next_count
   home="$TMP_ROOT/promote-home"
   mkdir -p "$home/state"
   touch "$home/state/.last-watcher-beat"
@@ -103,15 +103,46 @@ test_promoted_scouts_reuse_recorded_ship_contract() {
     out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-promote.sh" "$id" 2>&1); status=$?
     expect_code 0 "$status" "fm-promote.sh $id should exit 0"
     case "$mode" in
-      direct-PR) lane='This project ships **direct-PR**' ;;
-      local-only) lane='This project ships **local-only**' ;;
-      *) lane='This project ships **no-mistakes**' ;;
+      direct-PR)
+        lane='This project ships **direct-PR**'
+        rule="Never push to the default branch (push only your \`fm/$id\` branch)."
+        rule2='Never merge a PR.'
+        done_line="append \`done: PR {url}\` to the status file and stop."
+        ;;
+      local-only)
+        lane='This project ships **local-only**'
+        rule='Never push to any remote and never open a PR.'
+        rule2="Work only on your \`fm/$id\` branch; firstmate handles the merge into local \`main\`."
+        done_line="append \`done: ready in branch fm/$id\` to the status file and stop."
+        ;;
+      *)
+        lane='This project ships **no-mistakes**'
+        rule='Never push to the default branch.'
+        rule2='Never merge a PR.'
+        done_line="append \`done: {summary}\` to the status file and stop."
+        ;;
     esac
     handoff="$home/data/$id/promotion-handoff.md"
     assert_present "$handoff" "$id: promotion handoff file was not persisted"
     assert_grep "$lane" "$handoff" "$id: promotion handoff must name its recorded delivery lane"
+    assert_grep "$rule" "$handoff" "$id: promotion handoff must carry its mode-specific Rule 1"
+    assert_grep "$rule2" "$handoff" "$id: promotion handoff must carry all of its mode-specific Rule 1"
+    assert_grep "$done_line" "$handoff" "$id: promotion handoff must carry its mode-specific definition of done"
     assert_grep "delivery lane is assigned at dispatch and fixed for this task" "$handoff" \
       "$id: promotion handoff must carry the fixed-lane contract"
+    assert_grep "supersede every conflicting scout-brief instruction" "$handoff" \
+      "$id: promotion handoff must supersede conflicting scout rules"
+    assert_grep "blanket rule forbidding pushes and pull requests" "$handoff" \
+      "$id: promotion handoff must supersede the scout no-push/no-PR rule"
+    if [ "$mode" = no-mistakes ]; then
+      assert_grep "Run \`no-mistakes doctor\`" "$handoff" \
+        "$id: no-mistakes promotion must carry its mode-specific setup"
+      assert_grep "run \`no-mistakes init\`" "$handoff" \
+        "$id: no-mistakes promotion must carry its initialization setup"
+    else
+      assert_no_grep "Run \`no-mistakes doctor\`" "$handoff" \
+        "$id: faster-path promotion inherited no-mistakes setup"
+    fi
     next_line=$(printf '%s\n' "$out" | sed -n '/^next: /p')
     next_count=$(printf '%s\n' "$out" | awk '/^next: / { count++ } END { print count + 0 }')
     [ "$next_count" -eq 1 ] || fail "$id: promotion must print exactly one fm-send pointer"

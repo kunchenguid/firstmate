@@ -66,7 +66,11 @@ shape_ship_contract() {
   case "$mode" in
     direct-PR)
       SETUP2=""
-      RULE1='1. Never push to the default branch (push only your `fm/'"$id"'` branch). Never merge a PR.'
+      RULE1=$(cat <<EOF
+1. Never push to the default branch (push only your \`fm/$id\` branch).
+   Never merge a PR.
+EOF
+)
       DOD=$(cat <<EOF
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
@@ -80,7 +84,11 @@ EOF
       ;;
     local-only)
       SETUP2=""
-      RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into local \`main\`."
+      RULE1=$(cat <<EOF
+1. Never push to any remote and never open a PR.
+   Work only on your \`fm/$id\` branch; firstmate handles the merge into local \`main\`.
+EOF
+)
       DOD=$(cat <<EOF
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
@@ -94,9 +102,12 @@ EOF
 )
       ;;
     no-mistakes)
-      SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
-      RULE1='1. Never push to the default branch. Never merge a PR.'
+      SETUP2="2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+      RULE1=$(cat <<'EOF'
+1. Never push to the default branch.
+   Never merge a PR.
+EOF
+)
       DOD=$(cat <<EOF
 # Definition of done
 This project ships **no-mistakes**: the full validation pipeline runs on your committed branch before the PR is raised and merged.
@@ -126,12 +137,24 @@ EOF
   esac
 }
 
+render_promoted_ship_contract() {
+  shape_ship_contract "$1" "$2"
+
+  cat <<EOF
+# Promoted ship contract
+The mode-specific setup, rules, and definition of done below supersede every conflicting scout-brief instruction, including its blanket rule forbidding pushes and pull requests.
+EOF
+  if [ -n "$SETUP2" ]; then
+    printf '\n# Mode-specific setup\n%s\n' "$SETUP2"
+  fi
+  printf '\n# Mode-specific rules\n%s\n\n%s\n' "$RULE1" "$DOD"
+}
+
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
   --ship-contract)
     [ "$#" -eq 3 ] || { echo "error: usage: fm-brief.sh --ship-contract <task-id> <mode>" >&2; exit 2; }
-    shape_ship_contract "$3" "$2"
-    printf '%s\n' "$DOD"
+    render_promoted_ship_contract "$3" "$2"
     exit 0
     ;;
 esac
@@ -369,7 +392,8 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: \`git checkout -b fm/$ID\`
+$SETUP2
 
 # Rules
 $RULE1
