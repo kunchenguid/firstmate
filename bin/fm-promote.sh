@@ -2,8 +2,8 @@
 # Promote a scout task to a ship task in place: the crewmate keeps its window,
 # worktree, and loaded context; only the contract changes. Flips kind= to ship in
 # state/<task-id>.meta so fm-teardown.sh applies the full ship-task teardown protection
-# again. Before promoting, persist the crewmate's ship instructions under the
-# task data directory, then print a one-line fm-send.sh pointer to that file.
+# again. Before promoting, persist the crewmate's ship instructions at
+# data/<task-id>/promotion-handoff.md, then print a one-line fm-send.sh pointer to that file.
 # The handoff covers inventorying scratch state, resetting to a clean
 # default-branch base, carrying over only intended fix changes, creating branch
 # fm/<task-id>, implementing, and reporting done according to the recorded

@@ -16,6 +16,8 @@
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
 #   captain-relevant escalations and marked from-firstmate replies append to this
 #   home's status file.
+#   --ship-contract writes only the mode-specific setup, rules, and definition of done to stdout for a promoted scout, including the fixed-lane contract.
+#   Its <mode> must be no-mistakes, direct-PR, or local-only.
 #   --no-projects writes a project-less charter for a domain whose subject is the
 #   firstmate repo itself (its home is a firstmate worktree, its crews take pooled
 #   worktrees of the same repo). It is mutually exclusive with a project list, and
