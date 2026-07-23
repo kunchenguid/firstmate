@@ -136,5 +136,6 @@ A fresh Grok run was attempted on 2026-07-22 but stopped at `402 Payment Require
 It proves exact U+2063 `FIRSTMATE_OP:`-prefixed one-line output for a plain primary and a marked linked secondmate primary.
 It also verifies tracked wrapper registration for Claude, Codex, OpenCode, Pi, and Grok.
 `tests/fm-captain-translation-contract.test.sh` proves Ahoy's current marker rule, narrow legacy compatibility exclusions, genuine captain-message near misses, and the shared marker on every supported user-role operational injection.
-`tests/fm-pi-primary-live-e2e.test.sh` and `tests/fm-opencode-primary-live-e2e.test.sh` send the exact legacy startup and bare-marker away-mode rows through persistent model transcripts, invoke Ahoy, and contrast both with unrelated-marker and altered-startup captain near misses.
+`tests/fm-pi-primary-live-e2e.test.sh` sends the exact legacy startup and bare-marker away-mode rows through a persistent model transcript, invokes Ahoy, and contrasts both with unrelated-marker and altered-startup captain near misses.
+`tests/fm-pi-primary-live-e2e.test.sh` and `tests/fm-opencode-primary-live-e2e.test.sh` also exercise their genuine native startup paths with first-message and later-message Ahoy regressions.
 `tests/fm-turnend-guard.test.sh`, `tests/fm-pi-watch-extension.test.sh`, and `tests/fm-daemon.test.sh` cover marked guard, monitoring, and away-mode delivery without changing their behavior.

@@ -20,14 +20,16 @@
 # state/.subsuper-escalations and are flushed on the next "while you were out"
 # catch-up or when afk is re-entered.
 #
-# IN-BAND SENTINEL MARKER. Every daemon injection is prefixed with
-# FM_INJECT_MARK (U+2063 INVISIBLE SEPARATOR), a character a human cannot type
-# from a normal keyboard at the start of a message and Herdr transports as text.
-# Firstmate's contract: a message that starts with the marker is an internal
-# escalation (stay afk); a message without it means the captain is back (exit
-# afk, flush catch-up, resume per-wake responsiveness). The marker and the
-# busy-guard solve the same problem - the daemon and the human share one input
-# channel - so they live together under /afk.
+# IN-BAND OPERATIONAL PREFIX. Every current daemon injection is prefixed with
+# FM_OPERATIONAL_PREFIX: FM_INJECT_MARK (U+2063 INVISIBLE SEPARATOR) followed by
+# the stable FIRSTMATE_OP label. A human cannot type U+2063 from a normal
+# keyboard at the start of a message, and Herdr transports it as text.
+# Firstmate's contract: a message that starts with the current prefix, or a
+# legacy bare-marker daemon escalation, is internal (stay afk); an unmarked
+# message means the captain is back (exit afk, flush catch-up, resume per-wake
+# responsiveness). The prefix and busy-guard solve the same problem - the
+# daemon and the human share one input channel - so they live together under
+# /afk.
 #
 # Reliability model (see the /afk skill):
 #   - Nothing is lost in away mode: while state/.afk exists, the watcher reverts
@@ -205,7 +207,7 @@ CRASH_NORMAL_SLEEP_DEFAULT=5
 LOG_MAX_BYTES_DEFAULT=1048576
 LOG_KEEP_LINES_DEFAULT=2000
 
-# --- presence-gating + sentinel marker --------------------------------------
+# --- presence-gating + operational prefix ----------------------------------
 # The in-band sentinel: U+2063 INVISIBLE SEPARATOR (UTF-8 e2 81 a3). It has no
 # normal keyboard keystroke, so no real user message starts with it. Unlike the
 # original ASCII unit separator, Herdr transports U+2063 through Pi's terminal

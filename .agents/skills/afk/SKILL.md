@@ -58,13 +58,13 @@ batched digest rather than per-wake injections.
 
 No `/back` is needed. The first genuine message is the return signal:
 
-- A message **without** the sentinel marker and **not** starting with `/afk` -> the captain is back.
+- A message **without** the current operational prefix or a legacy bare marker, and **not** starting with `/afk` -> the captain is back.
   Run `bin/fm-afk-return.sh` before acting on the message that brought the captain back.
   That script owns correct-ordered daemon shutdown, durable wake draining, escalation and wedge evidence, and the return-catch-up gate.
   If it reports a firstmate-actionable `blocked:` event, remediate it immediately through the normal lifecycle, or explicitly reclassify it with a durable reason and close its decision key with `resolved [key=...]`, then run `bin/fm-afk-return.sh check`.
   Once the daemon stops, resume full per-wake responsiveness through the emitted primary-harness supervision protocol while blocker handling proceeds, so the gate never creates a blind wait.
   Do not answer a Bearings request or perform any other ordinary captain work until the check exits successfully.
-- A message **with** the sentinel marker (`FM_INJECT_MARK`, U+2063 INVISIBLE SEPARATOR) -> it is a daemon escalation; stay afk and process it.
+- A message **with** the current operational prefix (`FM_OPERATIONAL_PREFIX`, U+2063 INVISIBLE SEPARATOR followed by `FIRSTMATE_OP: `), or a legacy bare `FM_INJECT_MARK` daemon escalation -> stay afk and process it.
 - Re-invoking `/afk` while already away -> stay afk (refresh the flag); this
   does **not** trigger an exit.
 
@@ -78,11 +78,13 @@ what**. "Away" never means "approves more." A PR ready for merge, a
 needs-decision finding, or anything destructive still waits for the captain's
 explicit word - the daemon just batches the notification.
 
-## Sentinel marker contract
+## Operational prefix contract
 
-The daemon prefixes every injection with `FM_INJECT_MARK` (U+2063 INVISIBLE SEPARATOR), which has no normal keyboard keystroke and survives terminal transport as UTF-8 text.
+The daemon prefixes every current injection with `FM_OPERATIONAL_PREFIX`: `FM_INJECT_MARK` (U+2063 INVISIBLE SEPARATOR) followed by the stable `FIRSTMATE_OP: ` label.
+The bare `FM_INJECT_MARK` form remains accepted for legacy daemon escalations during rollout.
+U+2063 has no normal keyboard keystroke and survives terminal transport as UTF-8 text.
 This is how firstmate tells a daemon escalation apart from a real message in the same pane.
-The marker travels with the message text; it does not rely on harness-level typed-vs-injected detection, which is not portable across claude, codex, opencode, pi, and grok.
+The operational prefix travels with the message text; it does not rely on harness-level typed-vs-injected detection, which is not portable across claude, codex, opencode, pi, and grok.
 
 ## Busy-guard and composer guard
 
@@ -169,10 +171,10 @@ Classify each wake this way:
 - Unknown reason, or any uncertainty -> escalate fail-safe.
 
 Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 =
-immediate) and flushed as one single-line digest prefixed with the sentinel
-marker, carrying pre-read status summaries and a recommended action.
+immediate) and flushed as one single-line digest prefixed with the current
+operational prefix, carrying pre-read status summaries and a recommended action.
 The single-line format makes the submission unambiguous across harnesses, and
-the marker lets firstmate distinguish it from a real captain message.
+the operational prefix lets firstmate distinguish it from a real captain message.
 
 ## Injection hardening
 
@@ -203,8 +205,9 @@ the marker lets firstmate distinguish it from a real captain message.
   cleared.
   For herdr's normal idle-baseline path it means native agent-state observed a real turn start; herdr uses the ANSI-aware structural classifier for the pre-injection composer guard and fallback paths.
   This lets ghost-only or bordered-empty composers count as empty where a composer read is the active confirmation signal.
-- **Marker strip** - `strip_injection_marker` removes the sentinel prefix before
-  classification or relay, so the digest text firstmate sees is clean.
+- **Marker strip** - `strip_injection_marker` removes the current operational
+  prefix or legacy bare marker before classification or relay, so the digest
+  text firstmate sees is clean.
 - **Portable singleton lock** - the daemon uses the repo's portable lock helper
   (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
 - **Dedupe across signal/stale/scan** - `classify_signal` and terminal `classify_stale` paths check the seen-status marker before escalating, so a captain-relevant status escalated by one path is not re-escalated by another in the same digest.
