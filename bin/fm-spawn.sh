@@ -950,8 +950,8 @@ git_common_dir_real() {  # <dir>
 # below then fails closed rather than adopting any candidate worktree.
 PROJ_COMMON_REAL=$(git_common_dir_real "$PROJ_ABS") || PROJ_COMMON_REAL=
 
-# Session-provider container-ensure + task creation. tmux stays exactly as P1
-# left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
+# Session-provider container-ensure + task creation. tmux derives a readable,
+# ownership-stamped session per FM_HOME (see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
 # tab-per-task sequence in bin/backends/herdr.sh instead (D4/D5 as refined by
 # docs/herdr-backend.md's "workspace-per-home" pass, AGENTS.md task

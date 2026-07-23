@@ -227,6 +227,8 @@ case "${1:-}" in
   new-window|kill-window)
     printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
     exit 0 ;;
+  list-sessions) basename "$(cd "$FM_HOME" && pwd -P)"; exit 0 ;;
+  show-options) (cd "$FM_HOME" && pwd -P); exit 0 ;;
   list-windows|has-session) exit 0 ;;
 esac
 exit 0

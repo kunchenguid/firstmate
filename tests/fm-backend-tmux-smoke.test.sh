@@ -66,6 +66,64 @@ TARGET="$SESSION:$WINDOW"
 
 # --- create session ----------------------------------------------------------
 
+HOME_MAIN="$SHIM_DIR/homes/firstmate"
+HOME_LIFE="$SHIM_DIR/homes/firstmate-life"
+HOME_COLLISION="$SHIM_DIR/other/firstmate"
+mkdir -p "$HOME_MAIN" "$HOME_LIFE" "$HOME_COLLISION"
+HOME_MAIN=$(cd "$HOME_MAIN" && pwd -P)
+HOME_LIFE=$(cd "$HOME_LIFE" && pwd -P)
+HOME_COLLISION=$(cd "$HOME_COLLISION" && pwd -P)
+
+main_session=$(FM_HOME="$HOME_MAIN" fm_backend_tmux_container_ensure) \
+  || fail "real tmux: main-home container ensure failed"
+life_session=$(FM_HOME="$HOME_LIFE" fm_backend_tmux_container_ensure) \
+  || fail "real tmux: life-home container ensure failed"
+[ "$main_session" = firstmate ] \
+  || fail "real tmux: main home resolved session '$main_session', expected 'firstmate'"
+[ "$life_session" = firstmate-life ] \
+  || fail "real tmux: life home resolved session '$life_session', expected 'firstmate-life'"
+[ "$(tmux show-options -t firstmate -v @firstmate-home)" = "$HOME_MAIN" ] \
+  || fail "real tmux: main session ownership stamp does not match its physical FM_HOME"
+[ "$(tmux show-options -t firstmate-life -v @firstmate-home)" = "$HOME_LIFE" ] \
+  || fail "real tmux: life session ownership stamp does not match its physical FM_HOME"
+
+fm_backend_tmux_create_task "$main_session" fm-main-home-task "$HOME_MAIN" >/dev/null \
+  || fail "real tmux: main-home task window creation failed"
+fm_backend_tmux_create_task "$life_session" fm-life-home-task "$HOME_LIFE" >/dev/null \
+  || fail "real tmux: life-home task window creation failed"
+[ "$(tmux list-windows -t firstmate -F '#{window_name}' | grep -cx fm-main-home-task)" -eq 1 ] \
+  || fail "real tmux: main-home task did not land in session 'firstmate'"
+[ "$(tmux list-windows -t firstmate-life -F '#{window_name}' | grep -cx fm-life-home-task)" -eq 1 ] \
+  || fail "real tmux: life-home task did not land in session 'firstmate-life'"
+pass "real tmux: two FM_HOME basenames create separate stamped sessions and task windows"
+
+collision_error="$SHIM_DIR/collision-error"
+if FM_HOME="$HOME_COLLISION" fm_backend_tmux_container_ensure > /dev/null 2>"$collision_error"; then
+  fail "real tmux: an equal basename under another parent reused the stamped session"
+fi
+grep -Fq "belongs to FM_HOME '$HOME_MAIN', not '$HOME_COLLISION'; refusing to reuse it" "$collision_error" \
+  || fail "real tmux: basename collision did not report both the owner and rejected FM_HOME"
+[ "$(tmux show-options -t firstmate -v @firstmate-home)" = "$HOME_MAIN" ] \
+  || fail "real tmux: rejected collision changed the existing session ownership stamp"
+pass "real tmux: a basename collision with a mismatched ownership stamp errors and stops"
+
+LEGACY_HOME="$SHIM_DIR/legacy/legacy-home"
+mkdir -p "$LEGACY_HOME"
+LEGACY_HOME=$(cd "$LEGACY_HOME" && pwd -P)
+tmux new-session -d -s legacy-home -x 200 -y 50 \
+  || fail "real tmux: legacy unstamped session setup failed"
+tmux new-window -d -t legacy-home: -n legacy-existing-window -c "$LEGACY_HOME" \
+  || fail "real tmux: legacy existing-window setup failed"
+legacy_session=$(FM_HOME="$LEGACY_HOME" fm_backend_tmux_container_ensure) \
+  || fail "real tmux: existing unstamped session could not be claimed"
+[ "$legacy_session" = legacy-home ] \
+  || fail "real tmux: existing unstamped session resolved as '$legacy_session'"
+[ "$(tmux show-options -t legacy-home -v @firstmate-home)" = "$LEGACY_HOME" ] \
+  || fail "real tmux: existing unstamped session was not stamped on reuse"
+tmux list-windows -t legacy-home -F '#{window_name}' | grep -qx legacy-existing-window \
+  || fail "real tmux: claiming an existing unstamped session destroyed its existing window"
+pass "real tmux: an existing unstamped basename session is claimed without disturbing its windows"
+
 tmux new-session -d -s "$SESSION" -x 200 -y 50 \
   || fail "real tmux: new-session failed"
 fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" \

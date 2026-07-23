@@ -242,6 +242,11 @@ make_noop_tmux() {
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+case "${1:-}" in
+  new-session) exit 0 ;;
+  set-option) exit 0 ;;
+  show-options) (cd "$FM_HOME" && pwd -P); exit 0 ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
@@ -423,6 +428,8 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
+  list-sessions) basename "$(cd "$FM_HOME" && pwd -P)"; exit 0 ;;
+  show-options) (cd "$FM_HOME" && pwd -P); exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)

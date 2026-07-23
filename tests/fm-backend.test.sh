@@ -746,7 +746,9 @@ test_peek_conformance_old_vs_new() {
 # --- old vs new: fm-spawn.sh --------------------------------------------------
 
 make_spawn_fakebin() {  # <dir> <fake-worktree-path> -> echoes fakebin dir
-  local dir=$1 wt=$2 fb="$1/fakebin"
+  local dir=$1 wt=$2 fb="$1/fakebin" owner session
+  owner=$(cd "$ROOT" && pwd -P)
+  session=${owner##*/}
   mkdir -p "$fb"
   cat > "$fb/tmux" <<SH
 #!/usr/bin/env bash
@@ -756,6 +758,8 @@ case "\${1:-}" in
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
+  list-sessions) printf '%s\n' "$session"; exit 0 ;;
+  show-options) printf '%s\n' "$owner"; exit 0 ;;
   list-windows) exit 0 ;;
 esac
 exit 0
@@ -809,7 +813,9 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 # same stub to model a pane whose cwd read reports something other than the
 # task worktree.
 make_spawn_pane_seq_fakebin() {  # <dir> <first-path> <rest-path> -> echoes fakebin dir
-  local dir=$1 initial_path=$2 wt=$3 fb="$1/fakebin" counter="$1/poll-count"
+  local dir=$1 initial_path=$2 wt=$3 fb="$1/fakebin" counter="$1/poll-count" owner session
+  owner=$(cd "$ROOT" && pwd -P)
+  session=${owner##*/}
   mkdir -p "$fb"
   : > "$counter"
   cat > "$fb/tmux" <<SH
@@ -828,6 +834,8 @@ case "\${1:-}" in
       exit 0
     ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
+  list-sessions) printf '%s\\n' "$session"; exit 0 ;;
+  show-options) printf '%s\\n' "$owner"; exit 0 ;;
   list-windows) exit 0 ;;
 esac
 exit 0
