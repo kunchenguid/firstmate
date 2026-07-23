@@ -84,7 +84,7 @@ test_ship_modes_generate_clean_briefs() {
 }
 
 test_promoted_scouts_reuse_recorded_ship_contract() {
-  local home id meta out status lane
+  local home id meta handoff out status lane next_line next_count
   home="$TMP_ROOT/promote-home"
   mkdir -p "$home/state"
   touch "$home/state/.last-watcher-beat"
@@ -107,9 +107,24 @@ test_promoted_scouts_reuse_recorded_ship_contract() {
       local-only) lane='This project ships **local-only**' ;;
       *) lane='This project ships **no-mistakes**' ;;
     esac
-    assert_contains "$out" "$lane" "$id: promotion handoff must name its recorded delivery lane"
-    assert_contains "$out" "delivery lane is assigned at dispatch and fixed for this task" \
+    handoff="$home/data/$id/promotion-handoff.md"
+    assert_present "$handoff" "$id: promotion handoff file was not persisted"
+    assert_grep "$lane" "$handoff" "$id: promotion handoff must name its recorded delivery lane"
+    assert_grep "delivery lane is assigned at dispatch and fixed for this task" "$handoff" \
       "$id: promotion handoff must carry the fixed-lane contract"
+    next_line=$(printf '%s\n' "$out" | sed -n '/^next: /p')
+    next_count=$(printf '%s\n' "$out" | awk '/^next: / { count++ } END { print count + 0 }')
+    [ "$next_count" -eq 1 ] || fail "$id: promotion must print exactly one fm-send pointer"
+    assert_contains "$next_line" "bin/fm-send.sh fm-$id" \
+      "$id: promotion must target its worker through fm-send"
+    assert_contains "$next_line" 'Read\ the\ promotion\ handoff\ at' \
+      "$id: fm-send pointer must tell the worker to read the handoff"
+    assert_contains "$next_line" "promotion-handoff.md" \
+      "$id: fm-send must point the worker to the persisted handoff"
+    assert_not_contains "$next_line" '\n' \
+      "$id: fm-send pointer must not encode a multi-line payload"
+    assert_not_contains "$out" "$lane" \
+      "$id: promotion must not route the multi-line ship contract through fm-send"
     assert_grep "mode=$mode" "$meta" "$id: promotion must preserve the recorded delivery mode"
     assert_grep "kind=ship" "$meta" "$id: promotion must restore ship teardown protection"
     assert_no_grep "kind=scout" "$meta" "$id: promotion must replace the scout kind"
@@ -139,6 +154,8 @@ test_promotion_refuses_invalid_recorded_mode_before_mutation() {
     "invalid promotion refusal must explain the recorded-mode defect"
   assert_grep "kind=scout" "$meta" "invalid promotion must preserve scout teardown semantics"
   assert_no_grep "kind=ship" "$meta" "invalid promotion mutated kind before validating its handoff"
+  assert_absent "$home/data/$id/promotion-handoff.md" \
+    "invalid promotion wrote a handoff before validating its recorded mode"
   pass "fm-promote.sh: invalid recorded mode refuses before task mutation"
 }
 
