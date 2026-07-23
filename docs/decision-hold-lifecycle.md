@@ -34,8 +34,8 @@ Scout teardown calls the script's read-only `verify` subcommand after checking f
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
 The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
-It reads one raw decision-file snapshot and rejects invalid UTF-8, a UTF-8 BOM, NUL bytes, carriage-return line endings, and non-empty whitespace-only lines before any backlog mutation.
-Accepted Unicode is neither normalized nor rewritten, so its exact bytes remain recomputable after structured Markdown retention while canonical empty lines remain unchanged.
+It reads one raw decision-file snapshot and rejects invalid UTF-8, a UTF-8 BOM, NUL bytes, any carriage return, and non-empty whitespace-only lines before any backlog mutation.
+Bash command substitution removes all trailing LF bytes before size validation and digesting; accepted Unicode is otherwise not normalized, and internal empty lines remain distinct through structured Markdown retention.
 It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
 A failed intermediate step leaves the hold open.
