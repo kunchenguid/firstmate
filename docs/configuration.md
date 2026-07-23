@@ -278,6 +278,7 @@ Every declared checkout and matching-origin scan result must resolve to its exac
 
 Each `FM_HOME` owns a distinct background identity and state directory, so primary and secondmate homes can cover their own projects without displacing one another.
 Checkout-level owner locks are held by the shared `fm-fleet-sync.sh` mutation path, Treehouse acquisition, and every authorized Treehouse return, so home-scoped services, spawn, secondmate seeding, teardown, and merged-PR wake handling serialize overlapping checkouts safely.
+Each Treehouse return is process-tree bounded by `FM_TREEHOUSE_RETURN_TIMEOUT`, which defaults to 60 seconds, and the common checkout lock is released only after that process tree is gone.
 Each background owner probes every covered checkout's remote default-branch tip every 60 seconds.
 Any upstream-tip change triggers `fm-fleet-sync.sh` immediately, regardless of who pushed or merged it.
 Every `fm-fleet-sync.sh` invocation repeats the live upstream-default probe after fetching and proves that the fetched ref matches the live tip instead of trusting a checkout's possibly stale `origin/HEAD`.
@@ -539,6 +540,7 @@ FM_CHECKOUT_REFRESH_BACKSTOP=900      # maximum seconds between full safe refres
 FM_CHECKOUT_REFRESH_PROBE_TIMEOUT=15  # seconds allowed for one upstream-tip probe
 FM_CHECKOUT_REFRESH_SYNC_TIMEOUT=60   # seconds allowed for one checkout refresh
 FM_TREEHOUSE_ACQUIRE_TIMEOUT=60       # seconds allowed for one durable task-worktree acquisition
+FM_TREEHOUSE_RETURN_TIMEOUT=60        # seconds allowed for one Treehouse worktree return
 FM_TREEHOUSE_ROOT=                    # optional Treehouse state root override; defaults to ~/.treehouse
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature

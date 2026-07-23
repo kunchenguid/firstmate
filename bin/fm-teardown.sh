@@ -23,8 +23,9 @@
 # teardown refuses rather than risk discarding unlanded work.
 # Origin-backed content checks hold the shared checkout lock and require bounded
 # remote HEAD probes before and after fetch to agree before comparing trees.
-# Every authorized Treehouse return holds the same common checkout mutation lock
-# across its retry and stale-index-lock recovery sequence.
+# Every authorized Treehouse return is process-tree bounded by
+# FM_TREEHOUSE_RETURN_TIMEOUT while holding the same common checkout mutation
+# lock across its retry and stale-index-lock recovery sequence.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge on the captain's approval) as a fallback
@@ -583,23 +584,7 @@ content_in_origin_default() {
 content_in_default() {
   local name ref
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    (
-      local checkout_lock
-      if ! fm_checkout_lock_prepare "$CHECKOUT_LOCK_ROOT"; then
-        echo "teardown: cannot prepare the shared checkout lock at $CHECKOUT_LOCK_ROOT; retaining $WT" >&2
-        return 1
-      fi
-      checkout_lock=$(fm_checkout_lock_path "$WT" "$CHECKOUT_LOCK_ROOT") || {
-        echo "teardown: cannot resolve the shared checkout lock identity for $WT; retaining it" >&2
-        return 1
-      }
-      if ! fm_lock_try_acquire "$checkout_lock"; then
-        echo "teardown: checkout mutation already running for $WT (pid ${FM_LOCK_HELD_PID:-unknown}); retaining it" >&2
-        return 1
-      fi
-      trap 'fm_lock_release "$checkout_lock"' EXIT
-      content_in_origin_default
-    )
+    fm_checkout_lock_run "$WT" "$CHECKOUT_LOCK_ROOT" content_in_origin_default
     return
   fi
   name=$(default_branch) || return 1
@@ -793,15 +778,20 @@ cleanup_stale_lock_for_safety_check() {
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return_locked() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc
+  local out lock attempt=0 max_retries lock_desc return_status
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+  if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" 2>&1); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
+  else
+    return_status=$?
   fi
   [ -n "$out" ] && printf '%s\n' "$out" >&2
+  if fm_checkout_treehouse_return_requires_retention "$return_status"; then
+    return "$return_status"
+  fi
 
   if ! treehouse_return_is_index_lock_error "$out"; then
     return 1
@@ -822,12 +812,17 @@ teardown_treehouse_return_locked() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+    if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" 2>&1); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
+    else
+      return_status=$?
     fi
     [ -n "$out" ] && printf '%s\n' "$out" >&2
+    if fm_checkout_treehouse_return_requires_retention "$return_status"; then
+      return "$return_status"
+    fi
 
     if ! treehouse_return_is_index_lock_error "$out"; then
       echo "teardown: $label return failed with a non-lock error after retry; aborting" >&2
@@ -849,13 +844,18 @@ teardown_treehouse_return_locked() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+      if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" 2>&1); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
+      else
+        return_status=$?
       fi
       [ -n "$out" ] && printf '%s\n' "$out" >&2
       echo "teardown: $label return still failing after stale-lock cleanup" >&2
+      if fm_checkout_treehouse_return_requires_retention "$return_status"; then
+        return "$return_status"
+      fi
       return 1
     fi
 
@@ -1246,6 +1246,20 @@ cleanup_firstmate_home_children() {
         else
           child_return_rc=$?
           if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
+            return "$child_return_rc"
+          fi
+          if fm_checkout_treehouse_return_requires_retention "$child_return_rc"; then
+            case "$child_return_rc" in
+              "$FM_CHECKOUT_LOCK_CONTENTION_STATUS")
+                echo "error: retained child worktree $child_wt because its common checkout mutation lock is busy" >&2
+                ;;
+              "$FM_CHECKOUT_TREEHOUSE_RETURN_TIMEOUT_STATUS")
+                echo "error: retained child worktree $child_wt because its Treehouse return timed out" >&2
+                ;;
+              *)
+                echo "error: retained child worktree $child_wt because its locked Treehouse return could not complete safely (status $child_return_rc)" >&2
+                ;;
+            esac
             return "$child_return_rc"
           fi
           safe_rm_rf_child_worktree "$child_wt" "$child_proj"

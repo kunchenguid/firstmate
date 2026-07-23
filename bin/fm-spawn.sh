@@ -1223,13 +1223,7 @@ spawn_return_created_worktree() {
     echo "warning: retained acquired worktree $WT because post-cleanup repository safety could not be re-proven" >&2
     return 1
   fi
-  fm_checkout_lock_run "$WT" "$CHECKOUT_LOCK_ROOT" \
-    spawn_treehouse_return_locked "$WT" "$PROJ_ABS" >/dev/null 2>&1
-}
-
-spawn_treehouse_return_locked() {
-  local worktree=$1 project=$2
-  ( cd "$project" && treehouse return --force "$worktree" )
+  fm_checkout_treehouse_return "$WT" "$CHECKOUT_LOCK_ROOT" "$PROJ_ABS" >/dev/null 2>&1
 }
 
 spawn_restore_unmanaged_state_locked() {

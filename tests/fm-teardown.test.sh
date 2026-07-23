@@ -428,6 +428,60 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
+add_stale_lock_on_first_return_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  shift
+  wt=""
+  for a in "$@"; do
+    case "$a" in
+      --force) ;;
+      *) wt=$a ;;
+    esac
+  done
+  lock=$(git -C "$wt" rev-parse --git-path index.lock 2>/dev/null || true)
+  case "$lock" in
+    /*|'') ;;
+    *) lock="$wt/$lock" ;;
+  esac
+  if [ ! -f "${TREEHOUSE_FIRST_RETURN_MARKER:?}" ]; then
+    : > "$TREEHOUSE_FIRST_RETURN_MARKER"
+    mkdir -p "$(dirname "$lock")"
+    : > "$lock"
+    touch -t 200001010000 "$lock"
+  fi
+  if [ -n "$lock" ] && [ -e "$lock" ]; then
+    echo "fatal: Unable to create '$lock': File exists." >&2
+    exit 128
+  fi
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+add_hanging_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  (
+    trap '' TERM
+    while :; do
+      sleep 1
+    done
+  ) &
+  child=$!
+  printf '%s\n' "$child" > "${TREEHOUSE_RETURN_CHILD_PID_FILE:?}"
+  wait "$child"
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
 git_index_lock_path() {
   local dir=$1 lock abs_dir
   lock=$(git -C "$dir" rev-parse --git-path index.lock)
@@ -438,6 +492,15 @@ git_index_lock_path() {
       printf '%s/%s\n' "$abs_dir" "$lock"
       ;;
   esac
+}
+
+checkout_lock_path() {
+  local dir=$1 lock_root=$2 common key
+  common=$(git -C "$dir" rev-parse --git-common-dir)
+  case "$common" in /*) ;; *) common="$dir/$common" ;; esac
+  common=$(cd "$common" && pwd -P)
+  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
+  printf '%s/%s.lock\n' "$lock_root" "$key"
 }
 
 # fakebin/lsof stub: no process ever holds anything open (lsof's not-found exit
@@ -1151,6 +1214,64 @@ test_content_fallback_honors_shared_checkout_lock() {
     "$case_dir/stderr" "teardown did not surface shared checkout lock contention"
   rm -rf "$lock"
   pass "teardown landing proof holds the shared checkout lock"
+}
+
+test_locked_return_reuses_checkout_lock_for_landing_recheck() {
+  local case_dir rc lock marker
+  case_dir=$(make_case locked-return-landing-recheck)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_stale_lock_on_first_return_treehouse "$case_dir"
+  add_lsof_no_holder "$case_dir"
+  lock=$(git_index_lock_path "$case_dir/wt")
+  marker="$case_dir/treehouse-first-return"
+
+  set +e
+  TREEHOUSE_FIRST_RETURN_MARKER="$marker" \
+  FM_TREEHOUSE_RETURN_LOCK_RETRIES=0 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+  FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "locked landing recheck should reuse its already-held checkout lock"
+  assert_present "$marker" "locked landing recheck did not exercise Treehouse return recovery"
+  assert_absent "$lock" "locked landing recheck left the stale Git lock behind"
+  assert_not_contains "$(cat "$case_dir/stderr")" "checkout mutation already running" \
+    "locked landing recheck tried to reacquire its non-reentrant checkout lock"
+  pass "locked Treehouse recovery reuses its checkout lock for landing proof"
+}
+
+test_treehouse_return_timeout_reaps_children_before_unlock() {
+  local case_dir rc child_pid_file child_pid lock
+  case_dir=$(make_case treehouse-return-timeout)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_hanging_treehouse "$case_dir"
+  child_pid_file="$case_dir/treehouse-return-child.pid"
+  lock=$(checkout_lock_path "$case_dir/wt" "$case_dir/checkout-locks")
+
+  set +e
+  TREEHOUSE_RETURN_CHILD_PID_FILE="$child_pid_file" FM_TREEHOUSE_RETURN_TIMEOUT=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "timed-out Treehouse return should retain the task"
+  assert_present "$child_pid_file" "timed-out Treehouse return did not start its descendant"
+  child_pid=$(cat "$child_pid_file")
+  ! kill -0 "$child_pid" 2>/dev/null \
+    || fail "timed-out Treehouse return left descendant $child_pid alive"
+  assert_absent "$lock" "checkout lock remained held after the Treehouse return process tree was reaped"
+  assert_present "$case_dir/wt" "timed-out Treehouse return removed the worktree"
+  assert_present "$case_dir/state/task-x1.meta" "timed-out Treehouse return removed task metadata"
+  assert_grep "Treehouse return timed out after 1s" "$case_dir/stderr" \
+    "timed-out Treehouse return did not surface its timeout"
+  pass "Treehouse return timeout reaps descendants before releasing checkout lock"
 }
 
 test_dirty_worktree_refuses() {
@@ -1997,6 +2118,63 @@ SH
   pass "forced secondmate teardown quiesces and verifies the parent before child cleanup"
 }
 
+test_forced_secondmate_retains_child_on_checkout_lock_contention() {
+  local case_dir child_project child_worktree child_id lock_root lock parent_live rc
+  case_dir=$(make_case secondmate-child-checkout-contention)
+  child_project="$case_dir/child-project"
+  child_worktree="$case_dir/child-worktree"
+  child_id=child-contention-x5
+  lock_root="$case_dir/checkout-locks"
+  mkdir -p "$case_dir/wt/data" "$case_dir/wt/state" "$case_dir/wt/config" "$case_dir/wt/projects"
+  printf '%s\n' task-x1 > "$case_dir/wt/.fm-secondmate-home"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    'window=fm-task-x1' \
+    'tmux_session_target=firstmate:fm-task-x1' \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    'kind=secondmate' \
+    'mode=secondmate' \
+    "home=$case_dir/wt"
+  fm_git_worktree "$child_project" "$child_worktree" child-branch
+  fm_write_meta "$case_dir/wt/state/$child_id.meta" \
+    "window=fm-$child_id" \
+    "worktree=$child_worktree" \
+    "project=$child_project" \
+    'kind=ship' \
+    'mode=local-only'
+  lock=$(checkout_lock_path "$child_worktree" "$lock_root")
+  mkdir -p "$lock"
+  printf '%s\n' "$$" > "$lock/pid"
+  parent_live="$case_dir/parent-live"
+  : > "$parent_live"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message) [ -f "$FM_FAKE_PARENT_LIVE" ]; exit $? ;;
+  list-panes) exit 0 ;;
+  kill-window) rm -f "$FM_FAKE_PARENT_LIVE"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  FM_FAKE_PARENT_LIVE="$parent_live" FM_CHECKOUT_REFRESH_LOCK_ROOT="$lock_root" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 75 "$rc" "forced secondmate cleanup should surface checkout lock contention distinctly"
+  assert_present "$child_worktree" "checkout lock contention deleted the child worktree"
+  assert_present "$case_dir/wt/state/$child_id.meta" "checkout lock contention removed child retry metadata"
+  assert_present "$case_dir/state/task-x1.meta" "checkout lock contention removed parent retry metadata"
+  assert_grep "checkout mutation already running for $child_worktree (pid $$)" "$case_dir/stderr" \
+    "forced secondmate cleanup did not surface checkout lock contention"
+  assert_grep "retained child worktree $child_worktree because its common checkout mutation lock is busy" \
+    "$case_dir/stderr" "forced secondmate cleanup did not report retention on contention"
+  pass "forced secondmate cleanup retains child worktree on checkout lock contention"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -2329,6 +2507,13 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-8 ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-9 ]; then
+  test_forced_secondmate_retains_child_on_checkout_lock_contention
+  test_locked_return_reuses_checkout_lock_for_landing_recheck
+  test_treehouse_return_timeout_reaps_children_before_unlock
+  exit 0
+fi
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -2344,6 +2529,7 @@ test_managed_teardown_locks_generation_before_endpoint_cleanup
 test_managed_child_teardown_locks_generation_before_snapshot
 test_forced_secondmate_child_uses_child_home_for_endpoint_verification
 test_forced_secondmate_quiesces_parent_before_child_cleanup
+test_forced_secondmate_retains_child_on_checkout_lock_contention
 test_herdr_teardown_clears_escalation_marker
 test_required_report_blocks_then_publishes_before_cleanup
 test_required_report_restores_rollback_generation_before_publish
@@ -2365,6 +2551,8 @@ test_content_fallback_refreshes_stale_origin_ref
 test_content_fallback_uses_live_default
 test_content_fallback_reprobes_live_default_after_fetch
 test_content_fallback_honors_shared_checkout_lock
+test_locked_return_reuses_checkout_lock_for_landing_recheck
+test_treehouse_return_timeout_reaps_children_before_unlock
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds

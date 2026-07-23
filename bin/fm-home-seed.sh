@@ -665,16 +665,10 @@ seed_return_treehouse_home() {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
   fi
-  fm_checkout_lock_run "$abs_home" "$CHECKOUT_LOCK_ROOT" \
-    seed_treehouse_return_locked "$abs_home" >/dev/null || {
+  fm_checkout_treehouse_return "$abs_home" "$CHECKOUT_LOCK_ROOT" "$FM_ROOT" >/dev/null || {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
   }
-}
-
-seed_treehouse_return_locked() {
-  local home=$1
-  ( cd "$FM_ROOT" && treehouse return --force "$home" )
 }
 
 seed_remove_created_home() {
