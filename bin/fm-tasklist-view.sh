@@ -44,7 +44,11 @@ usage() {
   sed -n '20,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
-INTERVAL="${FM_TASKLIST_INTERVAL:-4}"
+if [ "${FM_TASKLIST_INTERVAL+x}" = x ]; then
+  INTERVAL=$FM_TASKLIST_INTERVAL
+else
+  INTERVAL=4
+fi
 DONE_LIMIT="${FM_TASKLIST_DONE:-8}"
 WIDTH=""
 ONCE=0
@@ -57,7 +61,14 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --once|-1) ONCE=1 ;;
-    --interval|-n) shift; INTERVAL="${1:-}" ;;
+    --interval|-n)
+      if [ "$#" -lt 2 ]; then
+        INTERVAL=""
+      else
+        shift
+        INTERVAL=$1
+      fi
+      ;;
     --width) shift; WIDTH="${1:-}" ;;
     --done) shift; DONE_LIMIT="${1:-}" ;;
     --no-clear) NO_CLEAR=1 ;;
@@ -67,7 +78,14 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-case "$INTERVAL" in ''|*[!0-9.]*|.) echo "fm-tasklist-view: --interval must be a positive number" >&2; exit 2 ;; esac
+invalid_interval() {
+  echo "fm-tasklist-view: --interval must be a positive number" >&2
+  exit 2
+}
+
+case "$INTERVAL" in ''|*[!0-9.]*) invalid_interval ;; esac
+[[ "$INTERVAL" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]] || invalid_interval
+[[ "$INTERVAL" =~ ^0*([.]0*)?$ ]] && invalid_interval
 case "$DONE_LIMIT" in ''|*[!0-9]*) echo "fm-tasklist-view: --done must be a non-negative integer" >&2; exit 2 ;; esac
 if [ -z "$WIDTH" ]; then WIDTH="${COLUMNS:-80}"; fi
 case "$WIDTH" in ''|*[!0-9]*|0) WIDTH=80 ;; esac
@@ -143,7 +161,7 @@ read -r -d '' BOARD_JQ <<'JQ' || true
           | (glyph(.current_state.state)) as $g
           | ((.current_state.state) | cell($stw)) as $st
           | (.id | cell($idw)) as $id
-          | (((.project // $bl.repo // "-")) | cell($rpw)) as $rp
+          | ((($bl.repo // .project // "-")) | cell($rpw)) as $rp
           | (($bl.title // .hints.last_event_text // .id) | cell($tiw)) as $ti
           | (if .hints.pending_decision then "  \($warn)⚠ needs decision\($rst)"
              elif .hints.blocked_event then "  \($err)⚠ blocked\($rst)"

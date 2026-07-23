@@ -82,7 +82,7 @@ EOF
     "harness=codex" "kind=scout" "mode=scout"
   printf 'done: report ready\n' > "$home/state/scout-task.status"
   fm_write_meta "$home/state/ship-api.meta" \
-    "window=firstmate:fm-ship-api" "worktree=$home/projects/b" "project=api" \
+    "window=firstmate:fm-ship-api" "worktree=$home/projects/b" "project=$home/projects/b" \
     "harness=codex" "kind=ship" "mode=ship" \
     "pr=https://github.com/acme/repo/pull/9"
   printf 'working: building endpoint\n' > "$home/state/ship-api.status"
@@ -112,13 +112,15 @@ test_empty_fleet_renders_gracefully() {
 }
 
 test_board_bands_and_parallel() {
-  local home fakebin out
+  local home fakebin out ship_line
   home=$(make_home fixture)
   write_fixture "$home"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW" --once --no-color --width 96)
   assert_contains "$out" "2 in parallel" "two actively-working workers are marked parallel"
   assert_contains "$out" "ship-api" "in-flight shows the working ship task"
+  ship_line=$(printf '%s\n' "$out" | grep 'ship-api' | head -1)
+  assert_contains "$ship_line" "ship-api         api" "in-flight repo prefers backlog repo over meta project"
   assert_contains "$out" "Add pagination to the events API" "in-flight shows the backlog title"
   assert_contains "$out" "needs decision" "a parked worker with an open decision is flagged"
   assert_contains "$out" "queued-cache" "queued-ready shows a ready item"
@@ -178,6 +180,22 @@ test_fail_closed_without_home() {
   pass "the board refuses to guess a home when FM_HOME is unset"
 }
 
+test_interval_validation() {
+  local home bad rc out
+  home=$(make_home interval)
+  for bad in 0 1..2 1.2.3; do
+    out=$(FM_HOME="$home" "$VIEW" --interval "$bad" 2>&1)
+    rc=$?
+    expect_code 2 "$rc" "invalid --interval $bad must fail"
+    assert_contains "$out" "--interval must be a positive number" "invalid --interval $bad explains the refusal"
+  done
+  out=$(FM_TASKLIST_INTERVAL='' FM_HOME="$home" "$VIEW" --once 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "empty FM_TASKLIST_INTERVAL must fail"
+  assert_contains "$out" "--interval must be a positive number" "empty FM_TASKLIST_INTERVAL explains the refusal"
+  pass "interval validation rejects nonpositive and malformed values"
+}
+
 # Provably read-only: a full render must not create, delete, or modify any file
 # under state/ or data/. The only child process is fm-fleet-snapshot.sh, itself
 # read-only, so a byte-level snapshot of both trees is identical afterward.
@@ -198,4 +216,5 @@ test_board_bands_and_parallel
 test_priority_ordering
 test_done_limit_and_width
 test_fail_closed_without_home
+test_interval_validation
 test_render_mutates_nothing
