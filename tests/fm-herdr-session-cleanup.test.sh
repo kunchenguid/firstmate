@@ -25,6 +25,16 @@ export FM_HERDR_SESSION_CLEANUP_SOURCE_ONLY=1
 . "$ROOT/bin/fm-herdr-session-cleanup.sh"
 unset FM_HERDR_SESSION_CLEANUP_SOURCE_ONLY
 
+LINUX_PROCESS_INFO='{"result":{"process_info":{"foreground_processes":[{"argv":["/bin/sh"],"name":"sh","pid":67}]}}}'
+[ "$(fm_herdr_cleanup_process_argv0 "$LINUX_PROCESS_INFO")" = /bin/sh ] \
+  || fail "Linux Herdr process argv array was not accepted"
+if fm_herdr_cleanup_process_argv0 \
+  '{"result":{"process_info":{"foreground_processes":[{"argv":[67],"name":"sh","pid":67}]}}}' \
+  >/dev/null 2>&1; then
+  fail "non-string Herdr process argv was accepted"
+fi
+pass "process proof reads Linux Herdr argv arrays and rejects malformed executable identities"
+
 TOKEN=AbCdEfGhIjKlMnOpQrStUv
 ID=task
 WS=w2

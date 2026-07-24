@@ -62,6 +62,14 @@ fm_herdr_cleanup_home_identity() {
   (cd "$FM_HOME" 2>/dev/null && pwd -P)
 }
 
+fm_herdr_cleanup_process_argv0() { # <process-info-json>
+  printf '%s' "$1" | jq -er '
+    .result.process_info.foreground_processes[0] as $process
+    | ($process.argv0 // $process.argv[0])
+    | select(type == "string" and length > 0)
+  ' 2>/dev/null
+}
+
 fm_herdr_cleanup_journal_matches() { # <title> <session> <home-real>
   local title=$1 session=$2 home_real=$3 journal id expected journal_home
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
@@ -135,8 +143,7 @@ fm_herdr_cleanup_process_is_idle_shell() { # <session> <pane-id>
   [ "$process_pid" = "$shell_pid" ] || return 1
   name=$(printf '%s' "$info" | jq -er \
     '.result.process_info.foreground_processes[0].name | select(type == "string" and length > 0)' 2>/dev/null) || return 1
-  argv0=$(printf '%s' "$info" | jq -er \
-    '.result.process_info.foreground_processes[0].argv0 | select(type == "string" and length > 0)' 2>/dev/null) || return 1
+  argv0=$(fm_herdr_cleanup_process_argv0 "$info") || return 1
   shell_name=${name##*/}
   argv0=${argv0#-}
   argv0=${argv0##*/}
