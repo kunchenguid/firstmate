@@ -433,6 +433,7 @@ FM_ACTIVE_CHECK_PID=
 FM_ACTIVE_CHECK_PGID=
 FM_CHECK_OUTPUT=
 FM_CHECK_RESULT=
+FM_CHECK_STATUS=
 FM_CHECK_SIGNAL_PENDING=
 
 fm_check_output_cleanup() {
@@ -469,6 +470,7 @@ run_check_capture() {
   local pgid
   fm_check_output_cleanup
   FM_CHECK_RESULT=
+  FM_CHECK_STATUS=
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
   chmod 0600 "$FM_CHECK_OUTPUT" || { fm_check_output_cleanup; return 1; }
   FM_CHECK_SIGNAL_PENDING=
@@ -486,7 +488,11 @@ run_check_capture() {
     return 1
   fi
   [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
-  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
+  if wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null; then
+    FM_CHECK_STATUS=0
+  else
+    FM_CHECK_STATUS=$?
+  fi
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
@@ -716,14 +722,20 @@ while :; do
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
           FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-            run_check_capture "$SCRIPT_DIR/fm-pr-publication-check.sh" verify "$id" "$url" || exit 1
-          case "$FM_CHECK_RESULT" in
-            verified\ *)
+            run_check_capture "$SCRIPT_DIR/fm-pr-publication-check.sh" verify "$id" "$url" --machine || exit 1
+          case "$FM_CHECK_STATUS:$FM_CHECK_RESULT" in
+            0:verified\ *)
               run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
                 "$provider" "$url" "$host" "$path" "$number" || exit 1
               out=$FM_CHECK_RESULT
               ;;
-            *) out=publication-invalid ;;
+            124:*) out=publication-verification-error:timeout:exit-124 ;;
+            [1-9]*:failure\ publication-invalid) out=publication-invalid ;;
+            [1-9]*:failure\ tool-unavailable|[1-9]*:failure\ forge-read-failed|[1-9]*:failure\ forge-response-invalid|[1-9]*:failure\ state-invalid|[1-9]*:failure\ request-invalid)
+              failure_class=${FM_CHECK_RESULT#failure }
+              out="publication-verification-error:$failure_class:exit-$FM_CHECK_STATUS"
+              ;;
+            *) out="publication-verification-error:malformed-result:exit-${FM_CHECK_STATUS:-unknown}" ;;
           esac
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT

@@ -14,9 +14,12 @@
 # evidence accessibility checks, and refuses body/head drift or a missing,
 # malformed, or failed attestation receipt.
 #
-# Neither mode edits a PR body. A failed check never changes review state. The
-# original task worker remains correction owner and must update the draft body
-# through the selected delivery path before attesting again.
+# Neither mode edits a PR body. Failures before the ready transition leave review
+# state unchanged. A failed post-ready readback removes the invalid receipt and
+# attempts draft rollback; if rollback also fails, both failures are reported and
+# the PR or MR is explicitly identified as possibly still reviewable. The original
+# task worker remains correction owner and must update the draft body through the
+# selected delivery path before attesting again.
 #
 # GitHub body readback uses gh-axi pr view --full and cross-checks it against one
 # raw gh JSON snapshot containing the exact body and head; gh-axi's generic API
@@ -24,6 +27,9 @@
 # Ruby's YAML parser decodes the structured full view. GitLab readback uses
 # glab's JSON output and requires jq so description, web_url, and sha are read
 # without parsing presentation text.
+# GitHub evidence uses the authenticated Contents JSON response and accepts only
+# type=file with a blob SHA. GitLab evidence likewise requires exact repository-
+# file metadata with a blob ID and matching ref; a directory is never evidence.
 # Create GitHub PRs with gh-axi pr create --draft and GitLab MRs with glab mr
 # create --draft. Successful attestation uses gh-axi pr ready or glab mr update
 # --ready. After later drift, the responsible worker returns the change to draft
@@ -34,8 +40,11 @@
 #     --intent-outcome-complete \
 #     --evidence <none-required|real-ui|nonvisual> \
 #     [--evidence-url <exact-head repository URL>]...
-#   fm-pr-publication-check.sh verify <task-id> <pr-url>
+#   fm-pr-publication-check.sh verify <task-id> <pr-url> [--machine]
 #   fm-pr-publication-check.sh --help
+# Watcher-only --machine failures emit one exact "failure <class>" line. Classes
+# are publication-invalid, tool-unavailable, forge-read-failed,
+# forge-response-invalid, state-invalid, and request-invalid.
 set -eu
 
 LC_ALL=C
@@ -89,18 +98,10 @@ NUMBER=$FM_PR_NUMBER
 META="$STATE/$ID.meta"
 RECEIPT="$STATE/$ID.pr-publication"
 
-if [ ! -d "$STATE" ] || [ -L "$STATE" ]; then
-  echo "error: task state directory is unavailable" >&2
-  exit 1
-fi
-if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
-  echo "error: task metadata is unavailable" >&2
-  exit 1
-fi
-
 INTENT_ATTESTED=0
 EVIDENCE_MODE=
 EVIDENCE_URLS=()
+MACHINE=0
 if [ "$ACTION" = attest ]; then
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -141,6 +142,9 @@ if [ "$ACTION" = attest ]; then
       ;;
     *) echo "error: --evidence must be none-required, real-ui, or nonvisual" >&2; exit 2 ;;
   esac
+elif [ "$#" -eq 1 ] && [ "$1" = --machine ]; then
+  MACHINE=1
+  shift
 elif [ "$#" -ne 0 ]; then
   echo "error: verify accepts no attestation arguments" >&2
   exit 2
@@ -152,6 +156,7 @@ FORGE_FILE=
 AXI_FIELDS_FILE=
 FIELDS_FILE=
 URLS_FILE=
+EVIDENCE_FILE=
 RECEIPT_TMP=
 INTENT_FILE=
 OUTCOME_FILE=
@@ -162,12 +167,33 @@ cleanup() {
   [ -z "$AXI_FIELDS_FILE" ] || rm -f -- "$AXI_FIELDS_FILE"
   [ -z "$FIELDS_FILE" ] || rm -f -- "$FIELDS_FILE"
   [ -z "$URLS_FILE" ] || rm -f -- "$URLS_FILE"
+  [ -z "$EVIDENCE_FILE" ] || rm -f -- "$EVIDENCE_FILE"
   [ -z "$RECEIPT_TMP" ] || rm -f -- "$RECEIPT_TMP"
   [ -z "$INTENT_FILE" ] || rm -f -- "$INTENT_FILE"
   [ -z "$OUTCOME_FILE" ] || rm -f -- "$OUTCOME_FILE"
 }
-trap cleanup EXIT
+FAILURE_CLASS=request-invalid
+finish() {
+  local status=$?
+  trap - EXIT
+  cleanup
+  if [ "$status" -ne 0 ] && [ "$MACHINE" -eq 1 ]; then
+    printf 'failure %s\n' "$FAILURE_CLASS"
+  fi
+  exit "$status"
+}
+trap finish EXIT
 trap 'exit 1' HUP INT TERM
+
+FAILURE_CLASS=state-invalid
+if [ ! -d "$STATE" ] || [ -L "$STATE" ]; then
+  echo "error: task state directory is unavailable" >&2
+  exit 1
+fi
+if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
+  echo "error: task metadata is unavailable" >&2
+  exit 1
+fi
 
 umask 077
 BODY_FILE=$(mktemp "$STATE/.fm-pr-publication-body.XXXXXX") || exit 1
@@ -176,6 +202,7 @@ FORGE_FILE=$(mktemp "$STATE/.fm-pr-publication-forge.XXXXXX") || exit 1
 AXI_FIELDS_FILE=$(mktemp "$STATE/.fm-pr-publication-axi-fields.XXXXXX") || exit 1
 FIELDS_FILE=$(mktemp "$STATE/.fm-pr-publication-fields.XXXXXX") || exit 1
 URLS_FILE=$(mktemp "$STATE/.fm-pr-publication-urls.XXXXXX") || exit 1
+EVIDENCE_FILE=$(mktemp "$STATE/.fm-pr-publication-evidence.XXXXXX") || exit 1
 
 decode_base64_to_body() {
   local encoded=$1
@@ -220,15 +247,19 @@ task_worktree() {
 
 github_worktree_valid() {
   local worktree=$1 slug expected
+  FAILURE_CLASS=state-invalid
   [ -d "$worktree" ] && [ ! -L "$worktree" ] || return 1
   [ "$(git -C "$worktree" rev-parse --is-inside-work-tree 2>/dev/null)" = true ] || return 1
+  FAILURE_CLASS=forge-read-failed
   slug=$(cd "$worktree" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) || return 1
+  FAILURE_CLASS=state-invalid
   expected=$(printf '%s' "$PROJECT_PATH" | tr '[:upper:]' '[:lower:]')
   [ "$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]')" = "$expected" ]
 }
 
 fetch_github() {
   local worktree
+  FAILURE_CLASS=tool-unavailable
   command -v gh-axi >/dev/null 2>&1 || {
     echo "error: GitHub publication readback requires gh-axi on PATH" >&2
     return 1
@@ -241,6 +272,7 @@ fetch_github() {
     echo "error: GitHub publication readback requires gh for an exact body/head snapshot" >&2
     return 1
   }
+  FAILURE_CLASS=state-invalid
   worktree=$(task_worktree) || {
     echo "error: task metadata lacks one exact worktree for GitHub publication readback" >&2
     return 1
@@ -249,10 +281,12 @@ fetch_github() {
     echo "error: task worktree does not match the GitHub PR repository" >&2
     return 1
   }
+  FAILURE_CLASS=forge-read-failed
   (cd "$worktree" && gh-axi pr view "$NUMBER" --full) > "$FORGE_FILE" 2>/dev/null || {
     echo "error: could not fetch the complete GitHub PR body" >&2
     return 1
   }
+  FAILURE_CLASS=forge-response-invalid
   ruby -ryaml -rbase64 -e '
     view = YAML.safe_load(File.binread(ARGV[0]), permitted_classes: [], aliases: false)
     expected_number = Integer(ARGV[1], 10)
@@ -270,11 +304,13 @@ fetch_github() {
     echo "error: complete GitHub PR body could not be decoded exactly" >&2
     return 1
   }
+  FAILURE_CLASS=forge-read-failed
   gh pr view "$URL" --json url,headRefOid,body,isDraft \
     --jq '[.url,.headRefOid,(.body|@base64),(.isDraft|tostring)] | .[]' > "$FIELDS_FILE" 2>/dev/null || {
     echo "error: could not fetch the complete GitHub PR body and head" >&2
     return 1
   }
+  FAILURE_CLASS=forge-response-invalid
   read_four_fields "$FIELDS_FILE" || {
     echo "error: GitHub PR readback was incomplete or malformed" >&2
     return 1
@@ -286,6 +322,7 @@ fetch_github() {
 }
 
 fetch_gitlab() {
+  FAILURE_CLASS=tool-unavailable
   command -v glab >/dev/null 2>&1 || {
     echo "error: GitLab publication readback requires glab on PATH" >&2
     return 1
@@ -294,10 +331,12 @@ fetch_gitlab() {
     echo "error: GitLab publication readback requires jq for exact JSON fields" >&2
     return 1
   }
+  FAILURE_CLASS=forge-read-failed
   glab mr view "$NUMBER" -R "https://$HOST/$PROJECT_PATH" -F json > "$FORGE_FILE" 2>/dev/null || {
     echo "error: could not fetch the complete GitLab MR body and head" >&2
     return 1
   }
+  FAILURE_CLASS=forge-response-invalid
   jq -er '[.web_url,.sha,((.description // "")|@base64),(.draft|tostring)] | .[]' "$FORGE_FILE" \
     > "$FIELDS_FILE" 2>/dev/null || {
       echo "error: GitLab MR JSON lacks exact web_url, sha, or description fields" >&2
@@ -335,11 +374,13 @@ case "$PROVIDER" in
   *) echo "error: unsupported forge for PR publication checking" >&2; exit 1 ;;
 esac
 
+FAILURE_CLASS=forge-response-invalid
 if [ "$FETCHED_URL" != "$URL" ] || ! fm_pr_head_valid "$FETCHED_HEAD"; then
   echo "error: forge readback did not match the exact PR identity and head" >&2
   exit 1
 fi
 case "$FETCHED_DRAFT" in true|false) ;; *) echo "error: forge readback did not include exact draft state" >&2; exit 1 ;; esac
+FAILURE_CLASS=publication-invalid
 if [ "$ACTION" = attest ] && [ "$FETCHED_DRAFT" != true ]; then
   echo "error: publication attestation requires a draft PR or MR" >&2
   exit 1
@@ -348,6 +389,7 @@ if [ "$ACTION" = verify ] && [ "$FETCHED_DRAFT" != false ]; then
   echo "error: publication verification requires a ready PR or MR" >&2
   exit 1
 fi
+FAILURE_CLASS=forge-response-invalid
 decode_base64_to_body "$FETCHED_BODY_BASE64" || {
   echo "error: forge body bytes could not be decoded exactly" >&2
   exit 1
@@ -355,10 +397,13 @@ decode_base64_to_body "$FETCHED_BODY_BASE64" || {
 
 BODY_BYTES=$(wc -c < "$BODY_FILE" | tr -d '[:space:]')
 BODY_SHA256=$(fm_pr_sha256 "$BODY_FILE") || {
+  FAILURE_CLASS=state-invalid
   echo "error: could not hash the fetched PR body" >&2
   exit 1
 }
 [[ "$BODY_BYTES" =~ ^[0-9]+$ ]] && [[ "$BODY_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 1
+
+FAILURE_CLASS=publication-invalid
 
 # Remove public HTTP(S) URLs before local-path scanning so an ordinary URL path
 # such as https://docs.example/home/user is not mistaken for a local home path.
@@ -440,7 +485,7 @@ awk '
 ' "$BODY_FILE" | LC_ALL=C sort -u > "$URLS_FILE" || exit 1
 
 verify_evidence_url() {
-  local evidence_url=$1 base evidence_path fragment encoded_project encoded_path
+  local evidence_url=$1 base evidence_path fragment encoded_project encoded_path response_status
   grep -Fxq -- "$evidence_url" "$URLS_FILE" || {
     echo "error: declared evidence URL is absent from the fetched public body" >&2
     return 1
@@ -477,14 +522,43 @@ verify_evidence_url() {
             ;;
         esac
       fi
-      command -v gh-axi >/dev/null 2>&1 || {
-        echo "error: GitHub evidence verification requires gh-axi on PATH" >&2
+      FAILURE_CLASS=tool-unavailable
+      command -v gh >/dev/null 2>&1 || {
+        echo "error: GitHub evidence verification requires gh on PATH" >&2
         return 1
       }
-      gh-axi api HEAD "/repos/$PROJECT_PATH/contents/$evidence_path?ref=$FETCHED_HEAD" >/dev/null 2>&1 || {
+      command -v ruby >/dev/null 2>&1 || {
+        echo "error: GitHub evidence verification requires Ruby for the Contents response" >&2
+        return 1
+      }
+      FAILURE_CLASS=forge-read-failed
+      gh api "/repos/$PROJECT_PATH/contents/$evidence_path?ref=$FETCHED_HEAD" \
+        --header 'Accept: application/vnd.github.object+json' > "$EVIDENCE_FILE" 2>/dev/null || {
         echo "error: GitHub evidence is not authenticated-accessible at the exact PR head" >&2
         return 1
       }
+      if ruby -rjson -e '
+        begin
+          response = JSON.parse(File.binread(ARGV[0]))
+        rescue JSON::ParserError
+          exit 2
+        end
+        exit 3 unless response.is_a?(Hash) && response["type"] == "file" &&
+          response["sha"].is_a?(String) && response["sha"].match?(/\A[0-9a-f]{40}([0-9a-f]{24})?\z/)
+      ' "$EVIDENCE_FILE" 2>/dev/null; then
+        :
+      else
+        response_status=$?
+        if [ "$response_status" -eq 2 ]; then
+          FAILURE_CLASS=forge-response-invalid
+          echo "error: GitHub Contents response was malformed" >&2
+        else
+          FAILURE_CLASS=publication-invalid
+          echo "error: GitHub evidence URL does not identify a file/blob at the exact PR head" >&2
+        fi
+        return 1
+      fi
+      FAILURE_CLASS=publication-invalid
       ;;
     gitlab)
       base="https://$HOST/$PROJECT_PATH/-/blob/$FETCHED_HEAD/"
@@ -512,12 +586,36 @@ verify_evidence_url() {
             ;;
         esac
       fi
+      FAILURE_CLASS=tool-unavailable
+      command -v glab >/dev/null 2>&1 || return 1
+      command -v jq >/dev/null 2>&1 || return 1
+      FAILURE_CLASS=state-invalid
       encoded_project=$(jq -rn --arg value "$PROJECT_PATH" '$value|@uri') || return 1
       encoded_path=$(jq -rn --arg value "$evidence_path" '$value|@uri') || return 1
-      glab api --hostname "$HOST" "projects/$encoded_project/repository/files/$encoded_path?ref=$FETCHED_HEAD" >/dev/null 2>&1 || {
+      FAILURE_CLASS=forge-read-failed
+      glab api --hostname "$HOST" \
+        "projects/$encoded_project/repository/files/$encoded_path?ref=$FETCHED_HEAD" \
+        > "$EVIDENCE_FILE" 2>/dev/null || {
         echo "error: GitLab evidence is not authenticated-accessible at the exact MR head" >&2
         return 1
       }
+      if jq -er --arg evidence_path "$evidence_path" --arg head "$FETCHED_HEAD" \
+        'type == "object" and .file_path == $evidence_path and .ref == $head and
+          (.blob_id | type == "string" and test("^[0-9a-f]{40}([0-9a-f]{24})?$"))' \
+        "$EVIDENCE_FILE" >/dev/null 2>&1; then
+        :
+      else
+        response_status=$?
+        if [ "$response_status" -eq 4 ]; then
+          FAILURE_CLASS=forge-response-invalid
+          echo "error: GitLab repository-file response was malformed" >&2
+        else
+          FAILURE_CLASS=publication-invalid
+          echo "error: GitLab evidence URL does not identify a file/blob at the exact MR head" >&2
+        fi
+        return 1
+      fi
+      FAILURE_CLASS=publication-invalid
       ;;
   esac
 }
@@ -571,6 +669,20 @@ parse_receipt() {
     real-ui|nonvisual) [ "$expected_count" -gt 0 ] ;;
     *) return 1 ;;
   esac
+}
+
+fail_after_ready() {
+  local message=$1 rollback_status=0 receipt_status=0
+  set_review_state draft || rollback_status=$?
+  rm -f -- "$RECEIPT" || receipt_status=$?
+  echo "error: $message" >&2
+  if [ "$rollback_status" -ne 0 ]; then
+    echo "error: draft rollback also failed with exit $rollback_status; the PR or MR may remain reviewable without a valid publication receipt" >&2
+  fi
+  if [ "$receipt_status" -ne 0 ]; then
+    echo "error: invalid publication receipt removal also failed with exit $receipt_status" >&2
+  fi
+  exit 1
 }
 
 if [ "$ACTION" = verify ]; then
@@ -638,11 +750,13 @@ if [ "$ACTION" = attest ]; then
   RECEIPT_TMP=
   fm_pr_private_file_valid "$RECEIPT" 600 "$STATE_DEVICE" || exit 1
   parse_receipt "$RECEIPT" || exit 1
+  FAILURE_CLASS=forge-read-failed
   if ! set_review_state ready; then
     rm -f -- "$RECEIPT"
     echo "error: publication passed but the forge could not mark the draft ready" >&2
     exit 1
   fi
+  READY_READBACK_FAILED=0
   case "$PROVIDER" in
     github) fetch_github || READY_READBACK_FAILED=1 ;;
     gitlab) fetch_gitlab || READY_READBACK_FAILED=1 ;;
@@ -650,19 +764,14 @@ if [ "$ACTION" = attest ]; then
   if [ "${READY_READBACK_FAILED:-0}" -ne 0 ] || [ "$FETCHED_URL" != "$URL" ] \
     || [ "$FETCHED_HEAD" != "$ATTESTED_HEAD" ] || [ "$FETCHED_DRAFT" != false ] \
     || ! decode_base64_to_body "$FETCHED_BODY_BASE64"; then
-    set_review_state draft || true
-    rm -f -- "$RECEIPT"
-    echo "error: ready-state readback did not preserve the attested PR identity and head" >&2
-    exit 1
+    fail_after_ready "ready-state readback did not preserve the attested PR identity and head"
   fi
   READY_BODY_BYTES=$(wc -c < "$BODY_FILE" | tr -d '[:space:]')
   READY_BODY_SHA256=$(fm_pr_sha256 "$BODY_FILE") || READY_BODY_SHA256=
   if [ "$READY_BODY_BYTES" != "$ATTESTED_BODY_BYTES" ] \
     || [ "$READY_BODY_SHA256" != "$ATTESTED_BODY_SHA256" ]; then
-    set_review_state draft || true
-    rm -f -- "$RECEIPT"
-    echo "error: public body drifted while the draft was being marked ready" >&2
-    exit 1
+    FAILURE_CLASS=publication-invalid
+    fail_after_ready "public body drifted while the draft was being marked ready"
   fi
   printf 'attested %s %s %s\n' "$ATTESTED_HEAD" "$ATTESTED_BODY_BYTES" "$ATTESTED_BODY_SHA256"
 else

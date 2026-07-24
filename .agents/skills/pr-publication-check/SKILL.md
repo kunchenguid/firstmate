@@ -36,7 +36,7 @@ The worker must choose exactly one evidence declaration.
 - Use `--evidence nonvisual --evidence-url <url>` for required logs, reports, or other nonvisual artifacts.
 - Use `--evidence real-ui --evidence-url <url>` only for evidence showing the real UI behavior, never a custom illustration, concept, or mockup.
 
-Every declared evidence URL must already appear in the fetched public body, resolve through the same repository or forge, and bind to the exact PR head.
+Every declared evidence URL must already appear in the fetched public body, resolve through the same repository or forge as an actual file/blob rather than a directory, and bind to the exact PR head.
 The worker remains responsible for deciding whether evidence is required and whether the artifact proves the claimed behavior under the accepted project contract.
 Do not force screenshots when the accepted contract does not require visual evidence.
 
@@ -54,14 +54,16 @@ Only after that transition and its fresh readback succeed may the worker append 
 
 ## Correction and monitoring
 
-A failed check never edits or normalizes the PR body and never marks a draft ready.
+A failed check never edits or normalizes the PR body, and any failure before the ready transition leaves the draft unchanged.
+If fresh readback after the ready transition fails, the gate removes the invalid receipt and attempts draft rollback; a rollback failure reports both errors and explicitly warns that the change may remain reviewable without a valid receipt.
 The responsible worker corrects the body through the selected delivery path, reads the complete public result again, and reruns `attest` against fresh bytes.
 After a ready PR or MR drifts, that worker first returns it to draft through the forge's supported mechanism, then corrects and re-attests it.
 For a no-mistakes task, the worker follows the active no-mistakes help and ownership flow rather than hand-editing around the pipeline; if that flow offers no supported correction, the worker reports the exact blocker.
 
 Firstmate runs `bin/fm-pr-check.sh <task-id> <full-pr-url>` after the worker's ready status.
 That command performs a second authenticated full-body/head readback, repeats deterministic privacy and evidence checks, requires the exact private attestation receipt, records canonical PR identity and head, and only then publishes ordinary merge monitoring.
-Every ordinary merge poll re-runs that verification first; body or head drift produces a `publication-invalid` wake instead of a merged outcome and returns correction ownership to the same task worker.
+Every ordinary merge poll re-runs that verification first; body, head, receipt, policy, or evidence drift produces a `publication-invalid` wake instead of a merged outcome and returns correction ownership to the same task worker.
+Tool absence, forge read failure, malformed forge response, invalid local state, timeout, or an invalid machine result instead produces a bounded `publication-verification-error:<class>:exit-<status>` wake and remains Firstmate operational work rather than being assigned to the delivery worker.
 
 The private receipt records only the canonical forge identity, exact head, body byte count and SHA-256, privacy/link/attestation verdicts, evidence mode, and the already-public evidence URLs encoded as data.
 Never copy that receipt or other private task evidence into the PR.

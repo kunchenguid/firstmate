@@ -42,16 +42,41 @@ SH
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+if [ "${1:-}" = api ]; then
+  [ "${FM_TEST_EVIDENCE_RC:-0}" -eq 0 ] || exit "$FM_TEST_EVIDENCE_RC"
+  case "${FM_TEST_EVIDENCE_KIND:-file}" in
+    file)
+      jq -n --arg sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+        '{type:"file",sha:$sha}'
+      ;;
+    directory)
+      jq -n '[{type:"file",sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]'
+      ;;
+    malformed) printf '%s\n' '{not-json' ;;
+    *) exit 1 ;;
+  esac
+  exit 0
+fi
 case "${1:-} ${2:-}" in
   'repo view')
     cat "$FM_TEST_REPO_FILE"
     exit 0
     ;;
   'pr view')
+    [ "${FM_TEST_GH_READ_RC:-0}" -eq 0 ] || exit "$FM_TEST_GH_READ_RC"
+    if [ "${FM_TEST_READY_READBACK_FAIL:-0}" -eq 1 ] \
+      && [ "$(cat "$FM_TEST_DRAFT_FILE")" = false ]; then
+      exit 1
+    fi
     printf '%s\n%s\n' "$FM_TEST_PR_URL" "$FM_TEST_PR_HEAD"
     base64 < "$FM_TEST_BODY_FILE" | tr -d '\n'
     printf '\n%s\n' "$(cat "$FM_TEST_DRAFT_FILE")"
     exit 0
+    ;;
+  'pr ready')
+    [ "${4:-}" = --undo ] || exit 1
+    [ "${FM_TEST_ROLLBACK_RC:-0}" -eq 0 ] || exit "$FM_TEST_ROLLBACK_RC"
+    printf '%s\n' true > "$FM_TEST_DRAFT_FILE"
     ;;
 esac
 exit 1
@@ -70,7 +95,6 @@ case "${1:-} ${2:-}" in
     jq -n --rawfile body "$FM_TEST_BODY_FILE" --argjson number "$number" --arg head "$FM_TEST_PR_HEAD" \
       '{number:$number,body:$body,head:{sha:$head}}'
     ;;
-  'api HEAD') exit "${FM_TEST_EVIDENCE_RC:-0}" ;;
   *) exit 1 ;;
 esac
 SH
@@ -84,8 +108,28 @@ case "${1:-} ${2:-}" in
       --argjson draft "$(cat "$FM_TEST_DRAFT_FILE")" \
       '{web_url:$web_url,sha:$sha,description:$description,draft:$draft}'
     ;;
-  'mr update') printf '%s\n' false > "$FM_TEST_DRAFT_FILE" ;;
-  'api --hostname') exit "${FM_TEST_EVIDENCE_RC:-0}" ;;
+  'mr update')
+    case " $* " in
+      *" --draft "*) printf '%s\n' true > "$FM_TEST_DRAFT_FILE" ;;
+      *) printf '%s\n' false > "$FM_TEST_DRAFT_FILE" ;;
+    esac
+    ;;
+  'api --hostname')
+    [ "${FM_TEST_EVIDENCE_RC:-0}" -eq 0 ] || exit "$FM_TEST_EVIDENCE_RC"
+    case "${FM_TEST_EVIDENCE_KIND:-file}" in
+      file)
+        jq -n --arg path "$FM_TEST_EVIDENCE_PATH" --arg ref "$FM_TEST_PR_HEAD" \
+          --arg blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+          '{file_path:$path,ref:$ref,blob_id:$blob}'
+        ;;
+      directory)
+        jq -n --arg path "$FM_TEST_EVIDENCE_PATH" --arg ref "$FM_TEST_PR_HEAD" \
+          '{file_path:$path,ref:$ref,blob_id:null}'
+        ;;
+      malformed) printf '%s\n' '{not-json' ;;
+      *) exit 1 ;;
+    esac
+    ;;
   *) exit 1 ;;
 esac
 SH
@@ -129,7 +173,10 @@ run_gate() {
     FM_TEST_AXI_BODY_FILE="${FM_TEST_AXI_BODY_FILE:-$dir/body.md}" \
     FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
     FM_TEST_GLAB_LOG="$dir/glab.log" FM_TEST_DRAFT_FILE="$dir/draft" \
-    FM_TEST_REPO_FILE="$dir/repo-path" \
+    FM_TEST_REPO_FILE="$dir/repo-path" FM_TEST_EVIDENCE_PATH="${FM_TEST_EVIDENCE_PATH:-evidence/result.txt}" \
+    FM_TEST_EVIDENCE_KIND="${FM_TEST_EVIDENCE_KIND:-file}" \
+    FM_TEST_READY_READBACK_FAIL="${FM_TEST_READY_READBACK_FAIL:-0}" \
+    FM_TEST_ROLLBACK_RC="${FM_TEST_ROLLBACK_RC:-0}" FM_TEST_GH_READ_RC="${FM_TEST_GH_READ_RC:-0}" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PUBLICATION_CHECK" "$@"
 }
@@ -309,8 +356,23 @@ test_exact_head_evidence_accessibility_and_kind() {
   run_gate "$dir" "$GITHUB_URL" "$GITHUB_HEAD" attest task-a "$GITHUB_URL" \
     --intent-outcome-complete --evidence nonvisual --evidence-url "$exact_url" \
     > "$dir/stdout" 2> "$dir/stderr" || fail "safe exact-head evidence failed: $(cat "$dir/stderr")"
-  assert_grep "api HEAD /repos/example/project/contents/evidence/result.txt?ref=$GITHUB_HEAD" "$dir/gh-axi.log" \
-    "GitHub evidence did not use authenticated exact-head accessibility"
+  assert_grep "api /repos/example/project/contents/evidence/result.txt?ref=$GITHUB_HEAD --header Accept: application/vnd.github.object+json" "$dir/gh.log" \
+    "GitHub evidence did not parse the authenticated exact-head Contents response"
+
+  dir=$(make_case directory-evidence)
+  write_body "$dir" "$(safe_body)
+
+[Evidence]($exact_url)
+"
+  set +e
+  FM_TEST_EVIDENCE_KIND=directory run_gate "$dir" "$GITHUB_URL" "$GITHUB_HEAD" attest task-a "$GITHUB_URL" \
+    --intent-outcome-complete --evidence nonvisual --evidence-url "$exact_url" \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "GitHub directory passed as file evidence"
+  assert_grep 'does not identify a file/blob' "$dir/stderr" \
+    "GitHub directory evidence refusal was unclear"
 
   dir=$(make_case evidence-substring)
   write_body "$dir" "$(safe_body)
@@ -383,6 +445,72 @@ Additional public outcome.
   pass "publication receipt rejects body/head drift and accepts a correction-readback retry"
 }
 
+test_ready_readback_surfaces_failed_rollback() {
+  local dir rc
+  dir=$(make_case ready-readback-rollback-failure)
+  safe_body > "$dir/body.md"
+  set +e
+  FM_TEST_READY_READBACK_FAIL=1 FM_TEST_ROLLBACK_RC=9 attest_none "$dir" \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "failed ready-state readback and rollback passed"
+  assert_grep 'ready-state readback did not preserve the attested PR identity and head' "$dir/stderr" \
+    "ready-state readback failure was lost"
+  assert_grep 'draft rollback also failed with exit 9' "$dir/stderr" \
+    "draft rollback failure was lost"
+  assert_grep 'may remain reviewable without a valid publication receipt' "$dir/stderr" \
+    "failed rollback did not report the unsafe reviewable state"
+  assert_absent "$dir/home/state/task-a.pr-publication" \
+    "failed ready-state readback retained an invalid receipt"
+  [ "$(cat "$dir/draft")" = false ] || fail "rollback-failure fixture did not remain reviewable"
+  pass "ready-state failure retains both the readback and rollback diagnostics"
+}
+
+test_machine_failure_classes_are_bounded() {
+  local dir rc
+  dir=$(make_case machine-failure-classes)
+  safe_body > "$dir/body.md"
+  attest_none "$dir" >/dev/null 2> "$dir/attest.err" \
+    || fail "machine classification fixture did not attest"
+
+  printf '\nPublic body drift.\n' >> "$dir/body.md"
+  set +e
+  run_gate "$dir" "$GITHUB_URL" "$GITHUB_HEAD" verify task-a "$GITHUB_URL" --machine \
+    > "$dir/drift.out" 2> "$dir/drift.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] && [ "$(cat "$dir/drift.out")" = 'failure publication-invalid' ] \
+    || fail "body drift did not emit the bounded publication failure class"
+
+  safe_body > "$dir/body.md"
+  set +e
+  FM_TEST_GH_READ_RC=7 run_gate "$dir" "$GITHUB_URL" "$GITHUB_HEAD" verify task-a "$GITHUB_URL" --machine \
+    > "$dir/read.out" 2> "$dir/read.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] && [ "$(cat "$dir/read.out")" = 'failure forge-read-failed' ] \
+    || fail "forge authentication or transport failure did not emit its bounded class"
+
+  set +e
+  run_gate "$dir" "$GITHUB_URL" invalid-head verify task-a "$GITHUB_URL" --machine \
+    > "$dir/malformed.out" 2> "$dir/malformed.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] && [ "$(cat "$dir/malformed.out")" = 'failure forge-response-invalid' ] \
+    || fail "malformed forge response did not emit its bounded class"
+
+  mv "$dir/fakebin/gh-axi" "$dir/gh-axi.disabled"
+  set +e
+  run_gate "$dir" "$GITHUB_URL" "$GITHUB_HEAD" verify task-a "$GITHUB_URL" --machine \
+    > "$dir/tool.out" 2> "$dir/tool.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] && [ "$(cat "$dir/tool.out")" = 'failure tool-unavailable' ] \
+    || fail "missing verifier tool did not emit its bounded class"
+  pass "machine verification distinguishes publication, forge, response, and tool failures"
+}
+
 test_github_and_gitlab_routes_and_monitoring_boundary() {
   local dir exact_url rc
   dir=$(make_case no-receipt-monitor)
@@ -431,6 +559,21 @@ test_github_and_gitlab_routes_and_monitoring_boundary() {
     "GitLab attestation did not mark the unchanged draft ready"
   run_gate "$dir" "$GITLAB_URL" "$GITLAB_HEAD" verify task-a "$GITLAB_URL" >/dev/null 2> "$dir/verify.err" \
     || fail "GitLab receipt did not verify"
+
+  dir=$(make_case gitlab-directory-evidence)
+  write_body "$dir" "$(safe_body)
+
+[Evidence]($exact_url)
+"
+  set +e
+  FM_TEST_EVIDENCE_KIND=directory run_gate "$dir" "$GITLAB_URL" "$GITLAB_HEAD" attest task-a "$GITLAB_URL" \
+    --intent-outcome-complete --evidence nonvisual --evidence-url "$exact_url" \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "GitLab non-file response passed as file evidence"
+  assert_grep 'does not identify a file/blob' "$dir/stderr" \
+    "GitLab non-file evidence refusal was unclear"
   pass "publication check routes GitHub and GitLab explicitly and blocks monitoring before fresh verification"
 }
 
@@ -443,4 +586,6 @@ test_internal_transcripts_and_secrets_refuse
 test_partial_intent_framing_refuses
 test_exact_head_evidence_accessibility_and_kind
 test_body_head_drift_and_correction_retry
+test_ready_readback_surfaces_failed_rollback
+test_machine_failure_classes_are_bounded
 test_github_and_gitlab_routes_and_monitoring_boundary

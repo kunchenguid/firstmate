@@ -72,6 +72,8 @@ case "${1:-} ${2:-}" in
   'pr view')
     case " $* " in
       *" --json url,headRefOid,body,isDraft "*)
+        [ "${FM_TEST_PUBLICATION_READ_FAIL:-0}" -eq 0 ] \
+          || exit "$FM_TEST_PUBLICATION_READ_FAIL"
         printf '%s\n%s\n' "$3" "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
         base64 < "$FM_TEST_BODY_FILE" | tr -d '\n'
         printf '\nfalse\n'
@@ -746,6 +748,8 @@ run_watcher_bounded() {
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
       FM_TEST_BODY_FILE="$dir/publication-body.md" FM_TEST_GH_LOG="$dir/gh.log" \
       FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+      FM_TEST_PUBLICATION_READ_FAIL="${FM_TEST_PUBLICATION_READ_FAIL:-0}" \
+      FM_TEST_GH_HEAD="${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
 
@@ -3093,6 +3097,60 @@ test_publication_drift_blocks_merged_outcome() {
   pass "ordinary monitoring revalidates publication before any merged outcome"
 }
 
+test_publication_operational_failures_keep_watcher_ownership() {
+  local dir state rc
+
+  dir=$(make_case publication-forge-read-failure)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  set +e
+  FM_TEST_PUBLICATION_READ_FAIL=7 run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "forge-read failure watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in
+    check:*task-a.check.sh:*publication-verification-error:forge-read-failed:exit-1) ;;
+    *) fail "forge-read failure was not routed as an operational verification error" ;;
+  esac
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "forge-read failure destroyed the recoverable poll identity"
+  [ ! -e "$state/task-a.pr-poll-retirement" ] \
+    || fail "forge-read failure received merged retirement authority"
+
+  dir=$(make_case publication-malformed-response)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  set +e
+  FM_TEST_GH_HEAD=invalid-head run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "malformed-response watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in
+    check:*task-a.check.sh:*publication-verification-error:forge-response-invalid:exit-1) ;;
+    *) fail "malformed forge response was not routed as an operational verification error" ;;
+  esac
+
+  dir=$(make_case publication-tool-unavailable)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  mv "$dir/fakebin/gh-axi" "$dir/gh-axi.disabled"
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "missing-tool watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in
+    check:*task-a.check.sh:*publication-verification-error:tool-unavailable:exit-1) ;;
+    *) fail "missing verifier tool was not routed as an operational verification error" ;;
+  esac
+  pass "watcher distinguishes publication drift from operational verification failures"
+}
+
 test_persistent_secondmate_retirement_is_poll_only() {
   local dir state meta_before status_before registry_before endpoint_before rc
   dir=$(make_case merged-retirement-secondmate)
@@ -3454,6 +3512,7 @@ test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_publication_drift_blocks_merged_outcome
+test_publication_operational_failures_keep_watcher_ownership
 test_persistent_secondmate_retirement_is_poll_only
 test_retirement_crash_recovery
 test_external_merge_transition_retires_only_terminal_poll
