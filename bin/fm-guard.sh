@@ -5,9 +5,8 @@
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
-# Then, if any task still needs continuous live supervision (see
-# bin/fm-supervision-lib.sh: actively progressing work, not parked/terminal/
-# paused/secondmate-only) and the watcher's liveness beacon
+# Then, if any task still needs continuous live supervision or queued wakes need
+# draining, and the watcher's liveness beacon
 # (state/.last-watcher-beat, touched every poll cycle) is missing or older than
 # FM_GUARD_GRACE seconds, prints a loud, clearly delimited banner so the agent
 # cannot skim past it in the tool output of whatever it was doing - the one
@@ -142,23 +141,17 @@ if [ -n "$tangle_branch" ]; then
   } >&2
 fi
 
-# Compute in-flight count and watcher-beacon freshness via the shared
-# grace-based predicate (bin/fm-supervision-lib.sh). Only act with tasks in
-# flight; count them so the banner can say how much is riding on an absent
-# watcher.
+# Compute supervision demand and watcher-beacon freshness via the shared
+# grace-based predicate (bin/fm-supervision-lib.sh).
 fm_supervision_status "$STATE" "$GRACE"
 in_flight=$FM_SUP_IN_FLIGHT
 watcher_fresh=$FM_SUP_WATCHER_FRESH
 beacon_desc=$FM_SUP_BEACON_DESC
-if [ "$in_flight" -eq 0 ]; then
-  # Leave the unhealthy state (no work riding on the watcher): clear so a later
-  # in-flight + stale combination is a fresh episode even if the beacon is still
-  # absent with the same key string.
+queue_pending=$FM_SUP_QUEUE_PENDING
+if [ "$in_flight" -eq 0 ] && [ "$queue_pending" = false ]; then
   [ "$READ_ONLY" -eq 1 ] || fm_guard_clear_stale_banner
   exit 0
 fi
-
-[ -s "$FM_WAKE_QUEUE" ] && queue_pending=true
 
 # No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line. Later
@@ -189,7 +182,11 @@ if [ "$watcher_fresh" = false ]; then
     {
       printf '●%s\n' "$rule"
       printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
-      printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+      if "$queue_pending"; then
+        printf '●  %s task(s) in flight and queued wakes pending, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+      else
+        printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+      fi
       if [ "$READ_ONLY" -eq 1 ]; then
         printf '●  This read-only session should report the lapse, not repair it.\n'
       else

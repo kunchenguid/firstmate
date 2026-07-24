@@ -16,7 +16,8 @@
 # continuous foreground checkpoints; PR merge polls and other durable checks keep
 # running through the existing watcher check path when supervision is live for
 # active work or other reasons (X mode). Persistent secondmates are idle by
-# default and never count as active work in the parent home.
+# default unless a parent request remains unresolved or their status shows live
+# progress.
 
 # Directory of this library (works when sourced from bin/ or tests/).
 _FM_SUP_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_SUP_LIB_DIR="."
@@ -41,11 +42,23 @@ fm_sup_meta_value() {
   grep "^${key}=" "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+fm_sup_secondmate_has_pending_reply() {
+  local state=$1 id=$2 rec task_id phase
+  for rec in "$state/pending-replies"/*; do
+    [ -f "$rec" ] || continue
+    task_id=$(fm_sup_meta_value "$rec" task_id)
+    [ "$task_id" = "$id" ] || continue
+    phase=$(fm_sup_meta_value "$rec" phase)
+    [ "$phase" = resolved ] || return 0
+  done
+  return 1
+}
+
 # fm_sup_task_needs_live_supervision <state-dir> <task-id>
 # Exit 0 when continuous live supervision is still required for this task.
 # Cheap status-log / meta classification only (no pane or no-mistakes calls):
-#   - kind=secondmate: never (idle-by-default; child work lives in its own home)
-#   - missing or empty status: yes (just launched or not yet reporting)
+#   - kind=secondmate: yes only for unresolved parent replies or live status
+#   - missing or empty status: yes for ordinary tasks, no for idle secondmates
 #   - last verb working or resolved: yes (active or just resumed)
 #   - last verb done, needs-decision, blocked, failed, paused, captain-held: no
 #   - any other / unreadable last line: yes (fail closed toward supervision)
@@ -56,17 +69,21 @@ fm_sup_task_needs_live_supervision() {
 
   kind=$(fm_sup_meta_value "$meta" kind)
   [ -n "$kind" ] || kind=ship
-  if [ "$kind" = secondmate ]; then
-    return 1
+  if [ "$kind" = secondmate ] && fm_sup_secondmate_has_pending_reply "$state" "$id"; then
+    return 0
   fi
 
   status="$state/$id.status"
   if [ ! -s "$status" ]; then
+    [ "$kind" = secondmate ] && return 1
     return 0
   fi
 
   last=$(last_status_line "$status")
-  [ -n "$last" ] || return 0
+  if [ -z "$last" ]; then
+    [ "$kind" = secondmate ] && return 1
+    return 0
+  fi
 
   if status_is_paused "$last" || status_is_paused_or_captain_held "$last"; then
     return 1
@@ -75,7 +92,7 @@ fm_sup_task_needs_live_supervision() {
   verb=$(status_line_verb "$last")
   case "$verb" in
     working|resolved) return 0 ;;
-    done|needs-decision|blocked|failed) return 1 ;;
+    idle|done|needs-decision|blocked|failed) return 1 ;;
     *) return 0 ;;
   esac
 }
@@ -125,10 +142,10 @@ fm_supervision_status() {
 }
 
 # fm_supervision_unhealthy <state-dir> [grace-seconds]
-# Exit 0 (true) exactly in the dangerous state: actively supervised work exists
-# and no watcher has a fresh beacon. Exit 1 (false) otherwise, including when
-# only parked, terminal, paused, or secondmate meta remains.
+# Exit 0 (true) exactly in the dangerous state: actively supervised work or a
+# queued wake exists and no watcher has a fresh beacon. Exit 1 (false) otherwise.
 fm_supervision_unhealthy() {
   fm_supervision_status "$@"
-  [ "$FM_SUP_IN_FLIGHT" -gt 0 ] && [ "$FM_SUP_WATCHER_FRESH" = false ]
+  { [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || [ "$FM_SUP_QUEUE_PENDING" = true ]; } \
+    && [ "$FM_SUP_WATCHER_FRESH" = false ]
 }

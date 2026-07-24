@@ -77,6 +77,21 @@ test_predicate_queue_pending_flag() {
   pass "fm_supervision_status: FM_SUP_QUEUE_PENDING tracks state/.wake-queue"
 }
 
+test_predicate_queue_pending_requires_supervision() {
+  local state="$TMP_ROOT/pred-queue-only/state"
+  mkdir -p "$state"
+  : > "$state/parked.meta"
+  printf 'done: settled\n' > "$state/parked.status"
+  printf 'record\n' > "$state/.wake-queue"
+  fm_supervision_unhealthy "$state" 300 || fail "queued wake without beacon must be unhealthy even when all tasks are settled"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "queued wake must not reclassify settled tasks as active"
+  rm -f "$state/.wake-queue"
+  if fm_supervision_unhealthy "$state" 300; then
+    fail "settled task with an empty queue must remain healthy without a watcher"
+  fi
+  pass "fm_supervision_unhealthy: queued wakes independently require supervision"
+}
+
 # Parked, terminal, and paused tasks keep meta for durable records and PR polls,
 # but must not force continuous live supervision (Codex foreground checkpoints).
 test_predicate_ignores_parked_terminal_and_paused() {
@@ -119,6 +134,24 @@ test_predicate_fresh_launch_and_working_need_supervision() {
   pass "fm_supervision_status: fresh, working, and resolved tasks still require live supervision"
 }
 
+test_predicate_secondmate_activity_needs_supervision() {
+  local state="$TMP_ROOT/pred-secondmate-active/state"
+  mkdir -p "$state/pending-replies"
+  printf 'kind=secondmate\n' > "$state/idle.meta"
+  printf 'idle: awaiting routed work\n' > "$state/idle.status"
+  printf 'kind=secondmate\n' > "$state/working.meta"
+  printf 'working: processing parent request\n' > "$state/working.status"
+  printf 'kind=secondmate\n' > "$state/resolved.meta"
+  printf 'resolved: resumed parent request\n' > "$state/resolved.status"
+  printf 'kind=secondmate\n' > "$state/pending.meta"
+  printf 'done: prior request settled\n' > "$state/pending.status"
+  printf 'task_id=pending\nphase=awaiting_report\n' > "$state/pending-replies/corr-active"
+  printf 'task_id=idle\nphase=resolved\n' > "$state/pending-replies/corr-resolved"
+  fm_supervision_unhealthy "$state" 300 || fail "active secondmate work without beacon must be unhealthy"
+  [ "$FM_SUP_IN_FLIGHT" -eq 3 ] || fail "working, resolved, and pending-reply secondmates must count as active, got $FM_SUP_IN_FLIGHT"
+  pass "fm_supervision_status: active secondmate work requires live supervision"
+}
+
 test_hook_silent_when_only_parked_or_terminal() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-parked-only")
@@ -130,6 +163,19 @@ test_hook_silent_when_only_parked_or_terminal() {
   expect_code 0 "$status" "hook must exit 0 when only parked/terminal meta remains"
   [ -z "$out" ] || fail "hook produced output for parked/terminal-only fleet: $out"
   pass "fm-turnend-guard: silent when only parked or terminal work remains"
+}
+
+test_hook_blocks_when_only_queue_is_pending() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-queue-only")
+  : > "$dir/state/done.meta"
+  printf 'done: settled\n' > "$dir/state/done.status"
+  printf 'record\n' > "$dir/state/.wake-queue"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must block when queued wakes remain without a live watcher"
+  assert_contains "$out" "queued wakes pending" "queue-only block must identify the undrained wake queue"
+  assert_contains "$out" "After draining queued wakes" "queue-only block must direct wake draining before watcher repair"
+  pass "fm-turnend-guard: queued wakes block blind turn end independently"
 }
 
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
@@ -993,10 +1039,13 @@ test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
+test_predicate_queue_pending_requires_supervision
 test_predicate_ignores_parked_terminal_and_paused
 test_predicate_fresh_launch_and_working_need_supervision
+test_predicate_secondmate_activity_needs_supervision
 test_hook_silent_when_no_work_in_flight
 test_hook_silent_when_only_parked_or_terminal
+test_hook_blocks_when_only_queue_is_pending
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
