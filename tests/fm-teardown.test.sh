@@ -1243,7 +1243,7 @@ test_local_only_force_overrides_unpushed() {
 }
 
 test_herdr_teardown_clears_escalation_marker() {
-  local case_dir marker key artifact status_line status_sig pid i
+  local case_dir marker key artifact status_line status_sig pid i signal_count real_sleep
   case_dir=$(make_case herdr-marker-cleanup)
   write_meta "$case_dir" local-only ship
   sed -i.bak 's/^window=.*/window=default:wG:pQ/' "$case_dir/state/task-x1.meta"
@@ -1254,6 +1254,20 @@ test_herdr_teardown_clears_escalation_marker() {
 exit 0
 SH
   chmod +x "$case_dir/fakebin/herdr"
+  real_sleep=$(command -v sleep)
+  cat > "$case_dir/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = 7 ]; then
+  : > "${FM_SIGNAL_COLLECTED:?}"
+  while [ ! -e "${FM_SIGNAL_RESUME:?}" ]; do
+    "$FM_REAL_SLEEP_FOR_TEST" 0.05
+  done
+  : > "${FM_SIGNAL_COLLECTED}.resumed"
+  exit 0
+fi
+exec "$FM_REAL_SLEEP_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/sleep"
   marker="$case_dir/state/.herdr-escalated-default_wG_pQ"
   : > "$marker"
   key=default_wG_pQ
@@ -1265,7 +1279,7 @@ SH
   else
     status_sig=$(stat -c '%s:%Y' "$case_dir/state/task-x1.status")
   fi
-  printf '%s' "$status_sig" > "$case_dir/state/.seen-task-x1_status"
+  printf '%s' 'retired-signature' > "$case_dir/state/.seen-task-x1_status"
   : > "$case_dir/state/.seen-task-x1_turn-ended"
   printf '%s' "$status_line" > "$case_dir/state/.hb-surfaced-task-x1"
   printf '%s' "$status_line" > "$case_dir/state/.subsuper-seen-status-task-x1"
@@ -1276,6 +1290,19 @@ SH
     : > "$case_dir/state/$artifact"
   done
 
+  PATH="$case_dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_REAL_SLEEP_FOR_TEST="$real_sleep" FM_SIGNAL_COLLECTED="$case_dir/signal-collected" \
+    FM_SIGNAL_RESUME="$case_dir/signal-resume" FM_POLL=1 FM_SIGNAL_GRACE=7 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch.sh" > "$case_dir/watch.out" 2> "$case_dir/watch.err" &
+  pid=$!
+  i=0
+  while [ ! -e "$case_dir/signal-collected" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$case_dir/signal-collected" ] \
+    || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "herdr-marker-cleanup: watcher did not collect the retired signal"; }
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-marker-cleanup: forced teardown failed"
   [ ! -e "$marker" ] || fail "herdr-marker-cleanup: teardown left the pane's escalation marker behind"
@@ -1288,12 +1315,21 @@ SH
     [ ! -e "$case_dir/state/$artifact" ] \
       || fail "herdr-marker-cleanup: teardown left retired watcher state $artifact behind"
   done
+  : > "$case_dir/signal-resume"
+  i=0
+  while [ ! -e "$case_dir/signal-collected.resumed" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$case_dir/signal-collected.resumed" ] \
+    || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "herdr-marker-cleanup: watcher did not resume after teardown"; }
+  kill -0 "$pid" 2>/dev/null \
+    || { wait "$pid" 2>/dev/null || true; fail "herdr-marker-cleanup: watcher surfaced the retired signal"; }
+  [ ! -s "$case_dir/watch.out" ] || fail "herdr-marker-cleanup: retired signal produced a watcher wake"
+  [ ! -e "$case_dir/state/.seen-task-x1_status" ] \
+    || fail "herdr-marker-cleanup: watcher recreated retired signal dedup state"
   printf '%s\n' 'window=fm-task-x1' 'kind=ship' > "$case_dir/state/task-x1.meta"
   cp -p "$case_dir/status-reference" "$case_dir/state/task-x1.status"
-  PATH="$case_dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
-    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    "$ROOT/bin/fm-watch.sh" > "$case_dir/watch.out" 2> "$case_dir/watch.err" &
-  pid=$!
   i=0
   while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 50 ]; do
     sleep 0.1
@@ -1307,7 +1343,12 @@ SH
   wait "$pid" || fail "herdr-marker-cleanup: watcher failed for the reused task ID: $(cat "$case_dir/watch.err")"
   grep -F "signal: $case_dir/state/task-x1.status" "$case_dir/watch.out" >/dev/null \
     || fail "herdr-marker-cleanup: reused task ID's identical actionable status was not surfaced"
-  pass "teardown retires worker dedupe state before the task ID is reused"
+  signal_count=$(grep -c "$(printf '\tsignal\ttask-x1.status\t')" "$case_dir/state/.wake-queue" 2>/dev/null || true)
+  [ "$signal_count" -eq 1 ] \
+    || fail "herdr-marker-cleanup: reused task ID surfaced $signal_count times instead of once"
+  [ "$(cat "$case_dir/state/.seen-task-x1_status")" = "$status_sig" ] \
+    || fail "herdr-marker-cleanup: reused task ID did not record the identical live signature"
+  pass "teardown drops collected retired signals before the task ID is reused"
 }
 
 configure_herdr_projection_teardown_case() {  # <case-dir>

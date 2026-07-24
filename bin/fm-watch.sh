@@ -794,13 +794,25 @@ while :; do
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    active_pending=""
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue
-      case " $files " in *" $f "*) ;; *) files="$files $f" ;; esac
+      base=${f##*/}
+      task=${base%.status}
+      task=${task%.turn-ended}
+      [ -f "$STATE/$task.meta" ] || continue
+      [ "$(stat_sig "$f" 2>/dev/null || true)" = "$sig" ] || continue
+      case " $files " in *" $f "*) continue ;; esac
+      [ -n "$active_pending" ] && active_pending="${active_pending}
+"
+      active_pending="${active_pending}${sf}$(printf '\t')${sig}$(printf '\t')${f}"
+      files="$files $f"
     done <<EOF
 $pending
 EOF
+    pending=$active_pending
+    [ -n "$pending" ] || continue
     reason="signal:$files"
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
@@ -819,13 +831,27 @@ EOF
     if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
+        base=${f##*/}
+        task=${base%.status}
+        task=${task%.turn-ended}
+        [ -f "$STATE/$task.meta" ] || continue
+        [ "$(stat_sig "$f" 2>/dev/null || true)" = "$sig" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
       done <<EOF
 $pending
 EOF
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
+        base=${f##*/}
+        task=${base%.status}
+        task=${task%.turn-ended}
+        [ -f "$STATE/$task.meta" ] || continue
+        [ "$(stat_sig "$f" 2>/dev/null || true)" = "$sig" ] || continue
         printf '%s' "$sig" > "$sf"
+        if [ ! -f "$STATE/$task.meta" ]; then
+          rm -f "$sf" "$(_hb_surfaced_path "$task")"
+          continue
+        fi
         mark_surfaced "$f"
       done <<EOF
 $pending
@@ -834,7 +860,13 @@ EOF
     else
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
+        base=${f##*/}
+        task=${base%.status}
+        task=${task%.turn-ended}
+        [ -f "$STATE/$task.meta" ] || continue
+        [ "$(stat_sig "$f" 2>/dev/null || true)" = "$sig" ] || continue
         printf '%s' "$sig" > "$sf"
+        [ -f "$STATE/$task.meta" ] || rm -f "$sf"
       done <<EOF
 $pending
 EOF
