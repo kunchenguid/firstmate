@@ -63,8 +63,8 @@
 # mode) for its read-only detect lines - missing tools, gh auth, the
 # worktree-tangle check, the harness override, crew-dispatch validation,
 # tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
-# which mutate shared state and all of which are safe to compute from a second
-# session.
+# which mutate shared state and all of which are safe to compute without
+# verified lock ownership.
 # Only projection cleanup, the five bootstrap mutating sweeps, and the
 # wake-queue drain are skipped.
 # The context and fleet-state digests
@@ -285,10 +285,10 @@ fi
 # Drained records are this turn's first work queue (AGENTS.md section 8); the
 # drain also runs fm-guard.sh internally on the locked path, so the
 # tangle/watcher-liveness alarms land right here too, ahead of the bulk digest
-# below. The read-only path never touches the queue (another session
-# may be actively draining it) but still runs fm-guard.sh directly with
-# non-mutating advisory text, so the same alarms surface without repair
-# commands.
+# below. The read-only path never touches the queue because it lacks mutation
+# authority, and another session may be actively draining it. It still runs
+# fm-guard.sh directly with non-mutating advisory text, so the same alarms
+# surface without repair commands.
 subsection "WAKE QUEUE"
 if [ "$READ_ONLY" -eq 1 ]; then
   QLEN=0
