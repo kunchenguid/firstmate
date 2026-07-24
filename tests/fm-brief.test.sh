@@ -117,8 +117,12 @@ test_pr_modes_require_publication_attestation_before_ready() {
   brief="$home/data/publication-direct/brief.md"
   assert_grep 'Operational validation intent is not publishable PR intent.' "$brief" \
     "direct-PR brief did not separate operational and publishable intent"
-  assert_grep 'Read and pass the PR publication check below' "$brief" \
+  assert_grep 'Keep it draft until the PR publication check below passes' "$brief" \
     "direct-PR brief allowed readiness before publication attestation"
+  assert_grep 'gh-axi pr create --draft' "$brief" \
+    "direct-PR brief allowed a GitHub PR to become reviewable before attestation"
+  assert_grep 'glab mr create --draft' "$brief" \
+    "direct-PR brief allowed a GitLab MR to become reviewable before attestation"
 
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-brief.sh" publication-local local-proj >/dev/null 2>&1

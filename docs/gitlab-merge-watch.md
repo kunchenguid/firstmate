@@ -192,7 +192,8 @@ No armed watch is lost by upgrading.
 
 ## Publication-gate addendum
 
-The later PR publication gate uses `glab mr view -F json` plus `jq` to fetch the complete description, canonical `web_url`, and exact `sha` before readiness or monitoring.
+The later PR publication gate uses `glab mr view -F json` plus `jq` to fetch the complete description, canonical `web_url`, exact `sha`, and draft state before readiness or monitoring.
+It accepts only a draft MR and uses `glab mr update --ready` after attestation succeeds.
 That path stops with an actionable error when either tool or any exact field is unavailable, and a passing publication receipt lets `fm-pr-check.sh` record GitLab `pr_head=` just as it records the GitHub head.
 The merge poll itself deliberately retains the presentation-text state lookup verified above so its silent watcher dependency does not expand.
 

@@ -32,6 +32,7 @@ make_case() {
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$fakebin"
+  git -C "$case_dir" init -q wt
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=fm-task-x1" \
     "worktree=$case_dir/wt" \
@@ -47,6 +48,7 @@ Deliver the complete merge-wrapper behavior.
 
 - Added the complete synthetic result.
 EOF
+  printf '%s\n' example/repo > "$case_dir/repo-path"
   # The forge readbacks are fully synthetic, so no real worktree is required.
   printf '%s\n' "$case_dir"
 }
@@ -68,11 +70,14 @@ esac
 SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
-case " $* " in
-  *" --json url,headRefOid,body "*)
-    printf '%s\n%s\n' "$FM_TEST_PR_URL" "$FM_TEST_PR_HEAD"
+case "${1:-} ${2:-}" in
+  'repo view')
+    cat "$(dirname "$0")/../repo-path"
+    ;;
+  'pr view')
+    printf '%s\n%s\n' "$3" "$FM_TEST_PR_HEAD"
     base64 < "$FM_TEST_BODY_FILE" | tr -d '\n'
-    printf '\n'
+    printf '\nfalse\n'
     ;;
   *) exit 1 ;;
 esac
@@ -99,11 +104,14 @@ exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
-case " $* " in
-  *" --json url,headRefOid,body "*)
-    printf '%s\n%s\n' "$FM_TEST_PR_URL" "$FM_TEST_PR_HEAD"
+case "${1:-} ${2:-}" in
+  'repo view')
+    cat "$(dirname "$0")/../repo-path"
+    ;;
+  'pr view')
+    printf '%s\n%s\n' "$3" "$FM_TEST_PR_HEAD"
     base64 < "$FM_TEST_BODY_FILE" | tr -d '\n'
-    printf '\n'
+    printf '\nfalse\n'
     ;;
   *) exit 1 ;;
 esac
@@ -113,12 +121,20 @@ SH
 }
 
 ensure_publication_receipt() {
-  local case_dir=$1 id=$2 url=$3 meta head bytes hash receipt
+  local case_dir=$1 id=$2 url=$3 meta head bytes hash receipt worktree
   meta="$case_dir/state/$id.meta"
   receipt="$case_dir/state/$id.pr-publication"
   fm_pr_task_id_valid "$id" && fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = github ] || return 0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   [ -f "$case_dir/publication-head" ] || return 0
+  printf '%s\n' "$FM_PR_PATH" > "$case_dir/repo-path"
+  worktree=$(sed -n 's/^worktree=//p' "$meta")
+  [ -n "$worktree" ] || return 0
+  if git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
+    git -C "$worktree" remote set-url origin "https://github.com/$FM_PR_PATH.git"
+  else
+    git -C "$worktree" remote add origin "https://github.com/$FM_PR_PATH.git"
+  fi
   head=$(cat "$case_dir/publication-head")
   bytes=$(wc -c < "$case_dir/publication-body.md" | tr -d '[:space:]')
   hash=$(shasum -a 256 "$case_dir/publication-body.md" | awk '{print $1}')

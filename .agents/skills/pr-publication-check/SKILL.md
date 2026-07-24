@@ -26,7 +26,8 @@ Do not inject a captain preference file, private fleet record, worker transcript
 ## Responsible worker attestation
 
 The task worker that owns the selected delivery path remains the publication and correction owner.
-After every PR create or body update, that worker reads the complete public PR or MR body and judges whether its Intent and outcome describe the whole PR rather than an operational slice.
+Every PR or MR is created as a draft.
+After every draft create or body update, that worker reads the complete public PR or MR body and judges whether its Intent and outcome describe the whole PR rather than an operational slice.
 Regex and structural checks reject known hazards but cannot prove semantic completeness, so the worker must explicitly pass `--intent-outcome-complete` against the fresh fetched body and head.
 
 The worker must choose exactly one evidence declaration.
@@ -48,17 +49,19 @@ Run the attestation from the task environment, where `FM_HOME` identifies the pr
 ```
 
 Use one `--evidence-url` flag per required published artifact when the evidence mode is `nonvisual` or `real-ui`.
-Only after attestation succeeds may the worker append the mode-specific PR-ready status.
+Attestation accepts only a draft, writes the exact-body/head receipt, and then marks the unchanged PR or MR ready through `gh-axi pr ready` or `glab mr update --ready`.
+Only after that transition and its fresh readback succeed may the worker append the mode-specific PR-ready status.
 
 ## Correction and monitoring
 
-A failed check never edits or normalizes the PR.
+A failed check never edits or normalizes the PR body and never marks a draft ready.
 The responsible worker corrects the body through the selected delivery path, reads the complete public result again, and reruns `attest` against fresh bytes.
+After a ready PR or MR drifts, that worker first returns it to draft through the forge's supported mechanism, then corrects and re-attests it.
 For a no-mistakes task, the worker follows the active no-mistakes help and ownership flow rather than hand-editing around the pipeline; if that flow offers no supported correction, the worker reports the exact blocker.
 
 Firstmate runs `bin/fm-pr-check.sh <task-id> <full-pr-url>` after the worker's ready status.
 That command performs a second authenticated full-body/head readback, repeats deterministic privacy and evidence checks, requires the exact private attestation receipt, records canonical PR identity and head, and only then publishes ordinary merge monitoring.
-Body or head drift invalidates the receipt and returns correction ownership to the same task worker.
+Every ordinary merge poll re-runs that verification first; body or head drift produces a `publication-invalid` wake instead of a merged outcome and returns correction ownership to the same task worker.
 
 The private receipt records only the canonical forge identity, exact head, body byte count and SHA-256, privacy/link/attestation verdicts, evidence mode, and the already-public evidence URLs encoded as data.
 Never copy that receipt or other private task evidence into the PR.

@@ -3,18 +3,20 @@
 # ordinary merge monitoring.
 #
 # The responsible task worker runs "attest" only after reading the complete
-# published body and judging that its Intent and outcome describe the whole PR.
-# The command fetches fresh public bytes, rejects deterministic publication
-# hazards, verifies any declared evidence, and atomically writes a private
-# state/<task-id>.pr-publication receipt bound to that body and head.
+# published draft body and judging that its Intent and outcome describe the
+# whole PR. The command fetches fresh public bytes, rejects deterministic
+# publication hazards, verifies any declared evidence, atomically writes a
+# private state/<task-id>.pr-publication receipt bound to that body and head,
+# and marks the unchanged draft ready through the forge's supported mechanism.
 #
 # Firstmate and bin/fm-pr-check.sh run "verify" before reporting or monitoring.
 # Verification fetches the public body again, repeats deterministic checks and
 # evidence accessibility checks, and refuses body/head drift or a missing,
 # malformed, or failed attestation receipt.
 #
-# Neither mode edits a PR. The original task worker remains correction owner and
-# must update the body through the selected delivery path before attesting again.
+# Neither mode edits a PR body. A failed check never changes review state. The
+# original task worker remains correction owner and must update the draft body
+# through the selected delivery path before attesting again.
 #
 # GitHub body readback uses gh-axi pr view --full and cross-checks it against one
 # raw gh JSON snapshot containing the exact body and head; gh-axi's generic API
@@ -22,6 +24,10 @@
 # Ruby's YAML parser decodes the structured full view. GitLab readback uses
 # glab's JSON output and requires jq so description, web_url, and sha are read
 # without parsing presentation text.
+# Create GitHub PRs with gh-axi pr create --draft and GitLab MRs with glab mr
+# create --draft. Successful attestation uses gh-axi pr ready or glab mr update
+# --ready. After later drift, the responsible worker returns the change to draft
+# with gh pr ready <url> --undo or glab mr update <number> -R <repo> --draft.
 #
 # Usage:
 #   fm-pr-publication-check.sh attest <task-id> <pr-url> \
@@ -145,6 +151,7 @@ SCAN_FILE=
 FORGE_FILE=
 AXI_FIELDS_FILE=
 FIELDS_FILE=
+URLS_FILE=
 RECEIPT_TMP=
 INTENT_FILE=
 OUTCOME_FILE=
@@ -154,6 +161,7 @@ cleanup() {
   [ -z "$FORGE_FILE" ] || rm -f -- "$FORGE_FILE"
   [ -z "$AXI_FIELDS_FILE" ] || rm -f -- "$AXI_FIELDS_FILE"
   [ -z "$FIELDS_FILE" ] || rm -f -- "$FIELDS_FILE"
+  [ -z "$URLS_FILE" ] || rm -f -- "$URLS_FILE"
   [ -z "$RECEIPT_TMP" ] || rm -f -- "$RECEIPT_TMP"
   [ -z "$INTENT_FILE" ] || rm -f -- "$INTENT_FILE"
   [ -z "$OUTCOME_FILE" ] || rm -f -- "$OUTCOME_FILE"
@@ -167,6 +175,7 @@ SCAN_FILE=$(mktemp "$STATE/.fm-pr-publication-scan.XXXXXX") || exit 1
 FORGE_FILE=$(mktemp "$STATE/.fm-pr-publication-forge.XXXXXX") || exit 1
 AXI_FIELDS_FILE=$(mktemp "$STATE/.fm-pr-publication-axi-fields.XXXXXX") || exit 1
 FIELDS_FILE=$(mktemp "$STATE/.fm-pr-publication-fields.XXXXXX") || exit 1
+URLS_FILE=$(mktemp "$STATE/.fm-pr-publication-urls.XXXXXX") || exit 1
 
 decode_base64_to_body() {
   local encoded=$1
@@ -176,12 +185,13 @@ decode_base64_to_body() {
   printf '%s' "$encoded" | base64 -D > "$BODY_FILE" 2>/dev/null
 }
 
-read_three_fields() {
-  local file=$1 first second third extra
+read_four_fields() {
+  local file=$1 first second third fourth extra
   exec 7< "$file" || return 1
   IFS= read -r first <&7 || { exec 7<&-; return 1; }
   IFS= read -r second <&7 || { exec 7<&-; return 1; }
   IFS= read -r third <&7 || { exec 7<&-; return 1; }
+  IFS= read -r fourth <&7 || { exec 7<&-; return 1; }
   if IFS= read -r extra <&7; then
     : "$extra"
     exec 7<&-
@@ -191,9 +201,34 @@ read_three_fields() {
   FETCHED_URL=$first
   FETCHED_HEAD=$second
   FETCHED_BODY_BASE64=$third
+  FETCHED_DRAFT=$fourth
+}
+
+task_worktree() {
+  local line value count=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      worktree=*)
+        count=$((count + 1))
+        value=${line#worktree=}
+        ;;
+    esac
+  done < "$META"
+  [ "$count" -eq 1 ] && [ -n "$value" ] || return 1
+  printf '%s\n' "$value"
+}
+
+github_worktree_valid() {
+  local worktree=$1 slug expected
+  [ -d "$worktree" ] && [ ! -L "$worktree" ] || return 1
+  [ "$(git -C "$worktree" rev-parse --is-inside-work-tree 2>/dev/null)" = true ] || return 1
+  slug=$(cd "$worktree" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) || return 1
+  expected=$(printf '%s' "$PROJECT_PATH" | tr '[:upper:]' '[:lower:]')
+  [ "$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]')" = "$expected" ]
 }
 
 fetch_github() {
+  local worktree
   command -v gh-axi >/dev/null 2>&1 || {
     echo "error: GitHub publication readback requires gh-axi on PATH" >&2
     return 1
@@ -206,7 +241,15 @@ fetch_github() {
     echo "error: GitHub publication readback requires gh for an exact body/head snapshot" >&2
     return 1
   }
-  gh-axi pr view "$NUMBER" --full > "$FORGE_FILE" 2>/dev/null || {
+  worktree=$(task_worktree) || {
+    echo "error: task metadata lacks one exact worktree for GitHub publication readback" >&2
+    return 1
+  }
+  github_worktree_valid "$worktree" || {
+    echo "error: task worktree does not match the GitHub PR repository" >&2
+    return 1
+  }
+  (cd "$worktree" && gh-axi pr view "$NUMBER" --full) > "$FORGE_FILE" 2>/dev/null || {
     echo "error: could not fetch the complete GitHub PR body" >&2
     return 1
   }
@@ -227,12 +270,12 @@ fetch_github() {
     echo "error: complete GitHub PR body could not be decoded exactly" >&2
     return 1
   }
-  gh pr view "$URL" --json url,headRefOid,body \
-    --jq '[.url,.headRefOid,(.body|@base64)] | .[]' > "$FIELDS_FILE" 2>/dev/null || {
+  gh pr view "$URL" --json url,headRefOid,body,isDraft \
+    --jq '[.url,.headRefOid,(.body|@base64),(.isDraft|tostring)] | .[]' > "$FIELDS_FILE" 2>/dev/null || {
     echo "error: could not fetch the complete GitHub PR body and head" >&2
     return 1
   }
-  read_three_fields "$FIELDS_FILE" || {
+  read_four_fields "$FIELDS_FILE" || {
     echo "error: GitHub PR readback was incomplete or malformed" >&2
     return 1
   }
@@ -255,15 +298,35 @@ fetch_gitlab() {
     echo "error: could not fetch the complete GitLab MR body and head" >&2
     return 1
   }
-  jq -er '[.web_url,.sha,((.description // "")|@base64)] | .[]' "$FORGE_FILE" \
+  jq -er '[.web_url,.sha,((.description // "")|@base64),(.draft|tostring)] | .[]' "$FORGE_FILE" \
     > "$FIELDS_FILE" 2>/dev/null || {
       echo "error: GitLab MR JSON lacks exact web_url, sha, or description fields" >&2
       return 1
     }
-  read_three_fields "$FIELDS_FILE" || {
+  read_four_fields "$FIELDS_FILE" || {
     echo "error: GitLab MR readback was incomplete or malformed" >&2
     return 1
   }
+}
+
+set_review_state() {
+  local state=$1 worktree
+  case "$PROVIDER:$state" in
+    github:ready)
+      worktree=$(task_worktree) && github_worktree_valid "$worktree" || return 1
+      (cd "$worktree" && gh-axi pr ready "$NUMBER") >/dev/null 2>&1
+      ;;
+    github:draft)
+      gh pr ready "$URL" --undo >/dev/null 2>&1
+      ;;
+    gitlab:ready)
+      glab mr update "$NUMBER" -R "https://$HOST/$PROJECT_PATH" --ready --yes >/dev/null 2>&1
+      ;;
+    gitlab:draft)
+      glab mr update "$NUMBER" -R "https://$HOST/$PROJECT_PATH" --draft --yes >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 case "$PROVIDER" in
@@ -274,6 +337,15 @@ esac
 
 if [ "$FETCHED_URL" != "$URL" ] || ! fm_pr_head_valid "$FETCHED_HEAD"; then
   echo "error: forge readback did not match the exact PR identity and head" >&2
+  exit 1
+fi
+case "$FETCHED_DRAFT" in true|false) ;; *) echo "error: forge readback did not include exact draft state" >&2; exit 1 ;; esac
+if [ "$ACTION" = attest ] && [ "$FETCHED_DRAFT" != true ]; then
+  echo "error: publication attestation requires a draft PR or MR" >&2
+  exit 1
+fi
+if [ "$ACTION" = verify ] && [ "$FETCHED_DRAFT" != false ]; then
+  echo "error: publication verification requires a ready PR or MR" >&2
   exit 1
 fi
 decode_base64_to_body "$FETCHED_BODY_BASE64" || {
@@ -316,6 +388,8 @@ reject_match "a raw generated pipeline-agent transcript" '"?(user_findings_json|
 reject_match "a private-key block" '-----BEGIN ([A-Z0-9]+ )?PRIVATE KEY-----' "$BODY_FILE" || exit 1
 reject_match "a credential-shaped token" '(AKIA[0-9A-Z]{16}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{24,})' "$BODY_FILE" || exit 1
 reject_match "an assigned secret value" '(api[_ -]?key|access[_ -]?token|password|client[_ -]?secret)[[:space:]]*[:=][[:space:]]*[A-Za-z0-9+/=_-]{16,}' "$BODY_FILE" || exit 1
+reject_match "an Authorization Bearer credential" 'authorization[[:space:]]*:[[:space:]]*bearer[[:space:]]+[A-Za-z0-9._~+/-]{12,}={0,2}' "$BODY_FILE" || exit 1
+reject_match "a standalone JWT-shaped credential" '(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{16,}([^A-Za-z0-9_-]|$)' "$BODY_FILE" || exit 1
 
 extract_section() {
   local kind=$1 output=$2
@@ -353,9 +427,21 @@ if ! grep -q '[^[:space:]]' "$INTENT_FILE" || ! grep -q '[^[:space:]]' "$OUTCOME
 fi
 reject_match "operational rather than PR-level intent framing" '(successor|current)[[:space:]_-]+(run|task|attempt)|latest[[:space:]_-]+commit|last[[:space:]_-]+commit|this[[:space:]_-]+round|recovered[[:space:]_-]+branch|captain([^A-Za-z]+s)?[[:space:]]+(authorization|approval)|authorized[[:space:]]+by[[:space:]]+(the[[:space:]]+)?captain' || exit 1
 
+awk '
+  {
+    rest=$0
+    while (match(rest, /https?:\/\/[^[:space:]<>()\[\]"`\047]+/)) {
+      token=substr(rest, RSTART, RLENGTH)
+      sub(/[.,;:!?]+$/, "", token)
+      print token
+      rest=substr(rest, RSTART + RLENGTH)
+    }
+  }
+' "$BODY_FILE" | LC_ALL=C sort -u > "$URLS_FILE" || exit 1
+
 verify_evidence_url() {
   local evidence_url=$1 base evidence_path fragment encoded_project encoded_path
-  grep -Fq -- "$evidence_url" "$BODY_FILE" || {
+  grep -Fxq -- "$evidence_url" "$URLS_FILE" || {
     echo "error: declared evidence URL is absent from the fetched public body" >&2
     return 1
   }
@@ -519,6 +605,9 @@ for evidence_url in "${EVIDENCE_URLS[@]+"${EVIDENCE_URLS[@]}"}"; do
 done
 
 if [ "$ACTION" = attest ]; then
+  ATTESTED_HEAD=$FETCHED_HEAD
+  ATTESTED_BODY_BYTES=$BODY_BYTES
+  ATTESTED_BODY_SHA256=$BODY_SHA256
   STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
   fm_pr_regular_destination_on_device_or_absent "$RECEIPT" "$STATE_DEVICE" || {
     echo "error: PR publication receipt destination is unsafe" >&2
@@ -549,7 +638,33 @@ if [ "$ACTION" = attest ]; then
   RECEIPT_TMP=
   fm_pr_private_file_valid "$RECEIPT" 600 "$STATE_DEVICE" || exit 1
   parse_receipt "$RECEIPT" || exit 1
-  printf 'attested %s %s %s\n' "$FETCHED_HEAD" "$BODY_BYTES" "$BODY_SHA256"
+  if ! set_review_state ready; then
+    rm -f -- "$RECEIPT"
+    echo "error: publication passed but the forge could not mark the draft ready" >&2
+    exit 1
+  fi
+  case "$PROVIDER" in
+    github) fetch_github || READY_READBACK_FAILED=1 ;;
+    gitlab) fetch_gitlab || READY_READBACK_FAILED=1 ;;
+  esac
+  if [ "${READY_READBACK_FAILED:-0}" -ne 0 ] || [ "$FETCHED_URL" != "$URL" ] \
+    || [ "$FETCHED_HEAD" != "$ATTESTED_HEAD" ] || [ "$FETCHED_DRAFT" != false ] \
+    || ! decode_base64_to_body "$FETCHED_BODY_BASE64"; then
+    set_review_state draft || true
+    rm -f -- "$RECEIPT"
+    echo "error: ready-state readback did not preserve the attested PR identity and head" >&2
+    exit 1
+  fi
+  READY_BODY_BYTES=$(wc -c < "$BODY_FILE" | tr -d '[:space:]')
+  READY_BODY_SHA256=$(fm_pr_sha256 "$BODY_FILE") || READY_BODY_SHA256=
+  if [ "$READY_BODY_BYTES" != "$ATTESTED_BODY_BYTES" ] \
+    || [ "$READY_BODY_SHA256" != "$ATTESTED_BODY_SHA256" ]; then
+    set_review_state draft || true
+    rm -f -- "$RECEIPT"
+    echo "error: public body drifted while the draft was being marked ready" >&2
+    exit 1
+  fi
+  printf 'attested %s %s %s\n' "$ATTESTED_HEAD" "$ATTESTED_BODY_BYTES" "$ATTESTED_BODY_SHA256"
 else
   printf 'verified %s %s %s\n' "$FETCHED_HEAD" "$BODY_BYTES" "$BODY_SHA256"
 fi

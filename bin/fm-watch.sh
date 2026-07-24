@@ -715,9 +715,16 @@ while :; do
           host=$FM_PR_POLL_SNAPSHOT_HOST
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
-          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
-            "$provider" "$url" "$host" "$path" "$number" || exit 1
-          out=$FM_CHECK_RESULT
+          FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+            run_check_capture "$SCRIPT_DIR/fm-pr-publication-check.sh" verify "$id" "$url" || exit 1
+          case "$FM_CHECK_RESULT" in
+            verified\ *)
+              run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+                "$provider" "$url" "$host" "$path" "$number" || exit 1
+              out=$FM_CHECK_RESULT
+              ;;
+            *) out=publication-invalid ;;
+          esac
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
           run_check_capture "$custom_snapshot" || exit 1

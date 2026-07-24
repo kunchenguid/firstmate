@@ -56,6 +56,7 @@ make_case() {
   fakebin="$dir/fakebin"
   fake_root="$dir/root"
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/wt" "$fakebin" "$fake_root/bin"
+  git -C "$dir" init -q wt
   cat > "$fake_root/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'guard\n' >> "$FM_TEST_GUARD_LOG"
@@ -64,16 +65,23 @@ SH
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
-case " $* " in
-  *" --json url,headRefOid,body "*)
-    printf '%s\n%s\n' "$FM_TEST_PR_URL" "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
-    base64 < "$FM_TEST_BODY_FILE" | tr -d '\n'
-    printf '\n'
+case "${1:-} ${2:-}" in
+  'repo view')
+    cat "$(dirname "$0")/../repo-path"
     ;;
-  *" state "*)
-    [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
-    [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
-    printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}"
+  'pr view')
+    case " $* " in
+      *" --json url,headRefOid,body,isDraft "*)
+        printf '%s\n%s\n' "$3" "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+        base64 < "$FM_TEST_BODY_FILE" | tr -d '\n'
+        printf '\nfalse\n'
+        ;;
+      *" state "*)
+        [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+        [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
+        printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}"
+        ;;
+    esac
     ;;
 esac
 SH
@@ -98,9 +106,9 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 if [ "${1:-} ${2:-}" = 'mr view' ] && [ "${*: -2}" = '-F json' ]; then
   jq -n --rawfile description "$FM_TEST_BODY_FILE" \
-    --arg web_url "$FM_TEST_PR_URL" \
+    --arg web_url "$5/-/merge_requests/$3" \
     --arg sha "${FM_TEST_GLAB_HEAD:-fedcba9876543210fedcba9876543210fedcba98}" \
-    '{web_url:$web_url,sha:$sha,description:$description}'
+    '{web_url:$web_url,sha:$sha,description:$description,draft:false}'
   exit 0
 fi
 if [ "${1:-} ${2:-}" = 'api --hostname' ]; then
@@ -113,6 +121,7 @@ SH
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
   : > "$dir/guard.log"
+  printf '%s\n' o/r > "$dir/repo-path"
   cat > "$dir/publication-body.md" <<'EOF'
 ## Intent
 
@@ -136,9 +145,11 @@ write_task_meta() {
 }
 
 write_poll_meta() {
-  local state=$1 id=$2 url=$3
+  local state=$1 id=$2 url=$3 worktree
+  worktree="$(dirname "$(dirname "$state")")/wt"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" \
+    "worktree=$worktree" \
     "pr=$url"
 }
 
@@ -146,6 +157,7 @@ write_ambiguous_poll() {
   local dir=$1 id=${2:-task-a}
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=fm-$id" \
+    "worktree=$dir/wt" \
     'pr=https://github.com/o/r/pull/10' \
     'window=unexpected-after-pr'
   printf 'legacy ambiguous bytes\n' > "$dir/home/state/$id.check.sh"
@@ -262,7 +274,7 @@ assert_private_symlink_unchanged() {
 }
 
 ensure_publication_receipt() {
-  local dir=$1 id=$2 url=$3 state meta head provider bytes hash receipt
+  local dir=$1 id=$2 url=$3 state meta head provider bytes hash receipt worktree
   state="$dir/home/state"
   meta="$state/$id.meta"
   receipt="$state/$id.pr-publication"
@@ -270,8 +282,20 @@ ensure_publication_receipt() {
   [ -f "$meta" ] && [ ! -L "$meta" ] && [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 0
   [ ! -e "$state/$id.pr-poll-retirement" ] && [ ! -L "$state/$id.pr-poll-retirement" ] || return 0
   provider=$FM_PR_PROVIDER
+  printf '%s\n' "$FM_PR_PATH" > "$dir/repo-path"
   case "$provider" in
-    github) head=${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567} ;;
+    github)
+      head=${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}
+      worktree=$(sed -n 's/^worktree=//p' "$meta")
+      [ -n "$worktree" ] || return 0
+      mkdir -p "$worktree"
+      git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1 || git -C "$worktree" init -q
+      if git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
+        git -C "$worktree" remote set-url origin "https://github.com/$FM_PR_PATH.git"
+      else
+        git -C "$worktree" remote add origin "https://github.com/$FM_PR_PATH.git"
+      fi
+      ;;
     gitlab) head=${FM_TEST_GLAB_HEAD:-fedcba9876543210fedcba9876543210fedcba98} ;;
   esac
   fm_pr_head_valid "$head" || return 0
@@ -703,6 +727,7 @@ SH
       || fail "path-safe legacy task ID could not use the PR merge flow"
     fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$POLL" \
       || fail "path-safe legacy task ID did not publish an authenticated poll"
+    rm -rf "$dir/missing-worktree"
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
       "$TEARDOWN" "$id" --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
       || fail "legacy path-safe task ID could not be torn down"
@@ -714,10 +739,13 @@ SH
 }
 
 run_watcher_bounded() {
-  local home=$1 fakebin=$2 check_interval=${FM_TEST_CHECK_INTERVAL:-0} watch_root=${FM_TEST_WATCH_ROOT:-$ROOT}
+  local home=$1 fakebin=$2 check_interval=${FM_TEST_CHECK_INTERVAL:-0} watch_root=${FM_TEST_WATCH_ROOT:-$ROOT} dir
   shift 2
+  dir=$(dirname "$home")
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
+      FM_TEST_BODY_FILE="$dir/publication-body.md" FM_TEST_GH_LOG="$dir/gh.log" \
+      FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
 
@@ -822,6 +850,7 @@ test_static_poll_contract() {
   [ -z "$out" ] || fail "timed-out static poll emitted output"
 
   write_poll_meta "$dir/home/state" task-a https://github.com/o/r/pull/1
+  ensure_publication_receipt "$dir" task-a https://github.com/o/r/pull/1
   fm_pr_poll_prepare "$dir/home/state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 "$POLL" \
     || fail "could not prepare authenticated watcher poll"
   fm_pr_poll_publish_prepared || fail "could not publish authenticated watcher poll"
@@ -2306,7 +2335,7 @@ test_direct_registration_refreshes_v1_x_shim() {
     dir=$(make_case "direct-registration-x-transition-$marker_kind")
     state="$dir/home/state"
     shim="$state/x-watch.check.sh"
-    fm_write_meta "$state/task-a.meta" 'window=fm-task-a'
+    fm_write_meta "$state/task-a.meta" 'window=fm-task-a' "worktree=$dir/wt"
     write_v1_x_shim "$shim" "$dir/home" "$dir/root"
     chmod 0755 "$shim"
     case "$marker_kind" in
@@ -2344,7 +2373,7 @@ test_direct_registration_refreshes_v1_x_shim() {
   dir=$(make_case direct-registration-x-lookalike)
   state="$dir/home/state"
   shim="$state/x-watch.check.sh"
-  fm_write_meta "$state/task-a.meta" 'window=fm-task-a'
+  fm_write_meta "$state/task-a.meta" 'window=fm-task-a' "worktree=$dir/wt"
   write_v1_x_shim "$shim" "$dir/home" "$dir/root"
   printf '# unrecognized version\n' >> "$shim"
   chmod 0755 "$shim"
@@ -2391,6 +2420,7 @@ test_bootstrap_isolates_incomplete_poll_migration() {
   printf 'legacy bytes\n' > "$state/task-a.check.sh"
   mkdir "$state/task-a.pr-poll"
   write_poll_meta "$state" z-healthy https://github.com/o/r/pull/13
+  ensure_publication_receipt "$dir" z-healthy https://github.com/o/r/pull/13
   fm_pr_poll_prepare "$state" z-healthy github https://github.com/o/r/pull/13 github.com o/r 13 "$POLL" \
     || fail "could not prepare healthy poll for migration isolation"
   fm_pr_poll_publish_prepared || fail "could not publish healthy poll for migration isolation"
@@ -2401,7 +2431,7 @@ test_bootstrap_isolates_incomplete_poll_migration() {
     'backend=tmux'
   printf 'FMX_PAIRING_TOKEN=test-token\n' > "$dir/home/.env"
   mkdir -p "$dir/home/projects"
-  fm_fake_exit0 "$fakebin" curl jq
+  fm_fake_exit0 "$fakebin" curl
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
@@ -2452,6 +2482,8 @@ SH
   set +e
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_X_POLL_MARKER="$x_poll_marker" \
     FM_TEST_GH_STATE=MERGED FM_POLL=0 FM_CHECK_INTERVAL=0 FM_SIGNAL_GRACE=0 \
+    FM_TEST_BODY_FILE="$dir/publication-body.md" FM_TEST_GH_LOG="$dir/gh.log" \
+    FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
     PATH="$fakebin:$BASE_PATH" "$WATCH" > "$dir/watch.out" 2> "$dir/watch.err"
   rc=$?
   set -e
@@ -2460,7 +2492,7 @@ SH
   assert_no_grep 'replacement-ran' "$dir/watch.out" \
     "watcher executed an unauthenticated check created after scan completion"
   assert_grep "check: $state/z-healthy.check.sh: merged" "$dir/watch.out" \
-    "watcher did not continue the healthy authenticated poll"
+    "watcher did not continue the healthy authenticated poll: out=$(cat "$dir/watch.out"); err=$(cat "$dir/watch.err"); gh=$(cat "$dir/gh.log"); gh-axi=$(cat "$dir/gh-axi.log")"
   [ ! -e "$state/task-a.check.sh" ] && [ ! -L "$state/task-a.check.sh" ] \
     || fail "watcher continuation rearmed the unsafe legacy check"
   rm -f "$state/a-replaced.check.sh" "$state/.last-check" "$x_poll_marker"
@@ -2718,6 +2750,7 @@ SH
     || fail "could not snapshot teardown receipt fixture"
   fm_pr_poll_retirement_publish "$dir/home/state" task-a "$POLL" merged \
     || fail "could not publish teardown receipt fixture"
+  rm -rf "$dir/missing-worktree"
   rm -f "$dir/home/state/task-a.check.sh"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -2960,6 +2993,7 @@ seed_canonical_poll() {
   host=$FM_PR_HOST
   path=$FM_PR_PATH
   number=$FM_PR_NUMBER
+  ensure_publication_receipt "$dir" "$id" "$url"
   fm_pr_poll_prepare "$state" "$id" "$provider" "$url" "$host" "$path" "$number" "$template" \
     || fail "could not prepare retirement fixture"
   fm_pr_poll_publish_prepared || fail "could not publish retirement fixture"
@@ -3033,6 +3067,30 @@ test_merged_poll_retires_once() {
   [ "$(grep -c $'\tcheck\t.*task-a.check.sh\t' "$state/.wake-queue" 2>/dev/null || true)" -eq 1 ] \
     || fail "merged poll did not queue exactly one terminal notification"
   pass "validated merged polls notify once and retire before the next watcher cycle"
+}
+
+test_publication_drift_blocks_merged_outcome() {
+  local dir state rc
+  dir=$(make_case publication-drift-before-merge)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  printf '\nBody changed after monitoring was armed.\n' >> "$dir/publication-body.md"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "publication drift watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in
+    check:*task-a.check.sh:*publication-invalid) ;;
+    *) fail "publication drift did not replace the merged outcome with an invalidation wake" ;;
+  esac
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "publication drift destroyed the recoverable poll identity"
+  [ ! -e "$state/task-a.pr-poll-retirement" ] \
+    || fail "publication drift received merged retirement authority"
+  pass "ordinary monitoring revalidates publication before any merged outcome"
 }
 
 test_persistent_secondmate_retirement_is_poll_only() {
@@ -3395,6 +3453,7 @@ test_gitlab_merged_poll_retires() {
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
+test_publication_drift_blocks_merged_outcome
 test_persistent_secondmate_retirement_is_poll_only
 test_retirement_crash_recovery
 test_external_merge_transition_retires_only_terminal_poll

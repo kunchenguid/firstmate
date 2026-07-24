@@ -27,6 +27,8 @@ make_case() {
   dir="$TMP_ROOT/$name"
   fakebin="$dir/fakebin"
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/fake-root/bin" "$fakebin"
+  git -C "$dir" init -q worktree
+  git -C "$dir/worktree" remote add origin https://github.com/example/project.git
   fm_write_meta "$dir/home/state/task-a.meta" \
     'window=fm-task-a' \
     "worktree=$dir/worktree" \
@@ -40,11 +42,15 @@ SH
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
-case " $* " in
-  *' pr view '*' --json url,headRefOid,body '*)
+case "${1:-} ${2:-}" in
+  'repo view')
+    cat "$FM_TEST_REPO_FILE"
+    exit 0
+    ;;
+  'pr view')
     printf '%s\n%s\n' "$FM_TEST_PR_URL" "$FM_TEST_PR_HEAD"
     base64 < "$FM_TEST_BODY_FILE" | tr -d '\n'
-    printf '\n'
+    printf '\n%s\n' "$(cat "$FM_TEST_DRAFT_FILE")"
     exit 0
     ;;
 esac
@@ -52,12 +58,13 @@ exit 1
 SH
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+printf '%s|%s\n' "$PWD" "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   'pr view')
     jq -n --rawfile body "${FM_TEST_AXI_BODY_FILE:-$FM_TEST_BODY_FILE}" --argjson number "$3" \
       '{pull_request:{number:$number,body:$body}}'
     ;;
+  'pr ready') printf '%s\n' false > "$FM_TEST_DRAFT_FILE" ;;
   'api GET')
     number=${3##*/}
     jq -n --rawfile body "$FM_TEST_BODY_FILE" --argjson number "$number" --arg head "$FM_TEST_PR_HEAD" \
@@ -74,8 +81,10 @@ case "${1:-} ${2:-}" in
   'mr view')
     jq -n --rawfile description "$FM_TEST_BODY_FILE" \
       --arg web_url "$FM_TEST_PR_URL" --arg sha "$FM_TEST_PR_HEAD" \
-      '{web_url:$web_url,sha:$sha,description:$description}'
+      --argjson draft "$(cat "$FM_TEST_DRAFT_FILE")" \
+      '{web_url:$web_url,sha:$sha,description:$description,draft:$draft}'
     ;;
+  'mr update') printf '%s\n' false > "$FM_TEST_DRAFT_FILE" ;;
   'api --hostname') exit "${FM_TEST_EVIDENCE_RC:-0}" ;;
   *) exit 1 ;;
 esac
@@ -84,6 +93,8 @@ SH
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
+  printf '%s\n' true > "$dir/draft"
+  printf '%s\n' example/project > "$dir/repo-path"
   printf '%s\n' "$dir"
 }
 
@@ -101,6 +112,8 @@ Make publication checks deterministic for the complete pull request.
 ## What Changed
 
 - Added exact public body and head validation for `src/app.ts`.
+- Kept ordinary source paths such as `src/auth/Jwt.Token.Parser.ts` publishable.
+- Kept `src/longmodule.longmodule.verylongfilenamecomponent.ts` publishable.
 - Documented the supported Windows install path `C:\Program Files\Example\config.ini` without exposing a user profile.
 
 ## Testing
@@ -115,7 +128,9 @@ run_gate() {
     FM_TEST_PR_URL="$url" FM_TEST_PR_HEAD="$head" FM_TEST_BODY_FILE="$dir/body.md" \
     FM_TEST_AXI_BODY_FILE="${FM_TEST_AXI_BODY_FILE:-$dir/body.md}" \
     FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
-    FM_TEST_GLAB_LOG="$dir/glab.log" PATH="$dir/fakebin:$BASE_PATH" \
+    FM_TEST_GLAB_LOG="$dir/glab.log" FM_TEST_DRAFT_FILE="$dir/draft" \
+    FM_TEST_REPO_FILE="$dir/repo-path" \
+    PATH="$dir/fakebin:$BASE_PATH" \
     "$PUBLICATION_CHECK" "$@"
 }
 
@@ -144,7 +159,9 @@ test_help_documents_publication_mechanics() {
   check_help=$("$PR_CHECK" --help)
   assert_contains "$help" 'attest <task-id> <pr-url>' "publication help omitted attest usage"
   assert_contains "$help" 'verify <task-id> <pr-url>' "publication help omitted verify usage"
-  assert_contains "$help" 'Neither mode edits a PR.' "publication help omitted correction ownership"
+  assert_contains "$help" 'Neither mode edits a PR body.' "publication help omitted correction ownership"
+  assert_contains "$help" 'gh-axi pr create --draft' "publication help omitted GitHub draft creation"
+  assert_contains "$help" 'glab mr update <number> -R <repo> --draft' "publication help omitted GitLab drift correction"
   assert_contains "$check_help" 'complete public body, exact head' "fm-pr-check help omitted its publication prerequisite"
   pass "publication and monitoring help describe the exact gate mechanics"
 }
@@ -189,6 +206,26 @@ test_complete_github_readbacks_must_match() {
   pass "publication check fails closed when complete GitHub public readbacks disagree"
 }
 
+test_github_readback_is_bound_to_task_worktree() {
+  local dir rc
+  dir=$(make_case github-task-worktree)
+  safe_body > "$dir/body.md"
+  attest_none "$dir" >/dev/null 2> "$dir/stderr" \
+    || fail "task-worktree GitHub attestation failed: $(cat "$dir/stderr")"
+  assert_grep 'github-task-worktree/worktree|pr view 17 --full' "$dir/gh-axi.log" \
+    "complete GitHub readback did not run in the validated task worktree: $(cat "$dir/gh-axi.log")"
+  printf '%s\n' other/project > "$dir/repo-path"
+  printf '%s\n' true > "$dir/draft"
+  set +e
+  attest_none "$dir" >/dev/null 2> "$dir/wrong-repo.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "GitHub readback accepted a task worktree for another repository"
+  assert_grep 'task worktree does not match the GitHub PR repository' "$dir/wrong-repo.err" \
+    "wrong task repository refusal was unclear"
+  pass "GitHub complete readback is bound to the validated task worktree"
+}
+
 test_studio_and_windows_privacy_hazards_refuse() {
   local prefix suffix
   prefix=$'## Intent\n\nDeliver the complete change.\n\n## What Changed\n\n'
@@ -208,6 +245,8 @@ test_internal_transcripts_and_secrets_refuse() {
   assert_attest_rejected raw-findings "$prefix- Raw result: {\"findings\":[{\"id\":\"review-1\",\"severity\":\"high\"}]}\n" 'raw generated pipeline-agent transcript'
   assert_attest_rejected worker-narration "$prefix- Worker status: finished after supervision.\n" 'private task, run, worker, or supervision narration'
   assert_attest_rejected secret-token "$prefix- access_token=abcdefghijklmnopqrstuvwxyz123456\n" 'assigned secret value'
+  assert_attest_rejected bearer-token "$prefix- Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue1234567890\n" 'Authorization Bearer credential'
+  assert_attest_rejected standalone-jwt "$prefix- Captured eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue1234567890 during validation.\n" 'standalone JWT-shaped credential'
   pass "publication check rejects generated findings, private narration, and credential-shaped material"
 }
 
@@ -273,6 +312,21 @@ test_exact_head_evidence_accessibility_and_kind() {
   assert_grep "api HEAD /repos/example/project/contents/evidence/result.txt?ref=$GITHUB_HEAD" "$dir/gh-axi.log" \
     "GitHub evidence did not use authenticated exact-head accessibility"
 
+  dir=$(make_case evidence-substring)
+  write_body "$dir" "$(safe_body)
+
+[Different evidence]($exact_url.bak)
+"
+  set +e
+  run_gate "$dir" "$GITHUB_URL" "$GITHUB_HEAD" attest task-a "$GITHUB_URL" \
+    --intent-outcome-complete --evidence nonvisual --evidence-url "$exact_url" \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "evidence URL substring passed as an exact public link"
+  assert_grep 'declared evidence URL is absent' "$dir/stderr" \
+    "evidence substring refusal was unclear"
+
   dir=$(make_case illustration-evidence)
   exact_url="https://github.com/example/project/blob/$GITHUB_HEAD/evidence/custom-illustration.png"
   write_body "$dir" "$(safe_body)
@@ -337,6 +391,7 @@ test_github_and_gitlab_routes_and_monitoring_boundary() {
   FM_ROOT_OVERRIDE="$dir/fake-root" FM_HOME="$dir/home" \
     FM_TEST_PR_URL="$GITHUB_URL" FM_TEST_PR_HEAD="$GITHUB_HEAD" FM_TEST_BODY_FILE="$dir/body.md" \
     FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_DRAFT_FILE="$dir/draft" FM_TEST_REPO_FILE="$dir/repo-path" \
     PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a "$GITHUB_URL" > "$dir/check.out" 2> "$dir/check.err"
   rc=$?
   set -e
@@ -348,11 +403,12 @@ test_github_and_gitlab_routes_and_monitoring_boundary() {
   attest_none "$dir" >/dev/null 2> "$dir/attest.err" || fail "GitHub route did not attest"
   assert_grep 'pr view 17 --full' "$dir/gh-axi.log" \
     "GitHub readback did not use the complete gh-axi PR view"
-  assert_grep "pr view $GITHUB_URL --json url,headRefOid,body" "$dir/gh.log" \
+  assert_grep "pr view $GITHUB_URL --json url,headRefOid,body,isDraft" "$dir/gh.log" \
     "GitHub head binding did not use one exact body/head JSON snapshot"
   FM_ROOT_OVERRIDE="$dir/fake-root" FM_HOME="$dir/home" \
     FM_TEST_PR_URL="$GITHUB_URL" FM_TEST_PR_HEAD="$GITHUB_HEAD" FM_TEST_BODY_FILE="$dir/body.md" \
     FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_DRAFT_FILE="$dir/draft" FM_TEST_REPO_FILE="$dir/repo-path" \
     PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a "$GITHUB_URL" > "$dir/check.out" 2> "$dir/check.err" \
     || fail "fm-pr-check refused a valid GitHub publication: $(cat "$dir/check.err")"
   assert_present "$dir/home/state/task-a.check.sh" "valid publication did not arm monitoring"
@@ -371,6 +427,8 @@ test_github_and_gitlab_routes_and_monitoring_boundary() {
     "GitLab readback did not use the canonical project route and JSON fields"
   assert_grep 'api --hostname gitlab.example projects/group%2Fproject/repository/files/evidence%2Fresult.txt' "$dir/glab.log" \
     "GitLab evidence did not use the authenticated host-bound route"
+  assert_grep 'mr update 23 -R https://gitlab.example/group/project --ready --yes' "$dir/glab.log" \
+    "GitLab attestation did not mark the unchanged draft ready"
   run_gate "$dir" "$GITLAB_URL" "$GITLAB_HEAD" verify task-a "$GITLAB_URL" >/dev/null 2> "$dir/verify.err" \
     || fail "GitLab receipt did not verify"
   pass "publication check routes GitHub and GitLab explicitly and blocks monitoring before fresh verification"
@@ -379,6 +437,7 @@ test_github_and_gitlab_routes_and_monitoring_boundary() {
 test_help_documents_publication_mechanics
 test_safe_nonvisual_body_and_legitimate_paths_pass
 test_complete_github_readbacks_must_match
+test_github_readback_is_bound_to_task_worktree
 test_studio_and_windows_privacy_hazards_refuse
 test_internal_transcripts_and_secrets_refuse
 test_partial_intent_framing_refuses

@@ -291,8 +291,8 @@ case "$MODE" in
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`.
-Read and pass the PR publication check below against the complete public body and exact head, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and create the GitHub PR with \`gh-axi pr create --draft\`, or the GitLab MR with \`glab mr create --draft\`.
+Keep it draft until the PR publication check below passes and marks it ready through the forge, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
 )
@@ -300,7 +300,7 @@ EOF
 # PR publication
 Operational validation intent is not publishable PR intent.
 Before creating or updating the PR, and again before reporting it ready, read and follow \`$FM_ROOT/.agents/skills/pr-publication-check/SKILL.md\`.
-That lifecycle owner requires complete reviewer-facing PR intent and outcome, privacy-safe exact-head evidence when required, an explicit fresh-body/head attestation, and correction through this direct-PR path if the check fails.
+That lifecycle owner requires a draft, complete reviewer-facing PR intent and outcome, privacy-safe exact-head evidence when required, an explicit fresh-body/head attestation, and correction through this direct-PR path if the check fails.
 EOF
 )
     ;;
@@ -346,7 +346,7 @@ EOF
 # PR publication
 Operational validation intent is not publishable PR intent.
 Before the pipeline publishes a PR, and again before reporting it ready, read and follow \`$FM_ROOT/.agents/skills/pr-publication-check/SKILL.md\`.
-That lifecycle owner requires complete reviewer-facing PR intent and outcome, privacy-safe exact-head evidence when required, an explicit fresh-body/head attestation, and correction through the active no-mistakes ownership flow if the check fails.
+That lifecycle owner requires the pipeline to keep the PR or MR draft until complete reviewer-facing PR intent and outcome, privacy-safe exact-head evidence when required, and an explicit fresh-body/head attestation pass; use the active no-mistakes ownership flow if the check fails.
 EOF
 )
     ;;

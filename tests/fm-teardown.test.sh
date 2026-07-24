@@ -233,12 +233,16 @@ SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 case "\${1:-} \${2:-}" in
+  "repo view")
+    printf '%s\n' example/repo
+    exit 0
+    ;;
   "pr view")
     case " \$* " in
-      *" --json url,headRefOid,body "*)
+      *" --json url,headRefOid,body,isDraft "*)
         printf '%s\n%s\n' "\$FM_TEST_PR_URL" '$head'
         base64 < "\$FM_TEST_BODY_FILE" | tr -d '\\n'
-        printf '\n'
+        printf '\nfalse\n'
         exit 0
         ;;
       *"state,headRefOid"*) printf '%s\t%s\n' 'MERGED' '$head' ; exit 0 ;;
