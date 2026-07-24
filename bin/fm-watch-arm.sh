@@ -58,9 +58,9 @@
 # Only the OWNING arm sees a cycle's wake output, so an arm merely attached to
 # that watcher cannot tell a delivered wake apart from a watcher that vanished.
 # Before an attached arm calls a close unexplained it reads the owner's own
-# ledger record for that exact watcher pid. Proof of a delivered wake ends this
-# arm quietly, because the owner already reported the reason and a second report
-# would be a duplicate wake. No proof still fails loudly.
+# ledger record for that exact process instance. Proof of a delivered wake ends
+# this arm quietly, because the owner already reported the reason and a second
+# report would be a duplicate wake. No proof still fails loudly.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
@@ -106,12 +106,28 @@ lock_snapshot() {
 
 cycle_active=0
 cycle_watcher_pid=none
+cycle_id=none
 cycle_origin=unknown
 cycle_started_at=0
 cycle_lock_before='pid:none|identity:none'
 
+cycle_identity_for_pid() {
+  local pid=$1 lock_pid identity
+  lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  if [ "$lock_pid" = "$pid" ]; then
+    identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
+    if [ -n "$identity" ]; then
+      printf '%s' "$identity"
+      return 0
+    fi
+  fi
+  fm_pid_identity "$pid" 2>/dev/null
+}
+
 cycle_begin() {
   cycle_watcher_pid=$1
+  cycle_id=$(cycle_identity_for_pid "$1" 2>/dev/null | od -An -v -tx1 2>/dev/null | tr -d '[:space:]' | cut -c1-512)
+  [ -n "$cycle_id" ] || cycle_id=none
   cycle_origin=$2
   cycle_started_at=$(date +%s)
   cycle_lock_before=$(lock_snapshot)
@@ -120,6 +136,8 @@ cycle_begin() {
 
 cycle_refresh_lock_before() {
   [ "$cycle_active" -eq 1 ] || return 0
+  cycle_id=$(cycle_identity_for_pid "$cycle_watcher_pid" 2>/dev/null | od -An -v -tx1 2>/dev/null | tr -d '[:space:]' | cut -c1-512)
+  [ -n "$cycle_id" ] || cycle_id=none
   cycle_lock_before=$(lock_snapshot)
 }
 
@@ -146,9 +164,10 @@ cycle_log_append() {
     sleep 0.02
     i=$((i + 1))
   done
-  printf 'arm_pid=%s\twatcher_pid=%s\torigin=%s\tstarted_at=%s\tended_at=%s\texit_code=%s\tsignal=%s\treason=%s\tbeacon_age=%s\tlock_before=%s\tlock_after=%s\tsuccessor=%s\n' \
+  printf 'arm_pid=%s\twatcher_pid=%s\tcycle_id=%s\torigin=%s\tstarted_at=%s\tended_at=%s\texit_code=%s\tsignal=%s\treason=%s\tbeacon_age=%s\tlock_before=%s\tlock_after=%s\tsuccessor=%s\n' \
     "$ARM_PID" \
     "$(fm_cycle_clean_field "$cycle_watcher_pid")" \
+    "$(fm_cycle_clean_field "$cycle_id")" \
     "$(fm_cycle_clean_field "$cycle_origin")" \
     "$cycle_started_at" \
     "$ended_at" \
@@ -274,7 +293,7 @@ report_delivered_close() {
 # to a verified successor. With no successor, fail loudly instead of returning a
 # clean empty completion that an adapter could mistake for a no-op.
 attach_and_wait() {
-  local attached_pid=$1 followed_since
+  local attached_pid=$1 attached_cycle_id
   while :; do
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ]; then
@@ -293,12 +312,9 @@ attach_and_wait() {
       report_attached
       continue
     fi
-    # Anchor the ledger lookup at the moment this arm began following that
-    # watcher, so a record left by an unrelated process that reused the pid can
-    # never answer for this cycle.
-    followed_since=$cycle_started_at
+    attached_cycle_id=$cycle_id
     cycle_log_append unknown unknown attached-cycle-ended none
-    if fm_cycle_pid_closed_actionably "$STATE" "$attached_pid" "$followed_since"; then
+    if fm_cycle_instance_closed_actionably "$STATE" "$attached_pid" "$attached_cycle_id"; then
       report_delivered_close "$attached_pid"
       return 0
     fi

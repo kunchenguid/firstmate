@@ -18,17 +18,18 @@
 #   - Need: arms only while work is in flight (state/*.meta) or X mode has a
 #     relay poll to run (state/x-watch.check.sh); an idle home exits 0.
 #   - Single-flight: Claude does not dedupe async hooks, so a home-scoped owner
-#     lock (state/.claude-autoarm.lock) admits exactly one owner; every other
-#     concurrent firing exits 0 without translating, which keeps one event
-#     epoch on exactly one recovery turn.
+#     lock (state/.claude-autoarm.lock) admits exactly one owner. One contending
+#     later Stop waits as the coalesced handoff; it starts the next cycle only
+#     when the predecessor closes cleanly, while duplicate firings leave after
+#     the predecessor records a rewake.
 #   - Foreground arm: the owner runs bin/fm-watch-arm.sh in the FOREGROUND of
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together.
 #   - Translation: while supervision is still needed and AFK remains inactive,
 #     an actionable arm close (signal:/stale:/check:/heartbeat) or a typed
 #     watcher: FAILED prints one rewake banner to stderr and exits 2, which
-#     wakes Claude even while idle ("Stop hook feedback"). A clean close with
-#     no actionable reason and no remaining need exits 0 silently.
+#     wakes Claude even while idle ("Stop hook feedback"). A clean close exits
+#     silently only after any overlapping Stop has a live handoff owner.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim and
 # outcome so the synchronous Stop guard (bin/fm-turnend-guard.sh --claude) can
@@ -37,8 +38,8 @@
 #
 # This hook never blocks the Stop decision itself and never prints to stdout:
 # exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
-# On any uncertainty such as unresolvable ancestry or lock contention, it exits
-# 0 and leaves continuity to the synchronous guard and the model.
+# Unresolvable session ancestry exits 0 and leaves continuity to the synchronous
+# guard, while an ambiguous queued handoff exits 2 with an alarm.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,6 +49,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
+HANDOFF_LOCK="$STATE/.claude-autoarm-handoff.lock"
 EPOCH="$STATE/.claude-autoarm-epoch"
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
@@ -78,13 +80,6 @@ need_supervision() {
 }
 need_supervision || exit 0
 
-# --- single-flight owner claim ------------------------------------------------
-# Claude runs one background process per firing with no dedupe. Exactly one
-# owner foregrounds the arm and translates its close; every other firing exits
-# 0 so one watcher cycle maps to at most one exit-2 rewake.
-fm_lock_try_acquire "$OWNER_LOCK" || exit 0
-trap 'fm_lock_release "$OWNER_LOCK"' EXIT
-
 write_epoch() {  # <outcome>
   local outcome=$1 seq tmp
   seq=$(sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$EPOCH" 2>/dev/null || true)
@@ -93,11 +88,95 @@ write_epoch() {  # <outcome>
   esac
   seq=$((seq + 1))
   tmp="$EPOCH.tmp.$$"
-  printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
-    "$seq" "${BASHPID:-$$}" "$outcome" "$(date +%s)" > "$tmp" 2>/dev/null \
+  printf 'epoch=%s owner_pid=%s owner_claim=%s outcome=%s updated_at=%s\n' \
+    "$seq" "${BASHPID:-$$}" "$OWNER_CLAIM" "$outcome" "$(date +%s)" > "$tmp" 2>/dev/null \
     && mv -f "$tmp" "$EPOCH" 2>/dev/null
   rm -f "$tmp" 2>/dev/null || true
 }
+
+epoch_outcome_for_claim() {
+  local final_newline
+  final_newline=$(tail -c 1 "$EPOCH" 2>/dev/null | wc -l | tr -d '[:space:]')
+  [ "$final_newline" = 1 ] || return 1
+  awk -v want="$1" '
+    {
+      if (NR != 1 || NF != 5 ||
+          $1 !~ /^epoch=[0-9][0-9]*$/ ||
+          $2 !~ /^owner_pid=[0-9][0-9]*$/ ||
+          $3 !~ /^owner_claim=[A-Za-z0-9._-][A-Za-z0-9._-]*$/ ||
+          $4 !~ /^outcome=(arming|clean|rewake|afk)$/ ||
+          $5 !~ /^updated_at=[0-9][0-9]*$/) {
+        invalid = 1
+        next
+      }
+      claim = ""; outcome = ""
+      for (i = 1; i <= NF; i += 1) {
+        if ($i ~ /^owner_claim=/) claim = substr($i, 13)
+        else if ($i ~ /^outcome=/) outcome = substr($i, 9)
+      }
+      if (claim == want) found = outcome
+    }
+    END { if (!invalid && found != "") print found }
+  ' "$EPOCH" 2>/dev/null
+}
+
+handoff_alarm() {
+  write_epoch rewake
+  printf 'firstmate watcher cycle FAILED - queued Stop re-arm handoff lost its predecessor outcome while this home still needs supervision.\n' >&2
+  exit 2
+}
+
+OWNER_CLAIM=
+PREDECESSOR_CLAIM=
+if fm_lock_try_acquire "$OWNER_LOCK"; then
+  OWNER_CLAIM=$(basename "${FM_LOCK_OWNER_DIR:-}")
+else
+  predecessor_target=$(readlink "$OWNER_LOCK" 2>/dev/null || true)
+  PREDECESSOR_CLAIM=${predecessor_target##*/}
+  case "$PREDECESSOR_CLAIM" in
+    ''|*[!A-Za-z0-9._-]*)
+      printf 'firstmate watcher cycle FAILED - queued Stop re-arm handoff could not identify its predecessor while this home still needs supervision.\n' >&2
+      exit 2
+      ;;
+  esac
+
+  handoff_wait=0
+  while ! fm_lock_try_acquire "$HANDOFF_LOCK"; do
+    handoff_pid=${FM_LOCK_HELD_PID:-}
+    fm_pid_alive "$handoff_pid" && exit 0
+    [ "$handoff_wait" -lt 20 ] || {
+      printf 'firstmate watcher cycle FAILED - queued Stop re-arm handoff ownership is ambiguous while this home still needs supervision.\n' >&2
+      exit 2
+    }
+    sleep 0.1
+    handoff_wait=$((handoff_wait + 1))
+  done
+  trap 'fm_lock_release "$OWNER_LOCK"; fm_lock_release "$HANDOFF_LOCK"' EXIT
+
+  while :; do
+    [ -e "$STATE/.afk" ] && exit 0
+    need_supervision || exit 0
+    if fm_lock_try_acquire "$OWNER_LOCK"; then
+      OWNER_CLAIM=$(basename "${FM_LOCK_OWNER_DIR:-}")
+      predecessor_outcome=$(epoch_outcome_for_claim "$PREDECESSOR_CLAIM")
+      case "$predecessor_outcome" in
+        clean) break ;;
+        rewake|afk) exit 0 ;;
+        *) handoff_alarm ;;
+      esac
+    fi
+    current_target=$(readlink "$OWNER_LOCK" 2>/dev/null || true)
+    current_claim=${current_target##*/}
+    if [ -n "$current_claim" ] && [ "$current_claim" != "$PREDECESSOR_CLAIM" ]; then
+      current_owner=${FM_LOCK_HELD_PID:-}
+      fm_pid_alive "$current_owner" && exit 0
+    fi
+    sleep 0.1
+  done
+  fm_lock_release "$HANDOFF_LOCK"
+fi
+trap 'fm_lock_release "$OWNER_LOCK"; fm_lock_release "$HANDOFF_LOCK"' EXIT
+case "$OWNER_CLAIM" in ''|*[!A-Za-z0-9._-]*) handoff_alarm ;; esac
 
 write_epoch arming
 

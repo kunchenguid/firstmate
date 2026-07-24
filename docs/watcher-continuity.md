@@ -10,6 +10,8 @@ Each adapter starts the next arm before delivering the wake prompt, checks curre
 A failed follow-up never cancels continuity restoration.
 Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
 The hook fires on every Stop, and an eligible primary with supervision need admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
+When a later Stop overlaps that owner, one coalesced hook holds a home-scoped handoff claim until the predecessor records its outcome.
+A clean predecessor transfers the next cycle to that claimant, an actionable predecessor cancels the duplicate, and an absent or ambiguous predecessor outcome raises the watcher alarm.
 While supervision is still needed and away mode remains inactive, an actionable close or typed failure wakes the idle session through exit 2.
 
 ## Actionable wake ordering
@@ -48,17 +50,19 @@ An attached arm follows verified identity-matched successors and reports the sam
 
 Only the arm that OWNS a watcher child reads that cycle's wake output, so an arm merely attached to the same watcher cannot tell a delivered wake apart from a watcher that vanished.
 Two arms following one watcher is ordinary whenever a manual recovery arm and the Stop-owned auto-arm overlap.
-Before an attached arm calls a close unexplained it reads the owner's own ledger record for that exact watcher PID, anchored at the moment it began following so a reused PID cannot answer for the cycle.
+Before an attached arm calls a close unexplained it reads the owner's own ledger record for that exact watcher process instance, so a reused PID cannot answer for the cycle.
 Proof of a delivered wake ends that arm quietly with `watcher: cycle closed with a delivered wake pid=<N> (reported by its owning arm)`, because the owner already reported the reason and a second report would be a duplicate wake.
 No proof still fails loudly.
-Claude's Stop hook reads that quiet close as a clean cycle and stays silent rather than rewaking for an already-delivered wake, and Grok's protocol names it so a model-driven home re-arms instead of acting on it.
+Claude's Stop hook reads that quiet close as a clean cycle and stays silent rather than rewaking for an already-delivered wake, while any Stop that overlapped the attached arm already owns the durable next-cycle handoff.
+Grok's protocol names the clean close so a model-driven home re-arms instead of acting on it.
 Pi's and OpenCode's adapters are unchanged by it: their close classifiers already treat every non-actionable close as a failure that triggers continuity restoration, which is what those homes did with the previous typed failure too.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
-Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
+Each record includes arm and watcher PIDs, the watcher process identity that binds every observer to one concrete cycle, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
 `bin/fm-watch-cycle-lib.sh` owns that record format and every read of it, including the attached-close and continuity-gate queries above; `bin/fm-watch-arm.sh` owns the write side and the arm lifecycle state machine.
 A reason carrying the `actionable-` prefix means the cycle closed because the watcher had a real wake to deliver; every other reason means the observer could not account for the close.
-Every query fails toward "not explained", so a missing or truncated ledger can never silence an alarm or open the gate.
+The continuity query orders concrete cycles by their owning row rather than by a later observer's completion time.
+Every query requires a complete canonical row and one unambiguous owner for each referenced cycle, rejects future-dated evidence, and fails toward "not explained", so missing, malformed, truncated, reused-PID, or ambiguous evidence can never silence an alarm or open the gate.
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.
 `state/.watch-triage.log` remains only the watcher's bounded absorbed-wake debug log and carries no lifecycle semantics.
 
@@ -69,9 +73,9 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops, then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
-It also drives two real arms against one real watcher and holds each to its honest verdict: a real wake closing the cycle must leave the attached arm quiet rather than alarming, and the same two-arm shape with the watcher killed instead must still produce the typed cycle-end failure.
-`tests/fm-continuity-pretool-check.test.sh` proves the Claude gate rejects only non-recovery fleet execution in the precise unhealthy state, allows the recorded post-wake gap while refusing an absent, superseded, stale, or non-delivering close, and preserves the registered Stop hooks.
-`tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, identity, AFK, need, single-flight, and exit-2 translation.
+It also drives two real arms against one real watcher and holds each to its honest verdict: a real wake closing the cycle must bind both rows to one process instance and leave the attached arm quiet, while the same two-arm shape with the watcher killed must reject actionable evidence from a reused PID and still produce the typed cycle-end failure.
+`tests/fm-continuity-pretool-check.test.sh` proves the Claude gate rejects only non-recovery fleet execution in the precise unhealthy state, allows the recorded post-wake gap, and refuses absent, superseded, late-observer, reused-PID, stale, future-dated, truncated, ownerless, or non-delivering evidence while preserving the registered Stop hooks.
+`tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, identity, AFK, need, single-flight, queued clean-close handoff, and exit-2 translation.
 `tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard.
 
 ## Active limits and verification

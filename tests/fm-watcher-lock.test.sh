@@ -618,7 +618,7 @@ run_two_arms_on_one_watcher() {  # <case-name> <owner-out-var> <attached-out-var
 }
 
 test_attached_arm_reports_the_owners_delivered_wake_not_a_failure() {
-  local owner_status attached_status
+  local owner_status attached_status owner_cycle attached_cycle
   run_two_arms_on_one_watcher attached-delivered-close
 
   # A real captain-relevant status append: the watcher enqueues it, prints the
@@ -638,6 +638,10 @@ test_attached_arm_reports_the_owners_delivered_wake_not_a_failure() {
   grep -qF "watcher: cycle closed with a delivered wake pid=$TWO_ARM_WATCHER_PID" "$TWO_ARM_DIR/attached.out" \
     || fail "attached arm did not account for the owner-delivered close: $(cat "$TWO_ARM_DIR/attached.out")"
   [ "$attached_status" -eq 0 ] || fail "attached arm exited $attached_status after a delivered wake it had nothing to add to"
+  owner_cycle=$(awk -F '\t' '$9 ~ /^reason=actionable-/ { sub(/^cycle_id=/, "", $3); print $3; exit }' "$TWO_ARM_STATE/.watch-cycle-exits.log")
+  attached_cycle=$(awk -F '\t' '$9 == "reason=attached-cycle-ended" { sub(/^cycle_id=/, "", $3); found=$3 } END { print found }' "$TWO_ARM_STATE/.watch-cycle-exits.log")
+  [ -n "$owner_cycle" ] && [ "$owner_cycle" != none ] || fail "owner row omitted the concrete cycle identity"
+  [ "$attached_cycle" = "$owner_cycle" ] || fail "attached row was not bound to the owner's concrete cycle"
   # The observer must not manufacture a second wake for an already-delivered one.
   ! grep -qE '^(signal:|stale:|check:|heartbeat)' "$TWO_ARM_DIR/attached.out" \
     || fail "attached arm duplicated the owner's wake reason: $(cat "$TWO_ARM_DIR/attached.out")"
@@ -645,11 +649,14 @@ test_attached_arm_reports_the_owners_delivered_wake_not_a_failure() {
 }
 
 test_attached_arm_still_alarms_when_the_close_is_unexplained() {
-  local attached_status
+  local attached_status now
   run_two_arms_on_one_watcher attached-unexplained-close
 
   # Same two-arm shape, but the watcher dies instead of waking. The owner records
   # a non-delivering close, so the ledger must NOT excuse the missing watcher.
+  now=$(date +%s)
+  printf 'arm_pid=999999\twatcher_pid=%s\tcycle_id=reused-pid-fixture\torigin=started\tstarted_at=%s\tended_at=%s\texit_code=0\tsignal=none\treason=actionable-signal\tbeacon_age=1\tlock_before=pid:none|identity:none\tlock_after=pid:none|identity:none\tsuccessor=none\n' \
+    "$TWO_ARM_WATCHER_PID" "$now" "$now" >> "$TWO_ARM_STATE/.watch-cycle-exits.log"
   kill "$TWO_ARM_WATCHER_PID" 2>/dev/null || fail "could not stop the watcher under test"
 
   wait_for_exit "$TWO_ARM_OWNER_PID" 150 || true
@@ -663,8 +670,8 @@ test_attached_arm_still_alarms_when_the_close_is_unexplained() {
   grep -q "watcher_pid=$TWO_ARM_WATCHER_PID" "$TWO_ARM_STATE/.watch-cycle-exits.log" \
     || fail "no lifecycle record was written for the watcher under test"
   ! grep -q "watcher_pid=$TWO_ARM_WATCHER_PID.*reason=actionable-" "$TWO_ARM_STATE/.watch-cycle-exits.log" \
-    || fail "fixture recorded a delivered wake, so it cannot prove the unexplained path"
-  pass "an attached arm still alarms when the ledger shows no delivered wake"
+    && fail "pid-reuse fixture did not record its older-cycle actionable reason"
+  pass "an attached arm rejects actionable evidence from a reused watcher pid"
 }
 
 test_attached_arm_signal_is_recorded_in_cycle_ledger() {
@@ -944,7 +951,7 @@ SH
   done
   size=$(wc -c < "$state/.watch-cycle-exits.log" | tr -d '[:space:]')
   [ "$size" -le 1400 ] || fail "cycle ledger exceeded its configured cap ($size bytes)"
-  ! grep -v '^arm_pid=.*watcher_pid=.*started_at=.*ended_at=.*exit_code=.*signal=.*reason=.*beacon_age=.*lock_before=.*lock_after=.*successor=' "$state/.watch-cycle-exits.log" | grep . >/dev/null \
+  ! grep -v '^arm_pid=.*watcher_pid=.*cycle_id=.*origin=.*started_at=.*ended_at=.*exit_code=.*signal=.*reason=.*beacon_age=.*lock_before=.*lock_after=.*successor=' "$state/.watch-cycle-exits.log" | grep . >/dev/null \
     || fail "bounded lifecycle ledger contains a partial or malformed record"
   pass "cycle-exit ledger links a verified successor and remains size-capped"
 }
