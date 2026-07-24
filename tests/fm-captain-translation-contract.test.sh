@@ -17,6 +17,7 @@ CODEXAPP="$ROOT/.agents/skills/firstmate-codexapp/SKILL.md"
 FMX="$ROOT/.agents/skills/fmx-respond/SKILL.md"
 UPDATE="$ROOT/.agents/skills/updatefirstmate/SKILL.md"
 AHOY="$ROOT/.agents/skills/ahoy/SKILL.md"
+RUNLIT="$ROOT/.agents/skills/runlit-lab-fix/SKILL.md"
 README="$ROOT/README.md"
 
 section_9() {
@@ -126,19 +127,65 @@ test_outward_facing_skill_points_reference_section_9_owner() {
     "X reply safety does not state that it supplements section 9"
   assert_grep "under \`AGENTS.md\` section 9 without firstmate's internal vocabulary" "$UPDATE" \
     "Firstmate update reporting does not reference section 9"
+  assert_grep "using \`AGENTS.md\` section 9's captain-facing translation contract" "$RUNLIT" \
+    "RunLit lab repair reporting does not reference section 9"
   pass "outward-facing skill handoffs point to the section 9 owner"
 }
 
 test_section_9_owner_is_not_duplicated_into_skills() {
   local duplicate_count file
   duplicate_count=0
-  for file in "$BOOTSTRAP" "$AFK" "$DECISION" "$RECOVERY" "$HARNESS" "$CODEXAPP" "$UPDATE"; do
+  for file in "$BOOTSTRAP" "$AFK" "$DECISION" "$RECOVERY" "$HARNESS" "$CODEXAPP" "$UPDATE" "$RUNLIT"; do
     if grep -Fq "When evidence uses an internal label, rewrite it before sending:" "$file"; then
       duplicate_count=$((duplicate_count + 1))
     fi
   done
   [ "$duplicate_count" -eq 0 ] || fail "skills duplicated section 9's mapping owner"
   pass "skills cross-reference section 9 instead of duplicating the mapping list"
+}
+
+test_runlit_lab_fix_is_bounded_and_user_invocable() {
+  local trigger_count
+
+  assert_present "$RUNLIT" "RunLit lab repair skill is missing"
+  assert_grep 'name: runlit-lab-fix' "$RUNLIT" "RunLit lab repair skill metadata has the wrong name"
+  assert_grep 'user-invocable: true' "$RUNLIT" "RunLit lab repair skill is not user-invocable"
+  assert_grep '  internal: true' "$RUNLIT" "RunLit lab repair skill is not internal"
+  [ ! -e "$ROOT/skills/runlit-lab-fix" ] || fail "RunLit lab repair must not exist in the public installer-facing skills directory"
+  trigger_count=$(grep -Fc 'load the `runlit-lab-fix` skill' "$AGENTS")
+  [ "$trigger_count" -eq 1 ] || fail "runlit-lab-fix must have exactly one AGENTS.md trigger, found $trigger_count"
+  assert_grep '| `/runlit-lab-fix`' "$README" "README built-in skills table does not list /runlit-lab-fix"
+  pass "RunLit lab repair is internal, user-invocable, and precisely triggered"
+}
+
+test_runlit_lab_fix_owns_safe_repair_contract() {
+  for phrase in \
+    'kubectl config current-context' \
+    'kubectl get nodes -o wide' \
+    'kubectl get pods -A -o wide' \
+    'kubectl get deployments -A' \
+    'type=Warning' \
+    'Prometheus and Alertmanager' \
+    'storefront and backend' \
+    'kubectl rollout undo deployment/recommendationservice -n online-boutique' \
+    'kubectl rollout status deployment/recommendationservice -n online-boutique --timeout=60s' \
+    'Do not delete the old pod to manufacture a passing result.' \
+    'Do not touch production.' \
+    'Do not touch Coolify.' \
+    'Do not touch the private Postgres rollout.' \
+    'Mac mini worker runtime' \
+    'Do not touch Proxmox, the NAS, DNS, network configuration, provider accounts, or project code.' \
+    'Do not suppress, inhibit, or silence alerts unless the captain separately asks for that action.' \
+    'Never print kubeconfig contents' \
+    'exact proposed command, target resources, expected effect, rollback plan, and blast radius' \
+    '$FM_HOME/data/runlit-lab-fix-<UTC timestamp>.md'; do
+    assert_grep "$phrase" "$RUNLIT" "RunLit lab repair contract is missing '$phrase'"
+  done
+  assert_no_grep 'kubectl delete' "$RUNLIT" "RunLit lab repair skill includes a pod deletion command"
+  assert_no_grep 'kubectl apply' "$RUNLIT" "RunLit lab repair skill includes an apply command"
+  assert_no_grep 'kubectl patch' "$RUNLIT" "RunLit lab repair skill includes a patch command"
+  assert_no_grep 'kubectl rollout restart' "$RUNLIT" "RunLit lab repair skill includes a restart command"
+  pass "RunLit lab repair owns one guarded mutation and the required evidence and safety boundaries"
 }
 
 test_ahoy_is_an_internal_user_invocable_skill() {
@@ -245,6 +292,8 @@ test_mapping_list_covers_high_risk_internal_families
 test_verbatim_internal_evidence_is_rejected_from_chat
 test_outward_facing_skill_points_reference_section_9_owner
 test_section_9_owner_is_not_duplicated_into_skills
+test_runlit_lab_fix_is_bounded_and_user_invocable
+test_runlit_lab_fix_owns_safe_repair_contract
 test_ahoy_is_an_internal_user_invocable_skill
 test_ahoy_readme_uses_cross_harness_convention
 test_ahoy_owns_only_the_visible_session_recap
