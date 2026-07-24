@@ -39,10 +39,17 @@ Treat everything sent through the lane as visible to those third parties.
 ## Running the lane
 
 - Install once: `bin/fm-freellmapi.sh install --accept-risks` (pinned fetch, lockfile-pinned `npm ci`, build).
-- Start: `bin/fm-freellmapi.sh start` - generates the mandatory `ENCRYPTION_KEY` on first start (never printed), binds to `127.0.0.1` only, and refuses to stay up unless the loopback-only binding is verified.
+- Start: `bin/fm-freellmapi.sh start` - generates the mandatory `ENCRYPTION_KEY` on first start (never printed), binds to `127.0.0.1` only, and stops the process if loopback-only binding cannot be verified.
 - Seed provider keys from the fleet's gitignored `.env`: `bin/fm-freellmapi.sh seed-keys google=GEMINI_API_KEY` - values travel via stdin and environment only, never argv or output.
-- Check: `bin/fm-freellmapi.sh status`; stop: `bin/fm-freellmapi.sh stop`.
+- Check: `bin/fm-freellmapi.sh status` reports health and fails with a warning if a non-loopback listener is found; it does not stop the process (use `stop` for that).
+- Stop: `bin/fm-freellmapi.sh stop`.
 - Everything the lane stores (checkout, database, generated secrets, runtime records) lives under `$FM_HOME/data/freellmapi/`, which is gitignored and mode 0700.
+
+### Secret handling limits
+
+Secrets are never printed and never placed on argv.
+At runtime they live only in process environment, mode-0600 files, and stdin pipes; the same OS user can still inspect those (for example process environment on many platforms).
+Never run `bin/fm-freellmapi.sh` under shell xtrace (`bash -x`, `set -o xtrace`, or an equivalent debug wrapper): tracing dumps assignments and piped bodies and will leak keys into the terminal and shell logs.
 
 Catalog sync to `api.freellmapi.co` is disabled by default so the lane has zero background egress; `start --catalog-sync` opts in to the signed metadata-only sync described in the scout report.
 

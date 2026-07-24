@@ -30,11 +30,15 @@
 #   - Secret values (provider keys, ENCRYPTION_KEY, dashboard password, session
 #     token) never appear in stdout, stderr, argv, this script's error messages,
 #     or files other than the mode-0600 secret files listed above. Secrets travel
-#     to child processes via environment or stdin only, never command arguments,
-#     so they cannot surface in a process listing.
+#     to child processes via environment or stdin only, never command arguments
+#     (never on argv; not printed). At runtime they live only in process env,
+#     mode-0600 files, and stdin pipes; the same OS user can still inspect those
+#     (for example /proc/<pid>/environ on Linux). Do not run this script under
+#     shell xtrace (bash -x or set -o xtrace): it dumps env assignments and pipes.
 #   - This script never prints the server log; on failure it prints the log path.
-#   - start and status fail unless every TCP listener of the server process is
-#     bound to 127.0.0.1; a non-loopback listener is stopped, never tolerated.
+#   - start verifies every TCP listener of the server process is bound to
+#     127.0.0.1 and stops the server if verification fails; status fails with a
+#     warning on the same condition but does not stop (use stop for that).
 #   - install refuses to run without --accept-risks and restates the known
 #     dependency-vulnerability findings every time.
 set -eu
@@ -69,7 +73,8 @@ die() {
 }
 
 usage() {
-  sed -n '2,39{s/^# \{0,1\}//;p;}' "$SCRIPT_DIR/fm-freellmapi.sh"
+  # Print the header comment through the last contract bullet (before set -eu).
+  sed -n '2,43{s/^# \{0,1\}//;p;}' "$SCRIPT_DIR/fm-freellmapi.sh"
 }
 
 print_risks() {
@@ -257,8 +262,9 @@ cmd_start() {
   local sync_disabled=1
   [ "$catalog_sync" -eq 1 ] && sync_disabled=0
 
-  # The key is passed via environment, never argv, so it cannot appear in a
-  # process listing. NODE_ENV=production makes upstream refuse to fall back to
+  # The key is passed via environment, never argv (so argv / ps args stay clean).
+  # It still lives in the node process env for the whole run; same-user tools
+  # can inspect that. NODE_ENV=production makes upstream refuse to fall back to
   # any implicit dev key. The background command is a simple command so $! is
   # the node pid itself, not a wrapping subshell.
   (
@@ -319,7 +325,9 @@ cmd_status() {
     return 1
   fi
   if ! verify_loopback_only "$pid"; then
-    printf 'fm-freellmapi.sh: WARNING: pid %s has a non-loopback or unverifiable listener; stop it now\n' "$pid" >&2
+    # status alerts only; start is the path that stops a bad bind. Operators
+    # must run stop (or restart via start) after this warning.
+    printf 'fm-freellmapi.sh: WARNING: pid %s has a non-loopback or unverifiable listener; run stop (status does not stop)\n' "$pid" >&2
     return 1
   fi
   printf 'fm-freellmapi.sh: running on http://127.0.0.1:%s (loopback binding verified, pid %s)\n' "$port" "$pid"
