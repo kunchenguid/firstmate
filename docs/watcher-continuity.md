@@ -17,6 +17,7 @@ While supervision is still needed and away mode remains inactive, an actionable 
 ## Actionable wake ordering
 
 After an actionable Pi or OpenCode child close, the adapter starts and verifies one singleton successor before it delivers the original wake.
+Pi delivers the authenticated operational body as a hidden `firstmate-watcher` custom message that triggers a follow-up model turn while remaining absent from captain-visible TUI transcript rendering.
 It waits at most one readiness timeout per attempt, then sends TERM and waits a bounded retirement confirmation before the next lock-verified exponential retry.
 If the unready arm does not retire within that bound, the adapter keeps ownership, starts no overlapping retry, and delivers the typed fallback immediately.
 When that retained arm later closes, its actual close is classified as a new supervised event without replaying the earlier fallback.
@@ -57,6 +58,8 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, and exit-2 translation.
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.
 `tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard.
+`tests/fm-watch-triage.test.sh` proves a current run-step-backed validation decision remains absorbed without stale escalation, declared external pauses keep their bounded cadence, a genuinely stopped worker still escalates, and retired status records are ignored.
+`tests/fm-pi-primary-live-e2e.test.sh` proves the credentialed interactive Pi path receives one hidden watcher notification exactly once without rendering its body, private state path, or queue-drain instruction.
 
 ## Active limits and verification
 

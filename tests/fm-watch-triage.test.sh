@@ -33,8 +33,15 @@ TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
 # absorb-only-when-provably-working triage reads a canned verdict; a test fixes that
 # verdict via FM_FAKE_CREW_STATE in its environment before calling watch_bg.
 watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
-  local state=$1 fakebin=$2 out=$3
+  local state=$1 fakebin=$2 out=$3 f base task
   shift 3
+  for f in "$state"/*.status "$state"/*.turn-ended; do
+    [ -e "$f" ] || continue
+    base=${f##*/}
+    task=${base%.status}
+    task=${task%.turn-ended}
+    [ -f "$state/$task.meta" ] || printf 'kind=ship\n' > "$state/$task.meta"
+  done
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
 }
@@ -111,14 +118,19 @@ test_stale_is_terminal_classifier() {
 test_scan_captain_relevant_statuses_classifier() {
   local dir state out
   dir=$(make_case classify-scan); state="$dir/state"
+  printf 'window=test:fm-one\n' > "$state/one.meta"
+  printf 'window=test:fm-two\n' > "$state/two.meta"
+  printf 'window=test:fm-three\n' > "$state/three.meta"
   printf 'working: a\n' > "$state/one.status"
   printf 'blocked: no perms\n' > "$state/two.status"
   printf 'done: PR https://x/y/pull/1\n' > "$state/three.status"
+  printf 'failed: retired task\n' > "$state/retired.status"
   out=$(scan_captain_relevant_statuses "$state")
   printf '%s' "$out" | grep -F "two.status" >/dev/null || fail "scan missed a blocked: status"
   printf '%s' "$out" | grep -F "three.status" >/dev/null || fail "scan missed a done: status"
   printf '%s' "$out" | grep -F "one.status" >/dev/null && fail "scan surfaced a benign working: status"
-  pass "scan_captain_relevant_statuses lists only captain-relevant statuses"
+  printf '%s' "$out" | grep -F "retired.status" >/dev/null && fail "scan surfaced a retired status with no live metadata"
+  pass "scan_captain_relevant_statuses lists only current captain-relevant worker statuses"
 }
 
 test_classifier_primitives() {
@@ -194,8 +206,10 @@ EOF
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
 # benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
 # actively-running pipeline step (source run-step) or a busy pane (source pane);
-# everything else - a stale working: status-log line, a finished/parked/failed run,
-# an unknown/torn-down crew, or an empty id - is NOT provable, so it surfaces. The
+# A current parked validation run is a distinct verified wait: it is not working,
+# but its stable pane is safe to absorb without stale escalation. Everything else - a stale working:
+# status-log line, a finished/failed run, an unknown/torn-down crew, or an empty
+# id - is NOT provable, so it surfaces. The
 # fake fm-crew-state.sh (FM_CREW_STATE_BIN) returns a canned verdict per case.
 test_crew_is_provably_working_classifier() {
   local dir fakebin
@@ -215,6 +229,9 @@ test_crew_is_provably_working_classifier() {
   ! crew_is_provably_working a || fail "finished run treated as provably working"
   FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
   ! crew_is_provably_working a || fail "parked run treated as provably working"
+  [ "$(crew_absorb_class a)" = waiting ] || fail "verified parked run was not classified as an absorbable wait"
+  FM_FAKE_CREW_STATE='state: parked · source: status-log · waiting for review'
+  [ "$(crew_absorb_class a)" = none ] || fail "unverified parked status log was treated as an absorbable wait"
   FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed'
   ! crew_is_provably_working a || fail "failed run treated as provably working"
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
@@ -222,7 +239,7 @@ test_crew_is_provably_working_classifier() {
   FM_FAKE_CREW_STATE='state: working · source: run-step · x'
   ! crew_is_provably_working "" || fail "empty id treated as provably working"
   unset FM_FAKE_CREW_STATE
-  pass "crew_is_provably_working: only working+run-step/pane is provable; idle/finished/parked/failed/unknown surface"
+  pass "crew_is_provably_working: active work is provable and only run-step parked state becomes a verified wait"
 }
 
 # status_is_paused: the shared pause verb test both consumers read (so neither
@@ -272,7 +289,7 @@ test_crew_absorb_class_classifier() {
   ! crew_is_paused a || fail "unknown crew classed paused"
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
   unset FM_FAKE_CREW_STATE
-  pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+  pass "crew_absorb_class: working/waiting/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
 }
 
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
@@ -304,6 +321,7 @@ test_provably_working_signal_absorbed() {
   local dir state fakebin out status_file pid
   dir=$(make_case provably-working-signal); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
   status_file="$state/task.status"
+  printf 'kind=ship\n' > "$state/task.meta"
   printf 'working: compiling step 2\n' > "$status_file"
   # The crew's pipeline is in an actively-running step: positive evidence it is
   # still working, so a no-verb working: signal is absorbed (the original low-churn
@@ -642,6 +660,51 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the paused re-surface failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "paused re-surface was not queued"
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
+}
+
+# A no-mistakes gate is a verified wait, not evidence that the worker stalled.
+# Its captain-relevant status signal is surfaced once when written; subsequent
+# static-pane observations remain absorbed and never start a wedge or stale timer.
+test_verified_validation_decision_is_not_stale() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back
+  dir=$(make_case verified-validation-wait); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate.status"
+  window="test:fm-gate"
+  printf 'idle no-mistakes approval gate\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/gate.meta"
+  printf 'needs-decision: no-mistakes review gate\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle no-mistakes approval gate")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=codex FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 1 finding(s)' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 20 || { reap "$pid"; fail "verified validation decision was surfaced as stalled: $(cat "$out")"; }
+  [ -e "$state/.verified-wait-$key" ] || { reap "$pid"; fail "verified validation wait marker was not recorded"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "verified validation decision started a wedge timer"; }
+  grep -F "possible wedge" "$state/.wake-queue" >/dev/null 2>&1 \
+    && { reap "$pid"; fail "verified validation decision emitted a wedge escalation"; }
+  reap "$pid"
+
+  back=$(( $(date +%s) - 5 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=codex FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 1 finding(s)' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=1 \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  wait_live "$pid" 20 || { reap "$pid"; fail "verified validation decision was stale-escalated after its age threshold: $(cat "$out")"; }
+  grep -F "$window" "$state/.wake-queue" >/dev/null 2>&1 \
+    && { reap "$pid"; fail "verified validation decision emitted a stale or wedge wake"; }
+  reap "$pid"
+  pass "verified no-mistakes decisions remain absorbed without stale or wedge escalation"
 }
 
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
@@ -1117,6 +1180,7 @@ exit 127
 SH
   chmod +x "$fakebin/wc"
   status_file="$state/task.status"
+  printf 'kind=ship\n' > "$state/task.meta"
   printf 'working: compiling step 2\n' > "$status_file"
   # Provably working so the no-verb signal is absorbed (which is what writes the
   # triage log line under test).
@@ -1167,6 +1231,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   # per-poll signal scan stays quiet) but which was never surfaced (no
   # .hb-surfaced-* marker). This stands in for a per-wake-path miss; the heartbeat
   # fleet-scan backstop must catch it and wake firstmate.
+  printf 'kind=ship\n' > "$state/miss.meta"
   printf 'done: PR https://example.test/pr/5\n' > "$state/miss.status"
   sig=$(seen_sig "$state/miss.status"); printf '%s' "$sig" > "$state/.seen-miss_status"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -1290,6 +1355,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_verified_validation_decision_is_not_stale
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

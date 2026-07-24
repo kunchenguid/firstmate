@@ -236,6 +236,10 @@ recorded_windows() {
   done
 }
 
+window_is_recorded() {  # <window>
+  [ -n "$(fm_backend_meta_for_window "$1" "$STATE" 2>/dev/null || true)" ]
+}
+
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
 # (default 3): a pane that keeps re-wedging on the SAME stale hash - each
 # escalation gets absorbed again as "still validating" one poll later, since the
@@ -291,12 +295,21 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # timer would. A .paused-resurfaced-<key> throttle marker records the last
 # re-surface epoch so, once past the window, it fires once per window rather than
 # every poll. Advances the stale suppressor to <hash> and flags the key paused.
-handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
+handle_paused_stale() {  # <window> <task> <hash> [paused|waiting]
+  local win=$1 task=$2 h=$3 class=${4:-paused} key statusf mtime age rf rf_age reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
+  if [ "$class" = waiting ]; then
+    : > "$STATE/.verified-wait-$key"
+  else
+    rm -f "$STATE/.verified-wait-$key"
+  fi
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  if [ "$class" = waiting ]; then
+    triage_log "absorbed stale (verified validation decision): $win"
+    return
+  fi
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
@@ -317,7 +330,8 @@ clear_pause_state() {  # <window>
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" \
+    "$STATE/.paused-resurfaced-$key" "$STATE/.verified-wait-$key"
 }
 
 clear_pause_tracking() {  # <window>
@@ -414,9 +428,13 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # surfaced or intentionally absorbed, so a watcher killed mid-cycle never
 # swallows a signal.
 scan_signals() {
-  local f sig sf
+  local f sig sf base task
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
     [ -e "$f" ] || continue
+    base=${f##*/}
+    task=${base%.status}
+    task=${task%.turn-ended}
+    [ -f "$STATE/$task.meta" ] || continue
     sig=$(stat_sig "$f") || continue
     sf="$STATE/.seen-$(basename "$f" | tr '.' '_')"
     if [ "$sig" != "$(cat "$sf" 2>/dev/null)" ]; then
@@ -829,19 +847,23 @@ EOF
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified).
   while IFS= read -r w; do
+    window_is_recorded "$w" || { clear_pause_tracking "$w"; continue; }
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     key=${w//:/_}
     key=${key//\//_}
     key=${key//./_}
     last=$(last_status_line "$STATE/$task.status")
-    if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
+    if ! status_is_paused_or_captain_held "$last" &&
+       [ ! -e "$STATE/.verified-wait-$key" ] &&
+       [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
     fi
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    window_is_recorded "$w" || { clear_pause_tracking "$w"; continue; }
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
@@ -850,6 +872,7 @@ EOF
     ssf="$STATE/.stale-since-$key"
     ewf="$STATE/.wedge-escalations-$key"
     pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
+    vwf="$STATE/.verified-wait-$key"
     prev=$(cat "$hf" 2>/dev/null || true)
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
@@ -889,23 +912,31 @@ EOF
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
-              printf '%s' "$h" > "$sf"
-              date +%s > "$ssf"
-              triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
-            else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
-              printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
-              wake "stale: $w"
-            fi
+            case "$(crew_absorb_class "$task")" in
+              working)
+                printf '%s' "$h" > "$sf"
+                date +%s > "$ssf"
+                triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+                ;;
+              waiting)
+                handle_paused_stale "$w" "$task" "$h" waiting
+                ;;
+              *)
+                fm_wake_append stale "$w" "stale: $w" || exit 1
+                printf '%s' "$h" > "$sf"
+                rm -f "$ssf"
+                mark_surfaced "$STATE/$task.status"
+                wake "stale: $w"
+                ;;
+            esac
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
             # wedge timer is running for it) - keep treating it that way
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
             wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf"
+          elif [ -e "$vwf" ]; then
+            handle_paused_stale "$w" "$task" "$h" waiting
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,

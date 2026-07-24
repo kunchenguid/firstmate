@@ -33,6 +33,7 @@ test_signal_passes_through_and_exits_zero() {
   home=$(make_home signal)
   out="$home/out.txt"
   err="$home/err.txt"
+  printf 'window=test:fm-demo\nkind=ship\n' > "$home/state/demo.meta"
   (
     sleep 1
     printf 'done: synthetic wake\n' > "$home/state/demo.status"

@@ -59,6 +59,7 @@ test_signal_catchup_without_running_watcher() {
   # watcher can absorb no-verb working: notes when the crew is provably working).
   # Use a captain-relevant verb so the wake is surfaced and the catch-up path is
   # tested.
+  printf 'window=test:fm-task\nkind=ship\n' > "$state/task.meta"
   printf 'blocked: first\n' > "$status_file"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for first signal"
