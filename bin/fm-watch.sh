@@ -127,16 +127,20 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # / stale path is absorb-only-when-provably-working: such a wake is absorbed ONLY
 # while the crew shows positive evidence it is still working (an actively-running
 # no-mistakes step, or a busy pane, via crew_is_provably_working over
-# fm-crew-state.sh); a crew that stopped its turn with no running pipeline and no
-# busy pane is SURFACED, so a finish reported only through interactive pane menus
+# fm-crew-state.sh), or - for a terminal stale status specifically - while only
+# the pane redrew and .hb-surfaced-<task> shows that exact status line already
+# surfaced; a crew that stopped its turn with no running pipeline and no busy
+# pane is SURFACED, so a finish reported only through interactive pane menus
 # (no done: status) is never swallowed. An ACTIONABLE wake (a captain-relevant
 # signal, a no-verb signal whose crew is not provably working, any check, a stale
-# pane whose crew is not provably working, a provably-working stale past the
-# threshold, or anything unknown) is written to the durable queue and exits, which
-# is what wakes the LLM through the background-task completion. The same classifier
-# (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
-# daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
-# wake) and never double-triages - and never runs the costly provably-working read.
+# pane whose crew is not provably working and whose terminal status (if any) was
+# not already surfaced under a different pane hash, a provably-working stale past
+# the threshold, or anything unknown) is written to the durable queue and exits,
+# which is what wakes the LLM through the background-task completion. The same
+# classifier (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk
+# exists the daemon owns triage, so this watcher reverts to one-shot (enqueue +
+# exit on every wake) and never double-triages - and never runs the costly
+# provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
