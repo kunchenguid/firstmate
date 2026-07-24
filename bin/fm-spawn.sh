@@ -1205,8 +1205,10 @@ EOF
       # .cursor/hooks/fm-firstmate-turn-end.sh (exact match only). Legacy
       # .cursor/hooks/fm-turn-end.sh from earlier adapters is reconciled before
       # install. Never clobber an existing hooks.json: merge when present, or
-      # create only when absent. Marker + optional byte backup let teardown
-      # reverse exactly what we did without deleting unrelated Cursor hooks.
+      # create only when absent. When the owned stop is already present, re-apply
+      # loop_limit 1 so older loop_limit 0 installs are not left disabled across
+      # respawns. Marker + optional byte backup let teardown reverse exactly what
+      # we did without deleting unrelated Cursor hooks.
       CURSOR_HOOK_CMD='.cursor/hooks/fm-firstmate-turn-end.sh'
       CURSOR_HOOK_LEGACY_CMD='.cursor/hooks/fm-turn-end.sh'
       CURSOR_HOOK_SCRIPT="$WT/.cursor/hooks/fm-firstmate-turn-end.sh"
@@ -1270,6 +1272,34 @@ EOF
               ' "$CURSOR_HOOKS_JSON" > "$tmp"; then
               rm -f "$tmp"
               echo "error: cannot merge Cursor turn-end hook into existing .cursor/hooks.json for $ID" >&2
+              exit 1
+            fi
+            mv "$tmp" "$CURSOR_HOOKS_JSON"
+          elif ! jq -e --arg cmd "$CURSOR_HOOK_CMD" '
+              [.hooks.stop // [] | .[]
+                | select((.command // "") == $cmd)
+                | .loop_limit]
+              | length > 0 and all(. == 1)
+            ' "$CURSOR_HOOKS_JSON" >/dev/null 2>&1; then
+            # Owned stop already present but loop_limit is missing or not 1.
+            if [ ! -f "$CURSOR_HOOKS_BAK" ]; then
+              cp "$CURSOR_HOOKS_JSON" "$CURSOR_HOOKS_BAK" || {
+                echo "error: cannot backup Cursor hooks.json before loop_limit upgrade for $ID" >&2
+                exit 1
+              }
+              exclude_path '.fm-cursor-hooks.json.bak'
+            fi
+            tmp=$(mktemp "$CURSOR_HOOKS_JSON.XXXXXX") || {
+              echo "error: cannot stage Cursor loop_limit upgrade for $ID" >&2
+              exit 1
+            }
+            if ! jq --arg cmd "$CURSOR_HOOK_CMD" '
+                .hooks.stop = ((.hooks.stop // []) | map(
+                  if (.command // "") == $cmd then . + {"loop_limit":1} else . end
+                ))
+              ' "$CURSOR_HOOKS_JSON" > "$tmp"; then
+              rm -f "$tmp"
+              echo "error: cannot upgrade Cursor stop loop_limit for $ID" >&2
               exit 1
             fi
             mv "$tmp" "$CURSOR_HOOKS_JSON"

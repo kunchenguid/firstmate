@@ -279,6 +279,106 @@ test_cursor_teardown_preserves_concurrent_hooks_edit() {
   pass "cursor merged teardown preserves concurrent hooks.json edits and retires excludes"
 }
 
+test_cursor_teardown_restores_owned_delta_backup() {
+  local case_dir wt mode_out bak_before restored
+  case_dir="$TMP_ROOT/teardown-owned-delta"
+  wt="$case_dir/wt"
+  mkdir -p "$wt/.cursor/hooks"
+  fm_git_identity fmtest fmtest@example.invalid
+  git init -q "$wt"
+  git -C "$wt" commit -q --allow-empty -m init
+  # Track pre-merge project hooks; working tree remains exactly bak + owned stop.
+  printf '%s\n' '{"version":1,"hooks":{"sessionStart":[{"command":"echo keep-me"}]}}' \
+    > "$wt/.cursor/hooks.json"
+  git -C "$wt" add .cursor/hooks.json
+  git -C "$wt" commit -q -m 'project cursor hooks'
+  cp "$wt/.cursor/hooks.json" "$wt/.fm-cursor-hooks.json.bak"
+  bak_before=$(cat "$wt/.fm-cursor-hooks.json.bak")
+  printf '%s\n' '{"version":1,"hooks":{"sessionStart":[{"command":"echo keep-me"}],"stop":[{"command":".cursor/hooks/fm-firstmate-turn-end.sh","loop_limit":1}]}}' \
+    > "$wt/.cursor/hooks.json"
+  printf 'merged\n' > "$wt/.fm-cursor-turnend"
+  printf '%s\n' '#!/bin/sh' > "$wt/.cursor/hooks/fm-firstmate-turn-end.sh"
+  chmod +x "$wt/.cursor/hooks/fm-firstmate-turn-end.sh"
+  # shellcheck disable=SC1090
+  eval "$(sed -n \
+    -e '/^cursor_hooks_is_owned_delta()/,/^}/p' \
+    -e '/^cursor_unexclude_path()/,/^}/p' \
+    -e '/^filter_owned_hook_dirtiness()/,/^}/p' \
+    -e '/^remove_cursor_turnend()/,/^}/p' \
+    "$ROOT/bin/fm-teardown.sh")"
+  mode_out=$(git -C "$wt" status --porcelain | filter_owned_hook_dirtiness "$wt")
+  if printf '%s\n' "$mode_out" | grep -qF '.cursor/hooks.json'; then
+    fail "owned-delta hooks.json dirtiness must be suppressed"
+  fi
+  remove_cursor_turnend "$wt"
+  assert_absent "$wt/.cursor/hooks/fm-firstmate-turn-end.sh" "teardown left owned turn-end script"
+  assert_absent "$wt/.fm-cursor-hooks.json.bak" "owned-delta restore should consume bak"
+  restored=$(cat "$wt/.cursor/hooks.json")
+  [ "$restored" = "$bak_before" ] || fail "teardown must restore exact pre-merge bak content"
+  if grep -q 'fm-firstmate-turn-end.sh\|fm-turn-end.sh' "$wt/.cursor/hooks.json" 2>/dev/null; then
+    fail "restored hooks.json still contains owned stop"
+  fi
+  assert_grep 'keep-me' "$wt/.cursor/hooks.json" "bak restore lost unrelated hooks"
+  pass "cursor teardown restores owned-delta bak and suppresses dirtiness"
+}
+
+test_cursor_spawn_upgrades_owned_stop_loop_limit() {
+  local case_dir home proj wt fakebin id out status=0
+  case_dir="$TMP_ROOT/spawn-loop-upgrade"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  id="cursor-loop-up-x1"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|send-keys|kill-window) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse gh-axi gh cursor-agent
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'brief\n' > "$home/data/$id/brief.md"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$wt/.cursor"
+  # Prior install left owned stop at loop_limit 0; respawn must upgrade to 1.
+  printf '%s\n' '{"version":1,"hooks":{"sessionStart":[{"command":"echo keep-me"}],"stop":[{"command":".cursor/hooks/fm-firstmate-turn-end.sh","loop_limit":0}]}}' \
+    > "$wt/.cursor/hooks.json"
+  touch "$home/state/.last-watcher-beat"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$proj" cursor 2>&1) || status=$?
+  expect_code 0 "$status" "loop_limit upgrade spawn should succeed"
+  assert_grep 'keep-me' "$wt/.cursor/hooks.json" "unrelated hooks destroyed during loop_limit upgrade"
+  assert_grep 'fm-firstmate-turn-end.sh' "$wt/.cursor/hooks.json" "owned stop missing after loop_limit upgrade"
+  jq -e '
+      [.hooks.stop[]?
+        | select((.command // "") == ".cursor/hooks/fm-firstmate-turn-end.sh")
+        | .loop_limit] == [1]
+    ' "$wt/.cursor/hooks.json" >/dev/null \
+    || fail "respawn must upgrade owned stop loop_limit to 1"
+  assert_grep 'merged' "$wt/.fm-cursor-turnend" "loop_limit upgrade must keep merged marker"
+  assert_present "$wt/.fm-cursor-hooks.json.bak" "loop_limit upgrade should create bak when missing"
+  jq -e '
+      [.hooks.stop[]?
+        | select((.command // "") == ".cursor/hooks/fm-firstmate-turn-end.sh")
+        | .loop_limit] == [0]
+    ' "$wt/.fm-cursor-hooks.json.bak" >/dev/null \
+    || fail "bak must capture pre-upgrade owned stop at loop_limit 0"
+  pass "cursor spawn upgrades owned stop loop_limit on respawn"
+}
+
 test_cursor_teardown_retires_created_hooks_exclude() {
   local case_dir home proj wt fakebin id out status=0 excl
   case_dir="$TMP_ROOT/teardown-exclude"
@@ -398,7 +498,9 @@ test_cursor_sessionstart_nudge_wrapper
 test_cursor_spawn_installs_turnend_hook
 test_cursor_spawn_merges_existing_hooks
 test_cursor_spawn_reconciles_legacy_hook
+test_cursor_spawn_upgrades_owned_stop_loop_limit
 test_cursor_teardown_preserves_concurrent_hooks_edit
+test_cursor_teardown_restores_owned_delta_backup
 test_cursor_teardown_retires_created_hooks_exclude
 test_cursor_teardown_refuses_staged_created_hooks
 test_cursor_turnend_adapter_encodes_operational_input
