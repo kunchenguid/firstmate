@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-brief.sh.
 #
-# Regression coverage for the heredoc-in-command-substitution parse bug (issue
-# #166): each ship-mode branch builds its Definition-of-done text with
-# `VAR=$(cat <<EOF ... EOF)`. Bash's lexer tracks quote state through the
-# heredoc body while it scans for the matching `)` of the command
-# substitution, so a single unescaped apostrophe anywhere in that body breaks
-# parsing of the *entire rest of the script* - `bash -n` fails, not just the
-# generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
-# is unaffected, so the secondmate charter block does not need this guard.
+# Regression coverage for the heredoc-in-command-substitution parse bug (issues
+# #166 and #958). A `VAR=$(cat <<EOF ... EOF)` builder wraps a heredoc body in a
+# command substitution. Bash's lexer tracks quote state through that body while
+# it scans for the matching `)`, so a single unescaped apostrophe anywhere in
+# the body breaks parsing of the *entire rest of the script* - `bash -n` fails,
+# not just the generated brief. Stock macOS bash 3.2 is stricter still: it trips
+# on the apostrophe even under a quoted `<<'EOF'` delimiter, which bash 4+ parses
+# cleanly - so a modern-bash `bash -n` alone (e.g. on CI) does not catch it.
+# The durable fix removes the command-substitution-around-heredoc pattern from
+# fm-brief.sh entirely: the Definition-of-done text is appended with a plain
+# `cat >> file <<EOF` redirection (not wrapped in `$(...)`), and the unguarded
+# Herdr section is built with `printf`. This suite guards that structurally
+# (the pattern must not return) and by parsing under the oldest bash available.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -19,14 +24,38 @@ BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
 # The script itself must always parse. This is the direct regression test for
-# issue #166: a stray apostrophe in any of the three DOD heredoc bodies
-# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
+# issues #166 and #958: a stray apostrophe in a DOD or Herdr heredoc body breaks
+# `bash -n` on the whole file. We parse under every distinct bash we can find,
+# because the #958 variant only surfaces on stock macOS bash 3.2 - a modern-bash
+# `bash -n` (e.g. CI) passes the exact input that breaks a stock-macOS firstmate.
 test_script_parses() {
-  local out rc
-  out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
-  expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
-  [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
-  pass "fm-brief.sh: bash -n succeeds"
+  local bash_bin out rc seen=""
+  for bash_bin in bash /bin/bash /usr/bin/bash /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    command -v "$bash_bin" >/dev/null 2>&1 || continue
+    # Resolve to a real path so we do not parse the same binary twice.
+    local resolved; resolved=$(command -v "$bash_bin")
+    case " $seen " in *" $resolved "*) continue ;; esac
+    seen="$seen $resolved"
+    out=$("$bash_bin" -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
+    expect_code 0 "$rc" "$bash_bin -n bin/fm-brief.sh must parse cleanly (got: $out)"
+    [ -z "$out" ] || fail "$bash_bin -n bin/fm-brief.sh emitted unexpected output: $out"
+  done
+  pass "fm-brief.sh: bash -n succeeds on every available bash (incl. stock 3.2)"
+}
+
+# Version-independent guard on the durable fix: the command-substitution-around-
+# heredoc pattern that caused #958 must not return. `bash -n` under a modern bash
+# would not catch its reintroduction, so pin it structurally instead. A heredoc
+# fed to a plain `cat > "$FILE"` / `cat >> "$FILE"` redirection is fine; only a
+# heredoc wrapped in `$(...)` (e.g. `VAR=$(cat <<EOF`) is the hazard.
+test_no_heredoc_in_command_substitution() {
+  local hits
+  # Match code lines only; a comment line (optionally indented) that names the
+  # pattern to explain the fix is not a reintroduction.
+  hits=$(grep -nE '=\$\(cat[[:space:]]*<<' "$ROOT/bin/fm-brief.sh" | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+  [ -z "$hits" ] || fail "fm-brief.sh reintroduced the \$(cat <<EOF ...) pattern that breaks bash 3.2 (#958):
+$hits"
+  pass "fm-brief.sh: no heredoc wrapped in command substitution"
 }
 
 test_help_includes_entire_header() {
@@ -383,6 +412,7 @@ test_scout_and_secondmate_scaffold() {
 }
 
 test_script_parses
+test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
