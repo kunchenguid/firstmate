@@ -192,7 +192,7 @@ test_malformed_url_refuses_before_merge() {
   rc=$?
   set -e
 
-  expect_code 2 "$rc" "malformed-url: fm-pr-merge should refuse a non-GitHub PR URL"
+  expect_code 2 "$rc" "malformed-url: fm-pr-merge should refuse a GitLab MR URL"
   assert_grep 'error: invalid PR merge request' "$case_dir/stderr" \
     "malformed-url: refusal was not fixed and non-probing"
   assert_no_grep 'pr=https://gitlab.com/example/repo/-/merge_requests/1' "$case_dir/state/task-x1.meta" \

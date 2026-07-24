@@ -2862,7 +2862,7 @@ EOF
   esac
   [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
 
-  # The merge path still addresses GitHub only, so it refuses rather than
+  # The merge path still does not support GitLab, so it refuses rather than
   # sending a merge request to the wrong forge.
   write_task_meta "$dir" task-c
   set +e
