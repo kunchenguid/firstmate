@@ -18,6 +18,7 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed: <reason>",
 #                 "TREEHOUSE_POOL: dirty idle slot <n> at <path> - inspect before cleanup; no changes made",
+#                 "TREEHOUSE_POOL: skipped: pool audit timed out (timeout=<n>s elapsed=<n>s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...",
 #                 "INTAKE: intake mode on ..." or "INTAKE: intake mode off ...".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
@@ -76,8 +77,13 @@
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
 #          The treehouse dirty-idle-slot audit is read-only and reports only
 #          abandoned dirty slots that treehouse will not hand out or prune. It
-#          sweeps the firstmate repo's pool AND every registered project clone's
-#          pool, reporting each slot path once.
+#          sweeps the firstmate repo's pool AND every registered project clone
+#          that is a git repo, reporting each slot path once. The whole sweep is
+#          bounded by FM_TREEHOUSE_AUDIT_TIMEOUT when it is a non-empty numeric
+#          override, and by 10s otherwise (non-numeric values fall back to 10s);
+#          a timed-out sweep relays its completed findings and then prints
+#          "TREEHOUSE_POOL: skipped: pool audit timed out (timeout=<n>s
+#          elapsed=<n>s)" rather than wedging session start.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
 #          x_mode_setup, intake_mode_setup, fleet_sync) while still printing
@@ -201,6 +207,14 @@ fleet_sync() {
 
 TREEHOUSE_AUDIT_SEEN_SLOTS=""
 
+treehouse_audit_relay() {
+  local tmp=$1 line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    printf '%s\n' "$line"
+  done < "$tmp"
+}
+
 treehouse_pool_dirty_idle_scan() {  # <repo>
   local repo=$1 out line slot state path rest
   out=$( (cd "$repo" 2>/dev/null && treehouse status) 2>/dev/null ) || return 0
@@ -224,8 +238,7 @@ $out
 EOF
 }
 
-treehouse_dirty_idle_slot_audit() {
-  command -v treehouse >/dev/null 2>&1 || return 0
+treehouse_audit_scan_pools() {
   # Pools are per-repo and `treehouse status` resolves the pool from the working
   # directory, so scanning FM_ROOT alone would only ever report firstmate's own
   # pool. Crewmate ship and scout slots are leased inside projects/<name>
@@ -236,6 +249,10 @@ treehouse_dirty_idle_slot_audit() {
   TREEHOUSE_AUDIT_SEEN_SLOTS=""
   for repo in "$FM_ROOT" "$PROJECTS"/*; do
     [ -d "$repo" ] || continue
+    # projects/ holds clones. A non-repo directory there owns no pool of its own,
+    # and probing it would only resolve some enclosing repo's pool, so skip it
+    # rather than pay a treehouse fork for it.
+    [ "$repo" = "$FM_ROOT" ] || git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || continue
     repo_real=$( (cd "$repo" && pwd -P) 2>/dev/null ) || continue
     case " $seen " in
       *" $repo_real "*) continue ;;
@@ -243,6 +260,51 @@ treehouse_dirty_idle_slot_audit() {
     seen="$seen $repo_real"
     treehouse_pool_dirty_idle_scan "$repo_real"
   done
+}
+
+treehouse_audit_timeout() {
+  case "${FM_TREEHOUSE_AUDIT_TIMEOUT:-}" in
+    ''|*[!0-9]*) echo 10 ;;
+    *) echo "$FM_TREEHOUSE_AUDIT_TIMEOUT" ;;
+  esac
+}
+
+treehouse_dirty_idle_slot_audit() {
+  command -v treehouse >/dev/null 2>&1 || return 0
+  # The sweep forks `treehouse status` once per registered clone and runs on the
+  # always-executed detect path, including the read-only FM_BOOTSTRAP_DETECT_ONLY
+  # session start, so a hung or lock-blocked provider must never wedge startup.
+  # Bound it the same way fleet_sync is bounded: run it as one background job,
+  # relay whatever it completed, and say so when the bound was hit. A missing
+  # TREEHOUSE_POOL line is far cheaper than a stalled session start.
+  local tmp timeout monitor_was_on pid start elapsed
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-treehouse-audit.XXXXXX" 2>/dev/null) || return 0
+  timeout=$(treehouse_audit_timeout)
+  monitor_was_on=0
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m 2>/dev/null || true
+  treehouse_audit_scan_pools >"$tmp" 2>/dev/null &
+  pid=$!
+
+  start=$SECONDS
+  while jobs -r -p | grep -qx "$pid"; do
+    elapsed=$((SECONDS - start))
+    if [ "$elapsed" -ge "$timeout" ]; then
+      kill -TERM "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+      treehouse_audit_relay "$tmp"
+      echo "TREEHOUSE_POOL: skipped: pool audit timed out (timeout=${timeout}s elapsed=${elapsed}s)"
+      rm -f "$tmp"
+      return 0
+    fi
+    sleep 0.2 2>/dev/null || sleep 1
+  done
+  wait "$pid" 2>/dev/null || true
+  [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+
+  treehouse_audit_relay "$tmp"
+  rm -f "$tmp"
 }
 
 secondmate_sync() {

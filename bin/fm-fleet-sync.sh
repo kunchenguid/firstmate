@@ -256,7 +256,6 @@ default_checked_out_elsewhere() {
 }
 
 local_default_safe_for_recovery() {
-  fm_pool_worktree_clean "$PROJ" || return 1
   ! git -C "$PROJ" rev-parse --verify --quiet "$DEFAULT^{commit}" >/dev/null \
     || git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BASE" 2>/dev/null
 }

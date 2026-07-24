@@ -974,36 +974,63 @@ refuse_spawn_pool_lease() {  # <detail> <inspect-target>
   exit 1
 }
 
+# Default-branch names the lease ancestry check will accept a tip from, most
+# authoritative first and deduplicated. default_branch reads
+# refs/remotes/origin/HEAD, which git only repairs during a fetch, and
+# bin/fm-fleet-sync.sh never fetches a local-only or origin-less clone - so a
+# remote that renamed master to main leaves that symbolic ref naming a branch
+# this clone's pool slots are no longer based on. Probing the conventional
+# default names alongside the resolved one keeps one stale symbolic ref from
+# turning every dispatch for that project into a refusal, without admitting task
+# branches as valid bases.
+spawn_pool_default_candidates() {  # <worktree>
+  local wt=$1 resolved name out=
+  resolved=$(default_branch "$wt" 2>/dev/null || true)
+  for name in "$resolved" main master; do
+    [ -n "$name" ] || continue
+    case " $out " in
+      *" $name "*) continue ;;
+    esac
+    out="$out $name"
+  done
+  printf '%s\n' "${out# }"
+}
+
 validate_spawn_pool_lease() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 default base bases dirty head_short
+  local source=$1 inspect_target=$2 name base bases dirty head_short
   if ! fm_pool_worktree_clean "$WT"; then
     dirty=$(fm_pool_first_real_porcelain_line "$WT" 2>/dev/null || printf 'unreadable status')
     refuse_spawn_pool_lease "$source yielded a dirty pool worktree ($dirty; allowed only a lone untracked treehouse.toml)" "$inspect_target"
   fi
-  default=$(default_branch "$WT") || refuse_spawn_pool_lease \
-    "$source yielded a pool worktree whose default branch cannot be determined" "$inspect_target"
   # A lease is stale or divergent only when its HEAD carries commits that NO
-  # <default> tip already holds - that is leftover work from a previous task, not
+  # default tip already holds - that is leftover work from a previous task, not
   # a fresh base. origin/<default> is the strongest such tip, but it is not the
   # only valid one: firstmate supports origin-less clones (bin/fm-fleet-sync.sh
   # skips them benignly as "no origin remote"), and bin/fm-merge-local.sh lands
   # approved local-only work by fast-forwarding the clone's LOCAL <default>
   # without ever pushing, so that branch is legitimately ahead of origin from then
-  # on. Accept a HEAD that is an ancestor of either tip, and refuse only when it
-  # is an ancestor of none of the tips that exist.
+  # on. Accept a HEAD that is an ancestor of any of those tips, and refuse only
+  # when it is an ancestor of none of the tips that exist.
   bases=
-  for base in "origin/$default" "refs/heads/$default"; do
-    git -C "$WT" rev-parse --verify --quiet "$base^{commit}" >/dev/null || continue
-    bases="${bases:+$bases and }$base"
-    ! git -C "$WT" merge-base --is-ancestor HEAD "$base" 2>/dev/null || return 0
+  for name in $(spawn_pool_default_candidates "$WT"); do
+    for base in "origin/$name" "refs/heads/$name"; do
+      git -C "$WT" rev-parse --verify --quiet "$base^{commit}" >/dev/null || continue
+      bases="${bases:+$bases and }$base"
+      ! git -C "$WT" merge-base --is-ancestor HEAD "$base" 2>/dev/null || return 0
+    done
   done
   if [ -z "$bases" ]; then
-    refuse_spawn_pool_lease \
-      "$source yielded a pool worktree with no $default tip (neither origin/$default nor local $default exists)" "$inspect_target"
+    # No default tip exists at all, so there is nothing to judge this HEAD
+    # against. bin/fm-fleet-sync.sh treats the same unresolvable clone as a
+    # benign skip, and refusing every dispatch for the project would add a
+    # self-inflicted outage on top of an already-unusual clone. The cleanliness
+    # check above still ran and passed, so say what went unchecked and launch.
+    echo "warning: $source yielded a pool worktree with no default-branch tip (no origin/ or local main, master, or resolved default); launching without the lease ancestry check. Repair it with: git -C $WT remote set-head origin -a" >&2
+    return 0
   fi
   head_short=$(git -C "$WT" rev-parse --short HEAD 2>/dev/null || printf unknown)
   refuse_spawn_pool_lease \
-    "$source yielded a stale or divergent pool worktree (HEAD $head_short is not an ancestor of $bases)" "$inspect_target"
+    "$source yielded a stale or divergent pool worktree (HEAD $head_short is not an ancestor of $bases; if origin/HEAD names a branch the remote renamed away from, repair it with: git -C $WT remote set-head origin -a)" "$inspect_target"
 }
 
 W="fm-$ID"

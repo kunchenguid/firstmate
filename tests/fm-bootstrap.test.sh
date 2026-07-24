@@ -61,6 +61,10 @@ fi
 if [ "${1:-}" = status ]; then
   if [ -n "${FM_FAKE_TREEHOUSE_STATUS_BY_DIR:-}" ] \
     && [ -f "$FM_FAKE_TREEHOUSE_STATUS_BY_DIR/$(basename "$PWD")" ]; then
+    if grep -q FM_FAKE_TREEHOUSE_HANG "$FM_FAKE_TREEHOUSE_STATUS_BY_DIR/$(basename "$PWD")"; then
+      sleep 120
+      exit 0
+    fi
     cat "$FM_FAKE_TREEHOUSE_STATUS_BY_DIR/$(basename "$PWD")"
   elif [ -n "${FM_FAKE_TREEHOUSE_STATUS_FILE:-}" ]; then
     cat "$FM_FAKE_TREEHOUSE_STATUS_FILE"
@@ -631,8 +635,9 @@ test_treehouse_dirty_idle_slot_audit_sweeps_project_pools() {
   home="$case_dir/home"
   proj_slot="$case_dir/proj-dirty-slot"
   root_slot="$case_dir/root-dirty-slot"
-  mkdir -p "$root" "$home/config" "$home/projects/alpha" "$home/projects/beta" \
-    "$proj_slot" "$root_slot"
+  mkdir -p "$root" "$home/config" "$home/projects/notes" "$proj_slot" "$root_slot"
+  git init -q -b main "$home/projects/alpha"
+  git init -q -b main "$home/projects/beta"
   printf '%s\n' manual > "$home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
   by_dir="$case_dir/status-by-dir"
@@ -641,6 +646,7 @@ test_treehouse_dirty_idle_slot_audit_sweeps_project_pools() {
   printf '1     dirty        %s\n' "$root_slot" > "$by_dir/root"
   printf '4     dirty        %s\n' "$proj_slot" > "$by_dir/alpha"
   printf '5     available    %s\n' "$case_dir/beta-free" > "$by_dir/beta"
+  printf '6     dirty        %s\n' "$case_dir/notes-slot" > "$by_dir/notes"
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
@@ -653,9 +659,48 @@ test_treehouse_dirty_idle_slot_audit_sweeps_project_pools() {
     "audit should report dirty idle slots in a project clone's pool"
   assert_not_contains "$out" "beta-free" "audit should ignore available project slots"
   assert_grep "status in $(cd "$home/projects/alpha" && pwd -P)" "$calls" "audit should scan each project clone's pool"
+  # A non-repo directory under projects/ owns no pool of its own, so it must not
+  # cost a treehouse fork or report some enclosing repo's slots as its own.
+  assert_not_contains "$out" "notes-slot" "audit should not probe a non-repo directory under projects/"
+  assert_no_grep "status in $(cd "$home/projects/notes" && pwd -P)" "$calls" \
+    "audit should skip non-repo directories under projects/"
   assert_no_grep "return" "$calls" "project pool audit must not call treehouse return"
   assert_no_grep "prune" "$calls" "project pool audit must not call treehouse prune"
-  pass "bootstrap: dirty idle treehouse slot audit sweeps project pools, not just the firstmate pool"
+  pass "bootstrap: dirty idle treehouse slot audit sweeps project clone pools, skipping non-repo directories"
+}
+
+# The sweep forks `treehouse status` per clone on the always-executed detect path,
+# so one hung or lock-blocked pool must degrade to a partial, labelled report
+# instead of wedging session start.
+test_treehouse_dirty_idle_slot_audit_is_bounded() {
+  local case_dir root home fakebin by_dir root_slot out start elapsed
+  case_dir="$TMP_ROOT/treehouse-dirty-audit-timeout"
+  root="$case_dir/root"
+  home="$case_dir/home"
+  root_slot="$case_dir/root-dirty-slot"
+  mkdir -p "$root" "$home/config" "$root_slot"
+  git init -q -b main "$home/projects/hung"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  by_dir="$case_dir/status-by-dir"
+  mkdir -p "$by_dir"
+  printf '1     dirty        %s\n' "$root_slot" > "$by_dir/root"
+  printf 'FM_FAKE_TREEHOUSE_HANG\n' > "$by_dir/hung"
+
+  start=$(date +%s)
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_TREEHOUSE_AUDIT_TIMEOUT=2 \
+    FM_FAKE_TREEHOUSE_STATUS_BY_DIR="$by_dir" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  elapsed=$(( $(date +%s) - start ))
+
+  assert_contains "$out" "TREEHOUSE_POOL: dirty idle slot 1 at $root_slot" \
+    "a bounded audit must still relay the findings it completed"
+  assert_contains "$out" "TREEHOUSE_POOL: skipped: pool audit timed out (timeout=2s" \
+    "a hung pool must produce a labelled timeout skip line"
+  [ "$elapsed" -lt 20 ] || fail "bounded audit took ${elapsed}s; the hung pool was not cut off"
+  pass "bootstrap: the dirty idle treehouse slot audit is bounded and reports partial findings"
 }
 
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
@@ -909,6 +954,7 @@ test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
 test_treehouse_dirty_idle_slot_audit_reports_read_only
 test_treehouse_dirty_idle_slot_audit_sweeps_project_pools
+test_treehouse_dirty_idle_slot_audit_is_bounded
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins

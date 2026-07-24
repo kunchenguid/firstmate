@@ -79,6 +79,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
 | `fm-lock-lib.sh`         | Shared "is this git lock provably abandoned?" proof used by teardown and fleet-sync   |
+| `fm-pool-lib.sh`         | Shared treehouse-pool worktree-cleanliness predicates (a lone untracked `treehouse.toml` is clean) |
 | `fm-config-inherit-lib.sh` | Shared primary-to-secondmate inheritable-config propagation                        |
 | `fm-harness-launch-lib.sh` | Shared verified harness launch templates, profile flags, and turn-end hook installation |
 | `fm-capacity-lib.sh`    | Shared passive capacity classification, cooldown, and opposite-harness guard helpers |

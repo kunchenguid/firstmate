@@ -32,15 +32,6 @@ make_repo() {
   printf '%s\n' "$dir"
 }
 
-add_origin_remote() {
-  local repo=$1 remote=$2 remote_abs
-  git clone --quiet --bare "$repo" "$remote"
-  remote_abs=$(cd "$remote" && pwd)
-  git -C "$repo" remote add origin "file://$remote_abs"
-  git -C "$repo" fetch -q origin
-  git -C "$repo" remote set-head origin main >/dev/null
-}
-
 # --- shared lib: branch classification --------------------------------------
 
 # fm_primary_tangle_branch is the whole scoping decision: a NAMED non-default
@@ -199,7 +190,7 @@ test_spawn_isolation_abort() {
   home="$TMP_ROOT/spawn-home"
   mkdir -p "$home/data"
   proj=$(make_repo "$TMP_ROOT/spawn-proj")
-  add_origin_remote "$proj" "$TMP_ROOT/spawn-origin.git"
+  fm_git_add_origin_head "$proj" "$TMP_ROOT/spawn-origin.git"
   fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-fake")
   # A genuine isolated linked worktree of the project, detached on the default.
   git -C "$proj" worktree add -q --detach "$TMP_ROOT/spawn-wt" >/dev/null 2>&1
@@ -229,7 +220,7 @@ test_spawn_pool_lease_assertion() {
   home="$TMP_ROOT/spawn-lease-home"
   mkdir -p "$home/data"
   proj=$(make_repo "$TMP_ROOT/spawn-lease-proj")
-  add_origin_remote "$proj" "$TMP_ROOT/spawn-lease-origin.git"
+  fm_git_add_origin_head "$proj" "$TMP_ROOT/spawn-lease-origin.git"
   fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-lease-fake")
 
   clean_wt="$TMP_ROOT/spawn-lease-clean"
@@ -285,7 +276,7 @@ test_spawn_pool_lease_accepts_local_default_tips() {
 
   # Local-only landing: local main is ahead of origin/main and never pushed.
   proj=$(make_repo "$TMP_ROOT/spawn-ahead-proj")
-  add_origin_remote "$proj" "$TMP_ROOT/spawn-ahead-origin.git"
+  fm_git_add_origin_head "$proj" "$TMP_ROOT/spawn-ahead-origin.git"
   git -C "$proj" commit -q --allow-empty -m "locally merged local-only work"
   wt="$TMP_ROOT/spawn-ahead-wt"
   git -C "$proj" worktree add -q --detach "$wt" main >/dev/null 2>&1
@@ -301,6 +292,56 @@ test_spawn_pool_lease_accepts_local_default_tips() {
   assert_contains "$out" "refs/heads/main" "refusal should name every default tip it checked"
 
   pass "fm-spawn: lease ancestry accepts origin-less and locally-ahead default tips, still refuses leftover commits"
+}
+
+# The ancestry check resolves the default branch from refs/remotes/origin/HEAD,
+# which git only repairs during a fetch - and fm-fleet-sync.sh never fetches a
+# local-only or origin-less clone. A misresolved or unresolvable default must not
+# turn every dispatch for that project into a refusal that also strands a leased
+# pool slot on each retry.
+test_spawn_pool_lease_survives_unusable_default_resolution() {
+  local home proj fakebin wt out status old
+  home="$TMP_ROOT/spawn-defres-home"
+  mkdir -p "$home/data"
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-defres-fake")
+
+  # Stale origin/HEAD: the remote renamed master -> main, but this never-fetched
+  # clone still carries origin/master and points origin/HEAD at it. The pool slot
+  # is correctly based on the current main tip.
+  proj=$(make_repo "$TMP_ROOT/spawn-defres-proj")
+  fm_git_add_origin_head "$proj" "$TMP_ROOT/spawn-defres-origin.git"
+  old=$(git -C "$proj" rev-parse origin/main)
+  git -C "$proj" update-ref refs/remotes/origin/master "$old"
+  git -C "$proj" commit -q --allow-empty -m "work landed after the rename"
+  git -C "$proj" push -q origin main
+  git -C "$proj" remote set-head origin master >/dev/null
+  wt="$TMP_ROOT/spawn-defres-wt"
+  git -C "$proj" worktree add -q --detach "$wt" main >/dev/null 2>&1
+  out=$(run_spawn "$home" lease-staledef-nn4 "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 0 "$status" "a stale origin/HEAD must not block dispatch for the whole project"
+  assert_contains "$out" "spawned lease-staledef-nn4" "stale-origin/HEAD lease did not launch"
+
+  # No default tip at all: nothing to judge HEAD against, so the lease launches
+  # with a stated unchecked-ancestry warning rather than refusing every dispatch.
+  proj="$TMP_ROOT/spawn-nodef-proj"
+  git init -q -b trunk "$proj"
+  git -C "$proj" commit -q --allow-empty -m init
+  wt="$TMP_ROOT/spawn-nodef-wt"
+  git -C "$proj" worktree add -q --detach "$wt" trunk >/dev/null 2>&1
+  out=$(run_spawn "$home" lease-nodef-oo5 "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 0 "$status" "an unresolvable default branch must not refuse the launch"
+  assert_contains "$out" "spawned lease-nodef-oo5" "no-default-tip lease did not launch"
+  assert_contains "$out" "no default-branch tip" "no-default-tip launch should say what went unchecked"
+  assert_contains "$out" "remote set-head origin -a" "no-default-tip warning should name the repair"
+
+  # A dirty lease is still a hard refusal in the same unresolvable clone: the
+  # cleanliness guard never degrades with the ancestry one.
+  printf '%s\n' 'real dirt' > "$wt/real-dirt.txt"
+  out=$(run_spawn "$home" lease-nodef-dirty-pp6 "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 1 "$status" "a dirty lease must still be refused when the default is unresolvable"
+  assert_contains "$out" "yielded a dirty pool worktree" "dirty refusal should survive an unresolvable default"
+
+  pass "fm-spawn: lease ancestry degrades honestly for stale or unresolvable default-branch resolution"
 }
 
 # --- GUARD 1c: fm-spawn tmux window construction ----------------------------
@@ -359,7 +400,7 @@ test_spawn_tmux_window_construction() {
   home="$TMP_ROOT/spawn-rec-home"
   mkdir -p "$home/data"
   proj=$(make_repo "$TMP_ROOT/spawn-rec-proj")
-  add_origin_remote "$proj" "$TMP_ROOT/spawn-rec-origin.git"
+  fm_git_add_origin_head "$proj" "$TMP_ROOT/spawn-rec-origin.git"
   fakebin=$(make_spawn_record_fakebin "$TMP_ROOT/spawn-rec-fake")
   rec="$TMP_ROOT/spawn-rec.log"
   : > "$rec"
@@ -398,4 +439,5 @@ test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawn_pool_lease_assertion
 test_spawn_pool_lease_accepts_local_default_tips
+test_spawn_pool_lease_survives_unusable_default_resolution
 test_spawn_tmux_window_construction
