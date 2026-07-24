@@ -8,9 +8,9 @@
 # home lock. Ordinary shell commands, recovery commands, healthy supervision,
 # fleet-idle homes, and child worktrees are always allowed.
 #
-# The existing turn-end guard remains the unchanged final backstop. This gate
-# closes the long-turn gap before another fleet mutation, but does not replace or
-# weaken the Stop hook.
+# The turn-end guard remains the final backstop, cooperating with the
+# Stop-owned auto-arm in its --claude mode. This gate closes the long-turn gap
+# before another fleet mutation, but does not replace or weaken the Stop hooks.
 #
 # Input is Claude PreToolUse JSON on stdin. Tests may pass --command directly.
 # Malformed transport, missing jq/Node, a missing classifier, or classifier
@@ -105,7 +105,7 @@ case "$REASON_CODE" in
     REASON="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; during recovery only the ordinary literal bin/fm-teardown.sh is allowed, so drop --force and any shell-expanded arguments and retry the literal invocation (blocked: $BLOCKED_SCRIPT)"
     ;;
   *)
-    REASON="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; drain wakes with bin/fm-wake-drain.sh, use fail-closed bin/fm-teardown.sh for completed tasks when needed, then re-arm with bin/fm-watch-arm.sh as a tracked Claude background task before running other fleet commands (blocked: $BLOCKED_SCRIPT)"
+    REASON="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; drain wakes with bin/fm-wake-drain.sh, use fail-closed bin/fm-teardown.sh for completed tasks when needed, then end the turn so the Stop-owned auto-arm re-establishes the watcher; if the Stop auto-arm itself failed, re-arm manually with bin/fm-watch-arm.sh as a tracked Claude background task (blocked: $BLOCKED_SCRIPT)"
     ;;
 esac
 ESCAPED=$(printf '%s' "$REASON" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' ')

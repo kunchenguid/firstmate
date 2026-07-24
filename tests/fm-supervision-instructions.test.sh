@@ -14,7 +14,7 @@ test_selected_harness_block_only() {
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: codex" "codex heading missing"
   assert_contains "$out" "Mode: Codex foreground checkpoint." "codex snippet missing"
   assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex checkpoint helper missing"
-  assert_not_contains "$out" "Mode: Claude background-notify supervision." "renderer printed the claude snippet too"
+  assert_not_contains "$out" "Mode: Claude Stop-hook-owned supervision." "renderer printed the claude snippet too"
   assert_not_contains "$out" "Mode: Pi extension background wake." "renderer printed the pi snippet too"
   pass "renderer prints exactly the selected harness block"
 }
@@ -86,9 +86,10 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
 
   out=$("$RENDER" --harness claude)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
-  assert_contains "$ordinary" "re-arm" "claude ordinary-wake line does not tell the model to re-arm"
-  assert_contains "$ordinary" "Claude Code background task" "claude ordinary-wake line lost tracked background ownership"
-  assert_contains "$ordinary" "bin/fm-watch-arm.sh" "claude ordinary-wake line lost the background arm command"
+  assert_contains "$ordinary" "Stop-owned auto-arm" "claude ordinary-wake line does not leave continuity to the Stop hook"
+  assert_contains "$ordinary" "bin/fm-claude-stop-autoarm.sh" "claude ordinary-wake line lost the auto-arm script name"
+  assert_contains "$ordinary" "do not arm another cycle" "claude ordinary-wake line does not forbid a model re-arm"
+  assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "claude ordinary-wake line incorrectly calls the manual arm"
   out=$("$RENDER" --harness claude --repair-line)
   assert_contains "$out" "Claude Code background task" "claude recovery line lost its tracked background repair"
   assert_contains "$out" "bin/fm-watch-arm.sh" "claude recovery line lost the arm command"

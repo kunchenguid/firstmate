@@ -41,7 +41,7 @@ expect_deny() {
   [ ! -s "$OUT" ] || fail "$label deny wrote stdout: $(cat "$OUT")"
   jq -e '.hookSpecificOutput.hookEventName == "PreToolUse" and .hookSpecificOutput.permissionDecision == "deny"' "$ERR" >/dev/null 2>&1 \
     || fail "$label deny omitted Claude's permission decision: $(cat "$ERR")"
-  [ -n "$expected" ] || expected="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; drain wakes with bin/fm-wake-drain.sh, use fail-closed bin/fm-teardown.sh for completed tasks when needed, then re-arm with bin/fm-watch-arm.sh as a tracked Claude background task before running other fleet commands (blocked: $blocked)"
+  [ -n "$expected" ] || expected="[watcher-continuity] tasks are in flight and no live watcher holds this home lock; drain wakes with bin/fm-wake-drain.sh, use fail-closed bin/fm-teardown.sh for completed tasks when needed, then end the turn so the Stop-owned auto-arm re-establishes the watcher; if the Stop auto-arm itself failed, re-arm manually with bin/fm-watch-arm.sh as a tracked Claude background task (blocked: $blocked)"
   actual=$(jq -r '.systemMessage' "$ERR")
   [ "$actual" = "$expected" ] || fail "$label recovery guidance changed: $actual"
 }
@@ -114,9 +114,12 @@ test_claude_hook_registration_preserves_stop_backstop() {
       | any(contains("fm-continuity-pretool-check.sh"))
   ' "$ROOT/.claude/settings.json" >/dev/null || fail "Claude settings omit the continuity PreToolUse hook"
   jq -e '
-    .hooks.Stop == [{"hooks":[{"type":"command","command":"\"$CLAUDE_PROJECT_DIR\"/bin/fm-turnend-guard.sh"}]}]
-  ' "$ROOT/.claude/settings.json" >/dev/null || fail "Claude Stop turn-end backstop changed"
-  pass "Claude wires the continuity gate while preserving the existing Stop backstop byte-for-byte"
+    .hooks.Stop == [{"hooks":[
+      {"type":"command","command":"\"$CLAUDE_PROJECT_DIR\"/bin/fm-turnend-guard.sh --claude"},
+      {"type":"command","command":"\"$CLAUDE_PROJECT_DIR\"/bin/fm-claude-stop-autoarm.sh","asyncRewake":true,"timeout":28800}
+    ]}]
+  ' "$ROOT/.claude/settings.json" >/dev/null || fail "Claude Stop registration changed: the --claude guard and the asyncRewake auto-arm with an explicit multi-hour timeout must both stay registered"
+  pass "Claude wires the continuity gate, the --claude Stop backstop, and the Stop-owned auto-arm registration"
 }
 
 test_gate_scope_and_recovery_exceptions

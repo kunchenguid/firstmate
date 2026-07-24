@@ -32,8 +32,7 @@ trap cleanup EXIT
 mkdir -p "$LAB"
 git clone -q "$ROOT" "$PROJECT"
 cp "$ROOT/.claude/settings.json" "$PROJECT/.claude/settings.json"
-cp "$ROOT/bin/fm-continuity-pretool-check.sh" "$PROJECT/bin/fm-continuity-pretool-check.sh"
-cp "$ROOT/bin/fm-continuity-command-policy.mjs" "$PROJECT/bin/fm-continuity-command-policy.mjs"
+cp -R "$ROOT/bin/." "$PROJECT/bin/"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config"
 printf 'project=fixture\n' > "$HOME_DIR/state/claude-e2e.meta"
 
@@ -68,7 +67,7 @@ PROMPT='Use Bash with run_in_background=true to run exactly `bin/fm-watch-arm.sh
 [ -f "$HOME_DIR/state/claude-arm-ran" ] || fail "Claude did not run the tracked background arm fixture"
 [ -f "$HOME_DIR/state/claude-drain-ran" ] || fail "Claude continuity gate blocked the allowed wake drain"
 [ ! -f "$HOME_DIR/state/claude-forbidden-ran" ] || fail "Claude continuity gate allowed an unrelated fleet command"
-GUIDANCE='[watcher-continuity] tasks are in flight and no live watcher holds this home lock; drain wakes with bin/fm-wake-drain.sh, use fail-closed bin/fm-teardown.sh for completed tasks when needed, then re-arm with bin/fm-watch-arm.sh as a tracked Claude background task before running other fleet commands (blocked: fm-crew-state.sh)'
+GUIDANCE='[watcher-continuity] tasks are in flight and no live watcher holds this home lock; drain wakes with bin/fm-wake-drain.sh, use fail-closed bin/fm-teardown.sh for completed tasks when needed, then end the turn so the Stop-owned auto-arm re-establishes the watcher; if the Stop auto-arm itself failed, re-arm manually with bin/fm-watch-arm.sh as a tracked Claude background task (blocked: fm-crew-state.sh)'
 grep -F "$GUIDANCE" "$TRANSCRIPT" >/dev/null || fail "Claude transcript omitted the exact continuity recovery guidance"
 
 printf 'ok - Claude %s live E2E refused only the post-completion fleet command with exact re-arm guidance\n' "$CLAUDE_VERSION"
