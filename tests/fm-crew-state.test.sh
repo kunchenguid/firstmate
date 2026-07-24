@@ -283,6 +283,31 @@ outcome: failed
 EOF
 }
 
+run_checks_passed() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/2"
+  findings: none
+outcome: checks-passed
+EOF
+}
+
+run_completed_without_outcome() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/2"
+  findings: none
+EOF
+}
+
 run_ci_monitoring() {  # <branch>
   cat <<EOF
 run:
@@ -433,7 +458,7 @@ test_gate_block_parked_not_superseded() {
   pass "gate block parked run is not flagged superseded"
 }
 
-test_ci_ready_done_log_beats_monitoring_run() {
+test_post_publication_done_log_completes_monitoring_run() {
   reset_fakes
   local d; d=$(new_case ci-ready)
   make_repo_on_branch "$d/wt" fm/feat-ci
@@ -446,15 +471,58 @@ test_ci_ready_done_log_beats_monitoring_run() {
   assert_contains "$out" "source: status-log" "ci-ready state comes from the status log"
   assert_contains "$out" "checks green" "ci-ready detail preserves the report"
   assert_not_contains "$out" "state: working" "ci-ready is not hidden by monitoring run"
-  pass "ci-ready status log beats monitoring run"
+  pass "post-publication done status completes the monitoring run"
 }
 
-# Regression for the PR #252 incident: the crew's own status log never got a
-# "done: ... checks green" line (log_reports_ci_ready above does not apply),
-# but the ci step's log tail shows CI is actually green and only waiting on
-# merge/close. fm-crew-state must surface this as done, not "validating
-# (running)", so a green PR is never silently absorbed as still-in-progress.
-test_ci_monitoring_checks_green_surfaces_done() {
+# CI green is only the validation boundary. The worker remains responsible for
+# the brief-mandated publication attestation and reports completion with the
+# explicit done status covered above.
+test_checks_passed_outcome_stays_working_until_publication() {
+  reset_fakes
+  local d; d=$(new_case checks-passed)
+  make_repo_on_branch "$d/wt" fm/feat-checkspassed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-checkspassed.meta" "window=fm:fm-feat-checkspassed" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-checkspassed)"
+  local out; out=$(run_crew_state "$d" feat-checkspassed)
+  assert_contains "$out" "state: working" "checks-passed outcome -> working"
+  assert_contains "$out" "source: run-step" "checks-passed outcome -> run-step source"
+  assert_contains "$out" "checks green: publication attestation pending" "checks-passed names the pending lifecycle step"
+  assert_not_contains "$out" "state: done" "checks-passed alone must not complete the task"
+  assert_not_contains "$out" "PR ready for review" "checks-passed alone must not claim review readiness"
+  pass "checks-passed waits for publication attestation"
+}
+
+test_checks_passed_with_post_publication_done_completes() {
+  reset_fakes
+  local d; d=$(new_case checks-passed-published)
+  make_repo_on_branch "$d/wt" fm/feat-checkspassed-published
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-checkspassed-published.meta" "window=fm:fm-feat-checkspassed-published" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-checkspassed-published.status"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-checkspassed-published)"
+  local out; out=$(run_crew_state "$d" feat-checkspassed-published)
+  assert_contains "$out" "state: done" "post-publication done status -> done"
+  assert_contains "$out" "source: status-log" "post-publication completion remains owner reported"
+  assert_contains "$out" "checks green" "post-publication completion preserves the owner report"
+  pass "explicit post-publication completion overrides checks-passed"
+}
+
+test_completed_without_outcome_stays_working() {
+  reset_fakes
+  local d; d=$(new_case completed-no-outcome)
+  make_repo_on_branch "$d/wt" fm/feat-completed-no-outcome
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-completed-no-outcome.meta" "window=fm:fm-feat-completed-no-outcome" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_completed_without_outcome fm/feat-completed-no-outcome)"
+  local out; out=$(run_crew_state "$d" feat-completed-no-outcome)
+  assert_contains "$out" "state: working" "completed run without exact outcome -> working"
+  assert_contains "$out" "exact outcome and publication status pending" "ambiguous completed run names missing lifecycle truth"
+  assert_not_contains "$out" "state: done" "completed run without exact outcome must not complete the task"
+  pass "completed run without exact outcome fails closed"
+}
+
+test_ci_monitoring_checks_green_stays_working_until_publication() {
   reset_fakes
   local d; d=$(new_case ci-green)
   make_repo_on_branch "$d/wt" fm/feat-cigreen
@@ -468,14 +536,15 @@ all CI checks passed - still monitoring until merged or closed
 EOF
 )
   local out; out=$(run_crew_state "$d" feat-cigreen)
-  assert_contains "$out" "state: done" "green ci-monitor run -> done"
+  assert_contains "$out" "state: working" "green ci-monitor run -> working"
   assert_contains "$out" "source: run-step" "green ci-monitor -> run-step source"
-  assert_contains "$out" "checks green" "green ci-monitor detail mentions checks green"
-  assert_not_contains "$out" "state: working" "green ci-monitor must not read as still validating"
-  pass "ci-monitoring run with checks already green surfaces done"
+  assert_contains "$out" "checks green: publication attestation pending" "green ci-monitor names the pending lifecycle step"
+  assert_not_contains "$out" "state: done" "green ci-monitor alone must not complete the task"
+  assert_not_contains "$out" "PR ready for review" "green ci-monitor alone must not claim review readiness"
+  pass "ci-monitoring green waits for publication attestation"
 }
 
-test_top_level_ci_checks_green_surfaces_done() {
+test_top_level_ci_checks_green_stays_working_until_publication() {
   reset_fakes
   local d; d=$(new_case top-level-ci-green)
   make_repo_on_branch "$d/wt" fm/feat-topcigreen
@@ -484,14 +553,14 @@ test_top_level_ci_checks_green_surfaces_done() {
   FM_FAKE_AXI_STATUS="$(run_top_level_ci fm/feat-topcigreen)"
   FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-topcigreen)
-  assert_contains "$out" "state: done" "top-level ci with green log -> done"
+  assert_contains "$out" "state: working" "top-level ci with green log -> working"
   assert_contains "$out" "source: run-step" "top-level ci green -> run-step source"
-  assert_contains "$out" "checks green" "top-level ci green detail mentions checks green"
-  assert_not_contains "$out" "state: working" "top-level ci green must not stay working"
-  pass "top-level ci status uses ci log green marker"
+  assert_contains "$out" "checks green: publication attestation pending" "top-level ci green names the pending lifecycle step"
+  assert_not_contains "$out" "state: done" "top-level ci green alone must not complete the task"
+  pass "top-level ci green waits for publication attestation"
 }
 
-test_ci_monitoring_no_checks_terminal_surfaces_done() {
+test_ci_monitoring_no_checks_stays_working_until_publication() {
   reset_fakes
   local d; d=$(new_case ci-nochecks)
   make_repo_on_branch "$d/wt" fm/feat-cinochecks
@@ -500,9 +569,10 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks)"
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-cinochecks)
-  assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
-  assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
-  pass "terminal no-checks ci-monitor marker surfaces done"
+  assert_contains "$out" "state: working" "terminal no-checks ci-monitor run -> working"
+  assert_contains "$out" "checks green: publication attestation pending" "terminal no-checks marker names the pending lifecycle step"
+  assert_not_contains "$out" "state: done" "terminal no-checks marker alone must not complete the task"
+  pass "terminal no-checks marker waits for publication attestation"
 }
 
 test_ci_monitoring_green_then_rearm_stays_working() {
@@ -728,6 +798,22 @@ EOF
   assert_contains "$out" "state: working" "most recent (running) row wins over an older completed row"
   assert_contains "$out" "source: run-step" "most-recent-row resolution -> run-step source"
   pass "cross-branch attribution picks the branch's most recent row"
+}
+
+test_coarse_completed_run_stays_working_without_owner_done() {
+  reset_fakes
+  local d short; d=$(new_case coarse-completed)
+  make_repo_on_branch "$d/wt" fm/feat-coarse-completed
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-coarse-completed.meta" "window=fm:fm-feat-coarse-completed" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="  completed  fm/feat-coarse-completed ${short}  2026-07-02 22:05  https://github.com/o/r/pull/2"
+  local out; out=$(run_crew_state "$d" feat-coarse-completed)
+  assert_contains "$out" "state: working" "coarse completed run without owner done -> working"
+  assert_contains "$out" "exact outcome and publication status pending" "coarse completed run names missing lifecycle truth"
+  assert_not_contains "$out" "state: done" "coarse completed run must not infer completion"
+  pass "coarse completed run fails closed without owner completion"
 }
 
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
@@ -1018,6 +1104,38 @@ test_dead_window_still_reports_active_run_step() {
   pass "closed pane still reports an active run-step"
 }
 
+test_dead_window_checks_green_still_waits_for_publication() {
+  reset_fakes
+  local d; d=$(new_case dead-window-publication-pending)
+  make_repo_on_branch "$d/wt" fm/feat-dead-pending
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dead-pending.meta" "window=fm:fm-feat-dead-pending" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-dead-pending)"
+  FM_FAKE_TMUX_MISSING=1
+  local out; out=$(run_crew_state "$d" feat-dead-pending)
+  assert_contains "$out" "state: working" "closed pane with checks-passed remains publication-pending"
+  assert_contains "$out" "source: run-step" "closed pane does not mask publication-pending run state"
+  assert_contains "$out" "checks green: publication attestation pending" "closed pane preserves the pending lifecycle detail"
+  assert_not_contains "$out" "state: done" "closed pane cannot turn checks-passed into completion"
+  pass "closed pane preserves publication-pending state"
+}
+
+test_dead_window_post_publication_done_still_completes() {
+  reset_fakes
+  local d; d=$(new_case dead-window-published)
+  make_repo_on_branch "$d/wt" fm/feat-dead-published
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dead-published.meta" "window=fm:fm-feat-dead-published" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-dead-published.status"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-dead-published)"
+  FM_FAKE_TMUX_MISSING=1
+  local out; out=$(run_crew_state "$d" feat-dead-published)
+  assert_contains "$out" "state: done" "closed pane preserves explicit post-publication completion"
+  assert_contains "$out" "source: status-log" "closed pane completion remains owner reported"
+  assert_not_contains "$out" "state: unknown" "closed pane with an attributable run remains known"
+  pass "closed pane preserves post-publication completion"
+}
+
 test_no_timeout_uses_perl_bound() {
   reset_fakes
   local d toolbin out start elapsed calls_file calls
@@ -1238,10 +1356,13 @@ test_stale_blocked_superseded
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
-test_ci_ready_done_log_beats_monitoring_run
-test_ci_monitoring_checks_green_surfaces_done
-test_top_level_ci_checks_green_surfaces_done
-test_ci_monitoring_no_checks_terminal_surfaces_done
+test_post_publication_done_log_completes_monitoring_run
+test_checks_passed_outcome_stays_working_until_publication
+test_checks_passed_with_post_publication_done_completes
+test_completed_without_outcome_stays_working
+test_ci_monitoring_checks_green_stays_working_until_publication
+test_top_level_ci_checks_green_stays_working_until_publication
+test_ci_monitoring_no_checks_stays_working_until_publication
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
@@ -1254,6 +1375,7 @@ test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
+test_coarse_completed_run_stays_working_without_owner_done
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
@@ -1268,6 +1390,8 @@ test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
+test_dead_window_checks_green_still_waits_for_publication
+test_dead_window_post_publication_done_still_completes
 test_no_timeout_uses_perl_bound
 test_scout_skips_run_lookup
 test_torn_down_worktree
