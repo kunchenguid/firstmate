@@ -130,7 +130,7 @@ if [ -n "$tangle_branch" ]; then
     printf '●  A crewmate likely branched/committed in the primary instead of its own worktree.\n'
     printf "●  The work is SAFE on the '%s' ref.\n" "$tangle_branch"
     if [ "$READ_ONLY" -eq 1 ]; then
-      printf '●  This read-only session must leave restore work to the session holding the fleet lock.\n'
+      printf '●  This read-only session must leave restore work to a session with verified fleet-lock ownership.\n'
     else
       printf "●  Restore the primary to '%s':\n" "$tangle_default"
       printf '●      git -C %s checkout %s\n' "$FM_ROOT" "$tangle_default"
@@ -212,7 +212,7 @@ fi
 # Dedup of the watcher-down banner never suppresses this warning.
 if "$queue_pending"; then
   if [ "$READ_ONLY" -eq 1 ]; then
-    echo "WARNING: queued wakes pending - left untouched for the session holding the fleet lock." >&2
+    echo "WARNING: queued wakes pending - left untouched because this session lacks verified fleet-lock ownership." >&2
   else
     echo "WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else." >&2
   fi
