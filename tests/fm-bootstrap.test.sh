@@ -703,6 +703,33 @@ test_treehouse_dirty_idle_slot_audit_is_bounded() {
   pass "bootstrap: the dirty idle treehouse slot audit is bounded and reports partial findings"
 }
 
+# A zero bound is the operator turning this advisory sweep off. It must go quiet,
+# not kill the sweep before it reads anything and then print a TREEHOUSE_POOL
+# timeout line - an actionable diagnostic - on every session start forever.
+test_treehouse_dirty_idle_slot_audit_zero_timeout_disables_it() {
+  local case_dir root home fakebin status_file calls dirty_slot out
+  case_dir="$TMP_ROOT/treehouse-dirty-audit-off"
+  root="$case_dir/root"
+  home="$case_dir/home"
+  dirty_slot="$case_dir/dirty-slot"
+  mkdir -p "$root" "$home/config" "$dirty_slot"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  status_file="$case_dir/treehouse-status.txt"
+  calls="$case_dir/treehouse-calls.txt"
+  printf '1     dirty        %s\n' "$dirty_slot" > "$status_file"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_TREEHOUSE_AUDIT_TIMEOUT=0 \
+    FM_FAKE_TREEHOUSE_STATUS_FILE="$status_file" FM_FAKE_TREEHOUSE_CALLS="$calls" \
+    "$ROOT/bin/fm-bootstrap.sh")
+
+  assert_not_contains "$out" "TREEHOUSE_POOL:" "a zero audit bound must print no pool diagnostic at all"
+  assert_no_grep "status in " "$calls" "a disabled audit must not fork treehouse status"
+  pass "bootstrap: FM_TREEHOUSE_AUDIT_TIMEOUT=0 turns the pool audit off silently"
+}
+
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   local case_dir home fakebin fake_root out
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
@@ -955,6 +982,7 @@ test_treehouse_lease_check_follows_resolved_backend
 test_treehouse_dirty_idle_slot_audit_reports_read_only
 test_treehouse_dirty_idle_slot_audit_sweeps_project_pools
 test_treehouse_dirty_idle_slot_audit_is_bounded
+test_treehouse_dirty_idle_slot_audit_zero_timeout_disables_it
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins

@@ -84,6 +84,8 @@
 #          a timed-out sweep relays its completed findings and then prints
 #          "TREEHOUSE_POOL: skipped: pool audit timed out (timeout=<n>s
 #          elapsed=<n>s)" rather than wedging session start.
+#          FM_TREEHOUSE_AUDIT_TIMEOUT=0 turns this advisory sweep off entirely
+#          and prints nothing, rather than timing it out on every session start.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
 #          x_mode_setup, intake_mode_setup, fleet_sync) while still printing
@@ -164,24 +166,33 @@ fleet_sync_relay_filtered_output() {
   done < "$tmp"
 }
 
-fleet_sync_relay_all_output() {
-  local tmp=$1 line
+# Relay every non-empty line a bounded sweep produced, optionally prefixed with
+# the sweep's diagnostic tag.
+bootstrap_relay_all_output() {  # <tmp> [<prefix>]
+  local tmp=$1 prefix=${2-} line
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    echo "FLEET_SYNC: $line"
+    printf '%s\n' "$prefix$line"
   done < "$tmp"
 }
 
-fleet_sync() {
-  [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
-  [ -d "$PROJECTS" ] || return 0
+# Run <cmd...> as one bounded background job with its output captured in <tmp>.
+# Both per-project sweeps on this always-executed detect path need the same
+# shape - job control so a hung child's whole process group is cut off, a poll
+# that never blocks past the bound, and an elapsed count for the caller's own
+# skip line - so keep it in one place and let a fix to the group kill or the
+# monitor-mode restore land for both.
+# Returns 0 when the job finished on its own, 1 when the bound was hit;
+# BOOTSTRAP_BOUNDED_ELAPSED carries the elapsed seconds either way.
+BOOTSTRAP_BOUNDED_ELAPSED=0
 
-  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-fleet-sync.XXXXXX" 2>/dev/null) || return 0
-  timeout=$(fleet_sync_bootstrap_timeout)
-  monitor_was_on=0
+bootstrap_run_bounded() {  # <tmp> <timeout-seconds> <poll-seconds> <cmd...>
+  local tmp=$1 timeout=$2 poll=$3
+  shift 3
+  local monitor_was_on=0 pid start elapsed
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
-  "$FM_ROOT/bin/fm-fleet-sync.sh" >"$tmp" 2>/dev/null &
+  "$@" >"$tmp" 2>/dev/null &
   pid=$!
 
   start=$SECONDS
@@ -191,29 +202,36 @@ fleet_sync() {
       kill -TERM "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
       [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
-      fleet_sync_relay_all_output "$tmp"
-      echo "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=${timeout}s elapsed=${elapsed}s)"
-      rm -f "$tmp"
-      return 0
+      BOOTSTRAP_BOUNDED_ELAPSED=$elapsed
+      return 1
     fi
-    sleep 1
+    sleep "$poll" 2>/dev/null || sleep 1
   done
   wait "$pid" 2>/dev/null || true
   [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+  BOOTSTRAP_BOUNDED_ELAPSED=$((SECONDS - start))
+  return 0
+}
+
+fleet_sync() {
+  [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
+  [ -d "$PROJECTS" ] || return 0
+
+  local tmp timeout
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-fleet-sync.XXXXXX" 2>/dev/null) || return 0
+  timeout=$(fleet_sync_bootstrap_timeout)
+  if ! bootstrap_run_bounded "$tmp" "$timeout" 1 "$FM_ROOT/bin/fm-fleet-sync.sh"; then
+    bootstrap_relay_all_output "$tmp" "FLEET_SYNC: "
+    echo "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=${timeout}s elapsed=${BOOTSTRAP_BOUNDED_ELAPSED}s)"
+    rm -f "$tmp"
+    return 0
+  fi
 
   fleet_sync_relay_filtered_output "$tmp"
   rm -f "$tmp"
 }
 
 TREEHOUSE_AUDIT_SEEN_SLOTS=""
-
-treehouse_audit_relay() {
-  local tmp=$1 line
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    printf '%s\n' "$line"
-  done < "$tmp"
-}
 
 treehouse_pool_dirty_idle_scan() {  # <repo>
   local repo=$1 out line slot state path rest
@@ -277,33 +295,23 @@ treehouse_dirty_idle_slot_audit() {
   # Bound it the same way fleet_sync is bounded: run it as one background job,
   # relay whatever it completed, and say so when the bound was hit. A missing
   # TREEHOUSE_POOL line is far cheaper than a stalled session start.
-  local tmp timeout monitor_was_on pid start elapsed
-  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-treehouse-audit.XXXXXX" 2>/dev/null) || return 0
+  local tmp timeout
   timeout=$(treehouse_audit_timeout)
-  monitor_was_on=0
-  case $- in *m*) monitor_was_on=1 ;; esac
-  set -m 2>/dev/null || true
-  treehouse_audit_scan_pools >"$tmp" 2>/dev/null &
-  pid=$!
+  # A zero bound would kill the sweep before it could read anything and then
+  # print a timed-out TREEHOUSE_POOL line - an actionable diagnostic - on every
+  # session start forever. Read it as the opt-out it plainly is: this advisory
+  # sweep is the one thing here with no bound worth reporting, so skip it and
+  # stay silent instead of raising a permanent false alarm.
+  [ "$timeout" -gt 0 ] || return 0
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-treehouse-audit.XXXXXX" 2>/dev/null) || return 0
+  if ! bootstrap_run_bounded "$tmp" "$timeout" 0.2 treehouse_audit_scan_pools; then
+    bootstrap_relay_all_output "$tmp"
+    echo "TREEHOUSE_POOL: skipped: pool audit timed out (timeout=${timeout}s elapsed=${BOOTSTRAP_BOUNDED_ELAPSED}s)"
+    rm -f "$tmp"
+    return 0
+  fi
 
-  start=$SECONDS
-  while jobs -r -p | grep -qx "$pid"; do
-    elapsed=$((SECONDS - start))
-    if [ "$elapsed" -ge "$timeout" ]; then
-      kill -TERM "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
-      [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
-      treehouse_audit_relay "$tmp"
-      echo "TREEHOUSE_POOL: skipped: pool audit timed out (timeout=${timeout}s elapsed=${elapsed}s)"
-      rm -f "$tmp"
-      return 0
-    fi
-    sleep 0.2 2>/dev/null || sleep 1
-  done
-  wait "$pid" 2>/dev/null || true
-  [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
-
-  treehouse_audit_relay "$tmp"
+  bootstrap_relay_all_output "$tmp"
   rm -f "$tmp"
 }
 

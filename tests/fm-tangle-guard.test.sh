@@ -321,16 +321,40 @@ test_spawn_pool_lease_survives_unusable_default_resolution() {
   expect_code 0 "$status" "a stale origin/HEAD must not block dispatch for the whole project"
   assert_contains "$out" "spawned lease-staledef-nn4" "stale-origin/HEAD lease did not launch"
 
-  # No default tip at all: nothing to judge HEAD against, so the lease launches
-  # with a stated unchecked-ancestry warning rather than refusing every dispatch.
+  # Neither origin/HEAD nor a conventional name resolves, but the backing clone
+  # is sitting on its own trunk: that branch is the last-resort candidate, so the
+  # ancestry check stays ON instead of degrading to a warning...
   proj="$TMP_ROOT/spawn-nodef-proj"
   git init -q -b trunk "$proj"
   git -C "$proj" commit -q --allow-empty -m init
   wt="$TMP_ROOT/spawn-nodef-wt"
   git -C "$proj" worktree add -q --detach "$wt" trunk >/dev/null 2>&1
   out=$(run_spawn "$home" lease-nodef-oo5 "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 0 "$status" "an origin-less clone on a non-conventional trunk must still launch"
+  assert_contains "$out" "spawned lease-nodef-oo5" "trunk-only lease did not launch"
+  assert_not_contains "$out" "no default-branch tip" "the backing clone's own branch should resolve a default tip"
+
+  # ...and that resolved trunk is a real base, so leftover work is still refused
+  # instead of riding along on a disabled check.
+  git -C "$wt" commit -q --allow-empty -m "leftover work from a previous task"
+  out=$(run_spawn "$home" lease-trunkstale-qq7 "$proj" "$wt" "$fakebin"); status=$?
+  expect_code 1 "$status" "a HEAD the clone's own trunk does not contain must still be refused"
+  assert_contains "$out" "refs/heads/trunk" "the refusal should name the trunk it judged HEAD against"
+
+  # No default evidence at all - no origin, no main or master, and the clone is
+  # not even on a branch - leaves nothing to judge HEAD against, so the lease
+  # launches with a stated unchecked-ancestry warning rather than refusing every
+  # dispatch for the project.
+  proj="$TMP_ROOT/spawn-nobase-proj"
+  git init -q -b trunk "$proj"
+  git -C "$proj" commit -q --allow-empty -m init
+  wt="$TMP_ROOT/spawn-nobase-wt"
+  git -C "$proj" worktree add -q --detach "$wt" trunk >/dev/null 2>&1
+  git -C "$proj" checkout -q --detach
+  git -C "$proj" branch -q -D trunk
+  out=$(run_spawn "$home" lease-nobase-rr8 "$proj" "$wt" "$fakebin"); status=$?
   expect_code 0 "$status" "an unresolvable default branch must not refuse the launch"
-  assert_contains "$out" "spawned lease-nodef-oo5" "no-default-tip lease did not launch"
+  assert_contains "$out" "spawned lease-nobase-rr8" "no-default-tip lease did not launch"
   assert_contains "$out" "no default-branch tip" "no-default-tip launch should say what went unchecked"
   assert_contains "$out" "remote set-head origin -a" "no-default-tip warning should name the repair"
 

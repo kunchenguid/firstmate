@@ -981,11 +981,21 @@ refuse_spawn_pool_lease() {  # <detail> <inspect-target>
 # remote that renamed master to main leaves that symbolic ref naming a branch
 # this clone's pool slots are no longer based on. Probing the conventional
 # default names alongside the resolved one keeps one stale symbolic ref from
-# turning every dispatch for that project into a refusal, without admitting task
-# branches as valid bases.
-spawn_pool_default_candidates() {  # <worktree>
-  local wt=$1 resolved name out=
+# turning every dispatch for that project into a refusal, without admitting a
+# task branch as a valid base while a default is still resolvable.
+spawn_pool_default_candidates() {  # <worktree> <backing-clone>
+  local wt=$1 proj=$2 resolved name out=
   resolved=$(default_branch "$wt" 2>/dev/null || true)
+  if [ -z "$resolved" ]; then
+    # Nothing named a default: no origin/HEAD, and neither conventional name
+    # exists locally either. The backing clone's own checked-out branch is the
+    # best remaining evidence of the trunk this project's slots are cut from
+    # (bin/fm-fleet-sync.sh parks a clone on its default), so an origin-less repo
+    # on a non-conventional trunk keeps a real ancestry base instead of losing
+    # the check entirely. Last resort only, so it can never widen the accepted
+    # bases for a clone whose default did resolve.
+    resolved=$(git -C "$proj" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  fi
   for name in "$resolved" main master; do
     [ -n "$name" ] || continue
     case " $out " in
@@ -1012,7 +1022,7 @@ validate_spawn_pool_lease() {  # <source> <inspect-target>
   # on. Accept a HEAD that is an ancestor of any of those tips, and refuse only
   # when it is an ancestor of none of the tips that exist.
   bases=
-  for name in $(spawn_pool_default_candidates "$WT"); do
+  for name in $(spawn_pool_default_candidates "$WT" "$PROJ_ABS"); do
     for base in "origin/$name" "refs/heads/$name"; do
       git -C "$WT" rev-parse --verify --quiet "$base^{commit}" >/dev/null || continue
       bases="${bases:+$bases and }$base"
@@ -1025,7 +1035,7 @@ validate_spawn_pool_lease() {  # <source> <inspect-target>
     # benign skip, and refusing every dispatch for the project would add a
     # self-inflicted outage on top of an already-unusual clone. The cleanliness
     # check above still ran and passed, so say what went unchecked and launch.
-    echo "warning: $source yielded a pool worktree with no default-branch tip (no origin/ or local main, master, or resolved default); launching without the lease ancestry check. Repair it with: git -C $WT remote set-head origin -a" >&2
+    echo "warning: $source yielded a pool worktree with no default-branch tip (no origin/ or local main, master, resolved default, or backing-clone branch); launching without the lease ancestry check. Repair it with: git -C $WT remote set-head origin -a" >&2
     return 0
   fi
   head_short=$(git -C "$WT" rev-parse --short HEAD 2>/dev/null || printf unknown)

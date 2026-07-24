@@ -247,8 +247,9 @@ prune_gone_branches() {
 }
 
 # True when some worktree of $PROJ has $DEFAULT checked out (so we cannot attach
-# to it here). The current worktree is detached when this is consulted, so any
-# match is necessarily another worktree.
+# to it here). Every caller consults this only once THIS worktree is known not to
+# be on $DEFAULT - detached, or on some other named branch - so any match is
+# necessarily another worktree.
 default_checked_out_elsewhere() {
   git -C "$PROJ" worktree list --porcelain 2>/dev/null \
     | sed -n 's#^branch refs/heads/##p' \
