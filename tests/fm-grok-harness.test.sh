@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behavior tests for Grok-harness hook authentication, teardown cleanup, and session-lock holder detection.
+# Behavior tests for Grok-harness busy detection, hook authentication, teardown cleanup, and session-lock holder detection.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -8,6 +8,32 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-grok-harness)
+
+test_grok_busy_signature_matches_current_footer() {
+  local regex
+  # shellcheck source=bin/fm-tmux-lib.sh
+  . "$ROOT/bin/fm-tmux-lib.sh"
+  regex=$FM_TMUX_BUSY_REGEX_DEFAULT
+  printf '%s\n' 'Shift+Tab:mode  │  Esc:cancel  │  Ctrl+x:shortcuts' \
+    | grep -qiE "$regex" \
+    || fail "grok 0.2.111 busy footer did not match the shared busy regex"
+  if printf '%s\n' 'Shift+Tab:mode  │  Ctrl+x:shortcuts' | grep -qiE "$regex"; then
+    fail "grok 0.2.111 idle footer matched the shared busy regex"
+  fi
+  assert_grep "Esc:cancel" "$ROOT/bin/fm-watch.sh" \
+    "watcher busy regex drifted from the shared grok footer signature"
+  (
+    tmux() { printf '%s\n' 'Shift+Tab:mode  │  Esc:cancel  │  Ctrl+x:shortcuts'; }
+    fm_pane_is_busy grok-pane
+  ) || fail "shared tmux pane classifier did not recognize grok 0.2.111 as busy"
+  if (
+    tmux() { printf '%s\n' 'Shift+Tab:mode  │  Ctrl+x:shortcuts'; }
+    fm_pane_is_busy grok-pane
+  ); then
+    fail "shared tmux pane classifier treated grok 0.2.111 idle footer as busy"
+  fi
+  pass "grok 0.2.111 Esc:cancel footer distinguishes busy from idle"
+}
 
 make_spawn_fakebin() {
   local dir=$1 fakebin
@@ -137,6 +163,7 @@ SH
   pass "fm-lock recognizes grok harness processes"
 }
 
+test_grok_busy_signature_matches_current_footer
 test_grok_hook_requires_registered_token
 test_grok_teardown_removes_pointer_and_token
 test_fm_lock_recognizes_grok_holder
