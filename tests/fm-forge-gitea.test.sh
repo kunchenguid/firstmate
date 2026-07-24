@@ -91,15 +91,21 @@ case "$scenario" in
         elif [ "$scenario" = reflected-review ]; then
           body='[{"id":1,"state":"APPROVED","user":{"login":"fixture-secret-token-ABC123"},"commit_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]'
         elif [ "$scenario" = paginated-reviews ] && [ "$page" -eq 1 ]; then
-          body=$(jq -cn '[range(1; 51) | {id:.,state:"APPROVED",user:{login:"reviewer"},commit_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]')
-        elif [ "$scenario" = paginated-reviews ]; then
+          body=$(jq -cn '[range(1; 21) | {id:.,state:"APPROVED",user:{login:"reviewer"},commit_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]')
+        elif [ "$scenario" = paginated-reviews ] && [ "$page" -eq 2 ]; then
           body='[{"id":51,"state":"REQUEST_CHANGES","user":{"login":"second-reviewer"},"commit_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]'
+        elif [ "$scenario" = paginated-reviews ]; then
+          body='[]'
         elif [ "$scenario" = malformed-review-page ] && [ "$page" -eq 1 ]; then
           body=$(jq -cn '[range(1; 51) | {id:.,state:"APPROVED",user:{login:"reviewer"},commit_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]')
         elif [ "$scenario" = malformed-review-page ]; then
           body='[{"id":51,"state":"UNRECOGNIZED","user":{"login":"reviewer"}}]'
         elif [ "$scenario" = excessive-reviews ]; then
           body=$(jq -cn --argjson page "$page" '[range(1; 51) | {id:(($page - 1) * 50 + .),state:"APPROVED",user:{login:"reviewer"},commit_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]')
+        elif [ "$scenario" = excessive-review-records ]; then
+          body=$(jq -cn '[range(1; 1002) | {id:.,state:"APPROVED",user:{login:"reviewer"},commit_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]')
+        elif [ "$page" -gt 1 ]; then
+          body='[]'
         else
           body='[{"id":1,"state":"APPROVED","user":{"login":"reviewer"},"commit_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]'
         fi
@@ -111,9 +117,13 @@ case "$scenario" in
         elif [ "$scenario" = reflected-check ]; then
           body='[{"id":2,"status":"success","context":"ci/test","target_url":"http://ci.invalid/fixture-secret-token-ABC123","description":"passed"}]'
         elif [ "$scenario" = paginated-checks ] && [ "$page" -eq 1 ]; then
-          body=$(jq -cn '[range(1; 51) | {id:.,status:"success",context:("ci/" + (.|tostring)),target_url:"http://ci.invalid/status",description:"passed"}]')
-        elif [ "$scenario" = paginated-checks ]; then
+          body=$(jq -cn '[range(1; 21) | {id:.,status:"success",context:("ci/" + (.|tostring)),target_url:"http://ci.invalid/status",description:"passed"}]')
+        elif [ "$scenario" = paginated-checks ] && [ "$page" -eq 2 ]; then
           body='[{"id":51,"status":"failure","context":"ci/final","target_url":"http://ci.invalid/51","description":"failed"}]'
+        elif [ "$scenario" = paginated-checks ]; then
+          body='[]'
+        elif [ "$page" -gt 1 ]; then
+          body='[]'
         else
           body='[{"id":2,"status":"success","context":"ci/test","target_url":"http://ci.invalid/2","description":"passed"}]'
         fi
@@ -369,11 +379,11 @@ test_pr_operations_and_malformed_responses() {
   assert_contains "$(run_forge "$dir" pr-checks "$PR_URL")" '"status":"success"' \
     "Gitea checks were not validated"
   reviews=$(FM_TEST_GITEA_SCENARIO=paginated-reviews run_forge "$dir" pr-reviews "$PR_URL")
-  [ "$(jq 'length' <<< "$reviews")" -eq 51 ] || fail "Gitea review pagination omitted records"
+  [ "$(jq 'length' <<< "$reviews")" -eq 21 ] || fail "Gitea review pagination omitted records"
   assert_contains "$reviews" '"state":"REQUEST_CHANGES"' \
     "Gitea review pagination omitted a later change request"
   checks=$(FM_TEST_GITEA_SCENARIO=paginated-checks run_forge "$dir" pr-checks "$PR_URL")
-  [ "$(jq 'length' <<< "$checks")" -eq 51 ] || fail "Gitea check pagination omitted records"
+  [ "$(jq 'length' <<< "$checks")" -eq 21 ] || fail "Gitea check pagination omitted records"
   assert_contains "$checks" '"status":"failure"' \
     "Gitea check pagination omitted a later failure"
 
@@ -390,6 +400,11 @@ test_pr_operations_and_malformed_responses() {
   assert_contains "$out" 'pagination safety limit' "excessive review pagination refusal was unclear"
   [ "$(grep -c 'reviews?page=' "$dir/curl.argv")" -le 20 ] \
     || fail "Gitea review pagination exceeded its request bound"
+  set +e
+  out=$(FM_TEST_GITEA_SCENARIO=excessive-review-records run_forge "$dir" pr-reviews "$PR_URL" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "excessive Gitea review record count was accepted"
+  assert_contains "$out" 'record safety limit' "excessive review record refusal was unclear"
 
   for scenario_command in malformed:pr-head cross-host:pr-head malformed-reviews:pr-reviews malformed-checks:pr-checks; do
     scenario=${scenario_command%%:*}

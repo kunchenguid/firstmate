@@ -488,7 +488,7 @@ fm_forge_gitea_pr_create() {
 }
 
 fm_forge_gitea_collection() {
-  local endpoint=$1 kind=$2 page=1 page_size=50 max_pages=20 count
+  local endpoint=$1 kind=$2 page=1 page_size=50 max_pages=20 max_records=1000 count total_count=0
   local tmp_dir pages_file
   umask 077
   tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-gitea-pages.XXXXXX") \
@@ -529,14 +529,20 @@ fm_forge_gitea_collection() {
     esac
     count=$(jq 'length' <<< "$FM_GITEA_RESPONSE") \
       || { rm -rf "$tmp_dir"; fm_forge_fail "Gitea collection could not be counted"; return 1; }
-    printf '%s\n' "$FM_GITEA_RESPONSE" >> "$pages_file" \
-      || { rm -rf "$tmp_dir"; fm_forge_fail "Gitea collection could not be recorded"; return 1; }
-    if [ "$count" -lt "$page_size" ]; then
-      FM_GITEA_RESPONSE=$(jq -cs 'add' "$pages_file") \
+    if [ "$count" -eq 0 ]; then
+      FM_GITEA_RESPONSE=$(jq -cs 'add // []' "$pages_file") \
         || { rm -rf "$tmp_dir"; fm_forge_fail "Gitea collection could not be aggregated"; return 1; }
       rm -rf "$tmp_dir"
       return 0
     fi
+    total_count=$((total_count + count))
+    if [ "$total_count" -gt "$max_records" ]; then
+      rm -rf "$tmp_dir"
+      fm_forge_fail "Gitea collection exceeded the record safety limit"
+      return 1
+    fi
+    printf '%s\n' "$FM_GITEA_RESPONSE" >> "$pages_file" \
+      || { rm -rf "$tmp_dir"; fm_forge_fail "Gitea collection could not be recorded"; return 1; }
     page=$((page + 1))
   done
   rm -rf "$tmp_dir"
