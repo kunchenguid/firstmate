@@ -414,17 +414,17 @@ secondmate_sync() {
 secondmate_liveness_sweep() {
   # Idempotent secondmate liveness guarantee - SESSION START ONLY. The detailed
   # state machine and its only recovery-authorizing states are owned by
-  # fm_backend_agent_state. A missing tmux pane is not enough: tmux must also
-  # return a readable inventory of the named session that omits the exact
-  # recorded window. This preserves duplicate prevention for existing
-  # ambiguous processes and every transiently unreadable target while adding
-  # the missing-window path the original bare-shell and Herdr-husk sweep lacked.
+  # fm_backend_agent_state. Each backend must prove structural absence from a
+  # readable inventory, and Zellij must additionally verify an empty task tab
+  # before treating a surviving ghost as dead. This preserves duplicate
+  # prevention for existing ambiguous processes and every transiently
+  # unreadable target while covering the recorded-session absence path.
   # A meta with no window remains owned by secondmate-provisioning recovery.
   # Secondmate homes never contain kind=secondmate meta, so this is naturally a
   # primary-only no-op there. Mid-session liveness remains explicitly out of
   # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target agent_state out cause
+  local meta id window harness backend target expected_label recorded_tab_id agent_state out cause
   SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -436,7 +436,9 @@ secondmate_liveness_sweep() {
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
-    agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
+    expected_label="fm-$id"
+    recorded_tab_id=$(fm_meta_get "$meta" zellij_tab_id)
+    agent_state=$(fm_backend_agent_state "$backend" "$target" "$expected_label" "$recorded_tab_id" 2>/dev/null) || agent_state=unreadable
     case "$harness" in
       claude|codex|opencode|pi|grok) ;;
       *)
@@ -452,9 +454,13 @@ secondmate_liveness_sweep() {
       dead|missing)
         if [ "$agent_state" = dead ]; then
           cause="confirmed agent absence on existing endpoint"
-          fm_backend_kill "$backend" "$target" 2>/dev/null || true
         else
           cause="recorded endpoint confidently missing"
+        fi
+        if [ "$backend" = zellij ]; then
+          fm_backend_kill "$backend" "$target" "$recorded_tab_id" "$expected_label" 2>/dev/null || true
+        elif [ "$agent_state" = dead ]; then
+          fm_backend_kill "$backend" "$target" 2>/dev/null || true
         fi
         if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
           SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"

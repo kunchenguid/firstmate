@@ -18,6 +18,8 @@
 #     inventory omits the exact window, regardless of display-message fallback.
 #   - The Herdr classifier preserves the proven husk mapping while separating a
 #     missing pane from an existing agent-less pane.
+#   - The Zellij classifier authorizes only readable session/tab absence and
+#     verified empty ghost tabs while preserving every existing pane.
 #   - fm_backend_agent_alive preserves the older three-state compatibility view.
 #   - bin/fm-bootstrap.sh's secondmate_liveness_sweep recovers only dead or
 #     missing endpoints, keeps successful recovery and already-live results
@@ -80,8 +82,11 @@ case "\${1:-}" in
   list-windows)
     case '$inventory' in
       missing) printf '%s\n' main ; exit 0 ;;
+      missing-session) printf '%s\n' "can't find session: sess" >&2; exit 1 ;;
+      missing-server) printf '%s\n' "no server running on /tmp/tmux-test/default" >&2; exit 1 ;;
+      missing-socket) printf '%s\n' "error connecting to /tmp/tmux-test/default (No such file or directory)" >&2; exit 1 ;;
       present) printf '%s\n' fm-sm1 ; exit 0 ;;
-      *) exit 1 ;;
+      *) printf '%s\n' "permission denied" >&2; exit 1 ;;
     esac
     ;;
 esac
@@ -124,6 +129,12 @@ test_tmux_agent_state_classifies() {
     [ "$out" = unreadable ] || fail "a $inventory inventory case should stay unreadable, got '$out'"
   done
 
+  for inventory in missing-session missing-server missing-socket; do
+    fb=$(make_failed_probe_tmux "$TMP_ROOT/tmux-$inventory" "$inventory")
+    out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:fm-sm1' "$ROOT")
+    [ "$out" = missing ] || fail "a confirmed $inventory inventory failure should classify as missing, got '$out'"
+  done
+
   pass "fm_backend_tmux_agent_state: separates live, dead, missing, ambiguous, and unreadable"
 }
 
@@ -148,6 +159,71 @@ test_herdr_agent_state_preserves_husk_classifier() {
   pass "fm_backend_herdr_agent_state: preserves missing/no-agent/live/unknown husk behavior"
 }
 
+# --- unit level: Zellij authoritative absence -------------------------------
+
+make_probe_zellij() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/zellij" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-sessions)
+    [ "${FM_TEST_ZELLIJ_MODE:-}" = unreadable-sessions ] && exit 1
+    [ "${FM_TEST_ZELLIJ_MODE:-}" = missing-session ] || printf '%s\n' sess
+    exit 0
+    ;;
+  --session)
+    case "$*" in
+      *"list-panes --json"*)
+        case "${FM_TEST_ZELLIJ_MODE:-}" in
+          unreadable-panes) printf '%s\n' not-json ;;
+          pane-present) printf '%s\n' '[{"id":7,"tab_id":3,"is_plugin":false}]' ;;
+          replacement-pane) printf '%s\n' '[{"id":8,"tab_id":3,"is_plugin":false}]' ;;
+          *) printf '%s\n' '[]' ;;
+        esac
+        ;;
+      *"list-tabs --json"*)
+        case "${FM_TEST_ZELLIJ_MODE:-}" in
+          missing-tab) printf '%s\n' '[]' ;;
+          unreadable-tabs) printf '%s\n' not-json ;;
+          *) printf '%s\n' '[{"tab_id":3,"name":"fm-sm1"}]' ;;
+        esac
+        ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/zellij"
+  printf '%s\n' "$fakebin"
+}
+
+test_zellij_agent_state_authorizes_only_structural_absence() {
+  local fb mode expected out
+  fb=$(make_probe_zellij "$TMP_ROOT/zellij-state")
+
+  for row in \
+    'missing-session missing' \
+    'missing-tab missing' \
+    'ghost dead' \
+    'replacement-pane ambiguous' \
+    'pane-present unverified' \
+    'unreadable-sessions unreadable' \
+    'unreadable-panes unreadable' \
+    'unreadable-tabs unreadable'
+  do
+    mode=${row%% *}
+    expected=${row#* }
+    out=$(PATH="$fb:$BASE_PATH" FM_TEST_ZELLIJ_MODE="$mode" \
+      bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state zellij sess:7 fm-sm1 3' "$ROOT")
+    [ "$out" = "$expected" ] || fail "Zellij $mode should classify as $expected, got '$out'"
+  done
+
+  pass "fm_backend_zellij_agent_state: authorizes only structural absence and verified ghost tabs"
+}
+
 # --- unit level: the generic dispatchers ------------------------------------
 
 test_agent_state_dispatcher_and_compatibility() {
@@ -160,9 +236,9 @@ test_agent_state_dispatcher_and_compatibility() {
   out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_pane_agent_state() { printf "live"; }; fm_backend_agent_state herdr sess:p1' "$ROOT")
   [ "$out" = alive ] || fail "detailed dispatcher should route Herdr, got '$out'"
 
-  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state zellij sess:7' "$ROOT")
+  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source zellij; fm_backend_zellij_agent_state() { printf "unverified"; }; fm_backend_agent_state zellij sess:7' "$ROOT")
   [ "$out" = unverified ] || fail "Zellij should remain unverified, got '$out'"
-  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive zellij sess:7' "$ROOT")
+  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source zellij; fm_backend_zellij_agent_state() { printf "unverified"; }; fm_backend_agent_alive zellij sess:7' "$ROOT")
   [ "$out" = unknown ] || fail "the compatibility dispatcher should map unverified to unknown, got '$out'"
 
   pass "fm_backend_agent_state: routes tmux/Herdr and keeps Zellij unverified"
@@ -479,6 +555,7 @@ test_sweep_noop_with_no_secondmate_meta() {
 
 test_tmux_agent_state_classifies
 test_herdr_agent_state_preserves_husk_classifier
+test_zellij_agent_state_authorizes_only_structural_absence
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched

@@ -142,17 +142,30 @@ fm_backend_tmux_current_command() {  # <target>
 # the empirical basis. Tmux silently falls back to the active window when a
 # named target is absent, so the exact recorded window must appear in a
 # successful session inventory before its foreground command can be trusted.
-# An omitted window is `missing`; an inventory or pane read failure is
-# `unreadable`, so a transient tmux problem never licenses a duplicate.
+# An omitted window or a definitive missing-session/server response is
+# `missing`; any other inventory or pane read failure is `unreadable`, so a
+# transient tmux problem never licenses a duplicate.
 fm_backend_tmux_agent_state() {  # <target>
-  local target=$1 comm session window windows
+  local target=$1 comm session window windows inventory_status
   session=${target%%:*}
   window=${target#*:}
   if [ -n "$session" ] && [ -n "$window" ] && [ "$window" != "$target" ]; then
-    windows=$(tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null) || {
-      printf 'unreadable'
+    if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+      inventory_status=0
+    else
+      inventory_status=$?
+    fi
+    if [ "$inventory_status" -ne 0 ]; then
+      case "$windows" in
+        *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+          printf 'missing'
+          ;;
+        *)
+          printf 'unreadable'
+          ;;
+      esac
       return 0
-    }
+    fi
     if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
       printf 'missing'
       return 0

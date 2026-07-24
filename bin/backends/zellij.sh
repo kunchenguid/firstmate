@@ -281,6 +281,17 @@ fm_backend_zellij_pane_exists() {  # <session> <pane_id>
     | jq -e --argjson p "$pane_id" '[.[]? | select(.id == $p and .is_plugin == false)] | length > 0' >/dev/null 2>&1
 }
 
+fm_backend_zellij_tabs_match_label() {  # <tabs-json> <tab-id> <label>
+  local tabs=$1 tab_id=$2 label=$3 scoped count
+  scoped=$(fm_backend_zellij_scoped_title "$label")
+  printf '%s' "$tabs" | jq -e --argjson t "$tab_id" --arg want "$scoped" \
+    '[.[]? | select(.tab_id == $t and .name == $want)] | length > 0' >/dev/null 2>&1 && return 0
+  printf '%s' "$tabs" | jq -e --argjson t "$tab_id" --arg want "$label" \
+    '[.[]? | select(.tab_id == $t and .name == $want)] | length > 0' >/dev/null 2>&1 || return 1
+  count=$(printf '%s' "$tabs" | jq -r --arg want "$label" '[.[]? | select(.name == $want)] | length' 2>/dev/null)
+  [ "$count" = "1" ]
+}
+
 # fm_backend_zellij_tab_matches_label: does <tab_id> in <session> carry the
 # tab name firstmate expects for the caller-facing task label <label>?
 # Checks the home-scoped, tagged title first (fm_backend_zellij_scoped_title
@@ -297,15 +308,9 @@ fm_backend_zellij_pane_exists() {  # <session> <pane_id>
 # already-fetched JSON), so a caller whose fake-CLI fixture supplies exactly
 # one list-tabs response keeps working unchanged.
 fm_backend_zellij_tab_matches_label() {  # <session> <tab_id> <label>
-  local session=$1 tab_id=$2 label=$3 scoped tabs count
-  scoped=$(fm_backend_zellij_scoped_title "$label")
+  local session=$1 tab_id=$2 label=$3 tabs
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
-  printf '%s' "$tabs" | jq -e --argjson t "$tab_id" --arg want "$scoped" \
-    '[.[]? | select(.tab_id == $t and .name == $want)] | length > 0' >/dev/null 2>&1 && return 0
-  printf '%s' "$tabs" | jq -e --argjson t "$tab_id" --arg want "$label" \
-    '[.[]? | select(.tab_id == $t and .name == $want)] | length > 0' >/dev/null 2>&1 || return 1
-  count=$(printf '%s' "$tabs" | jq -r --arg want "$label" '[.[]? | select(.name == $want)] | length' 2>/dev/null)
-  [ "$count" = "1" ]
+  fm_backend_zellij_tabs_match_label "$tabs" "$tab_id" "$label"
 }
 
 # fm_backend_zellij_create_task: create the task's tab (one terminal pane) in
@@ -379,6 +384,56 @@ fm_backend_zellij_target_ready() {  # <target> [expected-label]
     return $?
   fi
   fm_backend_zellij_pane_exists "$FM_BACKEND_ZELLIJ_SESSION" "$FM_BACKEND_ZELLIJ_PANE"
+}
+
+fm_backend_zellij_agent_state() {  # <target> [expected-label] [recorded-tab-id]
+  local target=$1 expected_label=${2:-} recorded_tab_id=${3:-} sessions panes tabs
+  fm_backend_zellij_parse_target "$target" || { printf 'unreadable'; return 0; }
+  case "$FM_BACKEND_ZELLIJ_PANE" in
+    ''|*[!0-9]*) printf 'unreadable'; return 0 ;;
+  esac
+  sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null) || {
+    printf 'unreadable'
+    return 0
+  }
+  if ! printf '%s\n' "$sessions" | grep -qxF "$FM_BACKEND_ZELLIJ_SESSION"; then
+    printf 'missing'
+    return 0
+  fi
+  panes=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-panes --json 2>/dev/null)
+  if ! printf '%s' "$panes" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    printf 'unreadable'
+    return 0
+  fi
+  if printf '%s' "$panes" | jq -e --argjson p "$FM_BACKEND_ZELLIJ_PANE" \
+    '[.[]? | select(.id == $p and .is_plugin == false)] | length > 0' >/dev/null 2>&1; then
+    printf 'unverified'
+    return 0
+  fi
+  case "$recorded_tab_id" in
+    ''|*[!0-9]*) printf 'unverified'; return 0 ;;
+  esac
+  [ -n "$expected_label" ] || { printf 'unverified'; return 0; }
+  tabs=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-tabs --json 2>/dev/null)
+  if ! printf '%s' "$tabs" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    printf 'unreadable'
+    return 0
+  fi
+  if ! printf '%s' "$tabs" | jq -e --argjson t "$recorded_tab_id" \
+    '[.[]? | select(.tab_id == $t)] | length > 0' >/dev/null 2>&1; then
+    printf 'missing'
+    return 0
+  fi
+  if ! fm_backend_zellij_tabs_match_label "$tabs" "$recorded_tab_id" "$expected_label"; then
+    printf 'unreadable'
+    return 0
+  fi
+  if printf '%s' "$panes" | jq -e --argjson t "$recorded_tab_id" \
+    '[.[]? | select(.tab_id == $t and .is_plugin == false)] | length > 0' >/dev/null 2>&1; then
+    printf 'ambiguous'
+  else
+    printf 'dead'
+  fi
 }
 
 # fm_backend_zellij_current_path: the live pane's cwd, or empty on any error.

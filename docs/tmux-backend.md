@@ -112,7 +112,8 @@ Verified the same session: a persisting parent process running a child command (
 The recovery classifier (`fm_backend_tmux_agent_state`) maps the observation to the shared detailed state owned by `fm_backend_agent_state` in `bin/fm-backend.sh`.
 A recognized harness is `alive`, a bare shell is `dead`, and an unrecognized foreground process is `ambiguous`.
 The classifier checks exact window-name membership in a readable session inventory before trusting `display-message`, because tmux silently redirects a missing named target to the active window.
-It returns `missing` only when `tmux list-windows` successfully reads the recorded session and omits the exact recorded window; a failed inventory or pane read is `unreadable` and never authorizes recovery.
+It returns `missing` when `tmux list-windows` successfully reads the recorded session and omits the exact recorded window, or when tmux definitively reports that the recorded session or server is absent.
+Any other failed inventory or pane read is `unreadable` and never authorizes recovery.
 `fm_backend_tmux_agent_alive` remains the compatibility view that maps these detailed states back to `alive`, `dead`, or `unknown` for callers that do not need the reason.
 
 Verified with real tmux 3.6a on macOS (Darwin 25.5.0), 2026-07-24, using the private `-L fm-target-check-<pid>` socket also exercised by `tests/fm-backend-tmux-smoke.test.sh`:
