@@ -487,19 +487,67 @@ fm_forge_gitea_pr_create() {
   printf '%s\n' "$url"
 }
 
+fm_forge_gitea_collection() {
+  local endpoint=$1 kind=$2 page=1 page_size=50 max_pages=20 count
+  local tmp_dir pages_file
+  umask 077
+  tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-gitea-pages.XXXXXX") \
+    || { fm_forge_fail "Gitea pagination workspace could not be created"; return 1; }
+  pages_file="$tmp_dir/pages"
+  : > "$pages_file"
+  while [ "$page" -le "$max_pages" ]; do
+    if [ "$page" -gt 1 ]; then
+      fm_forge_gitea_config_load \
+        || { rm -rf "$tmp_dir"; return 1; }
+    fi
+    fm_forge_gitea_request GET "$endpoint?page=$page&limit=$page_size" '' '200' \
+      || { rm -rf "$tmp_dir"; return 1; }
+    case "$kind" in
+      reviews)
+        jq -ce '
+          type == "array" and all(.[];
+            (.id | type == "number") and (.id >= 1) and
+            (.state == "APPROVED" or .state == "PENDING" or .state == "COMMENT" or
+             .state == "REQUEST_CHANGES" or .state == "REQUEST_REVIEW") and
+            (.user.login | type == "string" and length > 0)
+          )
+        ' >/dev/null 2>&1 <<< "$FM_GITEA_RESPONSE" \
+          || { rm -rf "$tmp_dir"; fm_forge_fail "Gitea returned malformed review data"; return 1; }
+        ;;
+      checks)
+        jq -ce '
+          type == "array" and all(.[];
+            (.id | type == "number") and
+            (.status == "success" or .status == "error" or .status == "failure" or
+             .status == "pending" or .status == "warning") and
+            (.context | type == "string")
+          )
+        ' >/dev/null 2>&1 <<< "$FM_GITEA_RESPONSE" \
+          || { rm -rf "$tmp_dir"; fm_forge_fail "Gitea returned malformed check data"; return 1; }
+        ;;
+      *) rm -rf "$tmp_dir"; fm_forge_fail "Gitea collection type is unsupported"; return 1 ;;
+    esac
+    count=$(jq 'length' <<< "$FM_GITEA_RESPONSE") \
+      || { rm -rf "$tmp_dir"; fm_forge_fail "Gitea collection could not be counted"; return 1; }
+    printf '%s\n' "$FM_GITEA_RESPONSE" >> "$pages_file" \
+      || { rm -rf "$tmp_dir"; fm_forge_fail "Gitea collection could not be recorded"; return 1; }
+    if [ "$count" -lt "$page_size" ]; then
+      FM_GITEA_RESPONSE=$(jq -cs 'add' "$pages_file") \
+        || { rm -rf "$tmp_dir"; fm_forge_fail "Gitea collection could not be aggregated"; return 1; }
+      rm -rf "$tmp_dir"
+      return 0
+    fi
+    page=$((page + 1))
+  done
+  rm -rf "$tmp_dir"
+  fm_forge_fail "Gitea collection exceeded the pagination safety limit"
+  return 1
+}
+
 fm_forge_gitea_pr_reviews() {
   local url=$1
   fm_forge_gitea_identity_bind "$url" || return 1
-  fm_forge_gitea_request GET "/repos/$FM_PR_PATH/pulls/$FM_PR_NUMBER/reviews" '' '200' || return 1
-  jq -ce '
-    type == "array" and all(.[];
-      (.id | type == "number") and (.id >= 1) and
-      (.state == "APPROVED" or .state == "PENDING" or .state == "COMMENT" or
-       .state == "REQUEST_CHANGES" or .state == "REQUEST_REVIEW") and
-      (.user.login | type == "string" and length > 0)
-    )
-  ' >/dev/null 2>&1 <<< "$FM_GITEA_RESPONSE" \
-    || { fm_forge_fail "Gitea returned malformed review data"; return 1; }
+  fm_forge_gitea_collection "/repos/$FM_PR_PATH/pulls/$FM_PR_NUMBER/reviews" reviews || return 1
   jq -c '[.[] | {id,state,user:.user.login,commit_id}]' <<< "$FM_GITEA_RESPONSE"
 }
 
@@ -509,16 +557,7 @@ fm_forge_gitea_pr_checks() {
   head=$(fm_forge_pr_head "$url") || return 1
   # fm_forge_pr_head deliberately clears the token after its request.
   fm_forge_gitea_config_load || return 1
-  fm_forge_gitea_request GET "/repos/$FM_PR_PATH/commits/$head/statuses" '' '200' || return 1
-  jq -ce '
-    type == "array" and all(.[];
-      (.id | type == "number") and
-      (.status == "success" or .status == "error" or .status == "failure" or
-       .status == "pending" or .status == "warning") and
-      (.context | type == "string")
-    )
-  ' >/dev/null 2>&1 <<< "$FM_GITEA_RESPONSE" \
-    || { fm_forge_fail "Gitea returned malformed check data"; return 1; }
+  fm_forge_gitea_collection "/repos/$FM_PR_PATH/commits/$head/statuses" checks || return 1
   jq -c '[.[] | {id,status,context,target_url,description}]' <<< "$FM_GITEA_RESPONSE"
 }
 
