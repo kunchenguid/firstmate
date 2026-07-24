@@ -829,6 +829,7 @@ EOF
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+      appended=0
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         base=${f##*/}
@@ -837,9 +838,11 @@ EOF
         [ -f "$STATE/$task.meta" ] || continue
         [ "$(stat_sig "$f" 2>/dev/null || true)" = "$sig" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
+        appended=$((appended + 1))
       done <<EOF
 $pending
 EOF
+      [ "$appended" -gt 0 ] || continue
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         base=${f##*/}
