@@ -4,13 +4,29 @@
 # This hook is deliberately narrow. It denies only an executed bin/fm-*.sh fleet
 # command other than bin/fm-wake-drain.sh, bin/fm-watch-arm.sh, or the
 # independently fail-closed bin/fm-teardown.sh, and only when the active primary
-# home has task metadata in flight but no identity-matched live watcher holds the
-# home lock. Ordinary shell commands, recovery commands, healthy supervision,
-# fleet-idle homes, and child worktrees are always allowed.
+# home has task metadata in flight, no identity-matched live watcher holds the
+# home lock, AND the missing watcher is unexplained. Ordinary shell commands,
+# recovery commands, healthy supervision, fleet-idle homes, and child worktrees
+# are always allowed.
+#
+# The explained case is the design's own post-wake gap. The watcher is one-shot:
+# it closes on an actionable wake, the arm's exit IS the notification, and the
+# next watcher arms at the next Stop. So a home is deliberately unwatched for the
+# whole handling turn - exactly the turn on which the model must read crew state,
+# merge, tear down, and dispatch. Denying there did not restore supervision; it
+# only blocked the handling of the wake, and left manual arming (recovery only,
+# per docs/supervision-protocols/claude.md) as the sole way forward. Ledger
+# evidence that the most recent cycle closed for a delivered wake, within
+# FM_CONTINUITY_GAP_GRACE, allows the turn to proceed instead.
+#
+# The bound still matters: past that window the close no longer plausibly belongs
+# to the current handling turn, and a home that never re-armed is refused again
+# with the same recovery guidance.
 #
 # The turn-end guard remains the final backstop, cooperating with the
-# Stop-owned auto-arm in its --claude mode. This gate closes the long-turn gap
-# before another fleet mutation, but does not replace or weaken the Stop hooks.
+# Stop-owned auto-arm in its --claude mode, and is what keeps a turn from ENDING
+# in this gap. This gate closes the unexplained-supervision gap before another
+# fleet mutation, but does not replace or weaken the Stop hooks.
 #
 # Input is Claude PreToolUse JSON on stdin. Tests may pass --command directly.
 # Malformed transport, missing jq/Node, a missing classifier, or classifier
@@ -28,6 +44,10 @@ Usage: fm-continuity-pretool-check.sh [--command <shell-command>]
 Reads Claude PreToolUse JSON from stdin unless --command is supplied.
 Exits 0 to allow. Exits 2 with a Claude deny object on stderr only when an
 unhealthy primary tries to execute a non-recovery firstmate fleet script.
+
+A missing watcher whose most recent cycle closed for a delivered wake within
+FM_CONTINUITY_GAP_GRACE seconds (default 1800) is the expected post-wake gap and
+is allowed; an unexplained or older one is refused.
 EOF
 }
 
@@ -70,6 +90,11 @@ FM_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 POLICY="$SCRIPT_DIR/fm-continuity-command-policy.mjs"
+# How long a delivered-wake close keeps accounting for a missing watcher. Long
+# enough to cover one wake-handling turn end to end, short enough that a session
+# which never re-arms is refused again rather than mutating the fleet unwatched.
+GAP_GRACE=${FM_CONTINUITY_GAP_GRACE:-1800}
+case "$GAP_GRACE" in ''|*[!0-9]*) GAP_GRACE=1800 ;; esac
 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
@@ -77,6 +102,8 @@ POLICY="$SCRIPT_DIR/fm-continuity-command-policy.mjs"
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-watch-cycle-lib.sh
+. "$SCRIPT_DIR/fm-watch-cycle-lib.sh"
 
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 fm_supervision_status "$STATE" "${FM_GUARD_GRACE:-300}"
@@ -85,6 +112,11 @@ LOCK_PID=$(cat "$STATE/.watch.lock/pid" 2>/dev/null || true)
 if fm_pid_alive "$LOCK_PID" && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$LOCK_PID" "$FM_HOME"; then
   exit 0
 fi
+
+# The recorded post-wake gap: this home's most recent watcher cycle closed
+# because it had a real wake to deliver. Absent or older evidence falls through
+# to the deny path, so an unexplained missing watcher is still refused.
+fm_cycle_close_explained "$STATE" "$GAP_GRACE" && exit 0
 
 command -v node >/dev/null 2>&1 || exit 0
 [ -f "$POLICY" ] || exit 0

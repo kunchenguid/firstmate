@@ -15,8 +15,10 @@ When this session owns supervision and away mode is not active:
    A shell `&`, a truncating pipe, or bundling is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) registered in `.claude/settings.json`.
 6. Treat `watcher: started ...` and `watcher: attached ...` inside arm output as proof that one live cycle exists.
    On attach, the arm follows verified identity-matched successors instead of exiting when the first cycle ends.
-7. The continuity PreToolUse gate allows wake drain, watcher arm recovery, and fail-closed teardown, and refuses only other `bin/fm-*.sh` fleet commands while tasks are in flight and no identity-matched live watcher holds the home lock.
-   It covers the bounded gap between a rewake and the next Stop-launched arm.
+   `watcher: cycle closed with a delivered wake ...` means an attached arm's cycle closed for a wake its owning arm already reported: it is neither a failure nor a second wake, so do not act on it or re-arm for it.
+7. The continuity PreToolUse gate allows wake drain, watcher arm recovery, and fail-closed teardown, and refuses only other `bin/fm-*.sh` fleet commands while tasks are in flight, no identity-matched live watcher holds the home lock, and that missing watcher is unexplained.
+   The gap between a rewake and the next Stop-launched arm is expected, not a failure, so handling a wake in that gap - reading crew state, merging, tearing down, dispatching - is allowed on the strength of the recorded delivered-wake close.
+   A refusal here means the missing watcher is genuinely unaccounted for: follow its recovery guidance rather than re-arming by reflex.
 8. The turn-end guard (`bin/fm-turnend-guard.sh --claude`) remains the final backstop.
    It allows the stop when a watcher is healthy, when the auto-arm already owns recovery for this event epoch, or when a fresh rewake is recorded; it re-blocks only when none of those materialize, within a bounded budget.
 9. Waiting on the hook-owned cycle is silent: do not send idle progress while the watcher is parked.
