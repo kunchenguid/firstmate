@@ -336,7 +336,7 @@ test_studio_and_windows_privacy_hazards_refuse() {
 }
 
 test_internal_transcripts_and_secrets_refuse() {
-  local prefix dir placeholder index=0 rc
+  local prefix dir name value rc
   prefix=$'## Intent\n\nDeliver the complete change.\n\n## What Changed\n\n'
   assert_attest_rejected raw-findings "$prefix- Raw result: {\"findings\":[{\"id\":\"review-1\",\"severity\":\"high\"}]}\n" 'raw generated pipeline-agent transcript'
   assert_attest_rejected worker-narration "$prefix- Worker status: finished after supervision.\n" 'private task, run, worker, or supervision narration'
@@ -350,24 +350,49 @@ test_internal_transcripts_and_secrets_refuse() {
   assert_attest_rejected basic-ambiguous-padding "$prefix- Authorization: Basic dXNlcjpwYXNzd29yZA===\n" 'Authorization Basic credential'
   assert_attest_rejected basic-noncanonical-padding "$prefix- Authorization: Basic dXNlcjpwYXNzd29yZB==\n" 'Authorization Basic credential'
   assert_attest_rejected basic-after-placeholder "$prefix- Authorization: Basic REDACTED; Authorization: Basic dXNlcjpwYXNzd29yZA==\n" 'Authorization Basic credential'
+  while IFS='|' read -r name value; do
+    assert_attest_rejected "basic-$name" "$prefix- Authorization: Basic $value"$'\n' 'Authorization Basic credential'
+  done <<'EOF'
+suffix-bypass|REDACTED-dXNlcjpwYXNzd29yZA
+backtick-wrapped-populated|`dXNlcjpwYXNzd29yZA`
+single-quote-wrapped-populated|'dXNlcjpwYXNzd29yZA'
+double-quote-wrapped-populated|"dXNlcjpwYXNzd29yZA"
+angle-wrapped-populated|<dXNlcjpwYXNzd29yZA>
+square-wrapped-populated|[dXNlcjpwYXNzd29yZA]
+mismatched-wrapper|<REDACTED]
+unterminated-wrapper|`REDACTED
+nested-wrapper|<[REDACTED]>
+trailing-content|<REDACTED> trailing
+empty-wrapper|<>
+unapproved-placeholder|SECRET_VALUE
+EOF
   assert_attest_rejected standalone-jwt "$prefix- Captured eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue1234567890 during validation.\n" 'standalone JWT-shaped credential'
 
-  while IFS= read -r placeholder; do
-    index=$((index + 1))
-    dir=$(make_case "basic-placeholder-$index")
+  while IFS='|' read -r name value; do
+    dir=$(make_case "basic-placeholder-$name")
     write_body "$dir" "$(safe_body)
 
-- Authorization: Basic $placeholder
+- Authorization: Basic $value
 "
     attest_none "$dir" >/dev/null 2> "$dir/stderr" \
-      || fail "Basic placeholder $placeholder was rejected: $(cat "$dir/stderr")"
+      || fail "Basic placeholder $name was rejected: $(cat "$dir/stderr")"
   done <<'EOF'
-REDACTED
-<redacted>
-[REDACTED]
-${BASIC_CREDENTIAL}
-REDACTED_TOKEN
-BASIC_CREDENTIAL
+raw-redacted|REDACTED
+case-variant|rEdAcTeD
+raw-masked|MASKED
+raw-placeholder|PLACEHOLDER
+raw-token|TOKEN
+raw-your-token|YOUR_TOKEN
+backtick|`REDACTED`
+single-quote|'PLACEHOLDER'
+double-quote|"TOKEN"
+angle|<YOUR_TOKEN>
+square|[redacted]
+shell-variable|${BASIC_CREDENTIAL}
+redacted-token|REDACTED_TOKEN
+basic-credential|BASIC_CREDENTIAL
+basic-token-hyphen|basic-token
+empty|
 EOF
 
   dir=$(make_case basic-ordinary-prose)

@@ -539,35 +539,59 @@ reject_match() {
   return 1
 }
 
-basic_token_is_placeholder() {
-  local lowered
-  lowered=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-  case "$lowered" in
-    redacted|masked|removed|placeholder|example|sample|dummy|token|credential|credentials|\
-      redacted[-._~]*|masked[-._~]*|removed[-._~]*|placeholder[-._~]*|\
-      basic_token|basic-token|basic.token|basic~token|basic_credential|basic-credential|basic.credential|basic~credential)
-      return 0
-      ;;
-  esac
-  return 1
-}
-
 reject_basic_authorization() {
-  local candidates line token
+  local line
   FAILURE_CLASS=state-invalid
-  candidates=$(awk '
+  line=$(awk '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function closing_wrapper(opener) {
+      if (opener == "<") return ">"
+      if (opener == "[") return "]"
+      if (opener == "`" || opener == "\"" || opener == apostrophe) return opener
+      return ""
+    }
+    function is_placeholder(value, lowered) {
+      lowered=tolower(value)
+      return lowered == "redacted" \
+        || lowered == "masked" \
+        || lowered == "removed" \
+        || lowered == "placeholder" \
+        || lowered == "example" \
+        || lowered == "sample" \
+        || lowered == "dummy" \
+        || lowered == "token" \
+        || lowered == "credential" \
+        || lowered == "credentials" \
+        || lowered == "your_token" \
+        || lowered == "redacted_token" \
+        || lowered == "basic_token" \
+        || lowered == "basic-token" \
+        || lowered == "basic.token" \
+        || lowered == "basic~token" \
+        || lowered == "basic_credential" \
+        || lowered == "basic-credential" \
+        || lowered == "basic.credential" \
+        || lowered == "basic~credential" \
+        || lowered == "${basic_credential}"
+    }
+    BEGIN { apostrophe=sprintf("%c", 39) }
     {
-      remaining=$0
-      lower=tolower(remaining)
-      while (match(lower, /authorization[[:space:]]*:[[:space:]]*basic[[:space:]]+/)) {
-        value_start=RSTART + RLENGTH
-        value=substr(remaining, value_start)
-        if (match(value, /^[A-Za-z0-9._~+\/=-]+/)) {
-          token=substr(value, RSTART, RLENGTH)
-          print NR "\t" token
-        }
-        remaining=substr(remaining, value_start)
-        lower=tolower(remaining)
+      lower=tolower($0)
+      if (!match(lower, /authorization[[:space:]]*:[[:space:]]*basic([[:space:]]+|$)/)) next
+      value=trim(substr($0, RSTART + RLENGTH))
+      if (value == "") next
+      opener=substr(value, 1, 1)
+      closer=closing_wrapper(opener)
+      if (closer != "" && substr(value, length(value), 1) == closer) {
+        value=substr(value, 2, length(value) - 2)
+      }
+      if (!is_placeholder(value)) {
+        print NR
+        exit
       }
     }
   ' "$BODY_FILE") || {
@@ -575,14 +599,10 @@ reject_basic_authorization() {
     return 1
   }
   FAILURE_CLASS=publication-invalid
-  [ -n "$candidates" ] || return 0
-  while IFS=$'\t' read -r line token; do
-    basic_token_is_placeholder "$token" && continue
-    echo "error: PR publication check rejected an Authorization Basic credential at body line $line" >&2
-    echo "error: the responsible task worker must correct the public body through its selected delivery path and attest again" >&2
-    return 1
-  done <<< "$candidates"
-  return 0
+  [ -n "$line" ] || return 0
+  echo "error: PR publication check rejected an Authorization Basic credential at body line $line" >&2
+  echo "error: the responsible task worker must correct the public body through its selected delivery path and attest again" >&2
+  return 1
 }
 
 reject_match "an absolute Unix home path" '/(Users|home)/[^/[:space:])]+/|/root/' || exit 1
