@@ -704,7 +704,16 @@ test_verified_validation_decision_is_not_stale() {
   grep -F "$window" "$state/.wake-queue" >/dev/null 2>&1 \
     && { reap "$pid"; fail "verified validation decision emitted a stale or wedge wake"; }
   reap "$pid"
-  pass "verified no-mistakes decisions remain absorbed without stale or wedge escalation"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 1 finding(s)' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_VERIFIED_WAIT_RECHECK_SECS=1 \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "verified validation decision with a dead worker stayed suppressed"
+  grep -F "stale: $window" "$out" >/dev/null || fail "dead verified validation worker did not surface as stale"
+  [ ! -e "$state/.verified-wait-$key" ] || fail "dead verified validation worker retained its wait marker"
+  pass "verified no-mistakes decisions require a live worker and are rechecked on a bounded cadence"
 }
 
 # A captain-held crew can leave a stable backend endpoint after its agent exits.

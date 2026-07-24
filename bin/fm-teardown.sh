@@ -106,6 +106,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -1229,6 +1231,7 @@ remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 TRACKING_KEY=$(printf '%s' "$T" | tr ':/.' '___')
 TASK_TRACKING_KEY=$(printf '%s' "$ID" | tr ':/.' '___')
 SIGNAL_TRACKING_KEY=$(printf '%s' "$ID" | tr '.' '_')
+fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" \
@@ -1238,6 +1241,7 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/.paused-resurfaced-$TRACKING_KEY" "$STATE/.verified-wait-$TRACKING_KEY" \
   "$STATE/.seen-${SIGNAL_TRACKING_KEY}_status" "$STATE/.seen-${SIGNAL_TRACKING_KEY}_turn-ended" \
   "$STATE/.hb-surfaced-$TASK_TRACKING_KEY" "$STATE/.subsuper-seen-status-$TASK_TRACKING_KEY"
+fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
