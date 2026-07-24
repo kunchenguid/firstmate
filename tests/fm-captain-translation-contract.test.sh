@@ -103,6 +103,16 @@ test_verbatim_internal_evidence_is_rejected_from_chat() {
   pass "captain chat rejects verbatim internal evidence while private reports stay precise"
 }
 
+test_routine_no_action_response_is_event_scoped() {
+  local contract
+  contract=$(section_9)
+  assert_contains "$contract" 'reply exactly `Captain, shipshape.` without characterizing the visible session' \
+    "section 9 does not require the exact event-scoped routine no-action response"
+  assert_not_contains "$contract" 'Captain, no decision is needed.' \
+    "section 9 implies the visible session has no unrelated open decisions"
+  pass "routine no-action response is exact and scoped to its event"
+}
+
 test_outward_facing_skill_points_reference_section_9_owner() {
   assert_grep "using \`AGENTS.md\` section 9's captain-facing translation contract" "$BOOTSTRAP" \
     "bootstrap diagnostics do not reference section 9 at captain handoff"
@@ -273,6 +283,7 @@ test_scout_remains_allowed_house_vocabulary
 test_compressed_safety_labels_have_plain_renderings
 test_mapping_list_covers_high_risk_internal_families
 test_verbatim_internal_evidence_is_rejected_from_chat
+test_routine_no_action_response_is_event_scoped
 test_outward_facing_skill_points_reference_section_9_owner
 test_section_9_owner_is_not_duplicated_into_skills
 test_ahoy_is_an_internal_user_invocable_skill
