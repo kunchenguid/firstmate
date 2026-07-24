@@ -672,15 +672,15 @@ EOF
 }
 
 test_session_lock_concurrent_single_winner() {
-  local rec root home fakebin ready done winners pids i pid count
+  local rec root home fakebin ready completed winners pids i pid count
   rec=$(new_world lock-concurrency)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
   ready="$home/ready"
-  done="$home/done"
+  completed="$home/done"
   winners="$home/winners"
-  mkdir -p "$ready" "$done"
+  mkdir -p "$ready" "$completed"
   : > "$winners"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
@@ -727,8 +727,8 @@ SH
         "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1; then
         printf '%s\n' "$harness_pid" >> "$winners"
       fi
-      : > "$done/$i"
-      while [ "$(find "$done" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
+      : > "$completed/$i"
+      while [ "$(find "$completed" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
         sleep 0.01
       done
     ) &
