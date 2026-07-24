@@ -3,7 +3,7 @@ name: firstmate-coding-guidelines
 description: >-
   Agent-only reference for changing firstmate's shared, tracked material per AGENTS.md section 1.
   Use before editing any of that material, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task.
-  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and backend-verification evidence).
+  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and maintainer-verification evidence).
 user-invocable: false
 metadata:
   internal: true
@@ -23,13 +23,20 @@ Before writing a new fact anywhere in this repo, ask where it belongs, in this o
    If yes: `AGENTS.md`, inline.
 2. Does the agent need it only in a nameable situation - a spawn, a recovery, a specific wake type, a specific lifecycle step?
    If yes: an agent-only skill under `.agents/skills/`, plus a one-line trigger pointer left inline in `AGENTS.md` (usually section 13).
-3. Is it human/reference detail - a wire format, a verification record, a mechanism narrative, an incident writeup?
-   If yes: `docs/`.
-4. Is it mechanics - exact flags, exact commands, exact paths?
-   If yes: the script's own header comment plus its `--help` output, not prose in `AGENTS.md` or a skill.
+3. Is it public product, setup, or user/operator reference?
+   If yes: the surface classified for that audience in [`docs/documentation-audiences.md`](../../../docs/documentation-audiences.md), limited to current behavior, setup, supported limits, stable invariants, concise rationale, and current verification entry points.
+4. Is it contributor/maintainer architecture?
+   If yes: the classified maintainer-architecture owner for stable ownership, extension points, mechanism boundaries, and safety rationale.
+5. Is it active reusable verification for a current guarantee?
+   If yes: an explicitly classified maintainer-verification record may keep current dates, versions, exact commands, and exact output.
+6. Is it task or incident evidence - chronology, transcripts, branches, temporary paths, failed hypotheses, or delivery proof?
+   If yes: keep it in the private task report or PR evidence by default, after distilling every unique current fact into its authoritative owner.
+7. Is it mechanics - exact flags, exact commands, exact paths?
+   If yes: the script's own header comment plus its `--help` output, not prose in `AGENTS.md`, a skill, or a second documentation owner.
 
 Stop at the first tier that answers yes.
 Do not place a fact at a more convenient tier than the one this tree gives you.
+The machine-consumed inventory in [`docs/documentation-audiences.json`](../../../docs/documentation-audiences.json) is the single classification owner for maintained prose surfaces; do not add parallel front matter or a second audience list.
 
 ## One-owner rule
 
@@ -74,6 +81,13 @@ Mark an axis not applicable only after inspecting its integration surface, and u
 For critical safety, routing, startup, and supervision infrastructure, prefer deterministic and idempotent enforcement over relying on agent memory alone.
 Keep instructions as the authority and discovery layer, but make repeated execution converge safely and make invalid or unsafe states fail closed wherever the runtime can enforce them.
 
+## Documentation change review
+
+For every changed maintained prose surface, identify its inventory audience, authoritative owner, current-behavior relevance, destination for supporting evidence, and any unique safety fact that removal could lose.
+Move or delete evidence only after the current owner and regression pointer are verified.
+After all documentation, review-fix, and lint-fix commits, review the complete branch diff again against those criteria rather than reviewing only the latest commit.
+Run `bin/fm-doc-audience-check.sh`; it enforces classification, README setup routing, local link targets, and owner pointers without keyword-linting legitimate evidence prose.
+
 ## Repo style rules
 
 - Put one full sentence per line in tracked Markdown.
@@ -83,6 +97,6 @@ Keep instructions as the authority and discovery layer, but make repeated execut
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
-- A backend-verification doc (`docs/*-backend.md`) records empirical facts, not assumptions.
-- Include the date, version, exact commands run, and exact output.
-- Write incidents the same way, as evidence, not narrative alone.
+- A maintainer-verification record under `docs/verification/` records active empirical facts, not assumptions or task chronology.
+- Include the date, version, exact commands run, and exact output needed to support the current guarantee.
+- Keep incident chronology and delivery evidence in private task reports or PR evidence unless a concise rationale is required to maintain a current safety boundary.

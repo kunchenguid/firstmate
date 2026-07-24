@@ -19,27 +19,3 @@ When this session owns supervision and away mode is not active:
 The turn-end guard extension lives at `__FM_PI_TURNEND_EXT__`.
 The watcher extension lives at `__FM_PI_EXT__`.
 Both are tracked, project-local `.pi/extensions/*.ts` files that Pi auto-discovers once the project is trusted; `bin/fm-session-start.sh` reports when the running Pi session has not loaded both required extensions.
-
-Verification on 2026-07-09 used Pi 0.80.5, an isolated `PI_CODING_AGENT_DIR`, an isolated `FM_HOME`, and the dedicated tmux socket `fm-pi-q6-lab`.
-The command `Use the fm_watch_arm_pi custom tool now. Do not use bash.` rendered `watcher: started Pi extension arm child 1`, then the model returned `DONE` without the prior `result.content.filter(...)` crash.
-The extension tool returned Pi's required text `content` plus structured `details` and used `Type.Object({})` for its parameter schema.
-The human command `/fm-watch-arm-pi` notified through `ctx.ui.notify(...)` and returned no value.
-The clean-exit probe ran `/quit`, printed `PI_EXIT=0`, and confirmed that both the attached arm process and watcher child were gone.
-That cleanup is owned by a one-shot process `exit` listener because Pi 0.80.5 did not reliably emit `session_shutdown` for `/quit`; the listener is removed when `session_shutdown` does run.
-Command run for the complete interactive regression: `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh`.
-Observed output: `ok - Pi 0.80.5 live E2E rendered the tool, guarded once, woke, re-armed, and cleaned up on exit`.
-Command run for the installed-type contract: `tests/fm-pi-primary-types.test.sh`.
-Observed output: `ok - Pi primary extensions pass strict no-emit typecheck against Pi 0.80.5`.
-
-Continuity verification on 2026-07-17 used Pi 0.80.10 with the existing shared Pi credential store and the explicit `openai-codex/gpt-5.6-sol` provider/model pin.
-The isolated live test copied no credential material and created no account.
-The model called `fm_watch_arm_pi` exactly once, an actionable status closed that cycle, the extension ledger-linked a verified successor before the handling turn ended, the turn-end guard never fired, and `/quit` cleaned up both child processes.
-Command: `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh`.
-Observed output: `ok - Pi 0.80.10 live E2E used shared Codex auth, auto-started one successor before turn end, and cleaned up`.
-
-Continuity and Calm verification on 2026-07-23 used Pi 0.81.1 with the existing shared Pi credential store and the explicit `openai-codex/gpt-5.6-sol` provider/model pin.
-The isolated live test activated Calm, proved Pi's native `Working...` row remained visible during a credentialed provider request, proved no `calm transcript` status appeared, restored Calm off, and then completed the unchanged watcher successor and clean-exit lifecycle.
-Command: `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh`.
-Observed output: `ok - Pi 0.81.1 live E2E covered native Calm Working visibility, Ahoy first/later messages, legacy transcripts, near misses, and watcher continuity`.
-
-The authoritative Pi 0.81.1 operational-follow-up and Calm presentation verification record, including exact commands and output, is in [`docs/calm-mode-feasibility.md`](../calm-mode-feasibility.md#2026-07-23-verification-record).

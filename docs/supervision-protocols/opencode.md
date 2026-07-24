@@ -14,8 +14,3 @@ When this session owns supervision and away mode is not active:
 
 OpenCode's persistent TUI plugin runtime is the wake mechanism.
 The plugin applies in the main primary checkout and a secondmate's own home, and stays silent only in child crewmate and scout worktrees.
-
-Continuity verification on 2026-07-17 used OpenCode 1.17.18 in a dedicated tmux socket with an isolated project and `FM_HOME` while retaining the existing managed authentication.
-An actionable child close was followed by a ledger-linked successor before prompt handling, the model issued no watcher-arm command, and the turn-end guard did not fire.
-Command: `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh`.
-Observed output: `ok - OpenCode 1.17.18 live E2E auto-started one successor before prompt handling without a model re-arm`.
