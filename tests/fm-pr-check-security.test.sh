@@ -2324,7 +2324,7 @@ test_bootstrap_isolates_incomplete_poll_migration() {
     || fail "could not prepare healthy poll for migration isolation"
   fm_pr_poll_publish_prepared || fail "could not publish healthy poll for migration isolation"
   fm_write_meta "$state/secondmate-a.meta" \
-    'window=fm-secondmate-a' \
+    'window=firstmate:fm-secondmate-a' \
     'kind=secondmate' \
     'harness=codex' \
     'backend=tmux'
@@ -2334,6 +2334,7 @@ test_bootstrap_isolates_incomplete_poll_migration() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
+  *' list-windows '*) printf 'fm-secondmate-a\n' ;;
   *' display-message '*) printf 'node\n' ;;
 esac
 SH

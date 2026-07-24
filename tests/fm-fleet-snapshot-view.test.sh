@@ -29,6 +29,9 @@ for arg in "$@"; do
   prev=$arg
 done
 case "${1:-}" in
+  list-windows)
+    sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta
+    ;;
   display-message)
     case "$*" in
       *pane_current_command*)
