@@ -34,7 +34,8 @@ Real harness credential tests remain opt-in rather than part of default CI.
 ## Watching and task containers
 
 Each Firstmate home gets one durable workspace with one task tab per endpoint.
-The primary workspace is `firstmate`.
+The preferred primary workspace is `FirstMate Crew`, which distinguishes worker tabs from the human-facing `FirstMate HQ`.
+Primary discovery first looks for `FirstMate Crew` and otherwise adopts the legacy lowercase `firstmate` workspace so an existing installation does not create a duplicate.
 A secondmate home uses `2ndmate-<secondmate-id>`, derived from its validated `.fm-secondmate-home` marker.
 The secondmate process and every child it launches resolve the same home label; a secondmate launched by the primary receives a narrowly scoped home override during container creation.
 
@@ -46,7 +47,8 @@ The first workspace in a completely empty Herdr session must become focused beca
 
 Herdr does not enforce workspace or tab label uniqueness.
 Firstmate adopts the first workspace matching its derived home label and refuses duplicate task tabs inside it.
-Avoid naming a personal workspace `firstmate` or `2ndmate-<id>` because the adapter cannot distinguish that label collision from its own container.
+Avoid naming a personal workspace `FirstMate Crew`, `firstmate`, or `2ndmate-<id>` because the adapter cannot distinguish that label collision from its own container.
+An adopted legacy primary workspace is not renamed automatically; recorded task endpoints continue to use workspace and pane ids.
 An older secondmate workspace using `firstmate-<id>` is not migrated automatically; rename it manually before expecting new tasks or recovery to use it.
 
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
@@ -75,6 +77,7 @@ Protocol 16 exposes `workspace.move` over the named session socket but no CLI su
 `bin/backends/herdr-workspace-move.py` sends only that whitelisted method and verifies the complete returned workspace order.
 Projected children are placed in one contiguous block immediately after their owning home when the session layout, protocol, socket, `python3`, and machine-private per-session lock are all verifiable.
 Existing legacy child labels may extend an already adjacent block read-only but are never renamed or migrated.
+A projection bound beneath a legacy lowercase primary workspace retains that recorded parent id and label during restart recovery.
 A foreign, ambiguous, detached, or manually interleaved child makes ordering skip with a warning rather than rewriting the layout.
 
 Ordering failure never fails the task spawn.

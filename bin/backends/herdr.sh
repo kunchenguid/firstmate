@@ -100,6 +100,12 @@ FM_BACKEND_HERDR_ESCALATED_PREFIX=".herdr-escalated-"
 # at a seeded secondmate home's root, containing exactly that secondmate's id.
 # The primary firstmate home never carries this marker.
 FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
+# The primary's visible worker-container label is intentionally distinct from
+# the human-facing "FirstMate HQ" workspace. Discovery still recognizes the
+# original lowercase label so an upgrade reuses its existing container instead
+# of creating a duplicate.
+FM_BACKEND_HERDR_PRIMARY_WORKSPACE_LABEL="FirstMate Crew"
+FM_BACKEND_HERDR_LEGACY_PRIMARY_WORKSPACE_LABEL="firstmate"
 # The default-off presentation projection is intentionally separate from the
 # authoritative task endpoint record.
 # A per-task journal lives under state/ as <id>.herdr-presentation.
@@ -112,12 +118,11 @@ FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
 
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
 # label (docs/herdr-backend.md "Default task container shape"). The PRIMARY home (no
-# secondmate marker) resolves to the constant "firstmate", byte-identical to
-# every pre-existing task's recorded label - no forced migration. A SECONDMATE
-# home resolves to "2ndmate-<secondmate-id>", so its tasks land in their own
-# workspace, obviously distinguishable from the primary's (and from every
-# other secondmate's) in herdr's spaces sidebar. Read fresh from FM_HOME on
-# every call rather than cached at source time: FM_HOME is the home's own
+# secondmate marker) resolves to the visible constant "FirstMate Crew". A
+# SECONDMATE home resolves to "2ndmate-<secondmate-id>", so its tasks land in
+# their own workspace, obviously distinguishable from the primary's (and from
+# every other secondmate's) in herdr's spaces sidebar. Read fresh from FM_HOME
+# on every call rather than cached at source time: FM_HOME is the home's own
 # durable identity, not env plumbing threaded through a call chain, so the
 # label is automatically stable across every respawn/recovery for the life of
 # that home. fm-spawn.sh briefly shadows FM_HOME to a secondmate's own home
@@ -132,7 +137,7 @@ fm_backend_herdr_workspace_label() {
       return 0
     fi
   fi
-  printf 'firstmate'
+  printf '%s' "$FM_BACKEND_HERDR_PRIMARY_WORKSPACE_LABEL"
 }
 
 # fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>, setting
@@ -629,7 +634,7 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
 # returned by THIS projected create immediately after its owning parent's
 # contiguous child block and before the next parent.
 #
-# <parent-label> is the owning FM_HOME label (firstmate or 2ndmate-<id>).
+# <parent-label> is the owning FM_HOME label (FirstMate Crew or 2ndmate-<id>).
 # New-format └ ... · p:<token> children and, for compatibility only, already
 # adjacent old-format firstmate/... or 2ndmate-<id>/... projections may extend
 # the block read-only; they are never renamed or moved.
@@ -655,12 +660,16 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     echo "warning: herdr presentation ordering could not list workspaces; leaving worker in Herdr's current order" >&2
     return 0
   }
-  analysis=$(printf '%s' "$list" | jq -c --arg created "$created" --arg parent "$parent" '
+  analysis=$(printf '%s' "$list" | jq -c \
+    --arg created "$created" \
+    --arg parent "$parent" \
+    --arg primary "$FM_BACKEND_HERDR_PRIMARY_WORKSPACE_LABEL" \
+    --arg legacy_primary "$FM_BACKEND_HERDR_LEGACY_PRIMARY_WORKSPACE_LABEL" '
     def is_parent:
       (.label | type) == "string" and .label == $parent;
     def is_top_level_parent:
       (.label | type) == "string"
-      and ((.label == "firstmate") or (.label | test("^2ndmate-[^/]+$")));
+      and ((.label == $primary) or (.label == $legacy_primary) or (.label | test("^2ndmate-[^/]+$")));
     def is_new_child:
       (.label | type) == "string"
       and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
@@ -668,7 +677,11 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
       (.label | type) == "string"
       and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"));
     def is_legacy_child_for($owner):
-      is_legacy_child and (.label | startswith($owner + "/"));
+      is_legacy_child
+      and (
+        (.label | startswith($owner + "/"))
+        or ($owner == $primary and (.label | startswith($legacy_primary + "/")))
+      );
     def is_child_for($owner):
       is_new_child or is_legacy_child_for($owner);
     (.result.workspaces // null) as $spaces
@@ -829,7 +842,7 @@ fm_backend_herdr_server_ensure() {  # <session>
 # (list order, normally creation order/oldest) rather than disambiguating -
 # identical in spirit to the pre-existing tab duplicate-label check below.
 fm_backend_herdr_workspace_find() {  # <session>
-  local session=$1 label list
+  local session=$1 label list match
   label=$(fm_backend_herdr_workspace_label)
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 0
   # NOTE: the jq variable is $want, NOT $label - `label` is a jq reserved
@@ -837,8 +850,19 @@ fm_backend_herdr_workspace_find() {  # <session>
   # compile error that `2>/dev/null` would silently swallow, making this find
   # ALWAYS return empty and every spawn mint a fresh "firstmate" workspace
   # (the workspace leak).
-  printf '%s' "$list" | jq -r --arg want "$label" \
-    '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null | head -1
+  match=$(printf '%s' "$list" | jq -r --arg want "$label" \
+    '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null | head -1)
+  if [ -n "$match" ]; then
+    printf '%s\n' "$match"
+    return 0
+  fi
+  # A primary upgraded from the original lowercase label must keep using that
+  # existing workspace until the operator renames it. This compatibility read
+  # never applies to secondmate homes and never creates or mutates anything.
+  if [ "$label" = "$FM_BACKEND_HERDR_PRIMARY_WORKSPACE_LABEL" ]; then
+    printf '%s' "$list" | jq -r --arg want "$FM_BACKEND_HERDR_LEGACY_PRIMARY_WORKSPACE_LABEL" \
+      '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null | head -1
+  fi
 }
 
 # fm_backend_herdr_workspace_prune_seeded_default_tab: close EXACTLY

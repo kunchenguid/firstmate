@@ -19,7 +19,7 @@
 #
 # Covers, at minimum (per the task brief):
 #   - a primary-shaped home (no .fm-secondmate-home marker) spawning a
-#     crewmate into the "firstmate" workspace
+#     crewmate into the "FirstMate Crew" workspace
 #   - a secondmate-shaped home (with .fm-secondmate-home) getting its own
 #     labeled workspace when the PRIMARY spawns it (fm-spawn.sh's FM_HOME
 #     shadow for --secondmate)
@@ -102,7 +102,7 @@ make_scratch_project() {  # <dir>
 PROJ1="$TMP_ROOT/scratch-project-1"; make_scratch_project "$PROJ1"
 PROJ2="$TMP_ROOT/scratch-project-2"; make_scratch_project "$PROJ2"
 
-# --- 1. primary-shaped home: a crewmate spawns into the "firstmate" space ---
+# --- 1. primary-shaped home: a crewmate spawns into "FirstMate Crew" --------
 
 CM1_OUT="$TMP_ROOT/cm1.out"; CM1_ERR="$TMP_ROOT/cm1.err"
 FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \
@@ -126,8 +126,8 @@ assert_contains_local "$CM1_CAPTURE" "primary-crew-ok" "cm1's raw launch command
 CM1_WSID=$(herdr pane get "$CM1_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
 [ -n "$CM1_WSID" ] || fail "could not read cm1's pane workspace_id"
 CM1_WS_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$CM1_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
-[ "$CM1_WS_LABEL" = "firstmate" ] || fail "a primary-shaped home's crewmate should land in the 'firstmate' workspace, got '$CM1_WS_LABEL'"
-pass "real herdr E2E: the primary-shaped home's crewmate landed in the 'firstmate' workspace"
+[ "$CM1_WS_LABEL" = "FirstMate Crew" ] || fail "a primary-shaped home's crewmate should land in the 'FirstMate Crew' workspace, got '$CM1_WS_LABEL'"
+pass "real herdr E2E: the primary-shaped home's crewmate landed in the 'FirstMate Crew' workspace"
 
 # --- 2. the PRIMARY spawns a secondmate: its tab lands in the SECONDMATE's own space ---
 # (fm-spawn.sh's herdr case arm shadows FM_HOME to the secondmate's home for
