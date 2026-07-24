@@ -153,7 +153,7 @@ if [ "$in_flight" -eq 0 ] && [ "$queue_pending" = false ]; then
   exit 0
 fi
 
-# No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
+# No fresh watcher while active work or queued wakes need supervision is the dangerous state: emit a prominent,
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line. Later
 # calls in the same episode get a one-line reminder only.
 if [ "$watcher_fresh" = false ]; then

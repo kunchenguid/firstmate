@@ -8,7 +8,7 @@
 # watcher holds the home lock. Ordinary shell commands, recovery commands,
 # healthy supervision, fleet-idle homes, and child worktrees are always allowed.
 #
-# The existing turn-end guard remains the unchanged final backstop. This gate
+# The existing turn-end guard remains the final backstop. This gate
 # closes the long-turn gap before another fleet mutation, but does not replace or
 # weaken the Stop hook.
 #
