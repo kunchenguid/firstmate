@@ -362,7 +362,7 @@ Inheriting an exported token from a shell profile is what leaves a restarted dae
 
 Session start verifies the credential when, and only when, this home tracks a repository on such a forge, and reports `FORGE_CREDENTIAL: <forge>: <reason>` when it is missing, empty, unusable, refused, or cannot see the repository it was probed against.
 That check probes exactly one deterministically chosen tracked repository per forge, so it costs at most one bounded request per session start however many clones on that forge the home tracks.
-It stays silent when the forge cannot be reached: being offline is not a credential fault.
+It stays silent when the forge cannot be reached: being offline is not a credential fault, and neither is a forge incident or a rate-limit refusal, so a transport error, a 5xx, and an HTTP 429 all report nothing rather than blaming a credential that was never judged.
 The whole reason it runs at startup is that a stale credential used to be invisible until a pull-request step failed roughly an hour into finished work.
 No diagnostic anywhere in this path prints a credential value; each one names the failing requirement instead.
 
@@ -391,6 +391,7 @@ Both waits on this path are bounded, because a startup check that can hang sessi
 `FM_FORGE_CREDENTIAL_TIMEOUT` bounds the forge request and `FM_FORGE_KEYCHAIN_TIMEOUT` bounds the store read; a blank, non-numeric, or zero value falls back to the default, since zero means "no limit" to curl rather than "do not wait".
 The store read needs its own bound because `security` has no timeout flag and blocks indefinitely when the stored item's access control makes the read raise a confirmation dialog that an unattended session can never answer.
 That stall is reported every time it happens, distinctly from every other outcome, because it is actionable: re-cache the item so an unattended read is allowed.
+The same access control can also make the store refuse the read outright instead of blocking, and that refusal is its own outcome too, never reported as an absent entry: the entry is present and merely unreadable unattended, so sending the captain to look for a missing one would point them away from the same re-cache that fixes it.
 
 Verified 21/07/2026 against the live Bitbucket Cloud API with `bin/fm-forge-credential.sh check bitbucket <workspace>/<repo>`: a valid read-only credential on a private repository returns HTTP 200 and exit 0, the same request with an invalid token returns HTTP 401 and exit 5, a credential whose scopes do not cover the request returns HTTP 403 and exit 5 with a body naming the required and granted scopes, and an unknown repository returns HTTP 404 and exit 8.
 The account-wide listing endpoints that would otherwise make a workspace-agnostic probe possible - `/2.0/repositories`, `/2.0/workspaces`, `/2.0/user/permissions/repositories` - all answer HTTP 410 with `CHANGE-2770 - Functionality has been deprecated`, authenticated or not, which is why the verification probe reads one named repository instead.

@@ -55,7 +55,8 @@
 #          forge the home tracks. It stays silent when no such repository is
 #          tracked and when the forge could not be reached.
 #          bin/fm-forge-credential.sh owns the resolution, the reason wording,
-#          and the exit-code contract.
+#          the exit-code contract, and which forges firstmate holds a credential
+#          for; this check names no forge of its own.
 #          Two outcomes are reported ONCE per home and then stay silent, because
 #          each is news the first time and unactionable noise every session
 #          after: a machine with no credential store at all, and a repository
@@ -844,32 +845,35 @@ forge_credential_report() {  # <forge> <status> <reason> [<repository>]
 }
 
 forge_credential_check() {
-  local resolver proj url forge repo out status unnamed probe_forge probe_repo
+  local resolver proj url urls out status target probe_forge probe_repo
   resolver="$SCRIPT_DIR/fm-forge-credential.sh"
   [ -x "$resolver" ] || return 0
   [ -d "$PROJECTS" ] || return 0
-  unnamed=
-  probe_forge=
-  probe_repo=
-  # Choose the probe target first and probe once, rather than probing as the
-  # scan goes: the scan must never turn a home's clone count into a session-start
-  # request count.
+  urls=
   for proj in "$PROJECTS"/*; do
     [ -d "$proj" ] || continue
     url=$(git -C "$proj" remote get-url origin 2>/dev/null) || continue
-    forge=$("$resolver" forge-of "$url" 2>/dev/null) || continue
-    [ "$forge" = bitbucket ] || continue
-    # Prefer a clone whose remote names a repository, because only a repository
-    # read proves the credential is still accepted.
-    if ! repo=$("$resolver" repo-of "$url" 2>/dev/null); then
-      [ -n "$unnamed" ] || unnamed=$forge
-      continue
-    fi
-    probe_forge=$forge
-    probe_repo=$repo
-    break
+    [ -n "$url" ] || continue
+    urls="$urls$url
+"
   done
-  if [ -n "$probe_forge" ]; then
+  [ -n "$urls" ] || return 0
+  # Collect the remotes first, then ask the resolver once. Two properties this
+  # buys are worth the extra variable. Which forges firstmate holds a credential
+  # for is never restated here, so a forge added to the resolver's table cannot
+  # be silently skipped by this scan. And the scan turns a home's clone count
+  # into neither a session-start request count nor a session-start process
+  # count: one resolver process chooses the target, one proves it.
+  # The remotes are handed over in glob order, so which clone gets probed stays
+  # deterministic.
+  target=$(printf '%s' "$urls" | "$resolver" probe-target 2>/dev/null) || return 0
+  probe_forge=${target%% *}
+  probe_repo=
+  case "$target" in
+    *' '*) probe_repo=${target#* } ;;
+  esac
+  [ -n "$probe_forge" ] || return 0
+  if [ -n "$probe_repo" ]; then
     if ! command -v curl >/dev/null 2>&1; then
       report_missing_tool curl
       return 0
@@ -882,10 +886,9 @@ forge_credential_check() {
   # Every tracked clone on that forge has an unusable remote: fall back to the
   # local proof, which still catches a missing or empty credential and needs no
   # request at all.
-  [ -n "$unnamed" ] || return 0
-  out=$("$resolver" check "$unnamed" 2>&1 >/dev/null)
+  out=$("$resolver" check "$probe_forge" 2>&1 >/dev/null)
   status=$?
-  forge_credential_report "$unnamed" "$status" "$out"
+  forge_credential_report "$probe_forge" "$status" "$out"
 }
 
 install_cmd() {

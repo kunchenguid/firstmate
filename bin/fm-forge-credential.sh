@@ -6,6 +6,7 @@
 #        fm-forge-credential.sh api-get <forge> <api-path>
 #        fm-forge-credential.sh forge-of <url>
 #        fm-forge-credential.sh repo-of <url>
+#        fm-forge-credential.sh probe-target < <urls>
 #
 # check    Resolve the credential, and with <repository> also prove it can read
 #          that repository. Silent and exit 0 when it works; one reason line on
@@ -28,6 +29,17 @@
 #          reads a repository URL, such as an origin remote, and deliberately
 #          not a pull-request URL: PR-URL grammar already has an owner in
 #          bin/fm-teardown.sh's pr_number_from_target.
+# probe-target
+#          Read git remote URLs on stdin, one per line, and print the ONE
+#          repository worth probing to prove a credential:
+#          "<forge> <repository>" for the first URL on a forge whose credential
+#          firstmate holds that also names a usable repository, or "<forge>"
+#          alone when such a forge is tracked but no remote on it names one.
+#          Exit 1 when no URL is on a forge firstmate holds a credential for.
+#          It exists so a caller scanning a home's clones needs neither the
+#          forge table nor one process per clone: which forges firstmate holds
+#          a credential for stays owned here, and the scan costs one process
+#          however many clones the home tracks.
 #
 # Exit codes - the contract every caller reads:
 #   0  ok
@@ -36,12 +48,17 @@
 #   4  credential incomplete - an entry exists but is empty or unusable
 #   5  credential rejected by the forge - invalid, revoked, expired, or under-scoped
 #   6  no credential store available on this machine
-#   7  inconclusive - the forge could not be reached, so nothing was proved
+#   7  inconclusive - the forge could not be reached or answered nothing usable
+#      (a transport error, a 5xx, or a rate-limit refusal), so nothing was proved
 #   8  the credential authenticated but the requested repository or resource is
 #      not visible to it; a 404 alone does not settle whether the account or
 #      scopes are wrong or the repository moved
 #   9  unexpected forge response
 #  10  the credential store did not answer within the allowed wait
+#  11  the credential store refused the read - the entry was not reported
+#      missing, the store declined to hand it over, as it does when the stored
+#      item's access control forbids an unattended read or the keychain is
+#      locked
 #
 # BOUNDED WAITS. Neither step of the path may stall a session start. The request
 # is bounded by FM_FORGE_CREDENTIAL_TIMEOUT (default 10 seconds) and the store
@@ -52,7 +69,11 @@
 # access control makes the read raise a confirmation dialog, which an unattended
 # session can never answer. That stall is its own outcome (exit 10) rather than
 # a silent pass, and its remedy is to re-cache the item so an unattended read is
-# allowed.
+# allowed. The same access control can also make the store refuse the read
+# outright instead of blocking - it answers at once, so no watchdog ever fires -
+# and that answer is exit 11 rather than "the entry is absent", because sending
+# the captain to look for an entry that is present and merely unreadable is the
+# opposite of the remedy, which is again to re-cache it.
 #
 # WHY IT READS THE KEYCHAIN DIRECTLY. The credential must resolve identically
 # whether firstmate was started from a warm interactive terminal, re-armed by a
@@ -94,6 +115,14 @@ EX_INCONCLUSIVE=7
 EX_NOT_FOUND=8
 EX_UNEXPECTED=9
 EX_STORE_TIMEOUT=10
+EX_STORE_REFUSED=11
+
+# What the store reports for "no such item", as distinct from every other way a
+# read can fail. macOS `security` exits 44 (errSecItemNotFound) for a missing
+# entry and answers other refusals with their own status - 51 when the item's
+# access control forbids an unattended read, 25293 when authentication failed -
+# so only 44 may be reported as an absent entry.
+STORE_NOT_FOUND_STATUS=44
 
 KEYCHAIN_TOOL="${FM_FORGE_KEYCHAIN_TOOL_OVERRIDE:-/usr/bin/security}"
 
@@ -140,6 +169,7 @@ usage: fm-forge-credential.sh check <forge> [<repository>]
        fm-forge-credential.sh api-get <forge> <api-path>
        fm-forge-credential.sh forge-of <url>
        fm-forge-credential.sh repo-of <url>
+       fm-forge-credential.sh probe-target < <urls>
 
 Read this script's header for the forge table, the exit-code contract, and the
 secret-handling rules every caller inherits.
@@ -193,10 +223,20 @@ forge_keychain_service() {  # <forge> <user|secret>
   esac
 }
 
-# Refuse an unsupported forge before anything reads a store or the network.
-forge_supported() {
+# The single owner of "which forges does firstmate hold a credential for". Every
+# other answer in this script, and every caller's, derives from it, so adding a
+# forge here is the whole change rather than the first half of one.
+forge_holds_credential() {  # <forge>
   case "$1" in
     bitbucket) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Refuse an unsupported forge before anything reads a store or the network.
+forge_supported() {
+  forge_holds_credential "$1" && return 0
+  case "$1" in
     github)
       REASON="github has no firstmate-held credential; GitHub access is owned by the gh CLI"
       return 1
@@ -216,9 +256,13 @@ forge_supported() {
 # the bound and kills the store command, so an item whose access control raises
 # a confirmation dialog cannot hold a session start open forever.
 # The first line lands in STORE_LINE and anything after it sets STORE_TRAILING,
-# because a value carrying a line break must still be detectable as one.
+# because a value carrying a line break must still be detectable as one. Both
+# come out of a SINGLE read of everything the store wrote: the reader may never
+# go back to the pipe for a second helping, because a pipe with no writer left
+# does not answer that second read on macOS until the backstop expires, and a
+# reader that waits that long turns every silent answer into a false stall.
 read_store_value() {  # <service>
-  local service=$1 dir fifo expired store_pid watchdog_pid backstop trailing
+  local service=$1 dir fifo expired store_pid watchdog_pid backstop raw
   STORE_LINE=
   STORE_TRAILING=0
   STORE_STATUS=0
@@ -256,12 +300,25 @@ read_store_value() {  # <service>
   # holds the pipe open after it is gone; the watchdog remains the real bound.
   backstop=$((STORE_TIMEOUT + 2))
   exec 3<"$fifo"
-  IFS= read -r -t "$backstop" -u 3 STORE_LINE
-  # Anything after the first line only has to be detected, never kept: a value
-  # carrying a line break is refused rather than repaired.
-  # shellcheck disable=SC2034 # `trailing` is a sink; its arrival is the signal.
-  IFS= read -r -t "$backstop" -u 3 trailing && STORE_TRAILING=1
+  # ONE read, never one per line. A second read on a pipe whose last writer has
+  # already gone waits out the whole backstop on macOS instead of seeing end of
+  # input, so reading the first line and then reading again to detect trailing
+  # data made every entry the store answers nothing for - an absent one, above
+  # all - arrive as a five-second stall wearing the stall's remedy. Reading to
+  # NUL takes everything the store wrote in a single bounded call, after which
+  # the first line and whether anything followed it are string questions.
+  raw=
+  IFS= read -r -d '' -t "$backstop" -u 3 raw
   exec 3<&-
+  STORE_LINE=${raw%%"$NL"*}
+  # One trailing line terminator is the store's own, not trailing data. Anything
+  # still there after removing it is a value carrying a line break, which is
+  # detected and refused rather than repaired.
+  raw=${raw%"$NL"}
+  case "$raw" in
+    *"$NL"*) STORE_TRAILING=1 ;;
+  esac
+  raw=
   # Always before the watchdog is stood down, so this wait is bounded by it.
   wait "$store_pid" 2>/dev/null
   STORE_STATUS=$?
@@ -291,9 +348,16 @@ read_keychain_half() {  # <forge> <user|secret>
   read_store_value "$service" || { status=$?; STORE_LINE=; return "$status"; }
   value=$STORE_LINE
   STORE_LINE=
-  if [ "$STORE_STATUS" -ne 0 ]; then
+  if [ "$STORE_STATUS" -eq "$STORE_NOT_FOUND_STATUS" ]; then
     REASON="keychain entry $service is absent from the login keychain"
     return "$EX_ABSENT"
+  fi
+  if [ "$STORE_STATUS" -ne 0 ]; then
+    # Not "absent": the store answered, and what it answered was a refusal.
+    # Reporting it as a missing entry would send the captain looking for
+    # something that is there, instead of re-caching what will not open.
+    REASON="keychain entry $service could not be read: the store refused the read (status $STORE_STATUS) rather than reporting the entry missing, as it does when the item's access control forbids an unattended read; re-cache it to allow one"
+    return "$EX_STORE_REFUSED"
   fi
   if [ "$STORE_TRAILING" -ne 0 ]; then
     # A line break would end the curl config line and let the remainder act as
@@ -425,6 +489,13 @@ forge_get() {  # <forge> <api-path>
       REASON="no usable response from ${base#https://}"
       status=$EX_INCONCLUSIVE
       ;;
+    429|5??)
+      # The forge is unreachable in every sense that matters here: an incident
+      # or a rate limit says nothing about the credential, so it must not be
+      # reported as a credential fault or repeated at every session start.
+      REASON="${base#https://} could not answer the request (HTTP $http), so nothing was proved about the credential"
+      status=$EX_INCONCLUSIVE
+      ;;
     *)
       REASON="unexpected response from $forge (HTTP $http)"
       status=$EX_UNEXPECTED
@@ -526,6 +597,30 @@ cmd_repo_of() {  # <url>
   printf '%s\n' "$repo"
 }
 
+# Choose the one repository worth probing out of a home's tracked remotes. The
+# forge table stays owned here rather than being restated by the caller, and the
+# whole scan costs the caller one process instead of one per clone.
+# A remote that names a repository wins, because only a repository read proves
+# the credential is still accepted; a forge with no such remote is still worth
+# naming, because the local proof still catches a missing or empty credential.
+# The first usable remote in the order given wins, so the caller's own ordering
+# decides the target and the choice stays deterministic.
+cmd_probe_target() {
+  local url forge repo fallback=
+  while IFS= read -r url; do
+    [ -n "$url" ] || continue
+    forge=$(cmd_forge_of "$url") || continue
+    forge_holds_credential "$forge" || continue
+    if repo=$(cmd_repo_of "$url"); then
+      printf '%s %s\n' "$forge" "$repo"
+      return 0
+    fi
+    [ -n "$fallback" ] || fallback=$forge
+  done
+  [ -n "$fallback" ] || return 1
+  printf '%s\n' "$fallback"
+}
+
 # --- entry -------------------------------------------------------------------
 
 STATUS=0
@@ -565,6 +660,15 @@ case "$COMMAND" in
       exit "$EX_USAGE"
     fi
     cmd_repo_of "$1"
+    exit $?
+    ;;
+  probe-target)
+    shift
+    if [ "$#" -ne 0 ]; then
+      echo "usage: fm-forge-credential.sh probe-target < <urls>" >&2
+      exit "$EX_USAGE"
+    fi
+    cmd_probe_target
     exit $?
     ;;
   -h|--help|help)

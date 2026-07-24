@@ -30,7 +30,10 @@ DUMMY_SECRET='dummy-token-value'
 # A fake `security` that answers only the firstmate-specific services. Each
 # service's behavior is set per case through FAKE_KEYCHAIN_<half>:
 #   ok      - return the dummy value
-#   absent  - exit non-zero, as a real keychain does for a missing entry
+#   absent  - exit 44, as a real keychain does for a missing entry
+#   refused - exit 51, as a real keychain does when the stored item's access
+#             control forbids an unattended read: the item is there, the store
+#             simply will not open it
 #   empty   - return an empty value
 #   newline - return a value carrying an embedded line break
 #   stall   - never answer, as a real keychain does when the item's access
@@ -58,6 +61,7 @@ esac
 case "\$mode" in
   ok) printf '%s\n' "\$value" ;;
   absent) exit 44 ;;
+  refused) exit 51 ;;
   empty) printf '\n' ;;
   newline) printf '%s\noutput = /tmp/fm-forge-injected\n' "\$value" ;;
   colon) printf 'user:with:colons\n' ;;
@@ -252,7 +256,7 @@ test_offline_resolution_needs_no_network() {
 }
 
 test_missing_entry_refuses_with_an_actionable_reason() {
-  local dir record err
+  local dir record err elapsed
   dir=$(new_case)
   record=$(FAKE_KEYCHAIN_SECRET=absent run_resolver "$dir" check bitbucket example-team/example-repo)
   expect_code 3 "$(field "$record" 1)" "an absent keychain entry"
@@ -260,7 +264,38 @@ test_missing_entry_refuses_with_an_actionable_reason() {
   assert_contains "$err" "firstmate-bitbucket-token" "the reason must name the missing entry"
   assert_contains "$err" "absent" "the reason must say the entry is absent"
   assert_absent "$dir/curl-argv" "an unresolved credential must never reach a request"
-  pass "a missing entry refuses with the entry name and its own exit code"
+
+  # A store that answers "no such entry" answers AT ONCE, so the read must end
+  # at once too. A reader that goes back to a pipe no writer is left on waits out
+  # the bound instead, and every absent entry then arrives as a stall - wrong
+  # remedy, and a session start that pays the whole store bound to learn it.
+  SECONDS=0
+  record=$(FAKE_KEYCHAIN_SECRET=absent FM_FORGE_KEYCHAIN_TIMEOUT=20 \
+    run_resolver "$dir" check bitbucket example-team/example-repo)
+  elapsed=$SECONDS
+  expect_code 3 "$(field "$record" 1)" "an absent entry under a long store bound"
+  [ "$elapsed" -lt 10 ] \
+    || fail "an absent entry must be reported at once, waited ${elapsed}s of a 20s bound"
+  pass "a missing entry refuses at once with the entry name and its own exit code"
+}
+
+test_a_refused_store_read_is_not_an_absent_entry() {
+  local dir record err
+  # The store answers a missing entry with 44 and a read it will not allow with
+  # its own status, and only the first means the entry is not there. Calling the
+  # second "absent" would send the captain hunting for an entry that is present
+  # and merely unreadable unattended, away from the re-cache that fixes it.
+  dir=$(new_case)
+  record=$(FAKE_KEYCHAIN_SECRET=refused run_resolver "$dir" check bitbucket example-team/example-repo)
+  expect_code 11 "$(field "$record" 1)" "a store that refused the read"
+  err=$(field "$record" 3)
+  assert_contains "$err" "firstmate-bitbucket-token" "the reason must name the entry the store would not open"
+  assert_contains "$err" "refused the read" "a refused read must read as a refusal"
+  assert_contains "$err" "re-cache" "the reason must name the remedy"
+  assert_not_contains "$err" "absent" "a refused read must never be reported as an absent entry"
+  assert_absent "$dir/curl-argv" "a credential the store would not hand over must never reach a request"
+  assert_no_credential_leak "$err" "the refused-read refusal"
+  pass "a store that refuses the read is its own outcome, not a missing entry"
 }
 
 test_empty_value_refuses_distinctly_from_absent() {
@@ -335,6 +370,24 @@ test_unreachable_forge_is_inconclusive_not_a_verdict() {
   pass "an unreachable forge is inconclusive, never a credential verdict"
 }
 
+test_a_forge_that_cannot_answer_is_not_a_credential_verdict() {
+  local dir record status
+  # An incident or a rate limit says nothing about the credential, so it must be
+  # inconclusive like any other unreachable forge. Reported as a credential fault
+  # it would print an unactionable line at every session start for the length of
+  # the incident, training the reader to skim past startup diagnostics.
+  for status in 500 502 503 429; do
+    dir=$(new_case)
+    record=$(FAKE_CURL_STATUS="$status" run_resolver "$dir" check bitbucket example-team/example-repo)
+    expect_code 7 "$(field "$record" 1)" "a forge answering HTTP $status"
+    assert_not_contains "$(field "$record" 3)" "rejected" \
+      "HTTP $status must not be reported as a rejected credential"
+    assert_not_contains "$(field "$record" 3)" "unexpected" \
+      "HTTP $status is the forge being unable to answer, not an unclassifiable response"
+  done
+  pass "a forge incident or rate limit is inconclusive, never a credential verdict"
+}
+
 test_invisible_repository_and_unexpected_response_are_separate() {
   local dir record
   dir=$(new_case)
@@ -352,8 +405,8 @@ test_invisible_repository_and_unexpected_response_are_separate() {
 test_no_stream_can_emit_a_credential_value() {
   local dir record mode statuses status all
   all=
-  for mode in ok absent empty newline colon; do
-    for status in 200 401 403 404 410; do
+  for mode in ok absent refused empty newline colon; do
+    for status in 200 401 403 404 410 503; do
       dir=$(new_case)
       record=$(FAKE_KEYCHAIN_SECRET="$mode" FAKE_CURL_STATUS="$status" \
         run_resolver "$dir" check bitbucket example-team/example-repo)
@@ -411,6 +464,39 @@ file:///tmp/local.git^-^-
 https://bitbucket.org/ws/repo/../../other^bitbucket^-
 ROWS
   pass "forge and repository identity are read from the host, never the path"
+}
+
+test_probe_target_owns_the_choice_of_what_to_probe() {
+  local out status
+  # The scan's caller must not restate which forges firstmate holds a credential
+  # for, and must not pay a process per clone to find out; one call over every
+  # remote answers both.
+  out=$(printf '%s\n' \
+    'https://github.com/owner/repo.git' \
+    'git@bitbucket.org:example-team/example-repo.git' \
+    'git@bitbucket.org:example-team/second.git' \
+    | "$RESOLVER" probe-target)
+  [ "$out" = 'bitbucket example-team/example-repo' ] \
+    || fail "the first held-forge remote naming a repository must be the target, got '$out'"
+
+  # A remote on a held forge that names no repository is still worth naming, so
+  # the local proof still runs; a remote that names one wins over it whatever the
+  # order.
+  out=$(printf '%s\n' 'https://bitbucket.org/' 'git@bitbucket.org:example-team/late.git' \
+    | "$RESOLVER" probe-target)
+  [ "$out" = 'bitbucket example-team/late' ] \
+    || fail "a usable remote must win over an earlier unusable one, got '$out'"
+  out=$(printf '%s\n' 'https://bitbucket.org/' | "$RESOLVER" probe-target)
+  [ "$out" = bitbucket ] \
+    || fail "a held forge with no usable remote must still be named, got '$out'"
+
+  # A home on no forge firstmate holds a credential for gets no target at all,
+  # which is what keeps a GitHub-only home from ever seeing a line.
+  out=$(printf '%s\n' 'https://github.com/owner/repo.git' 'file:///tmp/local.git' \
+    | "$RESOLVER" probe-target) && status=0 || status=$?
+  [ "$status" -eq 1 ] || fail "remotes on no held forge must yield no probe target, got exit $status"
+  [ -z "$out" ] || fail "a home with no held forge must print nothing, got '$out'"
+  pass "the resolver alone decides which repository proves a credential"
 }
 
 test_github_has_no_firstmate_credential() {
@@ -627,6 +713,61 @@ test_bootstrap_probes_one_repository_per_forge() {
   requests=$(grep -c . "$dir/rejected-argv")
   [ "$requests" -eq 1 ] || fail "a rejected credential must cost one request, made $requests"
   pass "session start probes one repository per forge however many clones are tracked"
+}
+
+test_bootstrap_stays_silent_when_the_forge_cannot_answer() {
+  local dir home fakebin out
+  # A forge incident is not a credential fault, and a session start that blames
+  # the credential for one prints an unactionable line every session until the
+  # incident ends.
+  dir=$(new_bootstrap_case 'example-repo=git@bitbucket.org:example-team/example-repo.git')
+  home="$dir/home"
+  fakebin="$dir/bin"
+  out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/security" \
+    FAKE_CURL_STATUS=503 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "FORGE_CREDENTIAL" \
+    "a forge that could not answer must not be reported as a credential fault"
+  pass "a forge incident leaves session start silent about the credential"
+}
+
+test_the_scan_names_no_forge_and_costs_no_process_per_clone() {
+  local dir home fakebin out
+  # The forge table has one owner. A scan that restates it would silently skip
+  # every clone on a forge added to the resolver later, and the regression would
+  # not surface until a pull-request step failed - the exact failure this check
+  # exists to pre-empt. It also asks once rather than per clone, so a home's
+  # clone count reaches neither the request count nor the process count.
+  assert_grep 'probe-target' "$ROOT/bin/fm-bootstrap.sh" \
+    "the scan must ask the resolver for its probe target"
+  # shellcheck disable=SC2016 # The invocations being excluded are literal shell source.
+  assert_no_grep '$resolver" forge-of' "$ROOT/bin/fm-bootstrap.sh" \
+    "the scan must not classify remotes one process at a time"
+  # shellcheck disable=SC2016
+  assert_no_grep '$resolver" repo-of' "$ROOT/bin/fm-bootstrap.sh" \
+    "the scan must not resolve repositories one process at a time"
+  # shellcheck disable=SC2016
+  assert_no_grep '"$forge" = bitbucket' "$ROOT/bin/fm-bootstrap.sh" \
+    "the scan must not restate which forges firstmate holds a credential for"
+
+  # And the behavior that source shape is protecting: many clones, one probe,
+  # the deterministic first one.
+  dir=$(new_bootstrap_case \
+    'a-first=git@bitbucket.org:example-team/first.git' \
+    'b-second=git@bitbucket.org:example-team/second.git' \
+    'c-third=git@bitbucket.org:example-team/third.git' \
+    'gh-only=https://github.com/owner/repo.git')
+  home="$dir/home"
+  fakebin="$dir/bin"
+  out=$(PATH="$fakebin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FORGE_KEYCHAIN_TOOL_OVERRIDE="$fakebin/security" \
+    FAKE_CURL_404_MATCH='example-team/' \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "cannot see bitbucket repository example-team/first" \
+    "the probe must land on the first tracked clone in glob order"
+  pass "the scan asks the resolver once and names no forge of its own"
 }
 
 test_bootstrap_reports_an_unseen_repository_once_per_home() {
@@ -861,15 +1002,18 @@ test_the_leak_guard_can_still_fail
 test_complete_pair_resolves_and_authenticates
 test_offline_resolution_needs_no_network
 test_missing_entry_refuses_with_an_actionable_reason
+test_a_refused_store_read_is_not_an_absent_entry
 test_empty_value_refuses_distinctly_from_absent
 test_half_a_pair_never_reaches_a_request
 test_unusable_values_refuse
 test_rejected_credential_is_distinct_from_absent
 test_unreachable_forge_is_inconclusive_not_a_verdict
+test_a_forge_that_cannot_answer_is_not_a_credential_verdict
 test_invisible_repository_and_unexpected_response_are_separate
 test_no_stream_can_emit_a_credential_value
 test_no_mistakes_credential_is_out_of_reach
 test_forge_and_repository_identity
+test_probe_target_owns_the_choice_of_what_to_probe
 test_github_has_no_firstmate_credential
 test_no_credential_store_is_its_own_outcome
 test_a_stalling_store_times_out_instead_of_hanging
@@ -877,6 +1021,8 @@ test_a_zero_bound_falls_back_to_the_default
 test_bootstrap_reports_a_broken_credential_at_session_start
 test_bootstrap_reports_no_store_once_per_home
 test_bootstrap_probes_one_repository_per_forge
+test_bootstrap_stays_silent_when_the_forge_cannot_answer
+test_the_scan_names_no_forge_and_costs_no_process_per_clone
 test_bootstrap_reports_an_unseen_repository_once_per_home
 test_two_unseen_repositories_report_independently
 test_a_lock_refused_session_reports_the_news_without_consuming_it
