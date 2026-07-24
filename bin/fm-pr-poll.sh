@@ -10,17 +10,45 @@ set -u
 LC_ALL=C
 export LC_ALL
 
+# Duplicated verbatim from bin/fm-pr-lib.sh's fm_pr_github_host_valid() because
+# this file must stay dependency-free; keep both copies identical when
+# changing this contract.
+host_syntax_ok() {
+  local h=$1 label old_ifs
+  [ -n "$h" ] && [ "${#h}" -le 253 ] || return 1
+  case "$h" in
+    .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
+  esac
+  case "$h" in
+    *.*) ;;
+    *) return 1 ;;
+  esac
+  old_ifs=$IFS
+  IFS=.
+  # shellcheck disable=SC2086  # deliberate word-splitting: tokenizing host into dot-joined labels
+  set -- $h
+  IFS=$old_ifs
+  for label in "$@"; do
+    [ -n "$label" ] && [ "${#label}" -le 63 ] || return 1
+    case "$label" in
+      -*|*-) return 1 ;;
+    esac
+  done
+}
+
 if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
   provider=$2
   url=$3
   host=$4
   path=$5
   number=$6
+  hosts_home=${FM_HOME:-}
 elif [ "$#" -eq 0 ]; then
   case "$0" in
     *.check.sh) data=${0%.check.sh}.pr-poll ;;
     *) exit 0 ;;
   esac
+  hosts_home=${0%/*}/..
 
   [ -f "$data" ] && [ ! -L "$data" ] || exit 0
   { exec 3< "$data"; } 2>/dev/null || exit 0
@@ -50,7 +78,22 @@ esac
 # a doctored sidecar cannot redirect this poll at another host or project.
 case "$provider" in
   github)
-    [ "$host" = github.com ] || exit 0
+    if [ "$host" != github.com ]; then
+      host_syntax_ok "$host" || exit 0
+      hosts_file="$hosts_home/config/pr-hosts"
+      allowed=0
+      if [ -f "$hosts_file" ] && [ ! -L "$hosts_file" ]; then
+        while IFS= read -r cand || [ -n "$cand" ]; do
+          [ -n "$cand" ] || continue
+          host_syntax_ok "$cand" || continue
+          if [ "$cand" = "$host" ]; then
+            allowed=1
+            break
+          fi
+        done < "$hosts_file"
+      fi
+      [ "$allowed" -eq 1 ] || exit 0
+    fi
     owner=${path%%/*}
     repo=${path#*/}
     [ "${#owner}" -ge 1 ] && [ "${#owner}" -le 39 ] || exit 0
@@ -61,7 +104,7 @@ case "$provider" in
     case "$repo" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
-    [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
+    [ "$url" = "https://$host/$owner/$repo/pull/$number" ] || exit 0
     state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
     [ "$state" = MERGED ] && printf '%s\n' merged
     ;;

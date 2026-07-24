@@ -156,10 +156,59 @@ fm_pr_gitlab_path_valid() {
   done
 }
 
+# A GitHub Enterprise host is a non-github.com host explicitly approved by the
+# operator in config/pr-hosts. Same DNS-name shape as fm_pr_gitlab_host_valid
+# (lowercase, no userinfo/port/trailing dot) but additionally requires at
+# least one dot, so a bare hostname like "localhost" is excluded even if an
+# operator mistakenly allowlists it - it would resolve to a loopback or
+# internal address inside a crewmate's own worktree/container.
+fm_pr_github_host_valid() {
+  local host=${1-} label
+  local LC_ALL=C
+  local -a labels
+  [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || return 1
+  case "$host" in
+    .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
+  esac
+  IFS=. read -ra labels <<< "$host"
+  [ "${#labels[@]}" -ge 2 ] || return 1
+  for label in "${labels[@]}"; do
+    [ "${#label}" -ge 1 ] && [ "${#label}" -le 63 ] || return 1
+    case "$label" in
+      -*|*-) return 1 ;;
+    esac
+  done
+}
+
+# Exact-line allowlist match against FM_HOME/config/pr-hosts (local,
+# gitignored, never inherited into secondmate homes since it is a security
+# access-control boundary rather than an operational preference; absent or
+# empty means no host beyond github.com is allowed). A malformed config line
+# never matches anything, rather than being coerced or skipped in a way that
+# widens access - fail closed. Never a suffix/substring match, so an entry
+# like "github.com" never also allows "github.com.evil.com".
+fm_pr_github_host_allowed() {
+  local host=${1-} file="${FM_HOME:-}/config/pr-hosts" line
+  local LC_ALL=C
+  [ -n "$host" ] || return 1
+  fm_pr_github_host_valid "$host" || return 1
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    fm_pr_github_host_valid "$line" || continue
+    [ "$line" = "$host" ] && return 0
+  done < "$file"
+  return 1
+}
+
 # Parse a canonical PR or MR URL into the provider-tagged identity. Validation
 # is strict and per provider: the GitHub username and repository rules are
 # unchanged, and GitLab gets its own host and namespace rules rather than a
 # loosened GitHub rule.
+#
+# github.com is always allowed; any other host must be present in the local
+# config/pr-hosts allowlist (see fm_pr_github_host_allowed above), so the host
+# on this branch is an access-control boundary and not just URL syntax.
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github because
 # bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
@@ -175,20 +224,24 @@ fm_pr_url_parse() {
   FM_PR_OWNER=
   FM_PR_REPO=
   FM_PR_NUMBER=
-  pattern='^https://github\.com/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
+  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
   if [[ "$raw" =~ $pattern ]]; then
-    [[ "${BASH_REMATCH[1]}" != *--* ]] || return 1
-    [ "${BASH_REMATCH[2]}" != . ] && [ "${BASH_REMATCH[2]}" != .. ] || return 1
+    host=${BASH_REMATCH[1]}
+    if [ "$host" != github.com ]; then
+      fm_pr_github_host_allowed "$host" || return 1
+    fi
+    [[ "${BASH_REMATCH[2]}" != *--* ]] || return 1
+    [ "${BASH_REMATCH[3]}" != . ] && [ "${BASH_REMATCH[3]}" != .. ] || return 1
     FM_PR_PROVIDER=github
     FM_PR_URL=$raw
-    FM_PR_HOST=github.com
-    FM_PR_PATH="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    FM_PR_HOST=$host
+    FM_PR_PATH="${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
     # Consumed by bin/fm-pr-merge.sh, which addresses GitHub by owner/repository.
     # shellcheck disable=SC2034
-    FM_PR_OWNER=${BASH_REMATCH[1]}
+    FM_PR_OWNER=${BASH_REMATCH[2]}
     # shellcheck disable=SC2034
-    FM_PR_REPO=${BASH_REMATCH[2]}
-    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    FM_PR_REPO=${BASH_REMATCH[3]}
+    FM_PR_NUMBER=${BASH_REMATCH[4]}
     return 0
   fi
   # The path class contains "/" and "-", so this match is greedy to the last

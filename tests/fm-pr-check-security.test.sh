@@ -323,6 +323,19 @@ INVALID_URLS=(
   'https://evilgithub.com/o/r/pull/1'
   'https://gıthub.com/o/r/pull/1'
   'https://xn--gthub-3va.com/o/r/pull/1'
+  # Adversarial GHE hosts: none of these are github.com and none are in any
+  # allowlist (FM_HOME is unset/empty for this matrix), so every one must be
+  # rejected regardless of otherwise-valid-looking owner/repo/number segments.
+  'https://github.com.evil.com/o/r/pull/1'
+  'https://git.example.com:8443/o/r/pull/1'
+  'https://user@git.example.com/o/r/pull/1'
+  'https://user:pass@git.example.com/o/r/pull/1'
+  'https://192.168.1.1/o/r/pull/1'
+  'https://localhost/o/r/pull/1'
+  'https://git%2Eexample.com/o/r/pull/1'
+  'https://git%252Eexample.com/o/r/pull/1'
+  'https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com/o/r/pull/1'
+  'https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/o/r/pull/1'
   'http://github.com/o/r/pull/1'
   'ssh://github.com/o/r/pull/1'
   'git://github.com/o/r/pull/1'
@@ -379,10 +392,13 @@ UNSAFE_LIFECYCLE_IDS=(
 
 test_parser_matrix() {
   local id row url owner repo number
+  # shellcheck disable=SC2034  # read by fm_pr_url_parse's fm_pr_github_host_allowed call, not this function
+  local FM_HOME=
   while IFS='|' read -r url owner repo number; do
     [ -n "$url" ] || continue
     fm_pr_url_parse "$url" || fail "parser rejected canonical URL"
     [ "$FM_PR_URL" = "$url" ] || fail "parser changed canonical URL"
+    [ "$FM_PR_HOST" = github.com ] || fail "parser returned wrong host for a github.com URL"
     [ "$FM_PR_OWNER" = "$owner" ] || fail "parser returned wrong owner"
     [ "$FM_PR_REPO" = "$repo" ] || fail "parser returned wrong repository"
     [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong PR number"
@@ -2885,6 +2901,147 @@ EOF
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }
 
+test_ghe_host_syntax_and_allowlist_unit() {
+  local dir
+  dir=$(make_case ghe-host-syntax-unit)
+
+  fm_pr_github_host_valid git.example.com || fail "syntax check rejected a plain two-label host"
+  fm_pr_github_host_valid a.b.c.example.com || fail "syntax check rejected a multi-label host"
+  ! fm_pr_github_host_valid localhost || fail "syntax check accepted a dotless bare hostname"
+  ! fm_pr_github_host_valid .example.com || fail "syntax check accepted a leading-dot host"
+  ! fm_pr_github_host_valid example.com. || fail "syntax check accepted a trailing-dot host"
+  ! fm_pr_github_host_valid example..com || fail "syntax check accepted a double-dot host"
+  ! fm_pr_github_host_valid -example.com || fail "syntax check accepted a leading-hyphen label"
+  ! fm_pr_github_host_valid example-.com || fail "syntax check accepted a trailing-hyphen label"
+  ! fm_pr_github_host_valid 'git .example.com' || fail "syntax check accepted an embedded space"
+  ! fm_pr_github_host_valid 'git.example.com:8443' || fail "syntax check accepted a port"
+  ! fm_pr_github_host_valid 'user@git.example.com' || fail "syntax check accepted userinfo"
+  ! fm_pr_github_host_valid Git.Example.Com || fail "syntax check accepted an uppercase host"
+
+  FM_HOME="$dir/home" fm_pr_github_host_allowed git.example.com \
+    && fail "host allowlist accepted an unlisted host with no config file"
+  : > "$dir/home/config/pr-hosts"
+  FM_HOME="$dir/home" fm_pr_github_host_allowed git.example.com \
+    && fail "host allowlist accepted an unlisted host with an empty config file"
+
+  printf '%s\n' github.com > "$dir/home/config/pr-hosts"
+  FM_HOME="$dir/home" fm_pr_github_host_allowed github.com.evil.com \
+    && fail "host allowlist let a github.com entry suffix-match github.com.evil.com"
+
+  printf '%s\n' git.example.com > "$dir/home/config/pr-hosts"
+  FM_HOME="$dir/home" fm_pr_github_host_allowed git.example.com \
+    || fail "host allowlist rejected an exact-match allowlisted host"
+  FM_HOME="$dir/home" fm_pr_github_host_allowed other.example.com \
+    && fail "host allowlist accepted a host absent from the config file"
+
+  {
+    printf '%s\n' -bad.example.com
+    printf '%s\n' 'git.example.com '
+    printf '%s\n' localhost
+    printf '%s\n' git.example.com
+  } > "$dir/home/config/pr-hosts"
+  FM_HOME="$dir/home" fm_pr_github_host_allowed git.example.com \
+    || fail "host allowlist rejected a valid line following malformed config lines"
+  FM_HOME="$dir/home" fm_pr_github_host_allowed localhost \
+    && fail "host allowlist accepted a config line that itself fails host syntax"
+  FM_HOME="$dir/home" fm_pr_github_host_allowed 'git.example.com ' \
+    && fail "host allowlist accepted a trailing-space config line via loose matching"
+
+  pass "GHE host syntax validation and exact-match allowlist behave correctly in isolation"
+}
+
+test_ghe_host_watch() {
+  local dir state before after rc out url sidecar reg
+
+  dir=$(make_case ghe-no-config-rejected)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  before=$(state_snapshot "$state")
+  set +e
+  run_check_entry "$dir" task-a https://git.example.com/o/r/pull/5 > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "GHE PR URL was accepted with no pr-hosts allowlist configured"
+  after=$(state_snapshot "$state")
+  [ "$after" = "$before" ] || fail "rejected GHE URL with no allowlist changed prior state"
+
+  dir=$(make_case ghe-allowlisted-arms-and-merges)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf '%s\n' git.example.com > "$dir/home/config/pr-hosts"
+  url=https://git.example.com/my-org/my-repo/pull/9
+  FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
+    run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "GHE PR URL was rejected with a matching pr-hosts entry"
+  grep -qxF "pr=$url" "$state/task-a.meta" || fail "GHE canonical pr metadata was not exact"
+  cmp -s "$POLL" "$state/task-a.check.sh" || fail "GHE published check was not byte-for-byte static"
+  sidecar=$(cat "$state/task-a.pr-poll")
+  [ "$sidecar" = $'github\nhttps://git.example.com/my-org/my-repo/pull/9\ngit.example.com\nmy-org/my-repo\n9' ] \
+    || fail "GHE published sidecar bytes were not exact"
+  reg="$state/task-a.pr-poll-registration"
+  [ "$(sed -n '1p' "$reg")" = fm-pr-poll-registration-v2 ] \
+    || fail "GHE published registration was not the current version tag"
+  [ "$(sed -n '3p' "$reg")" = github ] || fail "GHE published registration provider line was wrong"
+  [ "$(sed -n '4p' "$reg")" = "$url" ] || fail "GHE published registration url line was wrong"
+  [ "$(sed -n '5p' "$reg")" = git.example.com ] \
+    || fail "GHE published registration did not record host in the expected position"
+  FM_HOME="$dir/home" fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "GHE published poll provenance or metadata binding was invalid"
+
+  : > "$dir/gh-axi.log"
+  run_merge_entry "$dir" task-a "$url" -- --merge >/dev/null 2>/dev/null \
+    || fail "GHE merge wrapper failed"
+  grep -qxF 'pr merge 9 --repo my-org/my-repo --merge' "$dir/gh-axi.log" \
+    || fail "GHE merge wrapper did not preserve repository derivation and method"
+
+  cat > "$dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s %s\n' "${GH_HOST:-}" "$*" >> "$FM_TEST_GH_AXI_LOG"
+exit 0
+SH
+  chmod +x "$dir/fakebin/gh-axi"
+  : > "$dir/gh-axi.log"
+  run_merge_entry "$dir" task-a "$url" -- --merge >/dev/null 2>/dev/null \
+    || fail "GHE merge wrapper failed with GH_HOST-recording gh-axi"
+  grep -qxF 'git.example.com pr merge 9 --repo my-org/my-repo --merge' "$dir/gh-axi.log" \
+    || fail "GHE merge did not scope GH_HOST to the allowlisted enterprise host"
+
+  dir=$(make_case github-merge-has-no-gh-host)
+  write_task_meta "$dir"
+  cat > "$dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s %s\n' "${GH_HOST:-}" "$*" >> "$FM_TEST_GH_AXI_LOG"
+exit 0
+SH
+  chmod +x "$dir/fakebin/gh-axi"
+  : > "$dir/gh-axi.log"
+  run_merge_entry "$dir" task-a https://github.com/o/r/pull/9 -- --merge >/dev/null 2>/dev/null \
+    || fail "github.com merge wrapper failed"
+  grep -qxF ' pr merge 9 --repo o/r --merge' "$dir/gh-axi.log" \
+    || fail "github.com merge unexpectedly set GH_HOST"
+
+  dir=$(make_case ghe-narrowed-allowlist-stops-poll)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf '%s\n' git.example.com > "$dir/home/config/pr-hosts"
+  url=https://git.example.com/o/r/pull/12
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "could not arm a GHE poll for the narrowed-allowlist fixture"
+  FM_HOME="$dir/home" fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "GHE poll was not validly armed before narrowing the allowlist"
+  : > "$dir/home/config/pr-hosts"
+  out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "direct static poll execution fired after the allowlist was narrowed"
+
+  # The GHE allowlist is data, never a constant, so no tracked file ever names
+  # a specific enterprise host.
+  ! grep -qF git.example.com "$ROOT/bin/fm-pr-lib.sh" \
+    || fail "the shared PR library hardcodes a GHE host"
+  ! grep -qF git.example.com "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the static poll hardcodes a GHE host"
+  pass "GHE hosts arm and merge end-to-end with a scoped GH_HOST, and a narrowed allowlist stops a live poll"
+}
+
 seed_canonical_poll() {
   local dir=$1 id=$2 url=$3 template=${4:-$POLL} state provider host path number
   state="$dir/home/state"
@@ -3327,6 +3484,8 @@ test_gitlab_merged_poll_retires() {
 
 test_parser_matrix
 test_gitlab_merge_watch
+test_ghe_host_syntax_and_allowlist_unit
+test_ghe_host_watch
 test_merged_poll_retires_once
 test_persistent_secondmate_retirement_is_poll_only
 test_retirement_crash_recovery
