@@ -713,7 +713,7 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # tab absent, or proves that the verified recorded tab is an empty ghost; every
 # existing terminal pane remains unverified or ambiguous. Orca and cmux do not
 # support secondmate spawns.
-fm_backend_agent_state() {  # <backend> <target> [expected-label] [recorded-tab-id]
+fm_backend_agent_state() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   shift 2

@@ -438,7 +438,7 @@ secondmate_liveness_sweep() {
     [ -n "$target" ] || target="$window"
     expected_label="fm-$id"
     recorded_tab_id=$(fm_meta_get "$meta" zellij_tab_id)
-    agent_state=$(fm_backend_agent_state "$backend" "$target" "$expected_label" "$recorded_tab_id" 2>/dev/null) || agent_state=unreadable
+    agent_state=$(fm_backend_agent_state "$backend" "$target" "$expected_label" 2>/dev/null) || agent_state=unreadable
     case "$harness" in
       claude|codex|opencode|pi|grok) ;;
       *)

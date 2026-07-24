@@ -192,7 +192,7 @@ case "${1:-}" in
           unreadable-tabs) printf '%s\n' not-json ;;
           reused-pane-missing-task) printf '%s\n' '[{"tab_id":9,"name":"foreign"}]' ;;
           reused-tab-missing-task) printf '%s\n' '[{"tab_id":3,"name":"foreign"}]' ;;
-          relocated-task-pane) printf '%s\n' '[{"tab_id":9,"name":"fm-sm1"}]' ;;
+          relocated-task-pane|relocated-ghost) printf '%s\n' '[{"tab_id":9,"name":"fm-sm1"}]' ;;
           *) printf '%s\n' '[{"tab_id":3,"name":"fm-sm1"}]' ;;
         esac
         ;;
@@ -219,6 +219,7 @@ test_zellij_agent_state_authorizes_only_structural_absence() {
     'reused-pane-missing-task missing' \
     'reused-tab-missing-task missing' \
     'relocated-task-pane ambiguous' \
+    'relocated-ghost dead' \
     'unreadable-sessions unreadable' \
     'unreadable-panes unreadable' \
     'unreadable-tabs unreadable'
