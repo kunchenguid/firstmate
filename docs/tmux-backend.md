@@ -116,7 +116,7 @@ It returns `missing` when `tmux list-windows` successfully reads the recorded se
 Any other failed inventory or pane read is `unreadable` and never authorizes recovery.
 `fm_backend_tmux_agent_alive` remains the compatibility view that maps these detailed states back to `alive`, `dead`, or `unknown` for callers that do not need the reason.
 
-Verified with real tmux 3.6a on macOS (Darwin 25.5.0), 2026-07-24, using the private `-L fm-target-check-<pid>` socket also exercised by `tests/fm-backend-tmux-smoke.test.sh`:
+Verified with real tmux 3.6a on macOS (Darwin 25.5.0), 2026-07-23, using the private `-L fm-target-check-<pid>` socket also exercised by `tests/fm-backend-tmux-smoke.test.sh`:
 
 ```sh
 $ tmux -L "$socket" kill-window -t smoke:fm-smoke1
