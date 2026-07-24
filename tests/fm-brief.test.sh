@@ -10,10 +10,14 @@
 # /bin/bash 3.2.57 - `bash -n` fails, not just the generated brief. Bash 4/5
 # parses the same construct fine, so `bash -n` alone cannot guard this on a
 # Linux CI host: the durable guard is the version-independent no-apostrophe
-# style check in test_dod_heredocs_carry_no_apostrophes below, backed by the
-# style rule in .agents/skills/firstmate-coding-guidelines/SKILL.md. A plain
-# `cat > file <<EOF ... EOF` (not wrapped in `$(...)`) is unaffected, so the
-# secondmate charter block does not need this guard.
+# style check in test_bin_heredocs_carry_no_apostrophes below, backed by the
+# style rule in .agents/skills/firstmate-coding-guidelines/SKILL.md. That
+# guard scans every bin/*.sh script, not just fm-brief.sh - the identical
+# `VAR=$(cat <<EOF ... EOF)` pattern also appears in bin/fm-bootstrap.sh and
+# bin/fm-fleet-snapshot.sh, and is equally vulnerable there even though
+# neither currently carries an apostrophe. A plain `cat > file <<EOF ... EOF`
+# (not wrapped in `$(...)`) is unaffected, so the secondmate charter block
+# does not need this guard.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -28,7 +32,7 @@ mkdir -p "$BRIEF_HOME/data"
 # (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file under
 # bash 3.2. It only bites when the test host runs bash 3.2 (macOS /bin/bash);
 # on a Linux bash 5 host the apostrophe parses fine and this test cannot catch
-# the regression - test_dod_heredocs_carry_no_apostrophes is the durable,
+# the regression - test_bin_heredocs_carry_no_apostrophes is the durable,
 # version-independent guard.
 test_script_parses() {
   local out rc
@@ -38,28 +42,65 @@ test_script_parses() {
   pass "fm-brief.sh: bash -n succeeds"
 }
 
-# Version-independent style guard for the #166/#945 parse quirk: an
-# apostrophe inside a heredoc body that sits in a `$(...)` command
-# substitution breaks `bash -n` under bash 3.2 but parses fine under bash 5,
-# so `test_script_parses` alone cannot catch it on a Linux host. Scan every
-# `VAR=$(cat <<EOF ... EOF)` and `VAR=$(cat <<'EOF' ... EOF)` body in
-# bin/fm-brief.sh and reject apostrophes outright, regardless of the bash
-# version running the test. Bash 3.2 is equally vulnerable whether the
+# Version-independent style guard for the #166/#945 parse quirk. Verified
+# directly against real /bin/bash 3.2.57: bash 3.2's command-substitution
+# scanner tracks single-quote state through the heredoc body, so what
+# actually breaks `bash -n` is an UNBALANCED (odd) count of single-quote
+# characters in the body - e.g. one stray apostrophe in prose. A body with
+# an EVEN count (balanced ANSI-C `$'...'` strings, balanced jq `'...'`
+# strings, etc., as seen in bin/fm-fleet-snapshot.sh) parses fine under
+# bash 3.2, so flagging every single-quote character outright would
+# false-positive on those. `test_script_parses` alone cannot catch the odd
+# case on a Linux bash 5 host, since bash 4/5 parses it fine either way.
+# Scan every `VAR=$(cat <<DELIM ... DELIM)` and `VAR=$(cat <<'DELIM' ...
+# DELIM)` body across every bin/*.sh script (not just fm-brief.sh - the
+# same pattern recurs with delimiters other than EOF, e.g. BASH/JQ in
+# fm-fleet-snapshot.sh) and reject any body whose total single-quote count
+# is odd, regardless of the bash version running the test or which
+# delimiter word is used. Bash 3.2 is equally vulnerable whether the
 # heredoc delimiter is quoted or not, so both forms must be scanned.
-test_dod_heredocs_carry_no_apostrophes() {
-  local hits
-  hits=$(awk '
-    /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=\$\(cat <<'"'"'?[A-Za-z_]+'"'"'?[[:space:]]*$/ {
-      in_heredoc=1
-      next
-    }
-    in_heredoc && /^EOF$/ { in_heredoc=0; next }
-    in_heredoc && /'"'"'/ { print NR ": " $0 }
-  ' "$ROOT/bin/fm-brief.sh")
+test_bin_heredocs_carry_no_apostrophes() {
+  local hits file file_hits
+  hits=""
+  for file in "$ROOT"/bin/*.sh; do
+    file_hits=$(awk '
+      /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=\$\(cat <<-?'"'"'?[A-Za-z_][A-Za-z0-9_]*'"'"'?[[:space:]]*$/ {
+        delim = $0
+        sub(/^.*<<-?/, "", delim)
+        gsub(/'"'"'/, "", delim)
+        gsub(/[[:space:]]/, "", delim)
+        in_heredoc = 1
+        quote_count = 0
+        n = 0
+        next
+      }
+      in_heredoc && $0 == delim {
+        if (quote_count % 2 == 1) {
+          for (i = 1; i <= n; i++) print FILENAME ":" line_no[i] ": " line_text[i]
+        }
+        in_heredoc = 0
+        next
+      }
+      in_heredoc {
+        line = $0
+        c = gsub(/'"'"'/, "'"'"'", line)
+        if (c > 0) {
+          quote_count += c
+          n++
+          line_no[n] = FNR
+          line_text[n] = $0
+        }
+        next
+      }
+    ' "$file")
+    if [ -n "$file_hits" ]; then
+      hits="$hits${hits:+$'\n'}$file_hits"
+    fi
+  done
   if [ -n "$hits" ]; then
-    fail "apostrophe(s) inside a \$(cat <<EOF ...) heredoc body break bash 3.2 parsing (see firstmate-coding-guidelines style rules):"$'\n'"$hits"
+    fail "unbalanced (odd) single-quote count inside a \$(cat <<DELIM ...) heredoc body breaks bash 3.2 parsing (see firstmate-coding-guidelines style rules):"$'\n'"$hits"
   fi
-  pass "fm-brief.sh: command-substitution heredoc bodies carry no apostrophes"
+  pass "bin/*.sh: command-substitution heredoc bodies carry no unbalanced single quotes"
 }
 
 test_help_includes_entire_header() {
@@ -424,7 +465,7 @@ test_scout_and_secondmate_scaffold() {
 }
 
 test_script_parses
-test_dod_heredocs_carry_no_apostrophes
+test_bin_heredocs_carry_no_apostrophes
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
