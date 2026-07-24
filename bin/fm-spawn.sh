@@ -1523,6 +1523,15 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+# Publish the task metadata, checking the redirect result explicitly rather than
+# relying on set -e to abort on a failed compound-command redirect.
+# That errexit behavior is not reliable across bash versions (a failed meta-write
+# redirect is swallowed identically on bash 3.2 and bash 5.0.3), so without this
+# explicit check a meta-write failure would return success and leave a live task
+# firstmate never recorded and cannot supervise or tear down.
+# On failure exit non-zero with the Orca abort cleanup still armed, so the EXIT
+# trap releases the terminal and worktree instead of leaking them.
+meta_write_rc=0
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
@@ -1566,7 +1575,11 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$STATE/$ID.meta" || meta_write_rc=$?
+if [ "$meta_write_rc" -ne 0 ]; then
+  echo "error: failed to write task metadata to $STATE/$ID.meta" >&2
+  exit 1
+fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 backlog_start_failure_banner() {  # <heading> <detail> <repair-command>

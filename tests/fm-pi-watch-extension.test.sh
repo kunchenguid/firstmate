@@ -1014,6 +1014,17 @@ EOF
   done
   [ -f "$cleanup_log" ] || fail "Pi process-exit fallback did not deliver TERM to the arm child"
   pid=$(cat "$pid_file")
+  # The cleanup log only proves TERM was DELIVERED; the child still has to be
+  # scheduled to handle it and be reaped. Poll for its exit on the same bound as
+  # the log wait above instead of reading the pid table one instruction later:
+  # under CI load that race made this assertion fail intermittently while the
+  # cleanup itself was working. The assertion is unchanged - the child must be
+  # gone - this only stops treating "not dead yet" as "never dies".
+  i=0
+  while [ "$i" -lt 250 ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 0.02
+    i=$((i + 1))
+  done
   if kill -0 "$pid" 2>/dev/null; then
     kill -TERM "$pid" 2>/dev/null || true
     fail "Pi arm child $pid survived process-exit cleanup"
