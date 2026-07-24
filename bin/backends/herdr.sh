@@ -634,7 +634,8 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
 # returned by THIS projected create immediately after its owning parent's
 # contiguous child block and before the next parent.
 #
-# <parent-label> is the owning FM_HOME label (FirstMate Crew or 2ndmate-<id>).
+# <parent-label> is the resolved owning FM_HOME label (preferred FirstMate Crew,
+# legacy lowercase firstmate until renamed, or 2ndmate-<id>).
 # New-format └ ... · p:<token> children and, for compatibility only, already
 # adjacent old-format firstmate/... or 2ndmate-<id>/... projections may extend
 # the block read-only; they are never renamed or moved.

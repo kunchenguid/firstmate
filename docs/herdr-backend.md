@@ -75,7 +75,7 @@ An ambiguous response grants no mutation or cleanup authority.
 
 Protocol 16 exposes `workspace.move` over the named session socket but no CLI subcommand.
 `bin/backends/herdr-workspace-move.py` sends only that whitelisted method and verifies the complete returned workspace order.
-Projected children are placed in one contiguous block immediately after their owning home when the session layout, protocol, socket, `python3`, and machine-private per-session lock are all verifiable.
+Projected children are placed in one contiguous block immediately after their resolved owning home, including an adopted legacy lowercase primary workspace, when the session layout, protocol, socket, `python3`, and machine-private per-session lock are all verifiable.
 Existing legacy child labels may extend an already adjacent block read-only but are never renamed or migrated.
 A projection bound beneath a legacy lowercase primary workspace retains that recorded parent id and label during restart recovery.
 A foreign, ambiguous, detached, or manually interleaved child makes ordering skip with a warning rather than rewriting the layout.
