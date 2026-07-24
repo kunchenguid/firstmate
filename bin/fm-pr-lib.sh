@@ -283,8 +283,16 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# Canonical PR identity is a property of metadata content, not line order.
+# A task's metadata gains legitimate trailing fields after its pr=/pr_head=
+# block is written - fm-nm-watch.sh appends nm_watch_run= for a direct-PR
+# task, and other backend fields land later too - so a field after pr= is not
+# a corruption signal. The parser therefore judges only the content
+# invariants: exactly one pr= line, any pr_head= must be a valid SHA, and the
+# single pr= URL must resolve to a non-empty identity. Genuine ambiguity is
+# two or more pr= lines (which PR does this task own?), still rejected here.
 fm_pr_metadata_identity_parse() {
-  local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
+  local file=$1 line value pr_count=0 invalid=0
   FM_PR_META_PROVIDER=
   FM_PR_META_URL=
   FM_PR_META_HOST=
@@ -305,23 +313,15 @@ fm_pr_metadata_identity_parse() {
           FM_PR_META_PATH=$FM_PR_PATH
           FM_PR_META_NUMBER=$FM_PR_NUMBER
         fi
-        seen_pr=1
         ;;
       pr_head=*)
-        if [ "$seen_pr" -eq 1 ]; then
-          value=${line#pr_head=}
-          fm_pr_head_valid "$value" || post_pr_invalid=1
-        fi
-        ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
-        ;;
-      *)
-        [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
+        value=${line#pr_head=}
+        fm_pr_head_valid "$value" || invalid=1
         ;;
     esac
   done < "$file"
   [ "$pr_count" -eq 1 ] || return 1
-  [ "$post_pr_invalid" -eq 0 ] || return 1
+  [ "$invalid" -eq 0 ] || return 1
   [ -n "$FM_PR_META_URL" ]
 }
 
