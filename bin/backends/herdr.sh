@@ -1387,7 +1387,9 @@ fm_backend_herdr_projection_parent_workspace_exact() {  # <session> <parent-labe
       else empty
       end
   ' 2>/dev/null) || return 1
+  # shellcheck disable=SC2034 # Public source-library result read by fm-spawn.sh and callers.
   FM_BACKEND_HERDR_PROJECTION_PARENT_WORKSPACE_ID=$match
+  # shellcheck disable=SC2034 # Public source-library result read by fm-spawn.sh and callers.
   FM_BACKEND_HERDR_PROJECTION_PARENT_LABEL=$parent_label
 }
 
