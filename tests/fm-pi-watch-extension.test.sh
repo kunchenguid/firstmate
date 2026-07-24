@@ -1132,6 +1132,69 @@ EOF
   pass "Pi session_start cancels prior-session actionable restoration"
 }
 
+test_pi_session_start_ignores_delayed_prior_child_close() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-delayed-close-root"
+  home="$TMP_ROOT/pi-delayed-close-home"
+  log="$TMP_ROOT/pi-delayed-close.log"
+  stop="$TMP_ROOT/pi-delayed-close.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$count" -eq 1 ]; then
+  printf 'signal: delayed prior session wake\n'
+  trap 'sleep 0.15; exit 0' TERM INT
+  while :; do sleep 0.02; done
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const prompts = [];
+let tool = null;
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  registerCommand() {},
+  registerTool(candidate) { if (candidate.name === "fm_watch_arm_pi") tool = candidate; },
+  sendUserMessage: async (message) => { prompts.push(message); },
+};
+const rows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("initial-arm", {}, undefined, undefined, {});
+for (let i = 0; i < 100 && rows().length < 1; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
+await handlers.get("session_start")({ type: "session_start" }, {});
+for (let i = 0; i < 100 && rows().length < 2; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+await new Promise((resolve) => setTimeout(resolve, 220));
+if (rows().length !== 2) throw new Error(`delayed prior child launched a successor: ${rows().join(" | ")}`);
+if (prompts.length !== 0) throw new Error(`delayed prior child delivered a stale wake: ${prompts.join(" | ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi session_start must ignore a delayed prior-session child close"
+  [ -z "$out" ] || fail "Pi delayed-prior-close test printed output: $out"
+  pass "Pi session_start ignores delayed prior-session child close"
+}
+
 test_pi_process_exit_cleanup_stops_arm_child() {
   local repo home plugin cleanup_log pid_file out status pid i
   repo="$TMP_ROOT/pi-process-exit-root"
@@ -2174,6 +2237,7 @@ test_pi_arm_distinguishes_session_lock_ownership
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_session_start_clears_shutdown_latch_and_quiet_rearms
 test_pi_session_start_cancels_prior_restoration
+test_pi_session_start_ignores_delayed_prior_child_close
 test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_primary_watch_plugin_static_wiring
 test_opencode_plugin_package_boundary_is_explicit_esm

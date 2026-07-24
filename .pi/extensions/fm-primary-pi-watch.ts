@@ -320,6 +320,7 @@ export default function (pi: ExtensionAPI) {
       };
     }
     const id = ++seq;
+    const generation = sessionGeneration;
     const env = {
       ...process.env,
       FM_HOME: fmHome,
@@ -375,12 +376,12 @@ export default function (pi: ExtensionAPI) {
       resolveClosed();
       settleReadiness(false);
       releaseChild();
+      if (generation !== sessionGeneration) return;
       if (stopping) return;
       const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
         retryFailures = 0;
-        const generation = sessionGeneration;
         restoring = true;
         void (async () => {
           const failure = await restoreAfterActionableClose(predecessor, generation);
@@ -402,6 +403,7 @@ export default function (pi: ExtensionAPI) {
       resolveClosed();
       settleReadiness(false);
       releaseChild();
+      if (generation !== sessionGeneration) return;
       if (stopping) return;
       if (restoring) return;
       scheduleRetry(`watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
