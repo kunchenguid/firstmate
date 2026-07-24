@@ -302,6 +302,8 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
+# Keep Definition-of-done prose out of command substitutions: Bash 3.2 tracks
+# heredoc quote state while seeking the closing `)`, so apostrophes can break parsing.
 case "$MODE" in
   direct-PR)
     SETUP2=""
