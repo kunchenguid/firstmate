@@ -260,6 +260,8 @@ test_refuses_root_replacement_and_busy_registry() {
 
   assert_refused_unchanged "$home" "$destination" beta "project registry is busy" \
     "busy project registry"
+  assert_present "$home/data/.fm-project-relocate.projects.lock" \
+    "busy project registry lock was removed by the refused contender"
   pass "root replacement and a busy project registry refuse relocation"
 }
 

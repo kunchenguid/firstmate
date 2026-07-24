@@ -265,16 +265,17 @@ cleanup_registry_tmp() {
 trap cleanup_registry_tmp EXIT HUP INT TERM
 
 prepare_registry_update() {
-  local count
+  local count registry_lock
   [ -n "${DATA_ABS:-}" ] || return 0
   [ -e "$REGISTRY" ] || [ -L "$REGISTRY" ] || return 0
   [ ! -L "$REGISTRY" ] \
     || die "project registry must not be a symlink: $REGISTRY"
   [ -f "$REGISTRY" ] \
     || die "project registry is not a regular file: $REGISTRY"
-  REGISTRY_LOCK="$DATA_ABS/.fm-project-relocate.projects.lock"
-  mkdir "$REGISTRY_LOCK" 2>/dev/null \
+  registry_lock="$DATA_ABS/.fm-project-relocate.projects.lock"
+  mkdir "$registry_lock" 2>/dev/null \
     || die "project registry is busy: $REGISTRY"
+  REGISTRY_LOCK=$registry_lock
   [ ! -L "$REGISTRY" ] \
     || die "project registry must not be a symlink: $REGISTRY"
   [ -f "$REGISTRY" ] \
