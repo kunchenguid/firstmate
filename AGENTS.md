@@ -102,7 +102,7 @@ state/               volatile runtime signals; gitignored
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
   x-context/         generated X-mode durable per-request reply context and one-wake offer markers, keyed by request_id; survives inbox cleanup and expires within seven days (section 14; bin/fm-x-lib.sh)
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
-  telegram-inbox/ telegram-context/ telegram-offers/ telegram-deliveries/ telegram-final/   private authenticated Hermes Telegram intake, correlation, dedupe, and delivery records (section 15; docs/telegram-bridge.md)
+  telegram-inbox/ telegram-context/ telegram-offers/ telegram-deliveries/ telegram-final/ telegram-outbox/   private authenticated Hermes Telegram intake, correlation, dedupe, and delivery records; telegram-outbox holds dry-run reply previews when FMT_DRY_RUN is set (section 15; docs/telegram-bridge.md)
   x-poll.error x-poll.claim-error  generated X-mode relay and offer-claim diagnostic dedupe markers
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
