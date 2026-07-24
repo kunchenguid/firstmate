@@ -77,6 +77,19 @@ test_predicate_queue_pending_flag() {
   pass "fm_supervision_status: FM_SUP_QUEUE_PENDING tracks state/.wake-queue"
 }
 
+test_predicate_x_mode_needs_supervision() {
+  local state="$TMP_ROOT/pred-x-mode/state"
+  mkdir -p "$state"
+  : > "$state/x-watch.check.sh"
+  fm_supervision_needed "$state" 300 || fail "X-mode relay poll did not register as supervision need"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "X-mode relay poll must not count as an in-flight task"
+  [ "$FM_SUP_NEEDED" = true ] || fail "X-mode relay poll must set FM_SUP_NEEDED"
+  if fm_supervision_unhealthy "$state" 300; then
+    fail "task-specific unhealthy predicate must preserve its zero-task behavior"
+  fi
+  pass "fm_supervision_needed: X-mode relay poll needs supervision without changing the task predicate"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -928,6 +941,17 @@ test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy() {
   pass "fm-turnend-guard --claude: re-blocks a loop-guarded stop while unhealthy and unclaimed (incident regression)"
 }
 
+test_hook_claude_mode_reblocks_x_mode_without_tasks() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-x-mode")
+  : > "$dir/state/x-watch.check.sh"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "--claude mode must re-block an X-mode-only stop when no auto-arm claims recovery"
+  assert_contains "$out" "X-mode relay polling needs supervision" "--claude X-mode re-block must name the active supervision need"
+  [ -f "$dir/state/.turnend-claude-blocks" ] || fail "--claude X-mode re-block must consume the shared block budget"
+  pass "fm-turnend-guard --claude: X-mode-only homes re-block when auto-arm recovery is absent"
+}
+
 test_hook_claude_mode_allows_when_autoarm_owner_alive() {
   local dir pid out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-owner")
@@ -1067,6 +1091,7 @@ test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
+test_predicate_x_mode_needs_supervision
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
@@ -1103,6 +1128,7 @@ test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_grok_hook_invokes_adapter
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
+test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive
 test_hook_claude_mode_allows_on_fresh_rewake_epoch
 test_hook_claude_mode_stale_rewake_epoch_blocks

@@ -74,6 +74,25 @@ The direct and passive mechanisms were validated across all five harnesses on 20
 The secondmate-home scope was measured with Claude Code 2.1.207 on 2026-07-12.
 A native background completion re-invoked the idle model with no human input, while deterministic tests covered main/secondmate inclusion and child-worktree exclusion.
 
+Claude Code 2.1.218 was revalidated in a disposable contract lab on 2026-07-24.
+The lab observed that `asyncRewake` delivered exit-2 Stop feedback without a user turn, concurrent asynchronous Stop hooks were not deduplicated, the explicit timeout terminated the hook-owned process group, `stop_hook_active` remained true after a hook-driven continuation, the eighth consecutive blocking Stop was overridden, and an interactive session remained responsive while the asynchronous hook ran.
+
+The product live paths then ran with Claude Code 2.1.219:
+
+```sh
+claude --version
+FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh
+FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-continuity-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+2.1.219 (Claude Code)
+ok - Claude 2.1.219 (Claude Code) live E2E completed two tokenless Stop-owned auto-arm rewake cycles with zero model arm commands and no guard continuation
+ok - Claude 2.1.219 (Claude Code) live E2E refused only the post-completion fleet command with exact re-arm guidance
+```
+
 Current entry points:
 
 ```sh
@@ -111,6 +130,8 @@ Deterministic entry points:
 tests/fm-pi-watch-extension.test.sh
 tests/fm-watcher-lock.test.sh
 tests/fm-continuity-pretool-check.test.sh
+tests/fm-claude-stop-autoarm.test.sh
+tests/fm-turnend-guard.test.sh
 ```
 
 ## Wedge-alarm channels

@@ -73,9 +73,7 @@ fm_session_lock_owned_by_self "$STATE" || exit 0
 
 # --- need: in-flight work or an X-mode relay poll ----------------------------
 need_supervision() {
-  fm_supervision_status "$STATE" "$GRACE"
-  [ "$FM_SUP_IN_FLIGHT" -gt 0 ] && return 0
-  [ -f "$STATE/x-watch.check.sh" ]
+  fm_supervision_needed "$STATE" "$GRACE"
 }
 need_supervision || exit 0
 
