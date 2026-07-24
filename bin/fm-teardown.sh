@@ -196,13 +196,51 @@ remove_grok_turnend_auth() {
   rm -f "$hooks_dir/$token"
 }
 
+# True when worktree hooks.json is still exactly bak plus one owned stop entry
+# (command .cursor/hooks/fm-firstmate-turn-end.sh, optional loop_limit) and no
+# other semantic changes. Used by merged-mode dirtiness filter and restore.
+cursor_hooks_is_owned_delta() {
+  local wt=$1 bak cur
+  bak="$wt/.fm-cursor-hooks.json.bak"
+  cur="$wt/.cursor/hooks.json"
+  [ -f "$bak" ] && [ -f "$cur" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -e --slurpfile bak "$bak" '
+      def norm:
+        .version = (.version // 1)
+        | .hooks = (.hooks // {});
+      def without_owned_stop:
+        .hooks.stop = ((.hooks.stop // [])
+          | map(select((.command // "") != ".cursor/hooks/fm-firstmate-turn-end.sh")))
+        | if ((.hooks.stop // []) | length) == 0 then del(.hooks.stop) else . end;
+      def owned_count:
+        ([.hooks.stop // [] | .[]
+          | select((.command // "") == ".cursor/hooks/fm-firstmate-turn-end.sh")]
+         | length);
+      (owned_count == 1)
+      and (($bak[0] | owned_count) == 0)
+      and ((without_owned_stop | norm) == ($bak[0] | norm))
+    ' "$cur" >/dev/null 2>&1
+}
+
+# Drop an exact path line from the worktree's info/exclude if present.
+cursor_unexclude_path() {
+  local wt=$1 rel=$2 excl tmp
+  excl=$(git -C "$wt" rev-parse --git-path info/exclude 2>/dev/null || true)
+  [ -n "$excl" ] && [ -f "$excl" ] || return 0
+  tmp=$(mktemp "${excl}.XXXXXX") || return 0
+  grep -vxF "$rel" "$excl" > "$tmp" 2>/dev/null || true
+  mv "$tmp" "$excl"
+}
+
 # Reverse firstmate-installed Cursor turn-end hooks without deleting unrelated
 # project Cursor hooks. Marker modes: created (we wrote hooks.json) or merged
 # (we appended a stop entry to an existing hooks.json). Owned stop command is
 # .cursor/hooks/fm-firstmate-turn-end.sh; legacy .cursor/hooks/fm-turn-end.sh is
-# also removed. Prefer restoring the pre-merge byte backup when present.
+# also removed. Restore the pre-merge backup only when current is still the
+# exact owned delta; otherwise strip owned/legacy stop commands via jq.
 remove_cursor_turnend() {
-  local wt=$1 mode tmp
+  local wt=$1 mode tmp rel
   [ -n "$wt" ] && [ -d "$wt" ] || return 0
   rm -f "$wt/.cursor/hooks/fm-firstmate-turn-end.sh" \
     "$wt/.cursor/hooks/fm-turn-end.sh"
@@ -212,7 +250,7 @@ remove_cursor_turnend() {
       rm -f "$wt/.cursor/hooks.json"
       ;;
     merged)
-      if [ -f "$wt/.fm-cursor-hooks.json.bak" ]; then
+      if [ -f "$wt/.fm-cursor-hooks.json.bak" ] && cursor_hooks_is_owned_delta "$wt"; then
         mv "$wt/.fm-cursor-hooks.json.bak" "$wt/.cursor/hooks.json"
       elif [ -f "$wt/.cursor/hooks.json" ] && command -v jq >/dev/null 2>&1; then
         tmp=$(mktemp "$wt/.cursor/hooks.json.XXXXXX") || true
@@ -234,12 +272,24 @@ remove_cursor_turnend() {
       fi
       ;;
   esac
+  # Spawn may exclude Cursor hook artifacts for the task lifetime; always retire those lines.
+  for rel in \
+    '.cursor/hooks.json' \
+    '.cursor/hooks/fm-firstmate-turn-end.sh' \
+    '.cursor/hooks/fm-turn-end.sh' \
+    '.fm-cursor-turnend' \
+    '.fm-cursor-hooks.json.bak'
+  do
+    cursor_unexclude_path "$wt" "$rel"
+  done
   rm -f "$wt/.fm-cursor-turnend" "$wt/.fm-cursor-hooks.json.bak"
 }
 
 # Non-mutating porcelain filter: drop only exact firstmate-owned Cursor/Claude
 # hook artifacts so validate_worktree_teardown_safety can run before destructive
 # remove_cursor_turnend. Staged or tracked unlanded .cursor/hooks.json is kept.
+# Merged mode suppresses hooks.json dirtiness only while it remains the exact
+# owned delta vs bak; concurrent edits stay visible and refuse teardown.
 filter_owned_hook_dirtiness() {
   local wt=$1 mode path status
   mode=$(cat "$wt/.fm-cursor-turnend" 2>/dev/null || true)
@@ -260,7 +310,11 @@ filter_owned_hook_dirtiness() {
           fi
         elif [ "$mode" = merged ] && [ -f "$wt/.fm-cursor-hooks.json.bak" ]; then
           case "$status" in
-            ' M'|'M '|'MM'|'AM'|'MA') continue ;;
+            ' M'|'M '|'MM'|'AM'|'MA')
+              if cursor_hooks_is_owned_delta "$wt"; then
+                continue
+              fi
+              ;;
           esac
         fi
         ;;

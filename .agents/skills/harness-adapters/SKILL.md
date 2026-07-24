@@ -342,8 +342,8 @@ For model / effort axes, see the [launch-profile-axes table](#launch-profile-axe
 Directory trust: `--trust` on launch skips the workspace trust prompt.
 `fm-spawn` always passes it for crewmates.
 
-Turn-end hook (crewmate): project-local `.cursor/hooks.json` with exact owned stop command `.cursor/hooks/fm-firstmate-turn-end.sh` that touches `state/<id>.turn-ended` and returns `{}`, with `loop_limit: 0` so it never auto-follows up.
-Installed by `fm-spawn` and gitignored via info/exclude like the other harnesses' worktree hooks.
+Turn-end hook (crewmate): project-local `.cursor/hooks.json` with exact owned stop command `.cursor/hooks/fm-firstmate-turn-end.sh` that touches `state/<id>.turn-ended` and returns `{}`, with `loop_limit: 1` so the first stop runs (`loop_count` 0) while a second automatic loop stays blocked.
+Installed by `fm-spawn` and gitignored via info/exclude for the task lifetime; teardown retires those exclude entries.
 
 **Primary-session guard fact (verified 2026-07-23, cursor-agent 2026.07.20-8cc9c0b).**
 The firstmate PRIMARY's own `.cursor/hooks.json` registers:

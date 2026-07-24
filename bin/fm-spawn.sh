@@ -1266,7 +1266,7 @@ EOF
             if ! jq --arg cmd "$CURSOR_HOOK_CMD" '
                 .version = (.version // 1)
                 | .hooks = (.hooks // {})
-                | .hooks.stop = ((.hooks.stop // []) + [{"command":$cmd,"loop_limit":0}])
+                | .hooks.stop = ((.hooks.stop // []) + [{"command":$cmd,"loop_limit":1}])
               ' "$CURSOR_HOOKS_JSON" > "$tmp"; then
               rm -f "$tmp"
               echo "error: cannot merge Cursor turn-end hook into existing .cursor/hooks.json for $ID" >&2
@@ -1281,9 +1281,10 @@ EOF
         fi
       else
         cat > "$CURSOR_HOOKS_JSON" <<EOF
-{"version":1,"hooks":{"stop":[{"command":"$CURSOR_HOOK_CMD","loop_limit":0}]}}
+{"version":1,"hooks":{"stop":[{"command":"$CURSOR_HOOK_CMD","loop_limit":1}]}}
 EOF
         printf 'created\n' > "$WT/.fm-cursor-turnend"
+        # Exclude for the task lifetime so created hooks.json is not unlanded dirt; teardown retires this entry.
         exclude_path '.cursor/hooks.json'
       fi
       exclude_path '.fm-cursor-turnend'
