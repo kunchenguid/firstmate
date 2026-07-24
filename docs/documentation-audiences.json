@@ -152,6 +152,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/pr-publication-check/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/project-management/SKILL.md",
       "audience": "agent-runtime"
     },

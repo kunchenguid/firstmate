@@ -18,7 +18,7 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-pr-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
