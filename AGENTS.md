@@ -258,16 +258,25 @@ Supervise all live work under section 8.
 
 ### Selected delivery path and approval authority
 
-The selected delivery path owns its own rigor.
+The global default ship lifecycle is **fast-preview**: concentrate on planning and implementing the requested capability, run only the minimum build or smoke check needed to start a safe runnable result, start a local or authorized isolated cloud preview when available, and return the complete URL or local inspection path through a captain decision or review state so firstmate can open it immediately.
+Do not automatically add broad tests, documentation, lint, CI, PR, or no-mistakes stages.
+Those stages run only when the captain explicitly requests tests, validation, PR, CI, shipping, merge preparation, or no-mistakes, or when the smallest targeted check is strictly required for the preview to run safely.
+This policy does not relax merge, production deployment, destructive, security-sensitive, irreversible, or external-spending authority.
+
+Landing modes stay separate from that preview-first execution phase.
+`bin/fm-project-mode.sh` owns exact registry modes, legacy and missing-mode inheritance, and parsing; missing, bare legacy, and unknown mode data inherit `fast-preview` rather than forcing `no-mistakes`.
+The selected path owns its own rigor once chosen:
+
+- **fast-preview** (default) implements, smokes only as needed, starts a runnable preview, and stops at human-test review with a complete inspection path.
+- **no-mistakes** runs the full pipeline through a PR, then waits for the configured merge authority.
+- **direct-PR** has the worker push and open a PR without the no-mistakes pipeline, then waits for the configured merge authority.
+- **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
+
 When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.
 Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
 If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.
-The path's worker, automated gates, and captain approval remain authoritative:
-
-- **no-mistakes** runs the full pipeline through a PR, then waits for the configured merge authority.
-- **direct-PR** has the worker push and open a PR without the no-mistakes pipeline, then waits for the configured merge authority.
-- **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
+The path's worker, automated gates, and captain approval remain authoritative.
 
 Delivery mode and `yolo` are orthogonal.
 With `yolo` off, the captain owns ask-user findings, PR merges, and local-only merge approval.
@@ -281,7 +290,8 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 
 ### Validate
 
-For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
+For a no-mistakes ship authorized for that rigorous path, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
+Do not auto-start no-mistakes for fast-preview or other non-no-mistakes paths.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 
@@ -297,7 +307,7 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 
 ### PR ready, landing, and teardown
 
-For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
+For ship tasks, the ready signal depends on mode: `fast-preview` reports `needs-decision: review preview at <complete URL or local path>` after the runnable preview is up; `no-mistakes` reports `done: PR <url> checks green` after CI is green; `direct-PR` reports `done: PR <url>` after opening the PR; `local-only` reports `done: ready in branch fm/<id>`.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine authority.
@@ -323,11 +333,13 @@ The promoted worker must inventory scratch state, return to a clean default-bran
 
 Fleet supervision is an always-loaded operational contract; `docs/architecture.md`, `docs/turnend-guard.md`, the emitted session-start block, and script help own mechanisms and harness-specific recipes.
 
-Whenever work is under way, keep exactly one live supervision cycle using the emitted protocol for this primary harness.
+Whenever work can still make autonomous progress, keep exactly one live supervision cycle using the emitted protocol for this primary harness.
+`bin/fm-supervision-lib.sh` owns the shared predicate: continuous live supervision is required only for genuinely working, validating, fixing, just-launched, or otherwise actively progressing tasks.
+Terminal, parked captain-decision, blocked, and declared-pause states do not force continuous foreground checkpoints; PR monitoring and other external waits continue through their existing durable checks when a cycle is live for active work or other reasons.
 X mode may require that same live cycle with no fleet work.
 Do not substitute another harness's wait shape, use shell `&`, or create a second cycle when a healthy one already exists.
 For every actionable wake, follow the ordinary-wake continuation in the emitted protocol; use its repair action only when the live cycle is missing or failed.
-No turn ends blind while work is under way, including turns described as holding or waiting.
+No turn ends blind while actively progressing work is under way.
 
 At the start of every wake-handling turn, drain the durable wake queue before peeking, reading beyond the reason line, steering, or starting work.
 Session start is the only exception because its one-shot digest already drained while locked or deliberately left the queue untouched in lock-refused read-only mode.

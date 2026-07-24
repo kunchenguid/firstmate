@@ -543,7 +543,7 @@ clone_project() {
 $(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
   if [ "$mode" = local-only ]; then
-    echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
+    echo "error: project $project is local-only; secondmate routes support only fast-preview, no-mistakes, and direct-PR projects" >&2
     return 1
   fi
   if [ -e "$dst" ]; then
@@ -570,7 +570,7 @@ validate_seed_project() {
 $(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
 EOF
   if [ "$mode" = local-only ]; then
-    echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
+    echo "error: project $project is local-only; secondmate routes support only fast-preview, no-mistakes, and direct-PR projects" >&2
     return 1
   fi
   url=$(git -C "$src" remote get-url origin 2>/dev/null || true)

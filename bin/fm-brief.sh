@@ -29,10 +29,13 @@
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
-#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
+#   fast-preview implement -> minimum smoke -> runnable human-test preview (global default)
+#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
+#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
-#                captain approves, firstmate merges to local main
+#                configured authority approves, firstmate merges to local main
+# Landing modes (no-mistakes/direct-PR/local-only) are separate from the default
+# preview-first execution phase; missing or legacy registry lines inherit fast-preview.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
@@ -307,7 +310,7 @@ The configured merge authority approves the ready branch, then firstmate merges 
 EOF
 )
     ;;
-  *)  # no-mistakes (default)
+  no-mistakes)
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
@@ -328,6 +331,22 @@ Two firstmate-specific rules layer on top of that guidance:
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+EOF
+)
+    ;;
+  *)  # fast-preview (global default, including missing/legacy mode inheritance)
+    SETUP2=""
+    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch when a later landing steer explicitly requires it). Never merge a PR.'
+    DOD=$(cat <<EOF
+# Definition of done
+This project ships **fast-preview**: concentrate on planning and implementing the requested capability, then immediately provide a runnable human-test preview.
+After implementation, run only the minimum build or smoke check strictly required to start the result safely.
+Start a local preview or a safe isolated cloud preview when authorized and technically available.
+Do NOT invoke /no-mistakes, broad tests, documentation, lint, PR creation, or CI by default.
+An explicit firstmate steer that the captain requested tests, validation, PR, CI, shipping, merge preparation, or no-mistakes selects that rigorous path instead.
+When the preview is ready, append \`needs-decision: review preview at {complete URL or local inspection path}\` so firstmate can open it immediately, and stop.
+If a preview cannot be started after the minimum required check, append \`blocked: {why the preview cannot run}\` and stop.
+Landing modes (no-mistakes, direct-PR, local-only merge) are a separate phase: do not enter them unless firstmate steers you into that path.
 EOF
 )
     ;;

@@ -25,12 +25,16 @@ An unmarked checkout, or one with an invalid marker, falls through to the git-di
 That check keeps crewmate and scout worktrees inert because firstmate provisions them as linked git worktrees, where `git rev-parse --git-dir` differs from `git rev-parse --git-common-dir`.
 It also requires `AGENTS.md`, `bin/`, and the effective state directory to exist.
 
-For an in-scope primary checkout, it counts in-flight work from `state/*.meta`.
-If no task is in flight, it exits silently.
-If work is in flight, it requires `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`.
+For an in-scope primary checkout, it uses `bin/fm-supervision-lib.sh` to count only tasks that still need continuous live supervision.
+`FM_SUP_IN_FLIGHT` includes just-launched, working, validating, fixing, resumed, and otherwise actively progressing ordinary tasks.
+It excludes terminal, parked captain-decision, blocked, declared-pause, captain-held, and persistent secondmate records so foreground checkpoints (especially Codex) are not forced while only parked or terminal work remains.
+`FM_SUP_META_COUNT` remains available as the raw `state/*.meta` inventory size.
+If no task needs continuous supervision, the guard exits silently.
+If actively progressing work remains, it requires `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`.
 That is the same identity-matched live lock and fresh beacon check used by `bin/fm-watch-arm.sh`.
 A stale beacon blocks even if a watcher pid is still live.
 A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
+PR merge polls and other durable checks continue through the existing watcher check path when a cycle is live for active work or other reasons such as X mode; they do not alone force continuous Codex checkpoints.
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repo-root `state/`.
 `FM_GUARD_GRACE` controls the beacon freshness window and defaults to 300 seconds.
@@ -98,6 +102,15 @@ Command used to fire the watcher: `printf 'done: pi e2e watcher fire\n' > "$FM_H
 Observed output after the wake: Pi ran `bin/fm-wake-drain.sh`, read the terminal status, called `fm_watch_arm_pi`, and rendered `watcher: started Pi extension arm child 2`.
 This 2026-07-09 observation predates extension-owned successor continuity; [`watcher-continuity.md`](watcher-continuity.md) owns the current ordinary-wake contract.
 The complete pane contained one guard message and zero foreground `bin/fm-watch-arm.sh` bash calls.
+
+### 2026-07-24: active-only supervision predicate
+
+`bin/fm-supervision-lib.sh` now counts only tasks that still need continuous live supervision (`FM_SUP_IN_FLIGHT`), while `FM_SUP_META_COUNT` remains the raw meta inventory size.
+Hermetic coverage lives in `tests/fm-turnend-guard.test.sh`:
+parked (`needs-decision`), terminal (`done`/`failed`/`blocked`), declared-pause, and `kind=secondmate` records do not force the turn-end guard or unhealthy banner when no actively progressing work remains; fresh, `working:`, and `resolved:` tasks still do.
+Harness adapters (Claude Stop, Codex Stop, OpenCode `session.idle`, Pi `agent_settled`, Grok Stop adapter) continue to call the shared guard unchanged; only the shared predicate's in-flight definition changed.
+Runtime backends (tmux, Herdr, Zellij, Orca, cmux) are not applicable to this predicate beyond already writing ordinary `state/<id>.meta` and status logs; no backend-specific supervision count path exists.
+Delivery-mode default change (`fast-preview`) is owned by `bin/fm-project-mode.sh`, `bin/fm-brief.sh`, and `tests/fm-project-mode.test.sh` / `tests/fm-brief.test.sh`, not by harness or backend adapters.
 `/quit` printed `PI_EXIT=0`, and the second arm process plus its watcher child were both gone afterward.
 
 Grok 0.2.91 was validated with a scratch `GROK_HOME` and symlinked auth/config.

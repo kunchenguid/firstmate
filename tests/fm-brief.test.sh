@@ -19,8 +19,8 @@ BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
 # The script itself must always parse. This is the direct regression test for
-# issue #166: a stray apostrophe in any of the three DOD heredoc bodies
-# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
+# issue #166: a stray apostrophe in any of the ship DOD heredoc bodies
+# (fast-preview/no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
 test_script_parses() {
   local out rc
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
@@ -37,13 +37,15 @@ test_help_includes_entire_header() {
 }
 
 # Registry with one project per delivery mode, so each ship-mode DOD branch is
-# exercised. A project absent from the registry defaults to no-mistakes.
+# exercised. A project absent from the registry defaults to fast-preview.
 write_registry() {
   local home=$1
   mkdir -p "$home/data"
   cat > "$home/data/projects.md" <<'EOF'
+- nomistakes-proj [no-mistakes] - fixture for no-mistakes mode (added 2026-07-01)
 - direct-proj [direct-PR] - fixture for direct-PR mode (added 2026-07-01)
 - local-proj [local-only] - fixture for local-only mode (added 2026-07-01)
+- preview-proj [fast-preview] - fixture for fast-preview mode (added 2026-07-01)
 EOF
 }
 
@@ -57,7 +59,13 @@ test_ship_modes_generate_clean_briefs() {
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
-  for id_proj in "brief-nomistakes-a1:no-registry-proj" "brief-directpr-a2:direct-proj" "brief-localonly-a3:local-proj"; do
+  for id_proj in \
+    "brief-preview-a0:no-registry-proj" \
+    "brief-preview-explicit-a0b:preview-proj" \
+    "brief-nomistakes-a1:nomistakes-proj" \
+    "brief-directpr-a2:direct-proj" \
+    "brief-localonly-a3:local-proj"
+  do
     id=${id_proj%%:*}
     proj=${id_proj##*:}
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1; status=$?
@@ -70,7 +78,14 @@ test_ship_modes_generate_clean_briefs() {
       "$id: brief missing nonterminal working:/setup-complete gate protection"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
-  pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+  brief="$home/data/brief-preview-a0/brief.md"
+  assert_grep "This project ships **fast-preview**" "$brief" \
+    "absent registry project must inherit fast-preview DOD"
+  assert_grep "needs-decision: review preview at" "$brief" \
+    "fast-preview DOD must stop at captain preview review with an inspection path"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "fast-preview default must not auto-enter the no-mistakes pipeline"
+  pass "fm-brief.sh: fast-preview/no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
 test_faster_paths_use_configured_authority_without_stacked_review() {
@@ -101,9 +116,9 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
 test_no_mistakes_dod_wording() {
   local home id brief
   home="$TMP_ROOT/wording-home"
-  mkdir -p "$home/data"
+  write_registry "$home"
   id="brief-wording-b1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" nomistakes-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
@@ -127,6 +142,8 @@ test_ship_project_memory_wording() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
+  assert_grep "This project ships **fast-preview**" "$brief" \
+    "absent project must scaffold the fast-preview default DOD"
   assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
     "project-memory contract lost the durable-knowledge bar"
   assert_grep "prefer a pointer to the authoritative file, command, or doc over copying the detail" "$brief" \

@@ -77,6 +77,61 @@ test_predicate_queue_pending_flag() {
   pass "fm_supervision_status: FM_SUP_QUEUE_PENDING tracks state/.wake-queue"
 }
 
+# Parked, terminal, and paused tasks keep meta for durable records and PR polls,
+# but must not force continuous live supervision (Codex foreground checkpoints).
+test_predicate_ignores_parked_terminal_and_paused() {
+  local state="$TMP_ROOT/pred-parked/state"
+  mkdir -p "$state"
+  : > "$state/working.meta"
+  printf 'working: implementing feature\n' > "$state/working.status"
+  : > "$state/done.meta"
+  printf 'done: PR https://example.test/pull/1 checks green\n' > "$state/done.status"
+  : > "$state/decision.meta"
+  printf 'needs-decision: review preview at http://127.0.0.1:3000/\n' > "$state/decision.status"
+  : > "$state/paused.meta"
+  printf 'paused: waiting on upstream release\n' > "$state/paused.status"
+  : > "$state/blocked.meta"
+  printf 'blocked: needs credential\n' > "$state/blocked.status"
+  printf 'kind=secondmate\nwindow=fm-second\n' > "$state/second.meta"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_META_COUNT" -eq 6 ] || fail "expected 6 meta records, got $FM_SUP_META_COUNT"
+  [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "only the working task should need live supervision, got $FM_SUP_IN_FLIGHT"
+  rm -f "$state/working.meta" "$state/working.status"
+  fm_supervision_status "$state" 300
+  [ "$FM_SUP_META_COUNT" -eq 5 ] || fail "expected 5 meta records after removing active task, got $FM_SUP_META_COUNT"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "parked/terminal/paused/secondmate must not need live supervision, got $FM_SUP_IN_FLIGHT"
+  if fm_supervision_unhealthy "$state" 300; then
+    fail "parked/terminal/paused fleet without beacon must not read unhealthy when no active work"
+  fi
+  pass "fm_supervision_status: parked/terminal/paused/secondmate do not count as live in-flight"
+}
+
+test_predicate_fresh_launch_and_working_need_supervision() {
+  local state="$TMP_ROOT/pred-active/state"
+  mkdir -p "$state"
+  : > "$state/fresh.meta"
+  : > "$state/working.meta"
+  printf 'working: validating\n' > "$state/working.status"
+  : > "$state/resumed.meta"
+  printf 'resolved: captain chose option A\n' > "$state/resumed.status"
+  fm_supervision_unhealthy "$state" 300 || fail "fresh/working/resumed tasks without beacon must be unhealthy"
+  [ "$FM_SUP_IN_FLIGHT" -eq 3 ] || fail "expected 3 active tasks, got $FM_SUP_IN_FLIGHT"
+  pass "fm_supervision_status: fresh, working, and resolved tasks still require live supervision"
+}
+
+test_hook_silent_when_only_parked_or_terminal() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-parked-only")
+  : > "$dir/state/done.meta"
+  printf 'done: PR https://example.test/pull/9 checks green\n' > "$dir/state/done.status"
+  : > "$dir/state/decision.meta"
+  printf 'needs-decision: review preview at http://127.0.0.1:4173/\n' > "$dir/state/decision.status"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "hook must exit 0 when only parked/terminal meta remains"
+  [ -z "$out" ] || fail "hook produced output for parked/terminal-only fleet: $out"
+  pass "fm-turnend-guard: silent when only parked or terminal work remains"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -93,6 +148,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-classify-lib.sh" "$dir/bin/fm-classify-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
@@ -786,8 +842,23 @@ test_pi_extension_forces_followup() {
   pass ".pi primary extension: agent_settled forces one follow-up through the shared guard"
 }
 
+# Runtime import of tracked .ts extensions needs a Node build with TypeScript
+# strip support (or an equivalent loader). Static content checks above remain the
+# portable contract; skip the live injection probes when this host cannot load .ts.
+fm_node_can_import_ts() {
+  local probe="$TMP_ROOT/node-ts-probe.ts"
+  printf 'export default 1;\n' > "$probe"
+  node --experimental-strip-types --input-type=module -e \
+    "import { pathToFileURL } from 'node:url'; await import(pathToFileURL(process.argv[1]).href);" \
+    "$probe" >/dev/null 2>&1
+}
+
 test_pi_extension_injects_once_per_logical_agent_run() {
   local repo home ext log out status
+  if ! fm_node_can_import_ts; then
+    pass ".pi primary extension: skip live logical-run inject probe (Node lacks TypeScript strip support)"
+    return 0
+  fi
   repo="$TMP_ROOT/pi-logical-run-root"
   home="$TMP_ROOT/pi-logical-run-home"
   ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
@@ -855,6 +926,10 @@ EOF
 
 test_pi_extension_retries_after_followup_delivery_failure() {
   local repo home ext out status
+  if ! fm_node_can_import_ts; then
+    pass ".pi primary extension: skip live delivery-failure probe (Node lacks TypeScript strip support)"
+    return 0
+  fi
   repo="$TMP_ROOT/pi-delivery-failure-root"
   home="$TMP_ROOT/pi-delivery-failure-home"
   ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
@@ -918,7 +993,10 @@ test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
+test_predicate_ignores_parked_terminal_and_paused
+test_predicate_fresh_launch_and_working_need_supervision
 test_hook_silent_when_no_work_in_flight
+test_hook_silent_when_only_parked_or_terminal
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon

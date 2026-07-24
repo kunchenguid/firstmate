@@ -5,13 +5,15 @@
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
-# Then, if any task is in flight (a state/<id>.meta exists) and the watcher's
-# liveness beacon (state/.last-watcher-beat, touched every poll cycle) is
-# missing or older than FM_GUARD_GRACE seconds, prints a loud, clearly delimited
-# banner so the agent cannot skim past it in the tool output of whatever it was
-# doing - the one channel every harness has. The full banner is emitted once per
-# distinct staleness episode in this FM_HOME (keyed to beacon mtime or absence);
-# later guarded commands in the same episode print a one-line reminder instead.
+# Then, if any task still needs continuous live supervision (see
+# bin/fm-supervision-lib.sh: actively progressing work, not parked/terminal/
+# paused/secondmate-only) and the watcher's liveness beacon
+# (state/.last-watcher-beat, touched every poll cycle) is missing or older than
+# FM_GUARD_GRACE seconds, prints a loud, clearly delimited banner so the agent
+# cannot skim past it in the tool output of whatever it was doing - the one
+# channel every harness has. The full banner is emitted once per distinct
+# staleness episode in this FM_HOME (keyed to beacon mtime or absence); later
+# guarded commands in the same episode print a one-line reminder instead.
 # Episode state lives only under state/.guard-watcher-stale-banner (volatile,
 # bounded). Independent alarms (queued wakes, worktree tangle) are never
 # suppressed by that dedup. Normal wake handling (watcher briefly down between a

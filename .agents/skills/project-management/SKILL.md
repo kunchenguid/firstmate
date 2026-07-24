@@ -28,12 +28,17 @@ Do not overwrite or repurpose an existing path.
 
 ## Delivery posture
 
-Choose the delivery mode when adding or creating the project:
+Choose the delivery mode when adding or creating the project.
+`bin/fm-project-mode.sh` owns exact mode names, registry parsing, and missing or legacy inheritance.
 
-- `no-mistakes` runs the full validation pipeline before a PR and is the default when the captain does not specify a mode.
+- `fast-preview` implements, runs only the minimum smoke needed for a safe runnable result, starts a local or authorized isolated cloud preview, and stops at human-test review with a complete inspection path.
+  It is the global default when the captain does not specify a mode, and bare legacy registry lines without `[mode]` inherit it rather than `no-mistakes`.
+- `no-mistakes` runs the full validation pipeline before a PR.
+  Use it only when the captain explicitly wants that rigorous landing path for the project.
 - `direct-PR` pushes and opens a PR without the no-mistakes pipeline.
 - `local-only` has no required remote or PR and lands only through the approved local fast-forward path.
 
+Landing modes (`no-mistakes`, `direct-PR`, `local-only`) stay separate from the default preview-first execution phase so an existing project mode cannot silently force full validation before the first runnable preview unless that mode was explicitly selected for the work.
 The optional `+yolo` posture changes routine approval authority but does not change the delivery mode.
 Default it off, and enable it only on the captain's explicit instruction.
 `AGENTS.md` section 7 owns the complete authority boundary and exceptions when it is on.
@@ -44,12 +49,13 @@ Confirm the source URL, local project name, delivery mode, and autonomy posture.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
 A `no-mistakes` project must have an `origin` remote and must complete the initialization procedure below.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
+A `fast-preview` project usually has an `origin` when a later landing path or isolated cloud preview needs one, but skips no-mistakes initialization unless the captain later selects that rigorous path.
 A `local-only` project may have no remote and skips no-mistakes initialization.
 
 ## Create a project
 
 Creating a GitHub repository is outward-facing.
-Before making that remote change, propose the repository name, owner or organization, visibility, and delivery mode, defaulting visibility to private and delivery mode to `no-mistakes`, then obtain the captain's explicit consent for those values.
+Before making that remote change, propose the repository name, owner or organization, visibility, and delivery mode, defaulting visibility to private and delivery mode to `fast-preview`, then obtain the captain's explicit consent for those values.
 Use `gh-axi` for the approved GitHub operation and consult its current help rather than relying on remembered flags.
 After remote creation succeeds, clone it locally, add the registry entry, and initialize it according to its delivery mode.
 

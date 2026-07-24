@@ -285,7 +285,7 @@ spawn_abort_cleanup() {
             echo "project=$PROJ_ABS"
             echo "harness=$HARNESS"
             echo "kind=$KIND"
-            echo "mode=${MODE:-no-mistakes}"
+            echo "mode=${MODE:-fast-preview}"
             echo "yolo=${YOLO:-off}"
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
