@@ -49,6 +49,7 @@ output=
 data=
 auth=$(cat)
 printf 'call' >> "$FM_TEST_CURL_ARGV"
+[ "${1:-}" = -q ] || exit 96
 while [ "$#" -gt 0 ]; do
   printf ' <%s>' "$1" >> "$FM_TEST_CURL_ARGV"
   case "$1" in
@@ -57,7 +58,7 @@ while [ "$#" -gt 0 ]; do
     --output) output=$2; shift 2 ;;
     --data-binary) data=${2#@}; shift 2 ;;
     --config|--write-out|--header|--max-time|--max-filesize|--proto) shift 2 ;;
-    --silent) shift ;;
+    -q|--silent) shift ;;
     *) exit 91 ;;
   esac
 done
@@ -307,6 +308,8 @@ test_private_configuration_and_token_custody() {
     || fail "valid private Gitea state lookup failed"
   [ "$out" = open ] || fail "valid state lookup returned $out"
   grep -qxF auth-ok "$dir/curl.auth" || fail "curl did not receive auth over stdin config"
+  grep -q '^call <-q>' "$dir/curl.argv" \
+    || fail "authenticated curl did not disable ambient configuration first"
   assert_no_grep "$TOKEN" "$dir/curl.argv" "token appeared in curl argv"
   assert_no_grep "$TOKEN" "$dir/stderr" "token appeared in successful diagnostics"
 

@@ -328,13 +328,13 @@ fm_forge_gitea_request() {
   if [ "$rc" -eq 0 ]; then
     if [ -n "$body" ]; then
       code=$(printf 'header = "Authorization: token %s"\n' "$FM_GITEA_TOKEN" \
-        | "$curl_bin" --config - --silent --max-time 30 --max-filesize 1048576 \
+        | "$curl_bin" -q --config - --silent --max-time 30 --max-filesize 1048576 \
           --proto '=http,https' --output "$response" --write-out '%{http_code}' \
           --request "$method" --header 'Content-Type: application/json' \
           --data-binary "@$body_file" --url "$FM_GITEA_BASE_URL/api/v1$endpoint" 2>/dev/null) || rc=$?
     else
       code=$(printf 'header = "Authorization: token %s"\n' "$FM_GITEA_TOKEN" \
-        | "$curl_bin" --config - --silent --max-time 30 --max-filesize 1048576 \
+        | "$curl_bin" -q --config - --silent --max-time 30 --max-filesize 1048576 \
           --proto '=http,https' --output "$response" --write-out '%{http_code}' \
           --request "$method" --url "$FM_GITEA_BASE_URL/api/v1$endpoint" 2>/dev/null) || rc=$?
     fi
@@ -466,8 +466,10 @@ fm_forge_gitea_pr_create() {
   local repo_dir=$1 head=$2 base=$3 title=$4 body=$5 payload url path
   fm_forge_repo_from_dir "$repo_dir" || return 1
   [ "$FM_FORGE_REPO_PROVIDER" = gitea ] || { fm_forge_fail "repository is not configured as Gitea"; return 1; }
-  fm_forge_git_branch_valid "$head" && fm_forge_git_branch_valid "$base" \
-    || { fm_forge_fail "Gitea pull request branches are invalid"; return 1; }
+  if ! fm_forge_git_branch_valid "$head" || ! fm_forge_git_branch_valid "$base"; then
+    fm_forge_fail "Gitea pull request branches are invalid"
+    return 1
+  fi
   [ -n "$title" ] && [ "${#title}" -le 4096 ] && [ "${#body}" -le 262144 ] \
     || { fm_forge_fail "Gitea pull request text is invalid"; return 1; }
   path=$FM_FORGE_REPO_PATH
