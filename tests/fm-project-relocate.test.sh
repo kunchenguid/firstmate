@@ -196,6 +196,33 @@ test_refuses_unpushed_and_pushed_unlanded_branches() {
   pass "unpushed and pushed-but-unlanded commits both refuse relocation"
 }
 
+test_refuses_unlanded_tags_and_stashes() {
+  local pair home clone destination
+  pair=$(make_case alpha)
+  home=${pair%%$'\t'*}
+  clone=${pair#*$'\t'}
+  destination="$TMP_ROOT/destination-tag"
+  mkdir -p "$destination"
+  git -C "$clone" commit --quiet --allow-empty -m tag-retained
+  git -C "$clone" tag local-retained
+  git -C "$clone" reset --quiet --hard origin/main
+
+  assert_refused_unchanged "$home" "$destination" alpha "commits absent from every remote" \
+    "unlanded local tag"
+
+  pair=$(make_case beta)
+  home=${pair%%$'\t'*}
+  clone=${pair#*$'\t'}
+  destination="$TMP_ROOT/destination-stash"
+  mkdir -p "$destination"
+  printf 'stashed\n' > "$clone/stashed.txt"
+  git -C "$clone" stash push --quiet --include-untracked -m local-retained
+
+  assert_refused_unchanged "$home" "$destination" beta "commits absent from every remote" \
+    "unlanded stash"
+  pass "unlanded local tags and stashes both refuse relocation"
+}
+
 test_refuses_task_and_secondmate_references() {
   local pair home clone destination source_abs
   pair=$(make_case alpha)
@@ -258,5 +285,6 @@ test_refuses_existing_destination
 test_refuses_symlink_source_and_destination_root
 test_refuses_linked_worktree_and_dirty_worktree
 test_refuses_unpushed_and_pushed_unlanded_branches
+test_refuses_unlanded_tags_and_stashes
 test_refuses_task_and_secondmate_references
 test_refuses_traversal_duplicate_registry_and_gate_agent

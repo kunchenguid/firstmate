@@ -13,13 +13,12 @@
 # This is the sole sanctioned project-relocation path after captain approval.
 # It refuses before moving anything unless the source and destination root are
 # ordinary directories, the source is a standalone Git clone with no linked
-# worktrees, its working tree is clean, every local branch and HEAD are landed
-# on origin's default branch, and no primary task metadata or registered
+# worktrees, its working tree is clean, every local branch, local tag, stash,
+# and HEAD are landed on origin's default branch, and no primary task metadata or registered
 # secondmate lists the project. It also refuses path traversal, source-to-
 # destination nesting, cross-device moves, registry ambiguity, and unsafe
-# registry/state files. The project move uses `mv -T` only after those guards;
-# `-T` prevents a raced destination directory from changing the operation into
-# a recursive move. A registry entry is removed only after that rename succeeds.
+# registry/state files. The project move uses an atomic no-replace rename only
+# after those guards. A registry entry is removed only after that rename succeeds.
 # If registry publication fails, the helper attempts the inverse rename before
 # reporting failure, preserving the source whenever the filesystem permits it.
 # No recursive deletion is used.
@@ -132,7 +131,7 @@ source_has_clean_worktree() {
 }
 
 source_has_only_landed_commits() {
-  local remote_head default_branch default_ref unpushed_head unpushed_branches branches branch
+  local remote_head default_branch default_ref unpushed_head unpushed_branches unpushed_tags unpushed_stash branches branch
   remote_head=$(git -C "$SOURCE" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   case "$remote_head" in
     origin/*) default_branch=${remote_head#origin/} ;;
@@ -145,7 +144,14 @@ source_has_only_landed_commits() {
     || die "cannot inspect HEAD for commits absent from remotes"
   unpushed_branches=$(git -C "$SOURCE" log --format=%H --branches --not --remotes 2>/dev/null) \
     || die "cannot inspect local branches for commits absent from remotes"
-  if [ -n "$unpushed_head" ] || [ -n "$unpushed_branches" ]; then
+  unpushed_tags=$(git -C "$SOURCE" log --format=%H --tags --not --remotes 2>/dev/null) \
+    || die "cannot inspect local tags and stash for commits absent from remotes"
+  unpushed_stash=
+  if git -C "$SOURCE" rev-parse --verify --quiet refs/stash >/dev/null 2>&1; then
+    unpushed_stash=$(git -C "$SOURCE" log --format=%H refs/stash --not --remotes 2>/dev/null) \
+      || die "cannot inspect local tags and stash for commits absent from remotes"
+  fi
+  if [ -n "$unpushed_head" ] || [ -n "$unpushed_branches" ] || [ -n "$unpushed_tags" ] || [ -n "$unpushed_stash" ]; then
     die "source project has commits absent from every remote"
   fi
   if ! git -C "$SOURCE" merge-base --is-ancestor HEAD "$default_ref"; then
@@ -241,8 +247,10 @@ registered_secondmate_references_project() {
 
 REGISTRY_ACTION=none
 REGISTRY_TMP=
+REGISTRY_ORIGINAL=
 cleanup_registry_tmp() {
   [ -n "${REGISTRY_TMP:-}" ] && rm -f "$REGISTRY_TMP"
+  [ -n "${REGISTRY_ORIGINAL:-}" ] && rm -f "$REGISTRY_ORIGINAL"
   return 0
 }
 trap cleanup_registry_tmp EXIT HUP INT TERM
@@ -264,6 +272,10 @@ prepare_registry_update() {
   esac
   REGISTRY_TMP=$(mktemp "$DATA_ABS/.fm-project-relocate.XXXXXX") \
     || die "cannot prepare project-registry update in $DATA_ABS"
+  REGISTRY_ORIGINAL=$(mktemp "$DATA_ABS/.fm-project-relocate-original.XXXXXX") \
+    || die "cannot prepare project-registry comparison snapshot in $DATA_ABS"
+  cp "$REGISTRY" "$REGISTRY_ORIGINAL" \
+    || die "cannot prepare project-registry comparison snapshot for $NAME"
   awk -v project="$NAME" '!($1 == "-" && $2 == project) { print }' "$REGISTRY" > "$REGISTRY_TMP" \
     || die "cannot prepare project-registry update for $NAME"
   REGISTRY_ACTION=remove
@@ -271,8 +283,48 @@ prepare_registry_update() {
 
 publish_registry_update() {
   [ "$REGISTRY_ACTION" = remove ] || return 0
+  cmp -s "$REGISTRY" "$REGISTRY_ORIGINAL" || return 1
   mv -f "$REGISTRY_TMP" "$REGISTRY" || return 1
   REGISTRY_TMP=
+  rm -f "$REGISTRY_ORIGINAL"
+  REGISTRY_ORIGINAL=
+}
+
+atomic_rename_no_replace() {
+  command -v python3 >/dev/null 2>&1 || return 4
+  python3 - "$1" "$2" <<'PY'
+import ctypes
+import errno
+import os
+import sys
+
+source, destination = map(os.fsencode, sys.argv[1:])
+libc = ctypes.CDLL(None, use_errno=True)
+if sys.platform.startswith("linux"):
+    rename = getattr(libc, "renameat2", None)
+    if rename is None:
+        sys.exit(4)
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    result = rename(-100, source, -100, destination, 1)
+elif sys.platform == "darwin":
+    rename = getattr(libc, "renamex_np", None)
+    if rename is None:
+        sys.exit(4)
+    rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    result = rename(source, destination, 4)
+else:
+    sys.exit(4)
+if result == 0:
+    sys.exit(0)
+error = ctypes.get_errno()
+if error == errno.EEXIST:
+    sys.exit(3)
+if error in (errno.ENOSYS, errno.EOPNOTSUPP):
+    sys.exit(4)
+sys.exit(1)
+PY
 }
 
 rollback_relocation() {
@@ -280,7 +332,7 @@ rollback_relocation() {
     printf 'ERROR: registry update failed and source path was recreated; clone remains at %s\n' "$DESTINATION" >&2
     return 1
   fi
-  if mv -T "$DESTINATION" "$SOURCE"; then
+  if atomic_rename_no_replace "$DESTINATION" "$SOURCE"; then
     return 0
   fi
   printf 'ERROR: registry update failed and inverse rename also failed; clone remains at %s\n' "$DESTINATION" >&2
@@ -357,11 +409,14 @@ if [ "$secondmate_rc" -ne 1 ]; then
 fi
 prepare_registry_update
 
-# `-T` keeps this a rename to the exact guarded destination rather than allowing
-# a late-created directory to turn it into a nested move.
-if ! mv -T "$SOURCE" "$DESTINATION"; then
-  fail_after_move "rename failed; source remains at $SOURCE"
-fi
+rename_rc=0
+atomic_rename_no_replace "$SOURCE" "$DESTINATION" || rename_rc=$?
+case "$rename_rc" in
+  0) ;;
+  3) fail_after_move "destination project path appeared before rename; source remains at $SOURCE" ;;
+  4) fail_after_move "atomic no-replace rename is unavailable; source remains at $SOURCE" ;;
+  *) fail_after_move "rename failed; source remains at $SOURCE" ;;
+esac
 if ! publish_registry_update; then
   if rollback_relocation; then
     fail_after_move "project registry update failed; relocation was rolled back and source was preserved"
