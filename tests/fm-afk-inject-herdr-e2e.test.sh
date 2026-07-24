@@ -117,14 +117,15 @@ done
 [ "$PANE_READY" = true ] || fail "the supervisor pane's shell did not become ready"
 
 # A second, independent live task tab in the same workspace, mirroring the tmux
-# e2e's fake fm-fake-c1 crewmate window - not required by scan_signals (which
-# only watches state/*.status mtimes, no window/pane dependency), but kept for
-# parity so this test's shape matches the tmux e2e's.
+# e2e's fake fm-fake-c1 crewmate window. Its matching metadata proves the status
+# belongs to a current worker rather than a retired orphan.
 FAKE_CREW_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-fake-c1" /tmp) \
   || fail "could not create the fake crewmate scratch tab"
 read -r _FAKE_TAB_ID FAKE_CREW_PANE_ID <<EOF
 $FAKE_CREW_IDS
 EOF
+printf 'window=%s:%s\nkind=ship\nbackend=herdr\n' \
+  "$SESSION" "$FAKE_CREW_PANE_ID" > "$STATE_DIR/fake-c1.meta"
 
 # --- deterministic bordered-composer loop, drawn in the scratch pane ---------
 # Mirrors tests/fm-afk-inject-e2e.test.sh's supervisor-loop.sh, but draws a
