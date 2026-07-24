@@ -167,7 +167,7 @@ fm_tmux_classify_raw_row() {  # <raw-styled-row> -> empty|pending|unknown
 # composer structurally, not by cursor_y (bin/backends/herdr.sh), so this is
 # tmux-path-scoped; see docs/tmux-backend.md.
 fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cy raw plain win row rp anchored=""
+  local target=$1 cy raw plain win start row rp anchored=""
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || { printf 'unknown'; return 0; }
@@ -177,10 +177,11 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   plain="${plain#"${plain%%[![:space:]]*}"}"
   plain="${plain%"${plain##*[![:space:]]}"}"
   if fm_tmux_row_is_rule "$plain"; then
-    win=$(tmux capture-pane -e -p -t "$target" -S "$((cy - 2))" -E "$((cy + 2))" 2>/dev/null) || win=""
+    start=$((cy - 2)); [ "$start" -ge 0 ] || start=0
+    win=$(tmux capture-pane -e -p -t "$target" -S "$start" -E "$((cy + 2))" 2>/dev/null) || win=""
     if [ -n "$win" ]; then
       while IFS= read -r row; do
-        rp=$(printf '%s\n' "$row" | fm_composer_strip_ghost)
+        rp=$(printf '%s\n' "$row" | fm_composer_strip_ansi)
         rp="${rp#"${rp%%[![:space:]]*}"}"
         rp="${rp%"${rp##*[![:space:]]}"}"
         # Strip an agent box's side borders before testing the glyph (defensive:

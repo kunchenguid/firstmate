@@ -392,6 +392,31 @@ test_composer_box_with_real_text_stays_pending() {
   pass "fm_tmux_composer_state: real text in a composer box stays pending (cursor on rule OR input row)"
 }
 
+test_pristine_composer_box_dim_glyph_reanchors_empty() {
+  local dir fb rows out styled
+  dir="$TMP_ROOT/box-dimglyph"; mkdir -p "$dir"
+  fb=$(make_fake_tmux_box "$dir")
+  rows="$dir/rows.txt"
+  # A pristine composer box whose ❯/› input row glyph is de-emphasised - dim/faint
+  # (claude) OR a dark/muted truecolor (grok's placeholder shape), with cursor_y on
+  # the bottom rule. The re-anchor must detect the glyph off the ANSI-stripped
+  # (ghost-KEPT) row: ghost-stripping the anchor row would drop the de-emphasised
+  # glyph and miss the input row, keeping the rule verdict (pending) - the latent
+  # gap this pins. It must read empty.
+  for styled in '\033[2m\xe2\x9d\xaf\033[0m' '\033[38;2;50;47;70m\xe2\x80\xba\033[0m'; do
+    {
+      printf '\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n'
+      printf '%b \n' "$styled"
+      printf '\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n'
+    } > "$rows"
+    out=$(PATH="$fb:$PATH" FM_FAKE_ROWS="$rows" FM_FAKE_CY=3 \
+      fm_tmux_composer_state "fakepane")
+    [ "$out" = empty ] \
+      || fail "composer box with a de-emphasised input glyph ('$styled') must re-anchor and read empty, got '$out'"
+  done
+  pass "fm_tmux_composer_state: pristine composer box, de-emphasised input glyph, re-anchors empty"
+}
+
 test_rule_cursor_never_reanchors_onto_a_shell_prompt() {
   local dir fb rows out
   dir="$TMP_ROOT/box-shellnear"; mkdir -p "$dir"
@@ -454,5 +479,6 @@ test_row_is_rule_recognizes_only_pure_rule_rows
 test_pristine_composer_box_cursor_on_bottom_rule_is_empty
 test_pristine_composer_box_cursor_on_input_row_is_empty
 test_composer_box_with_real_text_stays_pending
+test_pristine_composer_box_dim_glyph_reanchors_empty
 test_rule_cursor_never_reanchors_onto_a_shell_prompt
 test_peek_output_is_escape_free
