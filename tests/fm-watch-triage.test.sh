@@ -716,6 +716,36 @@ test_verified_validation_decision_is_not_stale() {
   pass "verified no-mistakes decisions require a live worker and are rechecked on a bounded cadence"
 }
 
+test_verified_wait_uses_supported_endpoint_liveness() {
+  local dir state backend verdict
+  dir=$(make_case verified-wait-endpoint); state="$dir/state"
+  for backend in zellij orca cmux; do
+    printf 'window=test:fm-gate\nkind=ship\nbackend=%s\n' "$backend" > "$state/gate.meta"
+    verdict=$(FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_backend_agent_state() { printf "unverified"; }
+      fm_backend_target_exists() { return 0; }
+      if verified_wait_worker_live test:fm-gate; then printf live; else printf dead; fi
+    ' _ "$WATCH")
+    [ "$verdict" = live ] || fail "$backend parked wait rejected positive endpoint liveness"
+  done
+  verdict=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_backend_agent_state() { printf "unverified"; }
+    fm_backend_target_exists() { return 1; }
+    if verified_wait_worker_live test:fm-gate; then printf live; else printf dead; fi
+  ' _ "$WATCH")
+  [ "$verdict" = dead ] || fail "parked wait survived degraded endpoint liveness"
+  verdict=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_backend_agent_state() { printf "dead"; }
+    fm_backend_target_exists() { return 0; }
+    if verified_wait_worker_live test:fm-gate; then printf live; else printf dead; fi
+  ' _ "$WATCH")
+  [ "$verdict" = dead ] || fail "definitively dead worker was overridden by endpoint presence"
+  pass "verified waits use positive endpoint liveness on backends without recovery-grade agent state"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
@@ -1365,6 +1395,7 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_verified_validation_decision_is_not_stale
+test_verified_wait_uses_supported_endpoint_liveness
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
