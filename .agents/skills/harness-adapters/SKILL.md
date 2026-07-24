@@ -296,7 +296,7 @@ For Grok's supported reasoning-effort values and omission behavior, see the [lau
 
 | Fact | Value |
 |---|---|
-| Busy-pane signature | `Esc:cancel` (the mid-turn cancel hint in grok's keybind bar, shown iff a turn is running; the spinner line remains a braille glyph + `<status>… N.Ns` + `[stop]`). Idle keybind bar shows only `Shift+Tab:mode │ Ctrl+x:shortcuts`. The ASCII `Esc:cancel` is the busy regex (avoids locale fragility of matching braille). |
+| Busy-pane signature | `Esc:cancel` (the mid-turn cancel hint in grok's keybind bar, shown iff a turn is running; the spinner line remains a braille glyph + `<status>… N.Ns` + `[stop]`). Idle keybind bar shows only `Shift+Tab:mode │ Ctrl+x:shortcuts`. Firstmate's Grok-scoped ASCII busy regex accepts both 0.2.111's `Esc:cancel` and the legacy 0.2.73 `Ctrl+c:cancel` footer, avoiding locale-fragile matching of the braille spinner. |
 | Exit command | `/exit` typed into the composer exits the TUI cleanly and prints `Resume this session with: grok --resume <session-id>`; `Ctrl+Q` double-press within 1000ms remains a fallback; `Ctrl+D` is the quit key in VS Code family terminals; Escape is the interrupt, not the exit. |
 | Interrupt | single Escape cancels the current turn; the footer shows `Esc:cancel` mid-turn and the pane reports `Turn cancelled by user`. |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`), same as claude. Opens a slash-autocomplete popup. On 0.2.111 one Enter submitted the selected no-argument `/no-mistakes` entry, which discovered the user-level skill and began its repository checks. An argument-hint placeholder left in the composer remains pending and receives the adapter's retry Enter. |
