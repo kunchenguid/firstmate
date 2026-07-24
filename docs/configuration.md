@@ -60,8 +60,7 @@ Any value other than `tmux`, `herdr`, `zellij`, `orca`, or `cmux` is rejected un
 `fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, `orca`, and `cmux` for ship and scout tasks; `backend=orca` and `backend=cmux` both still refuse `--secondmate` until secondmate launch semantics are designed for each.
 `codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`](codex-app-backend.md) owns the Codex App boundary.
 The session-start secondmate liveness sweep uses the recovery-grade `fm_backend_agent_state` classifier where verified.
-Tmux and Herdr distinguish `alive`, `dead`, `missing`, `ambiguous`, and `unreadable` where applicable.
-Zellij additionally distinguishes structural session/tab absence and verified empty ghost tabs, but keeps every existing terminal pane `unverified` or `ambiguous`; Orca and cmux do not support secondmate spawns.
+Tmux and Herdr distinguish `alive`, `dead`, `missing`, `ambiguous`, and `unreadable` where applicable; Zellij reports `unverified`, while Orca and cmux do not support secondmate spawns.
 The compatibility helper `fm_backend_agent_alive` continues to collapse those detailed results to `alive`, `dead`, or `unknown` for older callers.
 A herdr spawn additionally version-gates against the installed `herdr` binary's protocol and requires `jq`, refusing loudly on an incompatible or missing installation.
 A zellij spawn additionally version-gates against the installed `zellij` binary's version and requires `jq`, refusing loudly when either is missing or the version is older than 0.44.

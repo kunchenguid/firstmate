@@ -759,23 +759,6 @@ test_kill_closes_recorded_tab_when_pane_already_gone() {
   pass "fm_backend_zellij_kill: closes the recorded tab id only after label verification"
 }
 
-test_kill_closes_relocated_empty_ghost_by_label() {
-  local dir fb
-  dir="$TMP_ROOT/kill-relocated-ghost"; mkdir -p "$dir/responses"
-  printf '[]\n' > "$dir/responses/1.out"
-  printf '[{"tab_id":9,"name":"fm-zghost"}]\n' > "$dir/responses/2.out"
-  fb=$(make_zellij_fakebin "$dir")
-  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
-    FM_ZELLIJ_SESSION_LIST="firstmate" \
-    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_kill firstmate:7 3 fm-zghost' "$ROOT"
-  expect_code 0 $? "kill must stay best-effort when the label-owned ghost moved to another tab id"
-  assert_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id'$'\x1f''9' \
-    "kill did not close the uniquely label-owned relocated ghost tab"
-  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id'$'\x1f''3' \
-    "kill trusted the stale recorded tab id instead of resolved label ownership"
-  pass "fm_backend_zellij_kill: closes a relocated empty ghost by verified label ownership"
-}
-
 test_kill_skips_recorded_tab_when_label_mismatches() {
   local dir fb
   dir="$TMP_ROOT/kill-recorded-tab-mismatch"; mkdir -p "$dir/responses"
@@ -1070,7 +1053,6 @@ test_current_path_ignores_tilde_prefixed_banner_lines
 test_kill_resolves_tab_and_closes_by_id
 test_kill_falls_back_to_close_pane_when_tab_lookup_empty
 test_kill_closes_recorded_tab_when_pane_already_gone
-test_kill_closes_relocated_empty_ghost_by_label
 test_kill_skips_recorded_tab_when_label_mismatches
 test_kill_is_noop_when_session_absent
 test_teardown_passes_recorded_tab_id_to_zellij_kill
