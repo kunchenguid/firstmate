@@ -351,6 +351,19 @@ test_internal_transcripts_and_secrets_refuse() {
   assert_attest_rejected basic-noncanonical-padding "$prefix- Authorization: Basic dXNlcjpwYXNzd29yZB==\n" 'Authorization Basic credential'
   assert_attest_rejected basic-after-placeholder "$prefix- Authorization: Basic REDACTED; Authorization: Basic dXNlcjpwYXNzd29yZA==\n" 'Authorization Basic credential'
   while IFS='|' read -r name value; do
+    assert_attest_rejected "basic-context-$name" "$prefix$value"$'\n' 'Authorization Basic credential'
+  done <<'EOF'
+raw-header|Authorization: Basic dXNlcjpwYXNzd29yZA
+whitespace-header|    Authorization: Basic dXNlcjpwYXNzd29yZA
+markdown-quote|> Authorization: Basic dXNlcjpwYXNzd29yZA
+markdown-list|- Authorization: Basic dXNlcjpwYXNzd29yZA
+markdown-code|`Authorization: Basic dXNlcjpwYXNzd29yZA`
+curl-short|curl -H 'Authorization: Basic dXNlcjpwYXNzd29yZA' https://example.invalid
+curl-long|curl --header="Authorization: Basic dXNlcjpwYXNzd29yZA" https://example.invalid
+structured-json|{"Authorization": "Basic dXNlcjpwYXNzd29yZA"}
+structured-key|Authorization = "Basic dXNlcjpwYXNzd29yZA"
+EOF
+  while IFS='|' read -r name value; do
     assert_attest_rejected "basic-$name" "$prefix- Authorization: Basic $value"$'\n' 'Authorization Basic credential'
   done <<'EOF'
 suffix-bypass|REDACTED-dXNlcjpwYXNzd29yZA
@@ -395,6 +408,20 @@ basic-token-hyphen|basic-token
 empty|
 EOF
 
+  while IFS='|' read -r name value; do
+    dir=$(make_case "basic-placeholder-context-$name")
+    write_body "$dir" "$(safe_body)
+
+$value
+"
+    attest_none "$dir" >/dev/null 2> "$dir/stderr" \
+      || fail "Basic placeholder context $name was rejected: $(cat "$dir/stderr")"
+  done <<'EOF'
+markdown-code|`Authorization: Basic REDACTED`
+curl-header|curl -H 'Authorization: Basic PLACEHOLDER' https://example.invalid
+structured-key|{"Authorization": "Basic TOKEN"}
+EOF
+
   dir=$(make_case basic-ordinary-prose)
   write_body "$dir" "$(safe_body)
 
@@ -402,6 +429,21 @@ EOF
 "
   attest_none "$dir" >/dev/null 2> "$dir/stderr" \
     || fail "ordinary Basic authorization prose was rejected: $(cat "$dir/stderr")"
+
+  while IFS='|' read -r name value; do
+    dir=$(make_case "basic-prose-$name")
+    write_body "$dir" "$(safe_body)
+
+$value
+"
+    attest_none "$dir" >/dev/null 2> "$dir/stderr" \
+      || fail "Basic non-header prose $name was rejected: $(cat "$dir/stderr")"
+  done <<'EOF'
+scheme-name|The client calls this the Authorization: Basic scheme.
+quoted-scheme-name|> The client calls this the Authorization: Basic scheme.
+near-miss-key|clientAuthorization: Basic dXNlcjpwYXNzd29yZA
+near-miss-curl|The curl -H 'Authorization: Basic dXNlcjpwYXNzd29yZA' example is documentation.
+EOF
 
   dir=$(make_case basic-machine-verdict)
   safe_body > "$dir/body.md"
