@@ -7,7 +7,13 @@
     "variants": {
       "subscription": {},
       "gateway": {
-        "command": "/absolute/path/to/claude-gw"
+        "_comment": "Optional quota block: how to read THIS identity's balance, for reminders only. command must print JSON and key must select this lane's entry in it; quota-axi cannot see a gateway account, and nothing here ever selects a launch identity. See docs/configuration.md 'Custom quota sources'.",
+        "command": "/absolute/path/to/claude-gw",
+        "quota": {
+          "command": "llm-quota",
+          "args": ["--json"],
+          "key": "claude_code"
+        }
       }
     }
   },

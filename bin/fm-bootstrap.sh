@@ -895,6 +895,16 @@ harness_overrides_validate() {
     echo "HARNESS_OVERRIDES: invalid config/harness-overrides.json - $err"
     return 0
   fi
+  # The optional custom quota-source block inside this file has its own schema,
+  # owned by fm-quota-alert.sh. Bootstrap only reports what that owner says, and
+  # --validate never runs a declared quota command, so session start stays off
+  # the network.
+  if [ -x "$SCRIPT_DIR/fm-quota-alert.sh" ]; then
+    if ! err=$("$SCRIPT_DIR/fm-quota-alert.sh" --validate --overrides "$file" 2>&1); then
+      echo "HARNESS_OVERRIDES: invalid config/harness-overrides.json - ${err#fm-quota-alert: }"
+      return 0
+    fi
+  fi
   # Declared variants are captain-facing capability, so list them the way
   # crew_dispatch_validate lists its rules: a home that has them should see them
   # at session start without opening the file.
