@@ -391,14 +391,23 @@ def command_ingest(args: argparse.Namespace) -> int:
         print(request_id)
         return EXIT_DUPLICATE
     try:
-        if not _atomic_write(context_path, _json_bytes(payload), exclusive=True):
-            raise BridgeError("Telegram reply context already exists", EXIT_REJECTED)
+        published = _atomic_write(context_path, _json_bytes(payload), exclusive=True)
     except Exception:
         try:
             inbox_path.unlink()
         except OSError:
             pass
         raise
+    if not published:
+        existing = _verify_context(home, request_id, settings, secret)
+        if not hmac.compare_digest(_replay_material(existing), _replay_material(payload)):
+            try:
+                inbox_path.unlink()
+            except OSError:
+                pass
+            raise BridgeError("Telegram request id collided with another context", EXIT_REJECTED)
+        print(request_id)
+        return EXIT_DUPLICATE
 
     # Make the registered custom check due on the watcher's next ordinary loop.
     last_check = home / "state" / ".last-check"

@@ -247,6 +247,77 @@ set -e
 [ ! -e "$HERMES_HOME_TEST/plugins/firstmate-telegram" ] || fail "plugin remained after uninstall"
 pass "uninstall is guarded and status-safe"
 
+CONC_HOME="$TMP/conc-home"
+mkdir -p "$CONC_HOME/config/telegram-bridge" "$CONC_HOME/state"
+chmod 700 "$CONC_HOME/config/telegram-bridge"
+cp "$HOME1/config/telegram-bridge/secret" "$CONC_HOME/config/telegram-bridge/secret"
+chmod 600 "$CONC_HOME/config/telegram-bridge/secret"
+cat >"$CONC_HOME/config/telegram-bridge/settings.json" <<EOF
+{"version":1,"enabled":true,"owner_id":"12345","secret_file":"$CONC_HOME/config/telegram-bridge/secret","hermes_home":"$TMP/hermes","hermes_bin":"$FAKEBIN/hermes","plugin_dir":"$TMP/hermes/plugins/firstmate-telegram","fm_home":"$CONC_HOME","fm_root":"$ROOT","reply_max_chars":256}
+EOF
+chmod 600 "$CONC_HOME/config/telegram-bridge/settings.json"
+RACE_REQUEST=$(make_envelope 106 '/firstmate race the inbox')
+NATURAL_REQUEST=$(make_envelope 107 '/firstmate natural race')
+python3 - "$BRIDGE" "$CONC_HOME" "$RACE_REQUEST" "$NATURAL_REQUEST" <<'PY' || fail "concurrent duplicate intake regressed"
+import importlib.util, io, json, sys, types
+from contextlib import redirect_stdout
+from pathlib import Path
+
+bridge_path, home, race_raw, natural_raw = sys.argv[1:5]
+spec = importlib.util.spec_from_file_location("fmt_bridge_conc", bridge_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+inbox_dir = Path(home) / "state" / "telegram-inbox"
+context_dir = Path(home) / "state" / "telegram-context"
+
+def run_ingest(raw):
+    args = types.SimpleNamespace(fm_home=home)
+    old_stdin = sys.stdin
+    sys.stdin = types.SimpleNamespace(buffer=io.BytesIO(raw.encode()))
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            code = mod.command_ingest(args)
+    except mod.BridgeError as exc:
+        code = exc.code
+    finally:
+        sys.stdin = old_stdin
+    return code, buf.getvalue().strip()
+
+def count(directory):
+    return len(list(directory.glob("*.json"))) if directory.exists() else 0
+
+# Force the reported losing interleaving: caller A wins the inbox write, then a
+# concurrent duplicate publishes the identical verified context a hair before
+# A's own exclusive context link, so A's link reports the context already exists.
+real_atomic_write = mod._atomic_write
+raced = {"fired": False}
+def racing_atomic_write(path, data, *, exclusive=False):
+    if exclusive and path.parent.name == "telegram-context" and not raced["fired"]:
+        raced["fired"] = True
+        assert real_atomic_write(path, data, exclusive=True) is True
+        return False
+    return real_atomic_write(path, data, exclusive=exclusive)
+
+mod._atomic_write = racing_atomic_write
+code, rid = run_ingest(race_raw)
+mod._atomic_write = real_atomic_write
+
+assert raced["fired"], "concurrency injection never triggered"
+assert code == mod.EXIT_DUPLICATE, f"racing caller must resolve as duplicate, got {code}"
+assert count(inbox_dir) == 1 and count(context_dir) == 1, "race did not leave exactly one inbox and one context"
+assert json.loads((inbox_dir / f"{rid}.json").read_text())["request_id"] == rid, "valid inbox correlation was deleted by the loser"
+
+# Two identical signed ingests still resolve as one accepted plus one duplicate.
+c1, o1 = run_ingest(natural_raw)
+c2, o2 = run_ingest(natural_raw)
+assert {c1, c2} == {0, mod.EXIT_DUPLICATE}, f"identical ingests must be one accept + one duplicate, got {c1} and {c2}"
+assert o1 == o2, "identical ingests returned different correlation ids"
+assert count(inbox_dir) == 2 and count(context_dir) == 2, "natural duplicate created a second inbox or context"
+PY
+pass "concurrent duplicate intake keeps exactly one inbox and one context"
+
 ! grep -R -F "$(cat "$HOME1/config/telegram-bridge/secret")" "$TMP" --exclude=secret --exclude=settings.json --exclude=bridge.json >/dev/null 2>&1 \
   || fail "bridge secret leaked outside private config"
 pass "diagnostics and fake transport logs contain no bridge secret"
