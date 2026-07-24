@@ -634,6 +634,10 @@ EOF
   assert_not_contains "$out" "drain them with bin/fm-wake-drain.sh" "read-only guard printed a mutating drain instruction"
   assert_not_contains "$out" "After draining queued wakes" "read-only guard printed a drain-then-rearm instruction"
   assert_not_contains "$out" "run bin/fm-watch-arm.sh" "read-only guard printed a mutating watcher-arm instruction"
+  assert_contains "$out" "Mode: non-owned lock state (LIVE_OTHER) - supervision withheld." "read-only supervision block did not withhold the harness protocol"
+  assert_not_contains "$out" "Mode: Claude background-notify supervision." "read-only supervision block still emitted the claude mutation protocol"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh" "read-only supervision block still instructed arming the watcher"
+  assert_not_contains "$out" "reclaim --expected" "read-only supervision block offered a reclaim against a proven live owner"
   assert_not_contains "$out" "git -C $root checkout main" "read-only bootstrap printed a state-changing checkout remediation"
 
   # Detect-only bootstrap diagnostics still ran (the fakebin's PATH excludes
@@ -778,6 +782,9 @@ EOF
   assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION" "identity-unavailable startup asserted an unproved live rival"
   assert_contains "$out" "skipped (lock outcome IDENTITY_UNAVAILABLE)" "identity-unavailable startup did not skip wake mutation explicitly"
   [ -s "$home/state/.wake-queue" ] || fail "identity-unavailable startup drained the wake queue without owning the lock"
+  assert_contains "$out" "Mode: non-owned lock state (IDENTITY_UNAVAILABLE) - supervision withheld." "identity-unavailable supervision block did not withhold the harness protocol"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh" "identity-unavailable supervision block still instructed arming the watcher"
+  assert_not_contains "$out" "reclaim --expected <recorded-owner>" "identity-unavailable supervision block offered an unconditional reclaim"
 
   pass "session start enters live-other read-only mode only for a proven LIVE_OTHER result"
 }
@@ -802,6 +809,8 @@ EOF
   assert_not_contains "$out" "LOCK IDENTITY UNAVAILABLE" "dead numeric owner was treated as ambiguous when kill -0 proved it stale"
   assert_grep "codex-thread:current-thread" "$home/state/.lock" "session start did not install its Codex thread identity"
   [ ! -s "$home/state/.wake-queue" ] || fail "same session did not drain the wake queue after reclaim"
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS" "reclaimed session start lost its supervision block"
+  assert_not_contains "$out" "supervision withheld" "reclaimed session start still withheld the owned supervision protocol"
 
   pass "stale numeric lock plus denied ps is reclaimed and startup continues in the same session"
 }

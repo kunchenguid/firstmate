@@ -444,6 +444,13 @@ $LOCK_RESULT. Do not drain, arm, spawn, steer, merge, or repair fleet state.
 This outcome does not prove that another live session owns the lock.
 
 EOF
+  if [ "$LOCK_RESULT" = STALE_RECLAIMABLE ]; then
+    cat <<'EOF'
+The one permitted action is the atomic reclaim offered in the supervision
+block above; after LOCK_RESULT=OWNED, re-run bin/fm-session-start.sh.
+
+EOF
+  fi
 elif [ "$AFK_PRESENT" -eq 1 ]; then
   cat <<'EOF'
 Away mode is active. Follow the supervision operating instructions block above:
