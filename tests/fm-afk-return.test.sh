@@ -163,10 +163,10 @@ EOF
   printf 'needs-decision [key=api-shape]: captain must choose the synthetic API shape\n' > "$dir/home/state/decision-task.status"
   date +%s > "$dir/home/state/.afk"
   printf '1784074271\t1\tsignal\tdecision-task.status\tsignal: synthetic decision\n' > "$dir/home/state/.fake-drain"
-  out=$(run_return "$dir" begin) || fail "captain-owned decision should not be treated as a firstmate blocker: $out"
-  assert_contains "$out" 'catch-up wake:' "captain-owned decision wake was not surfaced in catch-up"
-  [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "captain-owned decision incorrectly opened a firstmate blocker gate"
-  pass "captain-owned needs-decision remains reportable without masquerading as a firstmate-actionable blocker"
+  out=$(run_return "$dir" begin) || fail "approval decision should not be treated as a firstmate blocker: $out"
+  assert_contains "$out" 'catch-up wake:' "approval decision notification was not surfaced in catch-up"
+  [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "approval decision incorrectly opened a firstmate blocker gate"
+  pass "needs-decision remains reportable without masquerading as a firstmate-actionable blocker"
 }
 
 test_away_reentry_refuses_pending_return_gate() {

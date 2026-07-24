@@ -530,7 +530,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       fcount=$(nm_gate_findings_count)
       [ -n "$fcount" ] && RUN_DETAIL="$RUN_DETAIL: $fcount finding(s)"
       if printf '%s\n' "$RUN_OUT" | grep -q 'ask-user'; then
-        RUN_DETAIL="$RUN_DETAIL (ask-user: captain decision)"
+        RUN_DETAIL="$RUN_DETAIL (ask-user: authority decision)"
       fi
     else
       case "$status" in
