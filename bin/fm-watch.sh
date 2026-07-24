@@ -127,6 +127,7 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+VERIFIED_WAIT_RECHECK_SECS=${FM_VERIFIED_WAIT_RECHECK_SECS:-$STALE_ESCALATE_SECS}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -296,12 +297,21 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # re-surface epoch so, once past the window, it fires once per window rather than
 # every poll. Advances the stale suppressor to <hash> and flags the key paused.
 handle_paused_stale() {  # <window> <task> <hash> [paused|waiting]
-  local win=$1 task=$2 h=$3 class=${4:-paused} key statusf mtime age rf rf_age reason
+  local win=$1 task=$2 h=$3 class=${4:-paused} key statusf mtime age rf rf_age reason agent_alive
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   if [ "$class" = waiting ]; then
-    : > "$STATE/.verified-wait-$key"
+    rf="$STATE/.verified-wait-$key"
+    if [ "$(age_of "$rf")" -ge "$VERIFIED_WAIT_RECHECK_SECS" ]; then
+      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+      if [ "$agent_alive" != alive ] || [ "$(crew_absorb_class "$task")" != waiting ]; then
+        clear_pause_tracking "$win"
+        surface_nonterminal_stale "$win" "$h"
+        return
+      fi
+      date +%s > "$rf"
+    fi
   else
     rm -f "$STATE/.verified-wait-$key"
   fi
@@ -669,6 +679,10 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   exit 0
 fi
 watcher_cleanup() {
+  if [ "${SIGNAL_QUEUE_LOCK_HELD:-0}" = 1 ]; then
+    SIGNAL_QUEUE_LOCK_HELD=0
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  fi
   fm_active_check_stop || return 1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
@@ -830,6 +844,8 @@ EOF
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
       appended=0
+      fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+      SIGNAL_QUEUE_LOCK_HELD=1
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         base=${f##*/}
@@ -837,12 +853,16 @@ EOF
         task=${task%.turn-ended}
         [ -f "$STATE/$task.meta" ] || continue
         [ "$(stat_sig "$f" 2>/dev/null || true)" = "$sig" ] || continue
-        fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
+        fm_wake_append_locked signal "$(basename "$f")" "$reason" || exit 1
         appended=$((appended + 1))
       done <<EOF
 $pending
 EOF
-      [ "$appended" -gt 0 ] || continue
+      if [ "$appended" -eq 0 ]; then
+        SIGNAL_QUEUE_LOCK_HELD=0
+        fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+        continue
+      fi
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         base=${f##*/}

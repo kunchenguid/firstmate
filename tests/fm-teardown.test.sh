@@ -1436,6 +1436,62 @@ SH
   pass "teardown after signal filtering cannot wake without a durable queue record"
 }
 
+test_teardown_waits_for_live_signal_queue_commit() {
+  local case_dir real_date pid teardown_pid i signal_count
+  case_dir=$(make_case signal-queue-teardown)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' 'needs-decision: choose release target' > "$case_dir/state/task-x1.status"
+  real_date=$(command -v date)
+  cat > "$case_dir/fakebin/date" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = +%s ] && [ -e "${FM_QUEUE_APPEND_ARMED:?}" ] && [ ! -e "${FM_QUEUE_APPEND_ONCE:?}" ]; then
+  : > "$FM_QUEUE_APPEND_ONCE"
+  : > "${FM_QUEUE_APPEND_BLOCKED:?}"
+  while [ ! -e "${FM_QUEUE_APPEND_RESUME:?}" ]; do
+    "${FM_REAL_DATE_FOR_TEST:?}" +%s >/dev/null
+  done
+fi
+exec "${FM_REAL_DATE_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$case_dir/fakebin/date"
+  : > "$case_dir/queue-append-armed"
+
+  PATH="$case_dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_REAL_DATE_FOR_TEST="$real_date" FM_QUEUE_APPEND_ARMED="$case_dir/queue-append-armed" \
+    FM_QUEUE_APPEND_ONCE="$case_dir/queue-append-once" FM_QUEUE_APPEND_BLOCKED="$case_dir/queue-append-blocked" \
+    FM_QUEUE_APPEND_RESUME="$case_dir/queue-append-resume" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch.sh" > "$case_dir/watch.out" 2> "$case_dir/watch.err" &
+  pid=$!
+  i=0
+  while [ ! -e "$case_dir/queue-append-blocked" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$case_dir/queue-append-blocked" ] \
+    || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "signal-queue-teardown: watcher did not pause while committing its queue record"; }
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" &
+  teardown_pid=$!
+  sleep 0.2
+  kill -0 "$teardown_pid" 2>/dev/null \
+    || { wait "$teardown_pid" 2>/dev/null || true; fail "signal-queue-teardown: teardown retired metadata during the queue commit"; }
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "signal-queue-teardown: metadata disappeared before the queue commit completed"
+
+  : > "$case_dir/queue-append-resume"
+  wait "$pid" || fail "signal-queue-teardown: watcher failed after queue commit: $(cat "$case_dir/watch.err")"
+  wait "$teardown_pid" || fail "signal-queue-teardown: teardown failed after queue commit"
+  signal_count=$(grep -c "$(printf '\tsignal\ttask-x1.status\t')" "$case_dir/state/.wake-queue" 2>/dev/null || true)
+  [ "$signal_count" -eq 1 ] \
+    || fail "signal-queue-teardown: committed live signal queued $signal_count times instead of once"
+  grep -F "signal: $case_dir/state/task-x1.status" "$case_dir/watch.out" >/dev/null \
+    || fail "signal-queue-teardown: committed live signal did not wake"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "signal-queue-teardown: teardown did not retire metadata after the queue commit"
+  pass "teardown serializes worker retirement with live signal queue commits"
+}
+
 configure_herdr_projection_teardown_case() {  # <case-dir>
   local case_dir=$1 token=AbCdEfGhIjKlMnOpQrStUv
   sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
@@ -1554,6 +1610,7 @@ test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
 test_teardown_after_signal_filter_does_not_wake_empty_queue
+test_teardown_waits_for_live_signal_queue_commit
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_squash_merged_branch_deleted_allows
