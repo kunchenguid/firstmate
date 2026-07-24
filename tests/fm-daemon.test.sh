@@ -21,6 +21,13 @@ if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
   . "$DAEMON"
 fi
 
+# Each tmux-path inject test passes FM_HOME="$dir" (its own case dir, which
+# make_supercase/make_bordered_case create) on the injecting call. The fake `tmux`
+# subprocess inherits it and echoes it back as this home's @firstmate-home
+# ownership stamp, so the injection ownership guard's own-session read matches by
+# construction. A test that needs to model a FOREIGN pane overrides
+# FM_FAKE_TMUX_HOME_STAMP with a different home path instead.
+
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 
 test_afk_start_refuses_when_flag_cannot_be_written() {
@@ -523,7 +530,7 @@ test_escalate_batches_into_one_digest() {
   escalate_add "$state" "event A: done: PR 1"
   escalate_add "$state" "event B: done: PR 2"
   afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
     || fail "escalate_flush failed"
   grep -F "event A" "$sent" >/dev/null || fail "batch digest missing event A"
@@ -548,7 +555,7 @@ test_escalate_batch_age_uses_first_append() {
   escalate_add "$state" "event B: done: PR 2"
   echo $(( $(date +%s) - 100 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=90 FM_HOUSEKEEPING_TICK=0 \
     housekeeping "$state"
   grep -F 'event A: done: PR 1 | event B: done: PR 2' "$sent" >/dev/null \
@@ -687,7 +694,7 @@ test_busy_guard_defers_when_supervisor_busy() {
   printf 'esc to interrupt\n' > "$capture"
   escalate_add "$state" "done: PR 1"
   afk_enter "$state"
-  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+  if PATH="$fakebin:$PATH" FM_HOME="$dir" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state"; then
     fail "escalate_flush should defer when supervisor pane busy"
   fi
@@ -705,7 +712,7 @@ test_inject_refuses_login_shell_target_preserves_buffer() {
   capture="$dir/pane.txt"; printf '$ \n' > "$capture"
   escalate_add "$state" "done: PR 1"
   afk_enter "$state"
-  if PATH="$fakebin:$PATH" FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=firstmate:0 \
+  if PATH="$fakebin:$PATH" FM_HOME="$dir" FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=firstmate:0 \
     FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
     FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
     FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state"; then
@@ -727,7 +734,7 @@ test_inject_allows_non_shell_target_and_flushes() {
   capture="$dir/pane.txt"; : > "$capture"
   escalate_add "$state" "done: PR 1"
   afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=firstmate:0 \
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=firstmate:0 \
     FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_CURRENT_COMMAND=codex \
     FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
     FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
@@ -1118,7 +1125,7 @@ test_max_defer_empty_swallow_types_once_and_alarms() {
   escalate_add "$state" "needs-decision: pick A"
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
     FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 housekeeping "$state"
   [ "$(grep -c 'Supervisor escalate' "$sent" 2>/dev/null || true)" -eq 1 ] \
@@ -1139,7 +1146,7 @@ test_max_defer_flushes_empty_idle_pane() {
   escalate_add "$state" "done: PR https://x/y/pull/1"
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
     FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 FM_INJECT_CONFIRM_SLEEP=0.05 \
     housekeeping "$state"
   [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after a recovered max-defer flush"
@@ -1156,7 +1163,7 @@ test_max_defer_pending_composer_alarms_without_typing() {
   escalate_add "$state" "needs-decision: pick B"
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
     FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 FM_INJECT_CONFIRM_SLEEP=0.05 \
     housekeeping "$state"
   [ ! -s "$sent" ] || fail "max-defer typed into a pending composer"
@@ -1174,7 +1181,7 @@ test_normal_flush_clears_stale_wedge_marker() {
   printf 'old wedge\n' > "$state/.subsuper-inject-wedged"
   escalate_add "$state" "done: PR https://x/y/pull/2"
   afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
     FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" \
     || fail "normal escalate_flush failed"
   [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after normal flush"
@@ -1191,7 +1198,7 @@ test_below_max_defer_does_nothing() {
   escalate_add "$state" "needs-decision: pick A"
   date +%s > "$state/.subsuper-escalations.since"   # just now
   afk_enter "$state"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
     FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=300 housekeeping "$state"
   [ ! -s "$sent" ] || fail "injected before MAX_DEFER elapsed"
@@ -1207,7 +1214,7 @@ test_max_defer_afk_inactive_does_not_flush_or_alarm() {
   sent="$dir/sent.log"; : > "$sent"
   escalate_add "$state" "needs-decision: pick B"
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
     FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 FM_INJECT_CONFIRM_SLEEP=0.05 \
     housekeeping "$state"
   [ ! -s "$sent" ] || fail "injected while afk was inactive"
@@ -1627,12 +1634,18 @@ test_discover_supervisor_target_herdr() {
   out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION=iso1 discover_supervisor_target)
   [ "$out" = "iso1:w1:p9" ] || fail "herdr target should use an explicit HERDR_SESSION: $out"
 
-  if out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
+  # Bare fallback is now HOME-SCOPED: the session is named after FM_HOME's basename
+  # (a shared tmux server must not map a bare "firstmate:0" onto another home).
+  local hdir; hdir=$(make_supercase discover-fallback-home)
+  if out=$(FM_HOME="$hdir" FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
     fail "bare fallback should return non-zero"
   fi
-  [ "$out" = "firstmate:0" ] || fail "bare fallback should still print firstmate:0: $out"
+  [ "$out" = "${hdir##*/}:0" ] || fail "bare fallback should be home-scoped '<basename>:0': $out"
+  # Only when FM_HOME cannot be resolved at all does it degrade to the legacy literal.
+  out=$(FM_HOME="$hdir/missing" FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target)
+  [ "$out" = "firstmate:0" ] || fail "unresolvable home should degrade to the literal fallback: $out"
 
-  pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
+  pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > home-scoped <basename>:0 fallback"
 }
 
 test_pane_is_busy_herdr_native_busy_state() {

@@ -132,6 +132,16 @@ case "${1:-}" in
     for _a in "$@"; do
       case "$_a" in *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-fakepane}"; exit 0 ;; esac
       case "$_a" in *cursor_y*) printf '%s\n' "${FM_FAKE_TMUX_CURSOR_Y:-0}"; exit 0 ;; esac
+      # The supervisor home-ownership stamp (@firstmate-home): FM_FAKE_TMUX_HOME_STAMP
+      # wins (set it to a foreign path to model another home's pane, or empty to model
+      # an unstamped session); otherwise echo THIS home's physical FM_HOME so the
+      # injection guard's own-session read matches by construction.
+      case "$_a" in *@firstmate-home*)
+        if [ "${FM_FAKE_TMUX_HOME_STAMP+set}" = set ]; then printf '%s\n' "$FM_FAKE_TMUX_HOME_STAMP"
+        elif [ -n "${FM_HOME:-}" ]; then ( cd "$FM_HOME" 2>/dev/null && pwd -P ); fi
+        exit 0 ;;
+      esac
+      case "$_a" in *session_name*) printf '%s\n' "${FM_FAKE_TMUX_SESSION:-fakesession}"; exit 0 ;; esac
       [ "$_a" = "-p" ] && _print=1
     done
     [ "$_print" = 1 ] && printf 'fakepane\n'
@@ -211,6 +221,13 @@ case "${1:-}" in
     print=0
     for a in "$@"; do case "$a" in *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-fakepane}"; exit 0 ;; esac; done
     for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
+    # Supervisor home-ownership stamp (see make_supercase's shim for the contract).
+    for a in "$@"; do case "$a" in *@firstmate-home*)
+      if [ "${FM_FAKE_TMUX_HOME_STAMP+set}" = set ]; then printf '%s\n' "$FM_FAKE_TMUX_HOME_STAMP"
+      elif [ -n "${FM_HOME:-}" ]; then ( cd "$FM_HOME" 2>/dev/null && pwd -P ); fi
+      exit 0 ;;
+    esac; done
+    for a in "$@"; do case "$a" in *session_name*) printf '%s\n' "${FM_FAKE_TMUX_SESSION:-fakesession}"; exit 0 ;; esac; done
     for a in "$@"; do [ "$a" = "-p" ] && print=1; done
     [ "$print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;

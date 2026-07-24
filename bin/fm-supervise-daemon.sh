@@ -936,8 +936,12 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # Best-effort status-line flash. tmux's display-message is a client-side OSD
   # with no herdr equivalent; the log line + durable marker above are already
   # the primary, backend-independent signal, so a non-tmux backend just skips
-  # this cosmetic extra rather than attempting an unsupported call.
-  if [ "$backend" = tmux ]; then
+  # this cosmetic extra rather than attempting an unsupported call. Gate it on the
+  # SAME home-ownership check the injection uses: a target that is not provably
+  # ours (a shared-server fallback pointing at another home's pane) must not even
+  # flash a banner on that home's client. The backend-independent alert below
+  # still reaches this home's captain.
+  if [ "$backend" = tmux ] && supervisor_target_home_ok "$backend" "$target"; then
     tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
   fi
   # Backend-independent active alert. Unlike the tmux flash above (skipped on
@@ -1177,6 +1181,17 @@ inject_msg() {  # <message> [state]
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
   fm_backend_target_exists "$backend" "$target" || return 1
+  # (2b) HARD FLOOR - home ownership. Never inject into a pane this home does not
+  # own. On a shared backend server (one tmux server across several firstmate
+  # homes) a fallback or misresolved target can land on ANOTHER home's firstmate
+  # pane; refuse rather than leak this home's escalation into a foreign session
+  # (incident afk-crosshome-inject-leak). This is the last gate before typing, so
+  # it catches a wrong target even if every earlier resolution step was fooled.
+  # Owned by bin/fm-supervisor-target-lib.sh.
+  if ! supervisor_target_home_ok "$backend" "$target"; then
+    log "inject refused: supervisor target '$target' (backend '$backend') is not owned by this firstmate home (FM_HOME=${FM_HOME:-unset}); refusing to inject into a foreign pane, buffer preserved"
+    return 1
+  fi
   if shell_cmd=$(supervisor_target_login_shell "$backend" "$target"); then
     log "inject refused: supervisor target '$target' is a login shell (current command: $shell_cmd); buffer preserved"
     return 1
@@ -1451,9 +1466,11 @@ fm_super_main() {
   # --- auto-discover the supervisor target (the pane running firstmate) -----
   # Priority: FM_SUPERVISOR_TARGET override > $TMUX_PANE (tmux; inherited from
   # the pane that launched the daemon, normally firstmate's own) >
-  # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>") > firstmate:0
-  # fallback. Exporting the result into FM_SUPERVISOR_TARGET makes inject_msg
-  # (which reads that env var) use the discovered pane without an extra global.
+  # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>") > home-scoped
+  # "<FM_HOME basename>:0" fallback. Exporting the result into FM_SUPERVISOR_TARGET
+  # makes inject_msg (which reads that env var) use the discovered pane without an
+  # extra global. The FALLBACK* label is load-bearing: the stamp step below only
+  # claims ownership for a first-party source, never a fallback guess.
   local discovered target_source
   target_source="FM_SUPERVISOR_TARGET"
   if [ -z "${FM_SUPERVISOR_TARGET:-}" ]; then
@@ -1462,7 +1479,7 @@ fm_super_main() {
     elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
       target_source="HERDR_ENV(HERDR_PANE_ID)"
     else
-      target_source="FALLBACK(firstmate:0)"
+      target_source="FALLBACK($(supervisor_target_default))"
     fi
   fi
   if discovered=$(discover_supervisor_target); then
@@ -1492,6 +1509,29 @@ fm_super_main() {
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
     exit 1
+  fi
+
+  # --- home-ownership stamp + injection guard (cross-home leak defense) -------
+  # Stamp our own supervisor session so the injection ownership guard
+  # (supervisor_target_home_ok) can prove ownership at inject time, mirroring the
+  # crew-session stamp a31df6e added. Stamp ONLY when the target came from a
+  # first-party signal ($TMUX_PANE, herdr markers, or an explicit captured
+  # FM_SUPERVISOR_TARGET) - never the home-agnostic fallback, whose target is a
+  # guess we must not claim. tmux only; herdr targets are owned by construction.
+  if [ "$BACKEND" = tmux ]; then
+    case "$target_source" in
+      FALLBACK*) : ;;
+      *) supervisor_tmux_stamp_own "$TARGET" || true ;;
+    esac
+  fi
+  # If the resolved target is still not provably this home's pane (e.g. a
+  # primary harness that is neither tmux nor herdr fell back to a shared tmux
+  # session another home owns), keep the daemon running so buffering and the
+  # wake queue still recover every escalation, but it WILL refuse each injection
+  # rather than risk a cross-home escalation. Loud, non-fatal.
+  if ! supervisor_target_home_ok "$BACKEND" "$TARGET"; then
+    echo "warn: supervisor target '$TARGET' (backend '$BACKEND') is not provably owned by this firstmate home (FM_HOME=$FM_HOME); the away-mode daemon will refuse to inject into it and rely on the wake queue instead of risking a cross-home escalation. Set FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND to firstmate's own pane." >&2
+    log "startup: target '$TARGET' not owned by this home (source=$target_source, backend=$BACKEND); injections will be refused (cross-home guard)"
   fi
 
   local afk_status="off"
