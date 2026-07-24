@@ -27,11 +27,15 @@ mkdir -p "$BRIEF_HOME/data"
 # is a weak guard on its own; test_no_heredoc_in_command_substitution and the
 # macos-stock-bash CI job carry the real cross-version enforcement.
 test_script_parses() {
-  local out rc
+  local out rc direct_count
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
   expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
   [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
-  pass "fm-brief.sh: bash -n succeeds"
+  assert_no_grep "DOD=\$(cat <<EOF" "$ROOT/bin/fm-brief.sh" \
+    "Definition-of-done prose must not live inside command substitution"
+  direct_count=$(grep -F -c "IFS= read -r -d '' DOD <<EOF || true" "$ROOT/bin/fm-brief.sh")
+  expect_code 3 "$direct_count" "all three ship modes must read Definition-of-done prose directly"
+  pass "fm-brief.sh: bash -n succeeds and Definition-of-done heredocs avoid command substitution"
 }
 
 # Structural class guard (issues #166, #958, #1069): never build a variable by
@@ -188,17 +192,16 @@ write_registry() {
 EOF
 }
 
-# fm-brief.sh must exit 0 and produce a brief with no unreplaced shell
-# metacharacter corruption for every ship delivery mode. This also guards
-# against any *new* unescaped apostrophe or unbalanced quote later added to
-# one of these DOD blocks, since a broken heredoc corrupts or empties the
-# generated brief content, not just the script's own syntax.
-test_ship_modes_generate_clean_briefs() {
+# Scaffold every task kind through the real script and pin its safety contract.
+test_task_modes_generate_safety_contracts() {
   local home id brief status
-  home="$TMP_ROOT/ship-home"
+  home="$TMP_ROOT/task-mode-home"
   write_registry "$home"
 
-  for id_proj in "brief-nomistakes-a1:no-registry-proj" "brief-directpr-a2:direct-proj" "brief-localonly-a3:local-proj"; do
+  for id_proj in \
+    "brief-nomistakes-a1:no-registry-proj" \
+    "brief-directpr-a2:direct-proj" \
+    "brief-localonly-a3:local-proj"; do
     id=${id_proj%%:*}
     proj=${id_proj##*:}
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1; status=$?
@@ -209,9 +212,59 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
-    assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
+    assert_grep "Verify isolation before anything else." "$brief" \
+      "$id: ship brief lost worktree isolation"
+    assert_grep "# Herdr lifecycle declaration - NOT ENABLED" "$brief" \
+      "$id: ship brief lost its Herdr declaration"
+    assert_grep "States: working, needs-decision, blocked, paused, done, failed." "$brief" \
+      "$id: ship brief lost the status protocol"
+    assert_grep "# Project memory" "$brief" "$id: ship brief lost project-memory guidance"
+    assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker"
   done
-  pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+
+  brief="$home/data/brief-nomistakes-a1/brief.md"
+  assert_grep "Run \`no-mistakes doctor\`" "$brief" \
+    "no-mistakes brief lost pipeline setup"
+  assert_grep "ask-user findings are never yours to answer" "$brief" \
+    "no-mistakes brief let workers decide their own ask-user findings"
+  assert_grep "Firstmate applies the authority contract" "$brief" \
+    "no-mistakes brief lost Firstmate's authority check"
+  assert_grep "Avoid \`--yes\`: it would silently bypass firstmate's authority check" "$brief" \
+    "no-mistakes brief lost the --yes prohibition"
+
+  brief="$home/data/brief-directpr-a2/brief.md"
+  assert_grep "This project ships **direct-PR**" "$brief" \
+    "direct-PR brief lost its delivery definition"
+  assert_grep "push your branch and open a PR with \`gh-axi\`" "$brief" \
+    "direct-PR brief lost branch-only PR delivery"
+  assert_grep "Do NOT run /no-mistakes." "$brief" \
+    "direct-PR brief incorrectly permits the no-mistakes pipeline"
+
+  brief="$home/data/brief-localonly-a3/brief.md"
+  assert_grep "Never push to any remote and never open a PR." "$brief" \
+    "local-only brief lost its remote prohibition"
+  assert_grep "Keep your branch a clean fast-forward" "$brief" \
+    "local-only brief lost fast-forward readiness"
+  assert_grep "guarded fast-forward path" "$brief" \
+    "local-only brief lost guarded landing"
+
+  id="brief-scout-a4"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" scout-proj --scout >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "fm-brief.sh scout should exit 0"
+  brief="$home/data/$id/brief.md"
+  assert_grep "This is a SCOUT task: the deliverable is a written report, not a PR." "$brief" \
+    "scout brief lost its report-only delivery definition"
+  assert_grep "Never push to any remote and never open a PR." "$brief" \
+    "scout brief lost its remote prohibition"
+  assert_grep "decision-hold-lifecycle/SKILL.md" "$brief" \
+    "scout brief lost the unresolved-decision completion policy"
+  assert_grep "# Herdr lifecycle declaration - NOT ENABLED" "$brief" \
+    "scout brief lost its Herdr declaration"
+  assert_grep "States: working, needs-decision, blocked, paused, done, failed." "$brief" \
+    "scout brief lost the status protocol"
+  assert_no_grep "EOF" "$brief" "scout brief leaked a heredoc EOF marker"
+
+  pass "fm-brief.sh: every task mode preserves its safety contract"
 }
 
 test_faster_paths_use_configured_authority_without_stacked_review() {
@@ -243,9 +296,8 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
-# Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
-# reference must render as plain prose with no dangling apostrophe artifact.
-test_no_mistakes_dod_wording() {
+# Pin the ask-user authority prose that introduced the Bash 3.2 regression.
+test_no_mistakes_ask_user_authority_wording() {
   local home id brief
   home="$TMP_ROOT/wording-home"
   mkdir -p "$home/data"
@@ -274,8 +326,12 @@ test_no_mistakes_dod_wording() {
   # being reworded or escaped away. test_no_heredoc_in_command_substitution
   # guards the structure that makes it safe.
   assert_grep "firstmate's authority check" "$brief" \
-    "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
-  pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
+    "no-mistakes DOD lost the Firstmate-owned authority boundary"
+  assert_grep "ask-user findings are never yours to answer" "$brief" \
+    "no-mistakes DOD let workers decide their own ask-user findings"
+  assert_grep "Avoid \`--yes\`" "$brief" \
+    "no-mistakes DOD lost the --yes prohibition"
+  pass "fm-brief.sh: no-mistakes DOD preserves the ask-user authority boundary"
 }
 
 test_ship_project_memory_wording() {
@@ -635,9 +691,9 @@ test_scout_and_secondmate_scaffold() {
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
-test_ship_modes_generate_clean_briefs
+test_task_modes_generate_safety_contracts
 test_faster_paths_use_configured_authority_without_stacked_review
-test_no_mistakes_dod_wording
+test_no_mistakes_ask_user_authority_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
