@@ -885,7 +885,22 @@ while :; do
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
-    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    # Union the pre- and post-grace scans, then collapse to ONE record per signal
+    # file (latest signature wins, first-seen order preserved). A file that still
+    # differs from its seen-marker appears in BOTH scans - the marker is not
+    # advanced until the end of this block - so without this collapse every
+    # downstream loop (reason, wake-append, marker-advance) would process each
+    # file twice and write duplicate raw queue records for one logical signal.
+    # Drain dedupes by logical key downstream so no notification is lost, but the
+    # raw duplication is queue noise that weakens exactly-once reasoning, and an
+    # interrupted-then-restarted checkpoint re-scans and compounds it. Collapsing
+    # here also guarantees the reason file set and the appended set come from the
+    # same normalized list.
+    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)" | awk -F'\t' '
+      $1 == "" { next }
+      { key = $3; if (!(key in seen)) { order[++n] = key; seen[key] = 1 } line[key] = $0 }
+      END { for (i = 1; i <= n; i++) print line[order[i]] }
+    ')
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue

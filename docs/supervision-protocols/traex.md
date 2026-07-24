@@ -17,7 +17,10 @@ A marked supervision nudge (`FM_INJECT_MARK` prefix) while away mode is inactive
 It is not an away-mode escalation and does not load `/afk`; just drain and handle it per this protocol.
 
 Degraded backstop (honest, not silent):
-When `bin/fm-present-launch.sh start` fails - the supervisor backend is neither herdr nor tmux, or the daemon will not launch - report the degraded state plainly and fall back to the bounded foreground checkpoint:
+`bin/fm-present-launch.sh start` returns exit code 3 when it cannot inject automatically here - most often because this primary runs on an independent pty rather than inside tmux or herdr, so no injectable supervisor pane resolves.
+That is an EXPECTED degrade, not a failure: durable notifications still work (wakes are queued and never lost), only the automatic fresh-turn injection is unavailable, and the command says exactly that on stderr.
+Report it to the captain in those terms - durable notifications available, automatic injection unavailable, using the foreground checkpoint fallback - rather than as a broken supervisor, and distinguish "the event was durably queued" from "the primary automatically started a new turn".
+On that exit code 3, or any other non-zero start (the daemon genuinely would not launch), fall back to the bounded foreground checkpoint:
 1. Run one foreground watcher checkpoint with `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`.
 2. If it prints `signal:`, `stale:`, `check:`, or `heartbeat`, drain queued wakes, handle that wake, then start the next checkpoint.
 3. If it prints `checkpoint:` or exits 124 with no wake, drain queued wakes anyway, process any queued user message now visible to traex, then start the next checkpoint.

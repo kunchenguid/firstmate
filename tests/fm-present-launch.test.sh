@@ -255,6 +255,38 @@ unit_unsupported_backend_refuses() {
 }
 
 # ---------------------------------------------------------------------------
+# UNIT: an independent-pty primary (no injectable supervisor pane resolves)
+# degrades HONESTLY - it does not silently fail and does not inject into an
+# unverified pane. It reports that durable notifications remain while automatic
+# injection is unavailable, points at the checkpoint fallback, returns the
+# distinct degrade code 3, and leaves no terminal record or lock. This is the
+# Codex-on-an-independent-pty case from the 151 e2e run.
+unit_independent_pty_degrades_honestly() {
+  local st out status
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-present-independent-pty.XXXXXX")
+  status=0
+  # No FM_SUPERVISOR_TARGET/BACKEND and no tmux/herdr ambient markers, so
+  # discover_supervisor_target fails: exactly an independent pty.
+  out=$(env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION \
+    -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND \
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start 2>&1) || status=$?
+  if [ "$status" -ne 3 ]; then
+    fail "independent pty: expected degrade code 3, got $status (out: $out)"
+  elif ! printf '%s' "$out" | grep -q 'durable notifications available'; then
+    fail "independent pty: degrade did not state durable notifications remain (out: $out)"
+  elif ! printf '%s' "$out" | grep -q 'automatic turn injection unavailable'; then
+    fail "independent pty: degrade did not state injection is unavailable (out: $out)"
+  elif ! printf '%s' "$out" | grep -q 'foreground checkpoint fallback'; then
+    fail "independent pty: degrade did not point at the checkpoint fallback (out: $out)"
+  elif [ -e "$st/state/.present-daemon-terminal" ] || [ -e "$st/state/.supervise-present.lock" ]; then
+    fail "independent pty: degrade left a terminal record or lock (no unverified injection target must be armed)"
+  else
+    pass "independent pty: honest degrade (durable remain, injection unavailable, code 3), no state armed"
+  fi
+  rm -rf "$st"
+}
+
+# ---------------------------------------------------------------------------
 # E2E tmux: topology invariant - the daemon lands in a separate detached
 # session, the captain window is untouched, and stop kills it by exact id.
 # ---------------------------------------------------------------------------
@@ -299,6 +331,7 @@ unit_tmux_planned_record_and_rollback
 unit_herdr_run_failure_preserves_unconfirmed_record
 unit_stop_malformed_record_fails_closed
 unit_unsupported_backend_refuses
+unit_independent_pty_degrades_honestly
 e2e_tmux
 
 [ "$FAILED" -eq 0 ] || exit 1

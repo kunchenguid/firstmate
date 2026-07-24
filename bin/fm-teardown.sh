@@ -134,6 +134,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-scm-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-path-lib.sh
+. "$SCRIPT_DIR/fm-path-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -571,6 +573,13 @@ worktree_registered_for_project() {
       worktree\ *)
         listed_abs=$(removal_target_abs_path "${line#worktree }" 2>/dev/null || true)
         [ "$listed_abs" = "$abs_target" ] && return 0
+        # pwd -P canonicalizes symlinks but not a bind mount / firmlink, so the
+        # metadata path and the treehouse-recorded worktree path can be two
+        # distinct strings for the SAME directory object. Fall back to a device+
+        # inode identity compare so such an aliased-but-identical worktree is still
+        # recognized as treehouse-managed; two genuinely different directories
+        # never share dev:ino, so this never widens the match unsafely.
+        fm_same_physical_dir "$listed_abs" "$abs_target" && return 0
         ;;
     esac
   done <<EOF

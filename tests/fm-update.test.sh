@@ -291,6 +291,62 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
+# --- T12: fast-forward succeeds but the local no-mistakes lacks `watch` ------
+# The code update landing does not imply its dependencies are satisfied: an old
+# no-mistakes on PATH still fast-forwards firstmate but cannot arm direct-PR
+# monitoring. The updater must report that incompatibility as a distinct,
+# unignorable line WITHOUT reverting the completed fast-forward, and detection
+# must not perform the upgrade itself.
+make_nm_stub() {
+  local path=$1 mode=$2
+  cat > "$path" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = watch ] && [ "\${2:-}" = --help ]; then
+  case "$mode" in
+    missing) echo 'unknown command "watch" for "no-mistakes"' >&2; exit 1 ;;
+    *) printf '%s\n' 'Usage:' '  no-mistakes watch --pr <url> [flags]' \
+         '      --pr string   URL of the pull/merge request to watch (required)'; exit 0 ;;
+  esac
+fi
+exit 0
+SH
+  chmod +x "$path"
+}
+
+test_dependency_incompatible_after_successful_update() {
+  local w out old_nm new_nm
+  w=$(new_world t12)
+  bump_origin "$w" instr
+  old_nm="$w/no-mistakes-old"
+  make_nm_stub "$old_nm" missing
+
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" FM_NM_BIN="$old_nm" "$UPDATE" 2>/dev/null)
+
+  # The fast-forward still landed.
+  assert_contains "$out" "firstmate: updated " "firstmate must still fast-forward"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$(git -C "$w/main" rev-parse origin/main)" ] \
+    || fail "fast-forward reverted when dependency was incompatible"
+  # The incompatibility is reported distinctly and points at the upgrade command.
+  assert_contains "$out" "nm-watch-capability: incompatible (upgrade: no-mistakes update)" \
+    "incompatible no-mistakes must be reported after a successful update"
+  pass "T12 update reports an incompatible no-mistakes without reverting the fast-forward"
+}
+
+# --- T13: a compatible local no-mistakes reports ok -------------------------
+test_dependency_ok_after_update() {
+  local w out new_nm
+  w=$(new_world t13)
+  bump_origin "$w" instr
+  new_nm="$w/no-mistakes-new"
+  make_nm_stub "$new_nm" ok
+
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" FM_NM_BIN="$new_nm" "$UPDATE" 2>/dev/null)
+
+  assert_contains "$out" "nm-watch-capability: ok" "compatible no-mistakes must report ok"
+  assert_not_contains "$out" "nm-watch-capability: incompatible" "compatible build must not report incompatible"
+  pass "T13 update reports a compatible no-mistakes as ok"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -300,5 +356,7 @@ test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_dependency_incompatible_after_successful_update
+test_dependency_ok_after_update
 
 echo "# all fm-update tests passed"
