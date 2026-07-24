@@ -42,7 +42,7 @@ Expected matrix: pending plus busy is accepted as queued; pending plus idle rema
 ## Herdr
 
 The compatibility floor is protocol 14.
-The latest active verification uses Herdr 0.7.4 protocol 16 on macOS aarch64, with earlier protocol-14 and 0.7.3 evidence retained where it defines a current fallback.
+The latest active verification uses Herdr 0.7.5 protocol 16 on macOS aarch64, with earlier 0.7.4, protocol-14, and 0.7.3 evidence retained where they define current behavior or fallbacks.
 
 Core read-only probes:
 
@@ -55,7 +55,7 @@ herdr api schema --json | jq -c '.schemas.subscription_event["$defs"].Subscripti
 Observed current shapes:
 
 ```text
-herdr 0.7.4
+herdr 0.7.5
 {"client":16,"server":16}
 ["pane.output_matched","pane.agent_status_changed","pane.scroll_changed"]
 ```
@@ -125,6 +125,23 @@ ok - real Herdr lab validation completed on Herdr 0.7.4 with the default-session
 ```
 
 The suite also covers lost or failed move responses, active-tab refusal, restart husks, missing and duplicate tokens, manual renames, concurrent cleanup, and exact focus restoration.
+
+The mandatory projection suite ran again on 2026-07-24 against Herdr 0.7.5 protocol 16:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-backend-herdr-presentation-e2e.test.sh
+```
+
+Observed restart-reclaim guarantees:
+
+```text
+ok - real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence
+ok - real Herdr lab: secondmate restart binding and reclaim stay isolated to the exact child home and parent
+ok - real Herdr lab: concurrent cross-home recoveries replace exact husks under one session lock with no focus drift
+ok - real Herdr lab: missing, renamed, and duplicate tokens trigger zero destructive or adoptive calls, and live duplicate risk refuses launch
+ok - real Herdr lab validation completed on Herdr 0.7.5 with the default-session tripwire intact
+```
 
 ### Composer and operational input
 
