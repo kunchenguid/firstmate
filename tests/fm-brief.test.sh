@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-brief.sh.
 #
-# Regression coverage for the heredoc-in-command-substitution parse bug (issue
-# #166): each ship-mode branch builds its Definition-of-done text with
-# `VAR=$(cat <<EOF ... EOF)`. Bash's lexer tracks quote state through the
-# heredoc body while it scans for the matching `)` of the command
-# substitution, so a single unescaped apostrophe anywhere in that body breaks
-# parsing of the *entire rest of the script* - `bash -n` fails, not just the
-# generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
-# is unaffected, so the secondmate charter block does not need this guard.
+# Regression coverage for the heredoc-in-command-substitution parse bug (issues
+# #166 and #958): Bash's lexer tracks quote state through an unquoted heredoc
+# body while it scans for the matching `)` of the command substitution, so a
+# single apostrophe in that body can break parsing of the entire script.
+# The no-mistakes Definition-of-done body uses a quoted heredoc delimiter
+# outside the command substitution so apostrophes and backticks remain literal.
+# The secondmate charter is also exercised with apostrophes to guard its
+# scaffold behavior.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -18,9 +18,8 @@ TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
-# The script itself must always parse. This is the direct regression test for
-# issue #166: a stray apostrophe in any of the three DOD heredoc bodies
-# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
+# The script itself must always parse.
+# This directly guards the nested heredoc quote regression.
 test_script_parses() {
   local out rc
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
@@ -114,9 +113,35 @@ test_no_mistakes_dod_wording() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`help`' "$brief" \
     "no-mistakes DOD must render literal backticks around help"
-  assert_no_grep "no-mistakes' own guidance" "$brief" \
-    "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
-  pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
+  assert_grep "firstmate's authority check" "$brief" \
+    "no-mistakes DOD lost its literal apostrophe"
+  pass "fm-brief.sh: no-mistakes DOD renders literal apostrophes"
+}
+
+test_apostrophes_render_in_ship_and_secondmate_scaffolds() {
+  local home ship_id ship_brief mate_id mate_brief status
+  home="$TMP_ROOT/apostrophe-home"
+  mkdir -p "$home/data"
+
+  ship_id="brief-apostrophe-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$ship_id" some-proj >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "ship brief with instructional apostrophe should exit 0"
+  ship_brief="$home/data/$ship_id/brief.md"
+  assert_grep "firstmate's authority check" "$ship_brief" \
+    "ship brief did not preserve the instructional apostrophe"
+
+  mate_id="secondmate-apostrophe-c2"
+  FM_HOME="$home" \
+    FM_SECONDMATE_CHARTER="Supervise the owner's domain." \
+    FM_SECONDMATE_SCOPE="Handle the advisor's requests." \
+    "$ROOT/bin/fm-brief.sh" "$mate_id" --secondmate --no-projects >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "secondmate charter with apostrophes should exit 0"
+  mate_brief="$home/data/$mate_id/brief.md"
+  assert_grep "Supervise the owner's domain." "$mate_brief" \
+    "secondmate charter did not preserve the owner's apostrophe"
+  assert_grep "Handle the advisor's requests." "$mate_brief" \
+    "secondmate scope did not preserve the advisor's apostrophe"
+  pass "fm-brief.sh: ship and secondmate scaffolds preserve apostrophes"
 }
 
 test_ship_project_memory_wording() {
@@ -387,6 +412,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_apostrophes_render_in_ship_and_secondmate_scaffolds
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
