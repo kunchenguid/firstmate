@@ -675,10 +675,10 @@ make_routine_bootstrap_fixture() {
   add_real_jq "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = display-message ]; then
-  printf '%s\n' codex
-  exit 0
-fi
+case "${1:-}" in
+  display-message) printf '%s\n' codex ;;
+  list-windows) printf '%s\n' fm-sm ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"

@@ -2324,7 +2324,7 @@ test_bootstrap_isolates_incomplete_poll_migration() {
     || fail "could not prepare healthy poll for migration isolation"
   fm_pr_poll_publish_prepared || fail "could not publish healthy poll for migration isolation"
   fm_write_meta "$state/secondmate-a.meta" \
-    'window=fm-secondmate-a' \
+    'window=firstmate:fm-secondmate-a' \
     'kind=secondmate' \
     'harness=codex' \
     'backend=tmux'
@@ -2334,6 +2334,7 @@ test_bootstrap_isolates_incomplete_poll_migration() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
+  *' list-windows '*) printf 'fm-secondmate-a\n' ;;
   *' display-message '*) printf 'node\n' ;;
 esac
 SH
@@ -2366,7 +2367,7 @@ SH
     "isolated bootstrap migration did not surface its incomplete status"
   assert_grep 'SECONDMATE_SYNC: secondmate secondmate-a: skipped:' "$dir/bootstrap.out" \
     "incomplete poll migration suppressed secondmate sync"
-  assert_grep 'SECONDMATE_LIVENESS: secondmate secondmate-a: skipped: liveness probe inconclusive' "$dir/bootstrap.out" \
+  assert_grep 'SECONDMATE_LIVENESS: secondmate secondmate-a: skipped: existing endpoint has ambiguous agent process' "$dir/bootstrap.out" \
     "incomplete poll migration suppressed persistent supervisor recovery"
   assert_grep 'FMX: X mode on - relay poll armed' "$dir/bootstrap.out" \
     "incomplete poll migration suppressed X mention setup"

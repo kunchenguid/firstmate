@@ -1297,10 +1297,14 @@ else
   }
 
   worker_pid_is_running() {
-    local want=$1 running
+    local want=$1 running inventory="$RUN_TMP/running-pids"
+    # Keep `jobs` in this shell. A process substitution runs it in a subshell
+    # without this shell's job table on Bash 3.2/5.x, falsely reporting every
+    # worker complete and making the scheduler wait for the oldest PID.
+    jobs -r -p >"$inventory"
     while IFS= read -r running; do
       [ "$running" = "$want" ] && return 0
-    done < <(jobs -r -p)
+    done <"$inventory"
     return 1
   }
 

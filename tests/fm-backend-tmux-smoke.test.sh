@@ -156,15 +156,18 @@ if fm_backend_tmux_resolve_bare_selector "no-such-window-xyz" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that does not exist"
 
-# --- kill ---------------------------------------------------------------------
+# --- kill and recovery-grade missing-window classification ------------------
 
 fm_backend_tmux_kill "$TARGET"
 if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$WINDOW"; then
   fail "fm_backend_tmux_kill did not remove the window"
 fi
+state=$(fm_backend_agent_state tmux "$TARGET")
+[ "$state" = missing ] \
+  || fail "a real missing window in a readable session should classify as missing, got '$state'"
 # Best-effort contract: killing an already-gone window must not error.
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
-pass "real tmux: fm_backend_tmux_kill removes the window and is idempotent/best-effort"
+pass "real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing"
 
 cleanup_all
 trap - EXIT

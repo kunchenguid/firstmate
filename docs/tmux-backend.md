@@ -71,7 +71,7 @@ You should see a `fm-<id>` window for the task, live and updating as the crewmat
 `fm_backend_target_exists` (`bin/fm-backend.sh`) only checks that a window's pane still exists.
 A secondmate agent that exits leaves its pane alive as a bare idle shell, which passes that check as "alive" - the gap `bin/fm-bootstrap.sh`'s session-start secondmate-liveness sweep exists to close (evidence 2026-07-07: every secondmate in one fleet was found sitting at a dead `zsh` shell, invisible to that check).
 
-`fm_backend_tmux_agent_alive` (`bin/backends/tmux.sh`) answers a deeper question: is a real harness-agent *process* running in the pane right now, not just whether the pane exists?
+`fm_backend_tmux_agent_state` (`bin/backends/tmux.sh`) answers a deeper question: is a real harness-agent *process* running in the pane right now, or is the recorded endpoint authoritatively missing?
 It reads tmux's own `#{pane_current_command}`, which reports the pane's live foreground process name - already resolved by tmux from the pty's controlling process group, not something this adapter derives itself.
 
 Agent liveness and composer safety are separate checks.
@@ -109,21 +109,38 @@ A second case matters for a harness that shells out to subcommands while it runs
 Verified the same session: a persisting parent process running a child command (`bash -c 'echo start; sleep 30; echo end'`, where the parent bash stays alive waiting on its own child) reports the PARENT's own name (`bash`) throughout, not the child's (`sleep`) - so a harness that survives while it shells out stays correctly classified as alive.
 (A single-simple-command `bash -c "sleep 30"` is a different, unrelated case: bash execs directly into `sleep`, replacing itself, so the reported name changes because the process itself became `sleep` - not because tmux "saw through" to a child.)
 
-The classifier (`fm_backend_tmux_agent_alive`) maps the observed name to `alive`, `dead`, or `unknown`:
+The recovery classifier (`fm_backend_tmux_agent_state`) maps the observation to the shared detailed state owned by `fm_backend_agent_state` in `bin/fm-backend.sh`.
+A recognized harness is `alive`, a bare shell is `dead`, and an unrecognized foreground process is `ambiguous`.
+The classifier checks exact window-name membership in a readable session inventory before trusting `display-message`, because tmux silently redirects a missing named target to the active window.
+It returns `missing` when `tmux list-windows` successfully reads the recorded session and omits the exact recorded window, or when tmux definitively reports that the recorded session or server is absent.
+Any other failed inventory or pane read is `unreadable` and never authorizes recovery.
+`fm_backend_tmux_agent_alive` remains the compatibility view that maps these detailed states back to `alive`, `dead`, or `unknown` for callers that do not need the reason.
 
-- `alive` - the name contains `claude`, `codex`, `opencode`, or `grok`. All four were confirmed to run as their own literal process name (`ps -ef`, 2026-07-07): `claude` and `codex` and `opencode` are each a native compiled binary (`file` reports Mach-O), so their `comm` is their own binary name with no interpreter wrapper to hide behind.
-- `dead` - the name is a bare shell (`zsh`, `bash`, `sh`, `dash`, `ash`, `ksh`, `mksh`, `tcsh`, `csh`, `fish`).
-- `unknown` - anything else, including an unreadable pane.
+Verified with real tmux 3.6a on macOS (Darwin 25.5.0), 2026-07-23, using the private `-L fm-target-check-<pid>` socket also exercised by `tests/fm-backend-tmux-smoke.test.sh`:
+
+```sh
+$ tmux -L "$socket" kill-window -t smoke:fm-smoke1
+$ tmux -L "$socket" display-message -p -t smoke:fm-smoke1 '#{window_name}:#{pane_current_command}'
+main:zsh
+$ tmux -L "$socket" list-windows -t smoke -F '#{window_name}'
+main
+$ fm_backend_agent_state tmux smoke:fm-smoke1
+missing
+```
+
+The first post-kill command exits 0 and reports the unrelated active `main` window, which is the earliest meaningful divergence that made process-only liveness inconclusive for missing Pi windows.
+The exact inventory check prevents that fallback from masquerading as an existing ambiguous process, while an unreadable inventory still preserves duplicate prevention.
 
 ### Known gap: `pi` cannot be confidently classified
 
 `pi` is a `#!/usr/bin/env node` script (confirmed via its shebang and installed path, 2026-07-07), so a live `pi` agent's pane reports `node` as its `pane_current_command`, not `pi` - verified by running a long-lived `node -e` script in a pane and confirming its foreground process is a genuine child reachable via `pgrep -P <pane_pid>` with an inspectable `ps -o args=` (the same technique `bin/fm-harness.sh`'s own self-detection uses when walking UP its ancestry), while `pi --version` itself was observed to exit too quickly under the same pane to reliably capture its live foreground state - real `pi` invocations were not available to test.
 Since `node` is also the generic name for a plain interpreter session, any future JS-based harness, or someone's unrelated node script, there is no way to attribute a bare `node` foreground process back to `pi` specifically from outside the pane without deeper (and fragile) argument introspection.
-The classifier deliberately reports `unknown` for `node`/`python`/`python3` rather than guess - per the secondmate-liveness sweep's correctness bar, a wrong `alive` is harmless but a wrong `dead` spins up a duplicate agent, so an unresolvable case must never be treated as confidently dead.
-Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
-Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=true`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
+The classifier deliberately reports `ambiguous` for an existing `node`/`python`/`python3` process rather than guess - per the secondmate-liveness sweep's correctness bar, a wrong `alive` is harmless but a wrong `dead` spins up a duplicate agent, so an unresolvable existing process must never be treated as confidently dead.
+Practical effect: an existing Pi secondmate pane that reports `node` is never auto-healed, preserving duplicate prevention.
+A recorded Pi secondmate window that is authoritatively absent is different: no process exists to misattribute, so the corroborated `missing` state safely relaunches it at session start.
+Classifying an existing Pi process more precisely would still need either a Pi-specific marker inspectable from outside the process or accepting fragile argument inspection, neither of which this recovery path does.
 
 ## Limitations
 
 None specific to tmux for the reference path itself - it is the fully verified reference backend, while Orca and cmux are the backends without secondmate support.
-The agent-liveness probe above has one known gap (`pi`'s generic `node` process name, see above).
+The agent-liveness probe above retains one known gap for an existing Pi process (`node`, see above); authoritatively absent Pi windows are covered.
