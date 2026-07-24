@@ -539,6 +539,53 @@ reject_match() {
   return 1
 }
 
+basic_token_has_userpass() {
+  local token=$1
+  base64_value_valid "$token" || return 1
+  if printf '%s' "$token" | base64 --decode 2>/dev/null | grep -q ':'; then
+    return 0
+  fi
+  printf '%s' "$token" | base64 -D 2>/dev/null | grep -q ':'
+}
+
+reject_basic_authorization() {
+  local candidates line token
+  FAILURE_CLASS=state-invalid
+  candidates=$(awk '
+    {
+      remaining=$0
+      lower=tolower(remaining)
+      while (match(lower, /authorization[[:space:]]*:[[:space:]]*basic[[:space:]]+/)) {
+        value_start=RSTART + RLENGTH
+        value=substr(remaining, value_start)
+        if (match(value, /^[A-Za-z0-9+\/]+={0,2}/)) {
+          token=substr(value, RSTART, RLENGTH)
+          trailing=substr(value, RLENGTH + 1, 1)
+          if (trailing == "" || trailing !~ /[A-Za-z0-9+\/=]/) {
+            print NR "\t" token
+          }
+        }
+        remaining=substr(remaining, value_start)
+        lower=tolower(remaining)
+      }
+    }
+  ' "$BODY_FILE") || {
+    echo "error: private PR publication scratch could not be read" >&2
+    return 1
+  }
+  FAILURE_CLASS=publication-invalid
+  [ -n "$candidates" ] || return 0
+  while IFS=$'\t' read -r line token; do
+    [ "$(( ${#token} % 4 ))" -eq 0 ] || continue
+    if basic_token_has_userpass "$token"; then
+      echo "error: PR publication check rejected an Authorization Basic credential at body line $line" >&2
+      echo "error: the responsible task worker must correct the public body through its selected delivery path and attest again" >&2
+      return 1
+    fi
+  done <<< "$candidates"
+  return 0
+}
+
 reject_match "an absolute Unix home path" '/(Users|home)/[^/[:space:])]+/|/root/' || exit 1
 reject_match "an absolute Unix temporary path" '/((private/)?var/folders|((private/)?var/)?tmp)/' || exit 1
 reject_match "a Windows user or temporary path" '(^|[^A-Za-z0-9])([A-Za-z]:\\Users\\[^\\[:space:]]+\\|[A-Za-z]:\\([^\\[:space:]]*\\)?[Tt]emp\\)' || exit 1
@@ -554,6 +601,7 @@ reject_match "a private-key block" '-----BEGIN ([A-Z0-9]+ )?PRIVATE KEY-----' "$
 reject_match "a credential-shaped token" '(AKIA[0-9A-Z]{16}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{24,})' "$BODY_FILE" || exit 1
 reject_match "an assigned secret value" '(api[_ -]?key|access[_ -]?token|password|client[_ -]?secret)[[:space:]]*[:=][[:space:]]*[A-Za-z0-9+/=_-]{16,}' "$BODY_FILE" || exit 1
 reject_match "an Authorization Bearer credential" 'authorization[[:space:]]*:[[:space:]]*bearer[[:space:]]+[A-Za-z0-9._~+/-]{12,}={0,2}' "$BODY_FILE" || exit 1
+reject_basic_authorization || exit 1
 reject_match "a standalone JWT-shaped credential" '(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{16,}([^A-Za-z0-9_-]|$)' "$BODY_FILE" || exit 1
 
 extract_section() {

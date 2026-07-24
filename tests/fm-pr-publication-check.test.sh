@@ -336,13 +336,50 @@ test_studio_and_windows_privacy_hazards_refuse() {
 }
 
 test_internal_transcripts_and_secrets_refuse() {
-  local prefix
+  local prefix dir placeholder index=0 rc
   prefix=$'## Intent\n\nDeliver the complete change.\n\n## What Changed\n\n'
   assert_attest_rejected raw-findings "$prefix- Raw result: {\"findings\":[{\"id\":\"review-1\",\"severity\":\"high\"}]}\n" 'raw generated pipeline-agent transcript'
   assert_attest_rejected worker-narration "$prefix- Worker status: finished after supervision.\n" 'private task, run, worker, or supervision narration'
   assert_attest_rejected secret-token "$prefix- access_token=abcdefghijklmnopqrstuvwxyz123456\n" 'assigned secret value'
   assert_attest_rejected bearer-token "$prefix- Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue1234567890\n" 'Authorization Bearer credential'
+  assert_attest_rejected basic-token "$prefix- Authorization: Basic dXNlcjpwYXNzd29yZA==\n" 'Authorization Basic credential'
+  assert_attest_rejected basic-empty-user "$prefix- authorization: basic OnNlY3JldA==\n" 'Authorization Basic credential'
+  assert_attest_rejected basic-after-placeholder "$prefix- Authorization: Basic REDACTED; Authorization: Basic dXNlcjpwYXNzd29yZA==\n" 'Authorization Basic credential'
   assert_attest_rejected standalone-jwt "$prefix- Captured eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue1234567890 during validation.\n" 'standalone JWT-shaped credential'
+
+  while IFS= read -r placeholder; do
+    index=$((index + 1))
+    dir=$(make_case "basic-placeholder-$index")
+    write_body "$dir" "$(safe_body)
+
+- Authorization: Basic $placeholder
+"
+    attest_none "$dir" >/dev/null 2> "$dir/stderr" \
+      || fail "Basic placeholder $placeholder was rejected: $(cat "$dir/stderr")"
+  done <<'EOF'
+REDACTED
+<redacted>
+[REDACTED]
+${BASIC_CREDENTIAL}
+EOF
+
+  dir=$(make_case basic-machine-verdict)
+  safe_body > "$dir/body.md"
+  attest_none "$dir" >/dev/null 2> "$dir/attest.err" \
+    || fail "Basic machine-verdict fixture did not attest"
+  write_body "$dir" "$(safe_body)
+
+- Authorization: Basic dXNlcjpwYXNzd29yZA==
+"
+  set +e
+  run_gate "$dir" "$GITHUB_URL" "$GITHUB_HEAD" verify task-a "$GITHUB_URL" --machine \
+    > "$dir/verify.out" 2> "$dir/verify.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] && [ "$(cat "$dir/verify.out")" = 'failure publication-invalid' ] \
+    || fail "Basic credential did not preserve the machine-readable privacy verdict"
+  assert_grep 'Authorization Basic credential' "$dir/verify.err" \
+    "Basic machine-verdict failure lost its privacy diagnostic"
   pass "publication check rejects generated findings, private narration, and credential-shaped material"
 }
 
