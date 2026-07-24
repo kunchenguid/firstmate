@@ -218,7 +218,7 @@ fm_pr_url_parse() {
     FM_PR_URL=$raw
     FM_PR_HOST=github.com
     FM_PR_PATH="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
-    # Consumed by bin/fm-pr-merge.sh, which addresses GitHub by owner/repository.
+    # Consumed by bin/fm-pr-merge.sh for GitHub's owner/repository dispatch.
     # shellcheck disable=SC2034
     FM_PR_OWNER=${BASH_REMATCH[1]}
     # shellcheck disable=SC2034

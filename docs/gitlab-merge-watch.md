@@ -192,8 +192,8 @@ No armed watch is lost by upgrading.
 
 ## What this change does not cover
 
-`bin/fm-pr-merge.sh` still addresses GitHub only, by owner and repository.
-It refuses a GitLab merge request URL rather than sending it to the wrong forge, so merging a merge request stays a deliberate manual step until merge parity lands separately.
+`bin/fm-pr-merge.sh` supports canonical GitHub and configured Gitea pull-request URLs.
+It still refuses a GitLab merge request URL rather than sending it to the wrong forge, so merging a merge request stays a deliberate manual step until GitLab merge parity lands separately.
 
 A GitLab task records no `pr_head=`.
 `gh` exposes the head commit as a selectable field, while plain `glab` exposes it only inside its JSON output, which would need a JSON processor firstmate does not require.
