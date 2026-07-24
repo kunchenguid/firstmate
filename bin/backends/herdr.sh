@@ -2559,9 +2559,32 @@ fm_backend_herdr_expected_label_matches() {  # <target> [expected-label]
   [ "$(fm_backend_herdr_identity_state "$1" "${2:-}")" = match ]
 }
 
+# fm_backend_herdr_server_reachable_for_readsteer: the lighter precondition for
+# reading from or sending to an ALREADY-RUNNING pane, as distinct from the
+# launch-grade fm_backend_herdr_server_ensure used to spawn new crews.
+#
+# Reading a pane or sending keys to it does not care how the server was
+# launched - the pane already exists and the server is up. It only needs the
+# server to be running and adapter-owned (this HOME's own certificate names the
+# live pid), which fm_backend_herdr_server_adapter_owned proves without the
+# closed-shell launch certification. This is what keeps peek/steer working when
+# FirstMate itself runs INSIDE the herdr session it manages (HERDR_ENV=1): that
+# server was not launched through the crew adapter's own closed-shell path, so
+# closed_shell_environment_ready is false and the full ensure would try to
+# restart+recertify - impossible while the session is occupied by live crews and
+# FirstMate itself. The SPAWN path deliberately keeps the strict ensure so a new
+# crew still launches only in a certified closed-shell server.
+fm_backend_herdr_server_reachable_for_readsteer() {  # <session>
+  local session=$1 running
+  running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null \
+    | fm_backend_herdr_control_jq -r '.server.running // false' 2>/dev/null)
+  [ "$running" = true ] || return 1
+  fm_backend_herdr_server_adapter_owned "$session"
+}
+
 fm_backend_herdr_target_ready() {  # <target> [expected-label]
   fm_backend_herdr_parse_target "$1" || return 1
-  fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1
+  fm_backend_herdr_server_reachable_for_readsteer "$FM_BACKEND_HERDR_SESSION" || return 1
   fm_backend_herdr_expected_label_matches "$1" "${2:-}" || return 1
 }
 
