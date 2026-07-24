@@ -10,6 +10,10 @@ PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-publication-check)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 REAL_MKTEMP=$(command -v mktemp)
+REAL_SED=$(command -v sed)
+REAL_AWK=$(command -v awk)
+REAL_SORT=$(command -v sort)
+REAL_RM=$(command -v rm)
 GITHUB_URL=https://github.com/example/project/pull/17
 GITHUB_HEAD=1111111111111111111111111111111111111111
 GITLAB_URL=https://gitlab.example/group/project/-/merge_requests/23
@@ -178,9 +182,50 @@ run_gate() {
     FM_TEST_EVIDENCE_KIND="${FM_TEST_EVIDENCE_KIND:-file}" \
     FM_TEST_READY_READBACK_FAIL="${FM_TEST_READY_READBACK_FAIL:-0}" \
     FM_TEST_ROLLBACK_RC="${FM_TEST_ROLLBACK_RC:-0}" FM_TEST_GH_READ_RC="${FM_TEST_GH_READ_RC:-0}" \
-    FM_TEST_REAL_MKTEMP="$REAL_MKTEMP" \
+    FM_TEST_REAL_MKTEMP="$REAL_MKTEMP" FM_TEST_REAL_SED="$REAL_SED" \
+    FM_TEST_REAL_AWK="$REAL_AWK" FM_TEST_REAL_SORT="$REAL_SORT" FM_TEST_REAL_RM="$REAL_RM" \
+    FM_TEST_SCRATCH_FAIL_STAGE="${FM_TEST_SCRATCH_FAIL_STAGE:-}" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PUBLICATION_CHECK" "$@"
+}
+
+install_scratch_fault_tools() {
+  local dir=$1
+  cat > "$dir/fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+case "${FM_TEST_SCRATCH_FAIL_STAGE:-}:${1:-}" in
+  initial-create:*.fm-pr-publication-body.*|intent-create:*.fm-pr-publication-intent.*|outcome-create:*.fm-pr-publication-outcome.*) exit 1 ;;
+esac
+exec "$FM_TEST_REAL_MKTEMP" "$@"
+SH
+  cat > "$dir/fakebin/sed" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_TEST_SCRATCH_FAIL_STAGE:-}" != scan-write ] || exit 1
+exec "$FM_TEST_REAL_SED" "$@"
+SH
+  cat > "$dir/fakebin/awk" <<'SH'
+#!/usr/bin/env bash
+case "${FM_TEST_SCRATCH_FAIL_STAGE:-}:$*" in
+  intent-write:*wanted=intent*|outcome-write:*wanted=outcome*) exit 1 ;;
+esac
+exec "$FM_TEST_REAL_AWK" "$@"
+SH
+  cat > "$dir/fakebin/sort" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_TEST_SCRATCH_FAIL_STAGE:-}" != url-list-write ] || exit 1
+exec "$FM_TEST_REAL_SORT" "$@"
+SH
+  cat > "$dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_TEST_SCRATCH_FAIL_STAGE:-}" = cleanup ]; then
+  case "$*" in
+    *fm-pr-publication-*) exit 1 ;;
+  esac
+fi
+exec "$FM_TEST_REAL_RM" "$@"
+SH
+  chmod +x "$dir/fakebin/mktemp" "$dir/fakebin/sed" "$dir/fakebin/awk" \
+    "$dir/fakebin/sort" "$dir/fakebin/rm"
 }
 
 attest_none() {
@@ -515,6 +560,57 @@ test_machine_failure_classes_are_bounded() {
   pass "machine verification distinguishes publication, forge, response, and tool failures"
 }
 
+test_scratch_failures_are_state_invalid_and_preserve_primary_failure() {
+  local dir rc stage
+
+  for stage in initial-create scan-write intent-create outcome-create intent-write outcome-write url-list-write; do
+    dir=$(make_case "scratch-$stage")
+    safe_body > "$dir/body.md"
+    attest_none "$dir" >/dev/null 2> "$dir/attest.err" \
+      || fail "$stage scratch fixture did not attest"
+    install_scratch_fault_tools "$dir"
+    set +e
+    FM_TEST_SCRATCH_FAIL_STAGE="$stage" run_gate "$dir" "$GITHUB_URL" "$GITHUB_HEAD" \
+      verify task-a "$GITHUB_URL" --machine > "$dir/verify.out" 2> "$dir/verify.err"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] && [ "$(cat "$dir/verify.out")" = 'failure state-invalid' ] \
+      || fail "$stage scratch failure was not routed as state-invalid"
+  done
+
+  dir=$(make_case scratch-cleanup-only)
+  safe_body > "$dir/body.md"
+  attest_none "$dir" >/dev/null 2> "$dir/attest.err" \
+    || fail "cleanup-only scratch fixture did not attest"
+  install_scratch_fault_tools "$dir"
+  set +e
+  FM_TEST_SCRATCH_FAIL_STAGE=cleanup run_gate "$dir" "$GITHUB_URL" "$GITHUB_HEAD" \
+    verify task-a "$GITHUB_URL" --machine > "$dir/verify.out" 2> "$dir/verify.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] && [ "$(cat "$dir/verify.out")" = 'failure state-invalid' ] \
+    || fail "cleanup-only failure did not emit one bounded state-invalid result"
+  assert_grep 'private PR publication scratch cleanup failed' "$dir/verify.err" \
+    "cleanup-only failure lacked an operational diagnostic"
+
+  dir=$(make_case scratch-cleanup-precedence)
+  safe_body > "$dir/body.md"
+  attest_none "$dir" >/dev/null 2> "$dir/attest.err" \
+    || fail "cleanup precedence scratch fixture did not attest"
+  printf '\nPublic body drift.\n' >> "$dir/body.md"
+  install_scratch_fault_tools "$dir"
+  set +e
+  FM_TEST_SCRATCH_FAIL_STAGE=cleanup run_gate "$dir" "$GITHUB_URL" "$GITHUB_HEAD" \
+    verify task-a "$GITHUB_URL" --machine > "$dir/verify.out" 2> "$dir/verify.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] && [ "$(cat "$dir/verify.out")" = 'failure publication-invalid' ] \
+    || fail "cleanup failure suppressed the earlier publication-invalid result"
+  assert_grep 'private PR publication scratch cleanup failed' "$dir/verify.err" \
+    "cleanup failure after a primary failure was not reported"
+  pass "scratch I/O failures are state errors and cleanup preserves primary failures"
+}
+
 test_gitlab_evidence_paths_decode_and_encode_once() {
   local dir actual_path web_path exact_url api_path rc name rejected_path
   actual_path='evidence/result log#review?+proof.txt'
@@ -717,6 +813,7 @@ test_exact_head_evidence_accessibility_and_kind
 test_body_head_drift_and_correction_retry
 test_ready_readback_surfaces_failed_rollback
 test_machine_failure_classes_are_bounded
+test_scratch_failures_are_state_invalid_and_preserve_primary_failure
 test_gitlab_evidence_paths_decode_and_encode_once
 test_local_receipt_and_evidence_io_failures_are_state_invalid
 test_github_and_gitlab_routes_and_monitoring_boundary

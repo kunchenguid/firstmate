@@ -164,30 +164,54 @@ RECEIPT_TMP=
 INTENT_FILE=
 OUTCOME_FILE=
 cleanup() {
-  [ -z "$BODY_FILE" ] || rm -f -- "$BODY_FILE"
-  [ -z "$SCAN_FILE" ] || rm -f -- "$SCAN_FILE"
-  [ -z "$FORGE_FILE" ] || rm -f -- "$FORGE_FILE"
-  [ -z "$AXI_FIELDS_FILE" ] || rm -f -- "$AXI_FIELDS_FILE"
-  [ -z "$FIELDS_FILE" ] || rm -f -- "$FIELDS_FILE"
-  [ -z "$URLS_FILE" ] || rm -f -- "$URLS_FILE"
-  [ -z "$EVIDENCE_FILE" ] || rm -f -- "$EVIDENCE_FILE"
-  [ -z "$DECODE_TARGET" ] || rm -f -- "$DECODE_TARGET"
-  [ -z "$RECEIPT_TMP" ] || rm -f -- "$RECEIPT_TMP"
-  [ -z "$INTENT_FILE" ] || rm -f -- "$INTENT_FILE"
-  [ -z "$OUTCOME_FILE" ] || rm -f -- "$OUTCOME_FILE"
+  local path cleanup_status=0
+  for path in "$BODY_FILE" "$SCAN_FILE" "$FORGE_FILE" "$AXI_FIELDS_FILE" \
+    "$FIELDS_FILE" "$URLS_FILE" "$EVIDENCE_FILE" "$DECODE_TARGET" \
+    "$RECEIPT_TMP" "$INTENT_FILE" "$OUTCOME_FILE"; do
+    [ -z "$path" ] && continue
+    if ! rm -f -- "$path"; then
+      cleanup_status=1
+    fi
+  done
+  return "$cleanup_status"
 }
 FAILURE_CLASS=request-invalid
+SUCCESS_RESULT=
 finish() {
-  local status=$?
+  local status=$? cleanup_status=0 result_class=$FAILURE_CLASS
   trap - EXIT
-  cleanup
-  if [ "$status" -ne 0 ] && [ "$MACHINE" -eq 1 ]; then
-    printf 'failure %s\n' "$FAILURE_CLASS"
+  if ! cleanup; then
+    cleanup_status=1
+  fi
+  if [ "$cleanup_status" -ne 0 ]; then
+    echo "error: private PR publication scratch cleanup failed" >&2
+    if [ "$status" -eq 0 ]; then
+      status=1
+      result_class=state-invalid
+    fi
+  fi
+  if [ "$status" -eq 0 ]; then
+    [ -z "$SUCCESS_RESULT" ] || printf '%s\n' "$SUCCESS_RESULT"
+  elif [ "$MACHINE" -eq 1 ]; then
+    printf 'failure %s\n' "$result_class"
   fi
   exit "$status"
 }
 trap finish EXIT
 trap 'exit 1' HUP INT TERM
+
+scratch_create() {
+  local variable=$1 template=$2 path
+  FAILURE_CLASS=state-invalid
+  path=$(mktemp "$STATE/$template") || return 1
+  printf -v "$variable" '%s' "$path"
+}
+
+scratch_store_text() {
+  local destination=$1 content=$2
+  FAILURE_CLASS=state-invalid
+  printf '%s\n' "$content" > "$destination"
+}
 
 FAILURE_CLASS=state-invalid
 if [ ! -d "$STATE" ] || [ -L "$STATE" ]; then
@@ -200,13 +224,13 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
 fi
 
 umask 077
-BODY_FILE=$(mktemp "$STATE/.fm-pr-publication-body.XXXXXX") || exit 1
-SCAN_FILE=$(mktemp "$STATE/.fm-pr-publication-scan.XXXXXX") || exit 1
-FORGE_FILE=$(mktemp "$STATE/.fm-pr-publication-forge.XXXXXX") || exit 1
-AXI_FIELDS_FILE=$(mktemp "$STATE/.fm-pr-publication-axi-fields.XXXXXX") || exit 1
-FIELDS_FILE=$(mktemp "$STATE/.fm-pr-publication-fields.XXXXXX") || exit 1
-URLS_FILE=$(mktemp "$STATE/.fm-pr-publication-urls.XXXXXX") || exit 1
-EVIDENCE_FILE=$(mktemp "$STATE/.fm-pr-publication-evidence.XXXXXX") || exit 1
+scratch_create BODY_FILE .fm-pr-publication-body.XXXXXX || exit 1
+scratch_create SCAN_FILE .fm-pr-publication-scan.XXXXXX || exit 1
+scratch_create FORGE_FILE .fm-pr-publication-forge.XXXXXX || exit 1
+scratch_create AXI_FIELDS_FILE .fm-pr-publication-axi-fields.XXXXXX || exit 1
+scratch_create FIELDS_FILE .fm-pr-publication-fields.XXXXXX || exit 1
+scratch_create URLS_FILE .fm-pr-publication-urls.XXXXXX || exit 1
+scratch_create EVIDENCE_FILE .fm-pr-publication-evidence.XXXXXX || exit 1
 
 decode_base64_to_body() {
   local encoded=$1
@@ -297,7 +321,7 @@ github_worktree_valid() {
 }
 
 fetch_github() {
-  local worktree
+  local worktree forge_response axi_fields fields
   FAILURE_CLASS=tool-unavailable
   command -v gh-axi >/dev/null 2>&1 || {
     echo "error: GitHub publication readback requires gh-axi on PATH" >&2
@@ -321,12 +345,16 @@ fetch_github() {
     return 1
   }
   FAILURE_CLASS=forge-read-failed
-  (cd "$worktree" && gh-axi pr view "$NUMBER" --full) > "$FORGE_FILE" 2>/dev/null || {
+  forge_response=$(cd "$worktree" && gh-axi pr view "$NUMBER" --full 2>/dev/null) || {
     echo "error: could not fetch the complete GitHub PR body" >&2
     return 1
   }
+  scratch_store_text "$FORGE_FILE" "$forge_response" || {
+    echo "error: complete GitHub PR readback could not be stored in private task state" >&2
+    return 1
+  }
   FAILURE_CLASS=forge-response-invalid
-  ruby -ryaml -rbase64 -e '
+  axi_fields=$(ruby -ryaml -rbase64 -e '
     view = YAML.safe_load(File.binread(ARGV[0]), permitted_classes: [], aliases: false)
     expected_number = Integer(ARGV[1], 10)
     view_pr = view.fetch("pull_request")
@@ -334,19 +362,37 @@ fetch_github() {
     body = view_pr.fetch("body")
     abort unless body.is_a?(String)
     puts Base64.strict_encode64(body)
-  ' "$FORGE_FILE" "$NUMBER" > "$AXI_FIELDS_FILE" 2>/dev/null || {
+  ' "$FORGE_FILE" "$NUMBER" 2>/dev/null) || {
     echo "error: complete GitHub PR readback was incomplete or malformed" >&2
     return 1
   }
-  AXI_BODY_BASE64=$(cat "$AXI_FIELDS_FILE")
-  [ -n "$AXI_BODY_BASE64" ] && [ "$(wc -l < "$AXI_FIELDS_FILE" | tr -d '[:space:]')" = 1 ] || {
+  scratch_store_text "$AXI_FIELDS_FILE" "$axi_fields" || {
+    echo "error: complete GitHub PR fields could not be stored in private task state" >&2
+    return 1
+  }
+  FAILURE_CLASS=state-invalid
+  AXI_BODY_BASE64=$(cat "$AXI_FIELDS_FILE") || {
+    echo "error: complete GitHub PR fields could not be read from private task state" >&2
+    return 1
+  }
+  AXI_FIELD_LINES=$(wc -l < "$AXI_FIELDS_FILE") || {
+    echo "error: complete GitHub PR fields could not be measured in private task state" >&2
+    return 1
+  }
+  AXI_FIELD_LINES=${AXI_FIELD_LINES//[[:space:]]/}
+  FAILURE_CLASS=forge-response-invalid
+  [ -n "$AXI_BODY_BASE64" ] && [ "$AXI_FIELD_LINES" = 1 ] || {
     echo "error: complete GitHub PR body could not be decoded exactly" >&2
     return 1
   }
   FAILURE_CLASS=forge-read-failed
-  gh pr view "$URL" --json url,headRefOid,body,isDraft \
-    --jq '[.url,.headRefOid,(.body|@base64),(.isDraft|tostring)] | .[]' > "$FIELDS_FILE" 2>/dev/null || {
+  fields=$(gh pr view "$URL" --json url,headRefOid,body,isDraft \
+    --jq '[.url,.headRefOid,(.body|@base64),(.isDraft|tostring)] | .[]' 2>/dev/null) || {
     echo "error: could not fetch the complete GitHub PR body and head" >&2
+    return 1
+  }
+  scratch_store_text "$FIELDS_FILE" "$fields" || {
+    echo "error: complete GitHub PR body and head could not be stored in private task state" >&2
     return 1
   }
   FAILURE_CLASS=forge-response-invalid
@@ -361,6 +407,7 @@ fetch_github() {
 }
 
 fetch_gitlab() {
+  local forge_response fields
   FAILURE_CLASS=tool-unavailable
   command -v glab >/dev/null 2>&1 || {
     echo "error: GitLab publication readback requires glab on PATH" >&2
@@ -371,16 +418,25 @@ fetch_gitlab() {
     return 1
   }
   FAILURE_CLASS=forge-read-failed
-  glab mr view "$NUMBER" -R "https://$HOST/$PROJECT_PATH" -F json > "$FORGE_FILE" 2>/dev/null || {
+  forge_response=$(glab mr view "$NUMBER" -R "https://$HOST/$PROJECT_PATH" -F json 2>/dev/null) || {
     echo "error: could not fetch the complete GitLab MR body and head" >&2
     return 1
   }
+  scratch_store_text "$FORGE_FILE" "$forge_response" || {
+    echo "error: complete GitLab MR readback could not be stored in private task state" >&2
+    return 1
+  }
   FAILURE_CLASS=forge-response-invalid
-  jq -er '[.web_url,.sha,((.description // "")|@base64),(.draft|tostring)] | .[]' "$FORGE_FILE" \
-    > "$FIELDS_FILE" 2>/dev/null || {
+  fields=$(jq -er '[.web_url,.sha,((.description // "")|@base64),(.draft|tostring)] | .[]' \
+    "$FORGE_FILE" 2>/dev/null) || {
       echo "error: GitLab MR JSON lacks exact web_url, sha, or description fields" >&2
       return 1
     }
+  scratch_store_text "$FIELDS_FILE" "$fields" || {
+    echo "error: complete GitLab MR fields could not be stored in private task state" >&2
+    return 1
+  }
+  FAILURE_CLASS=forge-response-invalid
   read_four_fields "$FIELDS_FILE" || {
     echo "error: GitLab MR readback was incomplete or malformed" >&2
     return 1
@@ -429,29 +485,54 @@ if [ "$ACTION" = verify ] && [ "$FETCHED_DRAFT" != false ]; then
   exit 1
 fi
 FAILURE_CLASS=forge-response-invalid
-decode_base64_to_body "$FETCHED_BODY_BASE64" || {
+base64_value_valid "$FETCHED_BODY_BASE64" || {
   echo "error: forge body bytes could not be decoded exactly" >&2
   exit 1
 }
-
-BODY_BYTES=$(wc -c < "$BODY_FILE" | tr -d '[:space:]')
+FAILURE_CLASS=state-invalid
+decode_base64_to_body "$FETCHED_BODY_BASE64" || {
+  echo "error: forge body bytes could not be stored in private task state" >&2
+  exit 1
+}
+BODY_BYTES=$(wc -c < "$BODY_FILE") || {
+  echo "error: fetched PR body could not be measured in private task state" >&2
+  exit 1
+}
+BODY_BYTES=${BODY_BYTES//[[:space:]]/}
 BODY_SHA256=$(fm_pr_sha256 "$BODY_FILE") || {
-  FAILURE_CLASS=state-invalid
   echo "error: could not hash the fetched PR body" >&2
   exit 1
 }
-[[ "$BODY_BYTES" =~ ^[0-9]+$ ]] && [[ "$BODY_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 1
+[[ "$BODY_BYTES" =~ ^[0-9]+$ ]] && [[ "$BODY_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "error: fetched PR body metadata was invalid" >&2
+  exit 1
+}
 
 FAILURE_CLASS=publication-invalid
 
 # Remove public HTTP(S) URLs before local-path scanning so an ordinary URL path
 # such as https://docs.example/home/user is not mistaken for a local home path.
-sed -E 's#https?://[^[:space:])>]+##g' "$BODY_FILE" > "$SCAN_FILE" || exit 1
+FAILURE_CLASS=state-invalid
+sed -E 's#https?://[^[:space:])>]+##g' "$BODY_FILE" > "$SCAN_FILE" || {
+  echo "error: fetched PR body could not be scanned in private task state" >&2
+  exit 1
+}
+FAILURE_CLASS=publication-invalid
 
 reject_match() {
-  local category=$1 pattern=$2 file=${3:-$SCAN_FILE} match line
-  match=$(grep -Eni -- "$pattern" "$file" 2>/dev/null | head -1 || true)
-  [ -z "$match" ] && return 0
+  local category=$1 pattern=$2 file=${3:-$SCAN_FILE} match line match_status
+  if match=$(grep -Enim 1 -- "$pattern" "$file" 2>/dev/null); then
+    :
+  else
+    match_status=$?
+    if [ "$match_status" -eq 1 ]; then
+      return 0
+    fi
+    FAILURE_CLASS=state-invalid
+    echo "error: private PR publication scratch could not be read" >&2
+    return 1
+  fi
+  FAILURE_CLASS=publication-invalid
   line=${match%%:*}
   echo "error: PR publication check rejected $category at body line $line" >&2
   echo "error: the responsible task worker must correct the public body through its selected delivery path and attest again" >&2
@@ -494,24 +575,57 @@ extract_section() {
   ' "$BODY_FILE" > "$output"
 }
 
-INTENT_FILE=$(mktemp "$STATE/.fm-pr-publication-intent.XXXXXX") || exit 1
-OUTCOME_FILE=$(mktemp "$STATE/.fm-pr-publication-outcome.XXXXXX") || exit 1
+scratch_create INTENT_FILE .fm-pr-publication-intent.XXXXXX || exit 1
+scratch_create OUTCOME_FILE .fm-pr-publication-outcome.XXXXXX || exit 1
 
-extract_section intent "$INTENT_FILE" || {
-  echo "error: PR body must contain a reviewer-facing ## Intent section" >&2
+FAILURE_CLASS=state-invalid
+if extract_section intent "$INTENT_FILE"; then
+  :
+else
+  section_status=$?
+  if [ "$section_status" -eq 3 ]; then
+    FAILURE_CLASS=publication-invalid
+    echo "error: PR body must contain a reviewer-facing ## Intent section" >&2
+  else
+    echo "error: PR intent could not be stored in private task state" >&2
+  fi
   exit 1
-}
-extract_section outcome "$OUTCOME_FILE" || {
-  echo "error: PR body must contain a reviewer-facing ## What Changed, ## Outcome, ## Result, or ## Changes section" >&2
+fi
+if extract_section outcome "$OUTCOME_FILE"; then
+  :
+else
+  section_status=$?
+  if [ "$section_status" -eq 3 ]; then
+    FAILURE_CLASS=publication-invalid
+    echo "error: PR body must contain a reviewer-facing ## What Changed, ## Outcome, ## Result, or ## Changes section" >&2
+  else
+    echo "error: PR outcome could not be stored in private task state" >&2
+  fi
   exit 1
-}
-if ! grep -q '[^[:space:]]' "$INTENT_FILE" || ! grep -q '[^[:space:]]' "$OUTCOME_FILE"; then
+fi
+if grep -q '[^[:space:]]' "$INTENT_FILE"; then
+  intent_status=0
+else
+  intent_status=$?
+fi
+if grep -q '[^[:space:]]' "$OUTCOME_FILE"; then
+  outcome_status=0
+else
+  outcome_status=$?
+fi
+if [ "$intent_status" -gt 1 ] || [ "$outcome_status" -gt 1 ]; then
+  echo "error: PR intent or outcome could not be read from private task state" >&2
+  exit 1
+fi
+FAILURE_CLASS=publication-invalid
+if [ "$intent_status" -eq 1 ] || [ "$outcome_status" -eq 1 ]; then
   echo "error: PR intent and outcome sections must both contain reviewer-facing content" >&2
   exit 1
 fi
 reject_match "operational rather than PR-level intent framing" '(successor|current)[[:space:]_-]+(run|task|attempt)|latest[[:space:]_-]+commit|last[[:space:]_-]+commit|this[[:space:]_-]+round|recovered[[:space:]_-]+branch|captain([^A-Za-z]+s)?[[:space:]]+(authorization|approval)|authorized[[:space:]]+by[[:space:]]+(the[[:space:]]+)?captain' || exit 1
 
-awk '
+FAILURE_CLASS=state-invalid
+if ! (set -o pipefail; awk '
   {
     rest=$0
     while (match(rest, /https?:\/\/[^[:space:]<>()\[\]"`\047]+/)) {
@@ -521,14 +635,28 @@ awk '
       rest=substr(rest, RSTART + RLENGTH)
     }
   }
-' "$BODY_FILE" | LC_ALL=C sort -u > "$URLS_FILE" || exit 1
+' "$BODY_FILE" | LC_ALL=C sort -u > "$URLS_FILE"); then
+  echo "error: public PR links could not be stored in private task state" >&2
+  exit 1
+fi
+FAILURE_CLASS=publication-invalid
 
 verify_evidence_url() {
-  local evidence_url=$1 base evidence_path fragment encoded_project encoded_path response_status evidence_response
-  grep -Fxq -- "$evidence_url" "$URLS_FILE" || {
-    echo "error: declared evidence URL is absent from the fetched public body" >&2
+  local evidence_url=$1 base evidence_path fragment encoded_project encoded_path response_status evidence_response link_status
+  FAILURE_CLASS=state-invalid
+  if grep -Fxq -- "$evidence_url" "$URLS_FILE"; then
+    :
+  else
+    link_status=$?
+    if [ "$link_status" -gt 1 ]; then
+      echo "error: public PR links could not be read from private task state" >&2
+    else
+      FAILURE_CLASS=publication-invalid
+      echo "error: declared evidence URL is absent from the fetched public body" >&2
+    fi
     return 1
-  }
+  fi
+  FAILURE_CLASS=publication-invalid
   case "$PROVIDER" in
     github)
       base="https://github.com/$PROJECT_PATH/blob/$FETCHED_HEAD/"
@@ -576,8 +704,7 @@ verify_evidence_url() {
         echo "error: GitHub evidence is not authenticated-accessible at the exact PR head" >&2
         return 1
       }
-      FAILURE_CLASS=state-invalid
-      printf '%s\n' "$evidence_response" > "$EVIDENCE_FILE" || {
+      scratch_store_text "$EVIDENCE_FILE" "$evidence_response" || {
         echo "error: GitHub evidence response could not be stored in private task state" >&2
         return 1
       }
@@ -653,8 +780,7 @@ verify_evidence_url() {
         echo "error: GitLab evidence is not authenticated-accessible at the exact MR head" >&2
         return 1
       }
-      FAILURE_CLASS=state-invalid
-      printf '%s\n' "$evidence_response" > "$EVIDENCE_FILE" || {
+      scratch_store_text "$EVIDENCE_FILE" "$evidence_response" || {
         echo "error: GitLab evidence response could not be stored in private task state" >&2
         return 1
       }
@@ -767,8 +893,7 @@ if [ "$ACTION" = verify ]; then
   EVIDENCE_MODE=$RECEIPT_MODE
   EVIDENCE_URLS=()
   for encoded_url in "${RECEIPT_URLS[@]+"${RECEIPT_URLS[@]}"}"; do
-    FAILURE_CLASS=state-invalid
-    DECODE_TARGET=$(mktemp "$STATE/.fm-pr-publication-url.XXXXXX") || exit 1
+    scratch_create DECODE_TARGET .fm-pr-publication-url.XXXXXX || exit 1
     FAILURE_CLASS=publication-invalid
     if ! base64_value_valid "$encoded_url"; then
       echo "error: PR publication receipt contains malformed evidence data" >&2
@@ -807,7 +932,7 @@ if [ "$ACTION" = attest ]; then
     echo "error: PR publication receipt destination is unsafe" >&2
     exit 1
   }
-  RECEIPT_TMP=$(mktemp "$STATE/.fm-pr-publication-receipt.XXXXXX") || exit 1
+  scratch_create RECEIPT_TMP .fm-pr-publication-receipt.XXXXXX || exit 1
   {
     printf '%s\n' fm-pr-publication-v1
     printf 'task_id=%s\n' "$ID"
@@ -844,18 +969,30 @@ if [ "$ACTION" = attest ]; then
     gitlab) fetch_gitlab || READY_READBACK_FAILED=1 ;;
   esac
   if [ "${READY_READBACK_FAILED:-0}" -ne 0 ] || [ "$FETCHED_URL" != "$URL" ] \
-    || [ "$FETCHED_HEAD" != "$ATTESTED_HEAD" ] || [ "$FETCHED_DRAFT" != false ] \
-    || ! decode_base64_to_body "$FETCHED_BODY_BASE64"; then
+    || [ "$FETCHED_HEAD" != "$ATTESTED_HEAD" ] || [ "$FETCHED_DRAFT" != false ]; then
     fail_after_ready "ready-state readback did not preserve the attested PR identity and head"
   fi
-  READY_BODY_BYTES=$(wc -c < "$BODY_FILE" | tr -d '[:space:]')
-  READY_BODY_SHA256=$(fm_pr_sha256 "$BODY_FILE") || READY_BODY_SHA256=
+  FAILURE_CLASS=forge-response-invalid
+  if ! base64_value_valid "$FETCHED_BODY_BASE64"; then
+    fail_after_ready "ready-state readback returned malformed public body bytes"
+  fi
+  FAILURE_CLASS=state-invalid
+  if ! decode_base64_to_body "$FETCHED_BODY_BASE64"; then
+    fail_after_ready "ready-state public body could not be stored in private task state"
+  fi
+  READY_BODY_BYTES=$(wc -c < "$BODY_FILE") || {
+    fail_after_ready "ready-state public body could not be measured in private task state"
+  }
+  READY_BODY_BYTES=${READY_BODY_BYTES//[[:space:]]/}
+  READY_BODY_SHA256=$(fm_pr_sha256 "$BODY_FILE") || {
+    fail_after_ready "ready-state public body could not be hashed in private task state"
+  }
   if [ "$READY_BODY_BYTES" != "$ATTESTED_BODY_BYTES" ] \
     || [ "$READY_BODY_SHA256" != "$ATTESTED_BODY_SHA256" ]; then
     FAILURE_CLASS=publication-invalid
     fail_after_ready "public body drifted while the draft was being marked ready"
   fi
-  printf 'attested %s %s %s\n' "$ATTESTED_HEAD" "$ATTESTED_BODY_BYTES" "$ATTESTED_BODY_SHA256"
+  SUCCESS_RESULT="attested $ATTESTED_HEAD $ATTESTED_BODY_BYTES $ATTESTED_BODY_SHA256"
 else
-  printf 'verified %s %s %s\n' "$FETCHED_HEAD" "$BODY_BYTES" "$BODY_SHA256"
+  SUCCESS_RESULT="verified $FETCHED_HEAD $BODY_BYTES $BODY_SHA256"
 fi
