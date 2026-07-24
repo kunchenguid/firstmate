@@ -125,6 +125,8 @@ write_launch_agent_fixture() {
     printf '%s\n' '<string>/bin/bash</string>'
     printf '<string>%s/bin/fm-checkout-refresh.sh</string>\n' "$ROOT"
     printf '%s\n' '<string>run-once</string><string>--scheduled</string></array>'
+    printf '%s\n' '<key>StartInterval</key><integer>900</integer>'
+    printf '%s\n' '<key>RunAtLoad</key><true/>'
     printf '%s\n' '<key>EnvironmentVariables</key><dict>'
     printf '<key>FM_HOME</key><string>%s</string>\n' "$(cd "$home" && pwd -P)"
     printf '<key>FM_CHECKOUT_REFRESH_STATE_ROOT</key><string>%s</string>\n' "$state"
@@ -174,6 +176,22 @@ print("    arguments = {")
 for argument in arguments:
     print(f"        {argument}")
 print("    }")
+print("    inherited environment = {")
+inherited = os.environ.get("FM_TEST_LAUNCHCTL_INHERITED_ENV", "")
+if inherited:
+    key, separator, value = inherited.partition("=")
+    if not separator or not key:
+        raise SystemExit(5)
+    print(f"        {key} => {value}")
+print("    }")
+print("    default environment = {")
+default = os.environ.get("FM_TEST_LAUNCHCTL_DEFAULT_ENV", "")
+if default:
+    key, separator, value = default.partition("=")
+    if not separator or not key:
+        raise SystemExit(5)
+    print(f"        {key} => {value}")
+print("    }")
 print("    environment = {")
 for key, value in environment.items():
     print(f"        {key} => {value}")
@@ -184,6 +202,16 @@ if extra:
         raise SystemExit(5)
     print(f"        {key} => {value}")
 print("    }")
+interval = os.environ.get(
+    "FM_TEST_LAUNCHCTL_INTERVAL",
+    str(definition["StartInterval"]),
+)
+run_at_load = os.environ.get(
+    "FM_TEST_LAUNCHCTL_RUN_AT_LOAD",
+    "true" if definition["RunAtLoad"] else "false",
+)
+print(f"    run interval = {interval} seconds")
+print(f"    run at load = {run_at_load}")
 print("}")
 PY
     ;;
@@ -1997,6 +2025,70 @@ test_loaded_launch_agent_controls_and_untracked_legacy_job_fail_closed() {
   assert_contains "$out" "loaded identity is missing or untrusted" \
     "undeclared loaded LaunchAgent control was not surfaced before health"
 
+  set +e
+  out=$(HOME="$home/user" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
+    FM_TREEHOUSE_ROOT="$home/user/.treehouse" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
+    FM_TEST_LAUNCHCTL_INHERITED_ENV="FM_CONFIG_OVERRIDE=$TMP_ROOT/stale-config" \
+    "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "loaded LaunchAgent accepted an inherited checkout control"
+  assert_contains "$out" "loaded identity is missing or untrusted" \
+    "inherited loaded LaunchAgent control was not surfaced before health"
+
+  set +e
+  out=$(HOME="$home/user" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
+    FM_TREEHOUSE_ROOT="$home/user/.treehouse" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
+    FM_TEST_LAUNCHCTL_DEFAULT_ENV="GIT_CONFIG_PARAMETERS='remote.origin.url=/stale'" \
+    "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "loaded LaunchAgent accepted a default Git control"
+  assert_contains "$out" "loaded identity is missing or untrusted" \
+    "default loaded LaunchAgent control was not surfaced before health"
+
+  set +e
+  out=$(HOME="$home/user" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
+    FM_TREEHOUSE_ROOT="$home/user/.treehouse" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
+    FM_TEST_LAUNCHCTL_INTERVAL=1 \
+    "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "loaded LaunchAgent accepted a stale run interval"
+  assert_contains "$out" "loaded identity is missing or untrusted" \
+    "loaded LaunchAgent interval drift was not surfaced before health"
+
+  set +e
+  out=$(HOME="$home/user" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
+    FM_TREEHOUSE_ROOT="$home/user/.treehouse" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
+    FM_TEST_LAUNCHCTL_RUN_AT_LOAD=false \
+    "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "loaded LaunchAgent accepted disabled RunAtLoad"
+  assert_contains "$out" "loaded identity is missing or untrusted" \
+    "loaded LaunchAgent RunAtLoad drift was not surfaced before health"
+
   legacy_home="$TMP_ROOT/untracked-legacy-home"
   mkdir -p "$legacy_home/projects" "$legacy_home/config" "$legacy_home/user/.treehouse"
   legacy_key=$(checkout_state_key "$legacy_home" 16)
@@ -2197,6 +2289,11 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-16 ]; then
   test_reinspection_failure_invalidates_coverage_health
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-round-13-safety ]; then
+  test_loaded_launch_agent_controls_and_untracked_legacy_job_fail_closed
   exit 0
 fi
 

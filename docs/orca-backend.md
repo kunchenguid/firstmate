@@ -97,6 +97,7 @@ The guarded teardown design, exercised only in the synthetic authority lab, is:
 - Before close, teardown requires Orca's authoritative terminal read to bind the recorded terminal to the recorded worktree id; missing or mismatched identity preserves every resource.
 - After the existing firstmate safety checks pass, teardown closes the recorded Orca terminal and requires a `terminal_handle_stale` read result before removal.
 - The final project/worktree identity and landed-work checks, provider removal, and post-removal branch cleanup run under the common checkout lock.
+- Provider removal also requires a fresh fail-closed filesystem-boundary proof for the exact recorded worktree root; mounted, redirected, missing, or identity-drifted paths remain quarantined.
 - Missing terminal identity, a live terminal, an ambiguous read result, or a close failure retains the worktree and metadata.
 - A spawn-abort quarantine without a recorded terminal can proceed only when Orca explicitly reports that the retained worktree has no terminals.
 - Teardown does not raw-delete Orca worktrees.

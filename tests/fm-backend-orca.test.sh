@@ -1714,6 +1714,41 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
   pass "fm-teardown.sh backend=orca: ship teardown requires a matching Orca id path"
 }
 
+test_ship_teardown_rejects_orca_mounted_removal_root() {
+  local proj wt data state config id out rc neutral
+  id="orcamountedrootz6"
+  proj="$TMP_ROOT/mounted-root-project"
+  wt="$TMP_ROOT/mounted-root-wt"
+  data="$TMP_ROOT/mounted-root-data"
+  state="$TMP_ROOT/mounted-root-state"
+  config="$TMP_ROOT/mounted-root-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-mounted-root" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=ship" "mode=local-only" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-mounted-root"
+  orca_case mounted-root
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-mounted-root","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    FM_CONFIG_OVERRIDE="$config" FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1 \
+    FM_TEARDOWN_TEST_MOUNT_PATH="$wt" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "mounted Orca worktree root must block provider removal"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "mounted Orca worktree reached provider removal"
+  assert_present "$state/$id.meta" "mounted Orca worktree removed retry metadata"
+  assert_contains "$out" "crosses an untrusted filesystem boundary" \
+    "mounted Orca worktree was not surfaced"
+  pass "Orca removal rejects mounted worktree roots"
+}
+
 test_ship_teardown_refuses_orca_unresolvable_worktree_id() {
   local proj wt data state config id out rc neutral
   id="orcashipunresolvedz1"
@@ -2431,6 +2466,11 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-orca-authority ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-13-safety ]; then
+  test_ship_teardown_rejects_orca_mounted_removal_root
+  exit 0
+fi
+
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json
@@ -2489,6 +2529,7 @@ test_teardown_preserves_metadata_when_orca_remove_error_json
 test_scout_teardown_refuses_orca_missing_report_when_path_missing
 test_ship_teardown_refuses_orca_missing_worktree_path
 test_ship_teardown_removes_orca_worktree_when_id_path_matches
+test_ship_teardown_rejects_orca_mounted_removal_root
 test_ship_teardown_refuses_orca_unresolvable_worktree_id
 test_ship_teardown_refuses_orca_id_path_mismatch
 test_teardown_refuses_orca_missing_worktree_id

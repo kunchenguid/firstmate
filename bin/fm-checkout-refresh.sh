@@ -1102,6 +1102,28 @@ def block(name):
         raise ValueError(f"duplicate {name}")
     return [line.strip() for line in match.group(1).splitlines() if line.strip()]
 
+def optional_scalar(name):
+    matches = re.findall(
+        rf"(?m)^[ \t]*{re.escape(name)}[ \t]*=[ \t]*(.+?)[ \t]*$",
+        loaded,
+    )
+    if len(matches) > 1:
+        raise ValueError(f"ambiguous {name}")
+    return decode(matches[0]) if matches else None
+
+def environment_block(name):
+    lines = block(name)
+    values = {}
+    for line in lines:
+        if " => " not in line:
+            raise ValueError(f"malformed loaded {name}")
+        key, value = line.split(" => ", 1)
+        key = decode(key)
+        if not key or key in values:
+            raise ValueError(f"ambiguous loaded {name}")
+        values[key] = decode(value)
+    return values
+
 try:
     first = next(line.strip() for line in loaded.splitlines() if line.strip())
     if first != target + " = {":
@@ -1110,6 +1132,8 @@ try:
         definition = plistlib.load(stream)
     expected_arguments = definition.get("ProgramArguments")
     expected_environment = definition.get("EnvironmentVariables")
+    expected_interval = definition.get("StartInterval")
+    expected_run_at_load = definition.get("RunAtLoad")
     if (
         definition.get("Label") != target.rsplit("/", 1)[-1]
         or not isinstance(expected_arguments, list)
@@ -1120,6 +1144,10 @@ try:
             isinstance(key, str) and isinstance(value, str)
             for key, value in expected_environment.items()
         )
+        or not isinstance(expected_interval, int)
+        or isinstance(expected_interval, bool)
+        or expected_interval <= 0
+        or expected_run_at_load is not True
     ):
         raise ValueError("authoritative definition is malformed")
     if definition["Label"] == current_label:
@@ -1148,15 +1176,31 @@ try:
     arguments = [decode(line) for line in block("arguments")]
     if arguments != expected_arguments:
         raise ValueError("loaded arguments differ")
-    environment = {}
-    for line in block("environment"):
-        if " => " not in line:
-            raise ValueError("malformed loaded environment")
-        key, value = line.split(" => ", 1)
-        key = decode(key)
-        if not key or key in environment:
-            raise ValueError("ambiguous loaded environment")
-        environment[key] = decode(value)
+    interval = scalar("run interval")
+    match = re.fullmatch(r"([1-9][0-9]*)(?:[ \t]+seconds?)?", interval)
+    if match is None or int(match.group(1)) != expected_interval:
+        raise ValueError("loaded run interval differs")
+    run_at_load = optional_scalar("run at load")
+    properties = optional_scalar("properties")
+    if run_at_load is not None:
+        if run_at_load.lower() not in ("true", "1"):
+            raise ValueError("loaded RunAtLoad differs")
+    elif properties is None or "runatload" not in properties.lower().split():
+        raise ValueError("loaded RunAtLoad is missing")
+    inherited_environment = environment_block("inherited environment")
+    default_environment = environment_block("default environment")
+    environment = environment_block("environment")
+    behavior_control = re.compile(
+        r"^(?:FM_|GIT_|PATH$|HOME$|BASH_ENV$|ENV$|CDPATH$|SHELLOPTS$|"
+        r"PYTHON|PERL|RUBY|NODE_OPTIONS$|DYLD_|LD_|"
+        r"(?:HTTP|HTTPS|ALL|NO)_PROXY$|(?:http|https|all|no)_proxy$)"
+    )
+    for inherited in (inherited_environment, default_environment):
+        if any(
+            behavior_control.search(key) and key not in expected_environment
+            for key in inherited
+        ):
+            raise ValueError("loaded inherited environment has undeclared control")
     synthesized_environment = {
         "XPC_SERVICE_NAME": definition["Label"],
         "OSLogRateLimit": "64",

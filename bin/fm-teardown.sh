@@ -43,12 +43,12 @@
 # the handle stale, and remove the recorded worktree under its checkout lock;
 # teardown never substitutes the shared window alias for a missing terminal.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Teardown proves
-# the home clean and every local ref landed, then quiesces its endpoint and
+# the home clean and every ref and reflog commit landed, then quiesces its endpoint and
 # refuses while the home has in-flight crewmate meta files. --force authorizes
 # recursive retirement only after every child passes the same endpoint, identity,
 # cleanliness, stash, and landed-work proofs. Project retirement also rejects
-# mount boundaries and landing authorities whose Git metadata, objects, alternates,
-# or network endpoint may depend on the retiring home or local machine. Removing a
+# mount boundaries, rewritten history, and landing authorities whose complete Git
+# object storage or network transport may depend on the retiring home or local machine. Removing a
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
@@ -177,7 +177,10 @@ PRELOCK_KIND=$(fm_meta_get "$META" kind)
 if [ "$PRELOCK_KIND" = secondmate ]; then
   PRELOCK_HOME=$(fm_meta_get "$META" home)
   [ -n "$PRELOCK_HOME" ] || PRELOCK_HOME=$(fm_meta_get "$META" worktree)
-  SECONDMATE_HOME_LIFECYCLE_LOCK=$(fm_secondmate_home_lifecycle_lock_acquire "$CHECKOUT_LOCK_ROOT" "$PRELOCK_HOME") || exit 1
+  SECONDMATE_HOME_LIFECYCLE_LOCK=$(fm_secondmate_home_lifecycle_lock_acquire "$CHECKOUT_LOCK_ROOT" "$PRELOCK_HOME") || {
+    echo "error: secondmate home lifecycle identity is missing, redirected, or uninspectable for $ID" >&2
+    exit 1
+  }
   TEARDOWN_ACCOUNT_LOCKS+=("$SECONDMATE_HOME_LIFECYCLE_LOCK")
 fi
 ACCOUNT_DELETE_LOCK=$(fm_account_lifecycle_lock_acquire "$STATE" "$ID") || exit 1
@@ -269,7 +272,8 @@ elif [ "$REPORT_REQUIRED_COUNT" -gt 0 ]; then
 fi
 
 managed_endpoint_is_gone() {  # <backend> <target> <expected-label> [probe-home] [recorded-scoped-target]
-  local backend=$1 target=$2 expected=$3 probe_home=${4:-} recorded_scoped_target=${5:-} attempt state last=unknown
+  local backend=$1 target=$2 expected=$3 probe_home=${4:-} recorded_scoped_target=${5:-}
+  local attempt state agent_state last=unknown
   [ -n "$target" ] || return 2
   for attempt in 1 2 3 4 5 6 7 8 9 10; do
     if [ -n "$probe_home" ]; then
@@ -279,7 +283,19 @@ managed_endpoint_is_gone() {  # <backend> <target> <expected-label> [probe-home]
     fi
     case "$state" in
       absent) return 0 ;;
-      present|unknown) last=$state ;;
+      present)
+        if [ -n "$probe_home" ]; then
+          agent_state=$(unset FM_ROOT_OVERRIDE; FM_HOME="$probe_home" FM_ROOT="$probe_home" fm_backend_agent_alive "$backend" "$target" "$expected" "$recorded_scoped_target" 2>/dev/null)
+        else
+          agent_state=$(fm_backend_agent_alive "$backend" "$target" "$expected" "$recorded_scoped_target" 2>/dev/null)
+        fi
+        case "$agent_state" in
+          dead) return 0 ;;
+          alive) last=present ;;
+          *) last=unknown ;;
+        esac
+        ;;
+      unknown) last=unknown ;;
       *) last=unknown ;;
     esac
     sleep 0.1
@@ -1271,7 +1287,7 @@ cleanup_returned_worktree() {
   if [ "$branch" != "HEAD" ]; then
     git -C "$project" branch -D "$branch" >/dev/null 2>&1 || true
   fi
-  rm -f "$worktree/.claude/settings.local.json" "$worktree/.opencode/plugins/fm-turn-end.js" "$worktree/.fm-grok-turnend"
+  remove_worktree_compatibility_artifacts "$worktree" "returned worktree"
 }
 
 validate_worktree_teardown_safety() {
@@ -1412,9 +1428,14 @@ firstmate_home_has_treehouse_slot() {
 
 validate_removal_target() {
   local target=$1 label=$2 abs_target abs_home abs_root
-  [ -n "$target" ] || return 0
-  [ -e "$target" ] || return 0
-  abs_target=$(removal_target_abs_path "$target")
+  [ -n "$target" ] || {
+    echo "REFUSED: missing $label removal target" >&2
+    return 1
+  }
+  abs_target=$(fm_checkout_trusted_dir "$target") || {
+    echo "REFUSED: missing, redirected, or uninspectable $label removal target $target" >&2
+    return 1
+  }
   if abs_home=$(cd "$FM_HOME" 2>/dev/null && pwd -P); then
     :
   else
@@ -1567,8 +1588,10 @@ validate_firstmate_operational_dirs_for_removal() {
 
 validate_child_worktree_for_removal() {
   local target=$1 project=$2 abs_target abs_project abs_home abs_root target_common project_common
-  [ -n "$target" ] || return 0
-  [ -e "$target" ] || return 0
+  [ -n "$target" ] && [ -e "$target" ] || {
+    echo "REFUSED: missing child worktree removal target ${target:-<empty>}" >&2
+    return 1
+  }
   abs_target=$(validate_removal_target "$target" "child worktree") || return 1
   abs_target=$(exact_git_worktree_root "$abs_target") || {
     echo "REFUSED: unsafe child worktree removal target $target is not an exact Git root" >&2
@@ -1615,9 +1638,13 @@ import os
 import stat
 import sys
 
-root = os.path.realpath(sys.argv[1])
+raw_root = sys.argv[1]
 operation = sys.argv[2]
 label = os.environ["FM_REMOVAL_BOUNDARY_LABEL"]
+if not raw_root or "\x00" in raw_root or "\n" in raw_root or "\r" in raw_root:
+    print(f"REFUSED: {label} removal target is empty or malformed", file=sys.stderr)
+    raise SystemExit(1)
+root = os.path.normpath(os.path.abspath(raw_root))
 injected = ""
 if os.environ.get("FM_ACCOUNT_ROUTING_TEST_LAB") == "firstmate-account-routing-test-lab-v1":
     injected = os.environ.get("FM_TEARDOWN_TEST_MOUNT_PATH", "")
@@ -1651,6 +1678,14 @@ def identity(metadata):
 try:
     if operation not in ("validate", "remove") or root == os.path.sep:
         raise OSError("invalid removal operation")
+    current = os.path.sep
+    for component in root.split(os.path.sep):
+        if not component:
+            continue
+        current = os.path.join(current, component)
+        metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise OSError(f"redirected path component {current}")
     parent = os.path.dirname(root)
     name = os.path.basename(root)
     parent_flags = os.O_RDONLY | os.O_DIRECTORY
@@ -1664,7 +1699,7 @@ try:
         root_metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
         os.close(parent_fd)
-        raise SystemExit(0)
+        raise OSError("removal root disappeared")
     if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
         os.close(parent_fd)
         raise OSError("removal root is not a real directory")
@@ -1757,10 +1792,94 @@ safe_rm_rf_child_worktree() {
 }
 
 safe_remove_task_tmp() {
-  local target=$1
+  local target=$1 base
   [ -n "$target" ] || return 0
   [ "$target" = "/tmp/fm-$ID" ] || return 1
-  removal_tree_operation "$target" "task temp root" remove
+  base=$(python3 - <<'PY'
+import os
+import stat
+
+base = os.path.realpath("/tmp")
+if base not in ("/tmp", "/private/tmp"):
+    raise SystemExit(1)
+current = os.path.sep
+for component in base.split(os.path.sep):
+    if not component:
+        continue
+    current = os.path.join(current, component)
+    metadata = os.lstat(current)
+    if stat.S_ISLNK(metadata.st_mode):
+        raise SystemExit(1)
+if not stat.S_ISDIR(os.lstat(base).st_mode):
+    raise SystemExit(1)
+print(base)
+PY
+  ) || return 1
+  removal_tree_operation "$base/fm-$ID" "task temp root" remove
+}
+
+remove_worktree_compatibility_artifacts() {
+  local target=$1 label=$2
+  FM_COMPATIBILITY_CLEANUP_LABEL=$label python3 - "$target" <<'PY'
+import os
+import stat
+import sys
+
+root = os.path.normpath(os.path.abspath(sys.argv[1]))
+label = os.environ["FM_COMPATIBILITY_CLEANUP_LABEL"]
+if not sys.argv[1] or root == os.path.sep:
+    raise SystemExit(1)
+try:
+    current = os.path.sep
+    for component in root.split(os.path.sep):
+        if not component:
+            continue
+        current = os.path.join(current, component)
+        metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise OSError(f"redirected path component {current}")
+except FileNotFoundError:
+    raise SystemExit(0)
+flags = os.O_RDONLY | os.O_DIRECTORY
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+root_fd = os.open(root, flags)
+try:
+    for relative in (
+        ".claude/settings.local.json",
+        ".opencode/plugins/fm-turn-end.js",
+        ".fm-grok-turnend",
+    ):
+        parts = relative.split("/")
+        directory_fd = os.dup(root_fd)
+        try:
+            for component in parts[:-1]:
+                try:
+                    child = os.open(component, flags, dir_fd=directory_fd)
+                except FileNotFoundError:
+                    break
+                os.close(directory_fd)
+                directory_fd = child
+            else:
+                try:
+                    metadata = os.stat(
+                        parts[-1],
+                        dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISDIR(metadata.st_mode):
+                    raise OSError(f"compatibility artifact is a directory: {relative}")
+                os.unlink(parts[-1], dir_fd=directory_fd)
+        finally:
+            os.close(directory_fd)
+except OSError as error:
+    print(f"REFUSED: {label} compatibility cleanup is unsafe: {error}", file=sys.stderr)
+    raise SystemExit(1)
+finally:
+    os.close(root_fd)
+PY
 }
 
 repository_remote_identity() {
@@ -1807,7 +1926,9 @@ validate_firstmate_home_repository_identity() {
 
 validate_secondmate_home_landed_state() {
   local home=$1 expected_source=$2 dirty unsafe branch default source_default_ref source_default_tip
-  local refs ref tip live_output live_branch live_tip cached_tip stash_list home_common source_common live_status
+  local refs ref tip live_output live_branch live_tip cached_tip stash_list home_common source_common live_status reflog_tips
+  git_history_rewrite_state_is_clean "$home" "secondmate home repository" || return 1
+  git_history_rewrite_state_is_clean "$expected_source" "secondmate top-level source repository" || return 1
   dirty=$(GIT_OPTIONAL_LOCKS=0 git -C "$home" status --porcelain=v1 --untracked-files=all 2>/dev/null) || {
     echo "REFUSED: secondmate home cleanliness is uninspectable at $home" >&2
     return 1
@@ -1867,7 +1988,7 @@ validate_secondmate_home_landed_state() {
       return 1
     }
   fi
-  source_default_tip=$(git -C "$expected_source" rev-parse "$source_default_ref^{commit}" 2>/dev/null) || {
+  source_default_tip=$(GIT_NO_REPLACE_OBJECTS=1 git -C "$expected_source" rev-parse "$source_default_ref^{commit}" 2>/dev/null) || {
     echo "REFUSED: secondmate home authoritative default tip is uninspectable at $expected_source" >&2
     return 1
   }
@@ -1883,22 +2004,29 @@ validate_secondmate_home_landed_state() {
     return 1
   }
   if [ "$home_common" != "$source_common" ]; then
-    refs=$(git -C "$home" for-each-ref --format='%(refname)' 2>/dev/null) || {
+    refs=$(GIT_NO_REPLACE_OBJECTS=1 git -C "$home" for-each-ref --format='%(refname)' 2>/dev/null) || {
       echo "REFUSED: secondmate home refs are uninspectable at $home" >&2
       return 1
     }
   fi
-  refs=$(printf 'HEAD\n%s\n' "$refs")
+  reflog_tips=$(GIT_NO_REPLACE_OBJECTS=1 git -C "$home" reflog --all --format='%H' 2>/dev/null) || {
+    echo "REFUSED: secondmate home reflogs are uninspectable at $home" >&2
+    return 1
+  }
+  refs=$(printf 'HEAD\n%s\n%s\n' "$refs" "$reflog_tips")
   while IFS= read -r ref; do
     [ -n "$ref" ] || continue
-    tip=$(git -C "$home" rev-parse "$ref^{commit}" 2>/dev/null) || {
+    tip=$(GIT_NO_REPLACE_OBJECTS=1 git -C "$home" rev-parse "$ref^{commit}" 2>/dev/null) || {
       echo "REFUSED: secondmate home ref $ref cannot be resolved to a commit" >&2
       return 1
     }
-    git -C "$home" merge-base --is-ancestor "$tip" "$source_default_tip" 2>/dev/null || {
+    if ! GIT_NO_REPLACE_OBJECTS=1 git -C "$expected_source" \
+        cat-file -e "$tip^{commit}" 2>/dev/null \
+        || ! GIT_NO_REPLACE_OBJECTS=1 git -C "$expected_source" \
+          merge-base --is-ancestor "$tip" "$source_default_tip" 2>/dev/null; then
       echo "REFUSED: secondmate home ref $ref has commits not proven in authoritative $default" >&2
       return 1
-    }
+    fi
   done <<EOF
 $refs
 EOF
@@ -1934,6 +2062,29 @@ exact_git_repository_root() {
   fi
 }
 
+git_history_rewrite_state_is_clean() {
+  local repository=$1 label=$2 grafts replacements status
+  [ -z "${GIT_REPLACE_REF_BASE:-}" ] || {
+    echo "REFUSED: $label uses an ambient replacement-ref namespace" >&2
+    return 1
+  }
+  grafts=$(git -C "$repository" rev-parse --git-path info/grafts 2>/dev/null) || return 1
+  case "$grafts" in /*) ;; *) grafts="$repository/$grafts" ;; esac
+  if [ -e "$grafts" ] || [ -L "$grafts" ]; then
+    echo "REFUSED: $label uses local grafted history at $grafts" >&2
+    return 1
+  fi
+  if replacements=$(git -C "$repository" for-each-ref --format='%(refname)' refs/replace 2>/dev/null); then
+    [ -z "$replacements" ] || {
+      echo "REFUSED: $label uses replacement refs" >&2
+      return 1
+    }
+  else
+    status=$?
+    [ "$status" -eq 0 ] || return 1
+  fi
+}
+
 secondmate_network_remote_identity() {
   local repository=$1 url=$2 transport=$3 host=$4 user=$5 port=$6
   local ssh_output ssh_status resolved_host effective_user effective_port
@@ -1958,6 +2109,14 @@ secondmate_network_remote_identity() {
       [ "$config_status" -eq 1 ] || return 1
     fi
   done
+  if config_output=$(git -C "$repository" config --get-regexp \
+      '^(http\..*\.proxy|http\.proxy|remote\..*\.(proxy|uploadpack|receivepack))$' \
+      2>/dev/null); then
+    [ -z "$config_output" ] || return 1
+  else
+    config_status=$?
+    [ "$config_status" -eq 1 ] || return 1
+  fi
   if config_output=$(git -C "$repository" config --get-regexp \
       '^url\..*\.[iI]nstead[Oo]f$' 2>/dev/null); then
     [ -z "$config_output" ] || return 1
@@ -2099,6 +2258,7 @@ validate_surviving_repository_authority() {
   local shallow partial_status
   [ "$(exact_git_repository_root "$repository" "$repository_container")" = "$repository" ] \
     || return 1
+  git_history_rewrite_state_is_clean "$repository" "$label" || return 1
   [ -z "${GIT_OBJECT_DIRECTORY:-}" ] \
     && [ -z "${GIT_ALTERNATE_OBJECT_DIRECTORIES:-}" ] || {
       echo "REFUSED: $label uses ambient Git object storage that cannot be proven durable" >&2
@@ -2181,6 +2341,26 @@ def inspect(objects):
     visited.add(identity)
     if confined_to_retiring_home(objects):
         raise OSError(f"object directory depends on retiring home: {objects}")
+    object_device = metadata.st_dev
+    pending = [objects]
+    while pending:
+        current = pending.pop()
+        with os.scandir(current) as entries:
+            for entry in entries:
+                entry_metadata = entry.stat(follow_symlinks=False)
+                if stat.S_ISLNK(entry_metadata.st_mode):
+                    raise OSError(f"redirected object storage entry: {entry.path}")
+                if entry_metadata.st_dev != object_device:
+                    raise OSError(f"object storage crosses a filesystem boundary: {entry.path}")
+                canonical = os.path.realpath(entry.path)
+                if confined_to_retiring_home(canonical):
+                    raise OSError(f"object storage entry depends on retiring home: {entry.path}")
+                if stat.S_ISDIR(entry_metadata.st_mode):
+                    if canonical != entry.path:
+                        raise OSError(f"redirected object storage directory: {entry.path}")
+                    pending.append(entry.path)
+                elif not stat.S_ISREG(entry_metadata.st_mode):
+                    raise OSError(f"unsafe object storage entry: {entry.path}")
     info = os.path.join(objects, "info")
     alternates = os.path.join(info, "alternates")
     http_alternates = os.path.join(info, "http-alternates")
@@ -2286,6 +2466,8 @@ repository = sys.argv[1]
 label = os.environ["FM_SURVIVING_REPOSITORY_LABEL"]
 
 def run(arguments, input_data=None):
+    environment = os.environ.copy()
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     return subprocess.run(
         ["git", "-C", repository, *arguments],
         check=False,
@@ -2293,10 +2475,11 @@ def run(arguments, input_data=None):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=environment,
     )
 
 try:
-    revision_arguments = ["rev-list", "--objects", "--missing=print", "--all"]
+    revision_arguments = ["rev-list", "--objects", "--missing=print", "--all", "--reflog"]
     head = run(["rev-parse", "--verify", "HEAD^{object}"])
     if head.returncode == 0:
         revision_arguments.append("HEAD")
@@ -2337,7 +2520,7 @@ except (OSError, subprocess.SubprocessError) as error:
     print(f"REFUSED: {label} complete object graph is unavailable: {error}", file=sys.stderr)
     raise SystemExit(1)
 PY
-  git -C "$repository" fsck --connectivity-only --no-dangling >/dev/null 2>&1 || {
+  GIT_NO_REPLACE_OBJECTS=1 git -C "$repository" fsck --full --strict --no-dangling >/dev/null 2>&1 || {
     echo "REFUSED: $label required Git objects are incomplete at $repository" >&2
     return 1
   }
@@ -2479,6 +2662,80 @@ run_secondmate_remote_probe() {
       ;;
     *) return 1 ;;
   esac
+}
+
+prepare_secondmate_remote_authority() {
+  local repository=$1 retiring_home=$2 identity kind transport url authority state_root
+  local object_format fetch_status
+  identity=$(secondmate_remote_identity "$repository" "$retiring_home") || return 1
+  IFS=$'\t' read -r kind transport url <<EOF
+$identity
+EOF
+  if [ "$kind" = local ]; then
+    printf 'local\t%s\n' "$transport"
+    return 0
+  fi
+  [ "$kind" = network ] && [ -n "$transport" ] && [ -n "$url" ] || return 1
+  state_root=$(fm_checkout_trusted_dir "$STATE") || return 1
+  authority=$(mktemp -d "$state_root/.remote-authority.XXXXXX") || return 1
+  object_format=$(git -C "$repository" rev-parse --show-object-format 2>/dev/null) || {
+    removal_tree_operation "$authority" "remote authority proof" remove || true
+    return 1
+  }
+  git init --quiet --bare --object-format="$object_format" "$authority" >/dev/null 2>&1 || {
+    removal_tree_operation "$authority" "remote authority proof" remove || true
+    return 1
+  }
+  case "$transport" in
+    ssh|git+ssh)
+      if /usr/bin/env -u GIT_SSH -u GIT_SSH_COMMAND -u GIT_SSH_VARIANT \
+          -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
+          GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+          GIT_SSH_COMMAND=/usr/bin/ssh GIT_SSH_VARIANT=ssh \
+          git -C "$authority" fetch --quiet --force --no-tags --no-recurse-submodules \
+            "$url" '+refs/heads/*:refs/heads/*'; then
+        fetch_status=0
+      else
+        fetch_status=$?
+      fi
+      ;;
+    http|https)
+      if /usr/bin/env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+          -u ALL_PROXY -u all_proxy -u NO_PROXY -u no_proxy \
+          -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
+          GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+          git -C "$authority" -c http.proxy= -c http.followRedirects=false \
+            fetch --quiet --force --no-tags --no-recurse-submodules \
+            "$url" '+refs/heads/*:refs/heads/*'; then
+        fetch_status=0
+      else
+        fetch_status=$?
+      fi
+      ;;
+    git)
+      if /usr/bin/env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
+          GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+          git -C "$authority" fetch --quiet --force --no-tags --no-recurse-submodules \
+            "$url" '+refs/heads/*:refs/heads/*'; then
+        fetch_status=0
+      else
+        fetch_status=$?
+      fi
+      ;;
+    *) fetch_status=1 ;;
+  esac
+  if [ "$fetch_status" -ne 0 ] \
+      || ! validate_surviving_repository_authority \
+        "$authority" "$retiring_home" "$authority" "network landing authority"; then
+    removal_tree_operation "$authority" "remote authority proof" remove || true
+    return 1
+  fi
+  printf 'network\t%s\n' "$authority"
+}
+
+cleanup_secondmate_remote_authority() {
+  local kind=$1 authority=$2
+  [ "$kind" != network ] || removal_tree_operation "$authority" "remote authority proof" remove
 }
 
 enumerate_secondmate_project_repositories() {
@@ -2677,8 +2934,9 @@ EOF
 
 validate_secondmate_project_repository_landed_state() {
   local repository=$1 source_repository=$2 retiring_home=$3 repository_container=${4:-$1}
-  local source_container=${5:-$2} dirty refs ref tip remote_output remote_status
-  local remote_tips remote_tip remote_commit landed repository_identity source_identity bare stash_status
+  local source_container=${5:-$2} dirty refs ref tip reflog_tips
+  local remote_tips remote_tip landed repository_identity source_identity bare stash_status
+  local authority_record authority_kind authority cleanup_status=0
   [ "$(exact_git_repository_root "$repository" "$repository_container")" = "$repository" ] || {
     echo "REFUSED: secondmate project repository is not an exact repository root at $repository" >&2
     return 1
@@ -2690,6 +2948,7 @@ validate_secondmate_project_repository_landed_state() {
   validate_surviving_repository_authority \
     "$source_repository" "$retiring_home" "$source_container" \
     "registered source project repository" || return 1
+  git_history_rewrite_state_is_clean "$repository" "secondmate project repository" || return 1
   validate_secondmate_repository_worktree_graph \
     "$repository" "$retiring_home" "$repository_container" || return 1
   validate_secondmate_declared_submodules "$repository" "$repository_container" || {
@@ -2729,43 +2988,48 @@ validate_secondmate_project_repository_landed_state() {
     echo "REFUSED: secondmate project origin drifted from its registered source at $repository" >&2
     return 1
   }
-  if run_secondmate_remote_probe \
-      remote_output "$repository" "$retiring_home" origin 'refs/heads/*'; then
-    remote_status=0
-  else
-    remote_status=$?
-  fi
-  fm_process_tree_cleanup_verified || {
-    echo "REFUSED: secondmate project repository upstream probe cleanup is unverified at $repository" >&2
+  authority_record=$(prepare_secondmate_remote_authority "$repository" "$retiring_home") || {
+    echo "REFUSED: secondmate project remote authority graph is incomplete or uninspectable at $repository" >&2
     return 1
   }
-  [ "$remote_status" -eq 0 ] || {
-    echo "REFUSED: secondmate project remote branches are uninspectable at $repository" >&2
+  IFS=$'\t' read -r authority_kind authority <<EOF
+$authority_record
+EOF
+  remote_tips=$(GIT_NO_REPLACE_OBJECTS=1 git -C "$authority" \
+    for-each-ref --format='%(objectname)' refs/heads 2>/dev/null) || {
+    cleanup_secondmate_remote_authority "$authority_kind" "$authority" || true
     return 1
   }
-  remote_tips=$(printf '%s\n' "$remote_output" \
-    | awk 'NF == 2 && index($2, "refs/heads/") == 1 { print $1 }' | sort -u) || return 1
   [ -n "$remote_tips" ] || {
+    cleanup_secondmate_remote_authority "$authority_kind" "$authority" || true
     echo "REFUSED: secondmate project repository has no live remote branches at $repository" >&2
     return 1
   }
-  refs=$(git -C "$repository" for-each-ref --format='%(refname)' 2>/dev/null) || {
+  refs=$(GIT_NO_REPLACE_OBJECTS=1 git -C "$repository" for-each-ref --format='%(refname)' 2>/dev/null) || {
+    cleanup_secondmate_remote_authority "$authority_kind" "$authority" || true
     echo "REFUSED: secondmate project repository refs are uninspectable at $repository" >&2
     return 1
   }
-  refs=$(printf '%s\n' "$refs" | awk '$0 != "refs/stash" { print }') || return 1
-  refs=$(printf 'HEAD\n%s\n' "$refs")
+  reflog_tips=$(GIT_NO_REPLACE_OBJECTS=1 git -C "$repository" reflog --all --format='%H' 2>/dev/null) || {
+    cleanup_secondmate_remote_authority "$authority_kind" "$authority" || true
+    echo "REFUSED: secondmate project repository reflogs are uninspectable at $repository" >&2
+    return 1
+  }
+  refs=$(printf 'HEAD\n%s\n%s\n' "$refs" "$reflog_tips")
   while IFS= read -r ref; do
     [ -n "$ref" ] || continue
-    tip=$(git -C "$repository" rev-parse "$ref^{commit}" 2>/dev/null) || {
+    [ "$ref" != refs/stash ] || continue
+    tip=$(GIT_NO_REPLACE_OBJECTS=1 git -C "$repository" rev-parse "$ref^{commit}" 2>/dev/null) || {
+      cleanup_secondmate_remote_authority "$authority_kind" "$authority" || true
       echo "REFUSED: secondmate project repository ref $ref is uninspectable at $repository" >&2
       return 1
     }
     landed=0
     while IFS= read -r remote_tip; do
       [ -n "$remote_tip" ] || continue
-      remote_commit=$(git -C "$repository" rev-parse "$remote_tip^{commit}" 2>/dev/null) || continue
-      if git -C "$repository" merge-base --is-ancestor "$tip" "$remote_commit" 2>/dev/null; then
+      if GIT_NO_REPLACE_OBJECTS=1 git -C "$authority" cat-file -e "$tip^{commit}" 2>/dev/null \
+          && GIT_NO_REPLACE_OBJECTS=1 git -C "$authority" \
+            merge-base --is-ancestor "$tip" "$remote_tip" 2>/dev/null; then
         landed=1
         break
       fi
@@ -2773,12 +3037,18 @@ validate_secondmate_project_repository_landed_state() {
 $remote_tips
 EOF
     [ "$landed" -eq 1 ] || {
+      cleanup_secondmate_remote_authority "$authority_kind" "$authority" || true
       echo "REFUSED: secondmate project repository ref $ref is not proven on a live remote branch at $repository" >&2
       return 1
     }
   done <<EOF
 $refs
 EOF
+  cleanup_secondmate_remote_authority "$authority_kind" "$authority" || cleanup_status=$?
+  [ "$cleanup_status" -eq 0 ] || {
+    echo "REFUSED: remote authority proof cleanup could not be completed safely" >&2
+    return 1
+  }
 }
 
 validate_secondmate_project_clones() {
@@ -2876,8 +3146,10 @@ validate_firstmate_home_for_removal() {
   local home=$1 label=$2 expected_id=${3:-} expected_source=${4:-$FM_ROOT} expected_registry=${5:-} expected_project
   local abs_home_path metadata_home_root marker_id source_authority=${7:-1}
   expected_project=${6:-$home}
-  [ -n "$home" ] || return 0
-  [ -e "$home" ] || return 0
+  [ -n "$home" ] && [ -e "$home" ] || {
+    echo "REFUSED: missing $label removal target ${home:-<empty>}" >&2
+    return 1
+  }
   abs_home_path=$(validate_removal_target "$home" "$label") || return 1
   if [ ! -f "$abs_home_path/$SUB_HOME_MARKER" ]; then
     echo "REFUSED: unsafe $label removal target $home is not a seeded secondmate home" >&2
@@ -3059,12 +3331,14 @@ remove_child_orca_worktree_locked() {
   require_orca_worktree_path_match "$child_worktree_id" "$child_worktree" || return 1
   fm_backend_quiesce_worktree_terminals orca "$child_worktree_id" "fm-$child_id" "$(meta_value "$child_meta" terminal)" || return 1
   validate_child_worktree_landed_state "$child_meta" "$child_id" "$child_worktree" "$child_project" || return 1
+  validate_removal_tree_boundaries "$child_worktree" "child Orca worktree" || return 1
+  require_orca_worktree_path_match "$child_worktree_id" "$child_worktree" || return 1
   branch=$(git -C "$child_worktree" rev-parse --abbrev-ref HEAD 2>/dev/null) || return 1
   fm_backend_remove_worktree orca "$child_worktree_id" || return 1
   if [ "$branch" != "HEAD" ]; then
     git -C "$child_project" branch -D "$branch" >/dev/null 2>&1 || true
   fi
-  rm -f "$child_worktree/.claude/settings.local.json" "$child_worktree/.opencode/plugins/fm-turn-end.js" "$child_worktree/.fm-grok-turnend"
+  remove_worktree_compatibility_artifacts "$child_worktree" "removed child Orca worktree"
 }
 
 cleanup_firstmate_home_children() {
@@ -3330,6 +3604,8 @@ remove_pending_orca_worktree_locked() {
   pending_orca_endpoint_absent || return 1
   validate_worktree_teardown_safety || return 1
   validate_pending_orca_worktree_identity || return 1
+  validate_removal_tree_boundaries "$WT" "quarantined Orca worktree" || return 1
+  validate_pending_orca_worktree_identity || return 1
   fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID"
 }
 
@@ -3540,6 +3816,8 @@ remove_orca_worktree_locked() {
   fm_backend_quiesce_worktree_terminals orca "$ORCA_WORKTREE_ID" "fm-$ID" "$T" || return 1
   validate_worktree_teardown_safety || return 1
   validate_teardown_target_identity || return 1
+  validate_removal_tree_boundaries "$WT" "Orca worktree" || return 1
+  validate_teardown_target_identity || return 1
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null) || return 1
   fi
@@ -3547,7 +3825,7 @@ remove_orca_worktree_locked() {
   if [ "$branch" != "HEAD" ]; then
     git -C "$PROJ" branch -D "$branch" >/dev/null 2>&1 || true
   fi
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
+  remove_worktree_compatibility_artifacts "$WT" "removed Orca worktree"
 }
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then

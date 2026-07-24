@@ -108,6 +108,7 @@ prepare_secondmate_home_fixture() {
   git -C "$case_dir/project" remote set-url origin "$ROOT"
   git -C "$case_dir/project" update-ref "refs/remotes/origin/$default" "$root_tip"
   git -C "$case_dir/project" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$default"
+  git -C "$case_dir/wt" reflog expire --expire=now --all
   git clone --quiet "$case_dir/origin.git" "$case_dir/source-projects/test"
   git clone --quiet "$case_dir/origin.git" "$case_dir/wt/projects/test"
   exclude=$(git -C "$case_dir/wt" rev-parse --git-path info/exclude)
@@ -3756,6 +3757,222 @@ test_secondmate_retirement_rejects_source_common_dir_in_home() {
   pass "registered source storage must survive secondmate removal"
 }
 
+test_teardown_removal_roots_fail_closed() {
+  local missing_case retained caller rc symlink_case target
+  missing_case=$(make_case missing-secondmate-removal-root)
+  prepare_secondmate_home_fixture "$missing_case"
+  write_secondmate_meta "$missing_case"
+  retained="$missing_case/retained-home"
+  caller="$missing_case/caller"
+  mv "$missing_case/wt" "$retained"
+  mkdir -p "$caller"
+  printf 'caller sentinel\n' > "$caller/sentinel"
+  set +e
+  (
+    cd "$caller" || exit 1
+    run_teardown "$missing_case" --force
+  ) > "$missing_case/stdout" 2> "$missing_case/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "missing removal root must fail closed"
+  assert_present "$caller/sentinel" "missing removal root deleted the caller working directory"
+  assert_present "$retained/.fm-secondmate-home" "missing removal root deleted retained home data"
+  assert_present "$missing_case/state/task-x1.meta" "missing removal root removed retry metadata"
+  assert_grep 'missing secondmate home removal target' "$missing_case/stderr" \
+    "missing removal root was not surfaced"
+
+  symlink_case=$(make_case symlinked-secondmate-removal-root)
+  prepare_secondmate_home_fixture "$symlink_case"
+  write_secondmate_meta "$symlink_case"
+  target="$symlink_case/retained-home"
+  mv "$symlink_case/wt" "$target"
+  ln -s "$target" "$symlink_case/wt"
+  set +e
+  run_teardown "$symlink_case" --force > "$symlink_case/stdout" 2> "$symlink_case/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "symlinked removal root must fail closed"
+  assert_present "$target/.fm-secondmate-home" "symlinked removal root traversed its target"
+  assert_present "$symlink_case/state/task-x1.meta" "symlinked removal root removed retry metadata"
+  assert_grep 'error:' "$symlink_case/stderr" "symlinked removal root was not surfaced"
+  pass "missing and redirected removal roots never select another directory"
+}
+
+test_treehouse_return_stays_bound_to_validated_root() {
+  local case_dir moved redirect marker rc
+  case_dir=$(make_case treehouse-return-root-swap)
+  write_meta "$case_dir" local-only ship
+  moved="$case_dir/moved-worktree"
+  redirect="$case_dir/redirect-target"
+  marker="$case_dir/bound-root-observed"
+  printf 'validated worktree\n' > "$case_dir/wt/.bound-root-identity"
+  git -C "$case_dir/wt" add .bound-root-identity
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t \
+    commit -qm "record bound worktree identity"
+  add_fork_with_pushed_branch "$case_dir"
+  rm -f "$case_dir/fakebin/.tmux-live"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = return ] && [ "$2" = --force ] && [ "$3" = . ] || exit 91
+mv "$FM_TREEHOUSE_SWAP_TARGET" "$FM_TREEHOUSE_MOVED_TARGET" || exit 92
+mkdir -p "$FM_TREEHOUSE_REDIRECT_TARGET" || exit 93
+printf 'redirect target\n' > "$FM_TREEHOUSE_REDIRECT_TARGET/.bound-root-identity"
+ln -s "$FM_TREEHOUSE_REDIRECT_TARGET" "$FM_TREEHOUSE_SWAP_TARGET" || exit 94
+[ "$(cat ./.bound-root-identity)" = "validated worktree" ] || exit 95
+: > "$FM_TREEHOUSE_BOUND_MARKER"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  set +e
+  FM_TREEHOUSE_SWAP_TARGET="$case_dir/wt" \
+  FM_TREEHOUSE_MOVED_TARGET="$moved" \
+  FM_TREEHOUSE_REDIRECT_TARGET="$redirect" \
+  FM_TREEHOUSE_BOUND_MARKER="$marker" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || fail "identity-bound Treehouse return exited unexpectedly"
+  [ -e "$marker" ] || fail \
+    "Treehouse return did not execute from the validated worktree descriptor: $(cat "$case_dir/stderr")"
+  assert_grep 'redirect target' "$redirect/.bound-root-identity" \
+    "Treehouse return traversed the replacement symlink target"
+  pass "Treehouse return remains bound across pathname replacement"
+}
+
+test_teardown_distinguishes_dead_and_live_harness_processes() {
+  local dead_case live_case rc
+  dead_case=$(make_case dead-harness-endpoint)
+  write_meta "$dead_case" local-only ship
+  cat > "$dead_case/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+state="$(dirname "$0")/.tmux-live"
+case "${1:-}" in
+  display-message)
+    [ -f "$state" ] || exit 1
+    case " $* " in *pane_current_command*) printf 'zsh\n' ;; esac
+    ;;
+  list-windows) [ ! -f "$state" ] || printf '%s\n' fm-task-x1 ;;
+  kill-window) rm -f "$state" ;;
+esac
+exit 0
+SH
+  chmod +x "$dead_case/fakebin/tmux"
+  run_teardown "$dead_case" --force > "$dead_case/stdout" 2> "$dead_case/stderr" \
+    || fail "dead harness endpoint false-refused teardown: $(cat "$dead_case/stderr")"
+  assert_absent "$dead_case/state/task-x1.meta" "dead harness endpoint retained task metadata"
+
+  live_case=$(make_case live-harness-endpoint)
+  write_meta "$live_case" local-only ship
+  cat > "$live_case/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message)
+    case " $* " in *pane_current_command*) printf 'codex\n' ;; esac
+    exit 0
+    ;;
+  list-windows) printf '%s\n' fm-task-x1 ;;
+  kill-window) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$live_case/fakebin/tmux"
+  set +e
+  run_teardown "$live_case" --force > "$live_case/stdout" 2> "$live_case/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "live harness process must block teardown"
+  assert_present "$live_case/state/task-x1.meta" "live harness process removed retry metadata"
+  assert_grep 'endpoint for task-x1 is still alive' "$live_case/stderr" \
+    "live harness process was not surfaced"
+  pass "teardown distinguishes dead harnesses from live processes"
+}
+
+test_secondmate_retirement_retains_reflog_and_rewritten_history() {
+  local reflog_case clone unique_tip rc rewrite_case grafts
+  reflog_case=$(make_case secondmate-reflog-only-history)
+  prepare_secondmate_home_fixture "$reflog_case"
+  write_secondmate_meta "$reflog_case"
+  clone="$reflog_case/wt/projects/test"
+  git -C "$clone" checkout -q -b reflog-only
+  printf 'recoverable history\n' > "$clone/reflog-only.txt"
+  git -C "$clone" add reflog-only.txt
+  git -C "$clone" commit -qm "reflog-only project work"
+  unique_tip=$(git -C "$clone" rev-parse HEAD)
+  git -C "$clone" reset -q --hard HEAD^
+  git -C "$clone" checkout -q main
+  git -C "$clone" branch -D reflog-only >/dev/null
+  set +e
+  run_teardown "$reflog_case" --force > "$reflog_case/stdout" 2> "$reflog_case/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "reflog-only project history must block retirement"
+  assert_present "$reflog_case/wt" "reflog-only project history allowed home removal"
+  assert_present "$reflog_case/state/task-x1.meta" "reflog-only history removed retry metadata"
+  assert_grep "$unique_tip" "$reflog_case/stderr" "reflog-only commit was not inventoried"
+
+  rewrite_case=$(make_case secondmate-grafted-history)
+  prepare_secondmate_home_fixture "$rewrite_case"
+  write_secondmate_meta "$rewrite_case"
+  clone="$rewrite_case/wt/projects/test"
+  grafts=$(git -C "$clone" rev-parse --git-path info/grafts)
+  case "$grafts" in /*) ;; *) grafts="$clone/$grafts" ;; esac
+  mkdir -p "$(dirname "$grafts")"
+  printf '%s\n' "$(git -C "$clone" rev-parse HEAD)" > "$grafts"
+  set +e
+  run_teardown "$rewrite_case" --force > "$rewrite_case/stdout" 2> "$rewrite_case/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "grafted project history must block retirement"
+  assert_present "$rewrite_case/wt" "grafted project history allowed home removal"
+  assert_grep 'uses local grafted history' "$rewrite_case/stderr" \
+    "grafted history was not surfaced"
+  pass "retirement retains reflog-only and rewritten Git history"
+}
+
+test_secondmate_retirement_rejects_http_proxy_and_object_redirects() {
+  local proxy_case clone source rc object_case objects pack redirected
+  proxy_case=$(make_case secondmate-scoped-http-proxy)
+  prepare_secondmate_home_fixture "$proxy_case"
+  write_secondmate_meta "$proxy_case"
+  clone="$proxy_case/wt/projects/test"
+  source="$proxy_case/source-projects/test"
+  git -C "$clone" remote set-url origin https://example.com/repository.git
+  git -C "$source" remote set-url origin https://example.com/repository.git
+  git -C "$clone" config 'http.https://example.com.proxy' http://127.0.0.1:9
+  git -C "$source" config 'http.https://example.com.proxy' http://127.0.0.1:9
+  set +e
+  run_teardown "$proxy_case" --force > "$proxy_case/stdout" 2> "$proxy_case/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "URL-scoped HTTP proxy must block retirement"
+  assert_present "$proxy_case/wt" "URL-scoped HTTP proxy allowed home removal"
+  assert_grep 'remote identity is unsafe' "$proxy_case/stderr" \
+    "URL-scoped HTTP proxy was not surfaced"
+
+  object_case=$(make_case secondmate-object-file-redirect)
+  prepare_secondmate_home_fixture "$object_case"
+  write_secondmate_meta "$object_case"
+  source="$object_case/source-projects/test"
+  git -C "$source" gc --quiet --prune=now
+  objects=$(git -C "$source" rev-parse --git-path objects)
+  case "$objects" in /*) ;; *) objects="$source/$objects" ;; esac
+  pack=$(find "$objects/pack" -type f -name '*.pack' -print -quit)
+  [ -n "$pack" ] || fail "object redirect fixture did not create a pack"
+  redirected="$object_case/wt/data/$(basename "$pack")"
+  mv "$pack" "$redirected"
+  ln -s "$redirected" "$pack"
+  set +e
+  run_teardown "$object_case" --force > "$object_case/stdout" 2> "$object_case/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "redirected pack storage must block retirement"
+  assert_present "$redirected" "redirected pack storage inside home was deleted"
+  assert_present "$object_case/state/task-x1.meta" "redirected object storage removed retry metadata"
+  assert_grep 'redirected object storage entry' "$object_case/stderr" \
+    "redirected pack storage was not surfaced"
+  pass "HTTP routing and object-file redirects never prove durable landing"
+}
+
 test_secondmate_retirement_serializes_child_spawn() {
   local case_dir child_project rc teardown_pid spawn_rc waited
   case_dir=$(make_case secondmate-retirement-child-race)
@@ -4069,6 +4286,16 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-durable-secondmate ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = review-round-13-safety ]; then
+  test_teardown_removal_roots_fail_closed
+  test_treehouse_return_stays_bound_to_validated_root
+  test_teardown_distinguishes_dead_and_live_harness_processes
+  test_secondmate_retirement_retains_reflog_and_rewritten_history
+  test_secondmate_retirement_rejects_http_proxy_and_object_redirects
+  test_secondmate_retirement_rejects_incomplete_surviving_authority
+  exit 0
+fi
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -4119,6 +4346,11 @@ test_secondmate_retirement_validates_top_level_source_storage
 test_secondmate_retirement_rejects_local_network_aliases
 test_secondmate_retirement_rejects_in_home_remote_object_storage
 test_secondmate_retirement_rejects_source_common_dir_in_home
+test_teardown_removal_roots_fail_closed
+test_treehouse_return_stays_bound_to_validated_root
+test_teardown_distinguishes_dead_and_live_harness_processes
+test_secondmate_retirement_retains_reflog_and_rewritten_history
+test_secondmate_retirement_rejects_http_proxy_and_object_redirects
 test_secondmate_retirement_serializes_child_spawn
 test_nested_secondmate_cleanup_requires_child_home_lock
 test_secondmate_registry_updates_are_locked_and_literal

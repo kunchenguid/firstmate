@@ -7,6 +7,7 @@
 # same-process nested calls for the same common Git directory.
 # Use fm_checkout_treehouse_return <checkout> <lock-root> <project> for a
 # process-tree-bounded `treehouse return --force` under that lock.
+# shellcheck disable=SC2016
 
 if [ "${FM_CHECKOUT_LOCK_LIB_LOADED:-0}" = 1 ]; then
   return 0
@@ -303,7 +304,38 @@ fm_checkout_treehouse_return_locked() {
   esac
   previous_dir=$(pwd -P) || return "$FM_CHECKOUT_LOCK_FAILURE_STATUS"
   cd "$project" || return "$FM_CHECKOUT_LOCK_FAILURE_STATUS"
-  if fm_run_bounded "$timeout" treehouse return --force "$checkout"; then
+  if fm_run_bounded "$timeout" python3 -c '
+import os
+import stat
+import sys
+
+target = os.path.abspath(sys.argv[1])
+if not target or target == os.path.sep:
+    raise SystemExit(74)
+current = os.path.sep
+for component in target.split(os.path.sep):
+    if not component:
+        continue
+    current = os.path.join(current, component)
+    metadata = os.lstat(current)
+    if stat.S_ISLNK(metadata.st_mode):
+        raise SystemExit(74)
+metadata = os.lstat(target)
+if not stat.S_ISDIR(metadata.st_mode):
+    raise SystemExit(74)
+flags = os.O_RDONLY | os.O_DIRECTORY
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+descriptor = os.open(target, flags)
+opened = os.fstat(descriptor)
+if (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino):
+    raise SystemExit(74)
+os.fchdir(descriptor)
+bound = os.stat(".")
+if (opened.st_dev, opened.st_ino) != (bound.st_dev, bound.st_ino):
+    raise SystemExit(74)
+os.execvp("treehouse", ("treehouse", "return", "--force", "."))
+' "$checkout"; then
     status=0
   else
     status=$?
