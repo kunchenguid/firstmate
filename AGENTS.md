@@ -265,7 +265,8 @@ This policy does not relax merge, production deployment, destructive, security-s
 
 Landing modes stay separate from that preview-first execution phase.
 `bin/fm-project-mode.sh` owns exact registry modes, legacy and missing-mode inheritance, and parsing; missing, bare legacy, and unknown mode data inherit `fast-preview` rather than forcing `no-mistakes`.
-The selected path owns its own rigor once chosen:
+The selected delivery path owns its own rigor.
+Once chosen, its paths are:
 
 - **fast-preview** (default) implements, smokes only as needed, starts a runnable preview, and stops at human-test review with a complete inspection path.
 - **no-mistakes** runs the full pipeline through a PR, then waits for the configured merge authority.

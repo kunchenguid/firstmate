@@ -480,6 +480,7 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
   printf 'brief\n' > "$data/$id/brief.md"
+  printf '%s\n' '- spawn-project [no-mistakes] - Orca spawn fixture' > "$data/projects.md"
   touch "$state/.last-watcher-beat"
   orca_case spawn
   log="$LOG"

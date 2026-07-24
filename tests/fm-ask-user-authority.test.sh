@@ -123,6 +123,7 @@ test_primary_and_secondmate_instruction_generation() {
   local home ship charter
   home="$TMP_ROOT/home"
   mkdir -p "$home/data"
+  printf '%s\n' '- sample [no-mistakes] - authority fixture' > "$home/data/projects.md"
 
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$BRIEF" authority-worker sample >/dev/null 2>&1
