@@ -29,24 +29,29 @@ Keep the task operational and evidence-producing only, with no project-code edit
 
 Perform the checks in this order and retain only the minimum output needed for diagnosis.
 
-1. Read the RunLit lab's documented topology and identify the expected non-production kube context, namespaces, monitoring services, storefront route, backend route, and healthy resource baseline.
+1. Read the RunLit lab's documented topology from `scripts/k3s/CLUSTER-STATE.md` and `scripts/k3s/README.md` in the RunLit project, and identify the expected non-production kube context, namespaces, monitoring services, storefront route, backend route, and healthy resource baseline.
+   Read the documented `recommendationservice` healthy memory request and limit and its documented restore path from `docs/dogfood/oom-crashloop-validation.md` and `scripts/k3s/demo-chaos.sh` in the same project.
+   These four files are the authoritative topology and baseline sources for this skill.
    Treat the documented context mapping as authority rather than guessing from a context name.
-2. Run `kubectl config current-context` without printing kubeconfig contents.
-   If the current context is not proven to be the documented RunLit lab context, stop before any cluster request and report the mismatch.
-3. Verify read access with non-mutating `kubectl auth can-i` checks for the resources needed below.
+   `scripts/k3s/CLUSTER-STATE.md` maps the lab cluster to the local kubeconfig `default` context, and the documented lab namespaces are `online-boutique` and `monitoring`.
+   If any of those sources is absent, stale, or disagrees with the observed cluster identity, stop before any cluster access or mutation and escalate to the captain.
+2. Run `kubectl config current-context` without printing kubeconfig contents, and compare the documented lab context and its documented API server against what the local kubeconfig defines for `default`.
+   Every kubectl command below pins `--context=default` so a later context switch, another agent, a different shell environment, or a changed `KUBECONFIG` cannot redirect a read or the rollback at another cluster.
+   If the `default` context is missing, or is not proven to be the documented RunLit lab cluster, stop before any cluster request and report the mismatch.
+3. Verify read access with non-mutating `kubectl --context=default auth can-i` checks for the resources needed below.
    A failed access check is a blocker, not permission to change credentials or kubeconfig.
-4. Inspect nodes with `kubectl get nodes -o wide` and summarize Ready state, scheduling state, and pressure conditions.
-5. Inspect pods and deployments across the documented lab namespaces with `kubectl get pods -A -o wide` and `kubectl get deployments -A`.
+4. Inspect nodes with `kubectl --context=default get nodes -o wide` and summarize Ready state, scheduling state, and pressure conditions.
+5. Inspect pods and deployments in the documented lab namespaces only, with `kubectl --context=default get pods -n online-boutique -o wide` and `kubectl --context=default get deployments -n online-boutique`, then the same two reads with `-n monitoring`.
    Record unhealthy, unready, pending, terminating, or restart-heavy workloads without deleting them.
-6. Inspect recent warning events with `kubectl get events -A --field-selector type=Warning --sort-by=.lastTimestamp`.
+6. Inspect recent warning events in the same two namespaces with `kubectl --context=default get events -n online-boutique --field-selector type=Warning --sort-by=.lastTimestamp`, then the same read with `-n monitoring`.
    Separate current repeated warnings from stale events that predate the present workload revision.
-7. Inspect `recommendationservice` with `kubectl get deployment recommendationservice -n online-boutique`, `kubectl rollout history deployment/recommendationservice -n online-boutique`, its ReplicaSets, and pods selected by `app=recommendationservice`.
+7. Inspect `recommendationservice` with `kubectl --context=default get deployment recommendationservice -n online-boutique`, `kubectl --context=default rollout history deployment/recommendationservice -n online-boutique`, its ReplicaSets, and pods selected by `app=recommendationservice`.
    Capture the deployment revision, desired and available replicas, pod names and UIDs, restart counts, last termination reasons, and container image.
-8. Read only the service's memory request and limit with a narrow JSONPath query such as `kubectl get deployment recommendationservice -n online-boutique -o jsonpath='{range .spec.template.spec.containers[*]}{.name}{" request="}{.resources.requests.memory}{" limit="}{.resources.limits.memory}{"\n"}{end}'`.
+8. Read only the service's memory request and limit with a narrow JSONPath query such as `kubectl --context=default get deployment recommendationservice -n online-boutique -o jsonpath='{range .spec.template.spec.containers[*]}{.name}{" request="}{.resources.requests.memory}{" limit="}{.resources.limits.memory}{"\n"}{end}'`.
    Use pod status, termination reasons, warning events, and only a bounded tail of service logs when needed to distinguish an OOM or low-memory crash loop from an unrelated failure.
-9. Inspect the documented Prometheus and Alertmanager workloads, readiness, targets, and active alerts through their read-only Kubernetes or HTTP APIs.
+9. Inspect the documented Prometheus and Alertmanager workloads, readiness, targets, and active alerts through their read-only Kubernetes or HTTP APIs, pinning `--context=default` and `-n monitoring` on every kubectl read.
    Record alert names, states, and relevant labels without copying secret-bearing configuration or full payloads.
-10. Check the documented storefront and backend deployment readiness, Service endpoints, and health URLs with read-only GET requests.
+10. Check the documented storefront and backend deployment readiness, Service endpoints, and health URLs with read-only GET requests, pinning `--context=default` and `-n online-boutique` on every kubectl read.
     Record status codes and health conclusions rather than response bodies that may contain customer data or credentials.
 
 Do not proceed from a partial assessment when the evidence cannot distinguish the known artifact from another failure.
@@ -56,18 +61,23 @@ Do not proceed from a partial assessment when the evidence cannot distinguish th
 The only infrastructure-changing command approved by this invocation is:
 
 ```sh
-kubectl rollout undo deployment/recommendationservice -n online-boutique
+kubectl --context=default rollout undo deployment/recommendationservice -n online-boutique --to-revision=<verified revision>
 ```
+
+`<verified revision>` is the integer revision already read from rollout history and proven to carry the documented healthy memory request and limit.
+Never run an unqualified undo, because an undo without `--to-revision` targets whatever the previous revision happens to be at execution time rather than the revision this assessment proved healthy.
 
 Run it only when all of these facts are true:
 
-- The active context is proven to be the documented non-production RunLit lab context.
+- The `default` context is proven to be the documented non-production RunLit lab cluster.
 - The current `recommendationservice` revision has a crash-loop or unavailable pod.
 - Pod termination state, repeated warning events, or bounded logs identify an OOM or low-memory failure.
 - The current deployment memory request or limit matches the known low-memory artifact rather than the documented healthy baseline.
-- Rollout history contains the immediately previous healthy revision with the documented memory request and limit.
+- Rollout history contains an earlier healthy revision whose memory request and limit equal the documented baseline, and that revision's integer number is recorded.
 
 Capture the current revision and crash-loop pod UIDs before the command.
+Immediately before running it, re-prove both facts that the command depends on: re-run `kubectl config current-context` and the `default` context identity check, and re-read `kubectl --context=default rollout history deployment/recommendationservice -n online-boutique` to confirm the current revision is still the broken one and `<verified revision>` still names the inspected healthy revision.
+If either recheck disagrees with the assessment, stop and reassess from the beginning rather than running the command.
 Run the undo at most once for one observed broken revision.
 If another operator has already changed the revision, reassess from the beginning and do not undo blindly.
 Do not use this rollback for an image, configuration, dependency, scheduling, storage, network, or unknown failure.
@@ -76,7 +86,7 @@ Do not use this rollback for an image, configuration, dependency, scheduling, st
 
 After the rollback, complete every verification step before calling the lab healthy.
 
-1. Run `kubectl rollout status deployment/recommendationservice -n online-boutique --timeout=60s` and verify desired, updated, available, and ready replicas converge.
+1. Run `kubectl --context=default rollout status deployment/recommendationservice -n online-boutique --timeout=60s` and verify desired, updated, available, and ready replicas converge.
    If it times out while the rollout is still progressing, report progress and repeat the bounded check rather than starting one long blocking wait.
 2. Re-read the deployment revision and memory JSONPath and verify both the request and limit equal the documented healthy baseline or the captured previous healthy revision.
 3. Verify the pre-rollback crash-loop pod UIDs are gone, the replacement pod is Ready, and the new pod is not accumulating restarts.
@@ -97,6 +107,8 @@ If the rollout, memory baseline, pod replacement, health checks, or relevant ale
 - Do not touch the private Postgres rollout.
 - Do not stop, restart, reconfigure, or profile the Mac mini worker runtime.
 - Do not touch Proxmox, the NAS, DNS, network configuration, provider accounts, or project code.
+- Do not send any cluster request, read or mutation, without an explicit `--context=default`, and never let the ambient current context decide which cluster a command reaches; the `kubectl config current-context` identity check is the only local kubeconfig read exempt from the flag.
+- Do not run a cluster-wide `-A` read; scope every namespaced read to the documented `online-boutique` or `monitoring` namespace.
 - Do not delete pods as the primary fix for a Deployment-managed fault.
 - Do not scale, patch, apply, restart, or roll back any other Kubernetes resource.
 - Do not suppress, inhibit, or silence alerts unless the captain separately asks for that action.
@@ -107,7 +119,7 @@ Stop before running it and provide the exact proposed command, target resources,
 
 ## Evidence and captain handoff
 
-When the active RunLit home is known and writable, write a concise local note to `$FM_HOME/data/runlit-lab-fix-<UTC timestamp>.md`.
+When the active RunLit home is known and writable, resolve the effective home the way `docs/configuration.md` describes and write a concise local note to `data/runlit-lab-fix-<UTC timestamp>.md` under it.
 If the request arrived through the primary home, the RunLit second mate or its worker writes the note in the RunLit home rather than the primary home.
 Do not guess a home path or write the note into project code.
 

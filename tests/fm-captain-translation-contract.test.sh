@@ -158,17 +158,35 @@ test_runlit_lab_fix_is_bounded_and_user_invocable() {
   pass "RunLit lab repair is internal, user-invocable, and precisely triggered"
 }
 
+# The prescriptive body of the skill: everything except the "Hard boundaries"
+# prohibition list, where naming a forbidden command strengthens the contract
+# instead of authorizing it.
+runlit_prescribed_commands() {
+  awk '
+    /^## Hard boundaries$/ { skipping = 1; next }
+    skipping && /^## / { skipping = 0 }
+    !skipping { print }
+  ' "$RUNLIT"
+}
+
 test_runlit_lab_fix_owns_safe_repair_contract() {
+  local prescribed
   for phrase in \
     'kubectl config current-context' \
-    'kubectl get nodes -o wide' \
-    'kubectl get pods -A -o wide' \
-    'kubectl get deployments -A' \
-    'type=Warning' \
+    'kubectl --context=default get nodes -o wide' \
+    'kubectl --context=default get pods -n online-boutique -o wide' \
+    'kubectl --context=default get deployments -n online-boutique' \
+    'kubectl --context=default get events -n online-boutique --field-selector type=Warning' \
     'Prometheus and Alertmanager' \
     'storefront and backend' \
-    'kubectl rollout undo deployment/recommendationservice -n online-boutique' \
-    'kubectl rollout status deployment/recommendationservice -n online-boutique --timeout=60s' \
+    'kubectl --context=default rollout undo deployment/recommendationservice -n online-boutique --to-revision=<verified revision>' \
+    'Never run an unqualified undo' \
+    'kubectl --context=default rollout status deployment/recommendationservice -n online-boutique --timeout=60s' \
+    'scripts/k3s/CLUSTER-STATE.md' \
+    'scripts/k3s/README.md' \
+    'docs/dogfood/oom-crashloop-validation.md' \
+    'scripts/k3s/demo-chaos.sh' \
+    'stop before any cluster access or mutation and escalate to the captain' \
     'Do not delete the old pod to manufacture a passing result.' \
     'Do not touch production.' \
     'Do not touch Coolify.' \
@@ -178,13 +196,18 @@ test_runlit_lab_fix_owns_safe_repair_contract() {
     'Do not suppress, inhibit, or silence alerts unless the captain separately asks for that action.' \
     'Never print kubeconfig contents' \
     'exact proposed command, target resources, expected effect, rollback plan, and blast radius' \
-    '$FM_HOME/data/runlit-lab-fix-<UTC timestamp>.md'; do
+    'data/runlit-lab-fix-<UTC timestamp>.md'; do
     assert_grep "$phrase" "$RUNLIT" "RunLit lab repair contract is missing '$phrase'"
   done
-  assert_no_grep 'kubectl delete' "$RUNLIT" "RunLit lab repair skill includes a pod deletion command"
-  assert_no_grep 'kubectl apply' "$RUNLIT" "RunLit lab repair skill includes an apply command"
-  assert_no_grep 'kubectl patch' "$RUNLIT" "RunLit lab repair skill includes a patch command"
-  assert_no_grep 'kubectl rollout restart' "$RUNLIT" "RunLit lab repair skill includes a restart command"
+  assert_no_grep '$FM_HOME/data/' "$RUNLIT" "RunLit lab repair evidence path expands FM_HOME literally instead of resolving the effective home"
+  prescribed=$(runlit_prescribed_commands)
+  assert_not_contains "$prescribed" 'kubectl delete' "RunLit lab repair skill prescribes a pod deletion command"
+  assert_not_contains "$prescribed" 'kubectl apply' "RunLit lab repair skill prescribes an apply command"
+  assert_not_contains "$prescribed" 'kubectl patch' "RunLit lab repair skill prescribes a patch command"
+  assert_not_contains "$prescribed" 'kubectl rollout restart' "RunLit lab repair skill prescribes a restart command"
+  assert_not_contains "$prescribed" 'kubectl get pods -A' "RunLit lab repair skill prescribes a cluster-wide pod read"
+  assert_not_contains "$prescribed" 'kubectl get deployments -A' "RunLit lab repair skill prescribes a cluster-wide deployment read"
+  assert_not_contains "$prescribed" 'kubectl get events -A' "RunLit lab repair skill prescribes a cluster-wide event read"
   pass "RunLit lab repair owns one guarded mutation and the required evidence and safety boundaries"
 }
 
