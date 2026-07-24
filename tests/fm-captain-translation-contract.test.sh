@@ -211,11 +211,14 @@ test_runlit_lab_fix_owns_safe_repair_contract() {
     'is no defense against a changed `KUBECONFIG`' \
     "the home's \`data/projects.md\` registry names" \
     'require only that the worktree'"'"'s base is the project'"'"'s default branch' \
-    'or against `git ls-remote`' \
+    'Prove currency with a non-mutating `git ls-remote` read of the remote default branch' \
+    'never as the proof itself' \
     'Never run `git fetch`, or any other state-changing git command, under `projects/`' \
     'Do not open a `kubectl port-forward` or `kubectl proxy` tunnel' \
     'external read-only URLs that `scripts/k3s/CLUSTER-STATE.md` documents' \
-    'record its alert state as unverified' \
+    'record that one service'"'"'s target and alert state as unavailable' \
+    'never report an unavailable check as healthy, and never report it as a failed check either' \
+    'Do not call monitoring or alerting healthy on an unavailable check' \
     'kubectl --context=default get replicasets -n online-boutique -l app=recommendationservice' \
     'Never widen it into a full revision or ReplicaSet template dump' \
     'kubectl --context=default get nodes -o wide' \
@@ -283,6 +286,24 @@ test_runlit_lab_fix_prescribes_no_mutating_or_cluster_wide_kubectl() {
     fail "RunLit lab repair skill writes a kubectl command outside a code span, where the command guards cannot see it"
   fi
   pass "RunLit lab repair prescribes no mutating or cluster-wide kubectl command in any flag order"
+}
+
+test_runlit_lab_fix_carries_unavailable_outcome_into_verification() {
+  local verification
+  verification=$(awk '
+    /^## Verification$/ { found = 1; next }
+    found && /^## / { exit }
+    found { print }
+  ' "$RUNLIT")
+  assert_contains "$verification" 'unavailable, which is neither passed nor failed' \
+    "the Verification section does not carry the assessment's unavailable outcome, so an unreachable check has to be forced into pass or fail"
+  assert_contains "$verification" 'do not call monitoring or alerting healthy on that evidence' \
+    "the Verification section lets a missing or unreachable monitoring URL read as healthy"
+  assert_contains "$verification" 'the application-level repair is verified, monitoring or alerting verification was unavailable, and the missing URL or access path is named' \
+    "the Verification verdict has no narrower app-only conclusion, so an unavailable monitoring check forces a false not-healthy or a silent deviation"
+  assert_no_grep 'unverified' "$RUNLIT" \
+    "RunLit lab repair mixes 'unverified' into the 'unavailable' outcome vocabulary"
+  pass "RunLit lab repair carries the unavailable outcome from assessment into the verification verdict"
 }
 
 test_runlit_lab_fix_reproves_cluster_identity_before_mutating() {
@@ -408,6 +429,7 @@ test_section_9_owner_is_not_duplicated_into_skills
 test_runlit_lab_fix_is_bounded_and_user_invocable
 test_runlit_lab_fix_owns_safe_repair_contract
 test_runlit_lab_fix_prescribes_no_mutating_or_cluster_wide_kubectl
+test_runlit_lab_fix_carries_unavailable_outcome_into_verification
 test_runlit_lab_fix_reproves_cluster_identity_before_mutating
 test_ahoy_is_an_internal_user_invocable_skill
 test_ahoy_readme_uses_cross_harness_convention

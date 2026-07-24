@@ -33,9 +33,10 @@ Perform the checks in this order and retain only the minimum output needed for d
    The checkout is the RunLit clone under the active home's `projects/` directory that the home's `data/projects.md` registry names, or the isolated task worktree the worker already runs in when that worktree is a RunLit checkout; when both resolve, they must be the same repository.
    Confirm the resolved path is the expected RunLit repository and that its sources are current.
    A dispatched worker runs on a task branch in an isolated worktree, so require only that the worktree's base is the project's default branch; never require the branch it is on to be the default branch itself.
-   Establish currency with read-only git commands only, such as comparing the checkout against its already-present remote-tracking ref or against `git ls-remote`.
+   Prove currency with a non-mutating `git ls-remote` read of the remote default branch and compare what it reports against what the checkout contains.
+   An already-present remote-tracking ref is only as fresh as the last fetch, which this skill never performs, so agreeing with it proves nothing on its own; treat that comparison as corroboration after `git ls-remote` has answered, never as the proof itself.
    Never run `git fetch`, or any other state-changing git command, under `projects/` or in any project worktree; the read-only project boundary in `AGENTS.md` section 1 outranks this check.
-   If no checkout resolves, more than one candidate resolves, the checkout is not the expected RunLit repository, currency cannot be established read-only, or any of the four sources below is missing, stop before any cluster access or mutation and escalate to the captain.
+   If no checkout resolves, more than one candidate resolves, the checkout is not the expected RunLit repository, `git ls-remote` cannot reach the remote, currency cannot be proven, or any of the four sources below is missing, treat it as a blocker: stop before any cluster access or mutation, never use these sources as mutation guidance, and escalate to the captain.
    Read the RunLit lab's documented topology from `scripts/k3s/CLUSTER-STATE.md` and `scripts/k3s/README.md` in that checkout, and identify the expected non-production kube context, namespaces, monitoring services, storefront route, backend route, and healthy resource baseline.
    Read the documented `recommendationservice` healthy memory request and limit, its expected container image, and its documented restore path from `docs/dogfood/oom-crashloop-validation.md` and `scripts/k3s/demo-chaos.sh` in that same checkout.
    These four files are the authoritative topology and baseline sources for this skill.
@@ -69,7 +70,8 @@ Perform the checks in this order and retain only the minimum output needed for d
 9. Inspect the documented Prometheus and Alertmanager workload readiness through the Kubernetes API, pinning `--context=default` and `-n monitoring` on every kubectl read.
    Read their targets and active alerts only over the external read-only URLs that `scripts/k3s/CLUSTER-STATE.md` documents for those two services, with plain GET requests.
    Those documented URLs are the single approved path to the monitoring HTTP APIs, and the hard boundaries below forbid tunnelling into the cluster to reach them by any other route.
-   If `scripts/k3s/CLUSTER-STATE.md` documents no reachable URL for either service, record its alert state as unverified and say so in the report rather than improvising an access path.
+   Judge the two services separately: whenever `scripts/k3s/CLUSTER-STATE.md` documents no URL for one of them, or the URL it documents cannot be reached, record that one service's target and alert state as unavailable and name the missing URL or access path, rather than improvising a path or letting the other service stand in for it.
+   Unavailable is a third outcome, not a health verdict: never report an unavailable check as healthy, and never report it as a failed check either.
    Record alert names, states, and relevant labels without copying secret-bearing configuration or full payloads.
 10. Check the documented storefront and backend deployment readiness and Service endpoints through the Kubernetes API, pinning `--context=default` and `-n online-boutique` on every kubectl read, then request the health URLs `scripts/k3s/CLUSTER-STATE.md` documents for them with read-only GETs under the same single-approved-path rule as step 9.
     Record status codes and health conclusions rather than response bodies that may contain customer data or credentials.
@@ -107,19 +109,23 @@ Do not use this rollback for an image, configuration, dependency, scheduling, st
 ## Verification
 
 After the rollback, complete every verification step before calling the lab healthy.
+A step whose documented access path does not exist or cannot be reached is unavailable, which is neither passed nor failed; carry that distinction from the assessment into the verdict below instead of forcing it into either.
 
 1. Run `kubectl --context=default rollout status deployment/recommendationservice -n online-boutique --timeout=60s` and verify desired, updated, available, and ready replicas converge.
    If it times out while the rollout is still progressing, report progress and repeat the bounded check rather than starting one long blocking wait.
 2. Re-read the deployment revision and memory JSONPath and verify both the request and limit equal the documented healthy baseline or the captured previous healthy revision.
 3. Verify the pre-rollback crash-loop pod UIDs are gone, the replacement pod is Ready, and the new pod is not accumulating restarts.
 4. Recheck warning events and confirm the low-memory or OOM warning has stopped recurring on the new revision.
-5. Recheck Prometheus and Alertmanager and confirm the related workload or availability alerts recover.
-6. Recheck the storefront and backend readiness, endpoints, and documented health URLs.
+5. Recheck Prometheus and Alertmanager over the external URLs `scripts/k3s/CLUSTER-STATE.md` documents and confirm the related workload or availability alerts recover.
+   Judge the two services separately as step 9 does, and when one service's documented URL is missing or unreachable, record its alert recovery as unavailable and do not call monitoring or alerting healthy on that evidence.
+6. Recheck the storefront and backend readiness, endpoints, and documented health URLs, recording any missing or unreachable documented URL as unavailable rather than as a passed or failed check.
 7. Observe the repaired state for a bounded period long enough to catch an immediate repeat crash and alert reevaluation.
 
 Do not delete the old pod to manufacture a passing result.
 The Deployment controller must replace it as part of the rollback.
 If the rollout, memory baseline, pod replacement, health checks, or relevant alerts do not recover, report that the lab is not yet healthy.
+When every check that could run passed but a monitoring or health check was unavailable, report only the narrower conclusion the evidence supports: the application-level repair is verified, monitoring or alerting verification was unavailable, and the missing URL or access path is named.
+Never widen that into a claim that the lab, its monitoring, or its alerting is healthy, and never downgrade it into a claim that a check failed.
 
 ## Hard boundaries
 
@@ -133,8 +139,9 @@ If the rollout, memory baseline, pod replacement, health checks, or relevant ale
 - Do not accept a context name as proof of cluster identity, and do not treat the `--context=default` pin as protection against a changed `KUBECONFIG`; only the documented API server URL comparison proves it.
 - Do not dump a full revision or ReplicaSet template, or any container environment, when choosing the rollback revision; read only the narrow fields step 7 names.
 - Do not run a cluster-wide `-A` read; scope every namespaced read to the documented `online-boutique` or `monitoring` namespace.
-- Do not open a `kubectl port-forward` or `kubectl proxy` tunnel, exec or attach into a pod, or copy files out of one; reach an in-cluster HTTP API only over the read-only URLs `scripts/k3s/CLUSTER-STATE.md` documents, and report the check as unverified when no documented URL is reachable.
-- Do not run `git fetch` or any other state-changing command in the RunLit checkout; prove source currency with read-only git reads only.
+- Do not open a `kubectl port-forward` or `kubectl proxy` tunnel, exec or attach into a pod, or copy files out of one; reach an in-cluster HTTP API only over the read-only URLs `scripts/k3s/CLUSTER-STATE.md` documents, and report that service's check as unavailable when no documented URL is reachable.
+- Do not call monitoring or alerting healthy on an unavailable check, and do not report an unavailable check as a failure; name the missing URL or access path instead.
+- Do not run `git fetch` or any other state-changing command in the RunLit checkout; prove source currency with a non-mutating `git ls-remote` read, never with a remote-tracking ref alone.
 - Do not delete pods as the primary fix for a Deployment-managed fault.
 - Do not scale, patch, apply, restart, or roll back any other Kubernetes resource.
 - Do not suppress, inhibit, or silence alerts unless the captain separately asks for that action.
@@ -156,7 +163,8 @@ The note records:
 - Precheck and postcheck summaries for nodes, workloads, warning events, monitoring, storefront, and backend.
 - The `recommendationservice` revisions, pod UIDs, restart evidence, and memory request and limit before and after.
 - Whether the whitelisted command ran and its result.
-- Relevant alert names and recovery state.
+- Relevant alert names and recovery state, each recorded as recovered, not recovered, or unavailable with its missing URL or access path named.
+- The source currency proof, recorded as the `git ls-remote` comparison result rather than as a bare assertion that the checkout was current.
 - Any unresolved symptom or required captain decision.
 
 Keep raw secrets, kubeconfig content, Secret objects, credentials, full logs, and sensitive response bodies out of the note.
@@ -164,4 +172,5 @@ Keep raw secrets, kubeconfig content, Secret objects, credentials, full logs, an
 Report the outcome concisely using `AGENTS.md` section 9's captain-facing translation contract.
 State whether the lab was already healthy, was restored by the approved rollback, or remains unhealthy.
 Name the verified storefront, backend, recommendation service, and alert state, then link the local evidence note when one was written.
+When a monitoring or health check was unavailable, say so in that same summary, name the missing URL or access path, and scope the claim to the application-level repair instead of to the lab as a whole.
 If more mutation is needed, end with the exact decision-ready proposal and do not imply that the original invocation approved it.
