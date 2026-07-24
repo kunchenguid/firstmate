@@ -72,9 +72,10 @@ Text left in established structure remains `pending`, text in ambiguous structur
 
 OpenCode 1.18.4 has one busy-queue exception.
 While OpenCode is mid-turn, Enter queues the message but leaves its text visible until the turn completes.
-After the normal retry budget, only structurally proven pending text in a provably busy pane is accepted as queued, while an idle pane remains `pending` as a genuine swallowed Enter.
+After the normal retry budget, only structurally proven pending text in a provably busy pane is accepted as queued, while an idle-but-still-`pending` pane gets one bounded `FM_SEND_GRACE` grace re-check (composer, then busy) before `pending` ships as a genuine swallowed Enter.
 Ambiguous pending text never receives the busy-queue conversion.
-`tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
+The grace window rescues a large multi-line paste that arrived in several bracketed-paste chunks, or a redraw slowed by fleet load; a truly swallowed Enter does not change on its own, so the re-check cannot turn a real swallow into a false `empty`.
+`tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers, and `tests/fm-tmux-submit-grace.test.sh` covers the grace re-check (clears during grace -> `empty`, never clears -> `pending`).
 
 ## Limits and regression entry points
 
@@ -87,6 +88,7 @@ tests/fm-backend-tmux-smoke.test.sh
 tests/fm-composer-ghost.test.sh
 tests/fm-kimi-harness.test.sh
 tests/fm-tmux-submit-busy.test.sh
+tests/fm-tmux-submit-grace.test.sh
 tests/fm-bootstrap.test.sh
 ```
 

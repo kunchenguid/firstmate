@@ -246,13 +246,18 @@ primary is mid-turn is treated as wedged.
 The shared `fm_tmux_submit_enter_core` (`bin/fm-tmux-lib.sh`) now falls back
 to `fm_pane_is_busy` once the Enter-retry budget is spent: a busy pane means
 the Enter was accepted and queued (reported as `empty` so the caller does not
-re-send), while an idle pane keeps `pending` as a genuine swallow. The herdr
-adapter observes the same opencode behavior but needs a separate fix; it is
-recorded as a known gap in `docs/herdr-backend.md` rather than patched here,
-so the tmux adapter does not paper over a herdr-specific shape.
+re-send), while an idle pane gets one bounded `FM_SEND_GRACE` re-check
+(composer, then busy again) before `pending` ships as a genuine swallow - a
+fixed retry budget can otherwise race a large multi-line paste split across
+several chunks, or fleet load slowing tmux's own redraw. The herdr adapter
+observes the same opencode behavior but needs a separate fix; it is recorded
+as a known gap in `docs/herdr-backend.md` rather than patched here, so the
+tmux adapter does not paper over a herdr-specific shape.
 Regression coverage: `tests/fm-tmux-submit-busy.test.sh` covers the four
 scenarios (busy + pending -> `empty`, idle + pending -> `pending`, busy +
-cleared -> `empty`, idle + cleared -> `empty`).
+cleared -> `empty`, idle + cleared -> `empty`); `tests/fm-tmux-submit-grace.test.sh`
+covers the grace-window re-check (clears during grace -> `empty`, never
+clears -> `pending`).
 
 **Primary-session guard fact (verified 2026-07-08, OpenCode 1.17.6).**
 The firstmate PRIMARY's own `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`.
