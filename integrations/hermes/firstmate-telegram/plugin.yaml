@@ -1,0 +1,7 @@
+name: firstmate-telegram
+version: 1.0.0
+kind: standalone
+description: "Authenticated /firstmate Telegram transport into a local Firstmate primary. Hermes remains transport-only."
+author: Firstmate
+hooks:
+  - pre_gateway_dispatch
