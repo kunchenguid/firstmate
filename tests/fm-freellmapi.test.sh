@@ -144,6 +144,13 @@ test_static_pin_and_safety_contract() {
   assert_grep 'NODE_ENV=production' "$TOOL" "tool must run upstream in production mode so a dev fallback key is refused"
   assert_grep '--accept-risks' "$TOOL" "install must be gated on explicit risk acceptance"
   assert_no_grep 'set -x' "$TOOL" "tool must never enable shell tracing around secrets"
+  # Honest secret contract: argv protection, not absolute process-listing immunity.
+  assert_grep 'never on argv' "$TOOL" "tool must state secrets are never on argv"
+  assert_grep 'same OS user can still inspect' "$TOOL" "tool must not overclaim process-env secrecy"
+  assert_no_grep 'cannot surface in a process listing' "$TOOL" "tool must not claim absolute process-listing protection"
+  # status alerts; only start stops a bad bind.
+  assert_grep 'status fails with a' "$TOOL" "help must say status fails without stopping"
+  assert_grep 'does not stop' "$TOOL" "help must say status does not stop on bad bind"
   pass "static pin and safety contract"
 }
 
@@ -155,6 +162,7 @@ test_help_states_policy() {
   expect_code 0 "$code" "--help exit"
   assert_contains "$out" "127.0.0.1" "help must state the localhost-only binding"
   assert_contains "$out" "never appear in stdout" "help must state the secret-safety contract"
+  assert_contains "$out" "same OS user can still inspect" "help must not overclaim process-env secrecy"
   assert_contains "$out" "docs/freellmapi-lane.md" "help must point at the lane policy doc"
   pass "help states policy"
 }
@@ -401,6 +409,34 @@ EOF
   pass "status reports not running"
 }
 
+test_status_warns_on_non_loopback_without_stopping() {
+  local root home fakebin cap pid alive
+  root=$(fm_test_tmproot fm-freellmapi)
+  read -r home fakebin <<EOF
+$(fresh_home "$root")
+EOF
+  cap="$root/cap"
+  server_fakes "$fakebin" "$cap"
+  built_install "$home"
+  run_tool "$home" "$fakebin" start
+  expect_code 0 "$CODE" "start before status"
+  pid=$(cat "$home/data/freellmapi/run/server.pid")
+  set +e
+  OUT=$(FM_HOME="$home" PATH="$fakebin:$PATH" FAKE_LSOF_ADDR=0.0.0.0 \
+    FM_FREELLMAPI_STOP_TIMEOUT=2 "$TOOL" status 2>&1)
+  CODE=$?
+  set -e
+  [ "$CODE" -ne 0 ] || fail "status must fail when a listener is not loopback"
+  assert_contains "$OUT" "WARNING" "status must warn on non-loopback bind"
+  assert_contains "$OUT" "status does not stop" "status must say it does not stop"
+  alive=0
+  kill -0 "$pid" 2>/dev/null && alive=1
+  [ "$alive" -eq 1 ] || fail "status must not stop the server (only start/stop do)"
+  assert_absent "$cap/node-signal.capture" "status must not send TERM on bad bind"
+  stop_lane "$home" "$fakebin"
+  pass "status warns on non-loopback without stopping"
+}
+
 test_stop_gracefully_terminates() {
   local root home fakebin cap
   root=$(fm_test_tmproot fm-freellmapi)
@@ -472,6 +508,7 @@ test_seed_keys_refuses_missing_env_and_var
 test_seed_keys_sends_value_via_stdin_only
 test_seed_keys_refuses_injection_prone_value
 test_status_reports_not_running
+test_status_warns_on_non_loopback_without_stopping
 test_stop_gracefully_terminates
 test_stop_refuses_foreign_pid
 test_stop_without_pid_record
