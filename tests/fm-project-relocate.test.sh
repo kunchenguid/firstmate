@@ -223,6 +223,46 @@ test_refuses_unlanded_tags_and_stashes() {
   pass "unlanded local tags and stashes both refuse relocation"
 }
 
+test_refuses_root_replacement_and_busy_registry() {
+  local pair home destination fakebin real_python replacement out rc
+  pair=$(make_case alpha)
+  home=${pair%%$'\t'*}
+  destination="$TMP_ROOT/destination-root-race"
+  fakebin="$TMP_ROOT/fake-python"
+  replacement="$TMP_ROOT/replacement-projects"
+  real_python=$(command -v python3)
+  mkdir -p "$destination" "$fakebin" "$replacement"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'mv "$RELOCATE_RACE_ROOT" "$RELOCATE_RACE_ROOT.original"' \
+    'ln -s "$RELOCATE_RACE_REPLACEMENT" "$RELOCATE_RACE_ROOT"' \
+    'exec "$RELOCATE_REAL_PYTHON" "$@"' \
+    > "$fakebin/python3"
+  chmod +x "$fakebin/python3"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" \
+    RELOCATE_RACE_ROOT="$home/projects" \
+    RELOCATE_RACE_REPLACEMENT="$replacement" \
+    RELOCATE_REAL_PYTHON="$real_python" \
+    run_relocate "$home" alpha "$destination" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "root replacement unexpectedly succeeded"
+  assert_contains "$out" "source or destination root changed before rename" \
+    "root replacement did not explain its refusal"
+  assert_present "$home/projects.original/alpha" "root replacement moved the source clone"
+  assert_absent "$destination/alpha" "root replacement created a destination clone"
+  assert_grep "- alpha " "$home/data/projects.md" "root replacement changed the primary registry"
+
+  pair=$(make_case beta)
+  home=${pair%%$'\t'*}
+  destination="$TMP_ROOT/destination-registry-lock"
+  mkdir -p "$destination" "$home/data/.fm-project-relocate.projects.lock"
+
+  assert_refused_unchanged "$home" "$destination" beta "project registry is busy" \
+    "busy project registry"
+  pass "root replacement and a busy project registry refuse relocation"
+}
+
 test_refuses_task_and_secondmate_references() {
   local pair home clone destination source_abs
   pair=$(make_case alpha)
@@ -286,5 +326,6 @@ test_refuses_symlink_source_and_destination_root
 test_refuses_linked_worktree_and_dirty_worktree
 test_refuses_unpushed_and_pushed_unlanded_branches
 test_refuses_unlanded_tags_and_stashes
+test_refuses_root_replacement_and_busy_registry
 test_refuses_task_and_secondmate_references
 test_refuses_traversal_duplicate_registry_and_gate_agent

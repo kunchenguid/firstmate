@@ -88,6 +88,13 @@ device_for_path() {
   esac
 }
 
+directory_identity() {
+  case "$(uname -s)" in
+    Darwin) stat -f '%d:%i' "$1" ;;
+    *) stat -c '%d:%i' "$1" ;;
+  esac
+}
+
 optional_operational_dir() {
   local path=$1 label=$2
   if [ -L "$path" ]; then
@@ -248,9 +255,11 @@ registered_secondmate_references_project() {
 REGISTRY_ACTION=none
 REGISTRY_TMP=
 REGISTRY_ORIGINAL=
+REGISTRY_LOCK=
 cleanup_registry_tmp() {
   [ -n "${REGISTRY_TMP:-}" ] && rm -f "$REGISTRY_TMP"
   [ -n "${REGISTRY_ORIGINAL:-}" ] && rm -f "$REGISTRY_ORIGINAL"
+  [ -n "${REGISTRY_LOCK:-}" ] && rmdir "$REGISTRY_LOCK" 2>/dev/null || true
   return 0
 }
 trap cleanup_registry_tmp EXIT HUP INT TERM
@@ -259,6 +268,13 @@ prepare_registry_update() {
   local count
   [ -n "${DATA_ABS:-}" ] || return 0
   [ -e "$REGISTRY" ] || [ -L "$REGISTRY" ] || return 0
+  [ ! -L "$REGISTRY" ] \
+    || die "project registry must not be a symlink: $REGISTRY"
+  [ -f "$REGISTRY" ] \
+    || die "project registry is not a regular file: $REGISTRY"
+  REGISTRY_LOCK="$DATA_ABS/.fm-project-relocate.projects.lock"
+  mkdir "$REGISTRY_LOCK" 2>/dev/null \
+    || die "project registry is busy: $REGISTRY"
   [ ! -L "$REGISTRY" ] \
     || die "project registry must not be a symlink: $REGISTRY"
   [ -f "$REGISTRY" ] \
@@ -292,38 +308,63 @@ publish_registry_update() {
 
 atomic_rename_no_replace() {
   command -v python3 >/dev/null 2>&1 || return 4
-  python3 - "$1" "$2" <<'PY'
+  python3 - "$1" "$2" "$3" "$4" "$5" "$6" <<'PY'
 import ctypes
 import errno
 import os
+import stat
 import sys
 
-source, destination = map(os.fsencode, sys.argv[1:])
-libc = ctypes.CDLL(None, use_errno=True)
-if sys.platform.startswith("linux"):
-    rename = getattr(libc, "renameat2", None)
-    if rename is None:
-        sys.exit(4)
-    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-    rename.restype = ctypes.c_int
-    result = rename(-100, source, -100, destination, 1)
-elif sys.platform == "darwin":
-    rename = getattr(libc, "renamex_np", None)
-    if rename is None:
-        sys.exit(4)
-    rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-    rename.restype = ctypes.c_int
-    result = rename(source, destination, 4)
-else:
+source_root, source_identity, source_name, destination_root, destination_identity, destination_name = sys.argv[1:]
+if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
     sys.exit(4)
-if result == 0:
-    sys.exit(0)
-error = ctypes.get_errno()
-if error == errno.EEXIST:
-    sys.exit(3)
-if error in (errno.ENOSYS, errno.EOPNOTSUPP):
-    sys.exit(4)
-sys.exit(1)
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+if hasattr(os, "O_CLOEXEC"):
+    flags |= os.O_CLOEXEC
+try:
+    source_fd = os.open(source_root, flags)
+    destination_fd = os.open(destination_root, flags)
+except OSError:
+    sys.exit(5)
+try:
+    source_stat = os.fstat(source_fd)
+    destination_stat = os.fstat(destination_fd)
+    if not stat.S_ISDIR(source_stat.st_mode) or not stat.S_ISDIR(destination_stat.st_mode):
+        sys.exit(5)
+    if f"{source_stat.st_dev}:{source_stat.st_ino}" != source_identity:
+        sys.exit(5)
+    if f"{destination_stat.st_dev}:{destination_stat.st_ino}" != destination_identity:
+        sys.exit(5)
+    source = os.fsencode(source_name)
+    destination = os.fsencode(destination_name)
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform.startswith("linux"):
+        rename = getattr(libc, "renameat2", None)
+        if rename is None:
+            sys.exit(4)
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(source_fd, source, destination_fd, destination, 1)
+    elif sys.platform == "darwin":
+        rename = getattr(libc, "renameatx_np", None)
+        if rename is None:
+            sys.exit(4)
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(source_fd, source, destination_fd, destination, 4)
+    else:
+        sys.exit(4)
+    if result == 0:
+        sys.exit(0)
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        sys.exit(3)
+    if error in (errno.ENOSYS, errno.EOPNOTSUPP):
+        sys.exit(4)
+    sys.exit(1)
+finally:
+    os.close(source_fd)
+    os.close(destination_fd)
 PY
 }
 
@@ -332,7 +373,9 @@ rollback_relocation() {
     printf 'ERROR: registry update failed and source path was recreated; clone remains at %s\n' "$DESTINATION" >&2
     return 1
   fi
-  if atomic_rename_no_replace "$DESTINATION" "$SOURCE"; then
+  if atomic_rename_no_replace \
+    "$DESTINATION_ROOT" "$DESTINATION_ROOT_ID" "$NAME" \
+    "$PROJECTS_ABS" "$PROJECTS_ID" "$NAME"; then
     return 0
   fi
   printf 'ERROR: registry update failed and inverse rename also failed; clone remains at %s\n' "$DESTINATION" >&2
@@ -358,12 +401,16 @@ esac
 fm_refuse_if_gate_agent "$FM_ROOT"
 
 PROJECTS_ABS=$(canonical_ordinary_dir "$PROJECTS" "source projects root") || exit 1
+PROJECTS_ID=$(directory_identity "$PROJECTS_ABS") \
+  || die "cannot determine source projects root identity"
 SOURCE="$PROJECTS_ABS/$NAME"
 SOURCE=$(canonical_ordinary_dir "$SOURCE" "source project") || exit 1
 path_is_direct_child "$PROJECTS_ABS" "$SOURCE" \
   || die "source project escapes the declared projects root"
 
 DESTINATION_ROOT=$(canonical_ordinary_dir "$DESTINATION_ROOT_RAW" "destination root") || exit 1
+DESTINATION_ROOT_ID=$(directory_identity "$DESTINATION_ROOT") \
+  || die "cannot determine destination root identity"
 DESTINATION="$DESTINATION_ROOT/$NAME"
 path_is_direct_child "$DESTINATION_ROOT" "$DESTINATION" \
   || die "destination project escapes the declared destination root"
@@ -410,11 +457,14 @@ fi
 prepare_registry_update
 
 rename_rc=0
-atomic_rename_no_replace "$SOURCE" "$DESTINATION" || rename_rc=$?
+atomic_rename_no_replace \
+  "$PROJECTS_ABS" "$PROJECTS_ID" "$NAME" \
+  "$DESTINATION_ROOT" "$DESTINATION_ROOT_ID" "$NAME" || rename_rc=$?
 case "$rename_rc" in
   0) ;;
   3) fail_after_move "destination project path appeared before rename; source remains at $SOURCE" ;;
   4) fail_after_move "atomic no-replace rename is unavailable; source remains at $SOURCE" ;;
+  5) fail_after_move "source or destination root changed before rename; source remains at $SOURCE" ;;
   *) fail_after_move "rename failed; source remains at $SOURCE" ;;
 esac
 if ! publish_registry_update; then
