@@ -30,9 +30,12 @@ Keep the task operational and evidence-producing only, with no project-code edit
 Perform the checks in this order and retain only the minimum output needed for diagnosis.
 
 1. Resolve one unambiguous RunLit project checkout first, and read every source below from that same checkout.
-   The checkout is the RunLit clone under the active home's `projects/` directory that the home's `data/projects.md` registry names, or the worker's own checkout when it already runs inside the RunLit repository; when both resolve, they must be the same repository.
-   Confirm the resolved path is the expected RunLit repository, is on its default branch, and is current with its remote rather than a detached, diverged, or long-stale copy.
-   If no checkout resolves, more than one candidate resolves, the checkout is not the expected current RunLit repository, or any of the four sources below is missing, stop before any cluster access or mutation and escalate to the captain.
+   The checkout is the RunLit clone under the active home's `projects/` directory that the home's `data/projects.md` registry names, or the isolated task worktree the worker already runs in when that worktree is a RunLit checkout; when both resolve, they must be the same repository.
+   Confirm the resolved path is the expected RunLit repository and that its sources are current.
+   A dispatched worker runs on a task branch in an isolated worktree, so require only that the worktree's base is the project's default branch; never require the branch it is on to be the default branch itself.
+   Establish currency with read-only git commands only, such as comparing the checkout against its already-present remote-tracking ref or against `git ls-remote`.
+   Never run `git fetch`, or any other state-changing git command, under `projects/` or in any project worktree; the read-only project boundary in `AGENTS.md` section 1 outranks this check.
+   If no checkout resolves, more than one candidate resolves, the checkout is not the expected RunLit repository, currency cannot be established read-only, or any of the four sources below is missing, stop before any cluster access or mutation and escalate to the captain.
    Read the RunLit lab's documented topology from `scripts/k3s/CLUSTER-STATE.md` and `scripts/k3s/README.md` in that checkout, and identify the expected non-production kube context, namespaces, monitoring services, storefront route, backend route, and healthy resource baseline.
    Read the documented `recommendationservice` healthy memory request and limit, its expected container image, and its documented restore path from `docs/dogfood/oom-crashloop-validation.md` and `scripts/k3s/demo-chaos.sh` in that same checkout.
    These four files are the authoritative topology and baseline sources for this skill.
@@ -63,9 +66,12 @@ Perform the checks in this order and retain only the minimum output needed for d
    Never widen it into a full revision or ReplicaSet template dump, including `rollout history --revision=<n>`, because those echo container environment variables this skill must not print.
 8. Read only the service's memory request and limit with a narrow JSONPath query such as `kubectl --context=default get deployment recommendationservice -n online-boutique -o jsonpath='{range .spec.template.spec.containers[*]}{.name}{" request="}{.resources.requests.memory}{" limit="}{.resources.limits.memory}{"\n"}{end}'`.
    Use pod status, termination reasons, warning events, and only a bounded tail of service logs when needed to distinguish an OOM or low-memory crash loop from an unrelated failure.
-9. Inspect the documented Prometheus and Alertmanager workloads, readiness, targets, and active alerts through their read-only Kubernetes or HTTP APIs, pinning `--context=default` and `-n monitoring` on every kubectl read.
+9. Inspect the documented Prometheus and Alertmanager workload readiness through the Kubernetes API, pinning `--context=default` and `-n monitoring` on every kubectl read.
+   Read their targets and active alerts only over the external read-only URLs that `scripts/k3s/CLUSTER-STATE.md` documents for those two services, with plain GET requests.
+   Those documented URLs are the single approved path to the monitoring HTTP APIs, and the hard boundaries below forbid tunnelling into the cluster to reach them by any other route.
+   If `scripts/k3s/CLUSTER-STATE.md` documents no reachable URL for either service, record its alert state as unverified and say so in the report rather than improvising an access path.
    Record alert names, states, and relevant labels without copying secret-bearing configuration or full payloads.
-10. Check the documented storefront and backend deployment readiness, Service endpoints, and health URLs with read-only GET requests, pinning `--context=default` and `-n online-boutique` on every kubectl read.
+10. Check the documented storefront and backend deployment readiness and Service endpoints through the Kubernetes API, pinning `--context=default` and `-n online-boutique` on every kubectl read, then request the health URLs `scripts/k3s/CLUSTER-STATE.md` documents for them with read-only GETs under the same single-approved-path rule as step 9.
     Record status codes and health conclusions rather than response bodies that may contain customer data or credentials.
 
 Do not proceed from a partial assessment when the evidence cannot distinguish the known artifact from another failure.
@@ -127,6 +133,8 @@ If the rollout, memory baseline, pod replacement, health checks, or relevant ale
 - Do not accept a context name as proof of cluster identity, and do not treat the `--context=default` pin as protection against a changed `KUBECONFIG`; only the documented API server URL comparison proves it.
 - Do not dump a full revision or ReplicaSet template, or any container environment, when choosing the rollback revision; read only the narrow fields step 7 names.
 - Do not run a cluster-wide `-A` read; scope every namespaced read to the documented `online-boutique` or `monitoring` namespace.
+- Do not open a `kubectl port-forward` or `kubectl proxy` tunnel, exec or attach into a pod, or copy files out of one; reach an in-cluster HTTP API only over the read-only URLs `scripts/k3s/CLUSTER-STATE.md` documents, and report the check as unverified when no documented URL is reachable.
+- Do not run `git fetch` or any other state-changing command in the RunLit checkout; prove source currency with read-only git reads only.
 - Do not delete pods as the primary fix for a Deployment-managed fault.
 - Do not scale, patch, apply, restart, or roll back any other Kubernetes resource.
 - Do not suppress, inhibit, or silence alerts unless the captain separately asks for that action.

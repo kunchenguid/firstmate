@@ -210,6 +210,12 @@ test_runlit_lab_fix_owns_safe_repair_contract() {
     'Do not accept a context name as proof of cluster identity' \
     'is no defense against a changed `KUBECONFIG`' \
     "the home's \`data/projects.md\` registry names" \
+    'require only that the worktree'"'"'s base is the project'"'"'s default branch' \
+    'or against `git ls-remote`' \
+    'Never run `git fetch`, or any other state-changing git command, under `projects/`' \
+    'Do not open a `kubectl port-forward` or `kubectl proxy` tunnel' \
+    'external read-only URLs that `scripts/k3s/CLUSTER-STATE.md` documents' \
+    'record its alert state as unverified' \
     'kubectl --context=default get replicasets -n online-boutique -l app=recommendationservice' \
     'Never widen it into a full revision or ReplicaSet template dump' \
     'kubectl --context=default get nodes -o wide' \
