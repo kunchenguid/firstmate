@@ -70,9 +70,10 @@ If doctor reports an environment, authentication, or daemon problem, resolve tha
 
 ## Remove
 
-Project removal is destructive and is not one of Firstmate's current direct-write exceptions under `projects/`.
+Project removal is destructive and is not a general direct-write exception under `projects/`.
 Never issue a raw removal command from Firstmate.
-First obtain the captain's explicit removal decision, then inspect the current digest and authoritative repositories for in-flight or queued work, registered secondmate clones, linked worktrees, dirty files, unpushed commits, and any other unlanded work.
+First obtain the captain's explicit decision, then inspect the current digest and authoritative repositories for in-flight or queued work, registered secondmate clones, linked worktrees, dirty files, unpushed commits, and any other unlanded work.
+For a captain-authorized relocation, use only `bin/fm-project-relocate.sh <project-name> <destination-root>`.
+Its header and help own the exact path, clone, landed-work, reference, rename, rollback, and primary-registry guards.
 If any dependency or unlanded work exists, stop and report it before changing the registry.
-Until a guarded removal helper and corresponding prime-directive exception exist, report that implementation gap instead of bypassing the project-write boundary.
-When a clone has already been removed through an approved guarded path, or the registry is provably stale because no clone exists, remove its registry line so navigation matches reality.
+When a clone has already been relocated through the guarded helper, or the registry is provably stale because no clone exists, remove its registry line so navigation matches reality.
