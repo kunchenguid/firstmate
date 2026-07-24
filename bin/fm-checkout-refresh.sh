@@ -2614,25 +2614,29 @@ pool_preflight() {
   fi
   while IFS=$'\t' read -r treehouse_state pool worktree; do
     [ -n "$worktree" ] || continue
+    # A worktree we cannot fully inspect is SKIPPED, not fatal. The preflight
+    # iterates every Treehouse worktree in every pool, so a single busy,
+    # foreign, or half-torn-down worktree anywhere (including unrelated pools)
+    # must not cap acquisition for THIS pool - Treehouse pools grow, and acquire
+    # creates a fresh clean slot when no existing one is reusable. This mirrors
+    # the dirty-worktree case below, which already skips without failing. We can
+    # only confirm a worktree belongs to the target pool AFTER inspecting it, so
+    # an uninspectable one is by definition not provably ours to block on.
     backing_checkout "$worktree" "$pool" "$treehouse_state" >/dev/null 2>&1 || {
       echo "checkout-refresh: skipped: Treehouse worktree identity or registration is not inspectable: $worktree" >&2
-      failed=1
       continue
     }
     canonical=$(exact_git_root "$worktree" 2>/dev/null) || {
       echo "checkout-refresh: skipped: Treehouse worktree is not an exact Git root: $worktree" >&2
-      failed=1
       continue
     }
     common=$(fm_checkout_git_common_dir "$canonical") || {
       echo "checkout-refresh: skipped: Treehouse repository identity is not inspectable: $canonical" >&2
-      failed=1
       continue
     }
     [ "$common" = "$expected_common" ] || continue
     dirty=$(GIT_OPTIONAL_LOCKS=0 git -C "$canonical" status --porcelain=v1 --untracked-files=all 2>/dev/null) || {
       echo "checkout-refresh: skipped: Treehouse worktree cleanliness is not inspectable: $canonical" >&2
-      failed=1
       continue
     }
     [ -n "$dirty" ] || continue
@@ -2640,6 +2644,8 @@ pool_preflight() {
     echo "$canonical: skipped: dirty Treehouse pool worktree remains unavailable for acquisition ($example)" >&2
   done < "$treehouse_paths"
   rm -f "$treehouse_paths"
+  # 'failed' is retained for future in-pool-fatal conditions; today no inspection
+  # skip is fatal, so preflight succeeds and lets acquire find or grow a slot.
   [ "$failed" -eq 0 ]
 }
 
