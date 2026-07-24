@@ -811,6 +811,60 @@ test_projection_close_refuses_active_tab() {
   pass "herdr presentation focus: cleanup refuses rather than close the captain's active tab"
 }
 
+test_projection_close_reports_focus_restore_failure() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/projection-focus-restore-failure"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true},{"workspace_id":"w9","active_tab_id":"w9:t2","focused":false}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}}}' > "$resp/3.out"
+  : > "$resp/4.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true}]}}' > "$resp/5.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/6.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t1","workspace_id":"w1"}}}' > "$resp/7.out"
+  : > "$resp/8.out"
+  cp "$resp/5.out" "$resp/9.out"
+  cp "$resp/6.out" "$resp/10.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 2 ] || fail "cleanup did not distinguish post-close focus uncertainty: $status"
+  assert_contains "$out" "did not restore the exact prior workspace and tab" \
+    "focus restoration failure was not reported"
+  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p2' \
+    "focus restoration failure fixture did not reach the close boundary"
+  pass "herdr presentation focus: pane close fails when exact focus restoration fails"
+}
+
+test_projection_close_rechecks_required_agent_state_at_boundary() {
+  local dir log out status
+  dir="$TMP_ROOT/projection-close-agent-boundary"; mkdir -p "$dir"
+  log="$dir/log"; : > "$log"
+  out=$(ROOT="$ROOT" LOG="$log" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }
+    fm_backend_herdr_pane_agent_state() { printf live; }
+    fm_backend_herdr_cli() {
+      printf "%s\n" "$*" >> "$LOG"
+      case "$2 $3" in
+        "pane get") printf "{\"result\":{\"pane\":{\"pane_id\":\"w9:p2\",\"tab_id\":\"w9:t2\"}}}\n" ;;
+      esac
+    }
+    set +e
+    fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2 no-agent
+    rc=$?
+    set -e
+    printf "%s:%s" "$rc" "$FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE"
+  ')
+  status=${out%%:*}
+  [ "$status" -ne 0 ] && [ "$out" = "$status:live" ] \
+    || fail "required close-boundary agent state did not refuse live: $out"
+  assert_not_contains "$(cat "$log")" "pane close" \
+    "required close-boundary agent state still closed a live pane"
+  pass "herdr presentation reclaim: live agent state at the close boundary refuses mutation"
+}
+
 test_projection_seeded_prune_refuses_active_tab() {
   local dir log resp fb out status
   dir="$TMP_ROOT/projection-seeded-focus-active-refusal"; mkdir -p "$dir/responses"
@@ -1423,13 +1477,15 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   cp "$resp/6.out" "$resp/15.out"
   cp "$resp/7.out" "$resp/16.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2","tab_id":"w2:t2","workspace_id":"w2"}}}' > "$resp/17.out"
-  : > "$resp/18.out"
-  cp "$resp/6.out" "$resp/19.out"
-  cp "$resp/7.out" "$resp/20.out"
-  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/21.out"
-  cp "$resp/1.out" "$resp/22.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t3","label":"fm-fm-hibit-r1"}]}}' > "$resp/23.out"
-  printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p3","tab_id":"w2:t3"}]}}' > "$resp/24.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/18.out"
+  printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/19.out"
+  : > "$resp/20.out"
+  cp "$resp/6.out" "$resp/21.out"
+  cp "$resp/7.out" "$resp/22.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/23.out"
+  cp "$resp/1.out" "$resp/24.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t3","label":"fm-fm-hibit-r1"}]}}' > "$resp/25.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p3","tab_id":"w2:t3"}]}}' > "$resp/26.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '
@@ -1447,6 +1503,8 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   close_line=$(grep -n $'pane\x1fclose\x1fw2:p2' "$log" | cut -d: -f1)
   [ -n "$create_line" ] && [ -n "$close_line" ] && [ "$create_line" -lt "$close_line" ] \
     || fail "reclaim did not create the exact replacement before closing the old husk"
+  [ "$(sed -n "$((close_line - 1))p" "$log")" = $'HERDR_SESSION=fmtest\x1fagent\x1fget\x1fw2:p2\x1f--session\x1ffmtest' ] \
+    || fail "reclaim did not recheck the old pane agent state at the exact close boundary"
   assert_not_contains "$calls" $'workspace\x1fclose' "reclaim introduced workspace-close authority"
   assert_not_contains "$calls" $'workspace\x1frename' "reclaim renamed the projected workspace"
   assert_not_contains "$calls" $'tab\x1ffocus' "focus-preserving reclaim changed an already-stable focus snapshot"
@@ -2952,6 +3010,8 @@ test_projection_create_never_closes_a_concurrent_same_label_tab
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
 test_projection_close_restores_exact_prior_focus
 test_projection_close_refuses_active_tab
+test_projection_close_reports_focus_restore_failure
+test_projection_close_rechecks_required_agent_state_at_boundary
 test_projection_seeded_prune_refuses_active_tab
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order

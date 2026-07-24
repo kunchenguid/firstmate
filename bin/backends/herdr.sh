@@ -587,8 +587,10 @@ fm_backend_herdr_projection_focus_restore() {  # <session> <snapshot> <operation
 # anywhere else.
 # If the target belongs to the active tab, exact tab preservation is
 # impossible, so cleanup refuses instead of changing focus.
-fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id>
-  local session=$1 pane_id=$2 before active_tab info target_pane target_tab close_status
+fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state]
+  local session=$1 pane_id=$2 required_agent_state=${3:-}
+  local before active_tab info target_pane target_tab close_status state
+  FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
   [ -n "$pane_id" ] || return 0
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
     echo "warning: herdr presentation cleanup could not capture exact active workspace and tab; refusing focus-unsafe pane close" >&2
@@ -609,13 +611,18 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     echo "warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus" >&2
     return 1
   fi
+  if [ -n "$required_agent_state" ]; then
+    state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
+    FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=$state
+    [ "$state" = "$required_agent_state" ] || return 1
+  fi
   if fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1; then
     close_status=0
   else
     close_status=$?
   fi
-  fm_backend_herdr_projection_focus_restore "$session" "$before" "pane close" || true
-  return "$close_status"
+  fm_backend_herdr_projection_focus_restore "$session" "$before" "pane close" || return 2
+  [ "$close_status" -eq 0 ]
 }
 
 # fm_backend_herdr_projection_order_best_effort: place the exact workspace id
@@ -1401,7 +1408,7 @@ fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-pane>
     no-agent) ;;
     live|unknown) return 1 ;;
   esac
-  fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$new_pane" || return 1
+  fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$new_pane" no-agent || return 1
   [ "$(fm_backend_herdr_pane_agent_state "$session" "$new_pane")" = dead ]
 }
 
@@ -1414,7 +1421,7 @@ fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-pane>
 # post-mutation uncertainty that must refuse the launch.
 fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <parent-label> <task-label> <cwd>
   local session=$1 journal=$2 id=$3 home=$4 meta_workspace=$5 meta_tab=$6 meta_pane=$7
-  local parent_label=$8 task_label=$9 cwd=${10} canonical_home state focus_before active_tab out new_tab new_pane info
+  local parent_label=$8 task_label=$9 cwd=${10} canonical_home state focus_before active_tab out new_tab new_pane info close_status
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=""
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=""
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
@@ -1511,8 +1518,23 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
       return 2
       ;;
   esac
-  if ! fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$meta_pane"; then
+  if fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$meta_pane" no-agent; then
+    close_status=0
+  else
+    close_status=$?
+  fi
+  if [ "$close_status" -ne 0 ]; then
+    if [ "$close_status" -eq 2 ]; then
+      return 1
+    fi
+    state=$FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE
     fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
+    case "$state" in
+      live|unknown)
+        echo "error: herdr presentation pane for $id became $state at the close boundary; refusing duplicate launch" >&2
+        return 1
+        ;;
+    esac
     echo "warning: herdr presentation reclaim for $id could not close the exact old husk; spawning flat" >&2
     return 2
   fi
