@@ -66,6 +66,26 @@ set -e
 [ "$(find "$HOME1/state/telegram-inbox" -type f | wc -l | tr -d ' ')" = 1 ] || fail "replay duplicated inbox work"
 pass "same Telegram message is replay-safe"
 
+RESIGNED=$(python3 - "$HOME1/config/telegram-bridge/secret" "$REQUEST" <<'PY'
+import hashlib,hmac,json,sys
+secret=bytes.fromhex(open(sys.argv[1],encoding="ascii").read().strip())
+value=json.loads(sys.argv[2])
+value["issued_at"]=int(value["issued_at"])+30
+unsigned={k:v for k,v in value.items() if k!="signature"}
+value["signature"]=hmac.new(secret,json.dumps(unsigned,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode(),hashlib.sha256).hexdigest()
+print(json.dumps(value,separators=(",",":")))
+PY
+)
+[ "$RESIGNED" != "$REQUEST" ] || fail "re-signed envelope was byte-identical to the original"
+set +e
+RESIGNED_OUT=$(printf '%s' "$RESIGNED" | python3 "$BRIDGE" ingest --fm-home "$HOME1")
+RC=$?
+set -e
+[ "$RC" = 3 ] || fail "re-signed replay should return duplicate exit 3, got $RC"
+[ "$RESIGNED_OUT" = "$RID" ] || fail "re-signed replay returned an unexpected correlation id"
+[ "$(find "$HOME1/state/telegram-inbox" -type f | wc -l | tr -d ' ')" = 1 ] || fail "re-signed replay duplicated inbox work"
+pass "same Telegram message re-signed with a later timestamp is replay-safe"
+
 forged=$(printf '%s' "$REQUEST" | python3 -c 'import json,sys; v=json.load(sys.stdin); v["text"]="/firstmate forged"; print(json.dumps(v))')
 set +e
 printf '%s' "$forged" | python3 "$BRIDGE" ingest --fm-home "$HOME1" >/dev/null 2>"$TMP/forged.err"

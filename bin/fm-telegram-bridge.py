@@ -241,6 +241,11 @@ def _expected_request_id(payload: dict[str, Any], secret: bytes) -> str:
     return "tg-" + hmac.new(secret, b"request-id\0" + _identity_bytes(payload), hashlib.sha256).hexdigest()[:32]
 
 
+def _replay_material(payload: dict[str, Any]) -> bytes:
+    material = {k: v for k, v in payload.items() if k not in ("issued_at", "signature")}
+    return _canonical(material)
+
+
 def _verify_envelope(payload: dict[str, Any], settings: dict[str, Any], secret: bytes) -> tuple[str, str]:
     expected_keys = {
         "version", "issued_at", "request_id", "platform", "user_id", "chat_id",
@@ -360,7 +365,7 @@ def command_ingest(args: argparse.Namespace) -> int:
 
     if context_path.exists() or context_path.is_symlink():
         existing = _verify_context(home, request_id, settings, secret)
-        if not hmac.compare_digest(existing.get("signature", ""), payload["signature"]):
+        if not hmac.compare_digest(_replay_material(existing), _replay_material(payload)):
             raise BridgeError("Telegram request id collided with another context", EXIT_REJECTED)
         print(request_id)
         return EXIT_DUPLICATE
