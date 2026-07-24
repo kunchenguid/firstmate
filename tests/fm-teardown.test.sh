@@ -1351,6 +1351,91 @@ SH
   pass "teardown drops collected retired signals before the task ID is reused"
 }
 
+test_teardown_after_signal_filter_does_not_wake_empty_queue() {
+  local case_dir status_line status_sig real_grep real_sleep pid i signal_count
+  case_dir=$(make_case signal-filter-teardown)
+  write_meta "$case_dir" local-only ship
+  status_line='needs-decision: choose release target'
+  printf '%s\n' "$status_line" > "$case_dir/state/task-x1.status"
+  cp -p "$case_dir/state/task-x1.status" "$case_dir/status-reference"
+  if [ "$(uname)" = Darwin ]; then
+    status_sig=$(stat -f '%z:%Fm' "$case_dir/state/task-x1.status")
+  else
+    status_sig=$(stat -c '%s:%Y' "$case_dir/state/task-x1.status")
+  fi
+  real_grep=$(command -v grep)
+  real_sleep=$(command -v sleep)
+  cat > "$case_dir/fakebin/grep" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg in "$@"; do
+  last=$arg
+done
+if [ "$last" = "${FM_SIGNAL_FILTER_STATUS:-}" ] && [ ! -e "${FM_SIGNAL_FILTER_ONCE:?}" ]; then
+  : > "$FM_SIGNAL_FILTER_ONCE"
+  : > "${FM_SIGNAL_FILTER_BLOCKED:?}"
+  while [ ! -e "${FM_SIGNAL_FILTER_RESUME:?}" ]; do
+    "$FM_REAL_SLEEP_FOR_TEST" 0.05
+  done
+fi
+exec "$FM_REAL_GREP_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/grep"
+
+  PATH="$case_dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_REAL_GREP_FOR_TEST="$real_grep" FM_REAL_SLEEP_FOR_TEST="$real_sleep" \
+    FM_SIGNAL_FILTER_STATUS="$case_dir/state/task-x1.status" \
+    FM_SIGNAL_FILTER_ONCE="$case_dir/signal-filter-once" \
+    FM_SIGNAL_FILTER_BLOCKED="$case_dir/signal-filter-blocked" \
+    FM_SIGNAL_FILTER_RESUME="$case_dir/signal-filter-resume" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch.sh" > "$case_dir/watch.out" 2> "$case_dir/watch.err" &
+  pid=$!
+  i=0
+  while [ ! -e "$case_dir/signal-filter-blocked" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$case_dir/signal-filter-blocked" ] \
+    || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "signal-filter-teardown: watcher did not pause after active filtering"; }
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "signal-filter-teardown: forced teardown failed"
+  : > "$case_dir/signal-filter-resume"
+  i=0
+  while [ "$i" -lt 10 ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null \
+    || { wait "$pid" 2>/dev/null || true; fail "signal-filter-teardown: watcher emitted an empty-queue wake"; }
+  [ ! -s "$case_dir/watch.out" ] || fail "signal-filter-teardown: retired signal produced a watcher wake"
+  [ ! -s "$case_dir/state/.wake-queue" ] || fail "signal-filter-teardown: retired signal produced a queue record"
+  [ ! -e "$case_dir/state/.seen-task-x1_status" ] \
+    || fail "signal-filter-teardown: retired signal advanced its suppressor"
+
+  printf '%s\n' 'window=fm-task-x1' 'kind=ship' > "$case_dir/state/task-x1.meta"
+  cp -p "$case_dir/status-reference" "$case_dir/state/task-x1.status"
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "signal-filter-teardown: next live actionable signal did not wake"
+  fi
+  wait "$pid" || fail "signal-filter-teardown: watcher failed after task reuse: $(cat "$case_dir/watch.err")"
+  signal_count=$(grep -c "$(printf '\tsignal\ttask-x1.status\t')" "$case_dir/state/.wake-queue" 2>/dev/null || true)
+  [ "$signal_count" -eq 1 ] \
+    || fail "signal-filter-teardown: next live signal queued $signal_count times instead of once"
+  grep -F "signal: $case_dir/state/task-x1.status" "$case_dir/watch.out" >/dev/null \
+    || fail "signal-filter-teardown: next live signal did not wake"
+  [ "$(cat "$case_dir/state/.seen-task-x1_status")" = "$status_sig" ] \
+    || fail "signal-filter-teardown: next live signal did not advance its suppressor"
+  pass "teardown after signal filtering cannot wake without a durable queue record"
+}
+
 configure_herdr_projection_teardown_case() {  # <case-dir>
   local case_dir=$1 token=AbCdEfGhIjKlMnOpQrStUv
   sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
@@ -1468,6 +1553,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
+test_teardown_after_signal_filter_does_not_wake_empty_queue
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_squash_merged_branch_deleted_allows
