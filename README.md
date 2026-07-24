@@ -98,11 +98,11 @@ grok --trust
 **Pi**
 
 ```sh
-pi
+bin/fm-pi-primary.sh
 ```
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
-For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
+For Pi, the primary launcher pins xhigh thinking; approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
 `/calm` is a conversation-focused transcript toggle whose last choice persists for the effective Firstmate home across Pi session starts and resumes.
 While active, it keeps Pi's built-in `Working...` activity visible and uses Pi's presentation surface to hide collapsed thinking blocks, all seven built-in tool shells, the Firstmate watcher tool shell, and compatible presentation entries stored by earlier Calm versions.
 Calm adds no persistent status row, and controllable hidden rows are removed without reserving vertical space.

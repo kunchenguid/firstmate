@@ -435,28 +435,24 @@ for backend in tmux herdr zellij orca cmux; do
 done
 pass "the delegated profile traverses every executable backend handoff"
 
-PRIMARY_CASE="$TMP_ROOT/primary-xhigh"
-PRIMARY_HOME="$PRIMARY_CASE/home"
-PRIMARY_PROJECT="$PRIMARY_CASE/project"
-PRIMARY_WT="$PRIMARY_CASE/wt"
-PRIMARY_LOG="$PRIMARY_CASE/launch.log"
-PRIMARY_ID=primary-pi-xhigh-z1
-mkdir -p "$PRIMARY_HOME/config" "$PRIMARY_HOME/data/$PRIMARY_ID" "$PRIMARY_HOME/state" "$PRIMARY_HOME/projects"
-fm_git_worktree "$PRIMARY_PROJECT" "$PRIMARY_WT" "fm/$PRIMARY_ID"
-printf 'primary Pi brief\n' > "$PRIMARY_HOME/data/$PRIMARY_ID/brief.md"
-touch "$PRIMARY_HOME/state/.last-watcher-beat"
-: > "$PRIMARY_LOG"
-FM_ROOT_OVERRIDE="$SPAWN_ROOT" FM_HOME="$PRIMARY_HOME" \
-  FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
-  FM_PROJECTS_OVERRIDE="$PRIMARY_HOME/projects" FM_CONFIG_OVERRIDE="$PRIMARY_HOME/config" \
-  FM_SPAWN_NO_GUARD=1 FM_PROFILE_TEST_WT="$PRIMARY_WT" FM_PROFILE_TEST_LOG="$PRIMARY_LOG" \
-  PATH="$SPAWN_FAKEBIN:$PATH" \
-  "$SPAWN_ROOT/bin/fm-spawn.sh" "$PRIMARY_ID" "$PRIMARY_PROJECT" \
-    --harness pi --effort xhigh --backend tmux >/dev/null \
-  || fail "unprofiled primary Pi xhigh launch path failed"
-primary_launch=$(cut -f2- "$PRIMARY_LOG")
-assert_contains "$primary_launch" "pi --thinking 'xhigh'" "primary Pi launch path lost xhigh thinking"
-assert_not_contains "$primary_launch" "fm-pi-profile-guard.ts" "delegated profile leaked into the primary Pi launch path"
+PRIMARY_LOG="$TMP_ROOT/primary-launch.log"
+cat > "$SPAWN_FAKEBIN/pi" <<'SH'
+#!/usr/bin/env bash
+printf 'cwd=%s\n' "$PWD" > "$FM_PI_PRIMARY_TEST_LOG"
+printf 'arg=%s\n' "$@" >> "$FM_PI_PRIMARY_TEST_LOG"
+SH
+chmod +x "$SPAWN_FAKEBIN/pi"
+FM_PI_PRIMARY_TEST_LOG="$PRIMARY_LOG" PATH="$SPAWN_FAKEBIN:$PATH" \
+  "$ROOT/bin/fm-pi-primary.sh" --no-session \
+  || fail "FirstMate primary Pi launcher failed against the provider-free command double"
+assert_grep "cwd=$ROOT" "$PRIMARY_LOG" "primary Pi launcher did not enter the FirstMate root"
+assert_grep 'arg=--thinking' "$PRIMARY_LOG" "primary Pi launcher omitted the thinking flag"
+assert_grep 'arg=xhigh' "$PRIMARY_LOG" "primary Pi launcher lost xhigh thinking"
+assert_no_grep 'arg=medium' "$PRIMARY_LOG" "delegated medium leaked into the primary Pi launcher"
+if FM_PI_PRIMARY_TEST_LOG="$PRIMARY_LOG" PATH="$SPAWN_FAKEBIN:$PATH" \
+  "$ROOT/bin/fm-pi-primary.sh" --thinking medium >/dev/null 2>&1; then
+  fail "primary Pi launcher accepted a thinking-level override"
+fi
 pass "delegated medium remains separate from the primary Pi xhigh path"
 
 echo "# all fm-pi-compaction-profile tests passed"

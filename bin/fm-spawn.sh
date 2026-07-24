@@ -97,8 +97,8 @@
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
-#     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
-#     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+#     __PITURNEND__ absolute path to the protected FirstMate-root turn-end extension
+#     __PIWATCH__   absolute path to the protected FirstMate-root watcher extension
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __PIBRIEFENV__ shell assignment identifying the unchanged Pi positional brief
 #     __PICMD__      controlled delegated Pi command and environment, or pi by default

@@ -195,12 +195,12 @@ Those inherited values are defaults and rules only; `fm-spawn` still permits a c
 An active delegated Pi profile is the exception: its fail-closed model, effort, and raw-launch constraints are described below.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
-For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
+For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the protected `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts` in the launching FirstMate root, so a dirty or diverged secondmate home cannot replace executable supervision code.
 
 ## Delegated Pi profile (config/pi-delegated-profile)
 
 `config/pi-delegated-profile` is an optional local profile that makes every delegated Pi endpoint launched through `fm-spawn.sh` use one exact provider/model, explicit medium thinking, and automatic compaction once token usage is strictly greater than 60 percent of the resolved context window.
-It does not change the primary Pi path or its xhigh thinking level.
+It does not change the separate `bin/fm-pi-primary.sh` path, which explicitly owns the primary Pi xhigh thinking level.
 The file is in the primary-authoritative secondmate inheritance allowlist, whose safety guard copies it only when the destination checkout gitignores `config/pi-delegated-profile`; a launch or recovery stops before creating an endpoint unless that item reports verified convergence.
 When absent, Pi launch behavior remains backward-compatible.
 When present, `bin/fm-pi-profile.sh` validates every field and Pi 0.81.1's effective model metadata before any endpoint is created.
