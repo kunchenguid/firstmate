@@ -474,8 +474,9 @@ test_terminal_stale_absorbed_when_status_already_surfaced_by_redraw() {
   sig=$(seen_sig "$state/done3.status"); printf '%s' "$sig" > "$state/.seen-done3_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   # A double space mid-line is a plausible redraw byte-difference that the
-  # trailing-whitespace hardening at fm-watch.sh:888 does not normalize away,
-  # so this test exercises the marker-keying fix independent of that hardening.
+  # trailing-whitespace strip before hash_pane in fm-watch.sh's pane-tail
+  # hashing does not normalize away (it only trims trailing blanks), so this
+  # test exercises the marker-keying fix independent of that hardening.
   old_hash=$(hash_text "finished, awaiting review")
   new_hash=$(hash_text "finished,  awaiting review")
   # Prior poll already surfaced this exact status under old_hash: .stale-<key>
