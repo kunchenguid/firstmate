@@ -78,8 +78,7 @@ A metadata-routed selector returns the recorded backend target (`terminal=` for 
 Only metadata-routed task selectors carry secondmate-marker and Codex-harness context; explicit endpoint escape hatches do not.
 These five sentences are the single owner of the task-selector vocabulary; backend guides and other documents point here instead of restating the resolution order.
 `fm-teardown.sh <id>` takes a task id directly and uses the same recorded backend target fields after loading `state/<id>.meta`.
-By default, Herdr workspaces are derived from `FM_HOME`: the primary home uses the visible label `FirstMate Crew`, and a secondmate home marked by `.fm-secondmate-home` uses `2ndmate-<secondmate-id>`.
-For upgrade compatibility, a primary that finds no `FirstMate Crew` workspace falls back to the legacy lowercase `firstmate` label instead of creating a duplicate; rename that existing workspace with `herdr workspace rename <workspace-id> 'FirstMate Crew'`.
+By default, Herdr workspaces are derived from `FM_HOME`; [Watching and task containers](herdr-backend.md#watching-and-task-containers) owns the visible label mapping and legacy-workspace compatibility.
 The default-container spawn, list-live, and recovery paths read that label from the active home, so a secondmate's own crewmates stay inside that secondmate home's herdr space.
 The optional local `config/herdr-presentation-spaces` presence flag instead enables Herdr's default-off disposable single-task visual projection; [Optional presentation spaces](herdr-backend.md#optional-presentation-spaces) owns its behavior, safety limits, recovery contract, and narrow locked session-start cleanup of exact restored idle-shell children.
 The flag is default-off and inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
