@@ -148,13 +148,17 @@ EOF
 }
 
 test_collect_claude_excludes_cache_read() {
-  local home claude_dir session ledger old_home
+  local home worktree claude_dir session ledger old_home
   home=$(make_home claude-cache)
-  claude_dir="$home/claude/.claude/projects/$(printf '%s' "$home/wt" | sed 's#/#-#g')"
+  # Mirror a real Firstmate task worktree under a dotted path (.no-mistakes), so
+  # the fixture exercises Claude's on-disk encoding of non-slash characters.
+  worktree="$home/.no-mistakes/wt"
+  mkdir -p "$worktree"
+  claude_dir="$home/claude/.claude/projects/$(printf '%s' "$worktree" | sed 's#[^a-zA-Z0-9-]#-#g')"
   mkdir -p "$claude_dir"
   fm_write_meta "$home/state/tokens-claude-a4.meta" \
     "window=fm-tokens-claude-a4" \
-    "worktree=$home/wt" \
+    "worktree=$worktree" \
     "project=$home/project" \
     "harness=claude" \
     "model=opus" \

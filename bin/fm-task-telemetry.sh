@@ -164,7 +164,7 @@ json_usage_claude() {
 claude_project_dir() {
   local worktree=$1 encoded
   [ -n "$worktree" ] || return 1
-  encoded=$(printf '%s' "$worktree" | sed 's#/#-#g')
+  encoded=$(printf '%s' "$worktree" | sed 's#[^a-zA-Z0-9-]#-#g')
   printf '%s/.claude/projects/%s\n' "$HOME" "$encoded"
 }
 
