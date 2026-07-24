@@ -72,7 +72,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -493,6 +493,7 @@ run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
@@ -519,10 +520,13 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
   local case_dir out
   case_dir=$(make_case tasks-axi-reminder)
   write_meta "$case_dir" no-mistakes ship
+  printf '{"usage":{"input_tokens":100,"output_tokens":25,"total_tokens":125}}\n' > "$case_dir/state/task-x1.usage.json"
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   add_compatible_tasks_axi "$case_dir"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with compatible tasks-axi"
+  assert_grep $'task-x1\t' "$case_dir/data/task-telemetry.tsv" "teardown did not write telemetry row"
+  assert_grep $'\t125\t' "$case_dir/data/task-telemetry.tsv" "teardown did not collect usage total"
   printf '%s\n' "$out" | grep -F 'tasks-axi done task-x1 --pr https://github.com/example/repo/pull/7' >/dev/null \
     || fail "teardown did not prompt tasks-axi done: $out"
   printf '%s\n' "$out" | grep -F 'tasks-axi ready' >/dev/null \

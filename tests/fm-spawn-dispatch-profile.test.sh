@@ -108,6 +108,7 @@ assert_meta_profile() {
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
   assert_grep "model=$model" "$meta" "meta missing model=$model"
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
+  assert_grep "difficulty=simple" "$meta" "meta missing default simple difficulty estimate"
 }
 
 test_no_profile_keeps_claude_profile_defaults() {

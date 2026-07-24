@@ -176,6 +176,7 @@ HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+TASK_DIFFICULTY=unknown
 POS=()
 want_value=
 for a in "$@"; do
@@ -313,6 +314,7 @@ spawn_abort_cleanup() {
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
+            echo "difficulty=${TASK_DIFFICULTY:-unknown}"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -1453,6 +1455,7 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+TASK_DIFFICULTY=$("$SCRIPT_DIR/fm-task-telemetry.sh" estimate "$BRIEF" 2>/dev/null || printf 'unknown\n')
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
@@ -1465,6 +1468,7 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  echo "difficulty=$TASK_DIFFICULTY"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).

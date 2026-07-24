@@ -18,6 +18,20 @@ The tracked code root contains the shared instruction, skill, documentation, wor
 The producing PR and X helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 Wake, watcher, away-mode, and X-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 
+## Task telemetry
+
+`fm-spawn.sh` estimates task difficulty from the launch brief before handoff and records `difficulty=simple`, `difficulty=intermediate`, `difficulty=complex`, or `difficulty=unknown` beside the selected `harness=`, `model=`, and `effort=` fields in `state/<id>.meta`.
+The heuristic is intentionally local and deterministic: brief size, lifecycle keywords, investigation language, and explicit "small" wording determine the bucket.
+The exact scoring and usage-log mechanics live in `bin/fm-task-telemetry.sh`, which is the owner of this telemetry contract.
+`fm-teardown.sh` runs `fm-task-telemetry.sh collect <id>` before volatile task state or worktree files are removed.
+Collection is best-effort and never blocks cleanup.
+It reads explicit per-task usage sidecars when present, Codex JSONL `token_count` events for sessions whose cwd matches the task worktree, and Claude JSONL assistant-message usage for the encoded task worktree path.
+Unsupported harnesses, missing `jq`, absent logs, or unreadable transcripts produce a durable row with `source=unavailable` rather than failing the task lifecycle.
+The completed-task ledger is local and gitignored at `data/task-telemetry.tsv`.
+Rows record task id, completion timestamp, kind, difficulty, harness, model, effort, prompt tokens, completion tokens, total tokens, difficulty points, tokens per difficulty point, and usage source.
+Run `bin/fm-task-telemetry.sh summary` to group completed rows by difficulty, harness, and model.
+Use that output with `config/crew-dispatch.json` by lowering the default profile or individual rule profile when a cheaper harness/model repeatedly clears a difficulty bucket with acceptable token use.
+
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.
 `docs/sessionstart-nudge.md` owns the native session-open adapter mechanics that nudge the digest command.
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
