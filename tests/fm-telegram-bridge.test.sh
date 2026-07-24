@@ -203,7 +203,7 @@ FM_HOME="$INSTALL_HOME" "$ROOT/bin/fm-telegram-bridge.sh" stop >/dev/null || fai
 FM_HOME="$INSTALL_HOME" "$ROOT/bin/fm-telegram-bridge.sh" start >/dev/null || fail "start failed"
 pass "install, status, stop, and start are idempotent"
 
-python3 - "$HERMES_HOME_TEST/plugins/firstmate-telegram/__init__.py" <<'PY'
+python3 - "$HERMES_HOME_TEST/plugins/firstmate-telegram/__init__.py" <<'PY' || fail "Hermes hook command/auth/voice contract failed"
 import importlib.util,sys
 path=sys.argv[1]
 spec=importlib.util.spec_from_file_location("fmt_plugin",path)
@@ -235,7 +235,6 @@ class Context:
         assert name=="pre_gateway_dispatch"; self.callback=callback
 ctx=Context(); mod.register(ctx); assert ctx.callback is mod.pre_gateway_dispatch
 PY
-[ "$?" = 0 ] || fail "Hermes hook command/auth/voice contract failed"
 pass "Hermes hook gates prefix and authorization and normalizes voice"
 
 FM_HOME="$INSTALL_HOME" "$ROOT/bin/fm-telegram-bridge.sh" uninstall >/dev/null || fail "uninstall failed"
