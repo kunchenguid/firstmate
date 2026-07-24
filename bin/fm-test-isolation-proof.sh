@@ -87,9 +87,6 @@ now_ms() {
 # evidence; do not re-add a basename without clearing its reason.
 exclusion_reason() {
   case "$1" in
-    fm-continuity-pretool-check.test.sh)
-      printf '%s\n' 'background sleep 300 holder process for live-lock identity; process-leak risk under concurrent load'
-      ;;
     fm-test-isolation-proof.test.sh)
       printf '%s\n' 'isolation-proof harness contract itself; must not re-enter concurrent matrix'
       ;;
@@ -121,7 +118,7 @@ exclusion_reason() {
     fm-afk-launch.test.sh)
       printf '%s\n' 'AFK lifecycle / inject path; exclusive daemon and pane control'
       ;;
-    fm-afk-pi-herdr-return-e2e.test.sh|fm-claude-continuity-live-e2e.test.sh|\
+    fm-afk-pi-herdr-return-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
     fm-send-secondmate-marker-herdr-e2e.test.sh)
@@ -194,7 +191,6 @@ list_exclusions_for_report() {
       printf '%s\t%s\n' "$base" "$reason"
     fi
   done <<'EOF'
-fm-continuity-pretool-check.test.sh
 fm-test-isolation-proof.test.sh
 fm-backend-tmux-smoke.test.sh
 fm-backend.test.sh
