@@ -496,7 +496,7 @@ install_cmd() {
   case "$1" in
     tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
-    treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
+    treehouse) echo "git clone https://code.byted.org/obric/treehouse.git && cd treehouse && git checkout v2.0.1 && make install VERSION=v2.0.1  # requires Go 1.25+" ;;
     no-mistakes) echo "git clone https://code.byted.org/obric/no-mistakes.git && cd no-mistakes && make install  # requires Go 1.25+" ;;
     bytedcli) echo "NPM_CONFIG_REGISTRY=http://bnpm.byted.org npm install -g @bytedance-dev/bytedcli@latest" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
