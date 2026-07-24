@@ -136,7 +136,7 @@ If an older live workspace is still labeled `firstmate-<secondmate-id>`, rename 
 
 Tab-per-task within each home's own workspace remains the durable default for the reason P2 originally found: attaching once shows every one of that home's tasks as a tab in one tab bar, switchable with `ctrl+b <n>`, matching how a captain already watches a tmux-backed fleet.
 Durable workspace-per-task remains rejected.
-The optional projection accepts a top-level space per clean new task as a disposable visual aid, with one exact same-identity restart replacement and explicit flat fallback for every ambiguous case.
+The optional projection accepts a top-level space per clean new task as a disposable visual aid, with exact same-identity restart replacement and explicit flat fallback for every ambiguous case.
 
 ## Default workspace lifecycle: one per-home workspace, reused
 
@@ -228,7 +228,7 @@ Zero token matches, including a label whose token was removed by a human rename,
 
 The user-visible compromises are intentional:
 
-- Grouping is best-effort during a clean Herdr server lifetime, not durable or guaranteed.
+- Grouping remains best-effort rather than guaranteed; only an exact same-identity version 2 binding survives a Herdr restart in place.
 - Clean projected creates form one stable contiguous child block immediately after their owning parent (`firstmate` or `2ndmate-<id>`); existing ambiguous or manually interleaved layouts degrade with a warning instead of being rewritten.
 - Existing live or ambiguous projected spaces are never force-renamed, moved, or promoted from tabs into the new topology.
 - A same-identity Herdr restart retains its projected space only when every exact version 2 binding and agent-absence check agrees.
@@ -239,7 +239,7 @@ The user-visible compromises are intentional:
 - Regaining a dedicated space after ambiguous degradation requires stopping or retiring the flat task, manually verifying the stale projection is harmless, clearing its quarantined journal, and starting a genuinely fresh task.
 - The visible 22-character token is only a restart-stable correlator and never substitutes for the exact binding.
 
-The projection and its ordering follow-up make no Herdr provider/API change, no Treehouse lease or return change, no ownership registry, and no cross-home cleanup path.
+The projection, its ordering follow-up, and exact restart replacement make no Herdr provider/API change, no Treehouse lease or return change, no ownership registry, and no cross-home cleanup path.
 It is intentionally separate from any future Treehouse hardening work.
 
 ### Isolated E2E evidence (2026-07-24)

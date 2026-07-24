@@ -20,12 +20,12 @@
 # workspace is a non-authoritative visual projection containing only the normal
 # task pane. Its random token and mutable label never authorize lookup,
 # adoption, reuse, closure, deletion, task ownership, or endpoint selection.
-# A version 2 journal can authorize only one same-identity replacement after
-# exact metadata, home, session, workspace, tab, pane, parent, shape, focus,
-# and agent-absence checks all agree under the session lock. Every ambiguous
-# recovered launch uses the default flat home workspace when duplicate-agent
-# risk is independently absent. Target resolution stays parallel to the tmux
-# adapter in both layouts.
+# A version 2 journal can participate in replacing only its exact same-identity
+# endpoint after metadata, home, session, workspace, tab, pane, parent, shape,
+# focus, and agent-absence checks all agree under the session lock.
+# Every ambiguous recovered launch uses the default flat home workspace when
+# duplicate-agent risk is independently absent.
+# Target resolution stays parallel to the tmux adapter in both layouts.
 # Projected create, move, and cleanup operations capture the named session's
 # exact active workspace and tab. Herdr 0.7.4's last-pane close can focus an
 # unrelated neighbor, so projected cleanup serializes and restores only the
