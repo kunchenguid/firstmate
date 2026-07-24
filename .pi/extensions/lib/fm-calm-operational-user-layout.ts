@@ -5,7 +5,7 @@ import {
   UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
 import { calmPresentationHides } from "./fm-calm-visibility.ts";
-import { classifyFirstmateOperationalText } from "./fm-operational-input.ts";
+import { classifyFirstmateCurrentOperationalText } from "./fm-operational-input.ts";
 
 type UserMessageConstructorArgs = ConstructorParameters<typeof UserMessageComponent>;
 type UserMessageLike = {
@@ -42,6 +42,7 @@ type CalmOperationalUserLayoutPatch = {
 const CALM_OPERATIONAL_USER_LAYOUT_PATCH = Symbol.for(
   "firstmate:calm-operational-user-layout:pi-0.81.1",
 );
+const LEGACY_CALM_OPERATIONAL_PREFIX = "\u2063Supervisor escalate (";
 
 function contentIsTextOnly(content: unknown): boolean {
   if (typeof content === "string") return true;
@@ -61,7 +62,8 @@ export function installCalmOperationalUserLayout(): void {
   };
   const hidesOperationalInput = (): boolean => calmPresentationHides("synthetic-user");
   const isOperationalInput = (text: string): boolean =>
-    classifyFirstmateOperationalText(text) !== undefined;
+    classifyFirstmateCurrentOperationalText(text) !== undefined ||
+    text.startsWith(LEGACY_CALM_OPERATIONAL_PREFIX);
   const installed = registry[CALM_OPERATIONAL_USER_LAYOUT_PATCH];
   if (installed) {
     installed.hidesOperationalInput = hidesOperationalInput;

@@ -87,7 +87,8 @@ test_static_contract() {
   assert_contains "$assistant_layout" 'AssistantMessageComponent.prototype.updateContent' "Pi Calm assistant layout does not control the exported component presentation path"
   assert_contains "$assistant_layout" 'block.type !== "thinking"' "Pi Calm assistant layout does not remove thinking from its presentation copy"
   assert_contains "$operational_user_layout" 'InteractiveMode.prototype' "Pi Calm operational-user layout does not control the transcript owner"
-  assert_contains "$operational_user_layout" 'classifyFirstmateOperationalText(text)' "Pi Calm operational-user layout bypasses canonical classification"
+  assert_contains "$operational_user_layout" 'classifyFirstmateCurrentOperationalText(text)' "Pi Calm operational-user layout bypasses canonical current classification"
+  assert_contains "$operational_user_layout" '"\u2063Supervisor escalate ("' "Pi Calm operational-user layout lost the narrow legacy marker"
   assert_contains "$operational_user_layout" 'hidesOperationalInput()' "Pi Calm operational-user row does not use presentation-only hiding"
   assert_not_contains "$operational_user_layout" 'FIRSTMATE_OP: ' "Pi Calm operational-user layout duplicates the canonical marker grammar"
   assert_not_contains "$text" 'calm transcript' "Pi calm extension still adds a persistent Calm status row"
@@ -646,6 +647,27 @@ const operationalNearMisses = [
   {
     content: "\u2063ordinary captain text after an unrelated separator",
     visible: "ordinary captain text after an unrelated separator",
+  },
+  {
+    content: "\u2063FIRSTMATE_OP: legacy untyped captain message",
+    visible: "legacy untyped captain message",
+  },
+  {
+    content: "Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.",
+    visible: "before executing any other instructions",
+  },
+  {
+    content:
+      "FIRSTMATE WATCHER WAKE: captain-authored legacy-shaped message\n\n" +
+      "Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.",
+    visible: "captain-authored legacy-shaped message",
+  },
+  {
+    content:
+      "TURN WOULD END BLIND - supervision is off. The watcher cycle is missing, failed, or unhealthy. " +
+      "Follow the harness recovery instruction below before ending the turn.\n\n" +
+      "captain-authored legacy-shaped message",
+    visible: "captain-authored legacy-shaped message",
   },
   {
     content: [
