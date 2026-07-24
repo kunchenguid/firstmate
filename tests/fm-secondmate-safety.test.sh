@@ -22,7 +22,7 @@ file_mode() {
 }
 
 test_fm_home_parameterization() {
-  local brief home_one home_two out
+  local body brief bytes fakebin hash head home_one home_two out worktree
   home_one="$TMP_ROOT/home one"
   home_two="$TMP_ROOT/home-two"
   mkdir -p "$home_one/data" "$home_one/state" "$home_two/data" "$home_two/state"
@@ -47,8 +47,61 @@ test_fm_home_parameterization() {
   brief="$home_one/data/task-c/brief.md"
   grep -F ">> '$home_one/state/task-c.status'" "$brief" >/dev/null || fail "secondmate brief did not shell-quote FM_HOME state path"
 
-  printf 'project=x\n' > "$home_one/state/task-a.meta"
-  FM_HOME="$home_one" FM_GUARD_GRACE=999999 "$ROOT/bin/fm-pr-check.sh" task-a https://github.com/example/repo/pull/1 >/dev/null 2>/dev/null \
+  worktree="$home_one/worktree"
+  body="$home_one/pr-body.md"
+  head=1111111111111111111111111111111111111111
+  git -C "$home_one" init -q worktree
+  fm_write_meta "$home_one/state/task-a.meta" 'project=x' "worktree=$worktree"
+  cat > "$body" <<'EOF'
+## Intent
+
+Verify that PR monitoring remains scoped to the active Firstmate home.
+
+## What Changed
+
+- Bound the synthetic public body and exact head before monitoring.
+EOF
+  bytes=$(wc -c < "$body" | tr -d '[:space:]')
+  hash=$(shasum -a 256 "$body" | awk '{print $1}')
+  {
+    printf '%s\n' fm-pr-publication-v1 task_id=task-a provider=github
+    printf '%s\n' url=https://github.com/example/repo/pull/1 "head=$head"
+    printf 'body_bytes=%s\nbody_sha256=%s\n' "$bytes" "$hash"
+    printf '%s\n' privacy=pass links=pass attestation=agent-explicit evidence_mode=none-required evidence_count=0
+  } > "$home_one/state/task-a.pr-publication"
+  chmod 0600 "$home_one/state/task-a.pr-publication"
+  fakebin=$(fm_fakebin "$TMP_ROOT/home-parameterization-forge")
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'repo view') printf '%s\n' example/repo ;;
+  'pr view')
+    printf '%s\n%s\n' "$FM_TEST_PR_URL" "$FM_TEST_PR_HEAD"
+    base64 < "$FM_TEST_PR_BODY" | tr -d '\n'
+    printf '\nfalse\n'
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'pr view')
+    ruby -rjson -e '
+      puts JSON.generate("pull_request" => {
+        "number" => Integer(ARGV.fetch(0), 10),
+        "body" => File.binread(ENV.fetch("FM_TEST_PR_BODY"))
+      })
+    ' "$3"
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi"
+  FM_HOME="$home_one" FM_GUARD_GRACE=999999 \
+    FM_TEST_PR_URL=https://github.com/example/repo/pull/1 \
+    FM_TEST_PR_HEAD="$head" FM_TEST_PR_BODY="$body" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-pr-check.sh" task-a https://github.com/example/repo/pull/1 >/dev/null 2>/dev/null \
     || fail "fm-pr-check failed under FM_HOME"
   [ -f "$home_one/state/task-a.check.sh" ] || fail "pr check was not written under FM_HOME/state"
   [ ! -e "$home_two/state/task-a.check.sh" ] || fail "pr check leaked into another home"
