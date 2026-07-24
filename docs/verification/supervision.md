@@ -74,10 +74,7 @@ The direct and passive mechanisms were validated across all five harnesses on 20
 The secondmate-home scope was measured with Claude Code 2.1.207 on 2026-07-12.
 A native background completion re-invoked the idle model with no human input, while deterministic tests covered main/secondmate inclusion and child-worktree exclusion.
 
-Claude Code 2.1.218 was revalidated in a disposable contract lab on 2026-07-24.
-The lab observed that `asyncRewake` delivered exit-2 Stop feedback without a user turn, concurrent asynchronous Stop hooks were not deduplicated, the explicit timeout terminated the hook-owned process group, `stop_hook_active` remained true after a hook-driven continuation, the eighth consecutive blocking Stop was overridden, and an interactive session remained responsive while the asynchronous hook ran.
-
-The product live paths then ran with Claude Code 2.1.219:
+The Claude product live paths ran with Claude Code 2.1.219 on 2026-07-24:
 
 ```sh
 claude --version
