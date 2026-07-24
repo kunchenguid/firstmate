@@ -21,7 +21,7 @@ fm_pi_profile_fail() {
 
 fm_pi_profile_load() { # <config-dir> <project-dir>
   local config_dir=$1 project_dir=$2 file line key value seen expected_keys
-  local pi_real pi_package metadata settings project_paths
+  local pi_real pi_package package_identity metadata settings project_paths
   file="$config_dir/pi-delegated-profile"
   [ -f "$file" ] || return 2
 
@@ -92,8 +92,13 @@ fm_pi_profile_load() { # <config-dir> <project-dir>
     *) fm_pi_profile_fail "pi_command is not the Pi coding-agent CLI"; return 1 ;;
   esac
   FM_PI_COMMAND=$pi_real
-  [ "$(NODE_OPTIONS='' NODE_PATH='' PI_PACKAGE_DIR='' "$FM_PI_COMMAND" --version 2>/dev/null)" = "$FM_PI_VERSION" ] \
-    || { fm_pi_profile_fail "pi_command does not report version $FM_PI_VERSION"; return 1; }
+  package_identity=$(NODE_OPTIONS='' NODE_PATH='' PI_PACKAGE_DIR='' node -e '
+const pkg = require(process.argv[1]);
+process.stdout.write(`${pkg.name}\t${pkg.version}`);
+' "$pi_package/package.json") \
+    || { fm_pi_profile_fail "cannot read pi_command package metadata"; return 1; }
+  [ "$package_identity" = "@earendil-works/pi-coding-agent"$'\t'"$FM_PI_VERSION" ] \
+    || { fm_pi_profile_fail "pi_command package is not @earendil-works/pi-coding-agent $FM_PI_VERSION"; return 1; }
   metadata=$(NODE_OPTIONS='' NODE_PATH='' PI_PACKAGE_DIR='' node --input-type=module - "$pi_package" "$FM_PI_AGENT_DIR" "$FM_PI_PROVIDER" "$FM_PI_MODEL_ID" <<'NODE'
 import { pathToFileURL } from "node:url";
 const [pkg, agentDir, provider, modelId] = process.argv.slice(2);

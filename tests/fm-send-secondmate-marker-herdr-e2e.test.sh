@@ -35,6 +35,7 @@ LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 SESSION=$("$LAB_HELPER" name fm-send-secondmate-marker-v7)
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-send-marker-herdr-e2e.XXXXXX")
 SENDER_HOME="$TMP_ROOT/sender-home"
+PRIMARY_ROOT="$TMP_ROOT/primary-root"
 SECOND_HOME="$TMP_ROOT/secondmate-home"
 CAPTURE="$TMP_ROOT/pi-before-agent.jsonl"
 FAKEBIN="$TMP_ROOT/fakebin"
@@ -82,7 +83,9 @@ PATH="\$real_path" exec "\$helper" run "\$session" "\${args[@]}"
 EOF
 chmod +x "$FAKEBIN/herdr"
 
-git clone -q --no-hardlinks "$ROOT" "$SECOND_HOME"
+git clone -q --no-hardlinks "$ROOT" "$PRIMARY_ROOT"
+git -C "$PRIMARY_ROOT" checkout -q --detach HEAD
+git clone -q --no-hardlinks "$PRIMARY_ROOT" "$SECOND_HOME"
 git -C "$SECOND_HOME" checkout -q --detach HEAD
 mkdir -p "$SECOND_HOME/state" "$SECOND_HOME/data" "$SECOND_HOME/config" "$SECOND_HOME/projects"
 printf '%s\n' "$ID" > "$SECOND_HOME/.fm-secondmate-home"
@@ -93,12 +96,11 @@ You are a task-local secondmate used only for the marker transport regression.
 Stay idle and do not initiate work.
 EOF
 
-# The extension is already an explicit Pi -e resource in the real secondmate
-# launch template, so its project_trust hook can grant session-only trust before
-# project resources load. before_agent_start records the exact prompt bytes and
-# aborts before any provider request, keeping this transport regression local.
+# The protected primary extension is an explicit Pi -e resource in the real
+# secondmate launch template. This isolated primary-root copy adds a capture
+# hook without trusting mutable extension bytes from the secondmate home.
 CAPTURE_JSON=$(printf '%s' "$CAPTURE" | jq -Rs .)
-python3 - "$SECOND_HOME/.pi/extensions/fm-primary-turnend-guard.ts" "$CAPTURE_JSON" <<'PY'
+python3 - "$PRIMARY_ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$CAPTURE_JSON" <<'PY'
 from pathlib import Path
 import sys
 
@@ -128,7 +130,7 @@ PY
 
 "$LAB_HELPER" provision "$SESSION"
 PATH="$FAKEBIN:$ORIGINAL_PATH" FM_GATE_REFUSE_BYPASS=1 FM_HOME="$SENDER_HOME" HERDR_SESSION="$SESSION" \
-  "$ROOT/bin/fm-spawn.sh" "$ID" "$SECOND_HOME" --secondmate --harness pi --backend herdr >/dev/null
+  "$PRIMARY_ROOT/bin/fm-spawn.sh" "$ID" "$SECOND_HOME" --secondmate --harness pi --backend herdr >/dev/null
 
 META="$SENDER_HOME/state/$ID.meta"
 [ -f "$META" ] || fail "real secondmate spawn did not write exact-id metadata"

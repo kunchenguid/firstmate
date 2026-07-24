@@ -443,9 +443,9 @@ launch_template() {
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     pi)
       if [ "$kind" = secondmate ]; then
-        printf '%s' '__PIBRIEFENV__ __PICMD__ __MODELFLAG____EFFORTFLAG____PIPROFILE__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__PIBRIEFENV____PICMD__ __MODELFLAG____EFFORTFLAG____PIPROFILE__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' '__PIBRIEFENV__ __PICMD__ __MODELFLAG____EFFORTFLAG____PIPROFILE__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__PIBRIEFENV____PICMD__ __MODELFLAG____EFFORTFLAG____PIPROFILE__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -792,6 +792,7 @@ fi
 # suppress project resources and every ambient cancellation surface before the
 # required FirstMate extensions are explicitly re-added below.
 PICMD=pi
+PIBRIEFENV=
 PIPROFILE=
 PI_PROFILE_PATH="$CONFIG/pi-delegated-profile"
 PI_PROFILE_CONFIGURED=0
@@ -1326,12 +1327,13 @@ META_WINDOW=$T
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
-sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
-sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
+sq_piturnend=$(shell_quote "$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts")
+sq_piwatch=$(shell_quote "$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__PICMD__/$PICMD}
+LAUNCH=${LAUNCH//__PIBRIEFENV__/$PIBRIEFENV}
 LAUNCH=${LAUNCH//__PIPROFILE__/$PIPROFILE}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}

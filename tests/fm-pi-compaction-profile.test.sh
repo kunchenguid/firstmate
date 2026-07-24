@@ -352,24 +352,111 @@ assert_grep 'session_before_compact' "$ROOT/bin/fm-pi-profile-guard.ts" "profile
 assert_grep 'pi-delegated-profile' "$ROOT/bin/fm-config-inherit-lib.sh" "secondmate homes do not inherit the delegated Pi profile"
 pass "hostile project and extension surfaces are neutralized while explicit FirstMate extensions remain supported"
 
-for backend in tmux herdr zellij orca cmux; do
-  assert_grep "  $backend)" "$ROOT/bin/fm-spawn.sh" "spawn lost the $backend route"
-done
-assert_grep "MODELFLAG=\$(model_flag_for_harness" "$ROOT/bin/fm-spawn.sh" "backend routes no longer converge on one rendered profile"
-assert_grep "spawn_send_literal \"\$T\" \"\$LAUNCH\"" "$ROOT/bin/fm-spawn.sh" "rendered profile is not submitted through the common backend handoff"
-assert_grep 'backend=orca does not support --secondmate' "$ROOT/bin/fm-spawn.sh" "Orca secondmate safe refusal changed"
-assert_grep 'backend=cmux does not support --secondmate' "$ROOT/bin/fm-spawn.sh" "cmux secondmate safe refusal changed"
-pass "ships, scouts, batches, recovery, and supported secondmates share one profile across all backends"
+SPAWN_ROOT="$TMP_ROOT/spawn-root"
+SPAWN_FAKEBIN="$TMP_ROOT/spawn-fakebin"
+mkdir -p "$SPAWN_ROOT" "$SPAWN_FAKEBIN"
+cp -R "$ROOT/bin" "$SPAWN_ROOT/bin"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$SPAWN_FAKEBIN/sleep"
+chmod +x "$SPAWN_FAKEBIN/sleep"
 
-assert_grep 'FM_PI_EFFORT" = medium' "$ROOT/bin/fm-pi-profile.sh" "delegated Pi profile does not require medium"
-PRIMARY_PI_LAUNCHER=${FM_PI_PRIMARY_LAUNCHER:-}
-if [ -n "$PRIMARY_PI_LAUNCHER" ]; then
-  [ -f "$PRIMARY_PI_LAUNCHER" ] || fail "configured primary Pi launcher is absent: $PRIMARY_PI_LAUNCHER"
-  assert_grep 'thinking xhigh' "$PRIMARY_PI_LAUNCHER" "primary Pi xhigh path changed"
-  pass "delegated Pi remains medium while the configured primary Pi path remains xhigh"
-else
-  echo "skip: FM_PI_PRIMARY_LAUNCHER not set for optional primary Pi xhigh check"
-  pass "delegated Pi profile requires medium"
-fi
+cat > "$SPAWN_ROOT/bin/backends/tmux.sh" <<'SH'
+fm_backend_tmux_container_ensure() { printf 'profile-test'; }
+fm_backend_tmux_create_task() { printf '%%1'; }
+fm_backend_tmux_send_text_line() { :; }
+fm_backend_tmux_current_path() { printf '%s\n' "$FM_PROFILE_TEST_WT"; }
+fm_backend_tmux_send_literal() { printf 'tmux\t%s\n' "$2" >> "$FM_PROFILE_TEST_LOG"; }
+fm_backend_tmux_send_key() { :; }
+SH
+cat > "$SPAWN_ROOT/bin/backends/herdr.sh" <<'SH'
+fm_backend_herdr_projection_journal_path() { printf '%s/%s.herdr-presentation\n' "$1" "$2"; }
+fm_backend_herdr_container_ensure() { printf 'profile-test:w1\t'; }
+fm_backend_herdr_create_task() { printf 't1 p1'; }
+fm_backend_herdr_send_text_line() { :; }
+fm_backend_herdr_current_path() { printf '%s\n' "$FM_PROFILE_TEST_WT"; }
+fm_backend_herdr_send_literal() { printf 'herdr\t%s\n' "$2" >> "$FM_PROFILE_TEST_LOG"; }
+fm_backend_herdr_send_key() { :; }
+SH
+cat > "$SPAWN_ROOT/bin/backends/zellij.sh" <<'SH'
+fm_backend_zellij_container_ensure() { printf 'profile-test'; }
+fm_backend_zellij_create_task() { printf '1 2'; }
+fm_backend_zellij_send_text_line() { :; }
+fm_backend_zellij_current_path() { printf '%s\n' "$FM_PROFILE_TEST_WT"; }
+fm_backend_zellij_send_literal() { printf 'zellij\t%s\n' "$2" >> "$FM_PROFILE_TEST_LOG"; }
+fm_backend_zellij_send_key() { :; }
+SH
+cat > "$SPAWN_ROOT/bin/backends/cmux.sh" <<'SH'
+fm_backend_cmux_container_ensure() { :; }
+fm_backend_cmux_create_task() { printf 'w1 s1'; }
+fm_backend_cmux_send_text_line() { :; }
+fm_backend_cmux_current_path() { printf '%s\n' "$FM_PROFILE_TEST_WT"; }
+fm_backend_cmux_send_literal() { printf 'cmux\t%s\n' "$2" >> "$FM_PROFILE_TEST_LOG"; }
+fm_backend_cmux_send_key() { :; }
+SH
+cat > "$SPAWN_ROOT/bin/backends/orca.sh" <<'SH'
+fm_backend_orca_runtime_check() { :; }
+fm_backend_orca_worktree_create() { printf 'wt1\t%s\tterm1' "$FM_PROFILE_TEST_WT"; }
+fm_backend_orca_send_text_line() { :; }
+fm_backend_orca_send_literal() { printf 'orca\t%s\n' "$2" >> "$FM_PROFILE_TEST_LOG"; }
+fm_backend_orca_send_key() { :; }
+SH
+
+run_profile_spawn() {
+  local backend=$1 home=$2 project=$3 wt=$4 log=$5 id=$6
+  FM_ROOT_OVERRIDE="$SPAWN_ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_PROFILE_TEST_WT="$wt" FM_PROFILE_TEST_LOG="$log" \
+    PATH="$SPAWN_FAKEBIN:$PATH" \
+    "$SPAWN_ROOT/bin/fm-spawn.sh" "$id" "$project" --harness pi --backend "$backend"
+}
+
+for backend in tmux herdr zellij orca cmux; do
+  case_root="$TMP_ROOT/backend-$backend"
+  case_home="$case_root/home"
+  case_project="$case_root/project"
+  case_wt="$case_root/wt"
+  case_log="$case_root/launch.log"
+  case_id="profile-$backend-z1"
+  mkdir -p "$case_home/config" "$case_home/data/$case_id" "$case_home/state" "$case_home/projects"
+  fm_git_worktree "$case_project" "$case_wt" "fm/$case_id"
+  printf 'backend profile brief\n' > "$case_home/data/$case_id/brief.md"
+  touch "$case_home/state/.last-watcher-beat"
+  cp "$HOME_DIR/config/pi-delegated-profile" "$case_home/config/pi-delegated-profile"
+  : > "$case_log"
+  run_profile_spawn "$backend" "$case_home" "$case_project" "$case_wt" "$case_log" "$case_id" >/dev/null \
+    || fail "delegated Pi profile did not traverse the executable $backend spawn route"
+  launch=$(cut -f2- "$case_log")
+  assert_contains "$launch" "--thinking 'medium'" "$backend launch lost explicit medium thinking"
+  assert_contains "$launch" "--no-approve --no-extensions" "$backend launch lost delegated isolation"
+  assert_contains "$launch" "fm-pi-profile-guard.ts" "$backend launch lost the profile guard"
+  assert_not_contains "$launch" "__PIBRIEFENV__" "$backend launch retained the unresolved Pi brief placeholder"
+  [ "$(sed -n 's/^backend=//p' "$case_home/state/$case_id.meta")" = "$backend" ] || [ "$backend" = tmux ] \
+    || fail "$backend spawn did not record its backend route"
+done
+pass "the delegated profile traverses every executable backend handoff"
+
+PRIMARY_CASE="$TMP_ROOT/primary-xhigh"
+PRIMARY_HOME="$PRIMARY_CASE/home"
+PRIMARY_PROJECT="$PRIMARY_CASE/project"
+PRIMARY_WT="$PRIMARY_CASE/wt"
+PRIMARY_LOG="$PRIMARY_CASE/launch.log"
+PRIMARY_ID=primary-pi-xhigh-z1
+mkdir -p "$PRIMARY_HOME/config" "$PRIMARY_HOME/data/$PRIMARY_ID" "$PRIMARY_HOME/state" "$PRIMARY_HOME/projects"
+fm_git_worktree "$PRIMARY_PROJECT" "$PRIMARY_WT" "fm/$PRIMARY_ID"
+printf 'primary Pi brief\n' > "$PRIMARY_HOME/data/$PRIMARY_ID/brief.md"
+touch "$PRIMARY_HOME/state/.last-watcher-beat"
+: > "$PRIMARY_LOG"
+FM_ROOT_OVERRIDE="$SPAWN_ROOT" FM_HOME="$PRIMARY_HOME" \
+  FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
+  FM_PROJECTS_OVERRIDE="$PRIMARY_HOME/projects" FM_CONFIG_OVERRIDE="$PRIMARY_HOME/config" \
+  FM_SPAWN_NO_GUARD=1 FM_PROFILE_TEST_WT="$PRIMARY_WT" FM_PROFILE_TEST_LOG="$PRIMARY_LOG" \
+  PATH="$SPAWN_FAKEBIN:$PATH" \
+  "$SPAWN_ROOT/bin/fm-spawn.sh" "$PRIMARY_ID" "$PRIMARY_PROJECT" \
+    --harness pi --effort xhigh --backend tmux >/dev/null \
+  || fail "unprofiled primary Pi xhigh launch path failed"
+primary_launch=$(cut -f2- "$PRIMARY_LOG")
+assert_contains "$primary_launch" "pi --thinking 'xhigh'" "primary Pi launch path lost xhigh thinking"
+assert_not_contains "$primary_launch" "fm-pi-profile-guard.ts" "delegated profile leaked into the primary Pi launch path"
+pass "delegated medium remains separate from the primary Pi xhigh path"
 
 echo "# all fm-pi-compaction-profile tests passed"

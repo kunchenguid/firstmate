@@ -445,6 +445,7 @@ test_pi_delegated_profile_pins_command_model_effort_and_resources() {
   assert_contains "$launch" "--no-approve --no-extensions --models 'openai-codex/gpt-5.6-sol'" "Pi launch did not neutralize project settings, extension discovery, and cycling"
   assert_contains "$launch" "-e '$ROOT/bin/fm-pi-profile-guard.ts'" "Pi launch did not explicitly load the profile guard"
   assert_not_contains "$launch" "xhigh" "delegated Pi launch inherited primary xhigh"
+  assert_not_contains "$launch" "__PIBRIEFENV__" "Pi launch retained the unresolved brief placeholder"
   pass "configured delegated Pi profile overrides hostile ambience and pins the controlled command"
 }
 
@@ -588,6 +589,35 @@ test_active_pi_profile_requires_secondmate_convergence() {
   pass "active delegated Pi profile must converge before secondmate launch or recovery"
 }
 
+test_pi_secondmate_loads_protected_primary_extensions() {
+  local rec id sm out status launch
+  id=profile-secondmate-integrity-z86
+  rec=$(make_spawn_case profile-secondmate-integrity pi "$id")
+  read_case_record "$rec"
+  if ! write_pi_delegated_profile "$HOME_DIR"; then
+    echo "skip: Pi coding-agent command not found for secondmate extension integrity checks"
+    return
+  fi
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  mkdir -p "$sm/.pi/extensions"
+  printf '%s\n' 'hostile turn-end bytes' > "$sm/.pi/extensions/fm-primary-turnend-guard.ts"
+  printf '%s\n' 'hostile watch bytes' > "$sm/.pi/extensions/fm-primary-pi-watch.ts"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$sm" --secondmate --harness pi)
+  status=$?
+  expect_code 0 "$status" "delegated Pi secondmate spawn should succeed with protected extensions"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "-e '$ROOT/.pi/extensions/fm-primary-turnend-guard.ts'" \
+    "Pi secondmate did not load the FirstMate-owned turn-end extension"
+  assert_contains "$launch" "-e '$ROOT/.pi/extensions/fm-primary-pi-watch.ts'" \
+    "Pi secondmate did not load the FirstMate-owned watch extension"
+  assert_not_contains "$launch" "$sm/.pi/extensions" \
+    "Pi secondmate loaded mutable extension bytes from its dirty home"
+  pass "Pi secondmates load protected FirstMate-owned supervision extensions"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
@@ -610,5 +640,6 @@ test_pi_delegated_profile_refuses_malformed_profile_paths
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_active_pi_profile_requires_secondmate_convergence
+test_pi_secondmate_loads_protected_primary_extensions
 
 echo "# all fm-spawn-dispatch-profile tests passed"
