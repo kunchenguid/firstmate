@@ -158,26 +158,60 @@ test_runlit_lab_fix_is_bounded_and_user_invocable() {
   pass "RunLit lab repair is internal, user-invocable, and precisely triggered"
 }
 
-# The prescriptive body of the skill: everything except the "Hard boundaries"
-# prohibition list, where naming a forbidden command strengthens the contract
-# instead of authorizing it. The mandatory `--context=default` pin is stripped
-# so forbidden-verb guards match the skill's own command style rather than a
-# bare `kubectl <verb>` form the file never uses.
-runlit_prescribed_commands() {
+# One line per kubectl command the skill prescribes, taken from its code spans
+# and fenced blocks and excluding the "Hard boundaries" prohibition list, where
+# naming a forbidden verb strengthens the contract instead of authorizing it.
+# Whole commands, not a `kubectl <verb>` prefix: the guards below match a
+# forbidden verb or a cluster-wide selector anywhere in the command, so no flag
+# order and no `--context=default` pin can hide a mutation from them.
+runlit_prescribed_kubectl() {
   awk '
     /^## Hard boundaries$/ { skipping = 1; next }
     skipping && /^## / { skipping = 0 }
-    !skipping { gsub(/--context=default /, ""); print }
+    skipping { next }
+    /^```/ { fence = !fence; next }
+    fence { if ($0 ~ /kubectl/) print; next }
+    {
+      rest = $0
+      while (match(rest, /`[^`]*`/)) {
+        span = substr(rest, RSTART + 1, RLENGTH - 2)
+        if (span ~ /kubectl/) print span
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+    }
   ' "$RUNLIT"
 }
 
+# The same body with every code span and fenced block stripped, so a kubectl
+# command written as bare prose - which the extractor above would never see -
+# still has to answer to a guard.
+runlit_uncoded_prose() {
+  awk '
+    /^## Hard boundaries$/ { skipping = 1; next }
+    skipping && /^## / { skipping = 0 }
+    skipping { next }
+    /^```/ { fence = !fence; next }
+    fence { next }
+    { gsub(/`[^`]*`/, " "); print }
+  ' "$RUNLIT"
+}
+
+# Standalone-word match so `replicasets` never reads as `set` and
+# `--field-selector` never reads as `select`.
+runlit_kubectl_mentions() {
+  printf '%s\n' "$1" | grep -Eq -- "(^|[^[:alnum:]_-])$2([^[:alnum:]_-]|\$)"
+}
+
 test_runlit_lab_fix_owns_safe_repair_contract() {
-  local prescribed
   for phrase in \
     'kubectl config current-context' \
     'kubectl config view --minify --context=default -o jsonpath="{.clusters[0].cluster.server}"' \
     'lab API server documented in `scripts/k3s/CLUSTER-STATE.md`' \
     'Do not accept a context name as proof of cluster identity' \
+    'is no defense against a changed `KUBECONFIG`' \
+    "the home's \`data/projects.md\` registry names" \
+    'kubectl --context=default get replicasets -n online-boutique -l app=recommendationservice' \
+    'Never widen it into a full revision or ReplicaSet template dump' \
     'kubectl --context=default get nodes -o wide' \
     'kubectl --context=default get pods -n online-boutique -o wide' \
     'kubectl --context=default get deployments -n online-boutique' \
@@ -205,20 +239,44 @@ test_runlit_lab_fix_owns_safe_repair_contract() {
     assert_grep "$phrase" "$RUNLIT" "RunLit lab repair contract is missing '$phrase'"
   done
   assert_no_grep '$FM_HOME/data/' "$RUNLIT" "RunLit lab repair evidence path expands FM_HOME literally instead of resolving the effective home"
-  prescribed=$(runlit_prescribed_commands)
-  assert_contains "$prescribed" 'kubectl get nodes -o wide' \
-    "the --context=default pin is no longer stripped, so the forbidden-command guards below are dead"
-  assert_not_contains "$prescribed" 'kubectl delete' "RunLit lab repair skill prescribes a pod deletion command"
-  assert_not_contains "$prescribed" 'kubectl apply' "RunLit lab repair skill prescribes an apply command"
-  assert_not_contains "$prescribed" 'kubectl patch' "RunLit lab repair skill prescribes a patch command"
-  assert_not_contains "$prescribed" 'kubectl set ' "RunLit lab repair skill prescribes a resource-mutating set command"
-  assert_not_contains "$prescribed" 'kubectl scale' "RunLit lab repair skill prescribes a scale command"
-  assert_not_contains "$prescribed" 'kubectl rollout restart' "RunLit lab repair skill prescribes a restart command"
-  assert_not_contains "$prescribed" 'kubectl get pods -A' "RunLit lab repair skill prescribes a cluster-wide pod read"
-  assert_not_contains "$prescribed" 'kubectl get deployments -A' "RunLit lab repair skill prescribes a cluster-wide deployment read"
-  assert_not_contains "$prescribed" 'kubectl get events -A' "RunLit lab repair skill prescribes a cluster-wide event read"
-  assert_not_contains "$prescribed" '--all-namespaces' "RunLit lab repair skill prescribes a cluster-wide read"
   pass "RunLit lab repair owns one guarded mutation and the required evidence and safety boundaries"
+}
+
+test_runlit_lab_fix_prescribes_no_mutating_or_cluster_wide_kubectl() {
+  local prescribed verb line
+  prescribed=$(runlit_prescribed_kubectl)
+  assert_contains "$prescribed" 'kubectl --context=default get nodes -o wide' \
+    "the prescribed kubectl commands could not be extracted, so the guards below are dead"
+  for verb in delete apply patch create replace edit set scale autoscale expose annotate label taint drain cordon uncordon \
+    exec attach cp proxy port-forward debug; do
+    if runlit_kubectl_mentions "$prescribed" "$verb"; then
+      fail "RunLit lab repair skill prescribes a forbidden 'kubectl $verb' command"
+    fi
+  done
+  if printf '%s\n' "$prescribed" | grep -Eq 'rollout[[:space:]]+restart'; then
+    fail "RunLit lab repair skill prescribes a rollout restart"
+  fi
+  if runlit_kubectl_mentions "$prescribed" '-A' || runlit_kubectl_mentions "$prescribed" '--all-namespaces'; then
+    fail "RunLit lab repair skill prescribes a cluster-wide read"
+  fi
+  # Every prescribed request-issuing command must carry the pin; only the local
+  # `kubectl config` reads, which touch no cluster, are exempt.
+  while IFS= read -r line; do
+    case "$line" in
+      *'kubectl config'*) continue ;;
+      *kubectl*) : ;;
+      *) continue ;;
+    esac
+    case "$line" in
+      *'--context=default'*) : ;;
+      *) fail "RunLit lab repair skill prescribes an unpinned cluster command: $line" ;;
+    esac
+  done <<< "$prescribed"
+  # A real command written outside a code span would bypass the extractor above.
+  if printf '%s\n' "$(runlit_uncoded_prose)" | grep -Eq 'kubectl[[:space:]]+(-|/|(get|config|auth|rollout|delete|apply|patch|create|replace|edit|set|scale|exec|cp|drain|cordon|uncordon|label|annotate|taint|port-forward|proxy|attach|debug|top|logs|describe|wait|expose|autoscale)([^[:alnum:]_-]|$))'; then
+    fail "RunLit lab repair skill writes a kubectl command outside a code span, where the command guards cannot see it"
+  fi
+  pass "RunLit lab repair prescribes no mutating or cluster-wide kubectl command in any flag order"
 }
 
 test_runlit_lab_fix_reproves_cluster_identity_before_mutating() {
@@ -343,6 +401,7 @@ test_outward_facing_skill_points_reference_section_9_owner
 test_section_9_owner_is_not_duplicated_into_skills
 test_runlit_lab_fix_is_bounded_and_user_invocable
 test_runlit_lab_fix_owns_safe_repair_contract
+test_runlit_lab_fix_prescribes_no_mutating_or_cluster_wide_kubectl
 test_runlit_lab_fix_reproves_cluster_identity_before_mutating
 test_ahoy_is_an_internal_user_invocable_skill
 test_ahoy_readme_uses_cross_harness_convention
