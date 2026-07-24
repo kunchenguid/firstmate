@@ -241,6 +241,30 @@ window_is_recorded() {  # <window>
   [ -n "$(fm_backend_meta_for_window "$1" "$STATE" 2>/dev/null || true)" ]
 }
 
+verified_wait_worker_live() {  # <window>
+  local win=$1 backend agent_state
+  backend=$(window_backend "$win")
+  agent_state=$(fm_backend_agent_state "$backend" "$win" 2>/dev/null) || agent_state=unreadable
+  case "$agent_state" in
+    alive) return 0 ;;
+    dead|missing) return 1 ;;
+  esac
+  fm_backend_target_exists "$backend" "$win" "$(window_label "$win")"
+}
+
+queue_stale_for_current_window() {  # <window> <reason>
+  local win=$1 reason=$2
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  WAKE_QUEUE_LOCK_HELD=1
+  if ! window_is_recorded "$win"; then
+    clear_pause_tracking "$win"
+    WAKE_QUEUE_LOCK_HELD=0
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 1
+  fi
+  fm_wake_append_locked stale "$win" "$reason" || exit 1
+}
+
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
 # (default 3): a pane that keeps re-wedging on the SAME stale hash - each
 # escalation gets absorbed again as "still validating" one poll later, since the
@@ -278,7 +302,10 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
         fi
-        fm_wake_append stale "$win" "$reason" || exit 1
+        queue_stale_for_current_window "$win" "$reason" || {
+          rm -f "$since_file"
+          return
+        }
         rm -f "$since_file"
         wake "$reason"
       fi
@@ -297,15 +324,14 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # re-surface epoch so, once past the window, it fires once per window rather than
 # every poll. Advances the stale suppressor to <hash> and flags the key paused.
 handle_paused_stale() {  # <window> <task> <hash> [paused|waiting]
-  local win=$1 task=$2 h=$3 class=${4:-paused} key statusf mtime age rf rf_age reason agent_alive
+  local win=$1 task=$2 h=$3 class=${4:-paused} key statusf mtime age rf rf_age reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   if [ "$class" = waiting ]; then
     rf="$STATE/.verified-wait-$key"
     if [ "$(age_of "$rf")" -ge "$VERIFIED_WAIT_RECHECK_SECS" ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != alive ] || [ "$(crew_absorb_class "$task")" != waiting ]; then
+      if ! verified_wait_worker_live "$win" || [ "$(crew_absorb_class "$task")" != waiting ]; then
         clear_pause_tracking "$win"
         surface_nonterminal_stale "$win" "$h"
         return
@@ -328,7 +354,7 @@ handle_paused_stale() {  # <window> <task> <hash> [paused|waiting]
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
   if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
     reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
-    fm_wake_append stale "$win" "$reason" || exit 1
+    queue_stale_for_current_window "$win" "$reason" || return
     date +%s > "$rf"
     wake "$reason"
   fi
@@ -405,7 +431,7 @@ pause_state_class() {  # <window> <task>
 surface_nonterminal_stale() {  # <window> <hash>
   local win=$1 h=$2 key task last
   key=$(printf '%s' "$win" | tr ':/.' '___')
-  fm_wake_append stale "$win" "stale: $win" || exit 1
+  queue_stale_for_current_window "$win" "stale: $win" || return
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
   task=$(window_to_task "$win" "$STATE")
@@ -679,8 +705,8 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   exit 0
 fi
 watcher_cleanup() {
-  if [ "${SIGNAL_QUEUE_LOCK_HELD:-0}" = 1 ]; then
-    SIGNAL_QUEUE_LOCK_HELD=0
+  if [ "${WAKE_QUEUE_LOCK_HELD:-0}" = 1 ]; then
+    WAKE_QUEUE_LOCK_HELD=0
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   fi
   fm_active_check_stop || return 1
@@ -845,7 +871,7 @@ EOF
     if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
       appended=0
       fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-      SIGNAL_QUEUE_LOCK_HELD=1
+      WAKE_QUEUE_LOCK_HELD=1
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         base=${f##*/}
@@ -859,7 +885,7 @@ EOF
 $pending
 EOF
       if [ "$appended" -eq 0 ]; then
-        SIGNAL_QUEUE_LOCK_HELD=0
+        WAKE_QUEUE_LOCK_HELD=0
         fm_lock_release "$FM_WAKE_QUEUE_LOCK"
         continue
       fi
@@ -947,9 +973,10 @@ EOF
         elif afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w" || exit 1
-            printf '%s' "$h" > "$sf"
-            wake "stale: $w"
+            if queue_stale_for_current_window "$w" "stale: $w"; then
+              printf '%s' "$h" > "$sf"
+              wake "stale: $w"
+            fi
           fi
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's last line is captain-relevant - but that alone is not
@@ -977,11 +1004,12 @@ EOF
                 handle_paused_stale "$w" "$task" "$h" waiting
                 ;;
               *)
-                fm_wake_append stale "$w" "stale: $w" || exit 1
-                printf '%s' "$h" > "$sf"
-                rm -f "$ssf"
-                mark_surfaced "$STATE/$task.status"
-                wake "stale: $w"
+                if queue_stale_for_current_window "$w" "stale: $w"; then
+                  printf '%s' "$h" > "$sf"
+                  rm -f "$ssf"
+                  mark_surfaced "$STATE/$task.status"
+                  wake "stale: $w"
+                fi
                 ;;
             esac
           elif [ -e "$ssf" ]; then

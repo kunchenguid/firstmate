@@ -1492,6 +1492,75 @@ SH
   pass "teardown serializes worker retirement with live signal queue commits"
 }
 
+test_teardown_waits_for_live_stale_queue_commit() {
+  local case_dir real_date pid teardown_pid i stale_count key pane_hash
+  case_dir=$(make_case stale-queue-teardown)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' 'needs-decision: choose release target' > "$case_dir/state/task-x1.status"
+  key=$(printf '%s' 'fm-task-x1' | tr ':/.' '___')
+  if command -v md5 >/dev/null 2>&1; then
+    pane_hash=$(printf '' | md5 -q)
+  else
+    pane_hash=$(printf '' | md5sum | cut -d' ' -f1)
+  fi
+  printf '%s' "$pane_hash" > "$case_dir/state/.hash-$key"
+  printf '1\n' > "$case_dir/state/.count-$key"
+  if [ "$(uname)" = Darwin ]; then
+    stat -f '%z:%Fm' "$case_dir/state/task-x1.status" > "$case_dir/state/.seen-task-x1_status"
+  else
+    stat -c '%s:%Y' "$case_dir/state/task-x1.status" > "$case_dir/state/.seen-task-x1_status"
+  fi
+  real_date=$(command -v date)
+  cat > "$case_dir/fakebin/date" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = +%s ] && [ -e "${FM_QUEUE_APPEND_ARMED:?}" ] && [ ! -e "${FM_QUEUE_APPEND_ONCE:?}" ]; then
+  : > "$FM_QUEUE_APPEND_ONCE"
+  : > "${FM_QUEUE_APPEND_BLOCKED:?}"
+  while [ ! -e "${FM_QUEUE_APPEND_RESUME:?}" ]; do
+    "${FM_REAL_DATE_FOR_TEST:?}" +%s >/dev/null
+  done
+fi
+exec "${FM_REAL_DATE_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$case_dir/fakebin/date"
+  : > "$case_dir/queue-append-armed"
+
+  PATH="$case_dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_REAL_DATE_FOR_TEST="$real_date" \
+    FM_QUEUE_APPEND_ARMED="$case_dir/queue-append-armed" FM_QUEUE_APPEND_ONCE="$case_dir/queue-append-once" \
+    FM_QUEUE_APPEND_BLOCKED="$case_dir/queue-append-blocked" FM_QUEUE_APPEND_RESUME="$case_dir/queue-append-resume" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch.sh" > "$case_dir/watch.out" 2> "$case_dir/watch.err" &
+  pid=$!
+  i=0
+  while [ ! -e "$case_dir/queue-append-blocked" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$case_dir/queue-append-blocked" ] \
+    || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "stale-queue-teardown: watcher did not pause while committing its queue record"; }
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" &
+  teardown_pid=$!
+  sleep 0.2
+  kill -0 "$teardown_pid" 2>/dev/null \
+    || { wait "$teardown_pid" 2>/dev/null || true; fail "stale-queue-teardown: teardown retired metadata during the queue commit"; }
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "stale-queue-teardown: metadata disappeared before the queue commit completed"
+
+  : > "$case_dir/queue-append-resume"
+  wait "$pid" || fail "stale-queue-teardown: watcher failed after queue commit: $(cat "$case_dir/watch.err")"
+  wait "$teardown_pid" || fail "stale-queue-teardown: teardown failed after queue commit"
+  stale_count=$(grep -c "$(printf '\tstale\tfm-task-x1\t')" "$case_dir/state/.wake-queue" 2>/dev/null || true)
+  [ "$stale_count" -eq 1 ] \
+    || fail "stale-queue-teardown: committed live stale queued $stale_count times instead of once"
+  grep -F "stale: fm-task-x1" "$case_dir/watch.out" >/dev/null \
+    || fail "stale-queue-teardown: committed live stale did not wake"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "stale-queue-teardown: teardown did not retire metadata after the queue commit"
+  pass "teardown serializes worker retirement with live stale queue commits"
+}
+
 configure_herdr_projection_teardown_case() {  # <case-dir>
   local case_dir=$1 token=AbCdEfGhIjKlMnOpQrStUv
   sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
@@ -1611,6 +1680,7 @@ test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
 test_teardown_after_signal_filter_does_not_wake_empty_queue
 test_teardown_waits_for_live_signal_queue_commit
+test_teardown_waits_for_live_stale_queue_commit
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_squash_merged_branch_deleted_allows
