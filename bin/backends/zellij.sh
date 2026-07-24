@@ -387,7 +387,7 @@ fm_backend_zellij_target_ready() {  # <target> [expected-label]
 }
 
 fm_backend_zellij_agent_state() {  # <target> [expected-label] [recorded-tab-id]
-  local target=$1 expected_label=${2:-} recorded_tab_id=${3:-} sessions panes tabs
+  local target=$1 expected_label=${2:-} recorded_tab_id=${3:-} sessions panes tabs scoped task_tab_id match_count
   fm_backend_zellij_parse_target "$target" || { printf 'unreadable'; return 0; }
   case "$FM_BACKEND_ZELLIJ_PANE" in
     ''|*[!0-9]*) printf 'unreadable'; return 0 ;;
@@ -405,11 +405,6 @@ fm_backend_zellij_agent_state() {  # <target> [expected-label] [recorded-tab-id]
     printf 'unreadable'
     return 0
   fi
-  if printf '%s' "$panes" | jq -e --argjson p "$FM_BACKEND_ZELLIJ_PANE" \
-    '[.[]? | select(.id == $p and .is_plugin == false)] | length > 0' >/dev/null 2>&1; then
-    printf 'unverified'
-    return 0
-  fi
   case "$recorded_tab_id" in
     ''|*[!0-9]*) printf 'unverified'; return 0 ;;
   esac
@@ -419,16 +414,43 @@ fm_backend_zellij_agent_state() {  # <target> [expected-label] [recorded-tab-id]
     printf 'unreadable'
     return 0
   fi
-  if ! printf '%s' "$tabs" | jq -e --argjson t "$recorded_tab_id" \
-    '[.[]? | select(.tab_id == $t)] | length > 0' >/dev/null 2>&1; then
+  task_tab_id=
+  if fm_backend_zellij_tabs_match_label "$tabs" "$recorded_tab_id" "$expected_label"; then
+    task_tab_id=$recorded_tab_id
+  else
+    scoped=$(fm_backend_zellij_scoped_title "$expected_label")
+    match_count=$(printf '%s' "$tabs" | jq -r --arg want "$scoped" \
+      '[.[]? | select(.name == $want)] | length' 2>/dev/null)
+    if [ "$match_count" = 1 ]; then
+      task_tab_id=$(printf '%s' "$tabs" | jq -r --arg want "$scoped" \
+        '.[]? | select(.name == $want) | .tab_id' 2>/dev/null)
+    elif [ "$match_count" != 0 ]; then
+      printf 'unreadable'
+      return 0
+    else
+      match_count=$(printf '%s' "$tabs" | jq -r --arg want "$expected_label" \
+        '[.[]? | select(.name == $want)] | length' 2>/dev/null)
+      if [ "$match_count" = 1 ]; then
+        task_tab_id=$(printf '%s' "$tabs" | jq -r --arg want "$expected_label" \
+          '.[]? | select(.name == $want) | .tab_id' 2>/dev/null)
+      elif [ "$match_count" != 0 ]; then
+        printf 'unreadable'
+        return 0
+      fi
+    fi
+  fi
+  if [ -z "$task_tab_id" ]; then
     printf 'missing'
     return 0
   fi
-  if ! fm_backend_zellij_tabs_match_label "$tabs" "$recorded_tab_id" "$expected_label"; then
-    printf 'unreadable'
+  case "$task_tab_id" in
+    *[!0-9]*) printf 'unreadable'; return 0 ;;
+  esac
+  if [ "$task_tab_id" != "$recorded_tab_id" ]; then
+    printf 'ambiguous'
     return 0
   fi
-  if printf '%s' "$panes" | jq -e --argjson t "$recorded_tab_id" \
+  if printf '%s' "$panes" | jq -e --argjson t "$task_tab_id" \
     '[.[]? | select(.tab_id == $t and .is_plugin == false)] | length > 0' >/dev/null 2>&1; then
     printf 'ambiguous'
   else

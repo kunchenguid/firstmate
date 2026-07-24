@@ -180,6 +180,9 @@ case "${1:-}" in
           unreadable-panes) printf '%s\n' not-json ;;
           pane-present) printf '%s\n' '[{"id":7,"tab_id":3,"is_plugin":false}]' ;;
           replacement-pane) printf '%s\n' '[{"id":8,"tab_id":3,"is_plugin":false}]' ;;
+          reused-pane-missing-task) printf '%s\n' '[{"id":7,"tab_id":9,"is_plugin":false}]' ;;
+          reused-tab-missing-task) printf '%s\n' '[{"id":7,"tab_id":3,"is_plugin":false}]' ;;
+          relocated-task-pane) printf '%s\n' '[{"id":7,"tab_id":9,"is_plugin":false}]' ;;
           *) printf '%s\n' '[]' ;;
         esac
         ;;
@@ -187,6 +190,9 @@ case "${1:-}" in
         case "${FM_TEST_ZELLIJ_MODE:-}" in
           missing-tab) printf '%s\n' '[]' ;;
           unreadable-tabs) printf '%s\n' not-json ;;
+          reused-pane-missing-task) printf '%s\n' '[{"tab_id":9,"name":"foreign"}]' ;;
+          reused-tab-missing-task) printf '%s\n' '[{"tab_id":3,"name":"foreign"}]' ;;
+          relocated-task-pane) printf '%s\n' '[{"tab_id":9,"name":"fm-sm1"}]' ;;
           *) printf '%s\n' '[{"tab_id":3,"name":"fm-sm1"}]' ;;
         esac
         ;;
@@ -209,7 +215,10 @@ test_zellij_agent_state_authorizes_only_structural_absence() {
     'missing-tab missing' \
     'ghost dead' \
     'replacement-pane ambiguous' \
-    'pane-present unverified' \
+    'pane-present ambiguous' \
+    'reused-pane-missing-task missing' \
+    'reused-tab-missing-task missing' \
+    'relocated-task-pane ambiguous' \
     'unreadable-sessions unreadable' \
     'unreadable-panes unreadable' \
     'unreadable-tabs unreadable'
