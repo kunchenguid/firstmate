@@ -52,6 +52,7 @@ test_gate_scope_and_recovery_exceptions() {
 
   expect_allow "ordinary shell command" 'git status --short'
   expect_allow "fleet-script text as data" "rg -n 'bin/fm-send.sh' docs"
+  expect_allow "session start recovery" 'bin/fm-session-start.sh'
   expect_allow "wake drain recovery" 'bin/fm-wake-drain.sh'
   expect_allow "watch arm recovery" 'bin/fm-watch-arm.sh'
   expect_allow "drain then arm recovery" 'bin/fm-wake-drain.sh; bin/fm-watch-arm.sh'
@@ -62,6 +63,7 @@ test_gate_scope_and_recovery_exceptions() {
   # shellcheck disable=SC2016  # single quotes are deliberate: "$TEARDOWN_MODE" is literal test data (an unsafe shell-expanded arg the gate must deny), not an expansion here
   expect_deny "dynamic teardown mode is not recovery" 'bin/fm-teardown.sh task "$TEARDOWN_MODE"' 'fm-teardown.sh' "$unsafe_teardown_reason"
   expect_deny "unrelated fleet command" 'bin/fm-crew-state.sh task' 'fm-crew-state.sh'
+  expect_deny "session start bundled with unrelated fleet command" 'bin/fm-session-start.sh; bin/fm-send.sh task hi' 'fm-send.sh'
   expect_deny "recovery bundled with unrelated fleet command" 'bin/fm-wake-drain.sh; bin/fm-send.sh task hi' 'fm-send.sh'
   expect_deny "literal nested fleet command" "bash -lc 'bin/fm-bootstrap.sh'" 'fm-bootstrap.sh'
   pass "continuity gate allows recovery and ordinary commands but denies only other fleet execution"

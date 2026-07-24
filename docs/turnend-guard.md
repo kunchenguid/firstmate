@@ -55,6 +55,22 @@ The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 millis
 When none of those proofs appears, it re-blocks up to `FM_CLAUDE_TURNEND_BLOCK_BUDGET` times (default 3, below Claude's 8-block override), then allows degraded with a visible `systemMessage`.
 Any allow resets the budget.
 
+## 2026-07-24 stale-lock incident closure
+
+The pre-fix failure was reproduced through Claude Code 2.1.219 in a disposable plain clone and isolated `FM_HOME` with one synthetic task record, no watcher lock or beacon, and `state/.lock` set to a dead numeric owner.
+The expected first transition was for `bin/fm-session-start.sh` to run, reclaim the stale owner through `bin/fm-lock.sh`, and leave the next Stop eligible for auto-arm.
+Instead, the continuity gate denied that first command because `fm-session-start.sh` was missing from its recovery set.
+The stale session lock then masked the Stop hook because its identity check required exact pre-existing ownership, so no auto-arm epoch or owner claim appeared.
+The visible result was three consecutive `TURN WOULD END BLIND` continuations in one fresh session, each reporting that the Stop-owned auto-arm had not claimed the home.
+The real Claude path and direct hermetic controls produced the same initiating denial, stale-owner veto, and repeated manual-repair wedge.
+The earliest divergence was command classification, before session start could reach its existing lock acquisition.
+Running `bin/fm-lock.sh` directly under the same dead-owner fixture reclaimed the lock, which separated the proven acquisition path from the denied caller.
+Changing only the recovery set allowed session start, and changing only stale-owner identity handling allowed auto-arm to claim and rewake.
+A live verified-harness owner remained disconfirming evidence against any broad lock takeover because the competing hook stayed silent and left the owner unchanged.
+An identity-matched live watcher also bypassed the command denial, showing that stale session state alone was not sufficient without the unsupervised condition.
+The correction adds only session start to the recovery set and delegates eligible stale-owner claims back to `bin/fm-lock.sh` after the unchanged scope, AFK, and supervision-need checks.
+Session start's existing read-only refusal and the Stop hook's shared liveness predicate preserve the live-owner boundary.
+
 OpenCode, Pi, and Grok expose passive callbacks for this purpose.
 Their adapters fail open at the hook boundary to protect the user session but schedule one bounded follow-up when the predicate blocks.
 The generated prompts use the canonical `turn-end-guard` kind after the U+2063 `FIRSTMATE_OP: ` prefix, so Ahoy does not treat them as captain messages.
@@ -78,6 +94,8 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 ## Regression coverage
 
 `tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the cooperative `--claude` claim wait, epoch allow, re-block budget, Pi logical-run latching, missing-`jq` behavior, all five registrations, and Grok resume permission and recursion safety.
+`tests/fm-continuity-pretool-check.test.sh` and `tests/fm-claude-stop-autoarm.test.sh` cover the recovered session-start command, stale-owner claim, and competing-live-owner refusal.
+`FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` preserves the real fresh-session incident shape as opt-in regression coverage.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.
 [`verification/supervision.md`](verification/supervision.md#turn-end-guard) records the active cross-harness empirical evidence, including the 2026-07-24 Claude `asyncRewake` revalidation.
