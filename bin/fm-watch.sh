@@ -253,16 +253,17 @@ verified_wait_worker_live() {  # <window>
 }
 
 queue_stale_for_current_window() {  # <window> <reason>
-  local win=$1 reason=$2
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-  WAKE_QUEUE_LOCK_HELD=1
-  if ! window_is_recorded "$win"; then
-    clear_pause_tracking "$win"
-    WAKE_QUEUE_LOCK_HELD=0
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-    return 1
+  local win=$1 reason=$2 status
+  if fm_wake_append_stale_for_recorded_window "$win" "$reason"; then
+    :
+  else
+    status=$?
+    if [ "$status" -eq 3 ]; then
+      clear_pause_tracking "$win"
+      return 1
+    fi
+    exit 1
   fi
-  fm_wake_append_locked stale "$win" "$reason" || exit 1
 }
 
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT

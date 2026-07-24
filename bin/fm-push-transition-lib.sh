@@ -55,9 +55,21 @@ mark_surfaced() {  # <status-file>
   printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
 }
 
+fm_wake_append_stale_for_recorded_window() {  # <window> <reason>
+  local window=$1 reason=$2 status=0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  if [ -z "$(fm_backend_meta_for_window "$window" "$STATE" 2>/dev/null || true)" ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 3
+  fi
+  fm_wake_append_locked stale "$window" "$reason" || status=$?
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
 # Act on a fresh actionable transition from a push-capable backend.
 handle_push_transition() {  # <backend> <session> <record>
-  local backend=$1 session=$2 record=$3 pane_id to window task reason
+  local backend=$1 session=$2 record=$3 pane_id to window task reason status
   pane_id=$(fm_transition_pane_id "$record")
   to=$(fm_transition_to_status "$record")
   [ -n "$pane_id" ] || { sleep 1; return; }
@@ -69,7 +81,13 @@ handle_push_transition() {  # <backend> <session> <record>
     return
   fi
   reason="stale: $window (herdr: agent $to - waiting on human, escalated immediately, not via wedge timer)"
-  fm_wake_append stale "$window" "$reason" || exit 1
+  if fm_wake_append_stale_for_recorded_window "$window" "$reason"; then
+    :
+  else
+    status=$?
+    [ "$status" -eq 3 ] && return
+    exit 1
+  fi
   fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
   mark_surfaced "$STATE/$task.status"
   wake "$reason"
