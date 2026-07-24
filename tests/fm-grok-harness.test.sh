@@ -9,19 +9,27 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-grok-harness)
 
-test_grok_busy_signature_matches_current_footer() {
+test_grok_busy_signatures_match_verified_footers() {
   local regex
   # shellcheck source=bin/fm-tmux-lib.sh
   . "$ROOT/bin/fm-tmux-lib.sh"
   regex=$FM_TMUX_BUSY_REGEX_DEFAULT
+  printf '%s\n' 'Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+x:shortcuts' \
+    | grep -qiE "$regex" \
+    || fail "grok 0.2.73 busy footer did not match the shared busy regex"
   printf '%s\n' 'Shift+Tab:mode  │  Esc:cancel  │  Ctrl+x:shortcuts' \
     | grep -qiE "$regex" \
     || fail "grok 0.2.111 busy footer did not match the shared busy regex"
   if printf '%s\n' 'Shift+Tab:mode  │  Ctrl+x:shortcuts' | grep -qiE "$regex"; then
     fail "grok 0.2.111 idle footer matched the shared busy regex"
   fi
-  assert_grep "Esc:cancel" "$ROOT/bin/fm-watch.sh" \
-    "watcher busy regex drifted from the shared grok footer signature"
+  assert_grep "BUSY_REGEX=\${FM_BUSY_REGEX:-\$FM_TMUX_BUSY_REGEX_DEFAULT}" \
+    "$ROOT/bin/fm-watch.sh" \
+    "watcher busy regex drifted from the shared busy regex"
+  (
+    tmux() { printf '%s\n' 'Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+x:shortcuts'; }
+    fm_pane_is_busy grok-pane
+  ) || fail "shared tmux pane classifier did not recognize grok 0.2.73 as busy"
   (
     tmux() { printf '%s\n' 'Shift+Tab:mode  │  Esc:cancel  │  Ctrl+x:shortcuts'; }
     fm_pane_is_busy grok-pane
@@ -32,7 +40,7 @@ test_grok_busy_signature_matches_current_footer() {
   ); then
     fail "shared tmux pane classifier treated grok 0.2.111 idle footer as busy"
   fi
-  pass "grok 0.2.111 Esc:cancel footer distinguishes busy from idle"
+  pass "verified grok busy footers distinguish busy from idle"
 }
 
 make_spawn_fakebin() {
@@ -163,7 +171,7 @@ SH
   pass "fm-lock recognizes grok harness processes"
 }
 
-test_grok_busy_signature_matches_current_footer
+test_grok_busy_signatures_match_verified_footers
 test_grok_hook_requires_registered_token
 test_grok_teardown_removes_pointer_and_token
 test_fm_lock_recognizes_grok_holder
