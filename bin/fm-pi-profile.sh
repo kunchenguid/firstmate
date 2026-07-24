@@ -92,6 +92,7 @@ fm_pi_profile_load() { # <config-dir> <project-dir>
     *) fm_pi_profile_fail "pi_command is not the Pi coding-agent CLI"; return 1 ;;
   esac
   FM_PI_COMMAND=$pi_real
+  # shellcheck disable=SC2016 # JavaScript template expressions must remain literal.
   package_identity=$(NODE_OPTIONS='' NODE_PATH='' PI_PACKAGE_DIR='' node -e '
 const pkg = require(process.argv[1]);
 process.stdout.write(`${pkg.name}\t${pkg.version}`);
