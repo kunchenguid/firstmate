@@ -35,6 +35,17 @@ For connectivity diagnosis, separately record each host's local Tailscale status
 Report the host, evidence time, reachability result, ownership classification, and the next decision without treating stale output as current health.
 A healthy Tailscale peer does not prove SSH or Herdr health, and a reachable SSH host does not prove a task endpoint is safe to touch.
 
+## Workspace Wizard operating mode
+
+Start with targeted task and secondmate metadata, then query only the host and confirmed endpoint whose evidence needs refreshing.
+Run at most one bounded batched JSON inventory per host per stewardship pass.
+Do not retry a broad inventory in the same pass unless changed or contradictory evidence creates a new question.
+Read one exact confirmed pane only for render QA or to resolve contradictory evidence.
+Reuse a registered persistent secondmate for its in-scope stewardship work rather than creating another helper or sweeping sibling homes.
+Report a compact digest and changes only.
+Send a sparse update only when evidence creates an actionable decision, blocker, ownership conflict, or material health change.
+Do not conduct periodic, speculative, or repeated broad scans when the prior evidence remains sufficient.
+
 ## Approval boundaries
 
 Exact captain approval must name the target, requested action, expected outcome, and rollback or recovery plan before any mutation.
