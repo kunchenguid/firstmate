@@ -63,11 +63,18 @@ reset_state
 fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
 (
   # shellcheck disable=SC2329 # Runtime override called by the isolated production owner.
-  fm_wake_append() { return 1; }
+  fm_wake_append_locked() { return 1; }
   handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
 ) >/dev/null 2>&1 || true
 [ ! -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] || fail "a failed durable enqueue must leave the blocked edge eligible for reconnect reconciliation"
 pass "handle_push_transition: enqueue failure cannot commit the Herdr dedupe marker"
+
+reset_state
+handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
+[ ! -s "$STATE_DIR/.wake-queue" ] || fail "a retired push transition must not enqueue a stale wake"
+[ ! -s "$WAKE_LOG" ] || fail "a retired push transition must not wake the supervisor"
+[ ! -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] || fail "a retired push transition must not recreate dedupe tracking"
+pass "handle_push_transition: a retired worker identity cannot enqueue or wake"
 
 # --- handle_push_transition: absorb (no wake, no enqueue) for a declared pause -
 
