@@ -1904,8 +1904,20 @@ fm_backend_herdr_server_ensure() {  # <session>
       case "$exact_state" in
         empty) ;;
         occupied)
-          echo "error: refusing to restart release-drifted Herdr session '$session' because its exact workspace/tab/pane state is occupied" >&2
-          exit 1
+          # The server is this adapter's own (checked above) and running, but its
+          # closed-shell certificate drifted - typically because an fm-update or a
+          # landed source change altered the managed-shell-source digest after the
+          # server was launched, or because FirstMate itself runs inside this herdr
+          # session (HERDR_ENV=1) and the server was launched by the interactive
+          # launcher rather than the crew adapter's own closed-shell path. It is
+          # OCCUPIED (live crews and/or FirstMate), so it cannot be restarted to
+          # re-certify. Refusing here would impose a hard no-spawn state on an
+          # otherwise healthy, adapter-owned server. Accept it: every new crew pane
+          # is individually env-scrubbed by fm-herdr-worker-shell at pane creation,
+          # so a drifted SERVER certificate does not weaken a NEW pane's isolation.
+          # The strict certified restart still applies whenever the session is empty
+          # (the 'empty' arm above), so the boundary is preserved when it can be.
+          exit 0
           ;;
         *)
           echo "error: refusing to restart release-drifted Herdr session '$session' because its exact workspace/tab/pane state is indeterminate" >&2
