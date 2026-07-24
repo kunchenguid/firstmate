@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, BACKLOG_ORPHAN, CREW_DISPATCH invalid, HARNESS_OVERRIDES invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NM_ORPHAN, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, BACKLOG_ORPHAN, CREW_DISPATCH invalid, HARNESS_OVERRIDES invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NM_INCOMPATIBLE, NM_ORPHAN, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO capability fact, means no skill load.
 user-invocable: false
 metadata:
@@ -41,6 +41,10 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `FLEET_SYNC: <repo>: recovered: <detail>` - the clone had drifted onto a clean detached HEAD holding no unique commits and the sync self-healed it (re-attached the default branch and fast-forwarded); no action needed, it is reported only so the self-heal is visible.
 - `FLEET_SYNC: <repo>: STUCK: on <state>, N commits behind <base> - needs attention` - the clone is dirty, on a non-default branch, detached with unique commits, or diverged, so the sync left it untouched (never forcing or discarding); it will keep falling behind until you look.
   A loud STUCK, especially a growing N across bootstraps, means that clone needs hands-on attention; dispatch a crewmate or resolve it before it strands work.
+- `NM_INCOMPATIBLE: no-mistakes is installed but too old for direct-PR monitoring (its \`watch\` command is missing); ... (upgrade: no-mistakes update)` - the no-mistakes binary is present and executable but predates the `watch` subcommand that `bin/fm-nm-watch.sh` arms for a direct-PR task, so direct-PR CI, review, and merge alerts silently fail to start (the gap otherwise only surfaces later as a direct-PR task reporting `watch not armed`).
+  This is a detect-only diagnostic; bootstrap never upgrades the tool.
+  Tell the captain the plain consequence (direct-PR delivery will not be watched until no-mistakes is upgraded) and, on explicit consent, upgrade it with the printed `no-mistakes update`, then rerun session start to confirm the line is gone - the same detect-then-authorize split `/updatefirstmate` uses (it runs the identical `fm-nm-lib.sh` probe after fast-forwarding, so the two paths report the same capability).
+  Never auto-upgrade, and note that no-mistakes is a shared single-instance daemon: an upgrade is a captain-authorized action, not a routine bootstrap install.
 - `NM_ORPHAN: no-mistakes ... run parked ... - no live task in this home owns it ...` - a no-mistakes watch run THIS home armed (via `bin/fm-nm-watch.sh`, recorded in `data/nm-armed-runs`) is parked, but the task that armed it is gone (cancelled or torn down), so the reminder cascade re-sends into silence with nobody to answer.
   The line names the run id, the branch, and the gate; it is scoped by this home's own ledger, so a run this home never armed - the captain's own no-mistakes work or another firstmate home's task - never appears here.
   Escalate it to the captain as a stuck review that needs a call: answer the run with `no-mistakes axi respond --run <id>` (approve/skip only - an externally opened PR refuses `fix`) or cancel the run; do not merge a red PR to clear it.

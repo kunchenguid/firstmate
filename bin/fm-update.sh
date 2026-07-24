@@ -23,6 +23,9 @@
 # tmux actions the skill performs. The script's job is the safe git mechanics
 # plus a parseable summary telling the caller what to do next:
 #   - one status line per target (updated/already current/skipped)
+#   - nm-watch-capability: ok|incompatible (upgrade: ...)|absent
+#       (does the local no-mistakes expose the `watch` command direct-PR
+#        monitoring needs; detection only, the skill owns any authorized upgrade)
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - nudge-secondmates: fm-<id>...|none   (updated live secondmates to nudge)
 #
@@ -36,6 +39,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-nm-lib.sh
+. "$SCRIPT_DIR/fm-nm-lib.sh"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -79,6 +84,24 @@ if [ -f "$SECONDMATES_MD" ]; then
     home=$(printf '%s\n' "$line" | sed -n 's/.*(home:[[:space:]]*\([^;]*\);.*/\1/p' | sed 's/[[:space:]]*$//')
     process_secondmate "$id" "$home" "" origin no
   done < "$SECONDMATES_MD"
+fi
+
+# --- dependency compatibility ----------------------------------------------
+# The code fast-forward above may have advanced firstmate onto instructions that
+# now arm `no-mistakes watch` for direct-PR tasks (bin/fm-nm-watch.sh). Probe the
+# LOCAL no-mistakes for that capability so the caller can act on a real
+# incompatibility instead of discovering it later as `watch not armed`. This is
+# DETECTION only: the actual upgrade is separately captain-authorized in the
+# /updatefirstmate skill, never a silent self-upgrade here, and a failed upgrade
+# there must never revert the fast-forward this run just completed. The probe is
+# the same fm-nm-lib.sh one bootstrap uses, so both report the identical state.
+if fm_nm_supports_watch; then
+  echo "nm-watch-capability: ok"
+else
+  case "$?" in
+    2) echo "nm-watch-capability: absent" ;;
+    *) echo "nm-watch-capability: incompatible (upgrade: no-mistakes update)" ;;
+  esac
 fi
 
 # --- caller action summary -------------------------------------------------

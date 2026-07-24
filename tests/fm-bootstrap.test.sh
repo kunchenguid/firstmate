@@ -60,10 +60,28 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
-  # firstmate treats no-mistakes as a plain present/executable required tool; it
-  # does not probe its version or subcommands, so the stub only needs to exist.
+  # no-mistakes must be present AND expose the `watch` subcommand firstmate's
+  # direct-PR monitor depends on. The stub answers `watch --help` per
+  # FM_FAKE_NM_WATCH: `ok`/unset = compatible (documents --pr), `missing` = an old
+  # build that lacks the subcommand, `error` = an unexpected crash. Any other
+  # invocation just succeeds, so `command -v no-mistakes` still passes.
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = watch ] && [ "${2:-}" = --help ]; then
+  case "${FM_FAKE_NM_WATCH:-ok}" in
+    missing)
+      echo 'A new version of no-mistakes is available: v1.34.0 -> v1.40.3' >&2
+      echo 'unknown command "watch" for "no-mistakes"' >&2
+      exit 1 ;;
+    error)
+      echo 'panic: runtime error' >&2
+      exit 2 ;;
+    *)
+      printf '%s\n' 'Usage:' '  no-mistakes watch --pr <url> [flags]' \
+        'Flags:' '      --pr string   URL of the pull/merge request to watch (required)'
+      exit 0 ;;
+  esac
+fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
@@ -338,19 +356,37 @@ test_no_mistakes_present_or_internal_source() {
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
 
-  # Present and executable: no-mistakes is a plain required tool, so a present
-  # binary draws no MISSING line regardless of its version or subcommands.
+  # Present AND compatible: a build that exposes `watch` draws no line at all.
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ -z "$out" ] || fail "present no-mistakes: expected silence, got: $out"
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NM_WATCH=ok "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "compatible no-mistakes: expected silence, got: $out"
+
+  # Present but too old (no `watch` subcommand): a distinct NM_INCOMPATIBLE
+  # diagnostic, NOT the MISSING (not-installed) line, and it suggests the upgrade
+  # without running it.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NM_WATCH=missing "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "NM_INCOMPATIBLE: no-mistakes is installed but too old" \
+    "old no-mistakes: expected NM_INCOMPATIBLE diagnostic, got: $out"
+  assert_contains "$out" "upgrade: no-mistakes update" \
+    "old no-mistakes: diagnostic must suggest the upgrade command, got: $out"
+  assert_not_contains "$out" "MISSING: no-mistakes" \
+    "old no-mistakes: incompatibility must not be misreported as not-installed, got: $out"
+
+  # An unexpected `watch --help` failure is treated as incompatible (fail closed),
+  # never silently assumed compatible.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NM_WATCH=error "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "NM_INCOMPATIBLE" \
+    "erroring no-mistakes: expected NM_INCOMPATIBLE, got: $out"
 
   # Absent: the MISSING line carries the internal Codebase source, never a public
-  # upstream install script.
+  # upstream install script, and never the NM_INCOMPATIBLE line.
   rm -f "$fakebin/no-mistakes"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = "$missing" ] || fail "absent no-mistakes: expected '$missing', got: $out"
-  pass "bootstrap requires no-mistakes present and installs it from the internal source"
+  pass "bootstrap detects no-mistakes presence, watch-capability, and internal source"
 }
 
 test_bytedcli_required_for_codebase_fleet() {

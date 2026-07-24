@@ -34,7 +34,11 @@
 #                                   id and drop the record (recovery after crash).
 #   fm-present-launch.sh status     Print whether the present daemon is running.
 #
-# Supported backends: herdr, tmux (same as away mode). Others refuse loudly.
+# Supported backends: herdr, tmux (same as away mode). When no injectable
+# supervisor pane resolves (an independent pty) or the backend has no injection
+# primitive, start reports an honest degrade - durable notifications remain, only
+# automatic injection is unavailable - and returns 3 (FM_PRESENT_DEGRADED), NOT a
+# bare failure, so the caller falls back to the foreground checkpoint knowingly.
 #
 # Test seam: FM_PRESENT_LAUNCH_ENTRY overrides the command run in the created
 # terminal (default: the daemon itself), so a topology test can run a harmless
@@ -66,6 +70,24 @@ set +e
 FM_AFK_LOCK="$FM_PRESENT_STATE/.supervise-present.lock"
 
 fm_present_log() { printf 'fm-present-launch: %s\n' "$*" >&2; }
+
+# Exit code for an EXPECTED structural degrade: this primary cannot be woken by
+# automatic injection here (no injectable supervisor pane resolves, or the
+# supervisor backend has no non-visible injection primitive), yet durable
+# queueing is unaffected - wakes are still enqueued and drained by the foreground
+# checkpoint. Distinct from 1 (a genuine launch failure to repair) so the caller
+# reports the honest fallback instead of a bare error, and distinct from 0 so it
+# never looks like the daemon started.
+FM_PRESENT_DEGRADED=3
+
+# Report the honest degrade rather than failing silently or injecting into an
+# unverified pane. Durable notifications keep working; only automatic turn
+# injection is unavailable, so supervision falls back to the bounded foreground
+# checkpoint. <reason> names why injection is off. Writing a marked nudge into an
+# arbitrary pty would NOT be a reliable wake, so this deliberately does not try.
+fm_present_report_degraded() {  # <reason>
+  fm_present_log "durable notifications available (wakes are queued and never lost); automatic turn injection unavailable - $1; using the foreground checkpoint fallback (bin/fm-watch-checkpoint.sh). To enable automatic injection, run the primary inside tmux or herdr, or set FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND."
+}
 
 fm_present_usage() {
   sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -285,9 +307,11 @@ fm_present_start() {
     return 0
   fi
   captain_target=$(discover_supervisor_target) || {
-    fm_present_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"; return 1; }
+    fm_present_report_degraded "no injectable supervisor pane resolved (this primary is on an independent pty, not tmux/herdr)"
+    return "$FM_PRESENT_DEGRADED"; }
   captain_backend=$(discover_supervisor_backend) || {
-    fm_present_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"; return 1; }
+    fm_present_report_degraded "no injectable supervisor backend resolved (this primary is on an independent pty, not tmux/herdr)"
+    return "$FM_PRESENT_DEGRADED"; }
   mkdir -p "$FM_PRESENT_STATE"
   # Clear a leaked terminal from a prior crashed daemon before launching a new one.
   fm_present_reconcile || return 1
@@ -295,8 +319,8 @@ fm_present_start() {
     herdr) fm_present_create_herdr "$captain_target" "$captain_backend"; result=$? ;;
     tmux)  fm_present_create_tmux "$captain_target" "$captain_backend"; result=$? ;;
     *)
-      fm_present_log "no non-visible daemon-launch primitive for backend '$captain_backend' yet (supported: herdr, tmux)"
-      result=1
+      fm_present_report_degraded "supervisor backend '$captain_backend' has no non-visible injection primitive (supported: herdr, tmux)"
+      result="$FM_PRESENT_DEGRADED"
       ;;
   esac
   return "$result"

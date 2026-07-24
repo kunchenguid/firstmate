@@ -102,6 +102,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-nm-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-nm-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
@@ -995,6 +997,12 @@ fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
 fi
+# no-mistakes present but too old for direct-PR monitoring: the COMMON_TOOLS loop
+# above already reports the not-installed case as MISSING, so this reports ONLY
+# the installed-but-incompatible case (return 1) as a distinct, non-MISSING
+# diagnostic. An incompatible binary otherwise passes the presence check and the
+# gap surfaces only later as `watch not armed` on a direct-PR task.
+fm_nm_supports_watch || [ "$?" -eq 2 ] || fm_nm_incompatible_diagnostic
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the

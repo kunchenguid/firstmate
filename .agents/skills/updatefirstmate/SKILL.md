@@ -25,16 +25,27 @@ This touches only the firstmate repo and its own worktrees, never anything under
    bin/fm-update.sh
    ```
    It fast-forwards this firstmate repo's default branch from origin, then fast-forwards every registered secondmate home (each a treehouse worktree of this same repo, leased at a detached HEAD on the default branch) the same way.
-   It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by two action lines that tell you exactly what to do next:
+   It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by action lines that tell you exactly what to do next:
+   - `nm-watch-capability: ok|incompatible (upgrade: ...)|absent`
    - `reread-firstmate: yes|no`
    - `nudge-secondmates: fm-<id>...|none`
 
-2. **Re-read AGENTS.md if your own instructions changed.**
+2. **Act on the dependency-compatibility line before anything else.**
+   A code fast-forward landing does not prove firstmate's tool dependencies are satisfied.
+   `nm-watch-capability:` reports whether the LOCAL no-mistakes exposes the `watch` command that direct-PR monitoring arms (`bin/fm-nm-watch.sh`):
+   - `ok` - nothing to do.
+   - `incompatible (upgrade: no-mistakes update)` - the fast-forward landed, but the local no-mistakes is too old to start direct-PR CI, review, and merge alerts, and the gap would otherwise surface only later as a direct-PR task reporting `watch not armed`.
+     Detection and upgrade are deliberately separate: never silently upgrade.
+     Tell the captain the plain consequence and ask for explicit consent, then run the printed `no-mistakes update` only after they agree - no-mistakes is a shared single-instance daemon, so upgrading it is a captain-authorized action, not a routine step.
+     The completed firstmate fast-forward stands regardless; if the authorized upgrade fails, report it without reverting the update, and rerun session start afterward to confirm the capability is now present.
+   - `absent` - no-mistakes is not installed; session-start bootstrap owns that missing-tool install flow, so defer to it rather than installing here.
+
+3. **Re-read AGENTS.md if your own instructions changed.**
    When the updater printed `reread-firstmate: yes`, the tracked instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) just advanced under you.
    **Read `AGENTS.md` now** (CLAUDE.md is a symlink to it) to refresh your operating instructions before doing anything else, so you are acting on the new instructions rather than the stale ones you were started with.
    When it printed `reread-firstmate: no`, nothing changed for you - skip the re-read.
 
-3. **Nudge each updated live secondmate.**
+4. **Nudge each updated live secondmate.**
    For every target listed on the `nudge-secondmates:` line (do nothing when it says `none`), send a one-line re-read nudge so that secondmate picks up its new instructions too:
    ```sh
    FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
@@ -43,7 +54,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    This is a gentle steer, not an interruption: the secondmate already got a safe tracked-files fast-forward, and the nudge never forces, tears down, or discards its work.
    A secondmate that was skipped, already current, or has no live metadata is not on the list and needs no nudge.
 
-4. **Report to the captain in plain outcomes.**
+5. **Report to the captain in plain outcomes.**
    Summarize what landed under `AGENTS.md` section 9 without firstmate's internal vocabulary: which parts of the fleet are now on the latest, and which were left as-is and why.
    For example: "Captain, firstmate and both second mates are now on the latest."
    Surface any skipped target whose reason needs the captain's attention - for instance a home with its own un-landed changes (diverged) or local edits (dirty), which were left untouched on purpose.

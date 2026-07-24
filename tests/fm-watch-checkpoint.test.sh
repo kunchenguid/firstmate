@@ -87,7 +87,53 @@ test_existing_singleton_watcher_is_not_success() {
   pass "checkpoint rejects an existing watcher singleton as unowned"
 }
 
+# A signal's coalescing grace, interrupted mid-grace then restarted, must still
+# leave exactly ONE raw queue record per logical signal file. The post-grace
+# re-scan re-observes every file that is still pending (the seen markers are not
+# advanced until the block completes), so before the dedup collapse a single
+# completed checkpoint wrote two raw records per file and an interrupted restart
+# compounded it; drain masked the noise by collapsing on the logical key.
+test_interrupted_coalescing_does_not_duplicate_raw_records() {
+  local home out err status total
+  home=$(make_home coalesce-dedup)
+  out="$home/out.txt"
+  err="$home/err.txt"
+  # A crewmate's final status write and the same turn's turn-end hook: two files,
+  # one logical turn.
+  printf 'done: synthetic finish\n' > "$home/state/demo.status"
+  : > "$home/state/demo.turn-ended"
+  # First checkpoint enters the long grace and is killed before it advances the
+  # seen markers, so the restart re-scans the same still-pending signals.
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=30 FM_CHECK_INTERVAL=999999 "$CHECKPOINT" --seconds 3 >/dev/null 2>&1 || true
+  assert_absent "$home/state/.wake-queue" "interrupted grace appended before advancing markers"
+  # A trailing write lands during the gap: the restart must record the LATEST
+  # signature, so the signal settles instead of re-firing.
+  printf 'done: synthetic finish v2\n' > "$home/state/demo.status"
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 "$CHECKPOINT" --seconds 8 >"$out" 2>"$err" || status=$?
+  expect_code 0 "$status" "restarted coalescing checkpoint exit"
+  # Exactly one raw record per logical signal file, not two, and two in total.
+  expect_code 1 "$(grep -c $'\tsignal\tdemo.status\t' "$home/state/.wake-queue")" \
+    "demo.status did not collapse to exactly one raw queue record"
+  expect_code 1 "$(grep -c $'\tsignal\tdemo.turn-ended\t' "$home/state/.wake-queue")" \
+    "demo.turn-ended did not collapse to exactly one raw queue record"
+  total=$(wc -l < "$home/state/.wake-queue" | tr -d ' ')
+  expect_code 2 "$total" "coalesced signal left more than two raw records"
+  # Both files still coalesce into ONE actionable wake reason.
+  assert_contains "$(cat "$out")" "demo.status" "coalesced wake dropped the status file"
+  assert_contains "$(cat "$out")" "demo.turn-ended" "coalesced wake dropped the turn-end file"
+  # The restart recorded the current signature, so a follow-up quiet checkpoint
+  # does not re-fire the settled signals or append more raw records.
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 "$CHECKPOINT" --seconds 1 >"$out" 2>"$err" || status=$?
+  expect_code 124 "$status" "settled coalesced signal re-fired"
+  total=$(wc -l < "$home/state/.wake-queue" | tr -d ' ')
+  expect_code 2 "$total" "settled signal appended extra raw records on re-poll"
+  pass "interrupted-then-restarted coalescing leaves one raw record per logical signal"
+}
+
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success
+test_interrupted_coalescing_does_not_duplicate_raw_records

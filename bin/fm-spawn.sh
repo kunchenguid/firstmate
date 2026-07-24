@@ -162,6 +162,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-remote-preflight-lib.sh
+. "$SCRIPT_DIR/fm-remote-preflight-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1137,6 +1139,41 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
       ;;
   esac
 }
+
+# Distinct exit code for a spawn refused by the remote-access preflight (below):
+# separable from a generic error (1) or a usage error (2) so a caller can tell an
+# unstarted spawn (nothing created) from a mid-flight failure.
+FM_SPAWN_REMOTE_BLOCKED=4
+
+# Non-interactive SSH host-trust preflight, BEFORE any terminal/window is created.
+# treehouse get's `git fetch origin` would otherwise stop at a first-time host
+# authenticity prompt inside the crew pane, wedging the spawn with no recoverable
+# endpoint (metadata is not written until after the fetch). Refuse up front with an
+# actionable blocker instead of creating a doomed window, and never auto-accept an
+# unknown key. Only treehouse-get spawns fetch; an orca spawn owns its worktree and
+# a secondmate is not spawned here (mirrors the treehouse-get guard below).
+spawn_remote_preflight_or_block() {
+  local url host rc
+  url=$(git -C "$PROJ_ABS" remote get-url origin 2>/dev/null) || return 0
+  [ -n "$url" ] || return 0
+  host=$(fm_remote_ssh_host "$url") || return 0
+  rc=0
+  fm_remote_preflight_ssh "$host" || rc=$?
+  case "$rc" in
+    10)
+      echo "error: cannot spawn task $ID: the SSH host key for '$host' (project origin $url) is not trusted, so the first 'git fetch' would stop at an interactive host-authenticity prompt inside the crew terminal and wedge the spawn with no recoverable endpoint. Refusing to create a terminal or auto-accept the key. Verify the host fingerprint out of band and add it (run 'ssh $host' once to accept it, or append a verified key to known_hosts), then re-dispatch." >&2
+      exit "$FM_SPAWN_REMOTE_BLOCKED"
+      ;;
+    11)
+      echo "error: cannot spawn task $ID: SSH authentication to '$host' (project origin $url) was refused (Permission denied), so 'git fetch' would fail. Refusing to create a terminal. Provision the SSH credential/key for '$host', then re-dispatch." >&2
+      exit "$FM_SPAWN_REMOTE_BLOCKED"
+      ;;
+  esac
+  return 0
+}
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  spawn_remote_preflight_or_block
+fi
 
 W="fm-$ID"
 case "$BACKEND" in
