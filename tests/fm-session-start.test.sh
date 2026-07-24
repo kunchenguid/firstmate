@@ -668,6 +668,79 @@ EOF
   pass "session start stays read-only when lock ownership cannot be published"
 }
 
+test_session_lock_concurrent_single_winner() {
+  local rec root home fakebin ready done winners pids i pid count
+  rec=$(new_world lock-concurrency)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  ready="$home/ready"
+  done="$home/done"
+  winners="$home/winners"
+  mkdir -p "$ready" "$done"
+  : > "$winners"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+pid=
+previous=
+for argument in "$@"; do
+  [ "$previous" = -p ] && pid=$argument
+  previous=$argument
+done
+case "$*" in
+  *"comm="*)
+    if [ -f "$FM_FAKE_LOCK_STATE/harness-$pid" ]; then
+      printf '%s\n' /usr/local/bin/claude
+    else
+      printf '%s\n' /bin/bash
+    fi
+    ;;
+  *"args="*)
+    if [ -f "$FM_FAKE_LOCK_STATE/harness-$pid" ]; then
+      printf '%s\n' claude
+    else
+      printf '%s\n' bash
+    fi
+    ;;
+  *"ppid="*) printf '%s\n' "$FM_FAKE_HARNESS_PID" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  pids=
+  i=1
+  while [ "$i" -le 40 ]; do
+    (
+      harness_pid=$BASHPID
+      : > "$home/state/harness-$harness_pid"
+      : > "$ready/$i"
+      while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
+        sleep 0.01
+      done
+      if FM_HOME="$home" FM_FAKE_LOCK_STATE="$home/state" \
+        FM_FAKE_HARNESS_PID="$harness_pid" PATH="$fakebin:$BASE_PATH" \
+        "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1; then
+        printf '%s\n' "$harness_pid" >> "$winners"
+      fi
+      : > "$done/$i"
+      while [ "$(find "$done" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
+        sleep 0.01
+      done
+    ) &
+    pids="$pids $!"
+    i=$((i + 1))
+  done
+  for pid in $pids; do
+    wait "$pid" 2>/dev/null || true
+  done
+  count=$(awk 'NF { count++ } END { print count + 0 }' "$winners")
+  [ "$count" -eq 1 ] || fail "concurrent session-lock acquisition produced $count winners"
+
+  pass "concurrent session-lock acquisition admits exactly one live harness"
+}
+
 # --- output ordering ----------------------------------------------------------
 
 test_output_ordering_diagnostics_lead() {
@@ -1282,6 +1355,7 @@ EOF
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
+test_session_lock_concurrent_single_winner
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start
 test_session_start_relaunches_missing_pi_secondmate
