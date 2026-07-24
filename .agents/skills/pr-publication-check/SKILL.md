@@ -37,6 +37,7 @@ The worker must choose exactly one evidence declaration.
 - Use `--evidence real-ui --evidence-url <url>` only for evidence showing the real UI behavior, never a custom illustration, concept, or mockup.
 
 Every declared evidence URL must already appear in the fetched public body, resolve through the same repository or forge as an actual file/blob rather than a directory, and bind to the exact PR head.
+GitLab reviewer URL paths are percent-decoded exactly once before the actual repository path is encoded exactly once for the repository-file API; malformed paths and decoded paths that still contain an escape are refused.
 The worker remains responsible for deciding whether evidence is required and whether the artifact proves the claimed behavior under the accepted project contract.
 Do not force screenshots when the accepted contract does not require visual evidence.
 
@@ -64,6 +65,7 @@ Firstmate runs `bin/fm-pr-check.sh <task-id> <full-pr-url>` after the worker's r
 That command performs a second authenticated full-body/head readback, repeats deterministic privacy and evidence checks, requires the exact private attestation receipt, records canonical PR identity and head, and only then publishes ordinary merge monitoring.
 Every ordinary merge poll re-runs that verification first; body, head, receipt, policy, or evidence drift produces a `publication-invalid` wake instead of a merged outcome and returns correction ownership to the same task worker.
 Tool absence, forge read failure, malformed forge response, invalid local state, timeout, or an invalid machine result instead produces a bounded `publication-verification-error:<class>:exit-<status>` wake and remains Firstmate operational work rather than being assigned to the delivery worker.
+Missing, malformed, or mismatched publication content remains `publication-invalid`, while receipt safety, state-device, and private temporary-file failures remain `state-invalid`.
 
 The private receipt records only the canonical forge identity, exact head, body byte count and SHA-256, privacy/link/attestation verdicts, evidence mode, and the already-public evidence URLs encoded as data.
 Never copy that receipt or other private task evidence into the PR.

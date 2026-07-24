@@ -9,6 +9,7 @@ PUBLICATION_CHECK="$ROOT/bin/fm-pr-publication-check.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-publication-check)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+REAL_MKTEMP=$(command -v mktemp)
 GITHUB_URL=https://github.com/example/project/pull/17
 GITHUB_HEAD=1111111111111111111111111111111111111111
 GITLAB_URL=https://gitlab.example/group/project/-/merge_requests/23
@@ -177,6 +178,7 @@ run_gate() {
     FM_TEST_EVIDENCE_KIND="${FM_TEST_EVIDENCE_KIND:-file}" \
     FM_TEST_READY_READBACK_FAIL="${FM_TEST_READY_READBACK_FAIL:-0}" \
     FM_TEST_ROLLBACK_RC="${FM_TEST_ROLLBACK_RC:-0}" FM_TEST_GH_READ_RC="${FM_TEST_GH_READ_RC:-0}" \
+    FM_TEST_REAL_MKTEMP="$REAL_MKTEMP" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PUBLICATION_CHECK" "$@"
 }
@@ -209,6 +211,8 @@ test_help_documents_publication_mechanics() {
   assert_contains "$help" 'Neither mode edits a PR body.' "publication help omitted correction ownership"
   assert_contains "$help" 'gh-axi pr create --draft' "publication help omitted GitHub draft creation"
   assert_contains "$help" 'glab mr update <number> -R <repo> --draft' "publication help omitted GitLab drift correction"
+  assert_contains "$help" 'percent-decoded once and API-encoded once' \
+    "publication help omitted GitLab evidence path encoding"
   assert_contains "$check_help" 'complete public body, exact head' "fm-pr-check help omitted its publication prerequisite"
   pass "publication and monitoring help describe the exact gate mechanics"
 }
@@ -511,6 +515,131 @@ test_machine_failure_classes_are_bounded() {
   pass "machine verification distinguishes publication, forge, response, and tool failures"
 }
 
+test_gitlab_evidence_paths_decode_and_encode_once() {
+  local dir actual_path web_path exact_url api_path rc name rejected_path
+  actual_path='evidence/result log#review?+proof.txt'
+  web_path='evidence/result%20log%23review%3F%2Bproof.txt'
+  api_path='evidence%2Fresult%20log%23review%3F%2Bproof.txt'
+  exact_url="https://gitlab.example/group/project/-/blob/$GITLAB_HEAD/$web_path"
+  dir=$(make_case gitlab-encoded-evidence)
+  write_body "$dir" "$(safe_body)
+
+[Evidence]($exact_url)
+"
+  FM_TEST_EVIDENCE_PATH="$actual_path" run_gate "$dir" "$GITLAB_URL" "$GITLAB_HEAD" \
+    attest task-a "$GITLAB_URL" --intent-outcome-complete --evidence nonvisual \
+    --evidence-url "$exact_url" > "$dir/attest.out" 2> "$dir/attest.err" \
+    || fail "percent-encoded GitLab evidence failed: $(cat "$dir/attest.err")"
+  assert_grep "repository/files/$api_path?ref=$GITLAB_HEAD" "$dir/glab.log" \
+    "GitLab evidence path was not decoded and API-encoded exactly once"
+  FM_TEST_EVIDENCE_PATH="$actual_path" run_gate "$dir" "$GITLAB_URL" "$GITLAB_HEAD" \
+    verify task-a "$GITLAB_URL" > "$dir/verify.out" 2> "$dir/verify.err" \
+    || fail "encoded GitLab evidence receipt did not reverify: $(cat "$dir/verify.err")"
+
+  while IFS='|' read -r name rejected_path; do
+    dir=$(make_case "gitlab-evidence-$name")
+    exact_url="https://gitlab.example/group/project/-/blob/$GITLAB_HEAD/$rejected_path"
+    write_body "$dir" "$(safe_body)
+
+[Evidence]($exact_url)
+"
+    set +e
+    run_gate "$dir" "$GITLAB_URL" "$GITLAB_HEAD" attest task-a "$GITLAB_URL" \
+      --intent-outcome-complete --evidence nonvisual --evidence-url "$exact_url" \
+      > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$name GitLab evidence path unexpectedly passed"
+    assert_grep 'malformed or ambiguously encoded repository path' "$dir/stderr" \
+      "$name GitLab evidence refusal was unclear"
+  done <<'EOF'
+malformed-percent|evidence/result%2Glog.txt
+double-encoded|evidence/result%2520log.txt
+encoded-control|evidence/result%00log.txt
+EOF
+  pass "GitLab evidence paths decode once and reject malformed or ambiguous escapes"
+}
+
+test_local_receipt_and_evidence_io_failures_are_state_invalid() {
+  local dir exact_url receipt rc
+
+  dir=$(make_case unsafe-receipt-state)
+  safe_body > "$dir/body.md"
+  attest_none "$dir" >/dev/null 2> "$dir/attest.err" \
+    || fail "unsafe receipt state fixture did not attest"
+  receipt="$dir/home/state/task-a.pr-publication"
+  chmod 0644 "$receipt"
+  set +e
+  run_gate "$dir" "$GITHUB_URL" "$GITHUB_HEAD" verify task-a "$GITHUB_URL" --machine \
+    > "$dir/verify.out" 2> "$dir/verify.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] && [ "$(cat "$dir/verify.out")" = 'failure state-invalid' ] \
+    || fail "unsafe receipt state was not routed as state-invalid"
+
+  dir=$(make_case missing-receipt-content)
+  safe_body > "$dir/body.md"
+  attest_none "$dir" >/dev/null 2> "$dir/attest.err" \
+    || fail "missing receipt fixture did not attest"
+  rm -f "$dir/home/state/task-a.pr-publication"
+  set +e
+  run_gate "$dir" "$GITHUB_URL" "$GITHUB_HEAD" verify task-a "$GITHUB_URL" --machine \
+    > "$dir/verify.out" 2> "$dir/verify.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] && [ "$(cat "$dir/verify.out")" = 'failure publication-invalid' ] \
+    || fail "missing receipt content was not routed as publication-invalid"
+
+  dir=$(make_case malformed-evidence-receipt)
+  exact_url="https://github.com/example/project/blob/$GITHUB_HEAD/evidence/result.txt"
+  write_body "$dir" "$(safe_body)
+
+[Evidence]($exact_url)
+"
+  run_gate "$dir" "$GITHUB_URL" "$GITHUB_HEAD" attest task-a "$GITHUB_URL" \
+    --intent-outcome-complete --evidence nonvisual --evidence-url "$exact_url" \
+    > "$dir/attest.out" 2> "$dir/attest.err" \
+    || fail "malformed receipt fixture did not attest: $(cat "$dir/attest.err")"
+  receipt="$dir/home/state/task-a.pr-publication"
+  sed 's/^evidence_url_base64=.*/evidence_url_base64=%%%/' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+  chmod 0600 "$receipt"
+  set +e
+  run_gate "$dir" "$GITHUB_URL" "$GITHUB_HEAD" verify task-a "$GITHUB_URL" --machine \
+    > "$dir/verify.out" 2> "$dir/verify.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] && [ "$(cat "$dir/verify.out")" = 'failure publication-invalid' ] \
+    || fail "malformed receipt content was not routed as publication-invalid"
+
+  dir=$(make_case evidence-url-mktemp-failure)
+  exact_url="https://github.com/example/project/blob/$GITHUB_HEAD/evidence/result.txt"
+  write_body "$dir" "$(safe_body)
+
+[Evidence]($exact_url)
+"
+  run_gate "$dir" "$GITHUB_URL" "$GITHUB_HEAD" attest task-a "$GITHUB_URL" \
+    --intent-outcome-complete --evidence nonvisual --evidence-url "$exact_url" \
+    > "$dir/attest.out" 2> "$dir/attest.err" \
+    || fail "evidence mktemp fixture did not attest: $(cat "$dir/attest.err")"
+  cat > "$dir/fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  *.fm-pr-publication-url.*) exit 1 ;;
+esac
+exec "$FM_TEST_REAL_MKTEMP" "$@"
+SH
+  chmod +x "$dir/fakebin/mktemp"
+  set +e
+  run_gate "$dir" "$GITHUB_URL" "$GITHUB_HEAD" verify task-a "$GITHUB_URL" --machine \
+    > "$dir/verify.out" 2> "$dir/verify.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] && [ "$(cat "$dir/verify.out")" = 'failure state-invalid' ] \
+    || fail "evidence URL temporary-file failure was not routed as state-invalid"
+  pass "local receipt and evidence I/O failures remain operational state errors"
+}
+
 test_github_and_gitlab_routes_and_monitoring_boundary() {
   local dir exact_url rc
   dir=$(make_case no-receipt-monitor)
@@ -588,4 +717,6 @@ test_exact_head_evidence_accessibility_and_kind
 test_body_head_drift_and_correction_retry
 test_ready_readback_surfaces_failed_rollback
 test_machine_failure_classes_are_bounded
+test_gitlab_evidence_paths_decode_and_encode_once
+test_local_receipt_and_evidence_io_failures_are_state_invalid
 test_github_and_gitlab_routes_and_monitoring_boundary

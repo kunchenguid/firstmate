@@ -29,7 +29,9 @@
 # without parsing presentation text.
 # GitHub evidence uses the authenticated Contents JSON response and accepts only
 # type=file with a blob SHA. GitLab evidence likewise requires exact repository-
-# file metadata with a blob ID and matching ref; a directory is never evidence.
+# file metadata with a blob ID and matching ref; its reviewer URL path is strictly
+# percent-decoded once and API-encoded once. Malformed or still-escaped decoded
+# paths are refused, and a directory is never evidence.
 # Create GitHub PRs with gh-axi pr create --draft and GitLab MRs with glab mr
 # create --draft. Successful attestation uses gh-axi pr ready or glab mr update
 # --ready. After later drift, the responsible worker returns the change to draft
@@ -157,6 +159,7 @@ AXI_FIELDS_FILE=
 FIELDS_FILE=
 URLS_FILE=
 EVIDENCE_FILE=
+DECODE_TARGET=
 RECEIPT_TMP=
 INTENT_FILE=
 OUTCOME_FILE=
@@ -168,6 +171,7 @@ cleanup() {
   [ -z "$FIELDS_FILE" ] || rm -f -- "$FIELDS_FILE"
   [ -z "$URLS_FILE" ] || rm -f -- "$URLS_FILE"
   [ -z "$EVIDENCE_FILE" ] || rm -f -- "$EVIDENCE_FILE"
+  [ -z "$DECODE_TARGET" ] || rm -f -- "$DECODE_TARGET"
   [ -z "$RECEIPT_TMP" ] || rm -f -- "$RECEIPT_TMP"
   [ -z "$INTENT_FILE" ] || rm -f -- "$INTENT_FILE"
   [ -z "$OUTCOME_FILE" ] || rm -f -- "$OUTCOME_FILE"
@@ -210,6 +214,41 @@ decode_base64_to_body() {
     return 0
   fi
   printf '%s' "$encoded" | base64 -D > "$BODY_FILE" 2>/dev/null
+}
+
+base64_value_valid() {
+  local encoded=$1
+  if printf '%s' "$encoded" | base64 --decode >/dev/null 2>&1; then
+    return 0
+  fi
+  printf '%s' "$encoded" | base64 -D >/dev/null 2>&1
+}
+
+decode_gitlab_web_path() {
+  ruby -e '
+    input = ARGV.fetch(0).b
+    bytes = []
+    index = 0
+    while index < input.bytesize
+      byte = input.getbyte(index)
+      if byte == 37
+        exit 2 if index + 2 >= input.bytesize
+        hex = input.byteslice(index + 1, 2)
+        exit 2 unless hex.match?(/\A[0-9A-Fa-f]{2}\z/)
+        bytes << hex.to_i(16)
+        index += 3
+      else
+        bytes << byte
+        index += 1
+      end
+    end
+    decoded = bytes.pack("C*")
+    exit 3 if decoded.empty? || decoded.bytes.any? { |value| value < 32 || value == 127 }
+    exit 4 if decoded.match?(/%[0-9A-Fa-f]{2}/)
+    decoded.force_encoding(Encoding::UTF_8)
+    exit 5 unless decoded.valid_encoding?
+    STDOUT.write(decoded)
+  ' "$1"
 }
 
 read_four_fields() {
@@ -485,7 +524,7 @@ awk '
 ' "$BODY_FILE" | LC_ALL=C sort -u > "$URLS_FILE" || exit 1
 
 verify_evidence_url() {
-  local evidence_url=$1 base evidence_path fragment encoded_project encoded_path response_status
+  local evidence_url=$1 base evidence_path fragment encoded_project encoded_path response_status evidence_response
   grep -Fxq -- "$evidence_url" "$URLS_FILE" || {
     echo "error: declared evidence URL is absent from the fetched public body" >&2
     return 1
@@ -532,11 +571,17 @@ verify_evidence_url() {
         return 1
       }
       FAILURE_CLASS=forge-read-failed
-      gh api "/repos/$PROJECT_PATH/contents/$evidence_path?ref=$FETCHED_HEAD" \
-        --header 'Accept: application/vnd.github.object+json' > "$EVIDENCE_FILE" 2>/dev/null || {
+      evidence_response=$(gh api "/repos/$PROJECT_PATH/contents/$evidence_path?ref=$FETCHED_HEAD" \
+        --header 'Accept: application/vnd.github.object+json' 2>/dev/null) || {
         echo "error: GitHub evidence is not authenticated-accessible at the exact PR head" >&2
         return 1
       }
+      FAILURE_CLASS=state-invalid
+      printf '%s\n' "$evidence_response" > "$EVIDENCE_FILE" || {
+        echo "error: GitHub evidence response could not be stored in private task state" >&2
+        return 1
+      }
+      FAILURE_CLASS=forge-response-invalid
       if ruby -rjson -e '
         begin
           response = JSON.parse(File.binread(ARGV[0]))
@@ -578,6 +623,16 @@ verify_evidence_url() {
           ;;
       esac
       case "$evidence_path" in ''|*'?'*) return 1 ;; esac
+      FAILURE_CLASS=tool-unavailable
+      command -v ruby >/dev/null 2>&1 || {
+        echo "error: GitLab evidence verification requires Ruby for strict web-path decoding" >&2
+        return 1
+      }
+      evidence_path=$(decode_gitlab_web_path "$evidence_path" 2>/dev/null) || {
+        FAILURE_CLASS=publication-invalid
+        echo "error: GitLab evidence has a malformed or ambiguously encoded repository path" >&2
+        return 1
+      }
       if [ "$EVIDENCE_MODE" = real-ui ]; then
         case "$evidence_path" in
           *[Ii]llustration*|*[Mm]ockup*|*[Cc]oncept*|*[Gg]enerated*|*[Aa][Ii]-[Ii]mage*)
@@ -593,12 +648,17 @@ verify_evidence_url() {
       encoded_project=$(jq -rn --arg value "$PROJECT_PATH" '$value|@uri') || return 1
       encoded_path=$(jq -rn --arg value "$evidence_path" '$value|@uri') || return 1
       FAILURE_CLASS=forge-read-failed
-      glab api --hostname "$HOST" \
-        "projects/$encoded_project/repository/files/$encoded_path?ref=$FETCHED_HEAD" \
-        > "$EVIDENCE_FILE" 2>/dev/null || {
+      evidence_response=$(glab api --hostname "$HOST" \
+        "projects/$encoded_project/repository/files/$encoded_path?ref=$FETCHED_HEAD" 2>/dev/null) || {
         echo "error: GitLab evidence is not authenticated-accessible at the exact MR head" >&2
         return 1
       }
+      FAILURE_CLASS=state-invalid
+      printf '%s\n' "$evidence_response" > "$EVIDENCE_FILE" || {
+        echo "error: GitLab evidence response could not be stored in private task state" >&2
+        return 1
+      }
+      FAILURE_CLASS=forge-response-invalid
       if jq -er --arg evidence_path "$evidence_path" --arg head "$FETCHED_HEAD" \
         'type == "object" and .file_path == $evidence_path and .ref == $head and
           (.blob_id | type == "string" and test("^[0-9a-f]{40}([0-9a-f]{24})?$"))' \
@@ -625,7 +685,9 @@ RECEIPT_URLS=()
 parse_receipt() {
   local file=$1 line expected_count index=0
   local version task_id provider url head body_bytes body_sha privacy links attestation evidence_mode evidence_count
+  FAILURE_CLASS=state-invalid
   exec 8< "$file" || return 1
+  FAILURE_CLASS=publication-invalid
   IFS= read -r version <&8 || { exec 8<&-; return 1; }
   IFS= read -r task_id <&8 || { exec 8<&-; return 1; }
   IFS= read -r provider <&8 || { exec 8<&-; return 1; }
@@ -686,11 +748,18 @@ fail_after_ready() {
 }
 
 if [ "$ACTION" = verify ]; then
-  STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
-  fm_pr_private_file_valid "$RECEIPT" 600 "$STATE_DEVICE" || {
+  if [ ! -e "$RECEIPT" ] && [ ! -L "$RECEIPT" ]; then
+    FAILURE_CLASS=publication-invalid
     echo "error: a private PR publication attestation receipt is required before readiness or monitoring" >&2
     exit 1
+  fi
+  FAILURE_CLASS=state-invalid
+  STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
+  fm_pr_private_file_valid "$RECEIPT" 600 "$STATE_DEVICE" || {
+    echo "error: private PR publication receipt state is unsafe or unavailable" >&2
+    exit 1
   }
+  FAILURE_CLASS=publication-invalid
   parse_receipt "$RECEIPT" || {
     echo "error: PR publication receipt is malformed or does not match the fresh public body and head" >&2
     exit 1
@@ -698,20 +767,32 @@ if [ "$ACTION" = verify ]; then
   EVIDENCE_MODE=$RECEIPT_MODE
   EVIDENCE_URLS=()
   for encoded_url in "${RECEIPT_URLS[@]+"${RECEIPT_URLS[@]}"}"; do
-    decode_target=$(mktemp "$STATE/.fm-pr-publication-url.XXXXXX") || exit 1
-    if ! { printf '%s' "$encoded_url" | base64 --decode > "$decode_target" 2>/dev/null \
-      || printf '%s' "$encoded_url" | base64 -D > "$decode_target" 2>/dev/null; }; then
-      rm -f -- "$decode_target"
+    FAILURE_CLASS=state-invalid
+    DECODE_TARGET=$(mktemp "$STATE/.fm-pr-publication-url.XXXXXX") || exit 1
+    FAILURE_CLASS=publication-invalid
+    if ! base64_value_valid "$encoded_url"; then
       echo "error: PR publication receipt contains malformed evidence data" >&2
       exit 1
     fi
-    decoded_url=$(cat "$decode_target")
-    rm -f -- "$decode_target"
-    [ -n "$decoded_url" ] || exit 1
+    FAILURE_CLASS=state-invalid
+    if ! { printf '%s' "$encoded_url" | base64 --decode > "$DECODE_TARGET" 2>/dev/null \
+      || printf '%s' "$encoded_url" | base64 -D > "$DECODE_TARGET" 2>/dev/null; }; then
+      echo "error: evidence URL could not be decoded into private task state" >&2
+      exit 1
+    fi
+    decoded_url=$(cat "$DECODE_TARGET") || exit 1
+    rm -f -- "$DECODE_TARGET" || exit 1
+    DECODE_TARGET=
+    FAILURE_CLASS=publication-invalid
+    [ -n "$decoded_url" ] || {
+      echo "error: PR publication receipt contains empty evidence data" >&2
+      exit 1
+    }
     EVIDENCE_URLS+=("$decoded_url")
   done
 fi
 
+FAILURE_CLASS=publication-invalid
 for evidence_url in "${EVIDENCE_URLS[@]+"${EVIDENCE_URLS[@]}"}"; do
   verify_evidence_url "$evidence_url" || exit 1
 done
@@ -720,6 +801,7 @@ if [ "$ACTION" = attest ]; then
   ATTESTED_HEAD=$FETCHED_HEAD
   ATTESTED_BODY_BYTES=$BODY_BYTES
   ATTESTED_BODY_SHA256=$BODY_SHA256
+  FAILURE_CLASS=state-invalid
   STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
   fm_pr_regular_destination_on_device_or_absent "$RECEIPT" "$STATE_DEVICE" || {
     echo "error: PR publication receipt destination is unsafe" >&2
