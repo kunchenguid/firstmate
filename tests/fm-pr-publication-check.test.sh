@@ -343,7 +343,11 @@ test_internal_transcripts_and_secrets_refuse() {
   assert_attest_rejected secret-token "$prefix- access_token=abcdefghijklmnopqrstuvwxyz123456\n" 'assigned secret value'
   assert_attest_rejected bearer-token "$prefix- Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue1234567890\n" 'Authorization Bearer credential'
   assert_attest_rejected basic-token "$prefix- Authorization: Basic dXNlcjpwYXNzd29yZA==\n" 'Authorization Basic credential'
+  assert_attest_rejected basic-unpadded-token "$prefix- Authorization: Basic dXNlcjpwYXNzd29yZA\n" 'Authorization Basic credential'
   assert_attest_rejected basic-empty-user "$prefix- authorization: basic OnNlY3JldA==\n" 'Authorization Basic credential'
+  assert_attest_rejected basic-invalid-remainder "$prefix- Authorization: Basic dXNlcjpwYXNzd29yZ\n" 'Authorization Basic credential'
+  assert_attest_rejected basic-ambiguous-padding "$prefix- Authorization: Basic dXNlcjpwYXNzd29yZA===\n" 'Authorization Basic credential'
+  assert_attest_rejected basic-noncanonical-padding "$prefix- Authorization: Basic dXNlcjpwYXNzd29yZB==\n" 'Authorization Basic credential'
   assert_attest_rejected basic-after-placeholder "$prefix- Authorization: Basic REDACTED; Authorization: Basic dXNlcjpwYXNzd29yZA==\n" 'Authorization Basic credential'
   assert_attest_rejected standalone-jwt "$prefix- Captured eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue1234567890 during validation.\n" 'standalone JWT-shaped credential'
 
@@ -361,6 +365,8 @@ REDACTED
 <redacted>
 [REDACTED]
 ${BASIC_CREDENTIAL}
+REDACTED_TOKEN
+BASIC_CREDENTIAL
 EOF
 
   dir=$(make_case basic-machine-verdict)
