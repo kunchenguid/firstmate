@@ -8,6 +8,7 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-calm-pi-extension)
 EXT="$ROOT/.pi/extensions/fm-calm.ts"
 ASSISTANT_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+OPERATIONAL_USER_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
 VISIBILITY="$ROOT/.pi/extensions/lib/fm-calm-visibility.ts"
 WATCH_EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 OPERATIONAL_INPUT="$ROOT/bin/fm-operational-input.sh"
@@ -57,12 +58,14 @@ find_chrome() {
 }
 
 test_static_contract() {
-  local text assistant_layout visibility watch operational
+  local text assistant_layout operational_user_layout visibility watch operational
   assert_present "$EXT" "tracked Pi calm extension is missing"
   assert_present "$ASSISTANT_LAYOUT" "tracked Pi Calm assistant-layout adapter is missing"
+  assert_present "$OPERATIONAL_USER_LAYOUT" "tracked Pi Calm operational-user layout adapter is missing"
   assert_present "$VISIBILITY" "tracked Pi calm visibility policy is missing"
   text=$(cat "$EXT")
   assistant_layout=$(cat "$ASSISTANT_LAYOUT")
+  operational_user_layout=$(cat "$OPERATIONAL_USER_LAYOUT")
   visibility=$(cat "$VISIBILITY")
   watch=$(cat "$WATCH_EXT")
   operational=$(cat "$PI_OPERATIONAL_INPUT")
@@ -80,8 +83,15 @@ test_static_contract() {
   assert_not_contains "$text" 'ctx.ui.setWorkingVisible(!active)' "Pi calm extension still hides Pi's live working row"
   assert_contains "$text" 'ctx.ui.setHiddenThinkingLabel(active ? "" : undefined)' "Pi calm extension does not hide collapsed thinking labels"
   assert_contains "$text" 'installCalmAssistantLayout()' "Pi Calm extension does not install its zero-height assistant layout"
+  assert_contains "$text" 'installCalmOperationalUserLayout()' "Pi Calm extension does not install its operational-user layout"
   assert_contains "$assistant_layout" 'AssistantMessageComponent.prototype.updateContent' "Pi Calm assistant layout does not control the exported component presentation path"
   assert_contains "$assistant_layout" 'block.type !== "thinking"' "Pi Calm assistant layout does not remove thinking from its presentation copy"
+  assert_contains "$operational_user_layout" 'InteractiveMode.prototype' "Pi Calm operational-user layout does not control the transcript owner"
+  assert_contains "$operational_user_layout" 'classifyFirstmateCurrentOperationalText(text)' "Pi Calm operational-user layout bypasses canonical current classification"
+  assert_contains "$operational_user_layout" 'text.includes("\u2063")' "Pi Calm operational-user layout spawns its classifier for ordinary captain rows"
+  assert_contains "$operational_user_layout" '"\u2063Supervisor escalate ("' "Pi Calm operational-user layout lost the narrow legacy marker"
+  assert_contains "$operational_user_layout" 'hidesOperationalInput()' "Pi Calm operational-user row does not use presentation-only hiding"
+  assert_not_contains "$operational_user_layout" 'FIRSTMATE_OP: ' "Pi Calm operational-user layout duplicates the canonical marker grammar"
   assert_not_contains "$text" 'calm transcript' "Pi calm extension still adds a persistent Calm status row"
   assert_not_contains "$text" 'pi.on("input"' "Pi calm extension still intercepts semantic input"
   assert_not_contains "$text" 'sendMessage' "Pi calm extension still replaces user-role input with custom context"
@@ -126,6 +136,7 @@ test_home_resolution() {
     "$fixture/launch-cwd"
   cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
@@ -230,6 +241,7 @@ test_rendering_and_session_lifecycle() {
   mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/lib/fm-operational-input.ts"
   cp "$WATCH_EXT" "$fixture/fm-primary-pi-watch.ts"
@@ -237,16 +249,24 @@ test_rendering_and_session_lifecycle() {
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
+  cat >"$fixture/operational-input-probe.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1-}" >>"$FM_OPERATIONAL_INPUT_CALLS"
+exec "$FM_OPERATIONAL_INPUT_OWNER" "$@"
+SH
+  chmod +x "$fixture/operational-input-probe.sh"
 
-  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" WATCH_EXT="$fixture/fm-primary-pi-watch.ts" FM_HOME="$fixture/home" FM_OPERATIONAL_INPUT_SCRIPT="$OPERATIONAL_INPUT" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
+  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" WATCH_EXT="$fixture/fm-primary-pi-watch.ts" FM_HOME="$fixture/home" FM_OPERATIONAL_INPUT_SCRIPT="$fixture/operational-input-probe.sh" FM_OPERATIONAL_INPUT_OWNER="$OPERATIONAL_INPUT" FM_OPERATIONAL_INPUT_CALLS="$fixture/operational-input-calls" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
-const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionComponent }, { initTheme, theme }, { Text, getKeybindings, setCapabilities }, { createToolHtmlRenderer }] = await Promise.all([
+const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionComponent }, { UserMessageComponent }, { InteractiveMode }, { initTheme, theme }, { Text, getKeybindings, setCapabilities }, { createToolHtmlRenderer }] = await Promise.all([
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/assistant-message.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/custom-entry.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/tool-execution.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/user-message.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/interactive-mode.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
   import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/core/export-html/tool-renderer.js`).href),
@@ -322,6 +342,58 @@ const watcherBody =
   "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status\n\n" +
   "Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.";
 const watcherMessage = operationalInput.encodeFirstmateOperationalInput("watcher", watcherBody);
+const legacyAwayMessage = "\u2063Supervisor escalate (legacy presentation compatibility)";
+const operationalHistory = [];
+const operationalChat = {
+  children: [new Text("VISIBLE_PREDECESSOR", 0, 0)],
+  addChild(component) {
+    this.children.push(component);
+  },
+};
+const operationalMode = {
+  chatContainer: operationalChat,
+  editor: { addToHistory: (value) => operationalHistory.push(value) },
+  getMarkdownThemeWithSettings: () => undefined,
+  getUserMessageText: (message) => typeof message.content === "string"
+    ? message.content
+    : message.content.filter((item) => item.type === "text").map((item) => item.text).join(""),
+  outputPad: 1,
+};
+const callsBeforePlainReplay = readFileSync(process.env.FM_OPERATIONAL_INPUT_CALLS, "utf8");
+const plainReplayChat = {
+  children: [],
+  addChild(component) {
+    this.children.push(component);
+  },
+};
+for (let index = 0; index < 50; index += 1) {
+  InteractiveMode.prototype.addMessageToChat.call(
+    { ...operationalMode, chatContainer: plainReplayChat },
+    { role: "user", content: `ORDINARY_REPLAY_${index}` },
+  );
+}
+if (readFileSync(process.env.FM_OPERATIONAL_INPUT_CALLS, "utf8") !== callsBeforePlainReplay) {
+  throw new Error("ordinary replay rows invoked operational subprocess classification");
+}
+InteractiveMode.prototype.addMessageToChat.call(
+  operationalMode,
+  { role: "user", content: [{ type: "text", text: watcherMessage }] },
+  { populateHistory: true },
+);
+InteractiveMode.prototype.addMessageToChat.call(
+  operationalMode,
+  { role: "user", content: legacyAwayMessage },
+);
+const operationalComponent = operationalChat.children[1];
+const legacyOperationalComponent = operationalChat.children[2];
+const stockOperationalComponent = new UserMessageComponent(watcherMessage, undefined, 1);
+const expectedCalmOffOperationalRows = ["", ...stockOperationalComponent.render(100)];
+if (JSON.stringify(operationalComponent.render(100)) !== JSON.stringify(expectedCalmOffOperationalRows)) {
+  throw new Error("Calm-off operational user rendering changed from Pi stock rows");
+}
+if (operationalHistory.length !== 1 || operationalHistory[0] !== watcherMessage) {
+  throw new Error("operational user presentation changed Pi input history behavior");
+}
 
 writeFileSync("sample.txt", "alpha\n");
 const cases = [
@@ -576,6 +648,74 @@ presentationComponent.setExpanded(!expanded);
 if (presentationComponent.hasContent() || presentationComponent.render(100).length !== 0) {
   throw new Error("Calm left a synthetic Firstmate presentation row or spacer visible");
 }
+if (operationalComponent.render(100).length !== 0) {
+  throw new Error("Calm left a current operational user row or its leading spacer visible");
+}
+if (legacyOperationalComponent.render(100).length !== 0) {
+  throw new Error("Calm left the supported bare-marker legacy user row visible");
+}
+const operationalNearMisses = [
+  {
+    content: `Captain quote: ${watcherMessage}`,
+    visible: "Captain quote:",
+  },
+  {
+    content: "FIRSTMATE_OP: v1 watcher: ASCII_ONLY_CAPTAIN_MESSAGE",
+    visible: "ASCII_ONLY_CAPTAIN_MESSAGE",
+  },
+  {
+    content: `Ordinary captain text before ${watcherMessage}`,
+    visible: "Ordinary captain text before",
+  },
+  {
+    content: "\u2063ordinary captain text after an unrelated separator",
+    visible: "ordinary captain text after an unrelated separator",
+  },
+  {
+    content: "\u2063FIRSTMATE_OP: legacy untyped captain message",
+    visible: "legacy untyped captain message",
+  },
+  {
+    content: "Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.",
+    visible: "before executing any other instructions",
+  },
+  {
+    content:
+      "FIRSTMATE WATCHER WAKE: captain-authored legacy-shaped message\n\n" +
+      "Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.",
+    visible: "captain-authored legacy-shaped message",
+  },
+  {
+    content:
+      "TURN WOULD END BLIND - supervision is off. The watcher cycle is missing, failed, or unhealthy. " +
+      "Follow the harness recovery instruction below before ending the turn.\n\n" +
+      "captain-authored legacy-shaped message",
+    visible: "captain-authored legacy-shaped message",
+  },
+  {
+    content: [
+      { type: "text", text: watcherMessage },
+      { type: "image", data: "ignored-by-text-renderer", mimeType: "image/png" },
+    ],
+    visible: "FIRSTMATE WATCHER WAKE",
+  },
+];
+for (const nearMiss of operationalNearMisses) {
+  const chat = {
+    children: [new Text("VISIBLE_PREDECESSOR", 0, 0)],
+    addChild(component) {
+      this.children.push(component);
+    },
+  };
+  InteractiveMode.prototype.addMessageToChat.call(
+    { ...operationalMode, chatContainer: chat },
+    { role: "user", content: nearMiss.content },
+  );
+  const rendered = chat.children.flatMap((component) => component.render(180)).join("\n");
+  if (!rendered.includes(nearMiss.visible)) {
+    throw new Error(`Calm hid an operational near miss: ${nearMiss.visible}`);
+  }
+}
 for (const { name, actual } of rows) {
   if (actual.render(100).length !== 0) {
     throw new Error(`${name} was not hidden before export rendering`);
@@ -671,6 +811,12 @@ if (
 ) {
   throw new Error("turning Calm off did not restore a legacy synthetic presentation row");
 }
+if (JSON.stringify(operationalComponent.render(100)) !== JSON.stringify(expectedCalmOffOperationalRows)) {
+  throw new Error("turning Calm off did not restore byte-identical operational user rows and spacing");
+}
+if (!legacyOperationalComponent.render(100).join("\n").includes("legacy presentation compatibility")) {
+  throw new Error("turning Calm off did not restore the supported legacy operational row");
+}
 for (const { name, baseline, actual } of rows) {
   if (JSON.stringify(actual.render(100)) !== JSON.stringify(baseline.render(100))) {
     throw new Error(`${name} did not restore the expanded standard renderer`);
@@ -734,7 +880,7 @@ JS
 }
 
 test_operational_followup_turn_e2e() {
-  local project home config sessions version label case_name calm_state expected_notifications session_file pane i
+  local project home config sessions version label case_name calm_state expected_notifications session_file pane i captain_line handled_line geometry_gap exact_session
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi operational follow-up E2E"
     return 0
@@ -750,6 +896,7 @@ test_operational_followup_turn_e2e() {
   fm_git_init_commit "$project"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
   printf '%s\n' '{"followUpMode":"all"}' >"$config/settings.json"
@@ -766,6 +913,18 @@ let phase: "idle" | "captain" | "monitor" = "idle";
 let label = "";
 let adjacent = false;
 let latestInputRole: "user" | "custom" | undefined;
+
+const EXACT_WATCHER_INPUT =
+  "\u2063FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: signal: /Users/kunchen/github/kunchenguid/firstmate/state/oss-triage-t4.status\n\n" +
+  "Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.";
+
+function monitorInput(suffix: "ONE" | "TWO"): string {
+  if (label === "exact_watcher" && suffix === "ONE") return EXACT_WATCHER_INPUT;
+  if (label === "legacy_away" && suffix === "ONE") {
+    return "\u2063Supervisor escalate (LEGACY_AWAY_E2E)";
+  }
+  return encodeFirstmateOperationalInput("watcher", `MONITOR_${label}_${suffix}`);
+}
 
 function contentText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -786,15 +945,9 @@ export default function (pi: ExtensionAPI): void {
     }
     if (event.message.role !== "assistant" || phase !== "captain") return;
     phase = "monitor";
-    pi.sendUserMessage(
-      encodeFirstmateOperationalInput("watcher", `MONITOR_${label}_ONE`),
-      { deliverAs: "followUp" },
-    );
+    pi.sendUserMessage(monitorInput("ONE"), { deliverAs: "followUp" });
     if (adjacent) {
-      pi.sendUserMessage(
-        encodeFirstmateOperationalInput("watcher", `MONITOR_${label}_TWO`),
-        { deliverAs: "followUp" },
-      );
+      pi.sendUserMessage(monitorInput("TWO"), { deliverAs: "followUp" });
     }
   });
 
@@ -819,8 +972,8 @@ export default function (pi: ExtensionAPI): void {
         .join("\n");
       const responseText = latestInputRole === "custom"
         ? `CAPTAIN_ANSWER_${label}`
-        : allUserText.includes(`MONITOR_${label}_ONE`)
-          ? adjacent && allUserText.includes(`MONITOR_${label}_TWO`)
+        : allUserText.includes(monitorInput("ONE"))
+          ? adjacent && allUserText.includes(monitorInput("TWO"))
             ? `MONITOR_HANDLED_${label}_ONE_TWO`
             : `MONITOR_HANDLED_${label}_ONE`
           : `CAPTAIN_ANSWER_${label}`;
@@ -884,6 +1037,9 @@ TS
     if [ "$calm_state" = absent ]; then
       rm -f "$home/config/calm"
       extensions='-e ./followup-e2e.ts'
+    elif [ "$calm_state" = default ]; then
+      rm -f "$home/config/calm"
+      extensions='-e ./.pi/extensions/fm-calm.ts -e ./followup-e2e.ts'
     else
       printf '%s\n' "$calm_state" >"$home/config/calm"
       extensions='-e ./.pi/extensions/fm-calm.ts -e ./followup-e2e.ts'
@@ -926,10 +1082,31 @@ TS
     [ "$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)" -eq 1 ] \
       || fail "Pi follow-up $label case rendered a duplicate captain answer"
     assert_contains "$pane" "CAPTAIN_PROMPT_$label" "Pi follow-up $label case hid the genuine captain prompt"
-    assert_contains "$pane" "MONITOR_${label}_ONE" "Pi follow-up $label case lost the exact operational user row"
     assert_contains "$pane" "MONITOR_HANDLED_${label}_ONE" "Pi follow-up $label case did not render the intended processing result"
-    if [ "$expected_notifications" -eq 2 ]; then
-      assert_contains "$pane" "MONITOR_${label}_TWO" "Pi follow-up $label case lost the adjacent operational user row"
+    if [ "$calm_state" = on ]; then
+      assert_not_contains "$pane" "MONITOR_${label}_ONE" "Pi follow-up $label case rendered a Calm-hidden operational user row"
+      if [ "$label" = exact_watcher ]; then
+        assert_not_contains "$pane" "FIRSTMATE WATCHER WAKE: signal: /Users/kunchen/github/kunchenguid/firstmate/state/oss-triage-t4.status" \
+          "Pi exact watcher case rendered the Calm-hidden authoritative payload"
+        assert_not_contains "$pane" "Run bin/fm-wake-drain.sh first and handle the queued wake." \
+          "Pi exact watcher case rendered the Calm-hidden drain instruction"
+      elif [ "$label" = legacy_away ]; then
+        assert_not_contains "$pane" "LEGACY_AWAY_E2E" \
+          "Pi legacy-away case rendered the narrowly supported Calm-hidden input"
+      fi
+      if [ "$expected_notifications" -eq 2 ]; then
+        assert_not_contains "$pane" "MONITOR_${label}_TWO" "Pi follow-up $label case rendered the adjacent Calm-hidden operational row"
+      fi
+      captain_line=$(printf '%s\n' "$pane" | grep -Fn "CAPTAIN_ANSWER_$label" | tail -1 | cut -d: -f1)
+      handled_line=$(printf '%s\n' "$pane" | grep -Fn "MONITOR_HANDLED_${label}_ONE" | tail -1 | cut -d: -f1)
+      geometry_gap=$((handled_line - captain_line))
+      [ "$geometry_gap" -eq 2 ] \
+        || fail "Pi follow-up $label case consumed $geometry_gap rows between neighboring assistant text instead of the two-row visible-only geometry"
+    else
+      assert_contains "$pane" "MONITOR_${label}_ONE" "Pi follow-up $label case lost the Calm-off operational user row"
+      if [ "$expected_notifications" -eq 2 ]; then
+        assert_contains "$pane" "MONITOR_${label}_TWO" "Pi follow-up $label case lost the adjacent Calm-off operational user row"
+      fi
     fi
 
     node - "$session_file" "$label" "$expected_notifications" <<'JS' \
@@ -946,10 +1123,22 @@ const captainAnswer = `CAPTAIN_ANSWER_${label}`;
 const handled = expected === 2
   ? `MONITOR_HANDLED_${label}_ONE_TWO`
   : `MONITOR_HANDLED_${label}_ONE`;
-const matching = entries.filter((entry) =>
-  (entry.type === "message" && text(entry.message.content).includes(label)) ||
-  (entry.type === "custom_message" && text(entry.content).includes(label))
-);
+const expectedOperationalTexts = Array.from({ length: expected }, (_, index) => {
+  const suffix = index === 0 ? "ONE" : "TWO";
+  return label === "exact_watcher" && suffix === "ONE"
+    ? "\u2063FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: signal: /Users/kunchen/github/kunchenguid/firstmate/state/oss-triage-t4.status\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned."
+    : label === "legacy_away" && suffix === "ONE"
+      ? "\u2063Supervisor escalate (LEGACY_AWAY_E2E)"
+      : `\u2063FIRSTMATE_OP: v1 watcher: MONITOR_${label}_${suffix}`;
+});
+const matching = entries.filter((entry) => {
+  const entryText = entry.type === "message"
+    ? text(entry.message.content)
+    : entry.type === "custom_message"
+      ? text(entry.content)
+      : "";
+  return entryText.includes(label) || expectedOperationalTexts.includes(entryText);
+});
 const userEntries = matching.filter((entry) => entry.type === "message" && entry.message.role === "user");
 const customEntries = matching.filter((entry) => entry.type === "custom_message");
 const assistantEntries = matching.filter((entry) => entry.type === "message" && entry.message.role === "assistant");
@@ -958,8 +1147,7 @@ if (customEntries.length !== 0) throw new Error(`operational input was rerouted:
 if (userEntries.length !== expected + 1) throw new Error(`expected ${expected + 1} user inputs, found ${userEntries.length}`);
 if (text(userEntries[0].message.content) !== captainPrompt) throw new Error("genuine captain prompt changed");
 for (let index = 1; index <= expected; index += 1) {
-  const suffix = index === 1 ? "ONE" : "TWO";
-  const exact = `\u2063FIRSTMATE_OP: v1 watcher: MONITOR_${label}_${suffix}`;
+  const exact = expectedOperationalTexts[index - 1];
   if (text(userEntries[index].message.content) !== exact) throw new Error(`operational origin changed: ${text(userEntries[index].message.content)}`);
 }
 if (assistantText.filter((value) => value === captainAnswer).length !== 1) {
@@ -975,9 +1163,12 @@ if (positions.some((position, index) => index > 0 && position <= positions[index
 }
 JS
 
-    if [ "$calm_state" != absent ]; then
+    if [ "$calm_state" = on ] || [ "$calm_state" = off ]; then
       [ "$(cat "$home/config/calm")" = "$calm_state" ] \
         || fail "Pi follow-up $label case changed the persisted Calm choice"
+    elif [ "$calm_state" = default ]; then
+      [ ! -e "$home/config/calm" ] \
+        || fail "Pi follow-up $label case persisted a default Calm choice without a toggle"
     fi
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/quit'
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
@@ -985,14 +1176,59 @@ JS
     tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
   }
 
+  replay_exact_case() {
+    tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    printf '%s\n' on >"$home/config/calm"
+    tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 160 -y 36 \
+      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./followup-e2e.ts --session '$exact_session'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
+    i=0
+    while [ "$i" -lt 120 ]; do
+      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+      printf '%s\n' "$pane" | grep -Fq 'MONITOR_HANDLED_exact_watcher_ONE' && break
+      sleep 0.05
+      i=$((i + 1))
+    done
+    assert_contains "$pane" "CAPTAIN_PROMPT_exact_watcher" "Pi restart lost the genuine captain prompt"
+    assert_contains "$pane" "MONITOR_HANDLED_exact_watcher_ONE" "Pi restart lost the operational processing response"
+    assert_not_contains "$pane" "FIRSTMATE WATCHER WAKE: signal: /Users/kunchen/github/kunchenguid/firstmate/state/oss-triage-t4.status" \
+      "Pi restart replayed the Calm-hidden exact watcher row"
+    captain_line=$(printf '%s\n' "$pane" | grep -Fn 'CAPTAIN_ANSWER_exact_watcher' | tail -1 | cut -d: -f1)
+    handled_line=$(printf '%s\n' "$pane" | grep -Fn 'MONITOR_HANDLED_exact_watcher_ONE' | tail -1 | cut -d: -f1)
+    geometry_gap=$((handled_line - captain_line))
+    [ "$geometry_gap" -eq 2 ] \
+      || fail "Pi restart replay consumed $geometry_gap rows between neighboring assistant text"
+    node - "$exact_session" <<'JS' || fail "Pi restart replay changed exact watcher persistence"
+const fs = require("node:fs");
+const entries = fs.readFileSync(process.argv[2], "utf8").trim().split("\n").map(JSON.parse);
+const text = (content) => typeof content === "string"
+  ? content
+  : (content ?? []).filter((item) => item.type === "text").map((item) => item.text).join("");
+const exact = "\u2063FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: signal: /Users/kunchen/github/kunchenguid/firstmate/state/oss-triage-t4.status\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.";
+const users = entries.filter((entry) => entry.type === "message" && entry.message.role === "user" && text(entry.message.content) === exact);
+const responses = entries.filter((entry) => entry.type === "message" && entry.message.role === "assistant" && text(entry.message.content) === "MONITOR_HANDLED_exact_watcher_ONE");
+if (users.length !== 1 || responses.length !== 1) {
+  throw new Error(`restart changed exactly-once entries: users=${users.length} responses=${responses.length}`);
+}
+JS
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/quit'
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+    sleep 0.2
+    tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+  }
+
   run_followup_case loaded-on on loaded_on 1
+  run_followup_case exact-watcher on exact_watcher 1
+  exact_session=$session_file
+  replay_exact_case
+  run_followup_case legacy-away on legacy_away 1
   run_followup_case loaded-off off loaded_off 1
+  run_followup_case loaded-default default loaded_default 1
   run_followup_case extension-absent absent absent 1
   run_followup_case adjacent on adjacent 2 '' adjacent
   run_followup_case restart-before on restart_before 1
   local restart_session=$session_file
   run_followup_case restart-after on restart_after 1 "$restart_session"
-  pass "Pi operational follow-up E2E preserves one captain answer, exact user-role monitoring turns, Calm on/off/absent behavior, adjacent coalescing, genuine prompts, and restart persistence"
+  pass "Pi operational follow-up E2E processes exact user-role notifications once while Calm hides current and adjacent rows, Calm off and absent render them, and restart preserves semantics"
 }
 
 test_hidden_block_geometry_e2e() {
@@ -1022,7 +1258,9 @@ test_hidden_block_geometry_e2e() {
   fm_git_init_commit "$project"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
   printf '%s\n' on >"$home/config/calm"
   printf '%s\n' '{"hideThinkingBlock":true,"terminal":{"clearOnShrink":false}}' >"$config/settings.json"
   printf '%s\n' 'tool result one' >"$project/probe-one.txt"
@@ -1265,6 +1503,7 @@ test_interactive_terminal_e2e() {
   : > "$project/AGENTS.md"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$project/.pi/extensions/lib/fm-operational-input.ts"
   cp "$WATCH_EXT" "$project/.pi/extensions/fm-primary-pi-watch.ts"
@@ -1414,7 +1653,11 @@ TS
 {"type":"custom","id":"a0000009","parentId":"a0000008","timestamp":"$now","customType":"firstmate-synthetic-input-presentation","data":{"content":"FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status\\n\\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.","kind":"watcher"}}
 {"type":"custom_message","id":"a0000010","parentId":"a0000009","timestamp":"$now","customType":"firstmate-synthetic-input","content":"FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status\\n\\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.","display":false,"details":{"kind":"watcher"}}
 {"type":"message","id":"a0000011","parentId":"a0000010","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"FIRSTMATE WATCHER WAKE: can you explain this phrase?"}],"timestamp":11}}
-{"type":"message","id":"a0000012","parentId":"a0000011","timestamp":"$now","message":{"role":"assistant","content":[{"type":"text","text":"The deterministic tool example is complete."}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":12}}
+{"type":"message","id":"a0000012","parentId":"a0000011","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"Captain quote: \u2063FIRSTMATE_OP: v1 watcher: QUOTED_CURRENT_NEAR_MISS"}],"timestamp":12}}
+{"type":"message","id":"a0000013","parentId":"a0000012","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"FIRSTMATE_OP: v1 watcher: ASCII_ONLY_NEAR_MISS"}],"timestamp":13}}
+{"type":"message","id":"a0000014","parentId":"a0000013","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"Ordinary captain text before \u2063FIRSTMATE_OP: v1 watcher: EMBEDDED_CURRENT_NEAR_MISS"}],"timestamp":14}}
+{"type":"message","id":"a0000015","parentId":"a0000014","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"\u2063ordinary captain text after unrelated separator"}],"timestamp":15}}
+{"type":"message","id":"a0000016","parentId":"a0000015","timestamp":"$now","message":{"role":"assistant","content":[{"type":"text","text":"The deterministic tool example is complete."}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":16}}
 JSON
 
   tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 180 -y 44 \
@@ -1459,6 +1702,14 @@ JSON
   assert_not_contains "$(cat "$hidden_snapshot")" "Tool activity is hidden where supported" "/calm appended its own command-status row"
   assert_contains "$(cat "$hidden_snapshot")" "Show a deterministic tool example." "/calm removed a genuine user prompt"
   assert_contains "$(cat "$hidden_snapshot")" "FIRSTMATE WATCHER WAKE: can you explain this phrase?" "/calm hid a genuine near-miss user prompt"
+  for near_miss in \
+    QUOTED_CURRENT_NEAR_MISS \
+    ASCII_ONLY_NEAR_MISS \
+    EMBEDDED_CURRENT_NEAR_MISS \
+    "ordinary captain text after unrelated separator"
+  do
+    assert_contains "$(cat "$hidden_snapshot")" "$near_miss" "/calm hid the genuine operational near miss $near_miss"
+  done
   assert_contains "$(cat "$hidden_snapshot")" "I will run one command." "/calm removed assistant conversation before a tool"
   assert_contains "$(cat "$hidden_snapshot")" "The deterministic tool example is complete." "/calm removed assistant conversation after a tool"
 
@@ -1554,14 +1805,14 @@ JS
   # shellcheck disable=SC2016 # Backticks are literal prompt markup.
   assert_not_contains "$(cat "$active_hidden_snapshot")" 'Run `bin/fm-session-start.sh` now' \
     "Calm showed the native session-start operational input"
-  for visible in \
+  for hidden in \
     CURRENT_WATCHER_E2E \
     CURRENT_TURN_END_E2E \
     CURRENT_AWAY_E2E \
     CURRENT_FROM_FIRSTMATE_E2E \
     CURRENT_LAUNCH_BRIEF_E2E
   do
-    assert_contains "$(cat "$active_hidden_snapshot")" "$visible" "Calm hid semantic operational input $visible instead of showing the safe user row"
+    assert_not_contains "$(cat "$active_hidden_snapshot")" "$hidden" "Calm rendered operational input $hidden"
   done
   assert_contains "$(cat "$active_hidden_snapshot")" "Warning: CALM_TRANSIENT_DIAGNOSTIC" "operational arrival lost its preceding transient diagnostic"
   assert_contains "$(cat "$active_hidden_snapshot")" " Error:" "operational delivery did not produce a transient provider diagnostic"
@@ -1691,14 +1942,14 @@ JS
   assert_not_contains "$(cat "$restarted_snapshot")" "CALM_E2E_OUTPUT" "restart/resume reset Calm and restored a tool row"
   assert_not_contains "$(cat "$restarted_snapshot")" "fm_watch_arm_pi" "restart/resume reset Calm and restored the Firstmate watcher tool"
   assert_not_contains "$(cat "$restarted_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "restart/resume reset Calm and restored a legacy presentation row"
-  for visible in \
+  for hidden in \
     CURRENT_WATCHER_E2E \
     CURRENT_TURN_END_E2E \
     CURRENT_AWAY_E2E \
     CURRENT_FROM_FIRSTMATE_E2E \
     CURRENT_LAUNCH_BRIEF_E2E
   do
-    assert_contains "$(cat "$restarted_snapshot")" "$visible" "restart/resume hid semantic operational input $visible"
+    assert_not_contains "$(cat "$restarted_snapshot")" "$hidden" "restart/resume rendered operational input $hidden"
   done
   assert_not_contains "$(cat "$restarted_snapshot")" "calm transcript" "restart/resume added a persistent Calm status row"
   assert_contains "$(cat "$restarted_snapshot")" "CALM_WORKING_E2E_PROMPT" "restart/resume removed a genuine user prompt"
@@ -1712,7 +1963,7 @@ JS
   [ "$(cat "$home/config/calm")" = off ] || fail "/calm after restart did not persist the inactive choice"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  pass "Pi calm native E2E keeps Working visible, emits no Calm status, keeps operational input user-role and visible when no safe renderer exists, persists across restart/resume, and preserves export plus Ctrl+O behavior"
+  pass "Pi calm native E2E keeps Working and captain turns visible, hides exact operational user rows without changing persistence, restores them Calm-off, survives restart, and preserves export plus Ctrl+O behavior"
 }
 
 test_static_contract

@@ -19,7 +19,7 @@ export type FirstmateCurrentOperationalKind =
   (typeof FIRSTMATE_CURRENT_OPERATIONAL_KINDS)[number];
 
 function runOperationalInputCommand(
-  command: "encode" | "classify",
+  command: "encode" | "classify" | "kind",
   content: string,
   kind?: FirstmateCurrentOperationalKind,
 ): string | undefined {
@@ -46,4 +46,10 @@ export function encodeFirstmateOperationalInput(
 
 export function classifyFirstmateOperationalText(content: string): string | undefined {
   return runOperationalInputCommand("classify", content);
+}
+
+export function classifyFirstmateCurrentOperationalText(
+  content: string,
+): string | undefined {
+  return runOperationalInputCommand("kind", content);
 }
