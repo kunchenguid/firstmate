@@ -610,6 +610,16 @@ fm_backend_remove_worktree() {  # <backend> <worktree-id>
   esac
 }
 
+fm_backend_remove_worktree_bound() {  # <backend> <worktree-id> <expected-path> <boundary-token>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    orca) fm_backend_orca_remove_worktree_bound "$@" ;;
+    *) echo "error: backend '$backend' does not own task worktrees" >&2; return 1 ;;
+  esac
+}
+
 fm_backend_worktree_path() {  # <backend> <worktree-id>
   local backend=$1
   shift

@@ -70,9 +70,9 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
-printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
 case "${1:-}" in
   get)
+    printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
     # Durable lease: print only the worktree path to stdout (banners to stderr),
     # and record the lease holder so tests can assert it is set and later cleared.
     shift
@@ -109,6 +109,10 @@ case "${1:-}" in
       esac
       shift
     done
+    case "$target" in
+      .|/dev/fd/*) target=$(cd "$target" && pwd -P) || exit 18 ;;
+    esac
+    printf 'treehouse return --force %s\n' "$target" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
     [ -z "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-}" ] || exit 17
     [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] && rm -f "$FM_FAKE_TREEHOUSE_LEASE_FILE"
     [ -n "$target" ] && rm -rf -- "$target"

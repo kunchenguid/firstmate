@@ -209,6 +209,42 @@ fm_checkout_physical_path_key() {
   fm_checkout_hash_value "existing:$identity" "${3:-24}"
 }
 
+fm_checkout_tree_boundary_token() {
+  local path=$1
+  fm_checkout_system_perl -MDigest::SHA=sha256_hex -MErrno=ENOENT -MFcntl=:mode -MFile::Find -e '
+    my $root = shift;
+    exit 1 if !defined($root) || $root !~ m{^/} || $root eq q{/};
+    my @root_stat = lstat($root);
+    exit 1 if !@root_stat || S_ISLNK($root_stat[2]) || !S_ISDIR($root_stat[2]);
+    (my $parent = $root) =~ s{/[^/]+$}{};
+    $parent = q{/} if $parent eq q{};
+    my @parent_stat = stat($parent);
+    exit 1 if !@parent_stat || $root_stat[0] != $parent_stat[0];
+    my @records;
+    find(
+      {
+        no_chdir => 1,
+        preprocess => sub { sort @_ },
+        wanted => sub {
+          my @metadata = lstat($File::Find::name);
+          exit 1 if !@metadata;
+          exit 1 if $metadata[0] != $root_stat[0];
+          exit 1 if S_ISLNK($metadata[2]);
+          push @records, join(
+            qq{\0},
+            $File::Find::name,
+            $metadata[0],
+            $metadata[1],
+            S_IFMT($metadata[2]),
+          );
+        },
+      },
+      $root,
+    );
+    print sha256_hex(join(qq{\0}, @records));
+  ' "$path"
+}
+
 fm_checkout_lock_key() {
   fm_checkout_stable_path_key "$1" directory 0 24
 }
@@ -310,7 +346,8 @@ import stat
 import sys
 
 target = os.path.abspath(sys.argv[1])
-if not target or target == os.path.sep:
+project = os.path.abspath(sys.argv[2])
+if not target or target == os.path.sep or os.path.realpath(os.getcwd()) != project:
     raise SystemExit(74)
 current = os.path.sep
 for component in target.split(os.path.sep):
@@ -330,12 +367,44 @@ descriptor = os.open(target, flags)
 opened = os.fstat(descriptor)
 if (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino):
     raise SystemExit(74)
+parent = os.path.dirname(target)
+parent_metadata = os.stat(parent)
+if opened.st_dev != parent_metadata.st_dev or os.path.ismount(target):
+    raise SystemExit(74)
+root_device = opened.st_dev
+descriptors = [descriptor]
+pending = [(descriptor, target)]
+while pending:
+    directory_fd, path = pending.pop()
+    for name in sorted(os.listdir(directory_fd)):
+        item = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISLNK(item.st_mode):
+            raise SystemExit(74)
+        if not stat.S_ISDIR(item.st_mode):
+            continue
+        child_path = os.path.join(path, name)
+        child = os.open(name, flags, dir_fd=directory_fd)
+        child_opened = os.fstat(child)
+        if (
+            (item.st_dev, item.st_ino) != (child_opened.st_dev, child_opened.st_ino)
+            or child_opened.st_dev != root_device
+            or os.path.ismount(child_path)
+        ):
+            os.close(child)
+            raise SystemExit(74)
+        descriptors.append(child)
+        pending.append((child, child_path))
+for retained in descriptors:
+    os.set_inheritable(retained, True)
+os.environ["FM_TREEHOUSE_RETURN_ROOT_FD"] = str(descriptor)
+os.environ["FM_TREEHOUSE_RETURN_BOUNDARY_FDS"] = ",".join(map(str, descriptors))
+os.environ["FM_TREEHOUSE_RETURN_PROJECT"] = project
 os.fchdir(descriptor)
 bound = os.stat(".")
 if (opened.st_dev, opened.st_ino) != (bound.st_dev, bound.st_ino):
     raise SystemExit(74)
 os.execvp("treehouse", ("treehouse", "return", "--force", "."))
-' "$checkout"; then
+' "$checkout" "$project"; then
     status=0
   else
     status=$?

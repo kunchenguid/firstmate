@@ -290,8 +290,7 @@ managed_endpoint_is_gone() {  # <backend> <target> <expected-label> [probe-home]
           agent_state=$(fm_backend_agent_alive "$backend" "$target" "$expected" "$recorded_scoped_target" 2>/dev/null)
         fi
         case "$agent_state" in
-          dead) return 0 ;;
-          alive) last=present ;;
+          dead|alive) last=present ;;
           *) last=unknown ;;
         esac
         ;;
@@ -1631,6 +1630,12 @@ validate_removal_tree_boundaries() {
   removal_tree_operation "$target" "$label" validate
 }
 
+removal_tree_boundary_token() {
+  local target=$1 label=$2
+  validate_removal_tree_boundaries "$target" "$label" || return 1
+  fm_checkout_tree_boundary_token "$target"
+}
+
 removal_tree_operation() {
   local target=$1 label=$2 operation=$3
   FM_REMOVAL_BOUNDARY_LABEL=$label python3 - "$target" "$operation" <<'PY'
@@ -1710,15 +1715,15 @@ try:
         os.close(parent_fd)
         raise OSError("removal root identity changed")
     root_device = root_metadata.st_dev
+    mounted_paths = mountinfo_paths()
 
     def reject_boundary(path, metadata, is_root=False):
         canonical = os.path.realpath(path)
-        mounted = mountinfo_paths()
         if canonical == injected:
             raise OSError(f"mounted path {canonical}")
         if metadata.st_dev != root_device:
             raise OSError(f"filesystem device boundary at {canonical}")
-        if canonical in mounted or os.path.ismount(canonical):
+        if canonical in mounted_paths or os.path.ismount(canonical):
             raise OSError(f"mount boundary at {canonical}")
         if is_root and metadata.st_dev != parent_metadata.st_dev:
             raise OSError(f"removal root filesystem boundary at {canonical}")
@@ -2125,7 +2130,8 @@ secondmate_network_remote_identity() {
     [ "$config_status" -eq 1 ] || return 1
   fi
   resolved_host=$host
-  if [ "$transport" = ssh ]; then
+  case "$transport" in
+  ssh|git+ssh)
     [ -x /usr/bin/ssh ] || return 1
     ssh_args=(-G)
     [ -z "$user" ] || ssh_args+=(-l "$user")
@@ -2156,7 +2162,18 @@ secondmate_network_remote_identity() {
     [ -z "$local_command" ] || [ "$local_command" = none ] || return 1
     [ -z "$remote_command" ] || [ "$remote_command" = none ] || return 1
     [ -z "$permit_local" ] || [ "$permit_local" = no ] || return 1
-  fi
+    ;;
+  http) effective_port=${port:-80} ;;
+  https) effective_port=${port:-443} ;;
+  git) effective_port=${port:-9418} ;;
+  *) return 1 ;;
+  esac
+  case "$resolved_host" in
+    ''|-*|*[!A-Za-z0-9._:-]*) return 1 ;;
+  esac
+  case "$effective_port" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
   if fm_run_bounded_capture --combine-stderr resolution "$TEARDOWN_UPSTREAM_TIMEOUT" \
       python3 - "$resolved_host" <<'PY'
 import ipaddress
@@ -2217,7 +2234,19 @@ try:
     }
     if host in local_names:
         raise OSError("remote hostname names this machine")
-    remote = addresses(host)
+    injected = os.environ.get("FM_TEARDOWN_TEST_NETWORK_ADDRESSES", "")
+    if (
+        os.environ.get("FM_ACCOUNT_ROUTING_TEST_LAB")
+        == "firstmate-account-routing-test-lab-v1"
+        and injected
+    ):
+        remote = {
+            ipaddress.ip_address(value.strip())
+            for value in injected.split(",")
+            if value.strip()
+        }
+    else:
+        remote = addresses(host)
     local = local_interface_addresses()
     for name in tuple(local_names):
         if not name:
@@ -2248,10 +2277,210 @@ PY
   fi
   fm_process_tree_cleanup_verified || return 1
   [ "$resolution_status" -eq 0 ] && [ -n "$resolution" ] || return 1
-  printf 'network\t%s\t%s\n' "$transport" "$url"
+  printf 'network\t%s\t%s\t%s\t%s\t%s\n' \
+    "$transport" "$url" "$resolved_host" "$effective_port" "$resolution"
 }
 
-validate_surviving_repository_authority() {
+validate_surviving_object_graph_bound() {
+  local repository=$1 objects=$2 retiring_home=$3 label=$4
+  FM_SURVIVING_REPOSITORY_LABEL=$label python3 - "$repository" "$objects" "$retiring_home" <<'PY'
+import os
+import stat
+import subprocess
+import sys
+import time
+
+repository, initial, retiring_home = map(os.path.realpath, sys.argv[1:])
+label = os.environ["FM_SURVIVING_REPOSITORY_LABEL"]
+held = []
+visited = set()
+
+def confined(path):
+    try:
+        return os.path.commonpath((retiring_home, path)) == retiring_home
+    except ValueError:
+        return False
+
+def retain(path, expected_directory):
+    metadata = os.lstat(path)
+    if stat.S_ISLNK(metadata.st_mode):
+        raise OSError(f"redirected object storage entry: {path}")
+    if expected_directory and not stat.S_ISDIR(metadata.st_mode):
+        raise OSError(f"object storage directory is not a directory: {path}")
+    if not expected_directory and not stat.S_ISREG(metadata.st_mode):
+        raise OSError(f"object storage entry is not a regular file: {path}")
+    flags = os.O_RDONLY
+    if expected_directory:
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    opened = os.fstat(descriptor)
+    expected = (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+        metadata.st_size,
+    )
+    actual = (
+        opened.st_dev,
+        opened.st_ino,
+        stat.S_IFMT(opened.st_mode),
+        opened.st_size,
+    )
+    if expected != actual:
+        os.close(descriptor)
+        raise OSError(f"object storage identity changed at {path}")
+    if confined(os.path.realpath(path)):
+        os.close(descriptor)
+        raise OSError(f"object storage depends on retiring home: {path}")
+    held.append((path, descriptor, expected))
+    return descriptor, opened
+
+def inspect(objects):
+    objects = os.path.normpath(objects)
+    directory, metadata = retain(objects, True)
+    identity = (metadata.st_dev, metadata.st_ino)
+    if identity in visited:
+        return
+    visited.add(identity)
+    object_device = metadata.st_dev
+    for name in sorted(os.listdir(directory)):
+        path = os.path.join(objects, name)
+        item = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if item.st_dev != object_device:
+            raise OSError(f"object storage crosses a filesystem boundary: {path}")
+        if stat.S_ISLNK(item.st_mode):
+            raise OSError(f"redirected object storage entry: {path}")
+        if stat.S_ISDIR(item.st_mode):
+            inspect(path)
+        elif stat.S_ISREG(item.st_mode):
+            retain(path, False)
+        else:
+            raise OSError(f"unsafe object storage entry: {path}")
+    alternates = os.path.join(objects, "info", "alternates")
+    http_alternates = os.path.join(objects, "info", "http-alternates")
+    if os.path.lexists(http_alternates):
+        raise OSError(f"HTTP alternates are not durable proof: {http_alternates}")
+    if not os.path.lexists(alternates):
+        return
+    alternate_fd, _ = retain(alternates, False)
+    with os.fdopen(os.dup(alternate_fd), "r", encoding="utf-8") as stream:
+        entries = [line.rstrip("\n") for line in stream]
+    if not entries or any(not entry or "\x00" in entry for entry in entries):
+        raise OSError(f"malformed alternates file: {alternates}")
+    for entry in entries:
+        if entry.startswith('"') or entry.endswith('"'):
+            raise OSError(f"quoted alternates are ambiguous: {alternates}")
+        candidate = entry if os.path.isabs(entry) else os.path.join(objects, entry)
+        inspect(os.path.realpath(candidate))
+
+def verify_retained():
+    for path, descriptor, expected in held:
+        metadata = os.lstat(path)
+        current = (
+            metadata.st_dev,
+            metadata.st_ino,
+            stat.S_IFMT(metadata.st_mode),
+            metadata.st_size,
+        )
+        opened = os.fstat(descriptor)
+        retained = (
+            opened.st_dev,
+            opened.st_ino,
+            stat.S_IFMT(opened.st_mode),
+            opened.st_size,
+        )
+        if current != expected or retained != expected or stat.S_ISLNK(metadata.st_mode):
+            raise OSError(f"object storage identity changed during graph proof: {path}")
+
+def run(arguments, input_data=None):
+    environment = os.environ.copy()
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    completed = subprocess.run(
+        ["git", "-C", repository, *arguments],
+        check=False,
+        input=input_data,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
+    verify_retained()
+    return completed
+
+try:
+    inspect(initial)
+    marker = os.environ.get("FM_TEARDOWN_TEST_OBJECT_SCAN_MARKER", "")
+    release = os.environ.get("FM_TEARDOWN_TEST_OBJECT_SCAN_RELEASE", "")
+    scan_root = os.environ.get("FM_TEARDOWN_TEST_OBJECT_SCAN_ROOT", "")
+    if (
+        os.environ.get("FM_ACCOUNT_ROUTING_TEST_LAB")
+        == "firstmate-account-routing-test-lab-v1"
+        and marker
+        and release
+        and scan_root
+        and initial == os.path.realpath(scan_root)
+    ):
+        with open(marker, "w", encoding="utf-8"):
+            pass
+        deadline = time.monotonic() + 10
+        while not os.path.exists(release):
+            if time.monotonic() >= deadline:
+                raise OSError("object storage test mutation did not release")
+            time.sleep(0.01)
+    verify_retained()
+    revision_arguments = ["rev-list", "--objects", "--missing=print", "--all", "--reflog"]
+    head = run(["rev-parse", "--verify", "HEAD^{object}"])
+    if head.returncode == 0:
+        revision_arguments.append("HEAD")
+    objects = run(revision_arguments)
+    if objects.returncode != 0:
+        raise OSError("reachable objects cannot be enumerated")
+    object_ids = []
+    for line in objects.stdout.splitlines():
+        if not line:
+            continue
+        if line.startswith("?"):
+            raise OSError(f"promised object is missing: {line[1:].split()[0]}")
+        object_id = line.split(" ", 1)[0]
+        if not object_id:
+            raise OSError("malformed reachable-object inventory")
+        object_ids.append(object_id)
+    if not object_ids:
+        raise OSError("reachable-object inventory is empty")
+    checked = run(
+        ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
+        "\n".join(object_ids) + "\n",
+    )
+    if checked.returncode != 0:
+        raise OSError("reachable objects cannot be inspected")
+    records = checked.stdout.splitlines()
+    if len(records) != len(object_ids):
+        raise OSError("reachable-object inspection is incomplete")
+    for requested, record in zip(object_ids, records):
+        fields = record.split()
+        if (
+            len(fields) != 3
+            or fields[0] != requested
+            or fields[1] in ("missing", "promisor")
+            or not fields[2].isdigit()
+        ):
+            raise OSError(f"reachable object is unavailable: {requested}")
+    checked = run(["fsck", "--full", "--strict", "--no-dangling"])
+    if checked.returncode != 0:
+        raise OSError("required Git objects are incomplete")
+    verify_retained()
+except (OSError, UnicodeError, subprocess.SubprocessError) as error:
+    print(f"REFUSED: {label} complete object graph is unavailable: {error}", file=sys.stderr)
+    raise SystemExit(1)
+finally:
+    for _, descriptor, _ in reversed(held):
+        os.close(descriptor)
+PY
+}
+
+validate_surviving_repository_authority_locked() {
   local repository=$1 retiring_home=$2 repository_container=${3:-$1}
   local label=${4:-repository} common git_dir objects listed records path kind canonical
   local allowed_retiring_worktree=${5:-} listed_common bare_repository count=0 refs ref
@@ -2457,73 +2686,19 @@ EOF
   done <<EOF
 $refs
 EOF
-  FM_SURVIVING_REPOSITORY_LABEL=$label python3 - "$repository" <<'PY' || return 1
-import os
-import subprocess
-import sys
+  validate_surviving_object_graph_bound \
+    "$repository" "$objects" "$retiring_home" "$label"
+}
 
-repository = sys.argv[1]
-label = os.environ["FM_SURVIVING_REPOSITORY_LABEL"]
-
-def run(arguments, input_data=None):
-    environment = os.environ.copy()
-    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
-    return subprocess.run(
-        ["git", "-C", repository, *arguments],
-        check=False,
-        input=input_data,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=environment,
-    )
-
-try:
-    revision_arguments = ["rev-list", "--objects", "--missing=print", "--all", "--reflog"]
-    head = run(["rev-parse", "--verify", "HEAD^{object}"])
-    if head.returncode == 0:
-        revision_arguments.append("HEAD")
-    objects = run(revision_arguments)
-    if objects.returncode != 0:
-        raise OSError("reachable objects cannot be enumerated")
-    object_ids = []
-    for line in objects.stdout.splitlines():
-        if not line:
-            continue
-        if line.startswith("?"):
-            raise OSError(f"promised object is missing: {line[1:].split()[0]}")
-        object_id = line.split(" ", 1)[0]
-        if not object_id:
-            raise OSError("malformed reachable-object inventory")
-        object_ids.append(object_id)
-    if not object_ids:
-        raise OSError("reachable-object inventory is empty")
-    checked = run(
-        ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
-        "\n".join(object_ids) + "\n",
-    )
-    if checked.returncode != 0:
-        raise OSError("reachable objects cannot be inspected")
-    records = checked.stdout.splitlines()
-    if len(records) != len(object_ids):
-        raise OSError("reachable-object inspection is incomplete")
-    for requested, record in zip(object_ids, records):
-        fields = record.split()
-        if (
-            len(fields) != 3
-            or fields[0] != requested
-            or fields[1] in ("missing", "promisor")
-            or not fields[2].isdigit()
-        ):
-            raise OSError(f"reachable object is unavailable: {requested}")
-except (OSError, subprocess.SubprocessError) as error:
-    print(f"REFUSED: {label} complete object graph is unavailable: {error}", file=sys.stderr)
-    raise SystemExit(1)
-PY
-  GIT_NO_REPLACE_OBJECTS=1 git -C "$repository" fsck --full --strict --no-dangling >/dev/null 2>&1 || {
-    echo "REFUSED: $label required Git objects are incomplete at $repository" >&2
-    return 1
-  }
+validate_surviving_repository_authority() {
+  local repository=$1 bare
+  bare=$(git -C "$repository" rev-parse --is-bare-repository 2>/dev/null) || return 1
+  if [ "$bare" = true ]; then
+    validate_surviving_repository_authority_locked "$@"
+    return
+  fi
+  fm_checkout_lock_run "$repository" "$CHECKOUT_LOCK_ROOT" \
+    validate_surviving_repository_authority_locked "$@"
 }
 
 secondmate_remote_identity() {
@@ -2639,36 +2814,76 @@ EOF
   printf 'local\t%s\n' "$canonical"
 }
 
+secondmate_pinned_git_url() {
+  python3 - "$1" "$2" <<'PY'
+import ipaddress
+import sys
+import urllib.parse
+
+url, address = sys.argv[1:]
+parsed = urllib.parse.urlsplit(url)
+if parsed.scheme.lower() != "git" or not parsed.hostname:
+    raise SystemExit(1)
+ip = ipaddress.ip_address(address)
+host = f"[{ip}]" if ip.version == 6 else str(ip)
+port = f":{parsed.port}" if parsed.port is not None else ""
+user = f"{parsed.username}@" if parsed.username else ""
+print(urllib.parse.urlunsplit((parsed.scheme, user + host + port, parsed.path, parsed.query, parsed.fragment)))
+PY
+}
+
 run_secondmate_remote_probe() {
-  local output_name=$1 repository=$2 retiring_home=$3 identity
+  local output_name=$1 repository=$2 retiring_home=$3 identity kind transport url bound_host bound_port addresses
+  local pinned pinned_url curl_address ssh_command index
+  local -a probe_args
   shift 3
   identity=$(secondmate_remote_identity "$repository" "$retiring_home") || return 1
-  case "$identity" in
-    network$'\t'ssh$'\t'*)
+  IFS=$'\t' read -r kind transport url bound_host bound_port addresses <<EOF
+$identity
+EOF
+  probe_args=("$@")
+  if [ "$kind" = local ]; then
+    fm_run_bounded_capture --combine-stderr "$output_name" "$TEARDOWN_UPSTREAM_TIMEOUT" \
+      git -C "$repository" ls-remote "${probe_args[@]}"
+    return
+  fi
+  [ "$kind" = network ] && [ -n "$addresses" ] || return 1
+  pinned=${addresses%%,*}
+  case "$transport" in
+    ssh|git+ssh)
+      ssh_command="/usr/bin/ssh -oHostName=$pinned -oHostKeyAlias=$bound_host"
       fm_run_bounded_capture --combine-stderr "$output_name" "$TEARDOWN_UPSTREAM_TIMEOUT" \
         /usr/bin/env -u GIT_SSH -u GIT_SSH_COMMAND -u GIT_SSH_VARIANT \
-        GIT_SSH_COMMAND=/usr/bin/ssh GIT_SSH_VARIANT=ssh \
-        git -C "$repository" ls-remote "$@"
+        "GIT_SSH_COMMAND=$ssh_command" GIT_SSH_VARIANT=ssh \
+        git -C "$repository" ls-remote "${probe_args[@]}"
       ;;
-    network$'\t'http$'\t'*|network$'\t'https$'\t'*)
+    http|https)
+      curl_address=$pinned
+      case "$curl_address" in *:*) curl_address="[$curl_address]" ;; esac
       fm_run_bounded_capture --combine-stderr "$output_name" "$TEARDOWN_UPSTREAM_TIMEOUT" \
         /usr/bin/env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
         -u ALL_PROXY -u all_proxy -u NO_PROXY -u no_proxy \
-        git -C "$repository" ls-remote "$@"
+        git -C "$repository" \
+          -c "http.curloptResolve=$bound_host:$bound_port:$curl_address" \
+          ls-remote "${probe_args[@]}"
       ;;
-    network$'\t'git$'\t'*|local$'\t'*)
+    git)
+      pinned_url=$(secondmate_pinned_git_url "$url" "$pinned") || return 1
+      for index in "${!probe_args[@]}"; do
+        [ "${probe_args[index]}" != origin ] || probe_args[index]=$pinned_url
+      done
       fm_run_bounded_capture --combine-stderr "$output_name" "$TEARDOWN_UPSTREAM_TIMEOUT" \
-        git -C "$repository" ls-remote "$@"
+        git -C "$repository" ls-remote "${probe_args[@]}"
       ;;
     *) return 1 ;;
   esac
 }
 
 prepare_secondmate_remote_authority() {
-  local repository=$1 retiring_home=$2 identity kind transport url authority state_root
-  local object_format fetch_status
+  local repository=$1 retiring_home=$2 identity kind transport url bound_host bound_port addresses authority state_root
+  local object_format fetch_status pinned pinned_url curl_address ssh_command
   identity=$(secondmate_remote_identity "$repository" "$retiring_home") || return 1
-  IFS=$'\t' read -r kind transport url <<EOF
+  IFS=$'\t' read -r kind transport url bound_host bound_port addresses <<EOF
 $identity
 EOF
   if [ "$kind" = local ]; then
@@ -2676,6 +2891,8 @@ EOF
     return 0
   fi
   [ "$kind" = network ] && [ -n "$transport" ] && [ -n "$url" ] || return 1
+  pinned=${addresses%%,*}
+  [ -n "$pinned" ] || return 1
   state_root=$(fm_checkout_trusted_dir "$STATE") || return 1
   authority=$(mktemp -d "$state_root/.remote-authority.XXXXXX") || return 1
   object_format=$(git -C "$repository" rev-parse --show-object-format 2>/dev/null) || {
@@ -2688,10 +2905,11 @@ EOF
   }
   case "$transport" in
     ssh|git+ssh)
+      ssh_command="/usr/bin/ssh -oHostName=$pinned -oHostKeyAlias=$bound_host"
       if /usr/bin/env -u GIT_SSH -u GIT_SSH_COMMAND -u GIT_SSH_VARIANT \
           -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
           GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-          GIT_SSH_COMMAND=/usr/bin/ssh GIT_SSH_VARIANT=ssh \
+          "GIT_SSH_COMMAND=$ssh_command" GIT_SSH_VARIANT=ssh \
           git -C "$authority" fetch --quiet --force --no-tags --no-recurse-submodules \
             "$url" '+refs/heads/*:refs/heads/*'; then
         fetch_status=0
@@ -2700,11 +2918,14 @@ EOF
       fi
       ;;
     http|https)
+      curl_address=$pinned
+      case "$curl_address" in *:*) curl_address="[$curl_address]" ;; esac
       if /usr/bin/env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
           -u ALL_PROXY -u all_proxy -u NO_PROXY -u no_proxy \
           -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
           GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
           git -C "$authority" -c http.proxy= -c http.followRedirects=false \
+            -c "http.curloptResolve=$bound_host:$bound_port:$curl_address" \
             fetch --quiet --force --no-tags --no-recurse-submodules \
             "$url" '+refs/heads/*:refs/heads/*'; then
         fetch_status=0
@@ -2713,10 +2934,13 @@ EOF
       fi
       ;;
     git)
-      if /usr/bin/env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
+      pinned_url=$(secondmate_pinned_git_url "$url" "$pinned") || fetch_status=1
+      if [ -z "${pinned_url:-}" ]; then
+        fetch_status=1
+      elif /usr/bin/env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
           GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
           git -C "$authority" fetch --quiet --force --no-tags --no-recurse-submodules \
-            "$url" '+refs/heads/*:refs/heads/*'; then
+            "$pinned_url" '+refs/heads/*:refs/heads/*'; then
         fetch_status=0
       else
         fetch_status=$?
@@ -3326,7 +3550,7 @@ EOF
 }
 
 remove_child_orca_worktree_locked() {
-  local child_worktree=$1 child_project=$2 child_worktree_id=$3 child_id=$4 child_meta=$5 branch=HEAD
+  local child_worktree=$1 child_project=$2 child_worktree_id=$3 child_id=$4 child_meta=$5 branch=HEAD boundary_token
   validate_child_worktree_for_removal "$child_worktree" "$child_project" >/dev/null || return 1
   require_orca_worktree_path_match "$child_worktree_id" "$child_worktree" || return 1
   fm_backend_quiesce_worktree_terminals orca "$child_worktree_id" "fm-$child_id" "$(meta_value "$child_meta" terminal)" || return 1
@@ -3334,7 +3558,9 @@ remove_child_orca_worktree_locked() {
   validate_removal_tree_boundaries "$child_worktree" "child Orca worktree" || return 1
   require_orca_worktree_path_match "$child_worktree_id" "$child_worktree" || return 1
   branch=$(git -C "$child_worktree" rev-parse --abbrev-ref HEAD 2>/dev/null) || return 1
-  fm_backend_remove_worktree orca "$child_worktree_id" || return 1
+  boundary_token=$(removal_tree_boundary_token "$child_worktree" "child Orca worktree") || return 1
+  fm_backend_remove_worktree_bound \
+    orca "$child_worktree_id" "$child_worktree" "$boundary_token" || return 1
   if [ "$branch" != "HEAD" ]; then
     git -C "$child_project" branch -D "$branch" >/dev/null 2>&1 || true
   fi
@@ -3600,13 +3826,16 @@ pending_orca_endpoint_absent() {
 }
 
 remove_pending_orca_worktree_locked() {
+  local boundary_token
   validate_pending_orca_worktree_identity || return 1
   pending_orca_endpoint_absent || return 1
   validate_worktree_teardown_safety || return 1
   validate_pending_orca_worktree_identity || return 1
   validate_removal_tree_boundaries "$WT" "quarantined Orca worktree" || return 1
   validate_pending_orca_worktree_identity || return 1
-  fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID"
+  boundary_token=$(removal_tree_boundary_token "$WT" "quarantined Orca worktree") || return 1
+  fm_backend_remove_worktree_bound \
+    orca "$ORCA_WORKTREE_ID" "$WT" "$boundary_token"
 }
 
 if [ "$ORCA_CLEANUP_PENDING" = 1 ]; then
@@ -3811,7 +4040,7 @@ fi
 [ "$KIND" = secondmate ] || validate_teardown_target_identity || exit 1
 
 remove_orca_worktree_locked() {
-  local branch=HEAD
+  local branch=HEAD boundary_token
   validate_teardown_target_identity || return 1
   fm_backend_quiesce_worktree_terminals orca "$ORCA_WORKTREE_ID" "fm-$ID" "$T" || return 1
   validate_worktree_teardown_safety || return 1
@@ -3821,7 +4050,9 @@ remove_orca_worktree_locked() {
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null) || return 1
   fi
-  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID" || return 1
+  boundary_token=$(removal_tree_boundary_token "$WT" "Orca worktree") || return 1
+  fm_backend_remove_worktree_bound \
+    "$BACKEND" "$ORCA_WORKTREE_ID" "$WT" "$boundary_token" || return 1
   if [ "$branch" != "HEAD" ]; then
     git -C "$PROJ" branch -D "$branch" >/dev/null 2>&1 || true
   fi

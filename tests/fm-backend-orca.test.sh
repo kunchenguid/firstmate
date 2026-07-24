@@ -4,6 +4,7 @@
 set -u
 export FM_ORCA_TEST_LAB=firstmate-orca-test-lab-v1
 export FM_ORCA_TEST_AUTHORITY_CAPABILITIES=verified-v1
+export FM_ORCA_TEST_BOUND_REMOVAL_CAPABILITIES=verified-v1
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -550,15 +551,37 @@ test_remove_worktree_refuses_empty_id() {
 }
 
 test_remove_worktree_rejects_orca_error_json() {
-  local out status
+  local out status token
   orca_case remove-error-json
+  token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/1.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree wt-gone' "$ROOT" 2>&1 )
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree_bound wt-gone /tmp/orca-wt "$1"' "$ROOT" "$token" 2>&1 )
   status=$?
-  [ "$status" -ne 0 ] || fail "remove_worktree should fail on Orca ok:false JSON"
-  assert_contains "$out" "worktree not found" "remove_worktree should surface the Orca removal error"
-  pass "fm_backend_orca_remove_worktree: fails closed on ok:false JSON"
+  [ "$status" -ne 0 ] || fail "bound remove_worktree should fail on Orca ok:false JSON"
+  assert_contains "$out" "worktree not found" "bound remove_worktree should surface the Orca removal error"
+  assert_contains "$(cat "$LOG")" $'--expected-path\x1f/tmp/orca-wt' \
+    "bound remove_worktree omitted the provider path precondition"
+  assert_contains "$(cat "$LOG")" $'--expected-boundary-token\x1f'"$token" \
+    "bound remove_worktree omitted the filesystem-boundary precondition"
+  pass "fm_backend_orca_remove_worktree_bound: fails closed on provider errors"
+}
+
+test_remove_worktree_requires_bound_provider_capability() {
+  local out status token
+  orca_case remove-boundary-capability
+  token=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  set +e
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ORCA_TEST_BOUND_REMOVAL_CAPABILITIES=unavailable \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree_bound wt-retained /tmp/orca-wt "$1"' "$ROOT" "$token" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "Orca removal proceeded without a bound provider capability"
+  assert_contains "$out" "identity-bound provider capability" \
+    "unbound Orca removal did not surface its provider limitation"
+  [ ! -s "$LOG" ] || fail "unbound Orca removal reached the provider"
+  pass "Orca removal retains worktrees without a bound provider capability"
 }
 
 test_worktree_path_resolves_id() {
@@ -1512,7 +1535,7 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
   expect_code 0 "$rc" "Orca scout teardown should succeed once report exists"$'\n'"$out"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-teardown'$'\x1f''--json' \
     "teardown did not close the recorded Orca terminal"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-teardown'$'\x1f''--force'$'\x1f''--json' \
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-teardown' \
     "teardown did not remove the Orca worktree through orca worktree rm"
   assert_absent "$state/$id.meta" "teardown should remove task metadata"
   pass "fm-teardown.sh backend=orca: scout report gate then helper-backed worktree removal"
@@ -1708,7 +1731,7 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
     "teardown did not resolve the Orca worktree id before removal"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-ship-match'$'\x1f''--json' \
     "teardown did not close the matched Orca terminal"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-ship-match'$'\x1f''--force'$'\x1f''--json' \
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-ship-match' \
     "teardown did not remove the matched Orca worktree"
   assert_absent "$state/$id.meta" "successful matched teardown should remove task metadata"
   pass "fm-teardown.sh backend=orca: ship teardown requires a matching Orca id path"
@@ -1925,7 +1948,7 @@ test_secondmate_force_teardown_removes_orca_child_via_orca() {
   expect_code 0 "$rc" "forced secondmate teardown should remove Orca child work through Orca"$'\n'"$out"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-child-cleanup'$'\x1f''--json' \
     "child cleanup did not close the recorded Orca terminal"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-child-cleanup'$'\x1f''--force'$'\x1f''--json' \
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-child-cleanup' \
     "child cleanup did not remove the Orca worktree through orca worktree rm"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f'"fm-$child_id" \
     "child cleanup closed the stable alias instead of the Orca terminal"
@@ -2468,6 +2491,7 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-13-safety ]; then
   test_ship_teardown_rejects_orca_mounted_removal_root
+  test_remove_worktree_requires_bound_provider_capability
   exit 0
 fi
 
@@ -2492,6 +2516,7 @@ test_kill_propagates_close_failure
 test_terminal_state_classifies_closed_live_and_ambiguous_orca
 test_remove_worktree_refuses_empty_id
 test_remove_worktree_rejects_orca_error_json
+test_remove_worktree_requires_bound_provider_capability
 test_worktree_path_resolves_id
 test_dispatcher_sources_orca_and_routes_primitives
 test_spawn_refuses_cleanup_pending_orca_task_before_mutation

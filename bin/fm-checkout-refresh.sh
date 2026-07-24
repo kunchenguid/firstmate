@@ -1190,14 +1190,20 @@ try:
     inherited_environment = environment_block("inherited environment")
     default_environment = environment_block("default environment")
     environment = environment_block("environment")
-    behavior_control = re.compile(
-        r"^(?:FM_|GIT_|PATH$|HOME$|BASH_ENV$|ENV$|CDPATH$|SHELLOPTS$|"
-        r"PYTHON|PERL|RUBY|NODE_OPTIONS$|DYLD_|LD_|"
-        r"(?:HTTP|HTTPS|ALL|NO)_PROXY$|(?:http|https|all|no)_proxy$)"
-    )
+    harmless_inherited = {
+        "LOGNAME",
+        "OSLogRateLimit",
+        "SECURITYSESSIONID",
+        "SHELL",
+        "TMPDIR",
+        "USER",
+        "XPC_FLAGS",
+        "XPC_SERVICE_NAME",
+        "__CF_USER_TEXT_ENCODING",
+    }
     for inherited in (inherited_environment, default_environment):
         if any(
-            behavior_control.search(key) and key not in expected_environment
+            key not in expected_environment and key not in harmless_inherited
             for key in inherited
         ):
             raise ValueError("loaded inherited environment has undeclared control")

@@ -186,8 +186,34 @@ fm_backend_orca_send_literal() {  # <terminal-id> <text>
 fm_backend_orca_remove_worktree() {  # <worktree-id>
   local worktree_id=${1:-}
   [ -n "$worktree_id" ] || { echo "error: missing Orca worktree id; cannot remove worktree" >&2; return 1; }
+  echo "error: unbound Orca worktree removal is disabled" >&2
+  return 1
+}
+
+fm_backend_orca_remove_worktree_bound() {  # <worktree-id> <expected-path> <boundary-token>
+  local worktree_id=${1:-} expected_path=${2:-} boundary_token=${3:-}
+  [ -n "$worktree_id" ] || { echo "error: missing Orca worktree id; cannot remove worktree" >&2; return 1; }
+  case "$expected_path" in /*) ;; *) echo "error: missing absolute Orca worktree removal path" >&2; return 1 ;; esac
+  [ "${#boundary_token}" -eq 64 ] || {
+    echo "error: missing Orca worktree filesystem-boundary token" >&2
+    return 1
+  }
+  case "$boundary_token" in *[!0-9a-f]*)
+    echo "error: malformed Orca worktree filesystem-boundary token" >&2
+    return 1
+    ;;
+  esac
+  if [ "${FM_ORCA_TEST_LAB:-}" != firstmate-orca-test-lab-v1 ] \
+      || [ "${FM_ORCA_TEST_BOUND_REMOVAL_CAPABILITIES:-}" != verified-v1 ]; then
+    echo "error: Orca worktree removal lacks an identity-bound provider capability" >&2
+    return 1
+  fi
   fm_backend_orca_tool_check || return 1
-  fm_backend_orca_run_json orca worktree rm --worktree "id:$worktree_id" --force --json
+  fm_backend_orca_run_json orca worktree rm \
+    --worktree "id:$worktree_id" \
+    --expected-path "$expected_path" \
+    --expected-boundary-token "$boundary_token" \
+    --force --json
 }
 
 fm_backend_orca_worktree_path() {

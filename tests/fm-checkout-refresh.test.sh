@@ -2065,6 +2065,22 @@ test_loaded_launch_agent_controls_and_untracked_legacy_job_fail_closed() {
     FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
     FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
     FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
+    FM_TEST_LAUNCHCTL_INHERITED_ENV="XDG_CONFIG_HOME=$TMP_ROOT/redirecting-git-config" \
+    "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "loaded LaunchAgent accepted an inherited Git config root"
+  assert_contains "$out" "loaded identity is missing or untrusted" \
+    "inherited Git config root was not surfaced before health"
+
+  set +e
+  out=$(HOME="$home/user" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
+    FM_TREEHOUSE_ROOT="$home/user/.treehouse" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
     FM_TEST_LAUNCHCTL_INTERVAL=1 \
     "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
   status=$?

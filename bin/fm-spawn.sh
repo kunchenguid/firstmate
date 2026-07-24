@@ -1502,7 +1502,7 @@ spawn_restore_unmanaged_state() {
 }
 
 spawn_abort_cleanup() {
-  local status=$? endpoint_state endpoint_gone=1 account_clean=1 state_clean=1 worktree_clean=1 rollback_lock='' rollback_tmp restored_existing_meta=0 artifact_backup_name release_status orca_cleanup_failed=0
+  local status=$? endpoint_state endpoint_gone=1 account_clean=1 state_clean=1 worktree_clean=1 rollback_lock='' rollback_tmp restored_existing_meta=0 artifact_backup_name release_status orca_cleanup_failed=0 orca_boundary_token=
   trap - EXIT
   # This is an EXIT trap whose job is to attempt every independent cleanup
   # action and then return the original spawn status. The parent script runs
@@ -1544,7 +1544,11 @@ spawn_abort_cleanup() {
       validate_orca_abort_worktree_identity || orca_cleanup_failed=1
     fi
     if [ -n "${ORCA_WORKTREE_ID:-}" ] && [ "$orca_cleanup_failed" = 0 ]; then
-      fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" || orca_cleanup_failed=1
+      orca_boundary_token=$(fm_checkout_tree_boundary_token "$WT") || orca_cleanup_failed=1
+    fi
+    if [ -n "${ORCA_WORKTREE_ID:-}" ] && [ "$orca_cleanup_failed" = 0 ]; then
+      fm_backend_remove_worktree_bound \
+        orca "$ORCA_WORKTREE_ID" "$WT" "$orca_boundary_token" || orca_cleanup_failed=1
     fi
     if [ "$orca_cleanup_failed" = 0 ]; then
       spawn_restore_unmanaged_state "$rollback_lock" || {

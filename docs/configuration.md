@@ -339,7 +339,8 @@ The LaunchAgent is intentionally independent of the Firstmate watcher and contin
 Only the LaunchAgent's scheduled invocation advances its heartbeat, while foreground session and manual runs update coverage health without refreshing scheduler liveness.
 The heartbeat proves scheduler liveness only, while `ensure` independently requires the latest coverage result to be healthy.
 Its definition persists the configured Treehouse root, refresh interval, and backstop, and health validation rejects any installed value that no longer matches the current configuration.
-Health validation also binds the loaded job's effective arguments, inherited and explicit control environment, interval, and RunAtLoad state to that definition before accepting its coverage record.
+Health validation also binds the loaded job's effective arguments, interval, RunAtLoad state, explicit environment, and complete inherited/default environment surface to that definition before accepting its coverage record.
+Inherited launchd variables use a narrow harmless allowlist; undeclared variables, including alternate Git configuration roots and URL-rewrite controls, make the loaded identity untrusted rather than allowing fresh-looking health records to stand in for proven coverage.
 macOS launchd is the primary fleet scheduler in this release.
 Scheduler installation and health checks dispatch through an adapter seam, while a future Linux cron or systemd adapter remains explicit follow-up work rather than silently claiming coverage today.
 

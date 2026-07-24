@@ -3805,20 +3805,34 @@ test_treehouse_return_stays_bound_to_validated_root() {
   moved="$case_dir/moved-worktree"
   redirect="$case_dir/redirect-target"
   marker="$case_dir/bound-root-observed"
+  mkdir -p "$case_dir/wt/retained-descendant"
   printf 'validated worktree\n' > "$case_dir/wt/.bound-root-identity"
-  git -C "$case_dir/wt" add .bound-root-identity
+  printf 'retained descendant\n' > "$case_dir/wt/retained-descendant/identity"
+  git -C "$case_dir/wt" add .bound-root-identity retained-descendant/identity
   git -C "$case_dir/wt" -c user.email=t@t -c user.name=t \
     commit -qm "record bound worktree identity"
   add_fork_with_pushed_branch "$case_dir"
   rm -f "$case_dir/fakebin/.tmux-live"
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-[ "$1" = return ] && [ "$2" = --force ] && [ "$3" = . ] || exit 91
+[ "$1" = return ] && [ "$2" = --force ] || exit 91
+[ "$3" = "." ] || exit 92
+[ "$FM_TREEHOUSE_RETURN_PROJECT" = "$FM_TREEHOUSE_EXPECT_PROJECT" ] || exit 93
+bound_target=$3
+old_ifs=$IFS
+IFS=,
+set -- $FM_TREEHOUSE_RETURN_BOUNDARY_FDS
+IFS=$old_ifs
+[ "$#" -ge 2 ] || exit 95
+for descriptor in "$@"; do
+  [ -d "/dev/fd/$descriptor" ] || exit 96
+done
 mv "$FM_TREEHOUSE_SWAP_TARGET" "$FM_TREEHOUSE_MOVED_TARGET" || exit 92
 mkdir -p "$FM_TREEHOUSE_REDIRECT_TARGET" || exit 93
 printf 'redirect target\n' > "$FM_TREEHOUSE_REDIRECT_TARGET/.bound-root-identity"
 ln -s "$FM_TREEHOUSE_REDIRECT_TARGET" "$FM_TREEHOUSE_SWAP_TARGET" || exit 94
-[ "$(cat ./.bound-root-identity)" = "validated worktree" ] || exit 95
+[ "$(cat "$bound_target/.bound-root-identity")" = "validated worktree" ] || exit 97
+[ "$(cat "$bound_target/retained-descendant/identity")" = "retained descendant" ] || exit 98
 : > "$FM_TREEHOUSE_BOUND_MARKER"
 exit 0
 SH
@@ -3827,6 +3841,7 @@ SH
   FM_TREEHOUSE_SWAP_TARGET="$case_dir/wt" \
   FM_TREEHOUSE_MOVED_TARGET="$moved" \
   FM_TREEHOUSE_REDIRECT_TARGET="$redirect" \
+  FM_TREEHOUSE_EXPECT_PROJECT="$case_dir/project" \
   FM_TREEHOUSE_BOUND_MARKER="$marker" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
@@ -3859,6 +3874,8 @@ SH
   chmod +x "$dead_case/fakebin/tmux"
   run_teardown "$dead_case" --force > "$dead_case/stdout" 2> "$dead_case/stderr" \
     || fail "dead harness endpoint false-refused teardown: $(cat "$dead_case/stderr")"
+  assert_absent "$dead_case/fakebin/.tmux-live" \
+    "dead harness process left its managed endpoint behind"
   assert_absent "$dead_case/state/task-x1.meta" "dead harness endpoint retained task metadata"
 
   live_case=$(make_case live-harness-endpoint)
@@ -3971,6 +3988,129 @@ test_secondmate_retirement_rejects_http_proxy_and_object_redirects() {
   assert_grep 'redirected object storage entry' "$object_case/stderr" \
     "redirected pack storage was not surfaced"
   pass "HTTP routing and object-file redirects never prove durable landing"
+}
+
+test_secondmate_network_fetches_pin_validated_addresses() {
+  local case_dir clone source tip rc count
+  case_dir=$(make_case secondmate-pinned-network-authority)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  clone="$case_dir/wt/projects/test"
+  source="$case_dir/source-projects/test"
+  tip=$(git -C "$source" rev-parse refs/remotes/origin/main)
+  git -C "$clone" remote set-url origin https://example.com/repository.git
+  git -C "$source" remote set-url origin https://example.com/repository.git
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+network_operation=
+pin=
+any_pin=
+repository=
+previous=
+network_target=
+for argument in "$@"; do
+  if [ "$previous" = -C ]; then
+    repository=$argument
+  fi
+  case "$argument" in
+    ls-remote|fetch) network_operation=$argument ;;
+    http.curloptResolve=example.com:443:*) pin=$argument; any_pin=$argument ;;
+    http.curloptResolve=*) any_pin=$argument ;;
+    https://example.com/repository.git) network_target=1 ;;
+  esac
+  previous=$argument
+done
+case " $* " in
+  *" ls-remote --symref origin HEAD "*|*" ls-remote --symref origin HEAD")
+    if [ "$repository" = "$FM_FAKE_FIRSTMATE_SOURCE" ]; then
+      [ -n "$any_pin" ] || exit 88
+      remote_head=$("$FM_REAL_GIT" -C "$FM_FAKE_FIRSTMATE_SOURCE" \
+        symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || printf 'origin/main')
+      remote_tip=$("$FM_REAL_GIT" -C "$FM_FAKE_FIRSTMATE_SOURCE" rev-parse "$remote_head")
+      printf 'ref: refs/heads/%s\tHEAD\n%s\tHEAD\n' "${remote_head#origin/}" "$remote_tip"
+      exit 0
+    fi
+    ;;
+esac
+if [ -n "$network_operation" ]; then
+  if [ -z "$network_target" ] && [ -n "$repository" ]; then
+    remote=$("$FM_REAL_GIT" -C "$repository" remote get-url origin 2>/dev/null || true)
+    [ "$remote" != https://example.com/repository.git ] || network_target=1
+  fi
+  [ -n "$network_target" ] || exec "$FM_REAL_GIT" "$@"
+  printf '%s\t%s\n' "$network_operation" "$pin" >> "$FM_GIT_PIN_LOG"
+  [ -n "$pin" ] || exit 88
+  if [ "$network_operation" = ls-remote ]; then
+    printf 'ref: refs/heads/main\tHEAD\n%s\tHEAD\n' "$FM_PINNED_TIP"
+    exit 0
+  fi
+  exit 89
+fi
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+  : > "$case_dir/pinned-network.log"
+  set +e
+  FM_REAL_GIT="$(command -v git)" \
+  FM_GIT_PIN_LOG="$case_dir/pinned-network.log" \
+  FM_PINNED_TIP="$tip" \
+  FM_TEARDOWN_TEST_NETWORK_ADDRESSES=203.0.113.10 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "synthetic pinned authority fetch stops before retirement"
+  count=$(wc -l < "$case_dir/pinned-network.log" | tr -d ' ')
+  [ "$count" -ge 1 ] || fail \
+    "network authority did not exercise its graph probe: $(cat "$case_dir/pinned-network.log"); teardown: $(cat "$case_dir/stderr")"
+  if grep -v $'\thttp.curloptResolve=example.com:443:' "$case_dir/pinned-network.log" >/dev/null; then
+    fail "network authority re-resolved an unpinned hostname: $(cat "$case_dir/pinned-network.log")"
+  fi
+  assert_present "$case_dir/wt" "failed pinned authority proof removed the secondmate home"
+  pass "network authority fetches retain validated address bindings"
+}
+
+test_surviving_object_storage_is_bound_through_graph_proof() {
+  local case_dir source objects pack redirected marker release teardown_pid rc waited
+  case_dir=$(make_case secondmate-object-storage-toctou)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  source="$case_dir/source-projects/test"
+  git -C "$source" gc --quiet --prune=now
+  objects=$(git -C "$source" rev-parse --git-path objects)
+  case "$objects" in /*) ;; *) objects="$source/$objects" ;; esac
+  pack=$(find "$objects/pack" -type f -name '*.pack' -print -quit)
+  [ -n "$pack" ] || fail "object-storage identity fixture did not create a pack"
+  redirected="$case_dir/wt/data/$(basename "$pack")"
+  marker="$case_dir/object-scan-ready"
+  release="$case_dir/object-scan-release"
+  FM_TEARDOWN_TEST_OBJECT_SCAN_ROOT="$objects" \
+  FM_TEARDOWN_TEST_OBJECT_SCAN_MARKER="$marker" \
+  FM_TEARDOWN_TEST_OBJECT_SCAN_RELEASE="$release" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" &
+  teardown_pid=$!
+  waited=0
+  while [ ! -f "$marker" ] && [ "$waited" -lt 200 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  if [ ! -f "$marker" ]; then
+    : > "$release"
+    wait "$teardown_pid" || true
+    fail "object-storage graph proof did not expose its retained-identity boundary"
+  fi
+  mv "$pack" "$redirected"
+  ln -s "$redirected" "$pack"
+  : > "$release"
+  set +e
+  wait "$teardown_pid"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "object storage replacement during graph proof must fail closed"
+  assert_present "$case_dir/wt" "object storage replacement allowed secondmate home removal"
+  assert_grep 'object storage identity changed during graph proof' "$case_dir/stderr" \
+    "object storage replacement was not detected under retained identities"
+  pass "surviving object storage remains identity-bound through graph proof"
 }
 
 test_secondmate_retirement_serializes_child_spawn() {
@@ -4293,6 +4433,14 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-13-safety ]; then
   test_secondmate_retirement_retains_reflog_and_rewritten_history
   test_secondmate_retirement_rejects_http_proxy_and_object_redirects
   test_secondmate_retirement_rejects_incomplete_surviving_authority
+  test_secondmate_network_fetches_pin_validated_addresses
+  test_surviving_object_storage_is_bound_through_graph_proof
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-round-13-network ]; then
+  test_secondmate_network_fetches_pin_validated_addresses
+  test_surviving_object_storage_is_bound_through_graph_proof
   exit 0
 fi
 
@@ -4351,6 +4499,8 @@ test_treehouse_return_stays_bound_to_validated_root
 test_teardown_distinguishes_dead_and_live_harness_processes
 test_secondmate_retirement_retains_reflog_and_rewritten_history
 test_secondmate_retirement_rejects_http_proxy_and_object_redirects
+test_secondmate_network_fetches_pin_validated_addresses
+test_surviving_object_storage_is_bound_through_graph_proof
 test_secondmate_retirement_serializes_child_spawn
 test_nested_secondmate_cleanup_requires_child_home_lock
 test_secondmate_registry_updates_are_locked_and_literal

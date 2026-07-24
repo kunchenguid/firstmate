@@ -125,7 +125,7 @@ BASE_REF=$(resolve_base_ref) \
 # tmux-only conformance run the tmux adapter's behavior is what is under test,
 # and that is unchanged by any later (e.g. non-tmux backend) addition to
 # fm-backend.sh's own dispatch surface.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-transition-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-account-routing-lib.sh fm-report-contract-lib.sh fm-tasks-axi-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-backend.sh"
+OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-supervision-lib.sh fm-classify-lib.sh fm-transition-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-process-tree-lib.sh fm-checkout-lock-lib.sh fm-account-routing-lib.sh fm-report-contract-lib.sh fm-tasks-axi-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-backend.sh"
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh"
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
@@ -1108,13 +1108,46 @@ make_teardown_fakebin() {  # <dir> -> echoes fakebin dir; logs tmux+treehouse ca
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-{ printf 'tmux'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
-exit 0
+live="${FM_TMUX_LOG:?}.live"
+target=
+previous=
+for argument in "$@"; do
+  [ "$previous" != -t ] || target=$argument
+  previous=$argument
+done
+case "${1:-}" in
+  display-message)
+    [ -e "$live" ] || exit 1
+    case "${*: -1}" in
+      *session_name*window_name*) printf 'firstmate\t%s\n' "${target#*:}" ;;
+      *pane_current_command*) printf 'bash\n' ;;
+      *pane_id*) printf '%%1\n' ;;
+    esac
+    ;;
+  list-windows)
+    [ -e "$live" ] || {
+      printf "can't find session: firstmate\n" >&2
+      exit 1
+    }
+    printf '%s\n' "${target#*:}"
+    ;;
+  has-session) [ -e "$live" ] ;;
+  kill-window)
+    { printf 'tmux'; for argument in "$@"; do printf '\x1f%s' "$argument"; done; printf '\n'; } \
+      >> "$FM_TMUX_LOG"
+    rm -f "$live"
+    ;;
+esac
 SH
   cat > "$fb/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
-{ printf 'treehouse'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
+target=${3:-}
+case "$target" in
+  .|/dev/fd/*) target=$(cd "$target" && pwd -P) || exit 1 ;;
+esac
+printf 'treehouse\x1f%s\x1f%s\x1f%s\x1fCONTEXT=%s\n' \
+  "${1:-}" "${2:-}" "$target" "${FM_TREEHOUSE_RETURN_PROJECT:-}" >> "${FM_TMUX_LOG:?}"
 exit 0
 SH
   chmod +x "$fb/tmux" "$fb/treehouse"
@@ -1130,6 +1163,7 @@ SH
 run_teardown_case() {
   local script=$1 fmroot=$2 fb=$3 log=$4 state=$5 data=$6 config=$7 id=$8
   : > "$log"
+  : > "$log.live"
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$fmroot" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_TMUX_LOG="$log" \
@@ -1140,9 +1174,12 @@ test_teardown_conformance_old_vs_new() {
   local old_bin fb proj wt id
   local state_old state_new config_old config_new data log_old log_new out_old out_new rc_old rc_new
   old_bin=$(build_old_bin teardown-old)
-  proj="$TMP_ROOT/teardown-project"; wt="$TMP_ROOT/teardown-wt"
+  proj="$TMP_ROOT/teardown-project"; wt="$TMP_ROOT/teardown-pool/1/teardown-wt"
   id="teardownconform1"
   fm_git_worktree "$proj" "$wt" "fm/$id"
+  cat > "$TMP_ROOT/teardown-pool/treehouse-state.json" <<EOF
+{"worktrees":[{"name":"1","path":"$wt","leased":true,"lease_holder":"firstmate-$id"}]}
+EOF
   fb=$(make_teardown_fakebin "$TMP_ROOT/teardown-fake")
 
   data="$TMP_ROOT/teardown-data"
@@ -1167,14 +1204,19 @@ test_teardown_conformance_old_vs_new() {
 
   expect_code 0 "$rc_old" "old fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_old"
   expect_code 0 "$rc_new" "new fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_new"
-  diff -u "$log_old" "$log_new" > "$TMP_ROOT/teardown-diff.txt" 2>&1 \
-    || fail "fm-teardown.sh: tmux+treehouse command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/teardown-diff.txt")"
+  grep '^tmux' "$log_old" > "$TMP_ROOT/teardown-old-tmux.log"
+  grep '^tmux' "$log_new" > "$TMP_ROOT/teardown-new-tmux.log"
+  diff -u "$TMP_ROOT/teardown-old-tmux.log" "$TMP_ROOT/teardown-new-tmux.log" \
+    > "$TMP_ROOT/teardown-diff.txt" 2>&1 \
+    || fail "fm-teardown.sh: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/teardown-diff.txt")"
   assert_contains "$(cat "$log_new")" "treehouse"$'\x1f''return'$'\x1f''--force'$'\x1f'"$wt" \
     "teardown did not call treehouse return --force <worktree>"
+  assert_contains "$(cat "$log_new")" $'\x1f'"CONTEXT=$proj" \
+    "teardown did not preserve Treehouse project context"
   assert_contains "$(cat "$log_new")" "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"firstmate:fm-$id" \
     "teardown did not call tmux kill-window -t <window>"
 
-  pass "fm-teardown.sh: treehouse return + tmux kill-window command log is byte-identical old vs new for a scout task"
+  pass "fm-teardown.sh: Treehouse return preserves project context and tmux teardown compatibility"
 }
 
 # --- backend selection loudly refuses an unknown backend --------------------
@@ -1293,6 +1335,11 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-27 ]; then
   test_managed_tmux_target_state_finds_replacement_window
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = review-round-13-safety ]; then
+  test_teardown_conformance_old_vs_new
   exit 0
 fi
 
