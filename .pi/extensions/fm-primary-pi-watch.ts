@@ -407,7 +407,19 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on?.("session_start", () => {
+    // /new keeps this module loaded; clear the shutdown latch so arm works again.
+    stopping = false;
+    retryFailures = 0;
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+    // session_shutdown removes the exit fallback; put it back for the new session.
+    process.off("exit", cleanupOnProcessExit);
+    process.once("exit", cleanupOnProcessExit);
     markLoaded();
+    // Quiet re-own when this session already holds the lock and nothing is armed.
+    if (lockOwnership() === "owned" && !child && !retryTimer) {
+      startArm();
+    }
   });
   pi.on?.("session_shutdown", () => {
     stopArm();

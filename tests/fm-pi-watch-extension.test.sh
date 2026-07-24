@@ -965,12 +965,103 @@ await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
 if (process.listenerCount("exit") !== before) {
   throw new Error("session_shutdown did not remove the process-exit fallback");
 }
+await handlers.get("session_start")?.({ type: "session_start" }, {});
+if (process.listenerCount("exit") !== before + 1) {
+  throw new Error("session_start did not restore exactly one process-exit fallback");
+}
 EOF
 )
   status=$?
   expect_code 0 "$status" "Pi cleanup fallback listener must install once and unregister on session shutdown"
   [ -z "$out" ] || fail "Pi listener-lifecycle test printed output: $out"
   pass "Pi process-exit cleanup listener has a bounded lifecycle"
+}
+
+test_pi_session_start_clears_shutdown_latch_and_quiet_rearms() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-session-restart-root"
+  home="$TMP_ROOT/pi-session-restart-home"
+  log="$TMP_ROOT/pi-session-restart.log"
+  stop="$TMP_ROOT/pi-session-restart.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let tool = null;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {},
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (!tool) throw new Error("Pi watch tool was not registered");
+if (!handlers.has("session_start") || !handlers.has("session_shutdown")) {
+  throw new Error("Pi extension did not register session lifecycle handlers");
+}
+
+// Arm once, then simulate /new: session_shutdown sticks stopping=true in the loaded module.
+await tool.execute("tool-call-before-new", {}, undefined, undefined, {});
+for (let i = 0; i < 100 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("initial arm child did not start");
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
+const sticky = await tool.execute("tool-call-while-stuck", {}, undefined, undefined, {});
+if (!sticky.content[0]?.text.includes("session is shutting down")) {
+  throw new Error(`expected sticky shutdown refusal, got: ${sticky.content[0]?.text}`);
+}
+
+// session_start must clear the latch and quiet-rearm when the lock is owned.
+await handlers.get("session_start")({ type: "session_start" }, {});
+for (let i = 0; i < 250; i += 1) {
+  const rows = existsSync(process.env.FM_ARM_LOG)
+    ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+    : [];
+  if (rows.length >= 2) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const afterStart = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+if (afterStart.length !== 2) {
+  throw new Error(`owned session_start did not quiet-rearm (rows=${afterStart.length}): ${afterStart.join(" | ")}`);
+}
+
+// Explicit arm after session_start must not stick on the shutdown refusal.
+const after = await tool.execute("tool-call-after-new", {}, undefined, undefined, {});
+if (after.content[0]?.text.includes("session is shutting down")) {
+  throw new Error(`sticky shutdown latch survived session_start: ${after.content[0]?.text}`);
+}
+if (!after.content[0]?.text.includes("already owns an arm child")) {
+  throw new Error(`expected ownership no-op after quiet re-arm, got: ${after.content[0]?.text}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await new Promise((resolve) => setTimeout(resolve, 40));
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi session_start must clear the shutdown latch and quiet-rearm when lock-owned"
+  [ -z "$out" ] || fail "Pi session-restart test printed output: $out"
+  pass "Pi session_start clears shutdown latch and quiet-rearms when lock-owned"
 }
 
 test_pi_process_exit_cleanup_stops_arm_child() {
@@ -2013,6 +2104,7 @@ test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
 test_pi_process_exit_cleanup_listener_lifecycle
+test_pi_session_start_clears_shutdown_latch_and_quiet_rearms
 test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_primary_watch_plugin_static_wiring
 test_opencode_plugin_package_boundary_is_explicit_esm

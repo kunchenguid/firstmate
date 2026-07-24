@@ -8,6 +8,7 @@ Must-work continuity now lives above that process boundary instead of depending 
 Pi's `.pi/extensions/fm-primary-pi-watch.ts` and OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` own continuous re-arm after an actionable child close.
 Each adapter starts the next arm before delivering the wake prompt, checks current session-lock ownership at launch, preserves one child or scheduled retry at a time, and applies bounded exponential retry after an unexpected or failed close.
 A failed follow-up never cancels continuity restoration.
+Pi `session_start` also clears the process-local shutdown latch and quietly re-owns the arm when this session holds the lock, so `/new` in the same Pi process does not stick on "session is shutting down".
 
 ## Actionable wake ordering
 
