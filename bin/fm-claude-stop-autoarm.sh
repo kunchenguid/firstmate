@@ -24,10 +24,11 @@
 #   - Foreground arm: the owner runs bin/fm-watch-arm.sh in the FOREGROUND of
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together.
-#   - Translation: an actionable arm close (signal:/stale:/check:/heartbeat) or
-#     a typed watcher: FAILED prints one rewake banner to stderr and exits 2,
-#     which wakes Claude even while idle ("Stop hook feedback"). A clean close
-#     with no actionable reason and no remaining need exits 0 silently.
+#   - Translation: while supervision is still needed and AFK remains inactive,
+#     an actionable arm close (signal:/stale:/check:/heartbeat) or a typed
+#     watcher: FAILED prints one rewake banner to stderr and exits 2, which
+#     wakes Claude even while idle ("Stop hook feedback"). A clean close with
+#     no actionable reason and no remaining need exits 0 silently.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim and
 # outcome so the synchronous Stop guard (bin/fm-turnend-guard.sh --claude) can
@@ -36,8 +37,8 @@
 #
 # This hook never blocks the Stop decision itself and never prints to stdout:
 # exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
-# On any uncertainty (missing payload, unresolvable ancestry, lock contention)
-# it exits 0 and leaves continuity to the synchronous guard and the model.
+# On any uncertainty such as unresolvable ancestry or lock contention, it exits
+# 0 and leaves continuity to the synchronous guard and the model.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -160,7 +161,7 @@ else
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
     [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
-    printf 'Run bin/fm-wake-drain.sh first and handle the wake. This Stop hook owns the watcher cycle: when the handling turn ends, the next cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
+    printf 'Run bin/fm-wake-drain.sh first and handle the wake. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
 fi
 [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true

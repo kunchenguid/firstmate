@@ -16,8 +16,8 @@ Three consequences were observed, not hypothesized.
   A real crewmate lives in its own backend session with durable state and survives a primary restart.
 - The supervision cycle then stayed down for 73 minutes unnoticed, which silently killed the captain's Workflowy intake channel, since that channel only fires while a watch cycle runs.
 
-The deeper defect is that the bypass did not merely skip dispatch, it made the guard stack structurally inert.
-Only `bin/fm-spawn.sh` writes `state/<id>.meta`, and every guard keys off that record: `bin/fm-supervision-lib.sh` counts `state/*.meta`, and `bin/fm-turnend-guard.sh` exits silently when that count is zero.
+The deeper defect is that the bypass did not merely skip dispatch, it made the in-flight-work branch of the guard stack structurally inert.
+Only `bin/fm-spawn.sh` writes `state/<id>.meta`, so untracked project work contributes nothing to the in-flight count used by `bin/fm-supervision-lib.sh` and `bin/fm-turnend-guard.sh`.
 Work started through the harness's own delegation tool writes no metadata, so the in-flight count stayed at zero, the turn-end guard never blocked a blind turn end, and the continuity gate was inert.
 
 That is the reason the fence has to sit on the harness tool surface, before the primary can create untracked work.
@@ -357,9 +357,9 @@ tests/fm-subagent-pretool-check.test.sh
 ## Known residual gap
 
 This change does not close the deeper harness-agnostic defect.
-Every firstmate guard keys off `state/<id>.meta`, and only `bin/fm-spawn.sh` writes that record.
-`bin/fm-supervision-lib.sh` counts `state/*.meta`, and `bin/fm-turnend-guard.sh` exits silently at zero.
-Unaccounted primary work therefore reads as idle rather than suspicious.
+Every firstmate guard's in-flight-work branch keys off `state/<id>.meta`, and only `bin/fm-spawn.sh` writes that record.
+`bin/fm-supervision-lib.sh` also recognizes an X-mode relay poll as supervision need, but unaccounted primary work still contributes nothing to that predicate.
+Without an independent X-mode need, unaccounted primary work therefore reads as idle rather than suspicious.
 
 The durable fix for that class is to make the guards treat "the primary is doing project-shaped work with zero `state/*.meta` files" as a suspicious state rather than an idle one.
 That would catch this class on any harness, including work created through `Bash`.

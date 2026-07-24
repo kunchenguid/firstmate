@@ -4,11 +4,11 @@
 # A firstmate primary that delegates through a harness's own delegation,
 # scheduling, or background-work tool creates work with no `state/<id>.meta` and
 # no `data/<id>/brief.md`. Only `bin/fm-spawn.sh` writes that metadata, and
-# every firstmate guard keys off it (bin/fm-supervision-lib.sh counts
-# `state/*.meta`; bin/fm-turnend-guard.sh exits silently at zero). So such work
-# is not merely unsupervised: it makes the whole guard stack structurally inert,
-# and it dies with the primary session instead of living in its own backend
-# session.
+# untracked project work contributes nothing to the in-flight branch of
+# bin/fm-supervision-lib.sh or bin/fm-turnend-guard.sh. So such work is not
+# merely unsupervised: absent an independent X-mode need, it makes the whole
+# guard stack structurally inert, and it dies with the primary session instead
+# of living in its own backend session.
 #
 # This scoped PreToolUse guard is the shipped mechanism.
 # Claude primaries should also use an untracked per-home local
