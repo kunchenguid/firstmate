@@ -18,7 +18,7 @@
 # standalone with unchanged default behavior - other flows (fm-bootstrap.sh
 # install <tools> after consent, /updatefirstmate, the afk daemon, existing
 # tests) still call them directly. The one seam this script needed -
-# bootstrap running its detect-only diagnostics without its six mutating
+# bootstrap running its detect-only diagnostics without its five mutating
 # sweeps - is an opt-in FM_BOOTSTRAP_DETECT_ONLY=1 flag on fm-bootstrap.sh
 # itself (default unset/0 = unchanged behavior), not a fork.
 #
@@ -27,11 +27,12 @@
 #
 #   1. lock          - acquire the per-home session lock FIRST, before any
 #                       mutating step runs.
-#   2. bootstrap      - detect-only diagnostics always run. The six
-#                       MUTATING sweeps (legacy PR-check migration, home-local
-#                       stale Herdr projection cleanup, secondmate fast-forward,
+#   2. bootstrap      - home-local stale Herdr projection cleanup runs only
+#                       when this session actually holds the lock. Detect-only
+#                       diagnostics always run. Bootstrap's five MUTATING sweeps
+#                       (legacy PR-check migration, secondmate fast-forward,
 #                       secondmate liveness, X-mode artifact writes, fleet sync)
-#                       run only when this session actually holds the lock.
+#                       also run only when locked.
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
 #   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -64,7 +65,8 @@
 # tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
 # which mutate shared state and all of which are safe to compute from a second
 # session.
-# Only the six mutating sweeps and the wake-queue drain are skipped.
+# Only projection cleanup, the five bootstrap mutating sweeps, and the
+# wake-queue drain are skipped.
 # The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
 #
@@ -268,7 +270,10 @@ subsection "BOOTSTRAP"
 if [ "$READ_ONLY" -eq 1 ]; then
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 else
-  BOOT_OUT=$("$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
+  BOOT_OUT=$(
+    "$SCRIPT_DIR/fm-herdr-session-cleanup.sh" 2>&1 || true
+    "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1
+  )
 fi
 if [ -n "$BOOT_OUT" ]; then
   printf '%s\n' "$BOOT_OUT"

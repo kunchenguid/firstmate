@@ -169,16 +169,21 @@ write_v1() { # <id> [token]
   } > "$FM_STATE_OVERRIDE/$id.herdr-presentation"
 }
 
-write_cross_home_v2() {
-  mkdir -p "$TMP_ROOT/other-home"
+write_v2() { # <home> <workspace> <tab> <pane>
+  local home=$1 workspace=$2 tab=$3 pane=$4
   {
     printf 'version=2\n'
     printf 'task_id=%s\n' "$ID"
     printf 'projection_id=%s\n' "$TOKEN"
-    printf 'home=%s\n' "$TMP_ROOT/other-home"
-    printf 'session=test\nworkspace_id=%s\ntab_id=%s\npane_id=%s\n' "$WS" "$TAB" "$PANE"
+    printf 'home=%s\n' "$home"
+    printf 'session=test\nworkspace_id=%s\ntab_id=%s\npane_id=%s\n' "$workspace" "$tab" "$pane"
     printf 'parent_workspace_id=w1\nparent_label=firstmate\nworkspace_label=%s\ntask_label=fm-%s\n' "$TITLE" "$ID"
   } > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+}
+
+write_cross_home_v2() {
+  mkdir -p "$TMP_ROOT/other-home"
+  write_v2 "$TMP_ROOT/other-home" "$WS" "$TAB" "$PANE"
 }
 
 reset_fixture() {
@@ -223,6 +228,14 @@ reset_fixture; printf '%s\n' "└ task · p:$TOKEN p:$TOKEN" > "$FIXTURE_DIR/tit
 reset_fixture; rm -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; assert_preserved "zero journal match"
 reset_fixture; write_v1 fm-task; assert_preserved "multiple journal matches"
 reset_fixture; rm -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; write_cross_home_v2; assert_preserved "cross-home journal"
+reset_fixture; write_v2 "$FM_HOME" w9 "$TAB" "$PANE"; assert_preserved "v2 workspace binding mismatch"
+reset_fixture; write_v2 "$FM_HOME" "$WS" w9:t1 "$PANE"; assert_preserved "v2 tab binding mismatch"
+reset_fixture; write_v2 "$FM_HOME" "$WS" "$TAB" w9:p1; assert_preserved "v2 pane binding mismatch"
+reset_fixture; write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "matching v2 cleanup kept the journal"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "matching v2 cleanup did not close exactly once"
+pass "v2 cleanup requires and accepts the exact journal endpoint binding"
 reset_fixture; : > "$FM_STATE_OVERRIDE/$ID.meta"; assert_preserved "current task metadata"
 reset_fixture; printf 'live\n' > "$FIXTURE_DIR/agent"; assert_preserved "registered agent"
 reset_fixture; printf 'unknown\n' > "$FIXTURE_DIR/agent"; assert_preserved "unknown agent"
@@ -251,7 +264,33 @@ FM_HOME="$INTEGRATION_ROOT/home" FM_HERDR_CLEANUP_TRACE="$TRACE" FM_BOOTSTRAP_DE
 [ ! -e "$TRACE" ] || fail "detect-only bootstrap ran stale projection cleanup"
 FM_HOME="$INTEGRATION_ROOT/home" FM_HERDR_CLEANUP_TRACE="$TRACE" \
   "$INTEGRATION_ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
-[ "$(cat "$TRACE")" = "$INTEGRATION_ROOT/home" ] || fail "locked bootstrap did not run cleanup for its exact home"
-pass "bootstrap runs home-local cleanup only on the locked mutating session-start path"
+[ ! -e "$TRACE" ] || fail "standalone bootstrap ran lock-owned stale projection cleanup"
+pass "standalone bootstrap cannot run lock-owned stale projection cleanup"
+
+cat > "$INTEGRATION_ROOT/bin/fm-lock.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'lock acquired'
+SH
+chmod +x "$INTEGRATION_ROOT/bin/fm-lock.sh"
+FM_HOME="$INTEGRATION_ROOT/home" FM_ROOT_OVERRIDE="$INTEGRATION_ROOT" \
+  FM_HERDR_CLEANUP_TRACE="$TRACE" \
+  "$INTEGRATION_ROOT/bin/fm-session-start.sh" >/dev/null 2>&1 \
+  || fail "lock-owning session start failed"
+[ "$(cat "$TRACE")" = "$INTEGRATION_ROOT/home" ] \
+  || fail "lock-owning session start did not run cleanup for its exact home"
+
+: > "$TRACE"
+cat > "$INTEGRATION_ROOT/bin/fm-lock.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'error: another live firstmate session holds the lock' >&2
+exit 1
+SH
+chmod +x "$INTEGRATION_ROOT/bin/fm-lock.sh"
+FM_HOME="$INTEGRATION_ROOT/home" FM_ROOT_OVERRIDE="$INTEGRATION_ROOT" \
+  FM_HERDR_CLEANUP_TRACE="$TRACE" \
+  "$INTEGRATION_ROOT/bin/fm-session-start.sh" >/dev/null 2>&1 \
+  || fail "read-only session start failed"
+[ ! -s "$TRACE" ] || fail "read-only session start ran stale projection cleanup"
+pass "session start runs cleanup only after acquiring its home lock"
 
 printf 'all fm-herdr-session-cleanup tests passed\n'
