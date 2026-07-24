@@ -1227,13 +1227,17 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 TRACKING_KEY=$(printf '%s' "$T" | tr ':/.' '___')
+TASK_TRACKING_KEY=$(printf '%s' "$ID" | tr ':/.' '___')
+SIGNAL_TRACKING_KEY=$(printf '%s' "$ID" | tr '.' '_')
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" \
   "$STATE/.hash-$TRACKING_KEY" "$STATE/.count-$TRACKING_KEY" "$STATE/.stale-$TRACKING_KEY" \
   "$STATE/.stale-since-$TRACKING_KEY" "$STATE/.wedge-escalations-$TRACKING_KEY" \
   "$STATE/.paused-$TRACKING_KEY" "$STATE/.paused-rechecked-$TRACKING_KEY" \
-  "$STATE/.paused-resurfaced-$TRACKING_KEY" "$STATE/.verified-wait-$TRACKING_KEY"
+  "$STATE/.paused-resurfaced-$TRACKING_KEY" "$STATE/.verified-wait-$TRACKING_KEY" \
+  "$STATE/.seen-${SIGNAL_TRACKING_KEY}_status" "$STATE/.seen-${SIGNAL_TRACKING_KEY}_turn-ended" \
+  "$STATE/.hb-surfaced-$TASK_TRACKING_KEY" "$STATE/.subsuper-seen-status-$TASK_TRACKING_KEY"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

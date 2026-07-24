@@ -1243,7 +1243,7 @@ test_local_only_force_overrides_unpushed() {
 }
 
 test_herdr_teardown_clears_escalation_marker() {
-  local case_dir marker key artifact
+  local case_dir marker key artifact status_line status_sig pid i
   case_dir=$(make_case herdr-marker-cleanup)
   write_meta "$case_dir" local-only ship
   sed -i.bak 's/^window=.*/window=default:wG:pQ/' "$case_dir/state/task-x1.meta"
@@ -1257,6 +1257,18 @@ SH
   marker="$case_dir/state/.herdr-escalated-default_wG_pQ"
   : > "$marker"
   key=default_wG_pQ
+  status_line='needs-decision: choose release target'
+  printf '%s\n' "$status_line" > "$case_dir/state/task-x1.status"
+  cp -p "$case_dir/state/task-x1.status" "$case_dir/status-reference"
+  if [ "$(uname)" = Darwin ]; then
+    status_sig=$(stat -f '%z:%Fm' "$case_dir/state/task-x1.status")
+  else
+    status_sig=$(stat -c '%s:%Y' "$case_dir/state/task-x1.status")
+  fi
+  printf '%s' "$status_sig" > "$case_dir/state/.seen-task-x1_status"
+  : > "$case_dir/state/.seen-task-x1_turn-ended"
+  printf '%s' "$status_line" > "$case_dir/state/.hb-surfaced-task-x1"
+  printf '%s' "$status_line" > "$case_dir/state/.subsuper-seen-status-task-x1"
   for artifact in \
     ".hash-$key" ".count-$key" ".stale-$key" ".stale-since-$key" \
     ".wedge-escalations-$key" ".paused-$key" ".paused-rechecked-$key" \
@@ -1270,11 +1282,32 @@ SH
   for artifact in \
     ".hash-$key" ".count-$key" ".stale-$key" ".stale-since-$key" \
     ".wedge-escalations-$key" ".paused-$key" ".paused-rechecked-$key" \
-    ".paused-resurfaced-$key" ".verified-wait-$key"; do
+    ".paused-resurfaced-$key" ".verified-wait-$key" \
+    ".seen-task-x1_status" ".seen-task-x1_turn-ended" \
+    ".hb-surfaced-task-x1" ".subsuper-seen-status-task-x1"; do
     [ ! -e "$case_dir/state/$artifact" ] \
       || fail "herdr-marker-cleanup: teardown left retired watcher state $artifact behind"
   done
-  pass "herdr teardown removes retired worker watcher and escalation state"
+  printf '%s\n' 'window=fm-task-x1' 'kind=ship' > "$case_dir/state/task-x1.meta"
+  cp -p "$case_dir/status-reference" "$case_dir/state/task-x1.status"
+  PATH="$case_dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch.sh" > "$case_dir/watch.out" 2> "$case_dir/watch.err" &
+  pid=$!
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "herdr-marker-cleanup: reused task ID's identical actionable status remained suppressed"
+  fi
+  wait "$pid" || fail "herdr-marker-cleanup: watcher failed for the reused task ID: $(cat "$case_dir/watch.err")"
+  grep -F "signal: $case_dir/state/task-x1.status" "$case_dir/watch.out" >/dev/null \
+    || fail "herdr-marker-cleanup: reused task ID's identical actionable status was not surfaced"
+  pass "teardown retires worker dedupe state before the task ID is reused"
 }
 
 configure_herdr_projection_teardown_case() {  # <case-dir>
