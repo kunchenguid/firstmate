@@ -56,8 +56,8 @@
 # never overrides a real invocation. It exists only so this file's own unit
 # tests, which source it directly without that preamble, resolve to a sane
 # default (the firstmate repo root - never a secondmate home, so
-# fm_backend_herdr_workspace_label falls through to "firstmate" exactly like
-# pre-P3 behavior when a test does not care about home-specific labeling).
+# fm_backend_herdr_workspace_label falls through to the primary label when a
+# test does not care about home-specific labeling).
 FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -1354,19 +1354,40 @@ fm_backend_herdr_projection_cleanup_exact() {  # <session> <task-pane> <seeded-p
 # fm_backend_herdr_projection_parent_workspace_exact: resolve one exact parent
 # workspace only when its presentation label is unique in the named session.
 fm_backend_herdr_projection_parent_workspace_exact() {  # <session> <parent-label>
-  local session=$1 parent_label=$2 list
+  local session=$1 parent_label=$2 list count match
+  FM_BACKEND_HERDR_PROJECTION_PARENT_WORKSPACE_ID=""
+  FM_BACKEND_HERDR_PROJECTION_PARENT_LABEL=""
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
-  printf '%s' "$list" | jq -er --arg parent_label "$parent_label" '
+  count=$(printf '%s' "$list" | jq -er --arg parent_label "$parent_label" '
     (.result.workspaces // null) as $spaces
     | select(($spaces | type) == "array")
     | [$spaces[]? | select(.label == $parent_label)]
+    | length
+  ' 2>/dev/null) || return 1
+  case "$count" in
+    1) ;;
+    0)
+      [ "$parent_label" = "$FM_BACKEND_HERDR_PRIMARY_WORKSPACE_LABEL" ] || return 1
+      parent_label=$FM_BACKEND_HERDR_LEGACY_PRIMARY_WORKSPACE_LABEL
+      count=$(printf '%s' "$list" | jq -er --arg parent_label "$parent_label" '
+        [.result.workspaces[]? | select(.label == $parent_label)]
+        | length
+      ' 2>/dev/null) || return 1
+      [ "$count" = 1 ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  match=$(printf '%s' "$list" | jq -er --arg parent_label "$parent_label" '
+    [.result.workspaces[]? | select(.label == $parent_label)]
     | if length == 1
         and (.[0].workspace_id | type) == "string"
         and (.[0].workspace_id | length) > 0
       then .[0].workspace_id
       else empty
       end
-  ' 2>/dev/null
+  ' 2>/dev/null) || return 1
+  FM_BACKEND_HERDR_PROJECTION_PARENT_WORKSPACE_ID=$match
+  FM_BACKEND_HERDR_PROJECTION_PARENT_LABEL=$parent_label
 }
 
 # fm_backend_herdr_projection_live_binding_matches: verify one exact projected
@@ -1382,6 +1403,8 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
     --arg workspace "$workspace" \
     --arg parent_workspace "$parent_workspace" \
     --arg parent_label "$parent_label" \
+    --arg primary "$FM_BACKEND_HERDR_PRIMARY_WORKSPACE_LABEL" \
+    --arg legacy_primary "$FM_BACKEND_HERDR_LEGACY_PRIMARY_WORKSPACE_LABEL" \
     --arg workspace_label "$workspace_label" '
       def is_new_child:
         (.label | type) == "string"
@@ -1389,7 +1412,10 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
       def is_legacy_child_for($owner):
         (.label | type) == "string"
         and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"))
-        and (.label | startswith($owner + "/"));
+        and (
+          (.label | startswith($owner + "/"))
+          or ($owner == $primary and (.label | startswith($legacy_primary + "/")))
+        );
       (.result.workspaces // null) as $spaces
       | select(($spaces | type) == "array")
       | select(([$spaces[]? | select(.workspace_id == $workspace)] | length) == 1)
@@ -1443,9 +1469,10 @@ fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-pane>
 # Return 0 means exact reclaim, 2 means non-mutating or exactly rolled-back
 # refusal with flat fallback permitted, and 1 means a live/unknown or
 # post-mutation uncertainty that must refuse the launch.
-fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <parent-label> <task-label> <cwd>
+fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <parent-workspace> <parent-label> <task-label> <cwd>
   local session=$1 journal=$2 id=$3 home=$4 meta_workspace=$5 meta_tab=$6 meta_pane=$7
-  local parent_label=$8 task_label=$9 cwd=${10} canonical_home state focus_before active_tab out new_tab new_pane info close_status
+  local parent_workspace=$8 parent_label=$9 task_label=${10} cwd=${11}
+  local canonical_home state focus_before active_tab out new_tab new_pane info close_status
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=""
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=""
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
@@ -1462,6 +1489,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
      || [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" != "$meta_workspace" ] \
      || [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" != "$meta_tab" ] \
      || [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" != "$meta_pane" ] \
+     || [ "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" != "$parent_workspace" ] \
      || [ "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" != "$parent_label" ] \
      || [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" != "$task_label" ]; then
     echo "warning: herdr presentation binding for $id does not match its exact home, endpoint, or parent; spawning flat" >&2
@@ -1470,7 +1498,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
   if ! fm_backend_herdr_projection_live_binding_matches \
     "$session" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
     "$meta_workspace" "$meta_tab" "$meta_pane" \
-    "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" "$parent_label" \
+    "$parent_workspace" "$parent_label" \
     "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$task_label"; then
     echo "warning: herdr presentation binding for $id has an ambiguous, renamed, foreign, or non-nested live shape; spawning flat" >&2
     return 2
@@ -1569,7 +1597,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
   if ! fm_backend_herdr_projection_live_binding_matches \
     "$session" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
     "$meta_workspace" "$new_tab" "$new_pane" \
-    "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" "$parent_label" \
+    "$parent_workspace" "$parent_label" \
     "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$task_label"; then
     fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
     echo "warning: herdr presentation reclaim for $id did not converge exactly; spawning flat" >&2

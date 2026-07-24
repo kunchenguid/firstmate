@@ -654,13 +654,14 @@ test_projection_journal_v2_binds_and_advances_exact_endpoint() {
     fm_backend_herdr_projection_journal_bind \
       "$journal" fm-hibit-r1 "$home" lab-session w2 w2:t2 w2:p2 w1 firstmate "$label" fm-fm-hibit-r1 || exit 1
     fm_backend_herdr_projection_journal_snapshot "$journal" fm-hibit-r1 || exit 1
-    printf "%s|%s|%s|%s|%s|%s|%s\n" \
+    printf "%s|%s|%s|%s|%s|%s|%s|%s\n" \
       "$FM_BACKEND_HERDR_JOURNAL_VERSION" \
       "$FM_BACKEND_HERDR_JOURNAL_HOME" \
       "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" \
       "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" \
       "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" \
       "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" \
+      "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" \
       "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL"
     fm_backend_herdr_projection_journal_replace_endpoint \
       "$journal" fm-hibit-r1 w2:t2 w2:p2 w2:t3 w2:p3 || exit 1
@@ -668,7 +669,7 @@ test_projection_journal_v2_binds_and_advances_exact_endpoint() {
     printf "%s|%s\n" "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID"
   ' "$ROOT" "$state" "$home") || fail "version 2 projection journal binding failed"
   token=$(sed -n 's/^projection_id=//p' "$state/fm-hibit-r1.herdr-presentation")
-  [ "$(printf '%s\n' "$out" | sed -n '1p')" = "2|$home_real|w2|w2:t2|w2:p2|w1|└ hibit-r1 · p:$token" ] \
+  [ "$(printf '%s\n' "$out" | sed -n '1p')" = "2|$home_real|w2|w2:t2|w2:p2|w1|firstmate|└ hibit-r1 · p:$token" ] \
     || fail "version 2 projection journal did not retain exact home/endpoint/parent binding: $out"
   [ "$(printf '%s\n' "$out" | sed -n '2p')" = "w2:t3|w2:p3" ] \
     || fail "version 2 projection journal did not advance the exact replacement endpoint: $out"
@@ -1420,8 +1421,11 @@ test_projection_reclaim_refusal_matrix_is_non_mutating() {
           printf "w1\tw1:t1"
         }
         set +e
+        parent_workspace=w1
+        [ "$mode" != parent-id ] || parent_workspace=w9
         fm_backend_herdr_projection_reclaim_task \
-          fmtest "$journal" refusal-r1 "$home" w2 w2:t2 w2:p2 firstmate fm-refusal-r1 /tmp/project \
+          fmtest "$journal" refusal-r1 "$home" w2 w2:t2 w2:p2 \
+          "$parent_workspace" firstmate fm-refusal-r1 /tmp/project \
           >/dev/null 2>&1
         rc=$?
         set -e
@@ -1429,12 +1433,13 @@ test_projection_reclaim_refusal_matrix_is_non_mutating() {
       }
       run_case legacy "$LEGACY" "$HOME_A"
       run_case cross-home "$JOURNAL" "$HOME_B"
+      run_case parent-id "$JOURNAL" "$HOME_A"
       run_case ambiguous "$JOURNAL" "$HOME_A"
       run_case live "$JOURNAL" "$HOME_A"
       run_case unknown "$JOURNAL" "$HOME_A"
       run_case focus-unknown "$JOURNAL" "$HOME_A"
     ')
-  [ "$out" = $'legacy:2\ncross-home:2\nambiguous:2\nlive:1\nunknown:1\nfocus-unknown:2' ] \
+  [ "$out" = $'legacy:2\ncross-home:2\nparent-id:2\nambiguous:2\nlive:1\nunknown:1\nfocus-unknown:2' ] \
     || fail "reclaim refusal matrix returned wrong decisions: $out"
   [ ! -s "$mutation_log" ] \
     || fail "legacy, cross-home, ambiguous, live/unknown, or focus-unknown refusal mutated Herdr: $(cat "$mutation_log")"
@@ -1491,7 +1496,8 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
     bash -c '
       . "$0/bin/backends/herdr.sh"
       fm_backend_herdr_projection_reclaim_task \
-        fmtest "$1" fm-hibit-r1 "$2" w2 w2:t2 w2:p2 firstmate fm-fm-hibit-r1 /tmp/project || exit 1
+        fmtest "$1" fm-hibit-r1 "$2" w2 w2:t2 w2:p2 \
+        w1 firstmate fm-fm-hibit-r1 /tmp/project || exit 1
       printf "%s %s" "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" "$FM_BACKEND_HERDR_PROJECTION_PANE_ID"
     ' "$ROOT" "$journal" "$home") || fail "exact agent-free projection reclaim failed"
   [ "$out" = "w2:t3 w2:p3" ] || fail "reclaim did not return exact replacement ids: $out"
@@ -1561,6 +1567,63 @@ test_workspace_find_primary_falls_back_to_legacy_label() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_find fmtest' "$ROOT" )
   [ "$out" = "w-old" ] || fail "workspace_find should reuse the legacy primary workspace instead of creating a duplicate, got '$out'"
   pass "fm_backend_herdr_workspace_find: primary homes fall back to the legacy 'firstmate' label"
+}
+
+test_projection_parent_resolver_returns_legacy_identity() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/parent-legacy-primary"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspaces":[{"workspace_id":"w-old","label":"firstmate"}]}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_parent_workspace_exact fmtest "FirstMate Crew" || exit 1
+      printf "%s|%s" \
+        "$FM_BACKEND_HERDR_PROJECTION_PARENT_WORKSPACE_ID" \
+        "$FM_BACKEND_HERDR_PROJECTION_PARENT_LABEL"
+    ' "$ROOT")
+  [ "$out" = "w-old|firstmate" ] \
+    || fail "presentation parent lookup did not preserve the legacy primary id and label: $out"
+  pass "herdr presentation parent lookup: legacy primary identity is preserved exactly"
+}
+
+test_projection_parent_resolver_prefers_new_identity() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/parent-new-primary"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspaces":[{"workspace_id":"w-old","label":"firstmate"},{"workspace_id":"w-new","label":"FirstMate Crew"}]}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_parent_workspace_exact fmtest "FirstMate Crew" || exit 1
+      printf "%s|%s" \
+        "$FM_BACKEND_HERDR_PROJECTION_PARENT_WORKSPACE_ID" \
+        "$FM_BACKEND_HERDR_PROJECTION_PARENT_LABEL"
+    ' "$ROOT")
+  [ "$out" = "w-new|FirstMate Crew" ] \
+    || fail "presentation parent lookup did not prefer the current primary id and label: $out"
+  pass "herdr presentation parent lookup: current primary identity remains preferred"
+}
+
+test_projection_parent_resolver_refuses_ambiguous_preferred_identity() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/parent-ambiguous-primary"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspaces":[{"workspace_id":"w-new-a","label":"FirstMate Crew"},{"workspace_id":"w-new-b","label":"FirstMate Crew"},{"workspace_id":"w-old","label":"firstmate"}]}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_parent_workspace_exact fmtest "FirstMate Crew"
+      status=$?
+      printf "%s|%s" \
+        "$FM_BACKEND_HERDR_PROJECTION_PARENT_WORKSPACE_ID" \
+        "$FM_BACKEND_HERDR_PROJECTION_PARENT_LABEL"
+      exit "$status"
+    ' "$ROOT")
+  status=$?
+  [ "$status" -ne 0 ] || fail "ambiguous current primary labels must not fall through to the legacy parent"
+  [ "$out" = "|" ] || fail "ambiguous parent lookup retained a partial identity: $out"
+  pass "herdr presentation parent lookup: ambiguous preferred identity fails closed"
 }
 
 test_workspace_find_matches_only_this_homes_own_label() {
@@ -3047,6 +3110,9 @@ test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_primary_falls_back_to_legacy_label
+test_projection_parent_resolver_returns_legacy_identity
+test_projection_parent_resolver_prefers_new_identity
+test_projection_parent_resolver_refuses_ambiguous_preferred_identity
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target

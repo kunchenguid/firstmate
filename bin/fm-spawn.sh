@@ -903,7 +903,7 @@ case "$BACKEND" in
     # secondmate's home), so FM_HOME here still names the primary. Shadow it
     # to PROJ_ABS for just these two calls (bash restores it automatically
     # after each prefixed simple-command call) so the secondmate's tab lands
-    # in the secondmate's own workspace, not the primary's "firstmate" one.
+    # in the secondmate's own workspace, not the primary's one.
     HERDR_LABEL_HOME=$FM_HOME
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
@@ -913,6 +913,7 @@ case "$BACKEND" in
     if [ "$KIND" != secondmate ] && [ -f "$CONFIG/herdr-presentation-spaces" ]; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
+      HERDR_PARENT_WORKSPACE_ID=""
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
         fm_backend_herdr_server_ensure "$HERDR_SES" || {
           echo "error: herdr presentation recovery could not ensure its exact named session" >&2
@@ -928,11 +929,17 @@ case "$BACKEND" in
         fm_backend_herdr_projection_recovery_allows_flat \
           "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
         if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ]; then
+          fm_backend_herdr_projection_journal_snapshot \
+            "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
+          if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
+            HERDR_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID
+            HERDR_PARENT_LABEL=$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL
+          fi
           set +e
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
@@ -961,12 +968,15 @@ case "$BACKEND" in
         if ! fm_backend_herdr_server_ensure "$HERDR_SES"; then
           echo "warning: herdr presentation could not ensure its session server; using the ordinary flat layout without projection" >&2
         elif spawn_herdr_presentation_order_lock_acquire "$HERDR_SES"; then
-          HERDR_PARENT_WORKSPACE_ID=$(fm_backend_herdr_projection_parent_workspace_exact \
-            "$HERDR_SES" "$HERDR_PARENT_LABEL" 2>/dev/null || true)
-          if [ -z "$HERDR_PARENT_WORKSPACE_ID" ]; then
+          if fm_backend_herdr_projection_parent_workspace_exact \
+            "$HERDR_SES" "$HERDR_PARENT_LABEL" 2>/dev/null; then
+            HERDR_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_PARENT_WORKSPACE_ID
+            HERDR_PARENT_LABEL=$FM_BACKEND_HERDR_PROJECTION_PARENT_LABEL
+          else
             echo "warning: herdr presentation parent is absent or ambiguous; using the ordinary flat layout without projection" >&2
             spawn_herdr_presentation_order_lock_release
-          else
+          fi
+          if [ -n "$HERDR_PARENT_WORKSPACE_ID" ]; then
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
