@@ -136,6 +136,27 @@ test_tmux_agent_state_classifies() {
   pass "fm_backend_tmux_agent_state: separates live, dead, missing, ambiguous, and unreadable"
 }
 
+test_tmux_agent_state_rejects_malformed_targets_before_probe() {
+  local fakebin marker target out
+  fakebin=$(fm_fakebin "$TMP_ROOT/tmux-malformed")
+  marker="$TMP_ROOT/tmux-malformed-called"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'called\n' > "$FM_TEST_TMUX_MARKER"
+printf 'bash\n'
+SH
+  chmod +x "$fakebin/tmux"
+
+  for target in sess sess: :win sess:win:extra; do
+    out=$(PATH="$fakebin:$BASE_PATH" FM_TEST_TMUX_MARKER="$marker" \
+      bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux "$1"' "$ROOT" "$target")
+    [ "$out" = unreadable ] || fail "malformed tmux target '$target' should classify as unreadable, got '$out'"
+    [ ! -e "$marker" ] || fail "malformed tmux target '$target' invoked tmux"
+  done
+
+  pass "fm_backend_tmux_agent_state: rejects malformed targets before probing tmux"
+}
+
 # --- unit level: fm_backend_herdr_agent_state -------------------------------
 
 test_herdr_agent_state_preserves_husk_classifier() {
@@ -487,6 +508,7 @@ test_sweep_noop_with_no_secondmate_meta() {
 }
 
 test_tmux_agent_state_classifies
+test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
