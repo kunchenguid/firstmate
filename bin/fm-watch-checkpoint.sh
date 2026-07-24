@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Run one bounded foreground watcher checkpoint for harnesses that should not
 # rely on background-task completion to wake the model.
+# On a quiet watcher expiry, invoke the bounded owner in
+# bin/fm-pr-arrival-reconcile.sh before declaring the interval quiet.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,7 +14,10 @@ Usage: fm-watch-checkpoint.sh [--seconds <n>]
 
 Run bin/fm-watch.sh in the foreground for a bounded checkpoint.
 On an actionable watcher wake, pass through the watcher output and exit 0.
+On a quiet watcher expiry, run the bounded task-correlated unreported-PR scan.
+When that scan queues a reconciliation wake, print its "check:" reason and exit 0.
 On a quiet checkpoint, print "checkpoint: no actionable wake within <n>s" and exit 124.
+When the reconciliation scan itself fails, print its diagnostic and exit 1.
 EOF
 }
 
@@ -49,7 +54,11 @@ ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.err.XXXXXX") || {
   rm -f "$OUT"
   exit 1
 }
-trap 'rm -f "$OUT" "$ERR"' EXIT
+RECON_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.reconcile.err.XXXXXX") || {
+  rm -f "$OUT" "$ERR"
+  exit 1
+}
+trap 'rm -f "$OUT" "$ERR" "$RECON_ERR"' EXIT
 
 run_with_perl_timeout() {
   perl -e '
@@ -100,8 +109,25 @@ if grep -E '^watcher: already running' "$OUT" "$ERR" >/dev/null 2>&1; then
 fi
 
 if [ "$RC" -eq 124 ]; then
-  printf 'checkpoint: no actionable wake within %ss\n' "$SECONDS_ARG"
-  exit 124
+  RECON_OUT=
+  RECON_RC=0
+  RECON_OUT=$("$SCRIPT_DIR/fm-pr-arrival-reconcile.sh" 2>"$RECON_ERR") || RECON_RC=$?
+  case "$RECON_RC" in
+    0)
+      printf '%s\n' "$RECON_OUT"
+      [ ! -s "$RECON_ERR" ] || cat "$RECON_ERR" >&2
+      exit 0
+      ;;
+    1)
+      printf 'checkpoint: no actionable wake within %ss\n' "$SECONDS_ARG"
+      exit 124
+      ;;
+    *)
+      [ ! -s "$RECON_ERR" ] || cat "$RECON_ERR" >&2
+      echo "checkpoint: unreported-PR reconciliation failed after quiet watcher interval" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 [ ! -s "$OUT" ] || cat "$OUT"
