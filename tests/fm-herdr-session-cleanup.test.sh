@@ -17,8 +17,11 @@ export FM_CONFIG_OVERRIDE="$FM_HOME/config"
 mkdir -p "$FM_STATE_OVERRIDE" "$FM_CONFIG_OVERRIDE"
 touch "$FM_CONFIG_OVERRIDE/herdr-presentation-spaces"
 printf '%s\n' herdr > "$FM_CONFIG_OVERRIDE/backend"
+FAKEBIN=$(fm_fakebin "$TMP_ROOT")
+fm_fake_exit0 "$FAKEBIN" herdr
+export PATH="$FAKEBIN:$PATH"
 export FM_HERDR_SESSION_CLEANUP_SOURCE_ONLY=1
-# shellcheck source=bin/fm-herdr-session-cleanup.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-herdr-session-cleanup.sh"
 unset FM_HERDR_SESSION_CLEANUP_SOURCE_ONLY
 

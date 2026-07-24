@@ -61,6 +61,12 @@ SH
 chmod +x "$FAKEBIN/herdr"
 
 lab() { env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"; }
+production_process_proof() {
+  FM_HOME="$HOME_DIR" FM_BACKEND=herdr HERDR_SESSION="$HERDR_LAB_SESSION" \
+    FM_HERDR_SESSION_CLEANUP_SOURCE_ONLY=1 PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" \
+    bash -c '. "$1"; fm_herdr_cleanup_process_is_idle_shell "$2" "$3"' \
+      _ "$ROOT/bin/fm-herdr-session-cleanup.sh" "$HERDR_LAB_SESSION" "$PANE"
+}
 focus_snapshot() {
   local list workspace tab tabs
   list=$(lab workspace list) || return 1
@@ -102,17 +108,9 @@ PANES=$(lab pane list --workspace "$WS") || fail 'could not inspect restored pan
 if lab agent get "$PANE" >/dev/null 2>&1; then
   fail 'restored child unexpectedly retained a registered agent'
 fi
-PROCESS=
-SHELL_PID=
 attempt=0
 while [ "$attempt" -lt 50 ]; do
-  PROCESS=$(lab pane process-info --pane "$PANE" 2>/dev/null) || PROCESS=
-  SHELL_PID=$(printf '%s' "$PROCESS" | jq -r '.result.process_info.shell_pid // empty' 2>/dev/null)
-  if [ -n "$SHELL_PID" ] \
-    && [ "$(printf '%s' "$PROCESS" | jq '.result.process_info.foreground_processes | length' 2>/dev/null)" = 1 ] \
-    && [ "$(printf '%s' "$PROCESS" | jq -r '.result.process_info.foreground_process_group_id' 2>/dev/null)" = "$SHELL_PID" ] \
-    && [ "$(printf '%s' "$PROCESS" | jq -r '.result.process_info.foreground_processes[0].pid' 2>/dev/null)" = "$SHELL_PID" ] \
-    && ps -axo pid=,ppid= | awk -v shell="$SHELL_PID" '$1 == shell { found++ } $2 == shell { child++ } END { exit(found == 1 && child == 0 ? 0 : 1) }'; then
+  if production_process_proof; then
     break
   fi
   sleep 0.1
