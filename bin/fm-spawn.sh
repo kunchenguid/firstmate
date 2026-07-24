@@ -783,14 +783,15 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
-# A configured delegated Pi profile is proved before any backend creates an
-# endpoint. Omitted axes are filled from the home policy; conflicting caller
-# axes and raw Pi launch commands are refused because their exact profile cannot
-# be proved. The tracked startup guard hides project settings and the legacy
-# commands migration before Pi imports its CLI, and the explicit session
-# directory prevents project redirection. --no-approve and --no-extensions then
-# suppress project resources and every ambient cancellation surface before the
-# required FirstMate extensions are explicitly re-added below.
+# Before a selected Pi launch creates an endpoint on any backend, the configured
+# delegated profile is proved. Omitted axes are filled from the home policy;
+# conflicting caller axes are refused. Every raw launch command is also refused
+# while the profile is active because its runtime cannot be proved. The tracked
+# startup guard hides project settings and the legacy commands migration before
+# Pi imports its CLI, and the explicit session directory prevents project
+# redirection. --no-approve and --no-extensions then suppress project resources
+# and every ambient cancellation surface before the required FirstMate
+# extensions are explicitly re-added below.
 PICMD=pi
 PIBRIEFENV=
 PIPROFILE=
