@@ -31,7 +31,7 @@ Crew status files are append-only wake-event logs, not current-state fields.
 `bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
 The script header owns the exact run-head ancestry rules.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
-The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
+The most recent recognized ci log marker wins, so checks-green monitoring reports validation done while a later re-arm, failed-check, or issue marker returns the crew to working; publication readiness remains separately gated by the lifecycle owner below.
 Only when no matching run exists does it fall back to the pane busy-signature and then a status-log event whose verb maps to a recognized run-state; a dead pane without a run reports unknown instead of trusting a stale log.
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
@@ -191,9 +191,7 @@ For target project repos shipped through their own no-mistakes pipeline, commits
 The firstmate repo itself is the exception: its `.no-mistakes/` directory is local state, stays gitignored, and is rejected by CI if tracked.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records exact `pr=` and `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
 PR readiness and ordinary merge monitoring first pass the lifecycle owned by [`pr-publication-check`](../.agents/skills/pr-publication-check/SKILL.md): the responsible worker attests a fresh complete draft body and exact head, the gate marks the unchanged PR or MR ready, and `fm-pr-check.sh` repeats the authenticated readback before it can publish a poll.
-The watcher repeats that receipt, body, and head verification before every merge-state lookup, so publication drift wakes Firstmate as `publication-invalid`, operational verifier failures retain their bounded class and exit status, and neither can produce a merged outcome.
-The private receipt stores body size and hash, exact head, verdicts, evidence mode, and already-public evidence URLs; it is operational evidence and never PR content.
-Deterministic checks reject known disclosure and partial-run patterns, but semantic completeness and whether evidence proves the accepted behavior remain explicit worker judgment rather than a regex claim.
+The watcher repeats that verification before every merge-state lookup and refuses both publication drift and operational verifier failure before either can produce a merged outcome; the lifecycle owner contains the correction, privacy, evidence, and human-judgment contract.
 The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state; a well-formed GitLab merge request URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) is refused too, explicitly, rather than sent to the wrong forge.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.

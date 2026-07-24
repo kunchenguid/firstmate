@@ -47,6 +47,7 @@
 # Watcher-only --machine failures emit one exact "failure <class>" line. Classes
 # are publication-invalid, tool-unavailable, forge-read-failed,
 # forge-response-invalid, state-invalid, and request-invalid.
+# shellcheck disable=SC2100 # Hyphenated failure classes are strings, not arithmetic expressions.
 set -eu
 
 LC_ALL=C
