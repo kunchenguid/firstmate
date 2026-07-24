@@ -129,9 +129,11 @@ test_predicate_fresh_launch_and_working_need_supervision() {
   printf 'working: validating\n' > "$state/working.status"
   : > "$state/resumed.meta"
   printf 'resolved: captain chose option A\n' > "$state/resumed.status"
+  : > "$state/idle.meta"
+  printf 'idle: unexpected ordinary task status\n' > "$state/idle.status"
   fm_supervision_unhealthy "$state" 300 || fail "fresh/working/resumed tasks without beacon must be unhealthy"
-  [ "$FM_SUP_IN_FLIGHT" -eq 3 ] || fail "expected 3 active tasks, got $FM_SUP_IN_FLIGHT"
-  pass "fm_supervision_status: fresh, working, and resolved tasks still require live supervision"
+  [ "$FM_SUP_IN_FLIGHT" -eq 4 ] || fail "expected 4 active tasks, got $FM_SUP_IN_FLIGHT"
+  pass "fm_supervision_status: ordinary idle status fails closed toward live supervision"
 }
 
 test_predicate_secondmate_activity_needs_supervision() {

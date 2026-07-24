@@ -92,7 +92,11 @@ fm_sup_task_needs_live_supervision() {
   verb=$(status_line_verb "$last")
   case "$verb" in
     working|resolved) return 0 ;;
-    idle|done|needs-decision|blocked|failed) return 1 ;;
+    idle)
+      [ "$kind" = secondmate ] && return 1
+      return 0
+      ;;
+    done|needs-decision|blocked|failed) return 1 ;;
     *) return 0 ;;
   esac
 }
