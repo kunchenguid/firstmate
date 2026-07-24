@@ -3528,7 +3528,7 @@ test_secondmate_retirement_rejects_loopback_and_stale_tracking_authority() {
 }
 
 test_secondmate_retirement_rejects_mount_boundaries() {
-  local case_dir mounted rc
+  local case_dir mounted rc root_case
   case_dir=$(make_case secondmate-project-mount-boundary)
   prepare_secondmate_home_fixture "$case_dir"
   write_secondmate_meta "$case_dir"
@@ -3544,7 +3544,137 @@ test_secondmate_retirement_rejects_mount_boundaries() {
   assert_present "$case_dir/state/task-x1.meta" "mounted project subtree allowed metadata removal"
   assert_grep 'crosses an untrusted filesystem boundary' "$case_dir/stderr" \
     "mounted project subtree was not surfaced"
+
+  root_case=$(make_case secondmate-mounted-removal-root)
+  prepare_secondmate_home_fixture "$root_case"
+  write_secondmate_meta "$root_case"
+  set +e
+  FM_TEARDOWN_TEST_MOUNT_PATH="$root_case/wt" \
+    run_teardown "$root_case" --force > "$root_case/stdout" 2> "$root_case/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "mounted secondmate home root must block retirement"
+  assert_present "$root_case/wt" "mounted secondmate home root was traversed"
+  assert_present "$root_case/state/task-x1.meta" "mounted secondmate home removed metadata"
+  assert_grep 'crosses an untrusted filesystem boundary' "$root_case/stderr" \
+    "mounted secondmate home root was not surfaced"
+
+  root_case=$(make_case treehouse-mounted-return-root)
+  write_meta "$root_case" local-only ship
+  set +e
+  FM_TEARDOWN_TEST_MOUNT_PATH="$root_case/wt" \
+    run_teardown "$root_case" --force > "$root_case/stdout" 2> "$root_case/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "mounted Treehouse return root must block teardown"
+  assert_present "$root_case/wt" "mounted Treehouse worktree was returned"
+  assert_present "$root_case/state/task-x1.meta" "mounted Treehouse return removed metadata"
   pass "secondmate retirement refuses mounted deletion boundaries"
+}
+
+test_secondmate_retirement_rejects_effective_ssh_redirects() {
+  local case_dir clone source redirect local_origin rc
+  case_dir=$(make_case secondmate-effective-ssh-redirect)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  clone="$case_dir/wt/projects/test"
+  source="$case_dir/source-projects/test"
+  local_origin="$case_dir/wt/data/redirected-origin.git"
+  redirect="$case_dir/fakebin/redirect-ssh"
+  git clone --quiet --bare "$case_dir/origin.git" "$local_origin"
+  cat > "$redirect" <<'SH'
+#!/usr/bin/env bash
+exec git-upload-pack "${FM_REDIRECT_ORIGIN:?}"
+SH
+  chmod +x "$redirect"
+  git -C "$clone" remote set-url origin ssh://8.8.8.8/repository.git
+  git -C "$source" remote set-url origin ssh://8.8.8.8/repository.git
+  git -C "$clone" config core.sshCommand "$redirect"
+  git -C "$source" config core.sshCommand "$redirect"
+  set +e
+  FM_REDIRECT_ORIGIN="$local_origin" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "effective SSH redirect must block retirement"
+  assert_present "$local_origin" "effective SSH redirect landing authority was deleted"
+  assert_present "$case_dir/state/task-x1.meta" "effective SSH redirect allowed metadata removal"
+  assert_grep 'remote identity is unsafe' "$case_dir/stderr" \
+    "effective SSH transport override was not surfaced"
+  pass "effective Git SSH transport must match landing validation"
+}
+
+test_secondmate_retirement_rejects_incomplete_surviving_authority() {
+  local case_dir source rc promisor_case promisor_source
+  case_dir=$(make_case secondmate-shallow-source-authority)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  source="$case_dir/source-projects/test"
+  rm -rf "$source"
+  git clone --quiet --depth 1 "file://$case_dir/origin.git" "$source"
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "shallow source authority must block retirement"
+  assert_present "$case_dir/wt" "shallow source authority allowed home removal"
+  assert_grep 'is shallow and does not prove a complete surviving object graph' \
+    "$case_dir/stderr" "shallow source authority was accepted"
+
+  promisor_case=$(make_case secondmate-promisor-source-authority)
+  prepare_secondmate_home_fixture "$promisor_case"
+  write_secondmate_meta "$promisor_case"
+  promisor_source="$promisor_case/source-projects/test"
+  git -C "$promisor_source" config core.repositoryFormatVersion 1
+  git -C "$promisor_source" config extensions.partialClone origin
+  git -C "$promisor_source" config remote.origin.promisor true
+  set +e
+  run_teardown "$promisor_case" --force > "$promisor_case/stdout" 2> "$promisor_case/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "promisor source authority must block retirement"
+  assert_present "$promisor_case/wt" "promisor source authority allowed home removal"
+  assert_grep 'uses promisor or partial-clone object semantics' \
+    "$promisor_case/stderr" "promisor source authority was accepted"
+  pass "surviving authorities require complete local object graphs"
+}
+
+test_secondmate_retirement_validates_top_level_source_storage() {
+  local case_dir owner source root_ref root_tip rc
+  case_dir=$(make_case secondmate-top-source-storage)
+  prepare_secondmate_home_fixture "$case_dir"
+  write_secondmate_meta "$case_dir"
+  owner="$case_dir/wt/data/top-source-owner"
+  source="$case_dir/top-source"
+  root_ref=$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || printf 'origin/main')
+  root_tip=$(git -C "$ROOT" rev-parse "$root_ref")
+  git clone --quiet "$ROOT" "$owner"
+  git -C "$owner" checkout --quiet --detach "$root_tip"
+  git -C "$owner" branch --force main "$root_tip"
+  git -C "$owner" update-ref refs/remotes/origin/main "$root_tip"
+  git -C "$owner" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  git -C "$owner" worktree add --quiet "$source" main
+  git -C "$case_dir/project" remote set-url origin "$source"
+  set +e
+  FM_ROOT_OVERRIDE="$source" \
+  FM_HOME="$source" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_PROJECTS_OVERRIDE="$case_dir/source-projects" \
+  FM_CHECKOUT_REFRESH_LOCK_ROOT="$case_dir/checkout-locks" \
+  FM_FAKE_FIRSTMATE_SOURCE="$source" \
+  FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1 \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$TEARDOWN" task-x1 --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "top-level source storage inside retiring home must block retirement"
+  assert_present "$owner/.git" "top-level source storage inside retiring home was deleted"
+  assert_present "$case_dir/state/task-x1.meta" "top-level source storage allowed metadata removal"
+  assert_grep 'secondmate top-level source repository Git storage depends on the retiring home' \
+    "$case_dir/stderr" "top-level source storage graph was not validated"
+  pass "top-level source storage must survive secondmate retirement"
 }
 
 test_secondmate_retirement_rejects_local_network_aliases() {
@@ -3920,6 +4050,7 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-teardown-lifecycle ]; then
 fi
 
 if [ "${FM_TEST_FOCUSED:-}" = review-round-durable-secondmate ]; then
+  test_normal_secondmate_retires_proven_detached_head
   test_secondmate_retirement_retains_idle_registered_child
   test_secondmate_retirement_retains_unlanded_project_clone
   test_secondmate_project_tags_do_not_prove_landing
@@ -3929,6 +4060,9 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-durable-secondmate ]; then
   test_secondmate_retirement_accounts_for_directory_symlinks
   test_secondmate_retirement_rejects_loopback_and_stale_tracking_authority
   test_secondmate_retirement_rejects_mount_boundaries
+  test_secondmate_retirement_rejects_effective_ssh_redirects
+  test_secondmate_retirement_rejects_incomplete_surviving_authority
+  test_secondmate_retirement_validates_top_level_source_storage
   test_secondmate_retirement_rejects_local_network_aliases
   test_secondmate_retirement_rejects_in_home_remote_object_storage
   test_secondmate_retirement_rejects_source_common_dir_in_home
@@ -3979,6 +4113,9 @@ test_secondmate_retirement_rejects_linked_worktree_graphs
 test_secondmate_retirement_accounts_for_directory_symlinks
 test_secondmate_retirement_rejects_loopback_and_stale_tracking_authority
 test_secondmate_retirement_rejects_mount_boundaries
+test_secondmate_retirement_rejects_effective_ssh_redirects
+test_secondmate_retirement_rejects_incomplete_surviving_authority
+test_secondmate_retirement_validates_top_level_source_storage
 test_secondmate_retirement_rejects_local_network_aliases
 test_secondmate_retirement_rejects_in_home_remote_object_storage
 test_secondmate_retirement_rejects_source_common_dir_in_home

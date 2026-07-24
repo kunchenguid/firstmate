@@ -87,6 +87,12 @@ run_isolated_refresh() {
     "$ROOT/bin/fm-checkout-refresh.sh" "$@"
 }
 
+run_manifest_failure_refresh() {
+  local failure=$1
+  shift
+  FM_CHECKOUT_TEST_MANIFEST_FAILURE="$failure" run_isolated_refresh "$@"
+}
+
 assert_refresh_state() {
   local state_root=$1 expected=$2 coverage_epoch coverage
   coverage_epoch=$(sed -n '1p' "$state_root/coverage-health" 2>/dev/null || true)
@@ -152,6 +158,7 @@ case "${1:-}" in
     plist=$(cat "$record")
     [ -f "$plist" ] || exit 4
     python3 - "$target" "$plist" <<'PY'
+import os
 import plistlib
 import sys
 
@@ -169,6 +176,12 @@ for argument in arguments:
 print("    }")
 print("    environment = {")
 for key, value in environment.items():
+    print(f"        {key} => {value}")
+extra = os.environ.get("FM_TEST_LAUNCHCTL_EXTRA_ENV", "")
+if extra:
+    key, separator, value = extra.partition("=")
+    if not separator or not key:
+        raise SystemExit(5)
     print(f"        {key} => {value}")
 print("    }")
 print("}")
@@ -406,11 +419,8 @@ exec "$FM_REAL_GIT" "$@"
 SH
   chmod +x "$fakebin/git"
   set +e
-  out=$(
-    export PATH="$fakebin:$PATH"
-    export FM_REAL_GIT="$real_git"
-    run_isolated_refresh "$home" "$state" run-once --force 2>&1
-  )
+  out=$(FM_REAL_GIT="$real_git" PATH="$fakebin:$PATH" \
+    run_isolated_refresh "$home" "$state" run-once --force 2>&1)
   status=$?
   set -e
   [ "$status" -ne 0 ] || fail "uninspectable discovered Git identity reported healthy coverage"
@@ -755,7 +765,7 @@ test_empty_treehouse_and_identity_tool_failures_fail_closed() {
   set +e
   out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
     FM_CHECKOUT_REFRESH_STATE_ROOT="$STATE_ROOT" FM_CHECKOUT_REFRESH_LOCK_ROOT="$LOCK_ROOT" \
-    FM_TREEHOUSE_ROOT= FM_CHECKOUT_REFRESH_TEST=1 \
+    FM_TREEHOUSE_ROOT='' FM_CHECKOUT_REFRESH_TEST=1 \
     "$ROOT/bin/fm-checkout-refresh.sh" run-once --force 2>&1)
   status=$?
   set -e
@@ -1943,6 +1953,81 @@ test_launch_agent_label_and_custom_legacy_state_are_authoritative() {
   pass "LaunchAgent Label and custom legacy state remain authoritative"
 }
 
+test_loaded_launch_agent_controls_and_untracked_legacy_job_fail_closed() {
+  local home state_base state_root agents fakebin fake_state key label plist generation now out status
+  local legacy_home legacy_key legacy_plist legacy_shadow legacy_state_root log
+  home="$TMP_ROOT/loaded-control-home"
+  state_base="$TMP_ROOT/loaded-control-state"
+  agents="$TMP_ROOT/loaded-control-agents"
+  fakebin="$TMP_ROOT/loaded-control-fakebin"
+  fake_state="$TMP_ROOT/loaded-control-launchctl"
+  log="$TMP_ROOT/loaded-control-launchctl.log"
+  mkdir -p "$home/projects" "$home/config" "$home/user/.treehouse" "$agents" "$fakebin" "$fake_state"
+  write_stateful_launchctl_fake "$fakebin/launchctl"
+  HOME="$home/user" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
+    FM_TREEHOUSE_ROOT="$home/user/.treehouse" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
+    "$ROOT/bin/fm-checkout-refresh.sh" install >/dev/null
+  key=$(checkout_state_key "$home" 16)
+  label="com.firstmate.checkout-refresh.$key"
+  plist="$agents/$label.plist"
+  state_root="$state_base/homes/$key"
+  generation=$(plist_generation "$plist")
+  now=$(date +%s)
+  printf '%s\n' "$now" > "$state_root/heartbeat"
+  printf '%s\nhealthy\n' "$now" > "$state_root/coverage-health"
+  printf '%s\n' "$generation" > "$state_root/scheduler-generation"
+  set +e
+  out=$(HOME="$home/user" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
+    FM_TREEHOUSE_ROOT="$home/user/.treehouse" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
+    FM_TEST_LAUNCHCTL_EXTRA_ENV="FM_PROJECTS_OVERRIDE=$TMP_ROOT/stale-projects" \
+    "$ROOT/bin/fm-checkout-refresh.sh" ensure 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "loaded LaunchAgent accepted an undeclared checkout control"
+  assert_contains "$out" "loaded identity is missing or untrusted" \
+    "undeclared loaded LaunchAgent control was not surfaced before health"
+
+  legacy_home="$TMP_ROOT/untracked-legacy-home"
+  mkdir -p "$legacy_home/projects" "$legacy_home/config" "$legacy_home/user/.treehouse"
+  legacy_key=$(checkout_state_key "$legacy_home" 16)
+  legacy_plist="$agents/com.firstmate.checkout-refresh.$legacy_key.plist"
+  legacy_state_root="$state_base/homes/$legacy_key"
+  legacy_shadow="$TMP_ROOT/untracked-legacy-definition.plist"
+  write_launch_agent_fixture "$legacy_shadow" \
+    "com.firstmate.checkout-refresh" "$legacy_home" "$legacy_state_root"
+  mark_launch_agent_loaded "$fake_state" "com.firstmate.checkout-refresh" "$legacy_shadow"
+  set +e
+  out=$(HOME="$legacy_home/user" FM_HOME="$legacy_home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$state_base" \
+    FM_TREEHOUSE_ROOT="$legacy_home/user/.treehouse" \
+    FM_CHECKOUT_REFRESH_PLATFORM=Darwin \
+    FM_CHECKOUT_REFRESH_LAUNCH_AGENTS_DIR="$agents" \
+    FM_CHECKOUT_REFRESH_LAUNCHCTL="$fakebin/launchctl" \
+    FM_FAKE_LAUNCHCTL_STATE="$fake_state" \
+    FM_FAKE_LAUNCHCTL_LOG="$log" \
+    FM_TEST_LAUNCHCTL_BOOTOUT_FAIL_LABEL=com.firstmate.checkout-refresh \
+    "$ROOT/bin/fm-checkout-refresh.sh" install 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "untracked live legacy LaunchAgent allowed replacement activation"
+  assert_absent "$legacy_plist" "replacement activated before untracked legacy absence was proven"
+  assert_present "$legacy_state_root/legacy-launch-agent.quarantine" \
+    "untracked legacy LaunchAgent identity was not durably retained"
+  assert_contains "$out" "cannot quiesce checkout-refresh LaunchAgent" \
+    "untracked legacy LaunchAgent bootout failure was not surfaced"
+  pass "loaded scheduler controls and untracked legacy jobs fail closed"
+}
+
 test_same_path_replacement_and_manifest_failures_are_unhealthy() {
   local home state checkout original_checkout first_remote second_remote out status
   home="$TMP_ROOT/replacement-home"
@@ -1976,13 +2061,13 @@ test_same_path_replacement_and_manifest_failures_are_unhealthy() {
   assert_refresh_state "$state" unhealthy
 
   set +e
-  out=$(FM_CHECKOUT_TEST_MANIFEST_FAILURE=append run_isolated_refresh "$home" "$state" run-once --force 2>&1)
+  out=$(run_manifest_failure_refresh append "$home" "$state" run-once --force 2>&1)
   status=$?
   set -e
   [ "$status" -ne 0 ] || fail "manifest append failure remained healthy"
   assert_refresh_state "$state" unhealthy
   set +e
-  out=$(FM_CHECKOUT_TEST_MANIFEST_FAILURE=sort run_isolated_refresh "$home" "$state" run-once --force 2>&1)
+  out=$(run_manifest_failure_refresh sort "$home" "$state" run-once --force 2>&1)
   status=$?
   set -e
   [ "$status" -ne 0 ] || fail "manifest sort failure remained healthy"
@@ -2094,6 +2179,7 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-durable-identity ]; then
   test_launch_agent_definition_is_home_scoped_with_scheduler_seam
   test_logical_home_state_migrates_and_ambiguity_fails_closed
   test_launch_agent_label_and_custom_legacy_state_are_authoritative
+  test_loaded_launch_agent_controls_and_untracked_legacy_job_fail_closed
   test_same_path_replacement_and_manifest_failures_are_unhealthy
   test_legacy_identity_requires_physical_binding_and_migrates_transactionally
   test_lock_key_failure_cannot_construct_a_shared_lock_path
@@ -2201,6 +2287,7 @@ test_acquisition_honors_shared_checkout_lock
 test_launch_agent_definition_is_home_scoped_with_scheduler_seam
 test_logical_home_state_migrates_and_ambiguity_fails_closed
 test_launch_agent_label_and_custom_legacy_state_are_authoritative
+test_loaded_launch_agent_controls_and_untracked_legacy_job_fail_closed
 test_same_path_replacement_and_manifest_failures_are_unhealthy
 test_legacy_identity_requires_physical_binding_and_migrates_transactionally
 test_lock_key_failure_cannot_construct_a_shared_lock_path

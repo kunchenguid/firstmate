@@ -172,6 +172,8 @@ HOME_STATE_NAMESPACE_STAGED=0
 HOME_MIGRATION_ACTIVE=0
 HOME_MIGRATION_RUN_LOCK=
 PHYSICAL_AGENT_STOPPED=0
+LEGACY_AGENT_STOPPED=0
+LEGACY_AGENT_TRACKED=0
 SCHEDULER_GENERATION=${FM_CHECKOUT_REFRESH_GENERATION:-}
 case "$SCHEDULER_GENERATION" in
   '') ;;
@@ -858,7 +860,7 @@ acquire_worktree() {
   canonical=$(require_exact_git_root "$expected_source" "Treehouse acquisition source") || return 1
   expected_source=$canonical
   (
-    local checkout_lock
+    local checkout_lock process_guard
     ensure_lock_roots || exit 1
     checkout_lock=$(fm_checkout_lock_path "$expected_source" "$LOCK_ROOT") || {
       echo "error: cannot resolve Treehouse acquisition lock identity for $expected_source" >&2
@@ -868,10 +870,11 @@ acquire_worktree() {
       echo "error: Treehouse acquisition already running for $expected_source (pid ${FM_LOCK_HELD_PID:-unknown})" >&2
       exit 1
     fi
-    export FM_PROCESS_TREE_GUARD_FILE="${FM_LOCK_OWNER_DIR:?}/process-group"
+    process_guard="${FM_LOCK_OWNER_DIR:?}/process-group"
     trap 'fm_lock_release "$checkout_lock"' EXIT
     cd "$expected_source" || exit 1
-    if fm_run_bounded "$ACQUIRE_TIMEOUT" treehouse get --lease --lease-holder "$lease_holder"; then
+    if FM_PROCESS_TREE_GUARD_FILE="$process_guard" \
+        fm_run_bounded "$ACQUIRE_TIMEOUT" treehouse get --lease --lease-holder "$lease_holder"; then
       status=0
     else
       status=$?
@@ -1060,13 +1063,14 @@ launch_agent_loaded_state() {
     echo "error: loaded checkout-refresh LaunchAgent $label has no authoritative definition" >&2
     return 4
   }
-  FM_CHECKOUT_LOADED_JOB=$output python3 - "$plist" "$domain/$label" <<'PY'
+  FM_CHECKOUT_LOADED_JOB=$output python3 - "$plist" "$domain/$label" \
+      "$LABEL" "$SCRIPT_DIR/fm-checkout-refresh.sh" <<'PY'
 import os
 import plistlib
 import re
 import sys
 
-plist_path, target = sys.argv[1:]
+plist_path, target, current_label, script = sys.argv[1:]
 loaded = os.environ.get("FM_CHECKOUT_LOADED_JOB", "")
 
 def decode(value):
@@ -1118,6 +1122,25 @@ try:
         )
     ):
         raise ValueError("authoritative definition is malformed")
+    if definition["Label"] == current_label:
+        expected_keys = {
+            "HOME",
+            "PATH",
+            "FM_HOME",
+            "FM_TREEHOUSE_ROOT",
+            "FM_CHECKOUT_REFRESH_STATE_ROOT",
+            "FM_CHECKOUT_REFRESH_LOCK_ROOT",
+            "FM_CHECKOUT_REFRESH_INTERVAL",
+            "FM_CHECKOUT_REFRESH_BACKSTOP",
+            "FM_CHECKOUT_REFRESH_GENERATION",
+        }
+        if (
+            len(expected_arguments) != 4
+            or not os.path.isabs(expected_arguments[0])
+            or expected_arguments[1:] != [script, "run-once", "--scheduled"]
+            or set(expected_environment) != expected_keys
+        ):
+            raise ValueError("authoritative control surface is malformed")
     if scalar("path") != os.path.abspath(plist_path):
         raise ValueError("loaded definition path differs")
     if scalar("program") != expected_arguments[0]:
@@ -1134,9 +1157,18 @@ try:
         if not key or key in environment:
             raise ValueError("ambiguous loaded environment")
         environment[key] = decode(value)
-    for key, value in expected_environment.items():
-        if environment.get(key) != value:
-            raise ValueError(f"loaded environment differs for {key}")
+    synthesized_environment = {
+        "XPC_SERVICE_NAME": definition["Label"],
+        "OSLogRateLimit": "64",
+    }
+    for key, value in environment.items():
+        if key in expected_environment:
+            if expected_environment[key] != value:
+                raise ValueError(f"loaded environment differs for {key}")
+        elif synthesized_environment.get(key) != value:
+            raise ValueError(f"loaded environment has undeclared control {key}")
+    if any(key not in environment for key in expected_environment):
+        raise ValueError("loaded environment is incomplete")
 except (OSError, StopIteration, ValueError, plistlib.InvalidFileException):
     raise SystemExit(1)
 PY
@@ -1533,17 +1565,18 @@ prepare_home_state_namespace() {
 }
 
 rollback_home_state_namespace_migration() {
-  local failed=0 loaded_state
+  local failed=0 loaded_state domain
+  domain="gui/$(id -u)"
   if [ "$HOME_MIGRATION_ACTIVE" -eq 1 ] && [ "$PLATFORM" = Darwin ]; then
     if [ -e "$PLIST" ] || [ -L "$PLIST" ]; then
       if [ -f "$PLIST" ] && [ ! -L "$PLIST" ] \
-          && quiesce_launch_agent_verified "gui/$(id -u)" "$LABEL" "$PLIST"; then
+          && quiesce_launch_agent_verified "$domain" "$LABEL" "$PLIST"; then
         rm -f "$PLIST" || failed=1
       else
         return 1
       fi
     else
-      launch_agent_loaded_state "gui/$(id -u)" "$LABEL" ""
+      launch_agent_loaded_state "$domain" "$LABEL" ""
       loaded_state=$?
       [ "$loaded_state" -eq 3 ] || return 1
     fi
@@ -1562,14 +1595,15 @@ rollback_home_state_namespace_migration() {
   fi
   if [ "$PHYSICAL_AGENT_STOPPED" -eq 1 ]; then
     if [ -f "$PHYSICAL_PLIST" ] && [ ! -L "$PHYSICAL_PLIST" ] \
-      && "$LAUNCHCTL" bootstrap "gui/$(id -u)" "$PHYSICAL_PLIST" >/dev/null 2>&1 \
+      && "$LAUNCHCTL" bootstrap "$domain" "$PHYSICAL_PLIST" >/dev/null 2>&1 \
       && launch_agent_loaded_state \
-        "gui/$(id -u)" "$PHYSICAL_LABEL" "$PHYSICAL_PLIST"; then
+        "$domain" "$PHYSICAL_LABEL" "$PHYSICAL_PLIST"; then
       PHYSICAL_AGENT_STOPPED=0
     else
       failed=1
     fi
   fi
+  restart_tracked_legacy_launch_agent "$domain" || failed=1
   [ "$failed" -ne 0 ] || HOME_MIGRATION_ACTIVE=0
   [ "$failed" -eq 0 ]
 }
@@ -2068,8 +2102,9 @@ PY
 }
 
 migrate_checkout_identity_state() {
-  local checkout=$1 key=$2 destination="$STATE_ROOT/$key.identity"
-  local candidate source_prefix destination_prefix match= count=0 lines current_physical current_physical_key
+  local checkout=$1 key=$2 destination
+  local candidate source_prefix destination_prefix match='' count=0 lines current_physical current_physical_key
+  destination="$STATE_ROOT/$key.identity"
   current_physical=$(fm_checkout_physical_path_identity "$checkout" directory) || return 1
   destination_prefix="$STATE_ROOT/$key"
   checkout_identity_migration_transaction \
@@ -2740,15 +2775,171 @@ xml_escape() {
 remove_matching_legacy_launch_agent() {
   local domain=$1 legacy_plist="$LAUNCH_AGENTS_DIR/$LEGACY_LABEL.plist"
   [ "$LABEL" != "$LEGACY_LABEL" ] || return 0
-  [ -f "$legacy_plist" ] && [ ! -L "$legacy_plist" ] || return 0
-  grep -Fq "<key>Label</key><string>$(xml_escape "$LEGACY_LABEL")</string>" "$legacy_plist" || return 1
-  grep -Fq "<string>$(xml_escape "$SCRIPT_DIR/fm-checkout-refresh.sh")</string>" "$legacy_plist" || return 0
-  if ! grep -Fq "<key>FM_HOME</key><string>$(xml_escape "$FM_HOME_CANONICAL")</string>" "$legacy_plist" \
-    && ! grep -Fq "<key>FM_HOME</key><string>$(xml_escape "$FM_HOME")</string>" "$legacy_plist"; then
-    return 0
-  fi
-  quiesce_launch_agent_verified "$domain" "$LEGACY_LABEL" "$legacy_plist" || return 1
+  quiesce_legacy_launch_agent_before_activation "$domain" || return 1
+  [ -e "$legacy_plist" ] || [ -L "$legacy_plist" ] || return 0
+  legacy_launch_agent_definition_matches_home "$legacy_plist" || return 0
   rm -f "$legacy_plist"
+}
+
+legacy_launch_agent_definition_matches_home() {
+  local legacy_plist=$1
+  [ -f "$legacy_plist" ] && [ ! -L "$legacy_plist" ] && [ -r "$legacy_plist" ] || return 1
+  grep -Fq "<key>Label</key><string>$(xml_escape "$LEGACY_LABEL")</string>" "$legacy_plist" \
+    && grep -Fq "<string>$(xml_escape "$SCRIPT_DIR/fm-checkout-refresh.sh")</string>" "$legacy_plist" \
+    && { grep -Fq "<key>FM_HOME</key><string>$(xml_escape "$FM_HOME_CANONICAL")</string>" "$legacy_plist" \
+      || grep -Fq "<key>FM_HOME</key><string>$(xml_escape "$FM_HOME")</string>" "$legacy_plist"; }
+}
+
+legacy_loaded_job_matches_home() {
+  FM_CHECKOUT_LOADED_JOB=$1 python3 - "$2" "$SCRIPT_DIR/fm-checkout-refresh.sh" \
+      "$FM_HOME_CANONICAL" "$FM_HOME" <<'PY'
+import os
+import re
+import sys
+
+target, script, canonical_home, raw_home = sys.argv[1:]
+loaded = os.environ.get("FM_CHECKOUT_LOADED_JOB", "")
+
+def decode(value):
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        value = value[1:-1]
+    return value
+
+def scalar(name):
+    matches = re.findall(
+        rf"(?m)^[ \t]*{re.escape(name)}[ \t]*=[ \t]*(.+?)[ \t]*$",
+        loaded,
+    )
+    if len(matches) != 1:
+        raise ValueError
+    return decode(matches[0])
+
+def block(name):
+    matches = list(
+        re.finditer(
+            rf"(?ms)^[ \t]*{re.escape(name)}[ \t]*=[ \t]*\{{[ \t]*\n"
+            rf"(.*?)^[ \t]*\}}[ \t]*$",
+            loaded,
+        )
+    )
+    if len(matches) != 1:
+        raise ValueError
+    return [line.strip() for line in matches[0].group(1).splitlines() if line.strip()]
+
+try:
+    first = next(line.strip() for line in loaded.splitlines() if line.strip())
+    if first != target + " = {":
+        raise ValueError
+    arguments = [decode(line) for line in block("arguments")]
+    if (
+        len(arguments) != 4
+        or not os.path.isabs(arguments[0])
+        or scalar("program") != arguments[0]
+        or arguments[1:] != [script, "run-once", "--scheduled"]
+    ):
+        raise ValueError
+    environment = {}
+    for line in block("environment"):
+        if " => " not in line:
+            raise ValueError
+        key, value = line.split(" => ", 1)
+        key = decode(key)
+        if not key or key in environment:
+            raise ValueError
+        environment[key] = decode(value)
+    if environment.get("FM_HOME") not in (canonical_home, raw_home):
+        raise LookupError
+except LookupError:
+    raise SystemExit(3)
+except (StopIteration, ValueError):
+    raise SystemExit(1)
+PY
+}
+
+legacy_launch_agent_raw_state() {
+  local domain=$1 output status
+  output=$("$LAUNCHCTL" print "$domain/$LEGACY_LABEL" 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    case "$output" in
+      *"Could not find service"*|*"service not found"*|*"No such process"*) return 3 ;;
+      *) return 4 ;;
+    esac
+  fi
+  printf '%s\n' "$output"
+}
+
+quiesce_legacy_launch_agent_before_activation() {
+  local domain=$1 legacy_plist="$LAUNCH_AGENTS_DIR/$LEGACY_LABEL.plist"
+  local output state bootout_output bootout_status tracked=0
+  [ "$LABEL" != "$LEGACY_LABEL" ] || return 0
+  if [ -e "$legacy_plist" ] || [ -L "$legacy_plist" ]; then
+    if [ ! -f "$legacy_plist" ] || [ -L "$legacy_plist" ] || [ ! -r "$legacy_plist" ] \
+        || ! grep -Fq "<key>Label</key><string>$(xml_escape "$LEGACY_LABEL")</string>" "$legacy_plist" \
+        || ! grep -Fq "<string>$(xml_escape "$SCRIPT_DIR/fm-checkout-refresh.sh")</string>" "$legacy_plist"; then
+      echo "error: legacy checkout-refresh LaunchAgent definition is malformed or untrusted" >&2
+      return 1
+    fi
+    if legacy_launch_agent_definition_matches_home "$legacy_plist"; then
+      tracked=1
+    fi
+  fi
+  if output=$(legacy_launch_agent_raw_state "$domain"); then
+    state=0
+  else
+    state=$?
+  fi
+  case "$state" in
+    3) return 0 ;;
+    0) ;;
+    *)
+      echo "error: cannot prove whether legacy checkout-refresh LaunchAgent $LEGACY_LABEL is loaded" >&2
+      return 1
+      ;;
+  esac
+  if [ "$tracked" -eq 1 ]; then
+    launch_agent_loaded_state "$domain" "$LEGACY_LABEL" "$legacy_plist" || return 1
+  else
+    if legacy_loaded_job_matches_home "$output" "$domain/$LEGACY_LABEL"; then
+      atomic_write "$STATE_ROOT/legacy-launch-agent.quarantine" "$output" || {
+        echo "error: cannot durably record untracked legacy checkout-refresh LaunchAgent $LEGACY_LABEL" >&2
+        return 1
+      }
+    else
+      state=$?
+      [ "$state" -eq 3 ] && return 0
+      echo "error: untracked legacy checkout-refresh LaunchAgent $LEGACY_LABEL identity is ambiguous" >&2
+      return 1
+    fi
+  fi
+  bootout_output=$("$LAUNCHCTL" bootout "$domain/$LEGACY_LABEL" 2>&1)
+  bootout_status=$?
+  [ "$bootout_status" -eq 0 ] || {
+    echo "error: cannot quiesce checkout-refresh LaunchAgent $LEGACY_LABEL: ${bootout_output:-bootout failed}" >&2
+    return 1
+  }
+  if legacy_launch_agent_raw_state "$domain" >/dev/null; then
+    echo "error: checkout-refresh LaunchAgent $LEGACY_LABEL remains live after bootout" >&2
+    return 1
+  else
+    state=$?
+  fi
+  [ "$state" -eq 3 ] || {
+    echo "error: cannot prove checkout-refresh LaunchAgent $LEGACY_LABEL absent after bootout" >&2
+    return 1
+  }
+  LEGACY_AGENT_STOPPED=1
+  LEGACY_AGENT_TRACKED=$tracked
+}
+
+restart_tracked_legacy_launch_agent() {
+  local domain=$1 legacy_plist="$LAUNCH_AGENTS_DIR/$LEGACY_LABEL.plist"
+  [ "$LEGACY_AGENT_STOPPED" -eq 1 ] && [ "$LEGACY_AGENT_TRACKED" -eq 1 ] || return 0
+  legacy_launch_agent_definition_matches_home "$legacy_plist" \
+    && "$LAUNCHCTL" bootstrap "$domain" "$legacy_plist" >/dev/null 2>&1 \
+    && launch_agent_loaded_state "$domain" "$LEGACY_LABEL" "$legacy_plist" || return 1
+  LEGACY_AGENT_STOPPED=0
 }
 
 physical_launch_agent_matches_home() {
@@ -2949,7 +3140,15 @@ EOF
     rm -f "$temp" "$previous"
     return 1
   }
-  mv -f "$temp" "$PLIST" || return 1
+  quiesce_legacy_launch_agent_before_activation "$domain" || {
+    restart_tracked_legacy_launch_agent "$domain" || true
+    rm -f "$temp" "$previous"
+    return 1
+  }
+  mv -f "$temp" "$PLIST" || {
+    restart_tracked_legacy_launch_agent "$domain" || true
+    return 1
+  }
   if "$LAUNCHCTL" bootstrap "$domain" "$PLIST" \
     && "$LAUNCHCTL" kickstart "$domain/$LABEL" \
     && launch_agent_loaded_state "$domain" "$LABEL" "$PLIST"; then
@@ -2973,6 +3172,10 @@ EOF
     fi
   else
     rm -f "$PLIST"
+    restart_tracked_legacy_launch_agent "$domain" || {
+      echo "error: checkout-refresh LaunchAgent activation failed and the legacy definition could not be restarted" >&2
+      return 1
+    }
   fi
   echo "error: checkout-refresh LaunchAgent activation failed; previous definition restored" >&2
   return 1
@@ -3016,6 +3219,10 @@ ensure_launch_agent() {
   [ "${#generation}" -eq 32 ] \
     || { echo "checkout-refresh LaunchAgent scheduler generation is malformed" >&2; return 1; }
   domain="gui/$(id -u)"
+  quiesce_legacy_launch_agent_before_activation "$domain" || {
+    echo "checkout-refresh legacy LaunchAgent identity or absence is untrusted" >&2
+    return 1
+  }
   launch_agent_loaded_state "$domain" "$LABEL" "$PLIST" \
     || { echo "checkout-refresh LaunchAgent loaded identity is missing or untrusted" >&2; return 1; }
   heartbeat=$(read_epoch "$STATE_ROOT/heartbeat")

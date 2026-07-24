@@ -1144,6 +1144,7 @@ teardown_treehouse_return_locked() {
       return 1
     }
   fi
+  validate_removal_tree_boundaries "$dir" "$label" || return 1
   if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" 2>&1); then
     [ -n "$out" ] && printf '%s\n' "$out"
     if [ -n "$post_return_cleanup" ]; then
@@ -1189,6 +1190,7 @@ teardown_treehouse_return_locked() {
       echo "teardown: $label return aborted because Treehouse task ownership changed during final safety checks" >&2
       return 1
     fi
+    validate_removal_tree_boundaries "$dir" "$label" || return 1
     if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" 2>&1); then
       [ -n "$out" ] && printf '%s\n' "$out"
       if [ -n "$post_return_cleanup" ]; then
@@ -1232,6 +1234,7 @@ teardown_treehouse_return_locked() {
         echo "teardown: $label return aborted after stale-lock cleanup because Treehouse task ownership changed during safety checks" >&2
         return 1
       fi
+      validate_removal_tree_boundaries "$dir" "$label" || return 1
       if out=$(fm_checkout_treehouse_return_locked "$dir" "$CHECKOUT_LOCK_ROOT" "$cd_dir" 2>&1); then
         [ -n "$out" ] && printf '%s\n' "$out"
         if [ -n "$post_return_cleanup" ]; then
@@ -1602,12 +1605,18 @@ validate_child_worktree_for_removal() {
 
 validate_removal_tree_boundaries() {
   local target=$1 label=$2
-  FM_REMOVAL_BOUNDARY_LABEL=$label python3 - "$target" <<'PY'
+  removal_tree_operation "$target" "$label" validate
+}
+
+removal_tree_operation() {
+  local target=$1 label=$2 operation=$3
+  FM_REMOVAL_BOUNDARY_LABEL=$label python3 - "$target" "$operation" <<'PY'
 import os
 import stat
 import sys
 
 root = os.path.realpath(sys.argv[1])
+operation = sys.argv[2]
 label = os.environ["FM_REMOVAL_BOUNDARY_LABEL"]
 injected = ""
 if os.environ.get("FM_ACCOUNT_ROUTING_TEST_LAB") == "firstmate-account-routing-test-lab-v1":
@@ -1636,46 +1645,96 @@ def mountinfo_paths():
             paths.add(os.path.realpath(value))
     return paths
 
-try:
-    root_metadata = os.lstat(root)
-    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
-        raise OSError("removal root is not a real directory")
-    root_device = root_metadata.st_dev
-    mounted = mountinfo_paths()
+def identity(metadata):
+    return metadata.st_dev, metadata.st_ino
 
-    def reject_boundary(path, metadata):
+try:
+    if operation not in ("validate", "remove") or root == os.path.sep:
+        raise OSError("invalid removal operation")
+    parent = os.path.dirname(root)
+    name = os.path.basename(root)
+    parent_flags = os.O_RDONLY | os.O_DIRECTORY
+    directory_flags = parent_flags
+    if hasattr(os, "O_NOFOLLOW"):
+        parent_flags |= os.O_NOFOLLOW
+        directory_flags |= os.O_NOFOLLOW
+    parent_fd = os.open(parent, parent_flags)
+    parent_metadata = os.fstat(parent_fd)
+    try:
+        root_metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        os.close(parent_fd)
+        raise SystemExit(0)
+    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
+        os.close(parent_fd)
+        raise OSError("removal root is not a real directory")
+    root_fd = os.open(name, directory_flags, dir_fd=parent_fd)
+    opened_root_metadata = os.fstat(root_fd)
+    if identity(root_metadata) != identity(opened_root_metadata):
+        os.close(root_fd)
+        os.close(parent_fd)
+        raise OSError("removal root identity changed")
+    root_device = root_metadata.st_dev
+
+    def reject_boundary(path, metadata, is_root=False):
         canonical = os.path.realpath(path)
+        mounted = mountinfo_paths()
         if canonical == injected:
             raise OSError(f"mounted path {canonical}")
         if metadata.st_dev != root_device:
             raise OSError(f"filesystem device boundary at {canonical}")
-        if canonical != root and (canonical in mounted or os.path.ismount(canonical)):
+        if canonical in mounted or os.path.ismount(canonical):
             raise OSError(f"mount boundary at {canonical}")
+        if is_root and metadata.st_dev != parent_metadata.st_dev:
+            raise OSError(f"removal root filesystem boundary at {canonical}")
 
-    reject_boundary(root, root_metadata)
-    for current, directories, files in os.walk(
-        root, topdown=True, followlinks=False, onerror=lambda error: (_ for _ in ()).throw(error)
-    ):
-        current_metadata = os.lstat(current)
-        reject_boundary(current, current_metadata)
-        safe_directories = []
-        for name in sorted(directories):
-            path = os.path.join(current, name)
-            metadata = os.lstat(path)
+    def traverse(directory_fd, path):
+        reject_boundary(path, os.fstat(directory_fd))
+        for entry in sorted(os.listdir(directory_fd)):
+            metadata = os.stat(entry, dir_fd=directory_fd, follow_symlinks=False)
+            entry_path = os.path.join(path, entry)
             if stat.S_ISLNK(metadata.st_mode):
+                if operation == "remove":
+                    current = os.stat(entry, dir_fd=directory_fd, follow_symlinks=False)
+                    if identity(current) != identity(metadata):
+                        raise OSError(f"symlink identity changed at {entry_path}")
+                    os.unlink(entry, dir_fd=directory_fd)
                 continue
-            if not stat.S_ISDIR(metadata.st_mode):
-                raise OSError(f"non-directory traversal entry at {path}")
-            reject_boundary(path, metadata)
-            safe_directories.append(name)
-        directories[:] = safe_directories
-        for name in sorted(files):
-            path = os.path.join(current, name)
-            metadata = os.lstat(path)
-            if stat.S_ISLNK(metadata.st_mode):
+            if stat.S_ISDIR(metadata.st_mode):
+                child_fd = os.open(entry, directory_flags, dir_fd=directory_fd)
+                try:
+                    opened = os.fstat(child_fd)
+                    if identity(metadata) != identity(opened):
+                        raise OSError(f"directory identity changed at {entry_path}")
+                    reject_boundary(entry_path, opened)
+                    traverse(child_fd, entry_path)
+                    if operation == "remove":
+                        current = os.stat(entry, dir_fd=directory_fd, follow_symlinks=False)
+                        if identity(current) != identity(opened):
+                            raise OSError(f"directory identity changed at {entry_path}")
+                        os.rmdir(entry, dir_fd=directory_fd)
+                finally:
+                    os.close(child_fd)
                 continue
-            if os.path.ismount(path) or os.path.realpath(path) in mounted:
-                raise OSError(f"mounted file at {path}")
+            reject_boundary(entry_path, metadata)
+            if operation == "remove":
+                current = os.stat(entry, dir_fd=directory_fd, follow_symlinks=False)
+                if identity(current) != identity(metadata):
+                    raise OSError(f"entry identity changed at {entry_path}")
+                os.unlink(entry, dir_fd=directory_fd)
+
+    try:
+        reject_boundary(root, opened_root_metadata, True)
+        traverse(root_fd, root)
+        if operation == "remove":
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if identity(current) != identity(opened_root_metadata):
+                raise OSError("removal root identity changed before release")
+            reject_boundary(root, current, True)
+            os.rmdir(name, dir_fd=parent_fd)
+    finally:
+        os.close(root_fd)
+        os.close(parent_fd)
 except OSError as error:
     print(
         f"REFUSED: {label} removal crosses an untrusted filesystem boundary: {error}",
@@ -1686,17 +1745,22 @@ PY
 }
 
 safe_rm_rf() {
-  local target=$1 label=$2
-  validate_removal_target "$target" "$label" >/dev/null || return 1
-  validate_removal_tree_boundaries "$target" "$label" || return 1
-  rm -rf -- "$target"
+  local target=$1 label=$2 canonical
+  canonical=$(validate_removal_target "$target" "$label") || return 1
+  removal_tree_operation "$canonical" "$label" remove
 }
 
 safe_rm_rf_child_worktree() {
-  local target=$1 project=$2
-  validate_child_worktree_for_removal "$target" "$project" >/dev/null || return 1
-  validate_removal_tree_boundaries "$target" "child worktree" || return 1
-  rm -rf -- "$target"
+  local target=$1 project=$2 canonical
+  canonical=$(validate_child_worktree_for_removal "$target" "$project") || return 1
+  removal_tree_operation "$canonical" "child worktree" remove
+}
+
+safe_remove_task_tmp() {
+  local target=$1
+  [ -n "$target" ] || return 0
+  [ "$target" = "/tmp/fm-$ID" ] || return 1
+  removal_tree_operation "$target" "task temp root" remove
 }
 
 repository_remote_identity() {
@@ -1760,8 +1824,8 @@ validate_secondmate_home_landed_state() {
     return 1
   }
   if git -C "$expected_source" remote get-url origin >/dev/null 2>&1; then
-    if fm_run_bounded_capture --combine-stderr live_output "$TEARDOWN_UPSTREAM_TIMEOUT" \
-        git -C "$expected_source" ls-remote --symref origin HEAD; then
+    if run_secondmate_remote_probe \
+        live_output "$expected_source" "$home" --symref origin HEAD; then
       live_status=0
     else
       live_status=$?
@@ -1871,16 +1935,45 @@ exact_git_repository_root() {
 }
 
 secondmate_network_remote_identity() {
-  local url=$1 transport=$2 host=$3 ssh_output ssh_status resolved_host
-  local proxy_command proxy_jump resolution resolution_status
+  local repository=$1 url=$2 transport=$3 host=$4 user=$5 port=$6
+  local ssh_output ssh_status resolved_host effective_user effective_port
+  local proxy_command proxy_jump local_command remote_command permit_local
+  local resolution resolution_status config_output config_status config_key
+  local -a ssh_args
   case "$host" in
     ''|-*|*$'\n'*|*$'\r'*|*$'\t'*) return 1 ;;
   esac
+  [ -z "${GIT_SSH_COMMAND+x}" ] \
+    && [ -z "${GIT_SSH+x}" ] \
+    && [ -z "${GIT_SSH_VARIANT+x}" ] \
+    && [ -z "${GIT_PROXY_COMMAND+x}" ] \
+    && [ -z "${GIT_CONFIG_COUNT+x}" ] \
+    && [ -z "${GIT_CONFIG_PARAMETERS+x}" ] || return 1
+  for config_key in core.sshCommand ssh.variant core.gitProxy http.proxy \
+      remote.origin.proxy remote.origin.uploadpack remote.origin.receivepack; do
+    if config_output=$(git -C "$repository" config --get-all "$config_key" 2>/dev/null); then
+      [ -z "$config_output" ] || return 1
+    else
+      config_status=$?
+      [ "$config_status" -eq 1 ] || return 1
+    fi
+  done
+  if config_output=$(git -C "$repository" config --get-regexp \
+      '^url\..*\.[iI]nstead[Oo]f$' 2>/dev/null); then
+    [ -z "$config_output" ] || return 1
+  else
+    config_status=$?
+    [ "$config_status" -eq 1 ] || return 1
+  fi
   resolved_host=$host
   if [ "$transport" = ssh ]; then
     [ -x /usr/bin/ssh ] || return 1
+    ssh_args=(-G)
+    [ -z "$user" ] || ssh_args+=(-l "$user")
+    [ -z "$port" ] || ssh_args+=(-p "$port")
+    ssh_args+=("$host")
     if fm_run_bounded_capture --combine-stderr ssh_output "$TEARDOWN_UPSTREAM_TIMEOUT" \
-        /usr/bin/ssh -G "$host"; then
+        /usr/bin/ssh "${ssh_args[@]}"; then
       ssh_status=0
     else
       ssh_status=$?
@@ -1890,10 +1983,20 @@ secondmate_network_remote_identity() {
     [ "$(printf '%s\n' "$ssh_output" | awk '$1 == "hostname" { count++ } END { print count + 0 }')" -eq 1 ] \
       || return 1
     resolved_host=$(printf '%s\n' "$ssh_output" | awk '$1 == "hostname" { print $2; exit }')
+    effective_user=$(printf '%s\n' "$ssh_output" | awk '$1 == "user" { print $2; exit }')
+    effective_port=$(printf '%s\n' "$ssh_output" | awk '$1 == "port" { print $2; exit }')
     proxy_command=$(printf '%s\n' "$ssh_output" | awk '$1 == "proxycommand" { $1=""; sub(/^ /, ""); print; exit }')
     proxy_jump=$(printf '%s\n' "$ssh_output" | awk '$1 == "proxyjump" { print $2; exit }')
+    local_command=$(printf '%s\n' "$ssh_output" | awk '$1 == "localcommand" { $1=""; sub(/^ /, ""); print; exit }')
+    remote_command=$(printf '%s\n' "$ssh_output" | awk '$1 == "remotecommand" { $1=""; sub(/^ /, ""); print; exit }')
+    permit_local=$(printf '%s\n' "$ssh_output" | awk '$1 == "permitlocalcommand" { print $2; exit }')
+    [ -z "$user" ] || [ "$effective_user" = "$user" ] || return 1
+    [ -z "$port" ] || [ "$effective_port" = "$port" ] || return 1
     [ -z "$proxy_command" ] || [ "$proxy_command" = none ] || return 1
     [ -z "$proxy_jump" ] || [ "$proxy_jump" = none ] || return 1
+    [ -z "$local_command" ] || [ "$local_command" = none ] || return 1
+    [ -z "$remote_command" ] || [ "$remote_command" = none ] || return 1
+    [ -z "$permit_local" ] || [ "$permit_local" = no ] || return 1
   fi
   if fm_run_bounded_capture --combine-stderr resolution "$TEARDOWN_UPSTREAM_TIMEOUT" \
       python3 - "$resolved_host" <<'PY'
@@ -1986,13 +2089,14 @@ PY
   fi
   fm_process_tree_cleanup_verified || return 1
   [ "$resolution_status" -eq 0 ] && [ -n "$resolution" ] || return 1
-  printf 'network\t%s\n' "$url"
+  printf 'network\t%s\t%s\n' "$transport" "$url"
 }
 
 validate_surviving_repository_authority() {
   local repository=$1 retiring_home=$2 repository_container=${3:-$1}
   local label=${4:-repository} common git_dir objects listed records path kind canonical
-  local listed_common bare_repository count=0 refs ref
+  local allowed_retiring_worktree=${5:-} listed_common bare_repository count=0 refs ref
+  local shallow partial_status
   [ "$(exact_git_repository_root "$repository" "$repository_container")" = "$repository" ] \
     || return 1
   [ -z "${GIT_OBJECT_DIRECTORY:-}" ] \
@@ -2016,7 +2120,27 @@ validate_surviving_repository_authority() {
         ;;
     esac
   done
-  FM_SURVIVING_OBJECTS_LABEL=$label python3 - "$objects" "$retiring_home" <<'PY'
+  shallow=$(git -C "$repository" rev-parse --is-shallow-repository 2>/dev/null) || return 1
+  [ "$shallow" = false ] || {
+    echo "REFUSED: $label is shallow and does not prove a complete surviving object graph" >&2
+    return 1
+  }
+  if git -C "$repository" config --get extensions.partialClone >/dev/null 2>&1; then
+    echo "REFUSED: $label uses promisor or partial-clone object semantics" >&2
+    return 1
+  else
+    partial_status=$?
+    [ "$partial_status" -eq 1 ] || return 1
+  fi
+  if git -C "$repository" config --get-regexp \
+      '^remote\..*\.(promisor|partialclonefilter)$' >/dev/null 2>&1; then
+    echo "REFUSED: $label uses promisor or partial-clone object semantics" >&2
+    return 1
+  else
+    partial_status=$?
+    [ "$partial_status" -eq 1 ] || return 1
+  fi
+  FM_SURVIVING_OBJECTS_LABEL=$label python3 - "$objects" "$retiring_home" <<'PY' || return 1
 import os
 import stat
 import sys
@@ -2107,14 +2231,20 @@ PY
     }
     case "$canonical/" in
       "$retiring_home/"*)
-        echo "REFUSED: $label linked-worktree graph depends on the retiring home at $canonical" >&2
-        return 1
+        if [ -z "$allowed_retiring_worktree" ] \
+            || [ "$canonical" != "$allowed_retiring_worktree" ]; then
+          echo "REFUSED: $label linked-worktree graph depends on the retiring home at $canonical" >&2
+          return 1
+        fi
         ;;
     esac
     case "$kind" in
       bare)
-        [ "$canonical" = "$common" ] && [ "$bare_repository" = true ] || return 1
-        [ "$canonical" != "$repository" ] || count=$((count + 1))
+        [ "$canonical" = "$common" ] || return 1
+        if [ "$bare_repository" = true ]; then
+          [ "$canonical" = "$repository" ] || return 1
+          count=$((count + 1))
+        fi
         ;;
       worktree)
         if [ "$canonical" = "$repository" ] \
@@ -2147,6 +2277,66 @@ EOF
   done <<EOF
 $refs
 EOF
+  FM_SURVIVING_REPOSITORY_LABEL=$label python3 - "$repository" <<'PY' || return 1
+import os
+import subprocess
+import sys
+
+repository = sys.argv[1]
+label = os.environ["FM_SURVIVING_REPOSITORY_LABEL"]
+
+def run(arguments, input_data=None):
+    return subprocess.run(
+        ["git", "-C", repository, *arguments],
+        check=False,
+        input=input_data,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+try:
+    revision_arguments = ["rev-list", "--objects", "--missing=print", "--all"]
+    head = run(["rev-parse", "--verify", "HEAD^{object}"])
+    if head.returncode == 0:
+        revision_arguments.append("HEAD")
+    objects = run(revision_arguments)
+    if objects.returncode != 0:
+        raise OSError("reachable objects cannot be enumerated")
+    object_ids = []
+    for line in objects.stdout.splitlines():
+        if not line:
+            continue
+        if line.startswith("?"):
+            raise OSError(f"promised object is missing: {line[1:].split()[0]}")
+        object_id = line.split(" ", 1)[0]
+        if not object_id:
+            raise OSError("malformed reachable-object inventory")
+        object_ids.append(object_id)
+    if not object_ids:
+        raise OSError("reachable-object inventory is empty")
+    checked = run(
+        ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
+        "\n".join(object_ids) + "\n",
+    )
+    if checked.returncode != 0:
+        raise OSError("reachable objects cannot be inspected")
+    records = checked.stdout.splitlines()
+    if len(records) != len(object_ids):
+        raise OSError("reachable-object inspection is incomplete")
+    for requested, record in zip(object_ids, records):
+        fields = record.split()
+        if (
+            len(fields) != 3
+            or fields[0] != requested
+            or fields[1] in ("missing", "promisor")
+            or not fields[2].isdigit()
+        ):
+            raise OSError(f"reachable object is unavailable: {requested}")
+except (OSError, subprocess.SubprocessError) as error:
+    print(f"REFUSED: {label} complete object graph is unavailable: {error}", file=sys.stderr)
+    raise SystemExit(1)
+PY
   git -C "$repository" fsck --connectivity-only --no-dangling >/dev/null 2>&1 || {
     echo "REFUSED: $label required Git objects are incomplete at $repository" >&2
     return 1
@@ -2154,8 +2344,13 @@ EOF
 }
 
 secondmate_remote_identity() {
-  local repository=$1 retiring_home=$2 url parsed kind transport host path canonical bare git_dir
-  url=$(git -C "$repository" remote get-url origin 2>/dev/null) || return 1
+  local repository=$1 retiring_home=$2 url raw_urls parsed kind transport host user port path
+  local canonical bare git_dir url_count
+  raw_urls=$(git -C "$repository" config --get-all remote.origin.url 2>/dev/null) || return 1
+  url_count=$(printf '%s\n' "$raw_urls" | awk 'NF { count++ } END { print count + 0 }') || return 1
+  [ "$url_count" -eq 1 ] || return 1
+  url=$(printf '%s\n' "$raw_urls" | sed -n '1p') || return 1
+  [ "$(git -C "$repository" remote get-url origin 2>/dev/null)" = "$url" ] || return 1
   [ -n "$url" ] || return 1
   parsed=$(python3 - "$url" "$repository" <<'PY'
 import ipaddress
@@ -2198,21 +2393,32 @@ try:
                     raise ValueError
                 print("local\t" + path)
             elif host:
-                print("network\t" + scheme + "\t" + host + "\t" + url)
+                print(
+                    "network\t"
+                    + scheme
+                    + "\t"
+                    + host
+                    + "\t"
+                    + (parsed.username or "-")
+                    + "\t"
+                    + (str(parsed.port) if parsed.port is not None else "-")
+                    + "\t"
+                    + url
+                )
             else:
                 raise ValueError
         else:
             raise ValueError
     else:
-        scp = re.match(r"^(?:[^@/:]+@)?([^/:]+):(.+)$", url)
+        scp = re.match(r"^(?:([^@/:]+)@)?([^/:]+):(.+)$", url)
         if scp:
-            host, path = scp.groups()
+            user, host, path = scp.groups()
             if loopback(host):
                 if not os.path.isabs(path):
                     raise ValueError
                 print("local\t" + path)
             else:
-                print("network\tssh\t" + host + "\t" + url)
+                print("network\tssh\t" + host + "\t" + (user or "-") + "\t-\t" + url)
         else:
             path = url if os.path.isabs(url) else os.path.join(repository, url)
             print("local\t" + path)
@@ -2220,11 +2426,14 @@ except (OSError, ValueError):
     raise SystemExit(1)
 PY
   ) || return 1
-  IFS=$'\t' read -r kind transport host path <<EOF
+  IFS=$'\t' read -r kind transport host user port path <<EOF
 $parsed
 EOF
   if [ "$kind" = network ]; then
-    secondmate_network_remote_identity "$path" "$transport" "$host"
+    [ "$user" != - ] || user=
+    [ "$port" != - ] || port=
+    secondmate_network_remote_identity \
+      "$repository" "$path" "$transport" "$host" "$user" "$port"
     return $?
   fi
   [ "$kind" = local ] || return 1
@@ -2245,6 +2454,31 @@ EOF
     "$canonical" "$retiring_home" "$canonical" "secondmate project landing authority" \
     || return 1
   printf 'local\t%s\n' "$canonical"
+}
+
+run_secondmate_remote_probe() {
+  local output_name=$1 repository=$2 retiring_home=$3 identity
+  shift 3
+  identity=$(secondmate_remote_identity "$repository" "$retiring_home") || return 1
+  case "$identity" in
+    network$'\t'ssh$'\t'*)
+      fm_run_bounded_capture --combine-stderr "$output_name" "$TEARDOWN_UPSTREAM_TIMEOUT" \
+        /usr/bin/env -u GIT_SSH -u GIT_SSH_COMMAND -u GIT_SSH_VARIANT \
+        GIT_SSH_COMMAND=/usr/bin/ssh GIT_SSH_VARIANT=ssh \
+        git -C "$repository" ls-remote "$@"
+      ;;
+    network$'\t'http$'\t'*|network$'\t'https$'\t'*)
+      fm_run_bounded_capture --combine-stderr "$output_name" "$TEARDOWN_UPSTREAM_TIMEOUT" \
+        /usr/bin/env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+        -u ALL_PROXY -u all_proxy -u NO_PROXY -u no_proxy \
+        git -C "$repository" ls-remote "$@"
+      ;;
+    network$'\t'git$'\t'*|local$'\t'*)
+      fm_run_bounded_capture --combine-stderr "$output_name" "$TEARDOWN_UPSTREAM_TIMEOUT" \
+        git -C "$repository" ls-remote "$@"
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 enumerate_secondmate_project_repositories() {
@@ -2417,7 +2651,8 @@ EOF
 }
 
 validate_secondmate_declared_submodules() {
-  local repository=$1 container=${2:-$1} modules="$repository/.gitmodules" entries status key path submodule
+  local repository=$1 container=${2:-$1} modules entries status key path submodule
+  modules="$repository/.gitmodules"
   [ -e "$modules" ] || [ -L "$modules" ] || return 0
   [ -f "$modules" ] && [ ! -L "$modules" ] && [ -r "$modules" ] || return 1
   if entries=$(git -C "$repository" config --file .gitmodules \
@@ -2494,8 +2729,8 @@ validate_secondmate_project_repository_landed_state() {
     echo "REFUSED: secondmate project origin drifted from its registered source at $repository" >&2
     return 1
   }
-  if fm_run_bounded_capture --combine-stderr remote_output "$TEARDOWN_UPSTREAM_TIMEOUT" \
-      git -C "$repository" ls-remote origin 'refs/heads/*'; then
+  if run_secondmate_remote_probe \
+      remote_output "$repository" "$retiring_home" origin 'refs/heads/*'; then
     remote_status=0
   else
     remote_status=$?
@@ -2549,10 +2784,19 @@ EOF
 validate_secondmate_project_clones() {
   local home=$1 registry=$2 expected_id=$3 expected_source=$4 projects_root source_projects_root
   local expected listed project clone source_clone repositories relative repository source_repository
-  expected=$(fm_secondmate_registry_query "$registry" query "$expected_id" projects) || {
-    echo "REFUSED: secondmate project registration is unprovable for $expected_id" >&2
-    return 1
-  }
+  if ! expected=$(fm_secondmate_registry_query "$registry" query "$expected_id" projects); then
+    if [ "$registry" = "$PREPARED_REGISTRY_PATH" ] \
+        && [ "$expected_id" = "$PREPARED_REGISTRY_ID" ] \
+        && [ "$home" = "$PREPARED_REGISTRY_HOME" ] \
+        && [ -n "$PREPARED_REGISTRY_BACKUP" ] \
+        && fm_account_lifecycle_lock_owned "$PREPARED_REGISTRY_LOCK"; then
+      expected=$(fm_secondmate_registry_query \
+        "$PREPARED_REGISTRY_BACKUP" query "$expected_id" projects) || return 1
+    else
+      echo "REFUSED: secondmate project registration is unprovable for $expected_id" >&2
+      return 1
+    fi
+  fi
   projects_root=$(fm_checkout_trusted_dir "$home/projects") || {
     echo "REFUSED: secondmate projects directory is missing, redirected, or unreadable at $home/projects" >&2
     return 1
@@ -2630,7 +2874,7 @@ EOF
 
 validate_firstmate_home_for_removal() {
   local home=$1 label=$2 expected_id=${3:-} expected_source=${4:-$FM_ROOT} expected_registry=${5:-} expected_project
-  local abs_home_path metadata_home_root marker_id
+  local abs_home_path metadata_home_root marker_id source_authority=${7:-1}
   expected_project=${6:-$home}
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
@@ -2657,6 +2901,11 @@ validate_firstmate_home_for_removal() {
     return 1
   }
   validate_firstmate_home_repository_identity "$abs_home_path" "$expected_source" || return 1
+  if [ "$source_authority" -eq 1 ]; then
+    validate_surviving_repository_authority \
+      "$expected_source" "$abs_home_path" "$expected_source" \
+      "secondmate top-level source repository" "$abs_home_path" || return 1
+  fi
   if [ -n "$expected_id" ] && firstmate_home_has_treehouse_slot "$abs_home_path" "$expected_source"; then
     require_treehouse_task_lease "$abs_home_path" "$expected_id" || return 1
   fi
@@ -2716,12 +2965,12 @@ remove_firstmate_home() {
 }
 
 validate_registered_secondmate_children() {
-  local home=$1 entries child_id child_home child_projects child_meta meta_kind meta_home
+  local home=$1 entries child_id child_home _child_projects child_meta meta_kind meta_home
   entries=$(fm_secondmate_registry_query "$home/data/secondmates.md" list) || {
     echo "REFUSED: registered secondmate children are unprovable at $home/data/secondmates.md" >&2
     return 1
   }
-  while IFS=$'\t' read -r child_id child_home child_projects; do
+  while IFS=$'\t' read -r child_id child_home _child_projects; do
     [ -n "$child_id" ] || continue
     child_meta="$home/state/$child_id.meta"
     [ -f "$child_meta" ] && [ ! -L "$child_meta" ] && [ -r "$child_meta" ] || {
@@ -2991,7 +3240,7 @@ prepare_secondmate_registry_removal() {
     rm -f "$tmp"
     return 1
   }
-  if ! fm_account_system_perl -e '
+  if ! fm_account_system_perl - "$reg" "$tmp" "$backup" "$id" <<'PERL'
     my ($source, $destination, $backup, $expected) = @ARGV;
     open my $input, q{<}, $source or exit 1;
     open my $output, q{>}, $destination or exit 1;
@@ -3008,7 +3257,8 @@ prepare_secondmate_registry_removal() {
     close $output or exit 1;
     close $saved or exit 1;
     exit 1 if $removed != 1;
-  ' "$reg" "$tmp" "$backup" "$id"; then
+PERL
+  then
     rm -f "$tmp" "$backup"
     return 1
   fi
@@ -3101,7 +3351,7 @@ if [ "$ORCA_CLEANUP_PENDING" = 1 ]; then
   fm_checkout_lock_run "$WT" "$CHECKOUT_LOCK_ROOT" remove_pending_orca_worktree_locked || exit 1
   remove_grok_turnend_auth "$STATE" "$ID"
   fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-  [ -z "$TASK_TMP" ] || rm -rf "$TASK_TMP"
+  safe_remove_task_tmp "$TASK_TMP" || exit 1
   rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
   [ -z "$ACCOUNT_DELETE_LOCK" ] || fm_account_lifecycle_lock_release "$ACCOUNT_DELETE_LOCK" >/dev/null 2>&1 || true
   ACCOUNT_DELETE_LOCK=
@@ -3115,7 +3365,9 @@ if [ "$KIND" = secondmate ]; then
     echo "error: secondmate home identity changed while teardown waited for lifecycle ownership" >&2
     exit 1
   }
-  validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" "$FM_ROOT" "$SECONDMATE_REG" "$PROJ" >/dev/null || exit 1
+  validate_firstmate_home_for_removal \
+    "$HOME_PATH" "secondmate home" "$ID" "$FM_ROOT" "$SECONDMATE_REG" "$PROJ" 0 \
+    >/dev/null || exit 1
   if [ "$FORCE" = "--force" ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
   fi
@@ -3392,7 +3644,7 @@ remove_grok_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+[ -z "$TASK_TMP" ] || safe_remove_task_tmp "$TASK_TMP" || exit 1
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
 [ -z "$ACCOUNT_DELETE_LOCK" ] || fm_account_lifecycle_lock_release "$ACCOUNT_DELETE_LOCK" >/dev/null 2>&1 || true
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
