@@ -94,7 +94,11 @@ case "${1:-} ${2:-}" in
     jq -n --rawfile body "${FM_TEST_AXI_BODY_FILE:-$FM_TEST_BODY_FILE}" --argjson number "$3" \
       '{pull_request:{number:$number,body:$body}}'
     ;;
-  'pr ready') printf '%s\n' false > "$FM_TEST_DRAFT_FILE" ;;
+  'pr ready')
+    [ "${FM_TEST_READY_FAIL_BEFORE:-0}" -eq 0 ] || exit "$FM_TEST_READY_FAIL_BEFORE"
+    printf '%s\n' false > "$FM_TEST_DRAFT_FILE"
+    [ "${FM_TEST_READY_FAIL_AFTER:-0}" -eq 0 ] || exit "$FM_TEST_READY_FAIL_AFTER"
+    ;;
   'api GET')
     number=${3##*/}
     jq -n --rawfile body "$FM_TEST_BODY_FILE" --argjson number "$number" --arg head "$FM_TEST_PR_HEAD" \
@@ -116,7 +120,11 @@ case "${1:-} ${2:-}" in
   'mr update')
     case " $* " in
       *" --draft "*) printf '%s\n' true > "$FM_TEST_DRAFT_FILE" ;;
-      *) printf '%s\n' false > "$FM_TEST_DRAFT_FILE" ;;
+      *)
+        [ "${FM_TEST_READY_FAIL_BEFORE:-0}" -eq 0 ] || exit "$FM_TEST_READY_FAIL_BEFORE"
+        printf '%s\n' false > "$FM_TEST_DRAFT_FILE"
+        [ "${FM_TEST_READY_FAIL_AFTER:-0}" -eq 0 ] || exit "$FM_TEST_READY_FAIL_AFTER"
+        ;;
     esac
     ;;
   'api --hostname')
@@ -181,6 +189,8 @@ run_gate() {
     FM_TEST_REPO_FILE="$dir/repo-path" FM_TEST_EVIDENCE_PATH="${FM_TEST_EVIDENCE_PATH:-evidence/result.txt}" \
     FM_TEST_EVIDENCE_KIND="${FM_TEST_EVIDENCE_KIND:-file}" \
     FM_TEST_READY_READBACK_FAIL="${FM_TEST_READY_READBACK_FAIL:-0}" \
+    FM_TEST_READY_FAIL_BEFORE="${FM_TEST_READY_FAIL_BEFORE:-0}" \
+    FM_TEST_READY_FAIL_AFTER="${FM_TEST_READY_FAIL_AFTER:-0}" \
     FM_TEST_ROLLBACK_RC="${FM_TEST_ROLLBACK_RC:-0}" FM_TEST_GH_READ_RC="${FM_TEST_GH_READ_RC:-0}" \
     FM_TEST_REAL_MKTEMP="$REAL_MKTEMP" FM_TEST_REAL_SED="$REAL_SED" \
     FM_TEST_REAL_AWK="$REAL_AWK" FM_TEST_REAL_SORT="$REAL_SORT" FM_TEST_REAL_RM="$REAL_RM" \
@@ -369,6 +379,9 @@ structured-json|{"Authorization": "Basic dXNlcjpwYXNzd29yZA"}
 structured-non-leading|{"method":"GET","Authorization":"Basic dXNlcjpwYXNzd29yZA"}
 structured-nested|{"headers":{"Authorization":"Basic dXNlcjpwYXNzd29yZA"}}
 structured-multiple|{"Authorization":"Basic REDACTED","authorization":"Basic dXNlcjpwYXNzd29yZA"}
+structured-preceding-escaped-quote|{"note":"literal \" quote","Authorization":"Basic dXNlcjpwYXNzd29yZA"}
+structured-even-backslash-parity|{"note":"literal \\","Authorization":"Basic dXNlcjpwYXNzd29yZA"}
+structured-unterminated-value|{"Authorization":"Basic dXNlcjpwYXNzd29yZA}
 structured-key|Authorization = "Basic dXNlcjpwYXNzd29yZA"
 EOF
   while IFS='|' read -r name value; do
@@ -433,6 +446,8 @@ structured-non-leading|{"method":"GET","Authorization":"Basic REDACTED"}
 structured-nested|{"headers":{"Authorization":"Basic PLACEHOLDER"}}
 structured-multiple|{"Authorization":"Basic REDACTED","authorization":"Basic TOKEN"}
 structured-leading-with-tail|{"Authorization":"Basic REDACTED","method":"GET"}
+structured-preceding-escaped-quote|{"note":"literal \" quote","Authorization":"Basic REDACTED"}
+structured-even-backslash-parity|{"note":"literal \\","Authorization":"Basic PLACEHOLDER"}
 EOF
 
   dir=$(make_case basic-ordinary-prose)
@@ -650,6 +665,52 @@ test_ready_readback_surfaces_failed_rollback() {
     "failed ready-state readback retained an invalid receipt"
   [ "$(cat "$dir/draft")" = false ] || fail "rollback-failure fixture did not remain reviewable"
   pass "ready-state failure retains both the readback and rollback diagnostics"
+}
+
+test_ready_command_failure_rolls_back_ambiguous_transition() {
+  local dir name failure_stage failure_status rc
+  while IFS='|' read -r name failure_stage failure_status; do
+    dir=$(make_case "ready-command-$name")
+    safe_body > "$dir/body.md"
+    set +e
+    case "$failure_stage" in
+      before) FM_TEST_READY_FAIL_BEFORE=$failure_status attest_none "$dir" ;;
+      after) FM_TEST_READY_FAIL_AFTER=$failure_status attest_none "$dir" ;;
+      *) fail "unknown ready command failure stage: $failure_stage" ;;
+    esac > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "ready command $name failure passed"
+    assert_grep "readiness command failed with exit $failure_status" "$dir/stderr" \
+      "ready command $name failure lost its original status"
+    assert_grep "pr ready $GITHUB_URL --undo" "$dir/gh.log" \
+      "ready command $name failure did not attempt draft rollback"
+    assert_absent "$dir/home/state/task-a.pr-publication" \
+      "ready command $name failure retained its publication receipt"
+    [ "$(cat "$dir/draft")" = true ] || fail "ready command $name failure did not restore draft state"
+  done <<'EOF'
+before-transition|before|7
+after-transition|after|8
+EOF
+
+  dir=$(make_case ready-command-after-transition-rollback-failure)
+  safe_body > "$dir/body.md"
+  set +e
+  FM_TEST_READY_FAIL_AFTER=8 FM_TEST_ROLLBACK_RC=9 attest_none "$dir" \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "ambiguous ready command and rollback failure passed"
+  assert_grep 'readiness command failed with exit 8' "$dir/stderr" \
+    "ambiguous ready command failure lost its original status"
+  assert_grep 'draft rollback also failed with exit 9' "$dir/stderr" \
+    "ambiguous ready command failure lost its rollback status"
+  assert_grep 'may remain reviewable without a valid publication receipt' "$dir/stderr" \
+    "ambiguous ready command failure hid the unsafe reviewable state"
+  assert_absent "$dir/home/state/task-a.pr-publication" \
+    "ambiguous ready command failure retained its publication receipt"
+  [ "$(cat "$dir/draft")" = false ] || fail "rollback-failure fixture did not remain reviewable"
+  pass "ambiguous ready command failures roll back and preserve both diagnostics"
 }
 
 test_machine_failure_classes_are_bounded() {
@@ -948,6 +1009,7 @@ test_partial_intent_framing_refuses
 test_exact_head_evidence_accessibility_and_kind
 test_body_head_drift_and_correction_retry
 test_ready_readback_surfaces_failed_rollback
+test_ready_command_failure_rolls_back_ambiguous_transition
 test_machine_failure_classes_are_bounded
 test_scratch_failures_are_state_invalid_and_preserve_primary_failure
 test_gitlab_evidence_paths_decode_and_encode_once

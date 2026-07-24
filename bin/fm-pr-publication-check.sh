@@ -578,12 +578,25 @@ reject_basic_authorization() {
         || lowered == "basic~credential" \
         || lowered == "${basic_credential}"
     }
+    function closing_quote_position(text, quote, i, slash_count, cursor) {
+      for (i=1; i <= length(text); i++) {
+        if (substr(text, i, 1) != quote) continue
+        slash_count=0
+        cursor=i - 1
+        while (cursor > 0 && substr(text, cursor, 1) == "\\") {
+          slash_count++
+          cursor--
+        }
+        if (slash_count % 2 == 0) return i
+      }
+      return 0
+    }
     function unwrap_structured_value(value, first, tail, end, trailing) {
       value=trim(value)
       first=substr(value, 1, 1)
       if (first != "`" && first != "\"" && first != apostrophe) return value
       tail=substr(value, 2)
-      end=index(tail, first)
+      end=closing_quote_position(tail, first)
       if (end == 0) return tail
       trailing=trim(substr(tail, end + 1))
       if (trailing == "" || trailing == "," || trailing == "}" \
@@ -607,6 +620,10 @@ reject_basic_authorization() {
       lower=tolower(value)
       if (!match(lower, /^basic([[:space:]]+|$)/)) return 0
       return rejects_basic_value(substr(value, RSTART + RLENGTH))
+    }
+    function has_basic_scheme(value) {
+      value=tolower(trim(value))
+      return value ~ /^basic([[:space:]]+|$)/
     }
     function rejects_authorization(text, key, rest, delimiter) {
       text=trim(text)
@@ -634,7 +651,7 @@ reject_basic_authorization() {
           quote=apostrophe
         }
         tail=substr(rest, start + 1)
-        end=index(tail, quote)
+        end=closing_quote_position(tail, quote)
         if (end == 0) break
         key=substr(tail, 1, end - 1)
         after=trim(substr(tail, end + 1))
@@ -646,8 +663,8 @@ reject_basic_authorization() {
         value_quote=substr(after, 1, 1)
         if (value_quote == "`" || value_quote == "\"" || value_quote == apostrophe) {
           value_tail=substr(after, 2)
-          value_end=index(value_tail, value_quote)
-          if (value_end == 0) return rejects_basic_scheme(value_tail)
+          value_end=closing_quote_position(value_tail, value_quote)
+          if (value_end == 0) return has_basic_scheme(value_tail)
           value=substr(value_tail, 1, value_end - 1)
           rest=substr(value_tail, value_end + 1)
         } else {
@@ -1183,10 +1200,10 @@ if [ "$ACTION" = attest ]; then
   fm_pr_private_file_valid "$RECEIPT" 600 "$STATE_DEVICE" || exit 1
   parse_receipt "$RECEIPT" || exit 1
   FAILURE_CLASS=forge-read-failed
-  if ! set_review_state ready; then
-    rm -f -- "$RECEIPT"
-    echo "error: publication passed but the forge could not mark the draft ready" >&2
-    exit 1
+  READY_STATUS=0
+  set_review_state ready || READY_STATUS=$?
+  if [ "$READY_STATUS" -ne 0 ]; then
+    fail_after_ready "publication passed but the forge readiness command failed with exit $READY_STATUS and its remote result is ambiguous"
   fi
   READY_READBACK_FAILED=0
   case "$PROVIDER" in
