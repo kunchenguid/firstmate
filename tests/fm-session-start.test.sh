@@ -645,6 +645,29 @@ EOF
   pass "a lock refusal prints a loud read-only banner, skips every mutating step, and still completes the digest"
 }
 
+test_lock_write_failure_read_only_path() {
+  local rec root home fakebin out status
+  rec=$(new_world lock-write-failure)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  append_wake "$home/state" signal task-a "done: must remain queued" || fail "seed wake failed"
+  chmod 0500 "$home/state"
+
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  chmod 0700 "$home/state"
+
+  expect_code 0 "$status" "fm-session-start.sh must exit 0 when lock publication fails"
+  assert_contains "$out" "cannot write session lock" "lock publication failure was not surfaced"
+  assert_contains "$out" "READ-ONLY SESSION" "lock publication failure did not force a read-only session"
+  [ -s "$home/state/.wake-queue" ] || fail "lock publication failure allowed the wake queue to mutate"
+
+  pass "session start stays read-only when lock ownership cannot be published"
+}
+
 # --- output ordering ----------------------------------------------------------
 
 test_output_ordering_diagnostics_lead() {
@@ -1258,6 +1281,7 @@ EOF
 
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
+test_lock_write_failure_read_only_path
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start
 test_session_start_relaunches_missing_pi_secondmate
