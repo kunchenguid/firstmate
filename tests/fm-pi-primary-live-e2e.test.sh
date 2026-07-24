@@ -273,7 +273,7 @@ while [ "$i" -lt 120 ]; do
 done
 [ -f "$HOME_DIR/state/.pi-turnend-extension-loaded" ] || fail "Pi turn-end extension did not load"
 [ -f "$HOME_DIR/state/.pi-watch-extension-loaded" ] || fail "Pi watcher extension did not load"
-wait_for_text "(openai-codex)" 120 || fail "Pi did not reach its ready composer"
+wait_for_text "gpt-5.6-sol" 120 || fail "Pi did not reach its ready composer"
 sleep 1
 
 send_prompt "/calm"
@@ -299,7 +299,7 @@ send_prompt "/calm"
 sleep 0.2
 
 : > "$HOME_DIR/state/pi-e2e.meta"
-send_prompt "Start supervision with fm_watch_arm_pi and never use bash to arm supervision. After the watcher wake arrives, run bin/fm-wake-drain.sh and reply exactly HANDLED."
+send_prompt "Start supervision with fm_watch_arm_pi and never use bash to arm supervision. After the watcher wake arrives, handle it and reply exactly HANDLED."
 wait_for_text "watcher: started Pi extension arm child 1" || fail "Pi did not render the initial watcher tool result"
 
 printf 'done: pi live e2e watcher fire\n' > "$HOME_DIR/state/pi-e2e.status"
@@ -312,8 +312,17 @@ done
 grep -Eq 'reason=actionable-signal.*successor=started:[0-9]+' "$HOME_DIR/state/.watch-cycle-exits.log" 2>/dev/null \
   || fail "Pi extension did not start and ledger-link a successor after the actionable close"
 wait_for_exact_line "HANDLED" 120 || fail "Pi did not drain and settle after its extension-owned successor started"
-
+sleep 2
 pane=$(capture)
+handled_count=$(printf '%s\n' "$pane" | grep -Fxc " HANDLED" || true)
+[ "$handled_count" -eq 1 ] || fail "hidden watcher transport was missed or duplicated (HANDLED count $handled_count)"
+printf '%s\n' "$pane" | grep -Fq "FIRSTMATE WATCHER WAKE:" \
+  && fail "Pi rendered raw watcher transport in the captain transcript"
+printf '%s\n' "$pane" | grep -Fq "Run bin/fm-wake-drain.sh first and handle the queued wake." \
+  && fail "Pi rendered watcher queue-drain instructions in the captain transcript"
+printf '%s\n' "$pane" | grep -Fq "$HOME_DIR/state" \
+  && fail "Pi rendered the private watcher state path in the captain transcript"
+
 guard_count=$(printf '%s\n' "$pane" | grep -Fc "TURN WOULD END BLIND - supervision is off." || true)
 [ "$guard_count" -eq 0 ] || fail "successor was not protecting Pi before its next turn end (guard count $guard_count)"
 foreground_arm='$ bin/fm-watch-arm.sh'
@@ -336,4 +345,4 @@ wait_for_text "PI_EXIT=0" 60 || fail "Pi did not exit cleanly"
 wait_pid_dead "$watcher_pid" || fail "watcher child survived clean Pi exit"
 wait_pid_dead "$arm_pid" || fail "arm child survived clean Pi exit"
 
-printf 'ok - Pi %s live E2E covered native Calm Working visibility, Ahoy first/later messages, legacy transcripts, near misses, and watcher continuity\n' "$PI_VERSION"
+printf 'ok - Pi %s live E2E covered hidden exactly-once watcher transport, native Calm Working visibility, Ahoy first/later messages, legacy transcripts, near misses, and watcher continuity\n' "$PI_VERSION"

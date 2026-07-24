@@ -197,7 +197,15 @@ export default function (pi: ExtensionAPI) {
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
-    await pi.sendUserMessage(content, { deliverAs: "followUp" });
+    pi.sendMessage(
+      {
+        customType: "firstmate-watcher",
+        content,
+        display: false,
+        details: { kind: "watcher" },
+      },
+      { triggerTurn: true, deliverAs: "followUp" },
+    );
   }
 
   function surfaceFailure(message: string): void {

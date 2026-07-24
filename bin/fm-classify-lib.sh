@@ -321,9 +321,11 @@ signal_reason_is_actionable() {  # <file> ...
 #   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
 #             pane; the crew is legitimately mid-work on a static-looking pane
 #             (e.g. waiting on CI);
+#   waiting - a current no-mistakes run-step is parked at a verified validation
+#             decision, which is expected to idle until its gate response;
 #   paused  - the crew's authoritative current state is a declared external-wait
-#             pause (paused:), which is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
+#             pause (paused:), which is expected to idle;
+#   none    - neither, so the wake must surface (a stopped/finished/failed/
 #             torn-down/unknown crew, or an unreadable verdict).
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
@@ -338,6 +340,10 @@ crew_absorb_class() {  # <id>
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
+  if [ "$state" = parked ]; then
+    src=${line#*source: }; src=${src%% *}
+    [ "$src" = run-step ] && { printf 'waiting'; return; }
+  fi
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
@@ -351,7 +357,7 @@ crew_absorb_class() {  # <id>
 # ONLY when this returns 0, and SURFACED otherwise (the crew may be done, waiting
 # on a decision, or wedged). For stale panes it is checked before trusting the
 # status log so a pre-validation captain-relevant line does not override an active
-# run. See crew_absorb_class for the exact working/paused/none decision.
+# run. See crew_absorb_class for the exact working/waiting/paused/none decision.
 crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
 }
@@ -405,9 +411,10 @@ scan_captain_relevant_statuses() {  # <state>
   local state=$1 f last task
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    [ -f "$state/$task.meta" ] || continue
     last=$(last_status_line "$f")
     status_is_captain_relevant "$last" || continue
-    task=$(basename "$f"); task="${task%.status}"
     printf '%s\t%s\t%s\n' "$f" "$task" "$last"
   done
   return 0

@@ -67,8 +67,12 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" "fm_watch_arm_pi" "tracked extension missing tool name"
   assert_contains "$text" "fm-watch-arm-pi" "tracked extension missing command name"
   assert_contains "$text" "fm-watch-arm.sh" "tracked extension missing watcher arm"
-  assert_contains "$text" "sendUserMessage" "tracked extension missing Pi wake API"
-  assert_contains "$text" 'encodeFirstmateOperationalInput' "tracked extension does not construct typed synthetic user-role wakes"
+  assert_contains "$text" "sendMessage" "tracked extension missing Pi custom-message wake API"
+  assert_not_contains "$text" "sendUserMessage" "tracked extension still injects watcher transport as captain-visible user input"
+  assert_contains "$text" 'customType: "firstmate-watcher"' "tracked extension missing watcher custom-message identity"
+  assert_contains "$text" "display: false" "tracked extension does not hide watcher transport from the transcript"
+  assert_contains "$text" "triggerTurn: true" "tracked extension hidden transport does not wake an idle model"
+  assert_contains "$text" 'encodeFirstmateOperationalInput' "tracked extension does not construct typed operational wakes"
   assert_contains "$text" "deliverAs: \"followUp\"" "tracked extension missing followUp delivery"
   assert_contains "$text" ".pi-watch-extension-loaded" "tracked extension missing loaded marker"
   assert_contains "$text" 'createHash("sha256").update(readFileSync(extensionFile)).digest("hex")' "tracked extension does not self-hash its own content for extensionVersion"
@@ -138,8 +142,13 @@ const pi = {
     if (name === "fm-watch-arm-pi") handler = options.handler;
   },
   registerTool() {},
-  sendUserMessage: async (message) => {
-    prompt = message;
+  sendMessage: async (message, options) => {
+    if (message.display !== false) throw new Error("watcher transport is visible");
+    if (message.customType !== "firstmate-watcher") throw new Error("watcher transport has the wrong custom type");
+    if (options?.triggerTurn !== true || options?.deliverAs !== "followUp") {
+      throw new Error(`watcher transport has unsafe delivery options: ${JSON.stringify(options)}`);
+    }
+    prompt = message.content;
   },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
@@ -214,7 +223,7 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async () => {},
+  sendMessage: async () => {},
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -281,7 +290,7 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async () => {},
+  sendMessage: async () => {},
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -341,7 +350,7 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async () => {},
+  sendMessage: async () => {},
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -412,7 +421,7 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async () => {
+  sendMessage: async () => {
     rowsAtDelivery = existsSync(process.env.FM_ARM_LOG)
       ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").length
       : 0;
@@ -484,8 +493,8 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async (message) => {
-    prompt += message;
+  sendMessage: async (message) => {
+    prompt += message.content;
     rowsAtPrompt = existsSync(process.env.FM_ARM_LOG)
       ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").length
       : 0;
@@ -556,8 +565,8 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async (message) => {
-    prompt += message;
+  sendMessage: async (message) => {
+    prompt += message.content;
     rowsAtPrompt = existsSync(process.env.FM_ARM_LOG)
       ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").length
       : 0;
@@ -633,8 +642,8 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async (message) => {
-    prompts.push(message);
+  sendMessage: async (message) => {
+    prompts.push(message.content);
   },
 };
 const rows = () => existsSync(process.env.FM_ARM_LOG)
@@ -715,7 +724,7 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async () => {
+  sendMessage: async () => {
     prompts += 1;
   },
 };
@@ -770,8 +779,8 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async (message) => {
-    prompt += message;
+  sendMessage: async (message) => {
+    prompt += message.content;
   },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
@@ -823,8 +832,8 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async (message) => {
-    prompt += message;
+  sendMessage: async (message) => {
+    prompt += message.content;
   },
 };
 const lock = `${process.env.FM_HOME}/state/.lock`;
@@ -878,7 +887,7 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async () => {},
+  sendMessage: async () => {},
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
@@ -953,7 +962,7 @@ const pi = {
   },
   registerCommand() {},
   registerTool() {},
-  sendUserMessage: async () => {},
+  sendMessage: async () => {},
 };
 const before = process.listenerCount("exit");
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -1000,7 +1009,7 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async () => {},
+  sendMessage: async () => {},
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);

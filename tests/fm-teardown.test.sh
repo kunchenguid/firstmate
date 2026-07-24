@@ -1243,7 +1243,7 @@ test_local_only_force_overrides_unpushed() {
 }
 
 test_herdr_teardown_clears_escalation_marker() {
-  local case_dir marker
+  local case_dir marker key artifact
   case_dir=$(make_case herdr-marker-cleanup)
   write_meta "$case_dir" local-only ship
   sed -i.bak 's/^window=.*/window=default:wG:pQ/' "$case_dir/state/task-x1.meta"
@@ -1256,11 +1256,25 @@ SH
   chmod +x "$case_dir/fakebin/herdr"
   marker="$case_dir/state/.herdr-escalated-default_wG_pQ"
   : > "$marker"
+  key=default_wG_pQ
+  for artifact in \
+    ".hash-$key" ".count-$key" ".stale-$key" ".stale-since-$key" \
+    ".wedge-escalations-$key" ".paused-$key" ".paused-rechecked-$key" \
+    ".paused-resurfaced-$key" ".verified-wait-$key"; do
+    : > "$case_dir/state/$artifact"
+  done
 
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-marker-cleanup: forced teardown failed"
   [ ! -e "$marker" ] || fail "herdr-marker-cleanup: teardown left the pane's escalation marker behind"
-  pass "herdr teardown removes pane-owned escalation dedupe state"
+  for artifact in \
+    ".hash-$key" ".count-$key" ".stale-$key" ".stale-since-$key" \
+    ".wedge-escalations-$key" ".paused-$key" ".paused-rechecked-$key" \
+    ".paused-resurfaced-$key" ".verified-wait-$key"; do
+    [ ! -e "$case_dir/state/$artifact" ] \
+      || fail "herdr-marker-cleanup: teardown left retired watcher state $artifact behind"
+  done
+  pass "herdr teardown removes retired worker watcher and escalation state"
 }
 
 configure_herdr_projection_teardown_case() {  # <case-dir>

@@ -564,6 +564,7 @@ test_heartbeat_scan_dedup() {
   local dir state
   dir=$(make_supercase scan-dedup)
   state="$dir/state"
+  printf 'kind=ship\n' > "$state/dup-t6.meta"
   printf 'done: ready\n' > "$state/dup-t6.status"
   rm -f "$state/.subsuper-last-scan"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
