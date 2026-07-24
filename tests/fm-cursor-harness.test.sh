@@ -10,7 +10,7 @@ TMP_ROOT=$(fm_test_tmproot fm-cursor-harness)
 
 test_fm_harness_detects_cursor_env() {
   local got
-  got=$(CURSOR_AGENT=1 CLAUDECODE= GROK_AGENT= PI_CODING_AGENT= "$ROOT/bin/fm-harness.sh")
+  got=$(CURSOR_AGENT=1 CLAUDECODE='' GROK_AGENT='' PI_CODING_AGENT='' "$ROOT/bin/fm-harness.sh")
   [ "$got" = cursor ] || fail "CURSOR_AGENT=1 should detect as cursor, got: $got"
   pass "fm-harness detects CURSOR_AGENT=1"
 }
@@ -202,9 +202,7 @@ SH
   fi
   assert_grep 'keep-me' "$wt/.cursor/hooks.json" "unrelated hooks destroyed during legacy reconcile"
   # Teardown must leave neither generation behind.
-  # shellcheck source=bin/fm-teardown.sh
-  remove_cursor_turnend() { :; }
-  # Call the real teardown helper by sourcing the function definition.
+  # Extract only the helper body; do not pull the production source graph into lint.
   # shellcheck disable=SC1090
   eval "$(sed -n '/^remove_cursor_turnend()/,/^}/p' "$ROOT/bin/fm-teardown.sh")"
   remove_cursor_turnend "$wt"
