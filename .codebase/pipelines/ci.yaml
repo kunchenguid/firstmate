@@ -62,9 +62,10 @@ jobs:
     runs-on:
       env: boe
     image: hub.byted.org/codebase/ci_nodejs_20:latest
-    # The suite should finish in ~2-3 minutes; this generous cap fails loudly on
-    # a hung watcher or tmux test instead of riding the 120-minute default.
-    timeout: 15
+    # Every lane now runs even when an earlier one fails, so the wall is the
+    # whole suite rather than the first failure; this generous cap fails loudly
+    # on a hung watcher or tmux test instead of riding the 120-minute default.
+    timeout: 30
     steps:
       - name: Install tmux and gawk
         commands:
@@ -125,8 +126,28 @@ jobs:
             fi
             git fetch origin "main:refs/remotes/origin/main"
             git merge-base HEAD origin/main >/dev/null
-      - name: Run suite
+      - name: Run suite by lane
         commands:
+          # Composition owner: bin/fm-test-run.sh (docs/fm-test-portable-shards.md),
+          # the same one-owner runner and the same four partitions
+          # .github/workflows/ci.yml uses, instead of a bare `for` loop over
+          # tests/*.test.sh.
+          #
+          # Why: under `set -eu` that loop aborted at the FIRST failing script,
+          # so one ~14-minute run revealed exactly one failure and hid every
+          # later one behind it. The runner instead runs every selected script,
+          # continues past failures, and reports them all through
+          # FM_TEST_SUMMARY, so a single run yields the complete list.
+          #
+          # All four lanes run inside ONE step on purpose: a separate step per
+          # lane would abort the job at the first failing lane and reintroduce
+          # the same one-failure-at-a-time blindness. Each lane's exit code is
+          # collected and the step fails at the end if any lane failed.
+          #
+          # --check-coverage runs first so a lane partition that no longer
+          # covers every tests/*.test.sh fails loudly, rather than silently
+          # dropping scripts from the gate.
+          #
           # Two environment requirements, both learned the hard way:
           #
           # 1. NOT as root. tests/fm-daemon.test.sh chmods a state dir unwritable
@@ -154,9 +175,15 @@ jobs:
                 set -eu
                 [ "$(id -u)" -ne 0 ] || { echo "suite must not run as root"; exit 1; }
                 node --version
-                for test_script in tests/*.test.sh; do
-                  "$test_script"
+                bin/fm-test-run.sh --check-coverage
+                rc=0
+                for lane in portable-parallel-1 portable-parallel-2 portable-serial; do
+                  echo "=== lane: $lane ==="
+                  bin/fm-test-run.sh --lane "$lane" || rc=1
                 done
+                echo "=== family: real-herdr-gated ==="
+                bin/fm-test-run.sh --family real-herdr-gated || rc=1
+                exit "$rc"
               '
 
   invariants:
