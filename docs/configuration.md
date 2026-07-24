@@ -305,6 +305,7 @@ Orca provides both the task worktree and terminal endpoint (see "Runtime backend
 A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 When Relay is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
+When this home tracks a repository on a forge whose credential firstmate holds itself, bootstrap also requires `curl` for the credential check in "Forge credentials" below.
 `tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
 An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap stays silent and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until installation is approved and completed.
 An absent or incompatible `gh-axi` reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)`.
@@ -332,6 +333,67 @@ A changed remote home instead receives one durably recorded marked re-read instr
 The locked bootstrap inheritance pass uses the same placement-specific behavior; see `secondmate-provisioning` for the single contract owner.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
+
+## Forge credentials (login keychain)
+
+Some forges have no credential-owning CLI for firstmate to shell out to, so firstmate holds a credential of its own for them.
+GitHub is not one of them: `gh` owns that credential, firstmate has never held a GitHub token, and nothing here changes that.
+Bitbucket Cloud is, and `bin/fm-forge-credential.sh` is the only thing that reads it; its header owns the entry names, subcommands, and exit-code contract, and every caller goes through it rather than reading a store directly.
+
+What the captain provisions for Bitbucket is an Atlassian **account API token for the account that can read the repositories in question**, cached as two login-keychain items:
+
+| Keychain service | Holds |
+| --- | --- |
+| `firstmate-bitbucket-email` | the account email, used as the HTTP Basic username |
+| `firstmate-bitbucket-token` | the token, used as the HTTP Basic password |
+
+Both halves are required, because an account API token authenticates over HTTP Basic rather than as a bearer token.
+
+Three properties of this arrangement are deliberate and load-bearing.
+
+**It is read-only.** Its scopes are repository, pull request, and pipeline READ, nothing else, so an unattended reader cannot push, merge, or otherwise change a repository - it is write-incapable by construction rather than by convention.
+The accepted consequence is that firstmate can detect merges and read build results but cannot merge on Bitbucket; granting that would require pull-request write, which is a separate captain decision.
+
+**It is separate from no-mistakes' credential.** no-mistakes keeps its own write-capable Bitbucket credential, cached under a different service name and populated from the interactive shell path, because it pushes branches and opens pull requests.
+Firstmate must never read it. Keeping an unattended reader write-incapable is the entire point of holding two credentials instead of one.
+
+**It is read from the keychain directly, never from the environment.** The resolver reads the store itself, so it behaves identically whether firstmate was started from a warm interactive terminal, re-armed by a background repair path, or resumed after a reboot.
+Inheriting an exported token from a shell profile is what leaves a restarted daemon silently tokenless, and firstmate does not reproduce it.
+
+Session start verifies the credential when, and only when, this home tracks a repository on such a forge, and reports `FORGE_CREDENTIAL: <forge>: <reason>` when it is missing, empty, unusable, refused, or cannot see the repository it was probed against.
+That check probes exactly one deterministically chosen tracked repository per forge, so it costs at most one bounded request per session start however many clones on that forge the home tracks.
+It stays silent when the forge cannot be reached: being offline is not a credential fault.
+The whole reason it runs at startup is that a stale credential used to be invisible until a pull-request step failed roughly an hour into finished work.
+No diagnostic anywhere in this path prints a credential value; each one names the failing requirement instead.
+
+One probe settles the credential for the whole forge because of what the forge answers, verified live on 21/07/2026 against `api.bitbucket.org` with a fully resolved pair in every case.
+An invalid credential against a real private repository answers HTTP 401.
+A credential whose scopes do not cover the request answers HTTP 403 with a body naming the required and granted scopes, not 404, so scope refusal announces itself rather than hiding as a missing repository.
+A valid credential against a nonexistent repository answers HTTP 404.
+The first two are credential-level verdicts true of whichever repository was probed, which is why which clone gets probed cannot change what is reported.
+
+Two of that check's reporting choices are deliberate, and both follow from the same rule: a startup line the captain cannot act on trains them to skim past startup lines, but a line withheld entirely puts the discovery back at the failed pull-request step this check exists to pre-empt.
+Each is therefore reported **once per home**, then silence, recorded in `state/forge-credential-<outcome>.<forge>`.
+That record is keyed per home and per forge, so the two outcomes cannot suppress each other, and it holds no content of any kind, least of all a credential value.
+The not-visible record additionally keys on the probed repository, so each distinct unseen repository is worth one report and a later 404 on a different repository is not silenced by an earlier one; the no-store record names no repository and stays keyed per forge.
+Deleting it makes the next session start say it again.
+A session that did not get the fleet lock reports the news but does not write the record, so the session that can actually act on it is the one that consumes it.
+
+The first is a machine with no credential store at all - today anything other than macOS, since the store is the login keychain.
+The line says the forge's merge and build checks are unavailable here rather than implying a fault the captain can fix by retrying.
+
+The second is a repository the credential authenticated against but cannot see.
+A 404 does not settle whose fault it is: a credential holding repository read but bound to the wrong account, or one that has lost access to that specific private repository, is indistinguishable from a repository that was renamed or moved.
+The line names the repository that was probed and both possibilities, so the captain checks the credential's account and scopes as well as the repository's location.
+Silencing it was rejected because a credential broken in that way would otherwise stay invisible, which is exactly the failure this task removes.
+
+Both waits on this path are bounded, because a startup check that can hang session start is worse than the late failure it replaces.
+`FM_FORGE_CREDENTIAL_TIMEOUT` bounds the forge request and `FM_FORGE_KEYCHAIN_TIMEOUT` bounds the store read; a blank, non-numeric, or zero value falls back to the default, since zero means "no limit" to curl rather than "do not wait".
+The store read needs its own bound because `security` has no timeout flag and blocks indefinitely when the stored item's access control makes the read raise a confirmation dialog that an unattended session can never answer.
+That stall is reported every time it happens, distinctly from every other outcome, because it is actionable: re-cache the item so an unattended read is allowed.
+
+Verified 21/07/2026 against the live Bitbucket Cloud API with `bin/fm-forge-credential.sh check bitbucket <workspace>/<repo>`: a valid read-only credential on a private repository returns HTTP 200 and exit 0, the same request with an invalid token returns HTTP 401 and exit 5, a credential whose scopes do not cover the request returns HTTP 403 and exit 5 with a body naming the required and granted scopes, and an unknown repository returns HTTP 404 and exit 8.
+The account-wide listing endpoints that would otherwise make a workspace-agnostic probe possible - `/2.0/repositories`, `/2.0/workspaces`, `/2.0/user/permissions/repositories` - all answer HTTP 410 with `CHANGE-2770 - Functionality has been deprecated`, authenticated or not, which is why the verification probe reads one named repository instead.
 
 ## Relay (.env)
 
@@ -525,6 +587,9 @@ FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
+FM_FORGE_KEYCHAIN_TOOL_OVERRIDE=/usr/bin/security   # credential-store reader used by fm-forge-credential.sh, mainly for tests
+FM_FORGE_CREDENTIAL_TIMEOUT=10   # seconds allowed for one forge API request; a blank, non-numeric, or zero value uses 10
+FM_FORGE_KEYCHAIN_TIMEOUT=5      # seconds allowed for one credential-store read; a blank, non-numeric, or zero value uses 5
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)

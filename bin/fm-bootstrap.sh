@@ -7,6 +7,7 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "FORGE_CREDENTIAL: <forge>: <reason>",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -45,6 +46,26 @@
 #          failed names whether the endpoint was missing or agent-less.
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
+#          A FORGE_CREDENTIAL line means this home tracks a repository on a forge
+#          whose credential firstmate holds itself (today only Bitbucket), and
+#          that credential is missing, unusable, or refused - so merge and build
+#          checks for it cannot work. It is detect-only and probes exactly ONE
+#          deterministically chosen tracked repository per forge, so it costs at
+#          most one bounded request per session start however many clones on that
+#          forge the home tracks. It stays silent when no such repository is
+#          tracked and when the forge could not be reached.
+#          bin/fm-forge-credential.sh owns the resolution, the reason wording,
+#          and the exit-code contract.
+#          Two outcomes are reported ONCE per home and then stay silent, because
+#          each is news the first time and unactionable noise every session
+#          after: a machine with no credential store at all, and a repository
+#          the credential authenticated against but cannot see. The record is
+#          state/forge-credential-<outcome>.<forge>, keyed per home and per forge
+#          so the two outcomes cannot suppress each other; the not-visible record
+#          also keys on the probed repository, so each distinct unseen repository
+#          is worth one report, while the no-store record stays per forge.
+#          Under FM_BOOTSTRAP_DETECT_ONLY those records are NOT written: a
+#          lock-refused session reports the news without consuming it.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -750,6 +771,123 @@ secondmate_handoff_detect() {
   done
 }
 
+# Forge-credential detection. A missing, empty, or rejected credential used to
+# be invisible until a PR step failed an hour into finished work; this moves
+# that discovery to session start. It runs ONLY when this home actually tracks a
+# repository on a forge whose credential firstmate holds itself, so a
+# GitHub-only home never sees a line (gh owns that credential, per
+# bin/fm-forge-credential.sh). Exactly ONE tracked repository is probed per
+# forge per session start, so this costs at most one bounded request however
+# many clones on that forge the home tracks.
+# One probe is enough, and which clone it lands on cannot change what is
+# reported, because of what the forge answers. Verified live on 21/07/2026
+# against api.bitbucket.org, every case with a fully resolved pair: an INVALID
+# credential against a real private repository answers HTTP 401; a credential
+# whose scopes do not cover the request answers HTTP 403 with a body naming the
+# required and granted scopes, NOT 404; and a VALID credential against a
+# nonexistent repository answers HTTP 404. So 401 and 403 are credential-level
+# verdicts true of whichever repository was probed, and scope refusal announces
+# itself rather than hiding as a 404. The clone is still chosen
+# deterministically.
+# What a 404 does NOT settle is whose fault it is: a credential holding
+# repository read but bound to the wrong account, or one that has lost access to
+# that specific private repository, is indistinguishable from a repository that
+# was renamed or moved. Silencing it would put a genuinely broken credential
+# back where this whole check exists to stop it being - invisible until a
+# pull-request step fails - so it is REPORTED, once per home.
+# Two outcomes are reported once per home and then stay silent, because each is
+# news the first time and unactionable wallpaper every time after: a machine
+# with no credential store at all, and a repository the credential cannot see.
+# state/forge-credential-<outcome>.<forge> is that record, keyed per home and
+# per forge so the two outcomes cannot suppress each other. The not-visible
+# outcome additionally keys on the probed repository, because its line names a
+# repository and a later 404 on a different one is fresh news; the no-store
+# outcome names no repository and stays keyed per forge. No record holds a
+# credential value.
+
+# Returns 0 when this home has already been told this piece of news, 1 when it
+# has not - and marks it told in the same step, so the line is printed exactly
+# once. A record that cannot be written reports again rather than losing it.
+forge_news_already_reported() {  # <forge> <outcome>
+  local marker="$STATE/forge-credential-$2.$1"
+  [ -e "$marker" ] && return 0
+  # A session that did not get the fleet lock stays strictly read-only, so it
+  # reports the news without recording it: recording here would consume the one
+  # report and leave the session that CAN act about it silent.
+  [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ] && return 1
+  mkdir -p "$STATE" 2>/dev/null || return 1
+  : > "$marker" 2>/dev/null || return 1
+  return 1
+}
+
+forge_credential_report() {  # <forge> <status> <reason> [<repository>]
+  local forge=$1 status=$2 reason=$3 repo=${4:-} repo_key
+  case "$status" in
+    0|7) return 0 ;;
+    6)
+      forge_news_already_reported "$forge" no-store && return 0
+      echo "FORGE_CREDENTIAL: $forge: no credential store on this platform, so $forge merge and build checks are unavailable here"
+      return 0
+      ;;
+    8)
+      # The line names one repository, so the record must too: a later 404 on a
+      # DIFFERENT repository is genuinely new news. The identifier is validated
+      # to [A-Za-z0-9._/-] with a single slash, so mapping '/' to '%' (a char
+      # the identifier cannot contain) is a collision-free, filesystem-safe key.
+      repo_key=${repo//\//%}
+      forge_news_already_reported "$forge" "not-visible.$repo_key" && return 0
+      ;;
+  esac
+  reason=$(first_line "${reason#error: }")
+  [ -n "$reason" ] || reason="credential check failed (exit $status)"
+  echo "FORGE_CREDENTIAL: $forge: $reason"
+}
+
+forge_credential_check() {
+  local resolver proj url forge repo out status unnamed probe_forge probe_repo
+  resolver="$SCRIPT_DIR/fm-forge-credential.sh"
+  [ -x "$resolver" ] || return 0
+  [ -d "$PROJECTS" ] || return 0
+  unnamed=
+  probe_forge=
+  probe_repo=
+  # Choose the probe target first and probe once, rather than probing as the
+  # scan goes: the scan must never turn a home's clone count into a session-start
+  # request count.
+  for proj in "$PROJECTS"/*; do
+    [ -d "$proj" ] || continue
+    url=$(git -C "$proj" remote get-url origin 2>/dev/null) || continue
+    forge=$("$resolver" forge-of "$url" 2>/dev/null) || continue
+    [ "$forge" = bitbucket ] || continue
+    # Prefer a clone whose remote names a repository, because only a repository
+    # read proves the credential is still accepted.
+    if ! repo=$("$resolver" repo-of "$url" 2>/dev/null); then
+      [ -n "$unnamed" ] || unnamed=$forge
+      continue
+    fi
+    probe_forge=$forge
+    probe_repo=$repo
+    break
+  done
+  if [ -n "$probe_forge" ]; then
+    if ! command -v curl >/dev/null 2>&1; then
+      report_missing_tool curl
+      return 0
+    fi
+    out=$("$resolver" check "$probe_forge" "$probe_repo" 2>&1 >/dev/null)
+    status=$?
+    forge_credential_report "$probe_forge" "$status" "$out" "$probe_repo"
+    return 0
+  fi
+  # Every tracked clone on that forge has an unusable remote: fall back to the
+  # local proof, which still catches a missing or empty credential and needs no
+  # request at all.
+  [ -n "$unnamed" ] || return 0
+  out=$("$resolver" check "$unnamed" 2>&1 >/dev/null)
+  status=$?
+  forge_credential_report "$unnamed" "$status" "$out"
+}
+
 install_cmd() {
   case "$1" in
     tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
@@ -777,6 +915,19 @@ missing_tool_diagnostic() {
     return 0
   fi
   echo "MISSING: $tool (install: $(install_cmd "$tool"))"
+}
+
+# Several independent checks require the same tool - curl is required by both
+# the forge-credential check and the X-mode relay poll - and the digest is
+# parsed line by line, so a tool is named at most once however many checks want
+# it. Every missing-tool report goes through here rather than echoing directly.
+MISSING_TOOLS_REPORTED=
+report_missing_tool() {  # <tool>
+  case " $MISSING_TOOLS_REPORTED " in
+    *" $1 "*) return 0 ;;
+  esac
+  MISSING_TOOLS_REPORTED="$MISSING_TOOLS_REPORTED $1"
+  missing_tool_diagnostic "$1"
 }
 
 # Required-tool detection follows the RESOLVED backend, not a one-size default:
@@ -937,7 +1088,7 @@ x_mode_setup() {
   missing=0
   for tool in curl jq; do
     if ! command -v "$tool" >/dev/null 2>&1; then
-      echo "MISSING: $tool (install: $(install_cmd "$tool"))"
+      report_missing_tool "$tool"
       missing=1
     fi
   done
@@ -992,7 +1143,7 @@ crew_dispatch_validate() {
   file="$CONFIG/crew-dispatch.json"
   [ -f "$file" ] || return 0
   if ! command -v jq >/dev/null 2>&1; then
-    echo "MISSING: jq (install: $(install_cmd jq))"
+    report_missing_tool jq
     return 0
   fi
   if ! jq -e . "$file" >/dev/null 2>&1; then
@@ -1210,6 +1361,13 @@ if network_phase; then
   __fm_timing_stamp=$(fm_timing_now_ms)
   gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
   fm_timing_record phase gh-auth "$__fm_timing_stamp"
+  # The forge-credential probe is the same shape as the gh-auth check above - one
+  # bounded request that answers "can firstmate still act on this forge" - so it
+  # belongs in the deferred network phase beside it, never on the blocking local
+  # pass that composes the digest.
+  __fm_timing_stamp=$(fm_timing_now_ms)
+  forge_credential_check
+  fm_timing_record phase forge-credential "$__fm_timing_stamp"
 fi
 local_phase && detect_local_config
 
