@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Render the primary-harness supervision operating block for session start and
 # the short repair line used by guards and turn-end hooks.
-# A non-owned lock state (LIVE_OTHER, STALE_RECLAIMABLE, IDENTITY_UNAVAILABLE)
-# withholds the harness protocol and every other fleet-mutating instruction;
-# the only offered mutation is the atomic stale-lock reclaim path, so a proven
-# stale lock stays recoverable from the same session.
+# A non-owned lock state (LIVE_OTHER, STALE_RECLAIMABLE, IDENTITY_UNAVAILABLE,
+# RECLAIM_BUSY) withholds the harness protocol and every other fleet-mutating
+# instruction; the only offered mutation is the atomic stale-lock reclaim path,
+# so a proven stale lock stays recoverable from the same session.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -94,7 +94,7 @@ if [ -z "$LOCK_STATE" ]; then
   fi
 fi
 case "$LOCK_STATE" in
-  OWNED|LIVE_OTHER|STALE_RECLAIMABLE|IDENTITY_UNAVAILABLE) ;;
+  OWNED|LIVE_OTHER|STALE_RECLAIMABLE|IDENTITY_UNAVAILABLE|RECLAIM_BUSY) ;;
   *) echo "error: unsupported lock state: $LOCK_STATE" >&2; exit 2 ;;
 esac
 
@@ -183,8 +183,8 @@ repair_line() {
 # Non-owned lock states get no ordinary mutation instructions at all: emitting
 # the normal supervision recipe there would contradict the lock contract those
 # instructions exist to protect. The one deliberate exception is the atomic
-# reclaim offer in STALE_RECLAIMABLE, so a stale lock stays recoverable without
-# a new window.
+# reclaim offer in STALE_RECLAIMABLE and short-retry guidance for RECLAIM_BUSY,
+# so a stale lock stays recoverable without a new window.
 render_non_owned_block() {
   printf 'Mode: non-owned lock state (%s) - supervision withheld.\n\n' "$LOCK_STATE"
   printf '%s\n' 'The ordinary supervision protocol and every other fleet-mutating instruction'
@@ -201,6 +201,16 @@ render_non_owned_block() {
       printf '%s\n' 'The one permitted mutation is the atomic lock reclaim itself:'
       printf '%s\n' '  1. Read the recorded owner with bin/fm-lock.sh status.'
       printf '%s\n' '  2. Run bin/fm-lock.sh reclaim --expected <recorded-owner>.'
+      printf '%s\n' '  3. On LOCK_RESULT=OWNED, re-run bin/fm-session-start.sh; it continues as the'
+      printf '%s\n' "     owner into the wake-queue drain and this harness's normal supervision protocol."
+      printf '%s\n' 'Every other mutation stays withheld until this session owns the lock.'
+      ;;
+    RECLAIM_BUSY)
+      printf '%s\n' 'The reclaim mutex is temporarily held; this is not an identity failure.'
+      printf '%s\n' 'Do not treat this as IDENTITY_UNAVAILABLE and do not force the lock free.'
+      printf '%s\n' 'The one permitted mutation is a short retry of the atomic reclaim path:'
+      printf '%s\n' '  1. Re-check with bin/fm-lock.sh status (stale owners remain STALE_RECLAIMABLE).'
+      printf '%s\n' '  2. Retry bin/fm-lock.sh (or reclaim --expected <recorded-owner>) briefly.'
       printf '%s\n' '  3. On LOCK_RESULT=OWNED, re-run bin/fm-session-start.sh; it continues as the'
       printf '%s\n' "     owner into the wake-queue drain and this harness's normal supervision protocol."
       printf '%s\n' 'Every other mutation stays withheld until this session owns the lock.'

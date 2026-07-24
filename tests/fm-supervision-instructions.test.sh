@@ -46,7 +46,7 @@ test_conditional_stanzas() {
 
 test_non_owned_states_withhold_mutation_instructions() {
   local out state
-  for state in LIVE_OTHER STALE_RECLAIMABLE IDENTITY_UNAVAILABLE; do
+  for state in LIVE_OTHER STALE_RECLAIMABLE IDENTITY_UNAVAILABLE RECLAIM_BUSY; do
     out=$("$RENDER" --harness claude --lock-state "$state")
     assert_contains "$out" "Mode: non-owned lock state ($state) - supervision withheld." \
       "$state render lost the withheld mode line"
@@ -69,6 +69,16 @@ test_non_owned_states_withhold_mutation_instructions() {
     "stale render did not point back to the owned continuation"
   assert_contains "$out" "The one permitted mutation is the atomic lock reclaim itself" \
     "stale render did not scope the permitted mutation to the reclaim"
+
+  out=$("$RENDER" --harness claude --lock-state RECLAIM_BUSY)
+  assert_contains "$out" "The reclaim mutex is temporarily held" \
+    "busy render lost temporary-contention guidance"
+  assert_contains "$out" "not an identity failure" \
+    "busy render did not separate contention from identity failure"
+  assert_contains "$out" "Retry bin/fm-lock.sh" \
+    "busy render did not offer a short retry"
+  assert_not_contains "$out" "Restore identity evidence" \
+    "busy render pointed at identity recovery instead of retry"
 
   out=$("$RENDER" --harness claude --lock-state LIVE_OTHER)
   assert_not_contains "$out" "reclaim --expected" \

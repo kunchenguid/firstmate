@@ -247,13 +247,25 @@ section "SESSION START - $FM_HOME"
 
 # --- 1. lock -----------------------------------------------------------
 subsection "LOCK"
-LOCK_OUT=$("$SCRIPT_DIR/fm-lock.sh" 2>&1)
-LOCK_RC=$?
+# RECLAIM_BUSY is temporary mutex contention; retry briefly before treating
+# the session as non-owned. Main-lock status remains authoritative via status.
+LOCK_ATTEMPT=0
+LOCK_MAX_BUSY_RETRIES=${FM_SESSION_LOCK_BUSY_RETRIES:-3}
+case "$LOCK_MAX_BUSY_RETRIES" in ''|*[!0-9]*) LOCK_MAX_BUSY_RETRIES=3 ;; esac
+while :; do
+  LOCK_OUT=$("$SCRIPT_DIR/fm-lock.sh" 2>&1)
+  LOCK_RC=$?
+  LOCK_RESULT=$(printf '%s\n' "$LOCK_OUT" | sed -n 's/^LOCK_RESULT=//p' | tail -n 1)
+  if [ "$LOCK_RESULT" != RECLAIM_BUSY ] || [ "$LOCK_ATTEMPT" -ge "$LOCK_MAX_BUSY_RETRIES" ]; then
+    break
+  fi
+  LOCK_ATTEMPT=$((LOCK_ATTEMPT + 1))
+  sleep "${FM_SESSION_LOCK_BUSY_SLEEP_SECS:-0.1}" 2>/dev/null || sleep 1
+done
 printf '%s\n' "$LOCK_OUT"
-LOCK_RESULT=$(printf '%s\n' "$LOCK_OUT" | sed -n 's/^LOCK_RESULT=//p' | tail -n 1)
 case "$LOCK_RESULT:$LOCK_RC" in
   OWNED:0) ;;
-  LIVE_OTHER:*|STALE_RECLAIMABLE:*|IDENTITY_UNAVAILABLE:*) ;;
+  LIVE_OTHER:*|STALE_RECLAIMABLE:*|IDENTITY_UNAVAILABLE:*|RECLAIM_BUSY:*) ;;
   *)
     LOCK_RESULT=IDENTITY_UNAVAILABLE
     printf 'LOCK_RESULT=IDENTITY_UNAVAILABLE\n'
@@ -284,6 +296,8 @@ else
     printf '%s\n' "$BAR"
     if [ "$LOCK_RESULT" = STALE_RECLAIMABLE ]; then
       printf '●  STALE LOCK RECLAIM DID NOT COMPLETE\n'
+    elif [ "$LOCK_RESULT" = RECLAIM_BUSY ]; then
+      printf '●  RECLAIM MUTEX TEMPORARILY BUSY - FLEET LOCK NOT ACQUIRED\n'
     else
       printf '●  LOCK IDENTITY UNAVAILABLE - FLEET LOCK NOT ACQUIRED\n'
     fi
@@ -444,10 +458,11 @@ $LOCK_RESULT. Do not drain, arm, spawn, steer, merge, or repair fleet state.
 This outcome does not prove that another live session owns the lock.
 
 EOF
-  if [ "$LOCK_RESULT" = STALE_RECLAIMABLE ]; then
+  if [ "$LOCK_RESULT" = STALE_RECLAIMABLE ] || [ "$LOCK_RESULT" = RECLAIM_BUSY ]; then
     cat <<'EOF'
 The one permitted action is the atomic reclaim offered in the supervision
 block above; after LOCK_RESULT=OWNED, re-run bin/fm-session-start.sh.
+For RECLAIM_BUSY, retry briefly and re-check bin/fm-lock.sh status first.
 
 EOF
   fi

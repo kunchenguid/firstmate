@@ -132,9 +132,10 @@ An `ABSENT` captain, shared-captain, secondmate, or learnings file means the fir
 If the session lock cannot be acquired and verified, report its exact diagnostic and remain read-only; another active session is only one possible cause.
 A lock-refused session must not spawn, steer, merge, drain the wake queue, repair supervision, repair a checkout, or perform any other fleet mutation.
 Only a proven `LIVE_OTHER` lock outcome means another active session is managing the fleet and puts this session in read-only mode.
-`STALE_RECLAIMABLE` and `IDENTITY_UNAVAILABLE` are separate outcomes: do not claim another live owner, and do not mutate fleet state until the same session has acquired or atomically reclaimed the lock.
+`STALE_RECLAIMABLE`, `IDENTITY_UNAVAILABLE`, and `RECLAIM_BUSY` are separate outcomes: do not claim another live owner, and do not mutate fleet state until the same session has acquired or atomically reclaimed the lock.
+`RECLAIM_BUSY` is temporary reclaim-mutex contention - retry briefly and re-check `bin/fm-lock.sh status` rather than treating it as an identity failure.
 
-1. **Lock** - acquires the per-home session lock first, atomically reclaims a proven-stale numeric owner when possible, and reports `OWNED`, `LIVE_OTHER`, `STALE_RECLAIMABLE`, or `IDENTITY_UNAVAILABLE` before anything mutates shared state.
+1. **Lock** - acquires the per-home session lock first, atomically reclaims a proven-stale numeric owner when possible, and reports `OWNED`, `LIVE_OTHER`, `STALE_RECLAIMABLE`, `IDENTITY_UNAVAILABLE`, or `RECLAIM_BUSY` before anything mutates shared state.
 2. **Bootstrap** - detect-only checks (tool/version problems, GitHub auth, the worktree-tangle check, harness override, dispatch-profile validation, backlog-backend status) always run, but routine confirmations stay silent by default.
    When the lock could not be acquired, the worktree-tangle check uses read-only advisory wording without a checkout repair command.
    Home-local stale Herdr projection cleanup and the five bootstrap MUTATING sweeps - non-executing legacy PR-check migration, fleet sync, the local secondmate fast-forward sweep, the secondmate liveness sweep, and X-mode artifact writes - run only when this session actually holds the lock from step 1.
