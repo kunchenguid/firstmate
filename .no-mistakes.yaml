@@ -9,6 +9,19 @@
 # HEAD-continuity guard; see docs/architecture.md "No-mistakes gate authority boundary."
 disable_project_settings: true
 
+# Trusted documentation placement policy for the Document step.
+# The audience inventory and coding guideline own the detail; keep this as a
+# pointer so gate instructions cannot become a second prose policy.
+document:
+  instructions: |
+    Read docs/documentation-audiences.md and its machine-consumed
+    docs/documentation-audiences.json inventory before changing documentation.
+    Apply the knowledge-placement policy in
+    .agents/skills/firstmate-coding-guidelines/SKILL.md.
+    For changed prose, verify audience, authoritative owner, current relevance,
+    evidence destination, and unique safety facts, then review the complete
+    branch diff again after every documentation or lint fix.
+
 # Pin lint to the same owner CI runs instead of leaving it to no-mistakes'
 # default handling, which does not invoke the repository's canonical lint gate.
 # `bin/fm-lint.sh` owns the complete lint definition and
