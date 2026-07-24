@@ -15,7 +15,7 @@
 # false refusal (a leaked test workspace, cleaned up by hand later) is recoverable,
 # while the cost of a false negative (closing a workspace that is not the
 # test's own) is not - especially here, where that workspace could belong to
-# the captain's own live work.
+# the operator's own live work.
 set -u
 
 # cmux_refuse_if_unsafe: 0 (SAFE to proceed) only if <workspace_id> is

@@ -26,7 +26,7 @@ Never delete or bulk-clear inbox files.
 ## Routing
 
 Read each item's `route` field.
-For `lmoon-mate` or `koru-mate`, load `secondmate-provisioning`, route the request to that secondmate, and include the `topic-item` marker.
+For a route naming a registered secondmate, load `secondmate-provisioning`, route the request to that secondmate, and include the `topic-item` marker.
 For `main`, handle the request under the normal firstmate project and task lifecycle.
 For an unknown route, stop safely and treat it as `main` only after reporting that the local map needs correction.
 

@@ -5,10 +5,10 @@
 # docs/herdr-backend.md "Default-tab prune" / the incident writeup there).
 #
 # Reproduces the exact collision shape against a private, throwaway
-# HERDR_SESSION (never the captain's default): a startup-workspace-shaped
+# HERDR_SESSION (never the operator's default): a startup-workspace-shaped
 # layout - one tab labeled "1" in a pre-existing workspace labeled
 # "firstmate" - with a live long-running process in that pane, exactly as
-# the captain's own live crewmate session looked at incident time. Then
+# the reference environment's live crewmate session looked at incident time. Then
 # drives the real spawn-time container_ensure +
 # create_task path and asserts the live pane (and its live process) survive
 # untouched. Also exercises the normal happy path (a genuinely fresh

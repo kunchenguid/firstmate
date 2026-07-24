@@ -2349,7 +2349,7 @@ test_label_collision_startup_workspace_leaves_live_tab_alone() {
   # workspace's DISPLAYED label from the cwd basename - "firstmate" - byte-
   # identical to the primary firstmate home's own derived label, with no
   # --label ever passed and no firstmate involvement at all. That workspace's
-  # single auto-created tab (label "1") holds the captain's own live agent.
+  # single auto-created tab (label "1") holds the reference environment's live agent.
   # The very next crewmate spawn must adopt-and-leave-alone, never prune.
   local dir log state fb raw container seeded ids pane
   dir="$TMP_ROOT/label-collision"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
@@ -2358,7 +2358,7 @@ test_label_collision_startup_workspace_leaves_live_tab_alone() {
   # --label): the resulting workspace's label is the cwd basename, and its
   # one auto-created tab is still labeled "1" - indistinguishable, by label
   # alone, from firstmate's own freshly-seeded default tab. Its pane hosts a
-  # live agent (agent_status=working), exactly like the captain's own pane.
+  # live agent (agent_status=working), exactly like the reference environment's pane.
   jq -n '{next:2,workspaces:[{workspace_id:"w1",label:"firstmate"}],tabs:[{tab_id:"w1:t1",label:"1",workspace_id:"w1",pane_id:"w1:p1"}],agent_status:{"w1:p1":"working"}}' > "$state"
   raw=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /proj' "$ROOT" ) \

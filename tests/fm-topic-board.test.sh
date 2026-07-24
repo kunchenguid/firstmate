@@ -17,18 +17,18 @@ make_home() {
   mkdir -p "$home/state" "$home/config" "$data"
   cat > "$data/config.env" <<'EOF'
 FM_TOPIC_BOT_TOKEN=123456:test_topic_token
-FM_TOPIC_CAPTAIN_ID=953048088
+FM_TOPIC_CAPTAIN_ID=700000001
 EOF
   chmod 600 "$data/config.env"
   cat > "$data/topic-map.json" <<'EOF'
 {
-  "chat_id": "-1004497246253",
-  "group": "DevBois II",
-  "bot": "@secondmate_kingbot",
+  "chat_id": "-1001234567890",
+  "group": "Example Dev Group",
+  "bot": "@example_board_bot",
   "topics": {
-    "3": {"name": "LMoonDev", "project": "L'Moon", "route": "lmoon-mate"},
-    "2": {"name": "KoruDev", "project": "Koru", "route": "koru-mate"},
-    "4": {"name": "VisDev", "project": "Vintage in Style", "route": "main"}
+    "3": {"name": "AlphaDev", "project": "Alpha's Place", "route": "alpha-mate"},
+    "2": {"name": "BetaDev", "project": "Beta", "route": "beta-mate"},
+    "4": {"name": "GammaDev", "project": "Gamma Retail", "route": "main"}
   }
 }
 EOF
@@ -85,9 +85,9 @@ test_listener_is_lossless_and_topic_aware() {
   log="$home/curl.log"
   : > "$log"
   write_updates "$response" \
-    '{"update_id":10,"message":{"message_id":101,"message_thread_id":3,"from":{"id":953048088},"chat":{"id":-1004497246253},"text":"Build the booking fix"}}' \
-    '{"update_id":11,"message":{"message_id":102,"message_thread_id":3,"from":{"id":42},"chat":{"id":-1004497246253},"text":"not captain"}}' \
-    '{"update_id":12,"message":{"message_id":103,"message_thread_id":99,"from":{"id":953048088},"chat":{"id":-1004497246253},"caption":"diagram","photo":[{"file_id":"p1"}]}}'
+    '{"update_id":10,"message":{"message_id":101,"message_thread_id":3,"from":{"id":700000001},"chat":{"id":-1001234567890},"text":"Build the booking fix"}}' \
+    '{"update_id":11,"message":{"message_id":102,"message_thread_id":3,"from":{"id":42},"chat":{"id":-1001234567890},"text":"not captain"}}' \
+    '{"update_id":12,"message":{"message_id":103,"message_thread_id":99,"from":{"id":700000001},"chat":{"id":-1001234567890},"caption":"diagram","photo":[{"file_id":"p1"}]}}'
 
   listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 || fail "listener rejected valid updates"
   data="$home/data/fm-telegram-topics"
@@ -95,8 +95,8 @@ test_listener_is_lossless_and_topic_aware() {
   assert_present "$data/inbox/update-10.json" "mapped captain item was not retained"
   assert_absent "$data/inbox/update-11.json" "non-captain item reached the private inbox"
   assert_present "$data/inbox/update-12.json" "unmapped captain item was silently dropped"
-  [ "$(jq -r '.route' "$data/inbox/update-10.json")" = lmoon-mate ] || fail "mapped topic did not retain its secondmate route"
-  [ "$(jq -r '.topic' "$data/inbox/update-10.json")" = LMoonDev ] || fail "mapped topic name was not retained"
+  [ "$(jq -r '.route' "$data/inbox/update-10.json")" = alpha-mate ] || fail "mapped topic did not retain its secondmate route"
+  [ "$(jq -r '.topic' "$data/inbox/update-10.json")" = AlphaDev ] || fail "mapped topic name was not retained"
   [ "$(jq -r '.route' "$data/inbox/update-12.json")" = main ] || fail "unmapped topic did not fall back to main"
   [ "$(jq -r '.content_type' "$data/inbox/update-12.json")" = photo ] || fail "non-text captain message metadata was not retained"
   count=$(find "$data/inbox" -type f -name 'update-*.json' | wc -l | tr -d '[:space:]')
@@ -108,7 +108,7 @@ test_listener_is_lossless_and_topic_aware() {
   count=$(find "$data/inbox" -type f -name 'update-*.json' | wc -l | tr -d '[:space:]')
   [ "$count" -eq 2 ] || fail "replayed Telegram updates created duplicate inbox items"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$INBOX" list)
-  assert_contains "$out" $'10\tpending\tLMoonDev\tL\x27Moon\tlmoon-mate' "inbox list omitted topic and route context"
+  assert_contains "$out" $'10\tpending\tAlphaDev\tAlpha\x27s Place\talpha-mate' "inbox list omitted topic and route context"
 
   lifeline="$home/direct-message.env"
   printf 'TELEGRAM_BOT_TOKEN=123456:test_topic_token\n' > "$lifeline"
@@ -132,14 +132,14 @@ test_boundary_offset_and_failed_persistence() {
   data="$home/data/fm-telegram-topics"
   printf '20\n' > "$data/.poll-offset"
   write_updates "$response" \
-    '{"update_id":20,"message":{"message_id":201,"message_thread_id":2,"from":{"id":953048088},"chat":{"id":-1004497246253},"text":"boundary"}}'
+    '{"update_id":20,"message":{"message_id":201,"message_thread_id":2,"from":{"id":700000001},"chat":{"id":-1001234567890},"text":"boundary"}}'
   listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 || fail "listener failed at the exact offset boundary"
   [ "$(cat "$data/.poll-offset")" = 21 ] || fail "boundary update did not advance the offset"
 
   printf '30\n' > "$data/.poll-offset"
   mkdir "$data/inbox/update-30.json"
   write_updates "$response" \
-    '{"update_id":30,"message":{"message_id":301,"message_thread_id":2,"from":{"id":953048088},"chat":{"id":-1004497246253},"text":"must persist"}}'
+    '{"update_id":30,"message":{"message_id":301,"message_thread_id":2,"from":{"id":700000001},"chat":{"id":-1001234567890},"text":"must persist"}}'
   if listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1; then
     fail "listener advanced despite an unwritable item destination"
   fi
@@ -153,7 +153,7 @@ SH
   chmod +x "$fakebin/sync"
   printf '31\n' > "$data/.poll-offset"
   write_updates "$response" \
-    '{"update_id":31,"message":{"message_id":302,"message_thread_id":2,"from":{"id":953048088},"chat":{"id":-1004497246253},"text":"must flush"}}'
+    '{"update_id":31,"message":{"message_id":302,"message_thread_id":2,"from":{"id":700000001},"chat":{"id":-1001234567890},"text":"must flush"}}'
   if listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1; then
     fail "listener accepted an inbox write whose filesystem flush failed"
   fi
@@ -191,7 +191,7 @@ test_fast_wake_signals_only_verified_home_watcher() {
   watch_out="$home/watch.out"
   : > "$log"
   write_updates "$response" \
-    '{"update_id":40,"message":{"message_id":401,"message_thread_id":3,"from":{"id":953048088},"chat":{"id":-1004497246253},"text":"wake now"}}'
+    '{"update_id":40,"message":{"message_id":401,"message_thread_id":3,"from":{"id":700000001},"chat":{"id":-1001234567890},"text":"wake now"}}'
 
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_POLL=60 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$watch_out" 2>&1 &
   watcher=$!
@@ -225,7 +225,7 @@ test_queued_topic_wake_survives_unhandled_usr1() {
   watch_out="$home/watch.out"
   : > "$log"
   write_updates "$response" \
-    '{"update_id":41,"message":{"message_id":402,"message_thread_id":3,"from":{"id":953048088},"chat":{"id":-1004497246253},"text":"wake even if signal is masked"}}'
+    '{"update_id":41,"message":{"message_id":402,"message_thread_id":3,"from":{"id":700000001},"chat":{"id":-1001234567890},"text":"wake even if signal is masked"}}'
 
   (
     trap '' USR1
@@ -262,13 +262,13 @@ test_claim_reply_idempotency_and_ambiguous_delivery() {
   send_response="$home/send.json"
   log="$home/curl.log"
   : > "$log"
-  printf '%s\n' '{"ok":true,"result":{"message_id":900,"message_thread_id":3,"chat":{"title":"DevBois II"}}}' > "$send_response"
+  printf '%s\n' '{"ok":true,"result":{"message_id":900,"message_thread_id":3,"chat":{"title":"Example Dev Group"}}}' > "$send_response"
   write_updates "$response" \
-    '{"update_id":50,"message":{"message_id":501,"message_thread_id":3,"from":{"id":953048088},"chat":{"id":-1004497246253},"text":"ship it"}}'
+    '{"update_id":50,"message":{"message_id":501,"message_thread_id":3,"from":{"id":700000001},"chat":{"id":-1001234567890},"text":"ship it"}}'
   listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 || fail "could not seed reply item"
   data="$home/data/fm-telegram-topics"
 
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$INBOX" claim 50 lmoon-mate >/dev/null || fail "claim failed"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$INBOX" claim 50 alpha-mate >/dev/null || fail "claim failed"
   [ "$(jq -r '.status' "$data/inbox/update-50.json")" = claimed ] || fail "claim status was not persisted"
   out=$(printf 'Started and routed.' | PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_CURL_LOG="$log" FM_FAKE_SEND_RESPONSE="$send_response" "$REPLY" 50)
   assert_contains "$out" 'sent into topic thread 3' "reply did not report the originating thread"
@@ -286,7 +286,7 @@ test_claim_reply_idempotency_and_ambiguous_delivery() {
   [ "$send_count" -eq 2 ] || fail "stable follow-up key did not create exactly one additional send"
 
   write_updates "$response" \
-    '{"update_id":51,"message":{"message_id":502,"message_thread_id":3,"from":{"id":953048088},"chat":{"id":-1004497246253},"text":"ambiguous"}}'
+    '{"update_id":51,"message":{"message_id":502,"message_thread_id":3,"from":{"id":700000001},"chat":{"id":-1001234567890},"text":"ambiguous"}}'
   printf '51\n' > "$data/.poll-offset"
   listener_once "$home" "$fakebin" "$response" "$log" >/dev/null 2>&1 || fail "could not seed ambiguous reply item"
   set +e

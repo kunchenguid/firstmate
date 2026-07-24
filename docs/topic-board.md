@@ -1,8 +1,8 @@
 # Telegram topic board
 
 The topic board gives the captain a real-time Telegram forum channel with one project stream per topic.
-It uses the dedicated `@secondmate_kingbot` bot in the `DevBois II` forum group.
-It never uses the `@firstmate_kingbot` token or changes that bot's direct-message plugin poller.
+It uses a dedicated board bot (`@example_board_bot` in the examples below) in a dedicated forum group.
+It never uses the direct-message bot's token (`@example_direct_bot` in the examples below) or changes that bot's direct-message plugin poller.
 
 ## Architecture
 
@@ -29,8 +29,8 @@ An operator must inspect the topic and choose `--confirm-sent` or `--retry-unkno
 ## Lifeline safety
 
 Telegram permits only one `getUpdates` consumer per bot token.
-Pointing this service at `@firstmate_kingbot` would compete with the direct-message plugin and could steal the captain's private messages.
-The separate `@secondmate_kingbot` token gives the project board its own single consumer and keeps the direct-message lifeline isolated.
+Pointing this service at the direct-message bot (`@example_direct_bot`) would compete with the direct-message plugin and could steal the captain's private messages.
+The separate board-bot token (`@example_board_bot`) gives the project board its own single consumer and keeps the direct-message lifeline isolated.
 Configuration validation compares against the direct-message plugin token when it is locally available and refuses if the two tokens match.
 The group bot must have privacy mode disabled through BotFather so normal topic messages are visible to it.
 
@@ -64,13 +64,13 @@ The current project map is represented locally with this schema.
 
 ```json
 {
-  "chat_id": "-1004497246253",
-  "group": "DevBois II",
-  "bot": "@secondmate_kingbot",
+  "chat_id": "<BOARD_CHAT_ID>",
+  "group": "Example Dev Group",
+  "bot": "@example_board_bot",
   "topics": {
-    "3": {"name": "LMoonDev", "project": "L'Moon", "route": "lmoon-mate"},
-    "2": {"name": "KoruDev", "project": "Koru", "route": "koru-mate"},
-    "4": {"name": "VisDev", "project": "Vintage in Style", "route": "main"},
+    "3": {"name": "AlphaDev", "project": "Alpha", "route": "alpha-mate"},
+    "2": {"name": "BetaDev", "project": "Beta", "route": "beta-mate"},
+    "4": {"name": "GammaDev", "project": "Gamma", "route": "main"},
     "5": {"name": "DevOps", "project": "General DevOps", "route": "main"},
     "9": {"name": "MiscDev", "project": "Misc", "route": "main"}
   }
@@ -112,8 +112,8 @@ bin/fm-topic-service.sh uninstall
 ## Firstmate handling
 
 The agent-only `topic-board` skill owns intake, route selection, claiming, reply, and ambiguous-delivery recovery.
-L'Moon and Koru items route to `lmoon-mate` and `koru-mate` respectively.
-VIS, DevOps, Misc, and unmapped topics remain with main firstmate.
+Items in a topic whose route names a registered secondmate go to that secondmate.
+Topics routed to `main`, and unmapped topics, remain with main firstmate.
 Worker instructions and returns carry `topic-item <update-id>` so the final outcome can be sent back to the correct originating topic.
 
 An enabled topic board requires one live harness supervision cycle even when no project task is running.
