@@ -640,6 +640,48 @@ test_projection_journal_is_atomic_and_uses_128_bit_token() {
   pass "herdr presentation journal: atomically publishes one non-authoritative 128-bit correlator and refuses overwrite"
 }
 
+test_projection_journal_v2_binds_and_advances_exact_endpoint() {
+  local dir state home home_real out token
+  dir="$TMP_ROOT/projection-journal-v2"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$state" "$home"
+  home_real=$(cd "$home" && pwd -P)
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" fm-hibit-r1) || exit 1
+    journal="$1/fm-hibit-r1.herdr-presentation"
+    home=$(fm_backend_herdr_projection_home_identity "$2") || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label fm-hibit-r1 "$token")
+    fm_backend_herdr_projection_journal_bind \
+      "$journal" fm-hibit-r1 "$home" lab-session w2 w2:t2 w2:p2 w1 firstmate "$label" fm-fm-hibit-r1 || exit 1
+    fm_backend_herdr_projection_journal_snapshot "$journal" fm-hibit-r1 || exit 1
+    printf "%s|%s|%s|%s|%s|%s|%s\n" \
+      "$FM_BACKEND_HERDR_JOURNAL_VERSION" \
+      "$FM_BACKEND_HERDR_JOURNAL_HOME" \
+      "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" \
+      "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" \
+      "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" \
+      "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" \
+      "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL"
+    fm_backend_herdr_projection_journal_replace_endpoint \
+      "$journal" fm-hibit-r1 w2:t2 w2:p2 w2:t3 w2:p3 || exit 1
+    fm_backend_herdr_projection_journal_snapshot "$journal" fm-hibit-r1 || exit 1
+    printf "%s|%s\n" "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID"
+  ' "$ROOT" "$state" "$home") || fail "version 2 projection journal binding failed"
+  token=$(sed -n 's/^projection_id=//p' "$state/fm-hibit-r1.herdr-presentation")
+  [ "$(printf '%s\n' "$out" | sed -n '1p')" = "2|$home_real|w2|w2:t2|w2:p2|w1|└ hibit-r1 · p:$token" ] \
+    || fail "version 2 projection journal did not retain exact home/endpoint/parent binding: $out"
+  [ "$(printf '%s\n' "$out" | sed -n '2p')" = "w2:t3|w2:p3" ] \
+    || fail "version 2 projection journal did not advance the exact replacement endpoint: $out"
+  [ "$(wc -l < "$state/fm-hibit-r1.herdr-presentation" | tr -d '[:space:]')" = 12 ] \
+    || fail "version 2 projection journal must have exactly 12 fields"
+  printf 'pane_id=duplicate\n' >> "$state/fm-hibit-r1.herdr-presentation"
+  if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_snapshot "$1" fm-hibit-r1' \
+    "$ROOT" "$state/fm-hibit-r1.herdr-presentation"; then
+    fail "duplicate version 2 journal fields must be ambiguous"
+  fi
+  pass "herdr presentation journal: version 2 binds exact home/endpoint/parent identities and advances atomically"
+}
+
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
   local dir state log resp fb out token journal
   dir="$TMP_ROOT/projection-create"; state="$dir/state"; mkdir -p "$dir/responses" "$state"
@@ -1280,6 +1322,135 @@ test_projected_abort_cleanup_holds_presentation_lock() {
   LOCK="$lock" ROOT="$ROOT" bash -c '. "$ROOT/bin/fm-wake-lib.sh"; fm_lock_try_acquire "$LOCK"' \
     || fail "presentation lock remained held after abort cleanup"
   pass "fm-spawn: projected abort cleanup remains serialized by the presentation lock"
+}
+
+test_projection_reclaim_refusal_matrix_is_non_mutating() {
+  local dir state home other_home home_real journal legacy token label out mutation_log
+  dir="$TMP_ROOT/projection-reclaim-refusals"; state="$dir/state"; home="$dir/home"; other_home="$dir/other-home"
+  mkdir -p "$state" "$home" "$other_home"
+  home_real=$(cd "$home" && pwd -P)
+  token=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" refusal-r1) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label refusal-r1 "$token")
+    fm_backend_herdr_projection_journal_bind \
+      "$1/refusal-r1.herdr-presentation" refusal-r1 "$2" fmtest \
+      w2 w2:t2 w2:p2 w1 firstmate "$label" fm-refusal-r1 || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$state" "$home_real") || fail "could not create reclaim refusal fixture"
+  journal="$state/refusal-r1.herdr-presentation"
+  label="└ refusal-r1 · p:$token"
+  mkdir -p "$state/legacy"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_create "$1" refusal-r1 >/dev/null' \
+    "$ROOT" "$state/legacy" || fail "could not create legacy reclaim fixture"
+  legacy="$state/legacy/refusal-r1.herdr-presentation"
+  mutation_log="$dir/mutations.log"; : > "$mutation_log"
+  out=$(ROOT="$ROOT" JOURNAL="$journal" LEGACY="$legacy" HOME_A="$home" HOME_B="$other_home" MUTATIONS="$mutation_log" \
+    bash -c '
+      . "$ROOT/bin/backends/herdr.sh"
+      fm_backend_herdr_cli() { printf "%s\n" "$*" >> "$MUTATIONS"; return 1; }
+      run_case() {
+        mode=$1; journal=$2; home=$3
+        fm_backend_herdr_projection_live_binding_matches() {
+          [ "$mode" != ambiguous ]
+        }
+        fm_backend_herdr_pane_agent_state() {
+          case "$mode" in
+            live) printf live ;;
+            unknown) printf unknown ;;
+            *) printf no-agent ;;
+          esac
+        }
+        fm_backend_herdr_projection_focus_snapshot() {
+          [ "$mode" != focus-unknown ] || return 1
+          printf "w1\tw1:t1"
+        }
+        set +e
+        fm_backend_herdr_projection_reclaim_task \
+          fmtest "$journal" refusal-r1 "$home" w2 w2:t2 w2:p2 firstmate fm-refusal-r1 /tmp/project \
+          >/dev/null 2>&1
+        rc=$?
+        set -e
+        printf "%s:%s\n" "$mode" "$rc"
+      }
+      run_case legacy "$LEGACY" "$HOME_A"
+      run_case cross-home "$JOURNAL" "$HOME_B"
+      run_case ambiguous "$JOURNAL" "$HOME_A"
+      run_case live "$JOURNAL" "$HOME_A"
+      run_case unknown "$JOURNAL" "$HOME_A"
+      run_case focus-unknown "$JOURNAL" "$HOME_A"
+    ')
+  [ "$out" = $'legacy:2\ncross-home:2\nambiguous:2\nlive:1\nunknown:1\nfocus-unknown:2' ] \
+    || fail "reclaim refusal matrix returned wrong decisions: $out"
+  [ ! -s "$mutation_log" ] \
+    || fail "legacy, cross-home, ambiguous, live/unknown, or focus-unknown refusal mutated Herdr: $(cat "$mutation_log")"
+  [ "$(sed -n 's/^workspace_label=//p' "$journal")" = "$label" ] \
+    || fail "reclaim refusal matrix rewrote the bound workspace label"
+  pass "herdr presentation reclaim: legacy, cross-home, ambiguous, live/unknown, and focus-unknown cases refuse without mutation"
+}
+
+test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
+  local dir state home home_real log resp fb journal token label out calls create_line close_line
+  dir="$TMP_ROOT/projection-reclaim-exact"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$dir/responses" "$state" "$home"
+  home_real=$(cd "$home" && pwd -P)
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  token=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" fm-hibit-r1) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label fm-hibit-r1 "$token")
+    fm_backend_herdr_projection_journal_bind \
+      "$1/fm-hibit-r1.herdr-presentation" fm-hibit-r1 "$2" fmtest \
+      w2 w2:t2 w2:p2 w1 firstmate "$label" fm-fm-hibit-r1 || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$state" "$home_real") || fail "could not create exact reclaim journal fixture"
+  journal="$state/fm-hibit-r1.herdr-presentation"
+  label="└ hibit-r1 · p:$token"
+  printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\",\"focused\":true,\"active_tab_id\":\"w1:t1\"},{\"workspace_id\":\"w2\",\"label\":\"$label\",\"focused\":false,\"active_tab_id\":\"w2:t2\"}]}}" > "$resp/1.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","label":"fm-fm-hibit-r1"}]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}' > "$resp/3.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/4.out"
+  printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/5.out"
+  printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\",\"focused\":true,\"active_tab_id\":\"w1:t1\"},{\"workspace_id\":\"w2\",\"label\":\"$label\",\"focused\":false,\"active_tab_id\":\"w2:t2\"}]}}" > "$resp/6.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/7.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t3"},"root_pane":{"pane_id":"w2:p3"}}}' > "$resp/8.out"
+  cp "$resp/6.out" "$resp/9.out"
+  cp "$resp/7.out" "$resp/10.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t3","workspace_id":"w2"}}}' > "$resp/11.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p3","tab_id":"w2:t3","workspace_id":"w2"}}}' > "$resp/12.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/13.out"
+  printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/14.out"
+  cp "$resp/6.out" "$resp/15.out"
+  cp "$resp/7.out" "$resp/16.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2","tab_id":"w2:t2","workspace_id":"w2"}}}' > "$resp/17.out"
+  : > "$resp/18.out"
+  cp "$resp/6.out" "$resp/19.out"
+  cp "$resp/7.out" "$resp/20.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/21.out"
+  cp "$resp/1.out" "$resp/22.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t3","label":"fm-fm-hibit-r1"}]}}' > "$resp/23.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p3","tab_id":"w2:t3"}]}}' > "$resp/24.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_reclaim_task \
+        fmtest "$1" fm-hibit-r1 "$2" w2 w2:t2 w2:p2 firstmate fm-fm-hibit-r1 /tmp/project || exit 1
+      printf "%s %s" "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" "$FM_BACKEND_HERDR_PROJECTION_PANE_ID"
+    ' "$ROOT" "$journal" "$home") || fail "exact agent-free projection reclaim failed"
+  [ "$out" = "w2:t3 w2:p3" ] || fail "reclaim did not return exact replacement ids: $out"
+  [ "$(sed -n 's/^tab_id=//p' "$journal")" = w2:t3 ] \
+    && [ "$(sed -n 's/^pane_id=//p' "$journal")" = w2:p3 ] \
+    || fail "reclaim did not advance the journal to the replacement endpoint"
+  calls=$(cat "$log")
+  create_line=$(grep -n $'tab\x1fcreate\x1f--workspace\x1fw2' "$log" | cut -d: -f1)
+  close_line=$(grep -n $'pane\x1fclose\x1fw2:p2' "$log" | cut -d: -f1)
+  [ -n "$create_line" ] && [ -n "$close_line" ] && [ "$create_line" -lt "$close_line" ] \
+    || fail "reclaim did not create the exact replacement before closing the old husk"
+  assert_not_contains "$calls" $'workspace\x1fclose' "reclaim introduced workspace-close authority"
+  assert_not_contains "$calls" $'workspace\x1frename' "reclaim renamed the projected workspace"
+  assert_not_contains "$calls" $'tab\x1ffocus' "focus-preserving reclaim changed an already-stable focus snapshot"
+  pass "herdr presentation reclaim: exact agent-free husk is replaced in place and journal/focus identities advance"
 }
 
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
@@ -2775,6 +2946,7 @@ test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
 test_projection_journal_is_atomic_and_uses_128_bit_token
+test_projection_journal_v2_binds_and_advances_exact_endpoint
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
 test_projection_create_never_closes_a_concurrent_same_label_tab
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
@@ -2799,6 +2971,8 @@ test_presentation_lock_insecure_namespace_falls_back
 test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication
 test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission
 test_projected_abort_cleanup_holds_presentation_lock
+test_projection_reclaim_refusal_matrix_is_non_mutating
+test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only

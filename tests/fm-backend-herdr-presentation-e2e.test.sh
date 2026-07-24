@@ -454,7 +454,8 @@ PROJECT_DIR="$TMP_ROOT/project"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" \
   "$HOME_DIR/data/anchor" "$HOME_DIR/data/shape" \
   "$HOME_DIR/data/order-a" "$HOME_DIR/data/order-b" \
-  "$HOME_DIR/data/order-fail" "$HOME_DIR/data/restart1"
+  "$HOME_DIR/data/order-fail" "$HOME_DIR/data/fm-hibit-resume-r1" \
+  "$HOME_DIR/data/wheelhouse-healing-r1"
 mkdir -p "$HOME_DIR/data/active-seeded" "$HOME_DIR/data/abort-a" "$HOME_DIR/data/abort-b" \
   "$HOME_DIR/data/lock-contended"
 touch "$HOME_DIR/state/.last-watcher-beat"
@@ -463,7 +464,8 @@ printf 'Projection E2E fixture.\n' > "$HOME_DIR/data/shape/brief.md"
 printf 'Projection ordering fixture A.\n' > "$HOME_DIR/data/order-a/brief.md"
 printf 'Projection ordering fixture B.\n' > "$HOME_DIR/data/order-b/brief.md"
 printf 'Projection ordering failure fixture.\n' > "$HOME_DIR/data/order-fail/brief.md"
-printf 'Projection restart fixture.\n' > "$HOME_DIR/data/restart1/brief.md"
+printf 'Hi Bit-style projection restart fixture.\n' > "$HOME_DIR/data/fm-hibit-resume-r1/brief.md"
+printf 'Wheelhouse-style projection restart fixture.\n' > "$HOME_DIR/data/wheelhouse-healing-r1/brief.md"
 printf 'Projection active seeded fixture.\n' > "$HOME_DIR/data/active-seeded/brief.md"
 printf 'Projection abort fixture A.\n' > "$HOME_DIR/data/abort-a/brief.md"
 printf 'Projection abort fixture B.\n' > "$HOME_DIR/data/abort-b/brief.md"
@@ -1058,6 +1060,173 @@ teardown_task aflat "$SECOND_HOME_A" > "$TMP_ROOT/aflat-teardown.out" 2> "$TMP_R
   || fail "flat cross-home contention fixture teardown failed"
 pass "real Herdr lab: session lock contention from a secondmate home falls back flat with no journal"
 
+# Same-identity recovery replaces only one exact agent-free husk in its
+# original projected workspace.
+# Exercise both the leading fm- identity style seen in Hi Bit work and the
+# project-name identity style used by Wheelhouse work.
+for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
+  spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-first.out" 2> "$TMP_ROOT/$RESTART_ID-first.err" \
+    || fail "$RESTART_ID fixture's projected spawn failed: $(cat "$TMP_ROOT/$RESTART_ID-first.err")"
+  RESTART_META="$HOME_DIR/state/$RESTART_ID.meta"
+  OLD_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
+  OLD_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
+  OLD_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)
+  OLD_RESTART_LABEL=$(lab workspace get "$OLD_RESTART_WSID" | jq -r '.result.workspace.label')
+  [ "$(grep '^version=' "$HOME_DIR/state/$RESTART_ID.herdr-presentation")" = version=2 ] \
+    || fail "$RESTART_ID fresh projection did not publish an exact restart binding"
+  EXPECTED_CONCISE=${RESTART_ID#fm-}
+  case "$OLD_RESTART_LABEL" in
+    "└ $EXPECTED_CONCISE · p:"*) ;;
+    *) fail "$RESTART_ID fresh projection label did not apply concise prefix handling: $OLD_RESTART_LABEL" ;;
+  esac
+  PATH="$HERDR_ORIGINAL_PATH" \
+    "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
+    || fail "could not stop the isolated session for $RESTART_ID validation"
+  PATH="$HERDR_ORIGINAL_PATH" \
+    "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+    || fail "could not reprovision the isolated session for $RESTART_ID validation"
+  lab pane get "$OLD_RESTART_PANE" >/dev/null 2>&1 \
+    || fail "$RESTART_ID restart did not preserve the projected pane structurally"
+  if lab agent get "$OLD_RESTART_PANE" >/dev/null 2>&1; then
+    fail "$RESTART_ID restart fixture unexpectedly retained a registered agent"
+  fi
+  RECLAIM_FOCUS=$(focus_snapshot)
+  spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-reclaim.out" 2> "$TMP_ROOT/$RESTART_ID-reclaim.err" \
+    || fail "$RESTART_ID same-identity reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-reclaim.err")"
+  NEW_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
+  NEW_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
+  NEW_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)
+  [ "$NEW_RESTART_WSID" = "$OLD_RESTART_WSID" ] \
+    || fail "$RESTART_ID reclaim flattened into a different workspace"
+  [ "$NEW_RESTART_PANE" != "$OLD_RESTART_PANE" ] \
+    || fail "$RESTART_ID reclaim reused the old husk pane"
+  [ "$(lab workspace get "$NEW_RESTART_WSID" | jq -r '.result.workspace.label')" = "$OLD_RESTART_LABEL" ] \
+    || fail "$RESTART_ID reclaim renamed or replaced the projected workspace"
+  if lab pane get "$OLD_RESTART_PANE" >/dev/null 2>&1; then
+    fail "$RESTART_ID reclaim did not close the exact old husk pane"
+  fi
+  [ "$(grep '^pane_id=' "$HOME_DIR/state/$RESTART_ID.herdr-presentation" | cut -d= -f2-)" = "$NEW_RESTART_PANE" ] \
+    || fail "$RESTART_ID reclaim did not advance the exact journal binding"
+  assert_focus_is "$RECLAIM_FOCUS" "$RESTART_ID same-identity reclaim"
+
+  if [ "$RESTART_ID" = fm-hibit-resume-r1 ]; then
+    PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
+      || fail "could not stop the isolated session for idempotent reclaim"
+    PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+      || fail "could not reprovision the isolated session for idempotent reclaim"
+    PRIOR_RESTART_WT=$NEW_RESTART_WT
+    PRIOR_RESTART_PANE=$NEW_RESTART_PANE
+    spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-idempotent.out" 2> "$TMP_ROOT/$RESTART_ID-idempotent.err" \
+      || fail "$RESTART_ID repeated reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-idempotent.err")"
+    NEW_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
+    NEW_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
+    NEW_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)
+    [ "$NEW_RESTART_WSID" = "$OLD_RESTART_WSID" ] \
+      || fail "$RESTART_ID repeated reclaim changed workspace identity"
+    [ "$NEW_RESTART_PANE" != "$PRIOR_RESTART_PANE" ] \
+      || fail "$RESTART_ID repeated reclaim reused the prior husk pane"
+    "$REAL_TREEHOUSE" return --force "$PRIOR_RESTART_WT" >/dev/null 2>&1 || true
+  fi
+
+  teardown_task "$RESTART_ID" "$HOME_DIR" > "$TMP_ROOT/$RESTART_ID-teardown.out" 2> "$TMP_ROOT/$RESTART_ID-teardown.err" \
+    || fail "$RESTART_ID teardown after reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-teardown.err")"
+  [ ! -e "$HOME_DIR/state/$RESTART_ID.herdr-presentation" ] \
+    || fail "$RESTART_ID exact reclaimed teardown did not retire its journal"
+  "$REAL_TREEHOUSE" return --force "$OLD_RESTART_WT" >/dev/null 2>&1 || true
+  "$REAL_TREEHOUSE" return --force "$NEW_RESTART_WT" >/dev/null 2>&1 || true
+done
+pass "real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence"
+
+# A secondmate child binds and reclaims only inside its own home and parent.
+CROSS_RESTART_ID=wheel-child-resume
+mkdir -p "$SECOND_HOME_A/data/$CROSS_RESTART_ID"
+printf 'Cross-home restart fixture.\n' > "$SECOND_HOME_A/data/$CROSS_RESTART_ID/brief.md"
+spawn_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" "$PROJECT_DIR" > "$TMP_ROOT/cross-restart-first.out" 2> "$TMP_ROOT/cross-restart-first.err" \
+  || fail "cross-home restart fixture failed: $(cat "$TMP_ROOT/cross-restart-first.err")"
+CROSS_RESTART_META="$SECOND_HOME_A/state/$CROSS_RESTART_ID.meta"
+CROSS_OLD_WT=$(remember_meta_worktree "$CROSS_RESTART_META")
+CROSS_OLD_WSID=$(grep '^herdr_workspace_id=' "$CROSS_RESTART_META" | cut -d= -f2-)
+CROSS_OLD_PANE=$(grep '^herdr_pane_id=' "$CROSS_RESTART_META" | cut -d= -f2-)
+CROSS_OLD_LABEL=$(lab workspace get "$CROSS_OLD_WSID" | jq -r '.result.workspace.label')
+CROSS_BOUND_HOME=$(grep '^home=' "$SECOND_HOME_A/state/$CROSS_RESTART_ID.herdr-presentation" | cut -d= -f2-)
+[ "$CROSS_BOUND_HOME" = "$(cd "$SECOND_HOME_A" && pwd -P)" ] \
+  || fail "cross-home restart journal did not bind the secondmate's exact home"
+[ ! -e "$HOME_DIR/state/$CROSS_RESTART_ID.herdr-presentation" ] \
+  || fail "cross-home restart published a journal in the primary home"
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
+  || fail "could not stop the isolated session for cross-home restart"
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+  || fail "could not reprovision the isolated session for cross-home restart"
+spawn_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" "$PROJECT_DIR" > "$TMP_ROOT/cross-restart-resume.out" 2> "$TMP_ROOT/cross-restart-resume.err" \
+  || fail "cross-home same-identity reclaim failed: $(cat "$TMP_ROOT/cross-restart-resume.err")"
+CROSS_NEW_WT=$(remember_meta_worktree "$CROSS_RESTART_META")
+CROSS_NEW_WSID=$(grep '^herdr_workspace_id=' "$CROSS_RESTART_META" | cut -d= -f2-)
+CROSS_NEW_PANE=$(grep '^herdr_pane_id=' "$CROSS_RESTART_META" | cut -d= -f2-)
+[ "$CROSS_NEW_WSID" = "$CROSS_OLD_WSID" ] && [ "$CROSS_NEW_PANE" != "$CROSS_OLD_PANE" ] \
+  || fail "cross-home reclaim did not replace one pane inside the same secondmate child workspace"
+[ "$(lab workspace get "$CROSS_NEW_WSID" | jq -r '.result.workspace.label')" = "$CROSS_OLD_LABEL" ] \
+  || fail "cross-home reclaim changed the secondmate child's presentation label"
+teardown_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" > "$TMP_ROOT/cross-restart-teardown.out" 2> "$TMP_ROOT/cross-restart-teardown.err" \
+  || fail "cross-home reclaimed teardown failed: $(cat "$TMP_ROOT/cross-restart-teardown.err")"
+"$REAL_TREEHOUSE" return --force "$CROSS_OLD_WT" >/dev/null 2>&1 || true
+"$REAL_TREEHOUSE" return --force "$CROSS_NEW_WT" >/dev/null 2>&1 || true
+pass "real Herdr lab: secondmate restart binding and reclaim stay isolated to the exact child home and parent"
+
+# Two homes recovering concurrently serialize on the named session lock and
+# each replace only their own exact husk.
+PRIMARY_WAVE_ID=resume-wave-primary
+BRAVO_WAVE_ID=resume-wave-bravo
+mkdir -p "$HOME_DIR/data/$PRIMARY_WAVE_ID" "$SECOND_HOME_B/data/$BRAVO_WAVE_ID"
+printf 'Concurrent primary recovery fixture.\n' > "$HOME_DIR/data/$PRIMARY_WAVE_ID/brief.md"
+printf 'Concurrent secondmate recovery fixture.\n' > "$SECOND_HOME_B/data/$BRAVO_WAVE_ID/brief.md"
+spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/primary-wave-first.out" 2> "$TMP_ROOT/primary-wave-first.err" \
+  || fail "primary recovery-wave fixture failed: $(cat "$TMP_ROOT/primary-wave-first.err")"
+spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$PROJECT_DIR" > "$TMP_ROOT/bravo-wave-first.out" 2> "$TMP_ROOT/bravo-wave-first.err" \
+  || fail "secondmate recovery-wave fixture failed: $(cat "$TMP_ROOT/bravo-wave-first.err")"
+PRIMARY_WAVE_META="$HOME_DIR/state/$PRIMARY_WAVE_ID.meta"
+BRAVO_WAVE_META="$SECOND_HOME_B/state/$BRAVO_WAVE_ID.meta"
+PRIMARY_WAVE_OLD_WT=$(remember_meta_worktree "$PRIMARY_WAVE_META")
+BRAVO_WAVE_OLD_WT=$(remember_meta_worktree "$BRAVO_WAVE_META")
+PRIMARY_WAVE_WSID=$(grep '^herdr_workspace_id=' "$PRIMARY_WAVE_META" | cut -d= -f2-)
+BRAVO_WAVE_WSID=$(grep '^herdr_workspace_id=' "$BRAVO_WAVE_META" | cut -d= -f2-)
+PRIMARY_WAVE_OLD_PANE=$(grep '^herdr_pane_id=' "$PRIMARY_WAVE_META" | cut -d= -f2-)
+BRAVO_WAVE_OLD_PANE=$(grep '^herdr_pane_id=' "$BRAVO_WAVE_META" | cut -d= -f2-)
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
+  || fail "could not stop the isolated session for concurrent recovery"
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+  || fail "could not reprovision the isolated session for concurrent recovery"
+CONCURRENT_RECOVERY_FOCUS=$(focus_snapshot)
+spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/primary-wave-resume.out" 2> "$TMP_ROOT/primary-wave-resume.err" &
+PRIMARY_WAVE_PID=$!
+spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$PROJECT_DIR" > "$TMP_ROOT/bravo-wave-resume.out" 2> "$TMP_ROOT/bravo-wave-resume.err" &
+BRAVO_WAVE_PID=$!
+wait "$PRIMARY_WAVE_PID" || fail "concurrent primary recovery failed: $(cat "$TMP_ROOT/primary-wave-resume.err")"
+wait "$BRAVO_WAVE_PID" || fail "concurrent secondmate recovery failed: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+PRIMARY_WAVE_NEW_WT=$(remember_meta_worktree "$PRIMARY_WAVE_META")
+BRAVO_WAVE_NEW_WT=$(remember_meta_worktree "$BRAVO_WAVE_META")
+PRIMARY_WAVE_NEW_PANE=$(grep '^herdr_pane_id=' "$PRIMARY_WAVE_META" | cut -d= -f2-)
+BRAVO_WAVE_NEW_PANE=$(grep '^herdr_pane_id=' "$BRAVO_WAVE_META" | cut -d= -f2-)
+[ "$(grep '^herdr_workspace_id=' "$PRIMARY_WAVE_META" | cut -d= -f2-)" = "$PRIMARY_WAVE_WSID" ] \
+  && [ "$(grep '^herdr_workspace_id=' "$BRAVO_WAVE_META" | cut -d= -f2-)" = "$BRAVO_WAVE_WSID" ] \
+  || fail "concurrent recovery flattened one task into a different workspace"
+[ "$PRIMARY_WAVE_NEW_PANE" != "$PRIMARY_WAVE_OLD_PANE" ] \
+  && [ "$BRAVO_WAVE_NEW_PANE" != "$BRAVO_WAVE_OLD_PANE" ] \
+  || fail "concurrent recovery reused an old husk pane"
+if lab pane get "$PRIMARY_WAVE_OLD_PANE" >/dev/null 2>&1 \
+   || lab pane get "$BRAVO_WAVE_OLD_PANE" >/dev/null 2>&1; then
+  fail "concurrent recovery left an old husk pane behind"
+fi
+assert_focus_is "$CONCURRENT_RECOVERY_FOCUS" "concurrent cross-home recovery"
+teardown_task "$PRIMARY_WAVE_ID" "$HOME_DIR" > "$TMP_ROOT/primary-wave-teardown.out" 2> "$TMP_ROOT/primary-wave-teardown.err" \
+  || fail "concurrent primary recovery teardown failed"
+teardown_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" > "$TMP_ROOT/bravo-wave-teardown.out" 2> "$TMP_ROOT/bravo-wave-teardown.err" \
+  || fail "concurrent secondmate recovery teardown failed"
+"$REAL_TREEHOUSE" return --force "$PRIMARY_WAVE_OLD_WT" >/dev/null 2>&1 || true
+"$REAL_TREEHOUSE" return --force "$BRAVO_WAVE_OLD_WT" >/dev/null 2>&1 || true
+"$REAL_TREEHOUSE" return --force "$PRIMARY_WAVE_NEW_WT" >/dev/null 2>&1 || true
+"$REAL_TREEHOUSE" return --force "$BRAVO_WAVE_NEW_WT" >/dev/null 2>&1 || true
+pass "real Herdr lab: concurrent cross-home recoveries replace exact husks under one session lock with no focus drift"
+
 # Seed a legacy old-format primary projection and a flat secondmate tab; correction must not migrate them.
 LEGACY_OUT=$(lab workspace create --cwd "$PROJECT_DIR" --label "firstmate/legacy-seed · p:AbCdEfGhIjKlMnOpQrStUv" --no-focus) \
   || fail "could not seed a legacy old-format presentation space"
@@ -1091,48 +1260,6 @@ do
 done
 assert_focus_is "$CAPTAIN_FOCUS" "multi-home teardown"
 pass "real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority"
-
-# A restart preserves the label and structural pane but removes the registered
-# agent.
-# The next spawn must leave that old projection untouched and use the flat
-# home workspace.
-spawn_task restart1 "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/restart-first.out" 2> "$TMP_ROOT/restart-first.err" \
-  || fail "restart fixture's projected spawn failed: $(cat "$TMP_ROOT/restart-first.err")"
-RESTART_META="$HOME_DIR/state/restart1.meta"
-OLD_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
-OLD_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
-OLD_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)
-OLD_RESTART_LABEL=$(lab workspace get "$OLD_RESTART_WSID" | jq -r '.result.workspace.label')
-PATH="$HERDR_ORIGINAL_PATH" \
-  "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
-  || fail "could not stop the isolated session for restart validation"
-PATH="$HERDR_ORIGINAL_PATH" \
-  "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
-  || fail "could not reprovision the isolated session after restart"
-lab pane get "$OLD_RESTART_PANE" >/dev/null 2>&1 \
-  || fail "restart did not preserve the projected pane structurally"
-if lab agent get "$OLD_RESTART_PANE" >/dev/null 2>&1; then
-  fail "restart fixture unexpectedly retained a registered agent"
-fi
-spawn_task restart1 "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/restart-flat.out" 2> "$TMP_ROOT/restart-flat.err" \
-  || fail "flat fallback after restart failed: $(cat "$TMP_ROOT/restart-flat.err")"
-NEW_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
-NEW_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
-[ "$NEW_RESTART_WSID" != "$OLD_RESTART_WSID" ] || fail "restart fallback reused the quarantined projection workspace"
-NEW_RESTART_LABEL=$(lab workspace get "$NEW_RESTART_WSID" | jq -r '.result.workspace.label')
-[ "$NEW_RESTART_LABEL" = firstmate ] || fail "restart fallback did not use the normal flat home workspace"
-[ "$(lab workspace get "$OLD_RESTART_WSID" | jq -r '.result.workspace.label')" = "$OLD_RESTART_LABEL" ] \
-  || fail "restart fallback renamed or replaced the old projection workspace"
-lab pane get "$OLD_RESTART_PANE" >/dev/null 2>&1 \
-  || fail "restart fallback closed the old projected pane"
-pass "real Herdr lab: restart preserves the token label as an agent-free husk that is left untouched while the task respawns flat"
-
-teardown_task restart1 "$HOME_DIR" > "$TMP_ROOT/restart-teardown.out" 2> "$TMP_ROOT/restart-teardown.err" \
-  || fail "flat restart teardown failed: $(cat "$TMP_ROOT/restart-teardown.err")"
-[ -e "$HOME_DIR/state/restart1.herdr-presentation" ] \
-  || fail "flat fallback teardown should retain the quarantined projection journal for manual cleanup"
-"$REAL_TREEHOUSE" return --force "$OLD_RESTART_WT" >/dev/null 2>&1 || true
-"$REAL_TREEHOUSE" return --force "$NEW_RESTART_WT" >/dev/null 2>&1 || true
 
 # Missing, renamed, and duplicate tokens are read-only recovery diagnostics.
 # The duplicate case allows flat fallback only when every matching pane is
