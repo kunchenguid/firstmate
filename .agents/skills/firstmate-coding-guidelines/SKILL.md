@@ -81,6 +81,9 @@ Keep instructions as the authority and discovery layer, but make repeated execut
 - Plain dash `-`, never an em dash.
 - Never add an agent name as a commit co-author.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
+- Never put an apostrophe or unbalanced quote in a heredoc body that sits inside a `$(...)` command substitution (`VAR=$(cat <<EOF ... EOF)`): bash 3.2 (macOS `/bin/bash`) fails to parse the whole script, while bash 4/5 parses it fine, so Linux CI cannot catch it.
+  Reword to drop the apostrophe or move the heredoc out of the substitution.
+  Top-level heredocs (`cat > file <<EOF`) are unaffected.
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
 - A backend-verification doc (`docs/*-backend.md`) records empirical facts, not assumptions.

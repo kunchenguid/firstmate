@@ -2,13 +2,18 @@
 # Behavior tests for bin/fm-brief.sh.
 #
 # Regression coverage for the heredoc-in-command-substitution parse bug (issue
-# #166): each ship-mode branch builds its Definition-of-done text with
-# `VAR=$(cat <<EOF ... EOF)`. Bash's lexer tracks quote state through the
-# heredoc body while it scans for the matching `)` of the command
-# substitution, so a single unescaped apostrophe anywhere in that body breaks
-# parsing of the *entire rest of the script* - `bash -n` fails, not just the
-# generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
-# is unaffected, so the secondmate charter block does not need this guard.
+# #166, re-broken by PR #945 on 2026-07-24): each ship-mode branch builds its
+# Definition-of-done text with `VAR=$(cat <<EOF ... EOF)`. Bash 3.2's lexer
+# tracks quote state through the heredoc body while it scans for the matching
+# `)` of the command substitution, so a single unescaped apostrophe anywhere
+# in that body breaks parsing of the *entire rest of the script* under macOS
+# /bin/bash 3.2.57 - `bash -n` fails, not just the generated brief. Bash 4/5
+# parses the same construct fine, so `bash -n` alone cannot guard this on a
+# Linux CI host: the durable guard is the version-independent no-apostrophe
+# style check in test_dod_heredocs_carry_no_apostrophes below, backed by the
+# style rule in .agents/skills/firstmate-coding-guidelines/SKILL.md. A plain
+# `cat > file <<EOF ... EOF` (not wrapped in `$(...)`) is unaffected, so the
+# secondmate charter block does not need this guard.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -20,13 +25,39 @@ mkdir -p "$BRIEF_HOME/data"
 
 # The script itself must always parse. This is the direct regression test for
 # issue #166: a stray apostrophe in any of the three DOD heredoc bodies
-# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
+# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file under
+# bash 3.2. It only bites when the test host runs bash 3.2 (macOS /bin/bash);
+# on a Linux bash 5 host the apostrophe parses fine and this test cannot catch
+# the regression - test_dod_heredocs_carry_no_apostrophes is the durable,
+# version-independent guard.
 test_script_parses() {
   local out rc
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
   expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
   [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
   pass "fm-brief.sh: bash -n succeeds"
+}
+
+# Version-independent style guard for the #166/#945 parse quirk: an
+# apostrophe inside a heredoc body that sits in a `$(...)` command
+# substitution breaks `bash -n` under bash 3.2 but parses fine under bash 5,
+# so `test_script_parses` alone cannot catch it on a Linux host. Scan every
+# `VAR=$(cat <<EOF ... EOF)` body in bin/fm-brief.sh and reject apostrophes
+# outright, regardless of the bash version running the test.
+test_dod_heredocs_carry_no_apostrophes() {
+  local hits
+  hits=$(awk '
+    /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=\$\(cat <<[A-Za-z_]+[[:space:]]*$/ {
+      in_heredoc=1
+      next
+    }
+    in_heredoc && /^EOF$/ { in_heredoc=0; next }
+    in_heredoc && /'"'"'/ { print NR ": " $0 }
+  ' "$ROOT/bin/fm-brief.sh")
+  if [ -n "$hits" ]; then
+    fail "apostrophe(s) inside a \$(cat <<EOF ...) heredoc body break bash 3.2 parsing (see firstmate-coding-guidelines style rules):"$'\n'"$hits"
+  fi
+  pass "fm-brief.sh: command-substitution heredoc bodies carry no apostrophes"
 }
 
 test_help_includes_entire_header() {
@@ -116,6 +147,14 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must render literal backticks around help"
   assert_no_grep "no-mistakes' own guidance" "$brief" \
     "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
+  # PR #945's ask-user authority wording must survive, in the apostrophe-free
+  # form bash 3.2 can parse.
+  assert_grep "the firstmate authority check and any required captain escalation" "$brief" \
+    "no-mistakes DOD lost the #945 firstmate authority wording"
+  assert_grep "Firstmate applies the authority contract in its \`AGENTS.md\`" "$brief" \
+    "no-mistakes DOD lost the #945 authority-contract sentence"
+  assert_no_grep "firstmate's authority check" "$brief" \
+    "no-mistakes DOD regressed to the #945 apostrophe form that breaks bash 3.2"
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
@@ -383,6 +422,7 @@ test_scout_and_secondmate_scaffold() {
 }
 
 test_script_parses
+test_dod_heredocs_carry_no_apostrophes
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
