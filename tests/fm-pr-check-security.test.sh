@@ -112,12 +112,15 @@ write_poll_meta() {
     "pr=$url"
 }
 
+# Genuine metadata ambiguity is two pr= lines naming different PRs: the task's
+# PR ownership is unresolvable. A trailing non-pr field is NOT ambiguous (see
+# fm_pr_metadata_identity_parse), so the fixture must carry a real second pr=.
 write_ambiguous_poll() {
   local dir=$1 id=${2:-task-a}
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=fm-$id" \
     'pr=https://github.com/o/r/pull/10' \
-    'window=unexpected-after-pr'
+    'pr=https://github.com/o/r/pull/11'
   printf 'legacy ambiguous bytes\n' > "$dir/home/state/$id.check.sh"
 }
 
@@ -422,6 +425,55 @@ EOF
   fm_pr_task_id_valid "$id" || fail "operational validator rejected a path-safe legacy task ID"
   ! fm_task_id_creation_valid "$id" || fail "creation validator accepted an overlong task ID"
   pass "raw-byte parser accepts canonical URLs and rejects the complete adversarial matrix"
+}
+
+# Canonical identity must depend on metadata content, not line order. A task's
+# metadata legitimately grows a trailing nm_watch_run= (fm-nm-watch.sh appends
+# it after fm-pr-check.sh writes the pr=/pr_head= block), and that must stay
+# canonical instead of self-poisoning the very poll the same command just armed.
+test_metadata_identity_order_insensitive() {
+  local dir meta
+  dir=$(make_case parser-order-insensitive)
+  meta="$dir/home/state/task-a.meta"
+
+  # 1. nm_watch_run= before pr= is canonical.
+  fm_write_meta "$meta" \
+    'window=fm-task-a' \
+    'nm_watch_run=nm-abc123' \
+    'pr=https://github.com/o/r/pull/10'
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "parser rejected canonical metadata with nm_watch_run before pr="
+  [ "$FM_PR_META_URL" = https://github.com/o/r/pull/10 ] \
+    || fail "parser returned wrong URL when nm_watch_run preceded pr="
+
+  # 2. nm_watch_run= after pr= is canonical too (the self-poisoning bug).
+  fm_write_meta "$meta" \
+    'window=fm-task-a' \
+    'pr=https://github.com/o/r/pull/10' \
+    'pr_head=1111111111111111111111111111111111111111' \
+    'nm_watch_run=nm-abc123'
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "parser rejected a normally-armed direct-PR poll with nm_watch_run after pr="
+  [ "$FM_PR_META_URL" = https://github.com/o/r/pull/10 ] \
+    || fail "parser returned wrong URL when nm_watch_run followed pr="
+
+  # 3. Two pr= lines remain a genuine ambiguity and are still rejected.
+  fm_write_meta "$meta" \
+    'window=fm-task-a' \
+    'pr=https://github.com/o/r/pull/10' \
+    'pr=https://github.com/o/r/pull/11'
+  ! fm_pr_metadata_identity_parse "$meta" \
+    || fail "parser accepted metadata naming two different PRs"
+
+  # 4. A malformed pr_head= after pr= is still rejected.
+  fm_write_meta "$meta" \
+    'window=fm-task-a' \
+    'pr=https://github.com/o/r/pull/10' \
+    'pr_head=not-a-valid-sha'
+  ! fm_pr_metadata_identity_parse "$meta" \
+    || fail "parser accepted metadata with an invalid pr_head"
+
+  pass "canonical PR identity depends on content, not line order"
 }
 
 test_invalid_entrypoints_have_zero_side_effects() {
@@ -2051,7 +2103,7 @@ test_nonexecuting_migration() {
   fm_write_meta "$state/task-b.meta" \
     'window=fm-task-b' \
     'pr=https://github.com/o/r/pull/10' \
-    'window=injected-after-pr'
+    'pr=https://github.com/o/r/pull/11'
   printf 'legacy ambiguous bytes\n' > "$state/task-b.check.sh"
   FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err" \
     || fail "ambiguous migration failed to quarantine"
@@ -2843,6 +2895,7 @@ EOF
 }
 
 test_parser_matrix
+test_metadata_identity_order_insensitive
 test_gitlab_merge_watch
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
