@@ -234,9 +234,9 @@ test_refuses_root_replacement_and_busy_registry() {
   mkdir -p "$destination" "$fakebin" "$replacement"
   printf '%s\n' \
     '#!/usr/bin/env bash' \
-    'mv "$RELOCATE_RACE_ROOT" "$RELOCATE_RACE_ROOT.original"' \
-    'ln -s "$RELOCATE_RACE_REPLACEMENT" "$RELOCATE_RACE_ROOT"' \
-    'exec "$RELOCATE_REAL_PYTHON" "$@"' \
+    "mv \"\$RELOCATE_RACE_ROOT\" \"\$RELOCATE_RACE_ROOT.original\"" \
+    "ln -s \"\$RELOCATE_RACE_REPLACEMENT\" \"\$RELOCATE_RACE_ROOT\"" \
+    "exec \"\$RELOCATE_REAL_PYTHON\" \"\$@\"" \
     > "$fakebin/python3"
   chmod +x "$fakebin/python3"
 
