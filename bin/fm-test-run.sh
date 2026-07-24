@@ -140,6 +140,7 @@ family_for_basename() {
     fm-afk-inject-herdr-e2e.test.sh|fm-afk-launch.test.sh|fm-backend-autodetect-smoke.test.sh|\
     fm-backend-herdr-eventwait-smoke.test.sh|fm-backend-herdr-presentation-e2e.test.sh|\
     fm-backend-herdr-prune-safety-e2e.test.sh|fm-backend-herdr-respawn-idem-e2e.test.sh|\
+    fm-herdr-session-cleanup-e2e.test.sh|\
     fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh)
       printf '%s\n' real-herdr-gated
       ;;
@@ -160,8 +161,8 @@ family_for_basename() {
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
-    fm-send-strict.test.sh|fm-spawn-batch.test.sh|fm-spawn-dispatch-profile.test.sh|\
-    fm-spawn-worktree-settle.test.sh)
+    fm-herdr-session-cleanup.test.sh|fm-send-strict.test.sh|fm-spawn-batch.test.sh|\
+    fm-spawn-dispatch-profile.test.sh|fm-spawn-worktree-settle.test.sh)
       printf '%s\n' backend-dispatch
       ;;
     fm-pr-check-security.test.sh|fm-pr-merge.test.sh|fm-review-diff.test.sh|\
@@ -620,6 +621,11 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
+      ;;
+    bin/fm-herdr-session-cleanup.sh)
+      printf '%s\n' session-bootstrap
+      printf '%s\n' real-herdr-gated
+      printf '%s\n' backend-dispatch
       ;;
     bin/backends/zellij*|tests/zellij-test-safety.sh)
       printf '%s\n' zellij
