@@ -4,12 +4,11 @@ When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
 2. Routine watcher arm and re-arm are owned by the Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`), never by you.
    Every turn end while supervision is needed launches or attaches one home-scoped watcher cycle with no model command and no model tokens.
-   If that Stop overlaps an older attached auto-arm, one coalesced hook waits to own the next cycle instead of dropping the re-arm request.
    An actionable close wakes you through the hook's exit-2 rewake, delivered as a `Stop hook feedback` message.
 3. On a `Stop hook feedback` wake (`signal:`, `stale:`, `check:`, or `heartbeat`), run `bin/fm-wake-drain.sh` first and handle the wake.
    Do not run `bin/fm-watch-arm.sh` after an ordinary wake; the next turn end re-arms automatically when supervision is still needed.
    Do not invent a wake from an attach-status line alone; drain and act only on real wake records or a real watcher reason line.
-4. On a `Stop hook feedback` watcher-failure wake (`watcher: FAILED ...`), treat it as an alarm: drain, then repair supervision before ending the turn.
+4. On a `Stop hook feedback` watcher-failure wake (`watcher: FAILED ...`) or loud delivered-close wake (`watcher: cycle closed with a delivered wake ...; no live cycle remains`), treat it as an alarm: drain, then repair supervision before ending the turn.
 5. Manual arm is recovery only.
    When a repair is genuinely needed - the Stop hook did not claim this home, or a forced restart is required - run `bin/fm-watch-arm.sh` (or `bin/fm-watch-arm.sh --restart`) as its own Claude Code background task, never bundled with other commands, never with shell `&`.
    Source `__FM_X_MODE_ENV__` first when X mode is active.
