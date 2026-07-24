@@ -157,6 +157,7 @@ A silent bootstrap section needs no action; for any printed actionable diagnosti
 
 Load `harness-adapters` before every spawn or recovery and before trust handling, skill invocation, interrupt, exit, resume, or adapter verification.
 The verified harnesses are `claude`, `codex`, `opencode`, `pi`, and `grok`; never dispatch on an unverified adapter.
+GitHub Copilot CLI (`copilot`) is additionally verified for crewmate and secondmate dispatch, is recognized for session-lock and own-harness detection, and supervises as a primary through the codex-style foreground checkpoint; it has no blocking turn-end guard backstop, so its active checkpoint loop is the only supervision safety net.
 If configured harness data names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-dispatch-select.sh` owns selector mechanics, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.

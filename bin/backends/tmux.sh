@@ -181,7 +181,10 @@ fm_backend_tmux_agent_state() {  # <target>
   }
   comm=${comm#-}
   case "$comm" in
-    *claude*|*codex*|*opencode*|*grok*) printf 'alive' ;;
+    # copilot's ELF renames its main thread (ps comm "MainThread"), but tmux's
+    # #{pane_current_command} is cmdline-derived and reports "copilot" (verified
+    # live, copilot 1.0.73 with tmux 3.x, 2026-07-21).
+    *claude*|*codex*|*opencode*|*grok*|*copilot*) printf 'alive' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
     '') printf 'unreadable' ;;
     *) printf 'ambiguous' ;;

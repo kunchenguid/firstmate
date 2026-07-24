@@ -111,6 +111,8 @@ Verified the same session: a persisting parent process running a child command (
 
 The recovery classifier (`fm_backend_tmux_agent_state`) maps the observation to the shared detailed state owned by `fm_backend_agent_state` in `bin/fm-backend.sh`.
 A recognized harness is `alive`, a bare shell is `dead`, and an unrecognized foreground process is `ambiguous`.
+The recognized set is `claude`, `codex`, `opencode`, `grok`, and `copilot`.
+`copilot` matches even though its bundled ELF renames its main thread (`ps -o comm=` reports `MainThread`) because `#{pane_current_command}` is derived from the process cmdline, which is exactly `copilot` (verified live, copilot 1.0.73 with tmux 3.x, 2026-07-21).
 The classifier checks exact window-name membership in a readable session inventory before trusting `display-message`, because tmux silently redirects a missing named target to the active window.
 It returns `missing` when `tmux list-windows` successfully reads the recorded session and omits the exact recorded window, or when tmux definitively reports that the recorded session or server is absent.
 Any other failed inventory or pane read is `unreadable` and never authorizes recovery.

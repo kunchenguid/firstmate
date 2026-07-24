@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, and copilot (crew/secondmate dispatch plus foreground-checkpoint primary).
 user-invocable: false
 metadata:
   internal: true
@@ -50,15 +50,16 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 
 ## Primary turn-end guard
 
-Every verified primary harness has an empirically validated hook path for the "no turn ends blind" guard.
+Every hook-integrated primary harness (`claude`, `codex`, `opencode`, `pi`, `grok`) has an empirically validated hook path for the "no turn ends blind" guard.
 `claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
 `opencode`, `pi`, and `grok` expose passive lifecycle callbacks for this purpose, so their tracked primary adapters force one bounded follow-up or resume when the shared predicate blocks.
+`copilot` is the exception: its hooks cannot block a stop or force a continued turn (only `preToolUse` can approve/deny, and that fires before a tool call), so it has no turn-end guard and relies solely on its foreground checkpoint loop - see `docs/turnend-guard.md`.
 The exact hook files, commands, validation transcripts, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
 When changing any primary turn-end hook, validate the real harness behavior in a scratch project or throwaway home before trusting it, then update that doc and the relevant concise fact below.
 
 ## Primary pre-arm (PreToolUse) seatbelt
 
-Every verified primary harness also has a wired PreToolUse-equivalent hook that denies a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
+Every hook-integrated primary harness (`claude`, `codex`, `opencode`, `pi`, `grok`) also has a wired PreToolUse-equivalent hook that denies a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
 `claude` and `codex` block directly through PreToolUse hooks; `grok` blocks the same way but requires every `$VAR` reference in its hook `command` string to carry an inline `:-default` or it fails to launch the hook entirely.
 `opencode` and `pi` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
 The exact hook files, commands, output-shaping quirks (Claude Code only honors the deny when stdout is empty), and validation transcripts are owned by `docs/arm-pretool-check.md`.
@@ -119,6 +120,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-13 on Pi 0.80.6. `pi --help` advertises `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; `pi --print --model openai-codex/gpt-5.6-sol --thinking max 'Reply with exactly OK.'` completed successfully. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
+| copilot | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-21 on copilot 1.0.73. `--effort` (alias `--reasoning-effort`) advertises `none\|minimal\|low\|medium\|high\|xhigh\|max`, a superset of firstmate's vocabulary, and `--effort low` launched and ran a turn unattended live. The model catalog includes `claude-*`, `gpt-5.6-*`, `gemini-*`, `kimi-*`, and `auto`; `--model claude-haiku-4.5` verified live (the footer showed the selected model). |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.
@@ -132,6 +134,7 @@ Natural language is acceptable if uncertain.
 - codex: `$<skill>`, for example `$no-mistakes`; `/<skill>` is claude-only and codex rejects it as "Unrecognized command".
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
+- copilot: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified live on 1.0.73: copilot discovers `no-mistakes` from `~/.agents/skills/` (its "Personal" source; project skills load from `.github/skills/`, `.agents/skills/`, or `.claude/skills/`), typing `/no-mistakes` opens a slash-autocomplete popup listing the skill with its description, and one Enter submits it - the model then invokes its `skill(no-mistakes)` tool. Unlike grok/codex, the popup did NOT swallow the first Enter for exact-typed command text on the tmux backend (fm-send's 1.2s `/`-settle was in effect; its retried Enter remains the safety net).
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) already handles this correctly by reading the cursor row; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 
 ## claude (VERIFIED)
@@ -316,3 +319,40 @@ The adapter therefore runs the shared predicate and, when it returns 2, forces o
 It does not pass `--permission-mode`, so the passive hook cannot escalate the primary session's tool permissions.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
+
+## copilot (VERIFIED 2026-07-21, GitHub Copilot CLI 1.0.73 - crew/secondmate dispatch and foreground-checkpoint primary; no turn-end guard)
+
+GitHub Copilot CLI (`copilot`), an interactive TUI harness.
+Launch with the prompt as the `-i` flag's VALUE, the brief encoded through the shared operational-input encoder like every other harness: `copilot --allow-all --no-ask-user -i "$(<opinput> encode launch-brief < <brief>)"` - `-i/--interactive` starts the supervised interactive session and auto-executes the prompt, while `-p/--prompt` exits after one turn and is unsuitable for a steerable crewmate.
+For copilot's supported model and effort flags, see the [launch-profile-axes table](#launch-profile-axes).
+Every fact below was verified live in throwaway sessions on the tmux backend (private `tmux -L` server, scratch git repos, 2026-07-21).
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `<spinner> Working · <bytes> esc interrupt` (e.g. `◎ Working · 916 B esc interrupt`), shown iff a turn is running; matched by the existing `esc (to )?interrupt` busy-regex alternative, so no copilot-specific regex entry exists. Idle footer is `/ commands · ? help · tab next tab`. |
+| Exit command | `/exit` typed into the composer (give the slash popup a settle before Enter; `fm-send`'s 1.2s `/`-settle suffices). On exit copilot prints session stats plus `Resume  copilot --resume=<session-id>`. |
+| Interrupt | `Ctrl+C` mid-turn (prints `Operation aborted by user` / `Operation cancelled by user`). The busy footer advertises `esc interrupt`, but Esc pressed twice did NOT cancel a running sync shell tool in live testing - use Ctrl+C. On an IDLE composer Ctrl+C instead arms exit (footer shows `ctrl+c again to exit`), so never send it to an idle pane. |
+| Skill invocation | `/<skill>` (e.g. `/no-mistakes`), same form as claude - see the no-mistakes skill invocation list above for the popup and discovery details. |
+| Autonomy | `--allow-all` (equivalent to `--allow-all-tools --allow-all-paths --allow-all-urls`; `--yolo` is its documented alias, also verified live) plus `--no-ask-user` so the `ask_user` tool never stalls the crew. Verified: a shell-touching turn ran fully unattended with no permission prompt after folder trust. |
+| Composer | A bare `❯` glyph row between two horizontal rules, no box border. The glyph is truecolor `38;2;134;134;134` (luminance 134, at/above the ghost-strip threshold) and real typed text renders in the default foreground, so the shared classifier reads idle as `empty` and typed-unsubmitted as `pending` with no `FM_COMPOSER_IDLE_RE` override (verified through `fm_tmux_composer_state` live). |
+| Submit | One Enter submits plain text AND an exact-typed `/<skill>` command on tmux (composer clears immediately; no popup Enter-swallow reproduced there). The herdr adapter's structural bare-prompt scan (`^[❯›]`) matches copilot's composer row, so its settle-plus-retried-Enter submit path applies; live end-to-end herdr steer verification is still pending (see the herdr note below). |
+| Env / detection | `ps -o comm=` reports `MainThread` (the bundled ELF renames its main thread) while `ps -o args=` is exactly `copilot ...`; tmux's `#{pane_current_command}` is cmdline-derived and reports `copilot`. Detection and the session lock ride the anchored args path (`bin/fm-harness.sh`, `bin/fm-lock.sh`). |
+| Resume | `copilot --resume=<session-id>` (printed on exit), `--continue` (most recent), `-r/--resume[=id|name]`, or `--session-id <id>`. |
+
+Folder trust dialog: "Confirm folder trust" appears on EVERY launch in a not-yet-remembered folder, including every fresh task worktree, with `❯ 1. Yes` preselected (option 2 remembers the folder; firstmate does not use it so no durable trust is accumulated for disposable worktrees).
+Accept with Enter from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, the same post-spawn peek-within-20-seconds handling as claude.
+The `-i` prompt auto-executes immediately after the dialog is accepted (verified: the brief turn started and its shell command ran with no further keystroke).
+
+Turn-end hook: copilot loads repo-level hooks from `<git-root>/.github/hooks/*.json` with no gate beyond the same folder-trust dialog, and fires `agentStop` at every COMPLETED turn boundary (payload includes `stopReason: "end_turn"` and a `stop_hook_active` field; verified with a probe hook - two completed turns fired exactly two `agentStop` events).
+`fm-spawn` therefore writes `<worktree>/.github/hooks/fm-turn-end.json` (an `agentStop` hook touching `state/<id>.turn-ended`), git-excluded via info/exclude and removed by `fm-teardown` before a pooled worktree is returned, exactly the claude `.claude/settings.local.json` shape.
+A user-CANCELLED turn fires no `agentStop` (verified: a Ctrl+C-aborted turn left the count unchanged), which the watcher's pane-staleness backstop covers.
+`sessionStart` (with `initialPrompt`), `preToolUse`/`postToolUse` (with `toolName`/`toolArgs`), and `sessionEnd` (on `/exit`) also fired in the same probe; `userPromptSubmit` and other guessed event names never fired.
+Secondmate spawns skip the hook file (idle panes are healthy, no stale-pane detection for them).
+
+Herdr backend note: the original dispatch-parity observation (a brief typed into copilot's composer via herdr needed a separate Enter) is the shape `fm_backend_herdr_send_text_submit` already handles - it types, settles, then retries Enter until herdr's native agent state or the composer read confirms the submit.
+Copilot's composer rows classify correctly through the shared herdr path (regression-fixtured in `tests/fm-backend-herdr.test.sh` with real captured ANSI rows), but a live herdr end-to-end steer to a copilot crew has not been run yet; treat the first herdr-backed copilot dispatch as a supervised verification of that last step.
+
+Primary supervision: copilot runs a firstmate primary through the codex-style foreground checkpoint (`docs/supervision-protocols/copilot.md`, rendered by `bin/fm-supervision-instructions.sh`), because it cannot reason while a foreground tool call runs, exactly like codex.
+It has NO turn-end guard: copilot hooks cannot block a stop or force a continued turn (only `preToolUse` approves/denies, before a tool call), so the active checkpoint loop is its only supervision backstop - see `docs/turnend-guard.md`.
+Still unbuilt for copilot primary: the PreToolUse watcher-arm seatbelt and the session-start nudge (copilot's `preToolUse` and `sessionStart` hooks exist and could carry them, but the adapters are not written or validated yet).
+A copilot-driven home gets the session lock, own-harness detection, crew/secondmate dispatch, and foreground-checkpoint supervision.

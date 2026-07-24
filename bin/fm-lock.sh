@@ -15,7 +15,16 @@ LOCK="$STATE/.lock"
 mkdir -p "$STATE"
 
 # Known harness command names; extend when a new adapter is verified.
-HARNESS_RE='claude|codex|opencode|grok|^pi$'
+# copilot (GitHub Copilot CLI) is recognized for the session lock and
+# own-harness detection, and is a verified dispatchable crew/secondmate harness
+# (still not a verified primary). Verified 2026-07-21 on copilot 1.0.73:
+# its bundled ELF renames the main thread, so `ps -o comm=` reports "MainThread"
+# while `ps -o args=` is exactly "copilot"; recognition therefore rides the args
+# path. The copilot alternatives are anchored to a standalone word or a
+# path-prefixed argv[0] (e.g. "/home/x/.local/bin/copilot --allow-all") so
+# unrelated argv such as ".../extensions/copilot --locale" or
+# "@vscode/copilot-typescript-server-plugin" never matches.
+HARNESS_RE='claude|codex|opencode|grok|^pi$|(^| )copilot( |$)|^[^ ]*/copilot( |$)'
 
 harness_pid() {
   local pid=$$ comm args
@@ -26,8 +35,9 @@ harness_pid() {
       echo "$pid"; return 0
     fi
     # Bare interpreter (e.g. node): match the harness name in its script path.
+    # MainThread is copilot's comm (see HARNESS_RE note); its args carry the name.
     case "$comm" in
-      *node*|*python*) printf '%s' "$args" | grep -qE "$HARNESS_RE" && { echo "$pid"; return 0; } ;;
+      *node*|*python*|MainThread) printf '%s' "$args" | grep -qE "$HARNESS_RE" && { echo "$pid"; return 0; } ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
@@ -39,7 +49,17 @@ holder_alive() {  # true if $1 is a live process that looks like a harness
   local pid=$1 comm
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  printf '%s' "$(basename "$comm") $(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$HARNESS_RE"
+  if printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE"; then
+    return 0
+  fi
+  # Only trust args when comm is a bare interpreter or copilot's MainThread,
+  # mirroring harness_pid; otherwise a recycled pid whose argv merely mentions
+  # a harness name (e.g. "gh copilot suggest") would look like a live holder.
+  case "$comm" in
+    *node*|*python*|MainThread)
+      printf '%s' "$(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$HARNESS_RE" ;;
+    *) return 1 ;;
+  esac
 }
 
 if [ "${1:-}" = "status" ]; then

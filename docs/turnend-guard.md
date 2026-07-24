@@ -38,7 +38,7 @@ If `jq` is missing or hook stdin is empty, the guard fails open and exits 0 beca
 
 ## Harness Integrations
 
-All verified primary harnesses have a tracked integration:
+All five hook-integrated primary harnesses have a tracked integration:
 
 - `claude`: `.claude/settings.json` registers a `Stop` hook command anchored through `"$CLAUDE_PROJECT_DIR"/bin/fm-turnend-guard.sh`.
 - `codex`: `.codex/hooks.json` registers a `Stop` hook that reads the hook payload once, anchors the executable to the hook command process working directory, verifies that root is firstmate-shaped and hook-bearing, and pipes the original payload to that checkout's `bin/fm-turnend-guard.sh`.
@@ -59,6 +59,11 @@ Each adapter carries its own in-process or environment loop guard so the forced 
 Pi keeps that latch active across every internal tool turn and clears it only when the generated guard follow-up reaches `agent_settled`, or immediately when follow-up delivery fails.
 If a passive adapter cannot call its SDK method, cannot find `grok`, or cannot recover the Grok session id, it fails open and relies on the pull-based `fm-guard.sh` warning at the next fleet command.
 That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it points back to the active harness protocol instead of hardcoding one background-arm command.
+
+Copilot is a supervised primary without a turn-end guard integration.
+GitHub Copilot CLI hooks cannot block a stop or force a continued turn: only its `preToolUse` hook can approve or deny, and that fires before a tool call, not at turn end (verified against the GitHub Copilot hooks reference, copilot 1.0.74, 2026-07-24).
+So copilot has no entry above and no `bin/fm-turnend-guard.sh` hook.
+Its only supervision backstop is the active foreground checkpoint loop in `docs/supervision-protocols/copilot.md`; when a copilot turn ends with that loop stopped, the pull-based `fm-guard.sh` warning at the next fleet command is what points it back to resuming the checkpoint.
 
 ## Empirical Validation
 

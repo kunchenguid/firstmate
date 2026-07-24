@@ -27,6 +27,23 @@ test_unknown_fallback() {
   pass "renderer falls back to unknown.md for unverified harness names"
 }
 
+test_copilot_detected_with_checkpoint() {
+  local out ordinary
+  out=$("$RENDER" --harness copilot)
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: copilot" "copilot heading missing or renamed to unknown"
+  assert_contains "$out" "Mode: Copilot foreground checkpoint." "copilot did not get its own foreground-checkpoint snippet"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh" "copilot checkpoint helper missing"
+  assert_contains "$out" "no blocking turn-end guard" "copilot harness note lost the missing-backstop fact"
+  assert_not_contains "$out" "Mode: Unknown harness fallback." "copilot must not fall back to the manual snippet"
+  out=$("$RENDER" --harness copilot --repair-line)
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh" "copilot repair line should use the foreground checkpoint helper"
+  out=$("$RENDER" --harness copilot)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "next foreground" "copilot ordinary-wake line lost its foreground checkpoint"
+  assert_contains "$ordinary" "bin/fm-watch-checkpoint.sh" "copilot ordinary-wake line lost the checkpoint command"
+  pass "copilot supervises through the codex-style foreground checkpoint with an honest no-backstop note"
+}
+
 test_conditional_stanzas() {
   local home config out
   home="$TMP_ROOT/conditional-home"
@@ -156,6 +173,7 @@ test_pi_snippet_uses_effective_extension_path() {
 
 test_selected_harness_block_only
 test_unknown_fallback
+test_copilot_detected_with_checkpoint
 test_conditional_stanzas
 test_repair_lines
 test_cross_harness_ordinary_continuation_and_repair_matrix

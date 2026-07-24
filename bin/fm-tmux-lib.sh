@@ -62,7 +62,11 @@
 
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
-# (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
+# (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73);
+# copilot: "<spinner> Working · <bytes> esc interrupt" (shown iff a turn is
+# running; idle footer is "/ commands · ? help · tab next tab" - verified
+# copilot 1.0.73, 2026-07-21), already matched by the "esc (to )?interrupt"
+# alternative, so the regex needs no copilot-specific entry.
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor

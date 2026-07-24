@@ -59,7 +59,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|copilot)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -386,7 +386,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|copilot)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -447,6 +447,19 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # copilot (GitHub Copilot CLI): -i/--interactive takes the prompt as its VALUE
+    # (verified 1.0.73: it starts the supervised interactive session and
+    # auto-executes the prompt; -p/--prompt would exit after one turn, unsuitable
+    # for a steerable crewmate). --allow-all enables every permission
+    # (tools+paths+URLs; --yolo is its documented alias), and --no-ask-user
+    # disables the ask_user tool so the crew never stalls on a question - both
+    # verified to run a shell-touching turn fully unattended after the folder
+    # trust dialog is accepted (see harness-adapters for the dialog handling).
+    # The brief rides the shared operational-input encoder like every other
+    # harness so steering and marked returns stay consistent. copilot's turn-end
+    # signal does not ride the launch command - it is a repo-level agentStop hook
+    # installed below, so the template is identical for ship/scout/secondmate.
+    copilot) printf '%s' 'copilot --allow-all --no-ask-user __MODELFLAG____EFFORTFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -534,7 +547,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    claude|codex|opencode|pi|grok|copilot)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -571,6 +584,15 @@ effort_flag_for_harness() {
       # its --thinking flag.
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    copilot)
+      # copilot 1.0.73's --effort (alias --reasoning-effort) advertises
+      # none|minimal|low|medium|high|xhigh|max - a superset of firstmate's
+      # shared effort vocabulary, so every firstmate value passes through
+      # (verified live: --effort low launched and ran a turn unattended).
+      case "$effort" in
+        low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     # opencode's interactive `opencode --prompt` launch has a verified --model
@@ -1233,6 +1255,20 @@ EOF
       ;;
     codex*)
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
+      ;;
+    copilot*)
+      # copilot loads repo-level hooks from <git-root>/.github/hooks/*.json with
+      # no trust gate beyond the standard folder-trust dialog the launch already
+      # passes through, and fires agentStop at every COMPLETED turn boundary
+      # (verified 1.0.73: two turns fired two agentStop events with
+      # stopReason=end_turn; a user-cancelled turn fires none, which the
+      # watcher's staleness backstop covers). The "bash" command runs on Unix;
+      # "powershell" would be the Windows key, not needed for this fleet.
+      mkdir -p "$WT/.github/hooks"
+      cat > "$WT/.github/hooks/fm-turn-end.json" <<EOF
+{"version":1,"hooks":{"agentStop":[{"type":"command","bash":"touch '$TURNEND'","timeoutSec":10}]}}
+EOF
+      exclude_path '.github/hooks/fm-turn-end.json'
       ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the

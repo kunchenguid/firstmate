@@ -175,6 +175,7 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 ## Harness support
 
 claude, codex, opencode, pi, and grok are all empirically verified; new harnesses get verified through a supervised trial task before joining the set.
+GitHub Copilot CLI (`copilot`) is additionally recognized for the session lock and own-harness detection, so a copilot-driven home can hold its own lock, and is a verified crewmate/secondmate dispatch harness whose empirical facts live in the `harness-adapters` skill; as a primary it supervises through the codex-style foreground checkpoint (`docs/supervision-protocols/copilot.md`), but has no blocking turn-end guard backstop because Copilot hooks cannot force a continued turn (see `docs/turnend-guard.md`).
 The verified adapter knowledge - busy signatures, interrupt and exit commands, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
 Primary-session turn-end guard integrations for verified harnesses are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
