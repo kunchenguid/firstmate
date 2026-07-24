@@ -360,7 +360,15 @@ markdown-list|- Authorization: Basic dXNlcjpwYXNzd29yZA
 markdown-code|`Authorization: Basic dXNlcjpwYXNzd29yZA`
 curl-short|curl -H 'Authorization: Basic dXNlcjpwYXNzd29yZA' https://example.invalid
 curl-long|curl --header="Authorization: Basic dXNlcjpwYXNzd29yZA" https://example.invalid
+curl-attached-single|curl -H'Authorization: Basic dXNlcjpwYXNzd29yZA' https://example.invalid
+curl-attached-double|curl -H"Authorization: Basic dXNlcjpwYXNzd29yZA" https://example.invalid
+curl-attached-header-token|curl -HAuthorization:'Basic dXNlcjpwYXNzd29yZA' https://example.invalid
+curl-long-separated|curl --header 'Authorization: Basic dXNlcjpwYXNzd29yZA' https://example.invalid
+curl-long-spaced-equals|curl --header = 'Authorization: Basic dXNlcjpwYXNzd29yZA' https://example.invalid
 structured-json|{"Authorization": "Basic dXNlcjpwYXNzd29yZA"}
+structured-non-leading|{"method":"GET","Authorization":"Basic dXNlcjpwYXNzd29yZA"}
+structured-nested|{"headers":{"Authorization":"Basic dXNlcjpwYXNzd29yZA"}}
+structured-multiple|{"Authorization":"Basic REDACTED","authorization":"Basic dXNlcjpwYXNzd29yZA"}
 structured-key|Authorization = "Basic dXNlcjpwYXNzd29yZA"
 EOF
   while IFS='|' read -r name value; do
@@ -419,7 +427,12 @@ $value
   done <<'EOF'
 markdown-code|`Authorization: Basic REDACTED`
 curl-header|curl -H 'Authorization: Basic PLACEHOLDER' https://example.invalid
+curl-attached|curl -H'Authorization: Basic REDACTED' https://example.invalid
 structured-key|{"Authorization": "Basic TOKEN"}
+structured-non-leading|{"method":"GET","Authorization":"Basic REDACTED"}
+structured-nested|{"headers":{"Authorization":"Basic PLACEHOLDER"}}
+structured-multiple|{"Authorization":"Basic REDACTED","authorization":"Basic TOKEN"}
+structured-leading-with-tail|{"Authorization":"Basic REDACTED","method":"GET"}
 EOF
 
   dir=$(make_case basic-ordinary-prose)
@@ -443,6 +456,10 @@ scheme-name|The client calls this the Authorization: Basic scheme.
 quoted-scheme-name|> The client calls this the Authorization: Basic scheme.
 near-miss-key|clientAuthorization: Basic dXNlcjpwYXNzd29yZA
 near-miss-curl|The curl -H 'Authorization: Basic dXNlcjpwYXNzd29yZA' example is documentation.
+unrelated-short-option|curl -Help 'Authorization: Basic dXNlcjpwYXNzd29yZA' https://example.invalid
+lowercase-help-option|curl -h 'Authorization: Basic dXNlcjpwYXNzd29yZA' https://example.invalid
+unrelated-long-option|curl --headers='Authorization: Basic dXNlcjpwYXNzd29yZA' https://example.invalid
+near-miss-structured|{"clientAuthorization":"Basic dXNlcjpwYXNzd29yZA"}
 EOF
 
   dir=$(make_case basic-machine-verdict)

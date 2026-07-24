@@ -602,28 +602,66 @@ reject_basic_authorization() {
       }
       return !is_placeholder(value)
     }
-    function rejects_authorization(text, first, tail, end, key, rest, delimiter, lower) {
+    function rejects_basic_scheme(value, lower) {
+      value=trim(value)
+      lower=tolower(value)
+      if (!match(lower, /^basic([[:space:]]+|$)/)) return 0
+      return rejects_basic_value(substr(value, RSTART + RLENGTH))
+    }
+    function rejects_authorization(text, key, rest, delimiter) {
       text=trim(text)
       if (substr(text, 1, 1) == "{") text=trim(substr(text, 2))
-      first=substr(text, 1, 1)
-      if (first == "\"" || first == apostrophe) {
-        tail=substr(text, 2)
-        end=index(tail, first)
-        if (end == 0) return 0
-        key=substr(tail, 1, end - 1)
-        rest=trim(substr(tail, end + 1))
-      } else {
-        if (!match(text, /^[A-Za-z][A-Za-z0-9_-]*/)) return 0
-        key=substr(text, RSTART, RLENGTH)
-        rest=trim(substr(text, RSTART + RLENGTH))
-      }
+      if (!match(text, /^[A-Za-z][A-Za-z0-9_-]*/)) return 0
+      key=substr(text, RSTART, RLENGTH)
+      rest=trim(substr(text, RSTART + RLENGTH))
       if (tolower(key) != "authorization") return 0
       delimiter=substr(rest, 1, 1)
       if (delimiter != ":" && delimiter != "=") return 0
       rest=unwrap_structured_value(substr(rest, 2))
-      lower=tolower(rest)
-      if (!match(lower, /^basic([[:space:]]+|$)/)) return 0
-      return rejects_basic_value(substr(rest, RSTART + RLENGTH))
+      return rejects_basic_scheme(rest)
+    }
+    function rejects_structured_authorization(text, rest, double_pos, single_pos, start, quote, tail, end, key, after, delimiter, value_quote, value_tail, value_end, value, comma, brace, limit) {
+      rest=text
+      while (length(rest) > 0) {
+        double_pos=index(rest, "\"")
+        single_pos=index(rest, apostrophe)
+        if (double_pos == 0 && single_pos == 0) break
+        if (single_pos == 0 || (double_pos > 0 && double_pos < single_pos)) {
+          start=double_pos
+          quote="\""
+        } else {
+          start=single_pos
+          quote=apostrophe
+        }
+        tail=substr(rest, start + 1)
+        end=index(tail, quote)
+        if (end == 0) break
+        key=substr(tail, 1, end - 1)
+        after=trim(substr(tail, end + 1))
+        rest=substr(tail, end + 1)
+        if (tolower(key) != "authorization") continue
+        delimiter=substr(after, 1, 1)
+        if (delimiter != ":" && delimiter != "=") continue
+        after=trim(substr(after, 2))
+        value_quote=substr(after, 1, 1)
+        if (value_quote == "`" || value_quote == "\"" || value_quote == apostrophe) {
+          value_tail=substr(after, 2)
+          value_end=index(value_tail, value_quote)
+          if (value_end == 0) return rejects_basic_scheme(value_tail)
+          value=substr(value_tail, 1, value_end - 1)
+          rest=substr(value_tail, value_end + 1)
+        } else {
+          value=after
+          comma=index(value, ",")
+          brace=index(value, "}")
+          limit=0
+          if (comma > 0) limit=comma
+          if (brace > 0 && (limit == 0 || brace < limit)) limit=brace
+          if (limit > 0) value=substr(value, 1, limit - 1)
+        }
+        if (rejects_basic_scheme(value)) return 1
+      }
+      return 0
     }
     function unwrap_markdown_code(content, count, fence) {
       count=0
@@ -646,37 +684,70 @@ reject_basic_authorization() {
       }
       return unwrap_markdown_code(content)
     }
-    function rejects_curl_header(content, lower, rest, first, tail, end, argument) {
+    function parse_shell_word(text, i, character, quote, argument) {
+      sub(/^[[:space:]]+/, "", text)
+      quote=""
+      argument=""
+      for (i=1; i <= length(text); i++) {
+        character=substr(text, i, 1)
+        if (quote != "") {
+          if (character == quote) {
+            quote=""
+          } else {
+            argument=argument character
+          }
+        } else if (character == "`" || character == "\"" || character == apostrophe) {
+          quote=character
+        } else if (character ~ /[[:space:]]/) {
+          break
+        } else {
+          argument=argument character
+        }
+      }
+      parsed_argument=argument
+      parsed_rest=substr(text, i)
+      return argument != ""
+    }
+    function rejects_curl_header(content, lower, rest, option, tail, first) {
       if (content ~ /^\$[[:space:]]+/) content=trim(substr(content, 2))
       lower=tolower(content)
       if (!match(lower, /^curl([[:space:]]+|$)/)) return 0
       rest=substr(content, RSTART + RLENGTH)
-      while (match(tolower(rest), /(^|[[:space:]])(-h|--header)([[:space:]]+|[[:space:]]*=[[:space:]]*)/)) {
-        rest=trim(substr(rest, RSTART + RLENGTH))
-        first=substr(rest, 1, 1)
-        if (first == "`" || first == "\"" || first == apostrophe) {
-          tail=substr(rest, 2)
-          end=index(tail, first)
-          if (end == 0) {
-            argument=tail
-            rest=""
-          } else {
-            argument=substr(tail, 1, end - 1)
-            rest=substr(tail, end + 1)
+      while (match(rest, /(^|[[:space:]])(-H|--header)/)) {
+        option=substr(rest, RSTART, RLENGTH)
+        tail=substr(rest, RSTART + RLENGTH)
+        if (option ~ /--header$/) {
+          if (tail ~ /^[[:space:]]*=/) {
+            sub(/^[[:space:]]*=[[:space:]]*/, "", tail)
+          } else if (tail !~ /^[[:space:]]+/) {
+            rest=tail
+            continue
           }
         } else {
-          if (!match(rest, /^[^[:space:]]+/)) break
-          argument=substr(rest, RSTART, RLENGTH)
-          rest=substr(rest, RSTART + RLENGTH)
+          first=substr(tail, 1, 1)
+          lower=tolower(tail)
+          if (first !~ /[[:space:]]/ \
+              && first != "`" && first != "\"" && first != apostrophe \
+              && lower !~ /^authorization[[:space:]]*:/) {
+            rest=tail
+            continue
+          }
         }
-        if (rejects_authorization(argument)) return 1
+        if (!parse_shell_word(tail)) {
+          rest=tail
+          continue
+        }
+        if (rejects_authorization(parsed_argument)) return 1
+        rest=parsed_rest
       }
       return 0
     }
     BEGIN { apostrophe=sprintf("%c", 39) }
     {
       content=markdown_content($0)
-      if (rejects_authorization(content) || rejects_curl_header(content)) {
+      if (rejects_authorization(content) \
+          || rejects_structured_authorization(content) \
+          || rejects_curl_header(content)) {
         print NR
         exit
       }
