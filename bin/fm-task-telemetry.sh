@@ -309,6 +309,7 @@ EOF
 
 summary() {
   [ -f "$LEDGER" ] || { echo "no telemetry ledger at $LEDGER"; return 0; }
+  printf 'difficulty\tharness\tmodel\ttasks\tavg_total_tokens\tavg_tokens_per_difficulty_point\n'
   awk -F '\t' '
     NR == 1 { next }
     $10 ~ /^[0-9]+$/ {
@@ -318,7 +319,6 @@ summary() {
       point_total[key] += $11
     }
     END {
-      print "difficulty\tharness\tmodel\ttasks\tavg_total_tokens\tavg_tokens_per_difficulty_point"
       for (key in count) {
         avg = int(total[key] / count[key])
         ratio = point_total[key] > 0 ? int(total[key] / point_total[key]) : 0
