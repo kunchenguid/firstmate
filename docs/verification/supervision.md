@@ -74,12 +74,11 @@ The direct and passive mechanisms were validated across all five harnesses on 20
 The secondmate-home scope and manual-repair wake path were measured with Claude Code 2.1.207 on 2026-07-12, when a native background completion re-invoked the idle model with no human input.
 The current Stop-owned main/secondmate inclusion and child-worktree exclusion are covered deterministically by `tests/fm-claude-stop-autoarm.test.sh`.
 
-The Claude product live paths ran with Claude Code 2.1.219 on 2026-07-24:
+The Claude product live path ran with Claude Code 2.1.219 on 2026-07-24:
 
 ```sh
 claude --version
 FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh
-FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-continuity-live-e2e.test.sh
 ```
 
 Observed output:
@@ -87,7 +86,6 @@ Observed output:
 ```text
 2.1.219 (Claude Code)
 ok - Claude 2.1.219 (Claude Code) live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary
-ok - Claude 2.1.219 (Claude Code) live E2E refused only the post-completion fleet command with exact re-arm guidance
 ```
 
 Current entry points:
@@ -126,7 +124,7 @@ Deterministic entry points:
 ```sh
 tests/fm-pi-watch-extension.test.sh
 tests/fm-watcher-lock.test.sh
-tests/fm-continuity-pretool-check.test.sh
+tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```

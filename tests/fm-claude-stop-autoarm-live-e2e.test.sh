@@ -45,7 +45,7 @@ git clone -q "$ROOT" "$PROJECT"
 cp -R "$ROOT/bin/." "$PROJECT/bin/"
 cp "$ROOT/.claude/settings.json" "$PROJECT/.claude/settings.json"
 # The lab keeps the real tracked .claude/settings.json SessionStart nudge,
-# continuity gate, Stop guard, and asyncRewake auto-arm registration.
+# Stop guard, and asyncRewake auto-arm registration.
 # The only local hook records model-issued Bash calls without acquiring the
 # session lock or otherwise changing lifecycle behavior.
 cat > "$PROJECT/.claude/settings.local.json" <<'JSON'

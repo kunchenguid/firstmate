@@ -50,9 +50,6 @@ test_candidates_exclude_serial_classes() {
   # Self must never re-enter the concurrent matrix.
   printf '%s\n' "$listed" | grep -Fq 'tests/fm-test-isolation-proof.test.sh' \
     && fail "isolation-proof test must not be a parallel candidate"
-  # Continuity fixture starts a background sleep holder.
-  printf '%s\n' "$listed" | grep -Fq 'tests/fm-continuity-pretool-check.test.sh' \
-    && fail "continuity pretool check must stay serial (process holder)"
   # Real tmux smoke, watcher lock, real herdr, AFK, live harnesses stay serial.
   for banned in \
     tests/fm-backend-tmux-smoke.test.sh \
@@ -99,8 +96,6 @@ test_list_exclusions_documents_reasons() {
   local out
   out=$("$PROOF" --list-exclusions)
   [ -n "$out" ] || fail "--list-exclusions printed nothing"
-  printf '%s\n' "$out" | grep -Fq 'fm-continuity-pretool-check.test.sh' \
-    || fail "exclusions must document continuity process-holder reason"
   printf '%s\n' "$out" | grep -Fq 'fm-watcher-lock.test.sh' \
     || fail "exclusions must document watcher-lock serial reason"
   printf '%s\n' "$out" | grep -Fq 'fm-backend-herdr-smoke.test.sh' \

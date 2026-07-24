@@ -133,7 +133,6 @@ High-signal classes:
 
 | Class | Examples | Reason |
 |---|---|---|
-| Process-holder pure unit | `fm-continuity-pretool-check` | Background `sleep 300` lock-holder process |
 | Watcher / wake / locks | `fm-watcher-lock`, `fm-wake-queue`, ... | Intentional process locks and daemon races |
 | AFK | `fm-afk-inject-e2e`, ... | Daemon lifecycle and inject path |
 | Real Herdr | `fm-backend-herdr-smoke`, presentation e2e, ... | Named labs, session-global locks; Herdr lane is Phase 3+ |

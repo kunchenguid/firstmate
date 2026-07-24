@@ -15,18 +15,6 @@ The seatbelt rejects those command shapes before execution.
 This policy is not a post-arm liveness guarantee.
 `bin/fm-guard.sh`, `bin/fm-turnend-guard.sh`, the watcher lock, and the watcher beacon still prove whether supervision is healthy after an allowed call.
 
-## Claude continuity gate
-
-Claude also registers `bin/fm-continuity-pretool-check.sh` for Bash PreToolUse events.
-This is a separate, tightly bounded recovery gate rather than another watcher-shape policy.
-It runs only in a primary home, and it denies only an executed `bin/fm-*.sh` command other than `bin/fm-session-start.sh`, `bin/fm-wake-drain.sh`, `bin/fm-watch-arm.sh`, or the ordinary literal `bin/fm-teardown.sh` when task metadata is in flight and no identity-matched live watcher holds that home's lock.
-Ordinary shell commands, fleet-script names used as data, all commands in an idle fleet, child worktrees, session start, wake drain, watcher arm, and ordinary literal teardown remain allowed.
-Session start remains safe in this recovery set because its first step uses the per-home session lock and switches to a read-only digest when another live session owns the home.
-The denial gives Claude reason-specific recovery guidance - drain, use fail-closed `bin/fm-teardown.sh` for completed tasks, then end the turn so the Stop-owned auto-arm re-establishes the watcher, with a manual tracked Claude background-task arm only when the Stop auto-arm itself failed - per the contract in [`watcher-continuity.md`](watcher-continuity.md).
-`bin/fm-continuity-command-policy.mjs` reuses this document's shell lexer and command-position analysis but owns the recovery-versus-other-fleet classification.
-Malformed transport or opaque dynamic syntax fails open so this narrow gate cannot become a blanket Bash block.
-The existing `bin/fm-turnend-guard.sh` Stop integration remains the final backstop, cooperating with the Stop-owned auto-arm in its `--claude` mode ([`turnend-guard.md`](turnend-guard.md)).
-
 The classifier never executes, sources, evaluates, or expands any part of the submitted command.
 It tokenizes the bytes and classifies lexical execution positions only.
 
