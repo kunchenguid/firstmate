@@ -80,4 +80,4 @@ Rules that keep the contract unambiguous:
 
 This skill is read-mostly and changes no fleet state.
 Do not tear down a task, merge a PR, dispatch queued work, or mutate any `state/` or `data/` file other than the single report file as a side effect of generating the brief.
-If the state you read suggests an action - a PR ready to merge, a queued item whose gate has arrived, a needs-decision finding - name it in its section (a captain action under "Captain's Call", queued or gated work under "Charted Next") and let the captain decide, rather than taking the action from inside this skill.
+If the state you read suggests an action - a PR ready to merge, a queued item whose gate has arrived, or a needs-decision finding - name it in its section and leave the action to the normal lifecycle and configured authority rather than taking it from inside this skill.

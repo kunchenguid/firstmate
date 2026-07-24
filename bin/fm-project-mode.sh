@@ -12,9 +12,9 @@
 #   no-mistakes  full pipeline -> PR -> captain merge (default)
 #   direct-PR    push + PR via gh-axi, no pipeline -> captain merge
 #   local-only   local branch, no remote/PR -> captain approve -> guarded local merge
-# yolo (orthogonal) = when on, firstmate makes approval decisions itself (PR merges,
-#   ask-user findings, local-only merge approval) without checking the captain - except
-#   anything destructive/irreversible/security-sensitive, which still escalates.
+# yolo (orthogonal) = when on, firstmate may make routine approval decisions itself.
+#   AGENTS.md section 7 is the single owner of authority exceptions, including
+#   ask-user contract expansion and stronger captain boundaries.
 #
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
 # to stderr, so a typo never silently drops the gate.
