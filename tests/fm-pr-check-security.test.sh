@@ -65,7 +65,11 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
-  *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  *" --json url,headRefOid,body "*)
+    printf '%s\n%s\n' "$FM_TEST_PR_URL" "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+    base64 < "$FM_TEST_BODY_FILE" | tr -d '\n'
+    printf '\n'
+    ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
@@ -76,7 +80,14 @@ SH
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
-exit "${FM_TEST_GH_AXI_RC:-0}"
+case "${1:-} ${2:-}" in
+  'pr view')
+    jq -n --rawfile body "$FM_TEST_BODY_FILE" --argjson number "$3" \
+      '{pull_request:{number:$number,body:$body}}'
+    ;;
+  'api HEAD') exit "${FM_TEST_EVIDENCE_RC:-0}" ;;
+  *) exit "${FM_TEST_GH_AXI_RC:-0}" ;;
+esac
 SH
   # Plain glab, reproducing the real CLI's contract: its field output on stdout
   # and exit 0 on success, and a non-zero exit with no stdout on any failure.
@@ -85,6 +96,16 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
+if [ "${1:-} ${2:-}" = 'mr view' ] && [ "${*: -2}" = '-F json' ]; then
+  jq -n --rawfile description "$FM_TEST_BODY_FILE" \
+    --arg web_url "$FM_TEST_PR_URL" \
+    --arg sha "${FM_TEST_GLAB_HEAD:-fedcba9876543210fedcba9876543210fedcba98}" \
+    '{web_url:$web_url,sha:$sha,description:$description}'
+  exit 0
+fi
+if [ "${1:-} ${2:-}" = 'api --hostname' ]; then
+  exit "${FM_TEST_EVIDENCE_RC:-0}"
+fi
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
@@ -92,6 +113,15 @@ SH
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
   : > "$dir/guard.log"
+  cat > "$dir/publication-body.md" <<'EOF'
+## Intent
+
+Deliver the complete pull request outcome.
+
+## What Changed
+
+- Added the complete synthetic behavior.
+EOF
   printf '%s\n' "$dir"
 }
 
@@ -231,22 +261,63 @@ assert_private_symlink_unchanged() {
   esac
 }
 
+ensure_publication_receipt() {
+  local dir=$1 id=$2 url=$3 state meta head provider bytes hash receipt
+  state="$dir/home/state"
+  meta="$state/$id.meta"
+  receipt="$state/$id.pr-publication"
+  fm_pr_task_id_valid "$id" && fm_pr_url_parse "$url" || return 0
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 0
+  [ ! -e "$state/$id.pr-poll-retirement" ] && [ ! -L "$state/$id.pr-poll-retirement" ] || return 0
+  provider=$FM_PR_PROVIDER
+  case "$provider" in
+    github) head=${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567} ;;
+    gitlab) head=${FM_TEST_GLAB_HEAD:-fedcba9876543210fedcba9876543210fedcba98} ;;
+  esac
+  fm_pr_head_valid "$head" || return 0
+  bytes=$(wc -c < "$dir/publication-body.md" | tr -d '[:space:]')
+  hash=$(fm_pr_sha256 "$dir/publication-body.md") || return 0
+  {
+    printf '%s\n' fm-pr-publication-v1
+    printf 'task_id=%s\n' "$id"
+    printf 'provider=%s\n' "$provider"
+    printf 'url=%s\n' "$url"
+    printf 'head=%s\n' "$head"
+    printf 'body_bytes=%s\n' "$bytes"
+    printf 'body_sha256=%s\n' "$hash"
+    printf '%s\n' privacy=pass links=pass attestation=agent-explicit evidence_mode=none-required evidence_count=0
+  } > "$receipt"
+  chmod 0600 "$receipt"
+}
+
 run_check_entry() {
-  local dir=$1
+  local dir=$1 id='' url=''
   shift
+  if [ "$#" -eq 2 ]; then
+    id=$1
+    url=$2
+    ensure_publication_receipt "$dir" "$id" "$url"
+  fi
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_PR_URL="$url" FM_TEST_BODY_FILE="$dir/publication-body.md" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
 
 run_merge_entry() {
-  local dir=$1
+  local dir=$1 id='' url=''
   shift
+  if [ "$#" -ge 2 ]; then
+    id=$1
+    url=$2
+    ensure_publication_receipt "$dir" "$id" "$url"
+  fi
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_PR_URL="$url" FM_TEST_BODY_FILE="$dir/publication-body.md" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -563,9 +634,12 @@ test_valid_recording_and_merge_derivation() {
 
   dir=$(make_case newline-head)
   write_task_meta "$dir"
+  set +e
   FM_TEST_GH_HEAD=$'0123456789abcdef0123456789abcdef01234567\nwindow=unexpected' \
-    run_check_entry "$dir" task-a https://github.com/o/r/pull/2 >/dev/null 2>/dev/null \
-    || fail "valid check with malformed remote head failed"
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/2 >/dev/null 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "publication check accepted a multiline remote head"
   assert_no_grep 'pr_head=' "$dir/home/state/task-a.meta" "multiline PR head reached metadata"
   assert_no_grep 'window=unexpected' "$dir/home/state/task-a.meta" "newline metadata key was injected"
 
@@ -1450,8 +1524,7 @@ test_ambiguous_failure_accepts_validated_replacement() {
     || fail "ambiguous partial migration did not persist recovery obligations"
 
   rmdir "$state/task-a.pr-poll"
-  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
-    "$PR_CHECK" task-a https://github.com/o/r/pull/10 >/dev/null \
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/10 >/dev/null \
     || fail "validated replacement poll could not be published"
   fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
     || fail "replacement registration did not publish a valid poll pair"
@@ -2247,8 +2320,7 @@ test_direct_registration_refreshes_v1_x_shim() {
         ;;
     esac
 
-    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_GUARD_LOG="$dir/guard.log" \
-      PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a "https://github.com/o/r/pull/$number" \
+    run_check_entry "$dir" task-a "https://github.com/o/r/pull/$number" \
       > "$dir/register.out" 2> "$dir/register.err" \
       || fail "$marker_kind direct registration did not preserve the v1 X shim: $(cat "$dir/register.err")"
     fmx_poll_shim_valid "$shim" "$dir/home" "$dir/root" \
@@ -2277,8 +2349,7 @@ test_direct_registration_refreshes_v1_x_shim() {
   printf '# unrecognized version\n' >> "$shim"
   chmod 0755 "$shim"
 
-  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_GUARD_LOG="$dir/guard.log" \
-    PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a https://github.com/o/r/pull/22 \
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/22 \
     >/dev/null 2> "$dir/register.err" \
     || fail "direct registration failed after quarantining an X shim lookalike: $(cat "$dir/register.err")"
   [ ! -e "$shim" ] && [ ! -L "$shim" ] \

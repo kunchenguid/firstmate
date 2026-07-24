@@ -106,6 +106,15 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh"
+  cat > "$case_dir/publication-body.md" <<'EOF'
+## Intent
+
+Deliver the complete teardown integration behavior.
+
+## What Changed
+
+- Added the complete synthetic result.
+EOF
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -216,7 +225,8 @@ case "${1:-} ${2:-}" in
   "pr list")
     printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,merged" ; exit 0 ;;
   "pr view")
-    printf '%s\n' "pull_request:" "  number: 7" "  state: merged" '  merged: "2026-06-26T00:00:00Z"' ; exit 0 ;;
+    body=$(jq -Rs . < "$FM_TEST_BODY_FILE")
+    printf '%s\n' "pull_request:" "  number: 7" "  state: merged" '  merged: "2026-06-26T00:00:00Z"' "  body: $body" ; exit 0 ;;
 esac
 exit 0
 SH
@@ -225,6 +235,12 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
+      *" --json url,headRefOid,body "*)
+        printf '%s\n%s\n' "\$FM_TEST_PR_URL" '$head'
+        base64 < "\$FM_TEST_BODY_FILE" | tr -d '\\n'
+        printf '\n'
+        exit 0
+        ;;
       *"state,headRefOid"*) printf '%s\t%s\n' 'MERGED' '$head' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
@@ -234,6 +250,36 @@ echo "error: pull request not found" >&2
 exit 1
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+  printf '%s\n' "$head" > "$case_dir/publication-head"
+}
+
+ensure_publication_receipt() {
+  local case_dir=$1 head bytes hash receipt
+  head=$(cat "$case_dir/publication-head")
+  bytes=$(wc -c < "$case_dir/publication-body.md" | tr -d '[:space:]')
+  hash=$(shasum -a 256 "$case_dir/publication-body.md" | awk '{print $1}')
+  receipt="$case_dir/state/task-x1.pr-publication"
+  {
+    printf '%s\n' fm-pr-publication-v1
+    printf '%s\n' task_id=task-x1 provider=github
+    printf '%s\n' url=https://github.com/example/repo/pull/7
+    printf 'head=%s\n' "$head"
+    printf 'body_bytes=%s\n' "$bytes"
+    printf 'body_sha256=%s\n' "$hash"
+    printf '%s\n' privacy=pass links=pass attestation=agent-explicit evidence_mode=none-required evidence_count=0
+  } > "$receipt"
+  chmod 0600 "$receipt"
+}
+
+run_pr_check() {
+  local case_dir=$1
+  ensure_publication_receipt "$case_dir"
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TEST_PR_URL=https://github.com/example/repo/pull/7 \
+  FM_TEST_BODY_FILE="$case_dir/publication-body.md" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7
 }
 
 append_pr_meta_for_current_head() {
@@ -493,6 +539,7 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_TEST_BODY_FILE="$case_dir/publication-body.md" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -753,18 +800,12 @@ test_pr_check_does_not_refresh_stale_pr_head() {
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
-  FM_ROOT_OVERRIDE="$ROOT" \
-  FM_STATE_OVERRIDE="$case_dir/state" \
-  PATH="$case_dir/fakebin:$PATH" \
-    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
+  run_pr_check "$case_dir" >/dev/null
 
   wt_commit_file "$case_dir" later.txt local-only "local follow-up"
   new_head=$(git -C "$case_dir/wt" rev-parse HEAD)
 
-  FM_ROOT_OVERRIDE="$ROOT" \
-  FM_STATE_OVERRIDE="$case_dir/state" \
-  PATH="$case_dir/fakebin:$PATH" \
-    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
+  run_pr_check "$case_dir" >/dev/null
 
   count=$(grep -c '^pr_head=' "$case_dir/state/task-x1.meta" || true)
   expect_code 1 "$count" "pr-check-stale: stale rerun should not append a second pr_head"
@@ -790,10 +831,7 @@ test_pr_check_records_remote_head_when_local_lags() {
   pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
-  FM_ROOT_OVERRIDE="$ROOT" \
-  FM_STATE_OVERRIDE="$case_dir/state" \
-  PATH="$case_dir/fakebin:$PATH" \
-    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
+  run_pr_check "$case_dir" >/dev/null
 
   grep -qxF "pr_head=$pr_head" "$case_dir/state/task-x1.meta" \
     || fail "pr-check-local-lags: did not record GitHub PR head"

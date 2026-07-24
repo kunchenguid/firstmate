@@ -1,0 +1,64 @@
+---
+name: pr-publication-check
+description: >-
+  Agent-only lifecycle owner for complete reviewer-facing PR intent, privacy-safe published evidence, exact public body/head attestation, and the pre-monitoring publication gate.
+  Load before composing promotion or successor ship instructions, before accepting a PR-ready signal, and before calling fm-pr-check or fm-pr-merge.
+user-invocable: false
+metadata:
+  internal: true
+---
+
+# PR publication check
+
+This skill is the lifecycle owner for PR publication readiness.
+`bin/fm-pr-publication-check.sh --help` owns exact commands, flags, receipt fields, and forge mechanics.
+
+## Separate the two intents
+
+Operational validation intent tells a worker or validation system how to perform the current task, including recovery state, bounded runs, exclusions, and execution constraints.
+Publishable PR intent tells a reviewer the complete base-to-head problem, intended outcome, implementation result, final validation, risks, and remaining limits.
+Never publish operational framing as PR intent, including successor or current runs, the latest commit, this round, a recovered branch, or internal authorization.
+
+Initial ship briefs contain this distinction and the publication trigger.
+Any promotion or successor instruction must preserve it explicitly because the new instruction may otherwise replace the original publication context with current-run context.
+Do not inject a captain preference file, private fleet record, worker transcript, or internal task data into a project prompt or PR body.
+
+## Responsible worker attestation
+
+The task worker that owns the selected delivery path remains the publication and correction owner.
+After every PR create or body update, that worker reads the complete public PR or MR body and judges whether its Intent and outcome describe the whole PR rather than an operational slice.
+Regex and structural checks reject known hazards but cannot prove semantic completeness, so the worker must explicitly pass `--intent-outcome-complete` against the fresh fetched body and head.
+
+The worker must choose exactly one evidence declaration.
+
+- Use `--evidence none-required` when the accepted project contract does not require published artifacts, including ordinary nonvisual work where tests and documentation are sufficient.
+- Use `--evidence nonvisual --evidence-url <url>` for required logs, reports, or other nonvisual artifacts.
+- Use `--evidence real-ui --evidence-url <url>` only for evidence showing the real UI behavior, never a custom illustration, concept, or mockup.
+
+Every declared evidence URL must already appear in the fetched public body, resolve through the same repository or forge, and bind to the exact PR head.
+The worker remains responsible for deciding whether evidence is required and whether the artifact proves the claimed behavior under the accepted project contract.
+Do not force screenshots when the accepted contract does not require visual evidence.
+
+Run the attestation from the task environment, where `FM_HOME` identifies the primary or secondmate home that owns the task.
+
+```sh
+"$FM_ROOT/bin/fm-pr-publication-check.sh" attest <task-id> <full-pr-url> \
+  --intent-outcome-complete \
+  --evidence none-required
+```
+
+Use one `--evidence-url` flag per required published artifact when the evidence mode is `nonvisual` or `real-ui`.
+Only after attestation succeeds may the worker append the mode-specific PR-ready status.
+
+## Correction and monitoring
+
+A failed check never edits or normalizes the PR.
+The responsible worker corrects the body through the selected delivery path, reads the complete public result again, and reruns `attest` against fresh bytes.
+For a no-mistakes task, the worker follows the active no-mistakes help and ownership flow rather than hand-editing around the pipeline; if that flow offers no supported correction, the worker reports the exact blocker.
+
+Firstmate runs `bin/fm-pr-check.sh <task-id> <full-pr-url>` after the worker's ready status.
+That command performs a second authenticated full-body/head readback, repeats deterministic privacy and evidence checks, requires the exact private attestation receipt, records canonical PR identity and head, and only then publishes ordinary merge monitoring.
+Body or head drift invalidates the receipt and returns correction ownership to the same task worker.
+
+The private receipt records only the canonical forge identity, exact head, body byte count and SHA-256, privacy/link/attestation verdicts, evidence mode, and the already-public evidence URLs encoded as data.
+Never copy that receipt or other private task evidence into the PR.

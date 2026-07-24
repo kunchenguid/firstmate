@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# Record a PR-ready task only after bin/fm-pr-publication-check.sh verifies the
+# complete public body, exact head, and responsible worker's private attestation.
+# Store one validated canonical pr=<url> and exact pr_head=<sha>, then atomically
+# arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
+#        fm-pr-check.sh --help
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,6 +18,18 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+
+usage() {
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$0"
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -47,7 +62,9 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
   exit 1
 }
 
-# Refuse to arm a GitLab watch with no glab on PATH. The poll is silent on
+# Refuse to arm a GitLab watch with no glab on PATH. The publication verifier
+# already requires it, while this explicit check preserves the poll's own
+# actionable refusal. The poll is silent on
 # every error by design, so a missing CLI would be indistinguishable from a
 # merge request that is never merged. Arming is the one point where that can be
 # reported, so the absent tool stops the watch here instead of watching nothing.
@@ -56,27 +73,27 @@ if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   exit 1
 fi
 
+# This is the hard boundary before both readiness reporting and ordinary merge
+# monitoring. The verifier performs a fresh authenticated readback and returns
+# only a receipt-bound exact head; no locally drafted or pre-publication hash is
+# accepted here. A prior identity-bound retirement is recovered first because
+# finishing already-observed monitor cleanup is not arming a new monitor.
+PUBLICATION_RESULT=$("$SCRIPT_DIR/fm-pr-publication-check.sh" verify "$ID" "$URL") || exit 1
+read -r PUBLICATION_VERDICT PR_HEAD BODY_BYTES BODY_SHA256 PUBLICATION_EXTRA <<EOF
+$PUBLICATION_RESULT
+EOF
+if [ "$PUBLICATION_VERDICT" != verified ] || ! fm_pr_head_valid "$PR_HEAD" \
+  || ! [[ "$BODY_BYTES" =~ ^[0-9]+$ ]] || ! [[ "$BODY_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+  || [ -n "$PUBLICATION_EXTRA" ]; then
+  echo "error: PR publication verification returned malformed evidence" >&2
+  exit 1
+fi
+
 # Neutralize any pre-fix poll before recording or arming this task. The
 # migration never executes legacy artifacts and holds watcher exclusion while
 # it quarantines or rebuilds them.
 "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
 "$FM_ROOT/bin/fm-guard.sh" || true
-
-# pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head. Both consumers already treat it as optional:
-# bin/fm-teardown.sh reads the head from the forge at teardown rather than from
-# metadata and falls back to its provider-agnostic content check, and
-# bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
-WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
-PR_HEAD=
-if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
-  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
-    && fm_pr_head_valid "$REMOTE_HEAD"; then
-    PR_HEAD=$REMOTE_HEAD
-  fi
-fi
 
 META_TMP=
 pr_check_cleanup() {
@@ -99,7 +116,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   esac
 done < "$META"
 printf 'pr=%s\n' "$URL" >> "$META_TMP" || exit 1
-[ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
+printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
 chmod 0600 "$META_TMP" || exit 1
 fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" || exit 1
 fm_pr_metadata_identity_parse "$META_TMP" || exit 1

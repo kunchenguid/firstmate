@@ -34,6 +34,8 @@
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# PR-based ship briefs load the PR publication lifecycle owner and distinguish
+# operational validation intent from publishable reviewer-facing PR intent.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
@@ -289,8 +291,16 @@ case "$MODE" in
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`.
+Read and pass the PR publication check below against the complete public body and exact head, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+EOF
+)
+    PUBLICATION_SECTION=$(cat <<EOF
+# PR publication
+Operational validation intent is not publishable PR intent.
+Before creating or updating the PR, and again before reporting it ready, read and follow \`$FM_ROOT/.agents/skills/pr-publication-check/SKILL.md\`.
+That lifecycle owner requires complete reviewer-facing PR intent and outcome, privacy-safe exact-head evidence when required, an explicit fresh-body/head attestation, and correction through this direct-PR path if the check fails.
 EOF
 )
     ;;
@@ -306,6 +316,7 @@ When it is implemented and committed, append \`done: ready in branch fm/$ID\` to
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
 )
+    PUBLICATION_SECTION=""
     ;;
   *)  # no-mistakes (default)
     SETUP2="
@@ -325,9 +336,17 @@ Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
   Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
+- Avoid \`--yes\`: it would silently bypass the firstmate authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read and pass the PR publication check below against the complete public body and exact head.
+Only then append \`done: PR {url} checks green\` and stop. You are finished.
+EOF
+)
+    PUBLICATION_SECTION=$(cat <<EOF
+# PR publication
+Operational validation intent is not publishable PR intent.
+Before the pipeline publishes a PR, and again before reporting it ready, read and follow \`$FM_ROOT/.agents/skills/pr-publication-check/SKILL.md\`.
+That lifecycle owner requires complete reviewer-facing PR intent and outcome, privacy-safe exact-head evidence when required, an explicit fresh-body/head attestation, and correction through the active no-mistakes ownership flow if the check fails.
 EOF
 )
     ;;
@@ -381,6 +400,8 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+
+$PUBLICATION_SECTION
 
 $DOD
 EOF

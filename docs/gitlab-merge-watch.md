@@ -190,11 +190,15 @@ merged
 
 No armed watch is lost by upgrading.
 
-## What this change does not cover
+## Publication-gate addendum
+
+The later PR publication gate uses `glab mr view -F json` plus `jq` to fetch the complete description, canonical `web_url`, and exact `sha` before readiness or monitoring.
+That path stops with an actionable error when either tool or any exact field is unavailable, and a passing publication receipt lets `fm-pr-check.sh` record GitLab `pr_head=` just as it records the GitHub head.
+The merge poll itself deliberately retains the presentation-text state lookup verified above so its silent watcher dependency does not expand.
+
+## What remains unsupported
 
 `bin/fm-pr-merge.sh` still addresses GitHub only, by owner and repository.
 It refuses a GitLab merge request URL rather than sending it to the wrong forge, so merging a merge request stays a deliberate manual step until merge parity lands separately.
 
-A GitLab task records no `pr_head=`.
-`gh` exposes the head commit as a selectable field, while plain `glab` exposes it only inside its JSON output, which would need a JSON processor firstmate does not require.
-Both consumers already treat it as optional: `bin/fm-teardown.sh` reads the head from the forge at teardown rather than from metadata and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` resolves the head from the remote when none is recorded.
+GitLab merge execution remains unsupported even though publication verification and monitoring support GitLab merge requests.

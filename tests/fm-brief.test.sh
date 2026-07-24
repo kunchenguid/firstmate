@@ -96,6 +96,59 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
+test_pr_modes_require_publication_attestation_before_ready() {
+  local home brief
+  home="$TMP_ROOT/publication-home"
+  write_registry "$home"
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" publication-no-mistakes no-registry-proj >/dev/null 2>&1
+  brief="$home/data/publication-no-mistakes/brief.md"
+  assert_grep 'Operational validation intent is not publishable PR intent.' "$brief" \
+    "no-mistakes brief did not separate operational and publishable intent"
+  assert_grep "$ROOT/.agents/skills/pr-publication-check/SKILL.md" "$brief" \
+    "no-mistakes brief did not load the publication lifecycle owner"
+  # shellcheck disable=SC2016 # The backtick-wrapped status text is literal brief output.
+  assert_grep 'Only then append `done: PR {url} checks green`' "$brief" \
+    "no-mistakes brief allowed readiness before publication attestation"
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" publication-direct direct-proj >/dev/null 2>&1
+  brief="$home/data/publication-direct/brief.md"
+  assert_grep 'Operational validation intent is not publishable PR intent.' "$brief" \
+    "direct-PR brief did not separate operational and publishable intent"
+  assert_grep 'Read and pass the PR publication check below' "$brief" \
+    "direct-PR brief allowed readiness before publication attestation"
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" publication-local local-proj >/dev/null 2>&1
+  brief="$home/data/publication-local/brief.md"
+  assert_no_grep 'pr-publication-check' "$brief" \
+    "local-only brief incorrectly required a remote PR publication check"
+  pass "fm-brief.sh: PR modes attest public intent/body/head before ready while local-only remains unchanged"
+}
+
+test_promotion_instructions_preserve_publication_intent() {
+  local home out
+  home="$TMP_ROOT/promotion-publication-home"
+  mkdir -p "$home/state"
+  fm_write_meta "$home/state/promotion-task.meta" \
+    'window=fm-promotion-task' \
+    'kind=scout'
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-promote.sh" promotion-task 2>/dev/null) \
+    || fail "fm-promote.sh failed for publication instruction fixture"
+  assert_contains "$out" 'load pr-publication-check' \
+    "promotion output did not trigger the publication lifecycle owner"
+  assert_contains "$out" 'keep operational validation intent separate from complete reviewer-facing PR intent' \
+    "promotion output collapsed operational and publishable intent"
+  assert_grep 'kind=ship' "$home/state/promotion-task.meta" \
+    "promotion fixture did not become a ship"
+  assert_contains "$("$ROOT/bin/fm-promote.sh" --help)" 'gate when the delivery mode uses a PR' \
+    "fm-promote.sh help omitted the PR publication requirement"
+  pass "fm-promote.sh: promotion instructions preserve complete publishable PR intent"
+}
+
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
@@ -386,6 +439,8 @@ test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
+test_pr_modes_require_publication_attestation_before_ready
+test_promotion_instructions_preserve_publication_intent
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete

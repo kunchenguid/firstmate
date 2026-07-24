@@ -18,6 +18,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$ROOT/bin/fm-pr-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
@@ -36,33 +38,47 @@ make_case() {
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=no-mistakes"
-  # No worktree/project on disk; fm-pr-check.sh tolerates a worktree it cannot
-  # stat and simply skips the pr_head lookup via `gh` in that case, so give it
-  # one that resolves for cases that want pr_head recorded.
+  cat > "$case_dir/publication-body.md" <<'EOF'
+## Intent
+
+Deliver the complete merge-wrapper behavior.
+
+## What Changed
+
+- Added the complete synthetic result.
+EOF
+  # The forge readbacks are fully synthetic, so no real worktree is required.
   printf '%s\n' "$case_dir"
 }
 
-# gh-axi mock recording every invocation to a log file, and gh mock answering
-# headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
+# gh-axi mock recording every invocation and returning the complete body
+# readback for the publication gate. Args: case_dir head_sha
 add_gh_mocks() {
   local case_dir=$1 head=$2
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
-exit 0
-SH
-  cat > "$case_dir/fakebin/gh" <<SH
-#!/usr/bin/env bash
-case "\${1:-} \${2:-}" in
-  "pr view")
-    case " \$* " in
-      *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
-    esac
+case "${1:-} ${2:-}" in
+  'pr view')
+    jq -n --rawfile body "$FM_TEST_BODY_FILE" --argjson number "$3" \
+      '{pull_request:{number:$number,body:$body}}'
     ;;
+  *) exit 0 ;;
 esac
-exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" --json url,headRefOid,body "*)
+    printf '%s\n%s\n' "$FM_TEST_PR_URL" "$FM_TEST_PR_HEAD"
+    base64 < "$FM_TEST_BODY_FILE" | tr -d '\n'
+    printf '\n'
+    ;;
+  *) exit 1 ;;
+esac
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+  printf '%s\n' "$head" > "$case_dir/publication-head"
 }
 
 # gh-axi mock that fails the merge call but succeeds everything else, so a
@@ -74,21 +90,61 @@ add_gh_mocks_merge_fails() {
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "pr merge") echo "error: pr merge failed" >&2 ; exit 1 ;;
+  'pr view')
+    jq -n --rawfile body "$FM_TEST_BODY_FILE" --argjson number "$3" \
+      '{pull_request:{number:$number,body:$body}}'
+    ;;
 esac
 exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
-exit 0
+case " $* " in
+  *" --json url,headRefOid,body "*)
+    printf '%s\n%s\n' "$FM_TEST_PR_URL" "$FM_TEST_PR_HEAD"
+    base64 < "$FM_TEST_BODY_FILE" | tr -d '\n'
+    printf '\n'
+    ;;
+  *) exit 1 ;;
+esac
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+  printf '%s\n' 4444444444444444444444444444444444444444 > "$case_dir/publication-head"
+}
+
+ensure_publication_receipt() {
+  local case_dir=$1 id=$2 url=$3 meta head bytes hash receipt
+  meta="$case_dir/state/$id.meta"
+  receipt="$case_dir/state/$id.pr-publication"
+  fm_pr_task_id_valid "$id" && fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = github ] || return 0
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  [ -f "$case_dir/publication-head" ] || return 0
+  head=$(cat "$case_dir/publication-head")
+  bytes=$(wc -c < "$case_dir/publication-body.md" | tr -d '[:space:]')
+  hash=$(shasum -a 256 "$case_dir/publication-body.md" | awk '{print $1}')
+  {
+    printf '%s\n' fm-pr-publication-v1
+    printf 'task_id=%s\n' "$id"
+    printf '%s\n' provider=github
+    printf 'url=%s\n' "$url"
+    printf 'head=%s\n' "$head"
+    printf 'body_bytes=%s\n' "$bytes"
+    printf 'body_sha256=%s\n' "$hash"
+    printf '%s\n' privacy=pass links=pass attestation=agent-explicit evidence_mode=none-required evidence_count=0
+  } > "$receipt"
+  chmod 0600 "$receipt"
 }
 
 run_pr_merge() {
-  local case_dir=$1 rc; shift
+  local case_dir=$1 rc id url; shift
+  id=${1:-}
+  url=${2:-}
+  ensure_publication_receipt "$case_dir" "$id" "$url"
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_PR_URL="$url" FM_TEST_BODY_FILE="$case_dir/publication-body.md" \
+  FM_TEST_PR_HEAD="$(cat "$case_dir/publication-head" 2>/dev/null || true)" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
