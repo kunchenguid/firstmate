@@ -160,12 +160,14 @@ test_runlit_lab_fix_is_bounded_and_user_invocable() {
 
 # The prescriptive body of the skill: everything except the "Hard boundaries"
 # prohibition list, where naming a forbidden command strengthens the contract
-# instead of authorizing it.
+# instead of authorizing it. The mandatory `--context=default` pin is stripped
+# so forbidden-verb guards match the skill's own command style rather than a
+# bare `kubectl <verb>` form the file never uses.
 runlit_prescribed_commands() {
   awk '
     /^## Hard boundaries$/ { skipping = 1; next }
     skipping && /^## / { skipping = 0 }
-    !skipping { print }
+    !skipping { gsub(/--context=default /, ""); print }
   ' "$RUNLIT"
 }
 
@@ -173,6 +175,9 @@ test_runlit_lab_fix_owns_safe_repair_contract() {
   local prescribed
   for phrase in \
     'kubectl config current-context' \
+    'kubectl config view --minify --context=default -o jsonpath="{.clusters[0].cluster.server}"' \
+    'lab API server documented in `scripts/k3s/CLUSTER-STATE.md`' \
+    'Do not accept a context name as proof of cluster identity' \
     'kubectl --context=default get nodes -o wide' \
     'kubectl --context=default get pods -n online-boutique -o wide' \
     'kubectl --context=default get deployments -n online-boutique' \
@@ -201,14 +206,35 @@ test_runlit_lab_fix_owns_safe_repair_contract() {
   done
   assert_no_grep '$FM_HOME/data/' "$RUNLIT" "RunLit lab repair evidence path expands FM_HOME literally instead of resolving the effective home"
   prescribed=$(runlit_prescribed_commands)
+  assert_contains "$prescribed" 'kubectl get nodes -o wide' \
+    "the --context=default pin is no longer stripped, so the forbidden-command guards below are dead"
   assert_not_contains "$prescribed" 'kubectl delete' "RunLit lab repair skill prescribes a pod deletion command"
   assert_not_contains "$prescribed" 'kubectl apply' "RunLit lab repair skill prescribes an apply command"
   assert_not_contains "$prescribed" 'kubectl patch' "RunLit lab repair skill prescribes a patch command"
+  assert_not_contains "$prescribed" 'kubectl set ' "RunLit lab repair skill prescribes a resource-mutating set command"
+  assert_not_contains "$prescribed" 'kubectl scale' "RunLit lab repair skill prescribes a scale command"
   assert_not_contains "$prescribed" 'kubectl rollout restart' "RunLit lab repair skill prescribes a restart command"
   assert_not_contains "$prescribed" 'kubectl get pods -A' "RunLit lab repair skill prescribes a cluster-wide pod read"
   assert_not_contains "$prescribed" 'kubectl get deployments -A' "RunLit lab repair skill prescribes a cluster-wide deployment read"
   assert_not_contains "$prescribed" 'kubectl get events -A' "RunLit lab repair skill prescribes a cluster-wide event read"
+  assert_not_contains "$prescribed" '--all-namespaces' "RunLit lab repair skill prescribes a cluster-wide read"
   pass "RunLit lab repair owns one guarded mutation and the required evidence and safety boundaries"
+}
+
+test_runlit_lab_fix_reproves_cluster_identity_before_mutating() {
+  local remediation
+  remediation=$(awk '
+    /^## Whitelisted remediation$/ { found = 1; next }
+    found && /^## / { exit }
+    found { print }
+  ' "$RUNLIT")
+  assert_contains "$remediation" 'kubectl config view --minify --context=default -o jsonpath="{.clusters[0].cluster.server}"' \
+    "the rollback does not re-prove the lab API server immediately before mutating"
+  assert_contains "$remediation" 'rollout history deployment/recommendationservice -n online-boutique' \
+    "the rollback does not re-read rollout history immediately before mutating"
+  assert_not_contains "$remediation" 'kubectl config current-context' \
+    "the pre-mutation recheck relies on the ambient context name, which proves nothing once every command pins --context"
+  pass "RunLit lab repair re-proves cluster identity and revision immediately before the one mutation"
 }
 
 test_ahoy_is_an_internal_user_invocable_skill() {
@@ -317,6 +343,7 @@ test_outward_facing_skill_points_reference_section_9_owner
 test_section_9_owner_is_not_duplicated_into_skills
 test_runlit_lab_fix_is_bounded_and_user_invocable
 test_runlit_lab_fix_owns_safe_repair_contract
+test_runlit_lab_fix_reproves_cluster_identity_before_mutating
 test_ahoy_is_an_internal_user_invocable_skill
 test_ahoy_readme_uses_cross_harness_convention
 test_ahoy_owns_only_the_visible_session_recap

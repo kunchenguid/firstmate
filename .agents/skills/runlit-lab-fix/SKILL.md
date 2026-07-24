@@ -35,9 +35,12 @@ Perform the checks in this order and retain only the minimum output needed for d
    Treat the documented context mapping as authority rather than guessing from a context name.
    `scripts/k3s/CLUSTER-STATE.md` maps the lab cluster to the local kubeconfig `default` context, and the documented lab namespaces are `online-boutique` and `monitoring`.
    If any of those sources is absent, stale, or disagrees with the observed cluster identity, stop before any cluster access or mutation and escalate to the captain.
-2. Run `kubectl config current-context` without printing kubeconfig contents, and compare the documented lab context and its documented API server against what the local kubeconfig defines for `default`.
+2. Prove the `default` context is the lab cluster before any cluster request, using the API server it points at rather than its name, because `default` is a generic name that any kubeconfig can define.
+   Run `kubectl config view --minify --context=default -o jsonpath="{.clusters[0].cluster.server}"` and compare the exact result against the lab API server documented in `scripts/k3s/CLUSTER-STATE.md`.
+   That read returns one server URL and no credentials, so it satisfies the boundary against printing kubeconfig contents.
+   Also run `kubectl config current-context` to record which context was ambient at the start, and treat that name as evidence for the note rather than as proof of identity.
    Every kubectl command below pins `--context=default` so a later context switch, another agent, a different shell environment, or a changed `KUBECONFIG` cannot redirect a read or the rollback at another cluster.
-   If the `default` context is missing, or is not proven to be the documented RunLit lab cluster, stop before any cluster request and report the mismatch.
+   If the `default` context is missing, the server URL is empty, or it differs from the documented lab API server by any character, stop before any cluster request and report the mismatch.
 3. Verify read access with non-mutating `kubectl --context=default auth can-i` checks for the resources needed below.
    A failed access check is a blocker, not permission to change credentials or kubeconfig.
 4. Inspect nodes with `kubectl --context=default get nodes -o wide` and summarize Ready state, scheduling state, and pressure conditions.
@@ -69,14 +72,16 @@ Never run an unqualified undo, because an undo without `--to-revision` targets w
 
 Run it only when all of these facts are true:
 
-- The `default` context is proven to be the documented non-production RunLit lab cluster.
+- The `default` context's API server exactly matches the lab API server documented in `scripts/k3s/CLUSTER-STATE.md`.
 - The current `recommendationservice` revision has a crash-loop or unavailable pod.
 - Pod termination state, repeated warning events, or bounded logs identify an OOM or low-memory failure.
 - The current deployment memory request or limit matches the known low-memory artifact rather than the documented healthy baseline.
 - Rollout history contains an earlier healthy revision whose memory request and limit equal the documented baseline, and that revision's integer number is recorded.
 
 Capture the current revision and crash-loop pod UIDs before the command.
-Immediately before running it, re-prove both facts that the command depends on: re-run `kubectl config current-context` and the `default` context identity check, and re-read `kubectl --context=default rollout history deployment/recommendationservice -n online-boutique` to confirm the current revision is still the broken one and `<verified revision>` still names the inspected healthy revision.
+Immediately before running it, re-prove both facts that the command depends on.
+Re-run `kubectl config view --minify --context=default -o jsonpath="{.clusters[0].cluster.server}"` and confirm it still equals the documented lab API server exactly, because a kubeconfig edit between assessment and mutation can repoint `default` at another cluster.
+Re-read `kubectl --context=default rollout history deployment/recommendationservice -n online-boutique` and confirm the current revision is still the broken one and `<verified revision>` still names the inspected healthy revision.
 If either recheck disagrees with the assessment, stop and reassess from the beginning rather than running the command.
 Run the undo at most once for one observed broken revision.
 If another operator has already changed the revision, reassess from the beginning and do not undo blindly.
@@ -107,7 +112,8 @@ If the rollout, memory baseline, pod replacement, health checks, or relevant ale
 - Do not touch the private Postgres rollout.
 - Do not stop, restart, reconfigure, or profile the Mac mini worker runtime.
 - Do not touch Proxmox, the NAS, DNS, network configuration, provider accounts, or project code.
-- Do not send any cluster request, read or mutation, without an explicit `--context=default`, and never let the ambient current context decide which cluster a command reaches; the `kubectl config current-context` identity check is the only local kubeconfig read exempt from the flag.
+- Do not send any cluster request, read or mutation, without an explicit `--context=default`, and never let the ambient current context decide which cluster a command reaches; the local `kubectl config current-context` read is the only command exempt from the flag.
+- Do not accept a context name as proof of cluster identity; only the documented API server URL comparison proves it.
 - Do not run a cluster-wide `-A` read; scope every namespaced read to the documented `online-boutique` or `monitoring` namespace.
 - Do not delete pods as the primary fix for a Deployment-managed fault.
 - Do not scale, patch, apply, restart, or roll back any other Kubernetes resource.
@@ -126,7 +132,7 @@ Do not guess a home path or write the note into project code.
 The note records:
 
 - UTC start and finish times.
-- The context name and topology sources used to prove it is the lab.
+- The context name, the API server URL comparison result, and the topology sources used to prove it is the lab, recorded as matched or mismatched rather than by pasting the URL.
 - Precheck and postcheck summaries for nodes, workloads, warning events, monitoring, storefront, and backend.
 - The `recommendationservice` revisions, pod UIDs, restart evidence, and memory request and limit before and after.
 - Whether the whitelisted command ran and its result.
