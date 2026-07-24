@@ -211,8 +211,10 @@ test_runlit_lab_fix_owns_safe_repair_contract() {
     'is no defense against a changed `KUBECONFIG`' \
     "the home's \`data/projects.md\` registry names" \
     'require only that the worktree'"'"'s base is the project'"'"'s default branch' \
-    'Prove currency with a non-mutating `git ls-remote` read of the remote default branch' \
+    'Prove currency by comparing the checkout'"'"'s base against the live remote default-branch commit' \
+    'never compare the task-branch HEAD' \
     'never as the proof itself' \
+    'Do not label an unavailable storefront or backend health URL as a monitoring gap' \
     'Never run `git fetch`, or any other state-changing git command, under `projects/`' \
     'Do not open a `kubectl port-forward` or `kubectl proxy` tunnel' \
     'external read-only URLs that `scripts/k3s/CLUSTER-STATE.md` documents' \
@@ -299,8 +301,12 @@ test_runlit_lab_fix_carries_unavailable_outcome_into_verification() {
     "the Verification section does not carry the assessment's unavailable outcome, so an unreachable check has to be forced into pass or fail"
   assert_contains "$verification" 'do not call monitoring or alerting healthy on that evidence' \
     "the Verification section lets a missing or unreachable monitoring URL read as healthy"
-  assert_contains "$verification" 'the application-level repair is verified, monitoring or alerting verification was unavailable, and the missing URL or access path is named' \
-    "the Verification verdict has no narrower app-only conclusion, so an unavailable monitoring check forces a false not-healthy or a silent deviation"
+  assert_contains "$verification" 'name the checks that actually ran and passed, name each unavailable check for what it was' \
+    "the Verification verdict has no narrower conclusion, so an unavailable check forces a false not-healthy or a silent deviation"
+  assert_contains "$verification" 'record app-health verification as unavailable' \
+    "an unreachable storefront or backend health URL has no app-health label of its own"
+  assert_contains "$verification" 'never as an application-level repair verified with a monitoring gap' \
+    "the Verification verdict can still report an unavailable app health check as a monitoring gap"
   assert_no_grep 'unverified' "$RUNLIT" \
     "RunLit lab repair mixes 'unverified' into the 'unavailable' outcome vocabulary"
   pass "RunLit lab repair carries the unavailable outcome from assessment into the verification verdict"
