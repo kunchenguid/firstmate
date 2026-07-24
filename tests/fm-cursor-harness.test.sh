@@ -349,9 +349,12 @@ SH
   printf 'brief\n' > "$home/data/$id/brief.md"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$wt/.cursor"
-  # Prior install left owned stop at loop_limit 0; respawn must upgrade to 1.
+  # Prior install left owned stop at loop_limit 0 on a TRACKED hooks.json; respawn
+  # must upgrade to 1 without leaving teardown-blocking dirtiness.
   printf '%s\n' '{"version":1,"hooks":{"sessionStart":[{"command":"echo keep-me"}],"stop":[{"command":".cursor/hooks/fm-firstmate-turn-end.sh","loop_limit":0}]}}' \
     > "$wt/.cursor/hooks.json"
+  git -C "$wt" add .cursor/hooks.json
+  git -C "$wt" commit -q -m 'prior cursor hooks with loop_limit 0'
   touch "$home/state/.last-watcher-beat"
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -370,12 +373,27 @@ SH
     || fail "respawn must upgrade owned stop loop_limit to 1"
   assert_grep 'merged' "$wt/.fm-cursor-turnend" "loop_limit upgrade must keep merged marker"
   assert_present "$wt/.fm-cursor-hooks.json.bak" "loop_limit upgrade should create bak when missing"
-  jq -e '
-      [.hooks.stop[]?
-        | select((.command // "") == ".cursor/hooks/fm-firstmate-turn-end.sh")
-        | .loop_limit] == [0]
-    ' "$wt/.fm-cursor-hooks.json.bak" >/dev/null \
-    || fail "bak must capture pre-upgrade owned stop at loop_limit 0"
+  if jq -e '
+      [.hooks.stop // [] | .[]
+        | select((.command // "") == ".cursor/hooks/fm-firstmate-turn-end.sh")]
+      | length == 0
+    ' "$wt/.fm-cursor-hooks.json.bak" >/dev/null; then
+    :
+  else
+    fail "bak must be project baseline without owned stop (not the pre-upgrade owned install)"
+  fi
+  assert_grep 'keep-me' "$wt/.fm-cursor-hooks.json.bak" "baseline bak lost unrelated hooks"
+  # shellcheck disable=SC1090
+  eval "$(sed -n \
+    -e '/^cursor_hooks_is_owned_delta()/,/^}/p' \
+    -e '/^filter_owned_hook_dirtiness()/,/^}/p' \
+    "$ROOT/bin/fm-teardown.sh")"
+  cursor_hooks_is_owned_delta "$wt" \
+    || fail "after loop_limit upgrade, hooks.json must be exact owned delta vs baseline bak"
+  mode_out=$(git -C "$wt" status --porcelain | filter_owned_hook_dirtiness "$wt")
+  if printf '%s\n' "$mode_out" | grep -qF '.cursor/hooks.json'; then
+    fail "loop_limit upgrade must not leave teardown-blocking hooks.json dirtiness"
+  fi
   pass "cursor spawn upgrades owned stop loop_limit on respawn"
 }
 

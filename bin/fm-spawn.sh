@@ -1282,11 +1282,24 @@ EOF
               | length > 0 and all(. == 1)
             ' "$CURSOR_HOOKS_JSON" >/dev/null 2>&1; then
             # Owned stop already present but loop_limit is missing or not 1.
+            # Bak must be the project baseline WITHOUT the owned stop; copying the
+            # pre-upgrade file (still containing owned stop at 0) breaks owned-delta
+            # teardown and can refuse cleanup on a tracked hooks.json.
             if [ ! -f "$CURSOR_HOOKS_BAK" ]; then
-              cp "$CURSOR_HOOKS_JSON" "$CURSOR_HOOKS_BAK" || {
-                echo "error: cannot backup Cursor hooks.json before loop_limit upgrade for $ID" >&2
+              tmp=$(mktemp "$CURSOR_HOOKS_BAK.XXXXXX") || {
+                echo "error: cannot stage Cursor hooks baseline backup for $ID" >&2
                 exit 1
               }
+              if ! jq --arg cmd "$CURSOR_HOOK_CMD" '
+                  .hooks.stop = ((.hooks.stop // [])
+                    | map(select((.command // "") != $cmd)))
+                  | if ((.hooks.stop // []) | length) == 0 then del(.hooks.stop) else . end
+                ' "$CURSOR_HOOKS_JSON" > "$tmp"; then
+                rm -f "$tmp"
+                echo "error: cannot backup Cursor hooks.json baseline before loop_limit upgrade for $ID" >&2
+                exit 1
+              fi
+              mv "$tmp" "$CURSOR_HOOKS_BAK"
               exclude_path '.fm-cursor-hooks.json.bak'
             fi
             tmp=$(mktemp "$CURSOR_HOOKS_JSON.XXXXXX") || {
