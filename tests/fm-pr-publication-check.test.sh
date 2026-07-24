@@ -344,6 +344,7 @@ test_internal_transcripts_and_secrets_refuse() {
   assert_attest_rejected bearer-token "$prefix- Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue1234567890\n" 'Authorization Bearer credential'
   assert_attest_rejected basic-token "$prefix- Authorization: Basic dXNlcjpwYXNzd29yZA==\n" 'Authorization Basic credential'
   assert_attest_rejected basic-unpadded-token "$prefix- Authorization: Basic dXNlcjpwYXNzd29yZA\n" 'Authorization Basic credential'
+  assert_attest_rejected basic-canonical-no-colon "$prefix- Authorization: Basic c2VjcmV0\n" 'Authorization Basic credential'
   assert_attest_rejected basic-empty-user "$prefix- authorization: basic OnNlY3JldA==\n" 'Authorization Basic credential'
   assert_attest_rejected basic-invalid-remainder "$prefix- Authorization: Basic dXNlcjpwYXNzd29yZ\n" 'Authorization Basic credential'
   assert_attest_rejected basic-ambiguous-padding "$prefix- Authorization: Basic dXNlcjpwYXNzd29yZA===\n" 'Authorization Basic credential'
@@ -368,6 +369,14 @@ ${BASIC_CREDENTIAL}
 REDACTED_TOKEN
 BASIC_CREDENTIAL
 EOF
+
+  dir=$(make_case basic-ordinary-prose)
+  write_body "$dir" "$(safe_body)
+
+- Basic authorization documentation describes the scheme without publishing a header value.
+"
+  attest_none "$dir" >/dev/null 2> "$dir/stderr" \
+    || fail "ordinary Basic authorization prose was rejected: $(cat "$dir/stderr")"
 
   dir=$(make_case basic-machine-verdict)
   safe_body > "$dir/body.md"

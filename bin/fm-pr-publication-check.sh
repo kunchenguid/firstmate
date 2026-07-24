@@ -552,48 +552,8 @@ basic_token_is_placeholder() {
   return 1
 }
 
-basic_token_normalize() {
-  local token=$1 remainder canonical
-  BASIC_NORMALIZED_TOKEN=
-  case "$token" in
-    *[!A-Za-z0-9+/=]*) return 2 ;;
-  esac
-  if [[ "$token" == *'='* ]]; then
-    [[ "$token" =~ ^[A-Za-z0-9+/]+={1,2}$ ]] || return 2
-    [ "$(( ${#token} % 4 ))" -eq 0 ] || return 2
-    BASIC_NORMALIZED_TOKEN=$token
-  else
-    remainder=$(( ${#token} % 4 ))
-    case "$remainder" in
-      0) BASIC_NORMALIZED_TOKEN=$token ;;
-      2) BASIC_NORMALIZED_TOKEN="${token}==" ;;
-      3) BASIC_NORMALIZED_TOKEN="${token}=" ;;
-      *) return 2 ;;
-    esac
-  fi
-  if canonical=$(set -o pipefail; printf '%s' "$BASIC_NORMALIZED_TOKEN" \
-    | base64 --decode 2>/dev/null | base64 | tr -d '\n'); then
-    :
-  elif canonical=$(set -o pipefail; printf '%s' "$BASIC_NORMALIZED_TOKEN" \
-    | base64 -D 2>/dev/null | base64 | tr -d '\n'); then
-    :
-  else
-    return 2
-  fi
-  [ "$canonical" = "$BASIC_NORMALIZED_TOKEN" ] || return 2
-}
-
-basic_token_has_userpass() {
-  local token=$1
-  basic_token_normalize "$token" || return $?
-  if printf '%s' "$BASIC_NORMALIZED_TOKEN" | base64 --decode 2>/dev/null | grep -q ':'; then
-    return 0
-  fi
-  printf '%s' "$BASIC_NORMALIZED_TOKEN" | base64 -D 2>/dev/null | grep -q ':'
-}
-
 reject_basic_authorization() {
-  local candidates line token token_status
+  local candidates line token
   FAILURE_CLASS=state-invalid
   candidates=$(awk '
     {
@@ -618,16 +578,9 @@ reject_basic_authorization() {
   [ -n "$candidates" ] || return 0
   while IFS=$'\t' read -r line token; do
     basic_token_is_placeholder "$token" && continue
-    if basic_token_has_userpass "$token"; then
-      token_status=0
-    else
-      token_status=$?
-    fi
-    if [ "$token_status" -eq 0 ] || [ "$token_status" -eq 2 ]; then
-      echo "error: PR publication check rejected an Authorization Basic credential at body line $line" >&2
-      echo "error: the responsible task worker must correct the public body through its selected delivery path and attest again" >&2
-      return 1
-    fi
+    echo "error: PR publication check rejected an Authorization Basic credential at body line $line" >&2
+    echo "error: the responsible task worker must correct the public body through its selected delivery path and attest again" >&2
+    return 1
   done <<< "$candidates"
   return 0
 }
