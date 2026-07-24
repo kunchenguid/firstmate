@@ -75,6 +75,15 @@ case "$scenario" in
   cross-host) body='{"number":7,"html_url":"http://evil.lan:3000/Brad/Test-Repo/pulls/7","base":{"repo":{"full_name":"Brad/Test-Repo"}},"head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"state":"open","merged":false}' ;;
   *)
     case "$url" in
+      */api/v1/user)
+        if [ "$scenario" = malformed-account ]; then
+          body='{"login":7}'
+        elif [ "$scenario" = wrong-account ]; then
+          body='{"login":"mallory"}'
+        else
+          body='{"login":"brad"}'
+        fi
+        ;;
       */pulls/7/reviews)
         if [ "$scenario" = malformed-reviews ]; then
           body='[{"id":1,"state":"UNRECOGNIZED","user":{"login":"reviewer"}}]'
@@ -298,7 +307,7 @@ test_private_configuration_and_token_custody() {
 }
 
 test_pr_operations_and_malformed_responses() {
-  local dir out rc scenario_command scenario command_name
+  local dir out rc scenario_command scenario command_name branch
   dir="$TMP_ROOT/operations"
   write_config "$dir"
   make_fake_curl "$dir"
@@ -310,6 +319,30 @@ test_pr_operations_and_malformed_responses() {
   [ "$out" = "$PR_URL" ] || fail "Gitea PR create did not return canonical URL"
   jq -e '.head == "fm/topic" and .base == "main" and .title == "Fixture PR" and .body == "Body fixture."' \
     "$dir/create.body" >/dev/null || fail "Gitea PR create body was malformed"
+
+  for branch in '.hidden' 'feature..topic' 'feature.lock' 'feature/' 'feature//topic' 'feature@{topic}'; do
+    : > "$dir/curl.argv"
+    set +e
+    out=$(run_forge "$dir" pr-create "$dir/repo" --head "$branch" --base main \
+      --title 'Fixture PR' --body-file "$dir/body.md" 2>&1); rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "Git-invalid Gitea head branch was accepted: $branch"
+    assert_contains "$out" 'branches are invalid' "Git-invalid branch refusal was unclear"
+    [ ! -s "$dir/curl.argv" ] || fail "Git-invalid branch triggered a Gitea request: $branch"
+  done
+
+  for scenario in malformed-account wrong-account; do
+    : > "$dir/curl.argv"
+    set +e
+    out=$(FM_TEST_GITEA_SCENARIO=$scenario run_forge "$dir" pr-state "$PR_URL" 2>&1); rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$scenario Gitea account response was accepted"
+    assert_contains "$out" 'authenticated account does not match' \
+      "$scenario Gitea account refusal was unclear"
+    assert_no_grep '/repos/' "$dir/curl.argv" \
+      "$scenario Gitea account response allowed a repository request"
+  done
+
   [ "$(run_forge "$dir" pr-head "$PR_URL")" = "$HEAD" ] || fail "Gitea PR head failed"
   [ "$(FM_TEST_GITEA_SCENARIO=closed run_forge "$dir" pr-state "$PR_URL")" = closed ] \
     || fail "Gitea closed-unmerged state was misread"

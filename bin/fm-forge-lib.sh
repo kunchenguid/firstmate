@@ -298,6 +298,8 @@ fm_forge_gitea_identity_bind() {
   [ "$FM_PR_URL" = "$FM_GITEA_BASE_URL/$FM_PR_PATH/pulls/$FM_PR_NUMBER" ] \
     && [ "$FM_PR_HOST" = "$FM_GITEA_AUTHORITY" ] \
     || { FM_GITEA_TOKEN=; fm_forge_fail "Gitea pull request host does not match private configuration"; return 1; }
+  fm_forge_gitea_account_bind || return 1
+  fm_forge_gitea_config_load || return 1
 }
 
 # Authenticated Gitea request. The token is delivered through curl's stdin
@@ -368,6 +370,21 @@ fm_forge_gitea_request() {
   [ "$response_read_rc" -eq 0 ] \
     || { rm -rf "$tmp_dir"; fm_forge_fail "Gitea response could not be read"; return 1; }
   rm -rf "$tmp_dir"
+}
+
+fm_forge_gitea_account_bind() {
+  local configured_account=$FM_GITEA_ACCOUNT
+  fm_forge_gitea_request GET '/user' '' '200' || return 1
+  jq -e --arg account "$configured_account" '
+    type == "object" and
+    (.login | type == "string") and
+    .login == $account
+  ' >/dev/null 2>&1 <<< "$FM_GITEA_RESPONSE" \
+    || { fm_forge_fail "Gitea authenticated account does not match private configuration"; return 1; }
+}
+
+fm_forge_git_branch_valid() {
+  [ "$#" -eq 1 ] && git check-ref-format --branch "$1" >/dev/null 2>&1
 }
 
 fm_forge_gitea_pr_json_valid() {
@@ -449,13 +466,15 @@ fm_forge_gitea_pr_create() {
   local repo_dir=$1 head=$2 base=$3 title=$4 body=$5 payload url path
   fm_forge_repo_from_dir "$repo_dir" || return 1
   [ "$FM_FORGE_REPO_PROVIDER" = gitea ] || { fm_forge_fail "repository is not configured as Gitea"; return 1; }
-  [[ "$head" =~ ^[A-Za-z0-9._/-]{1,255}$ ]] && [[ "$base" =~ ^[A-Za-z0-9._/-]{1,255}$ ]] \
+  fm_forge_git_branch_valid "$head" && fm_forge_git_branch_valid "$base" \
     || { fm_forge_fail "Gitea pull request branches are invalid"; return 1; }
   [ -n "$title" ] && [ "${#title}" -le 4096 ] && [ "${#body}" -le 262144 ] \
     || { fm_forge_fail "Gitea pull request text is invalid"; return 1; }
   path=$FM_FORGE_REPO_PATH
   payload=$(jq -cn --arg head "$head" --arg base "$base" --arg title "$title" --arg body "$body" \
     '{head:$head,base:$base,title:$title,body:$body}') || { fm_forge_fail "Gitea request body could not be encoded"; return 1; }
+  fm_forge_gitea_config_load || return 1
+  fm_forge_gitea_account_bind || return 1
   fm_forge_gitea_config_load || return 1
   fm_forge_gitea_request POST "/repos/$path/pulls" "$payload" '201' || return 1
   url=$(jq -er '.html_url | strings' <<< "$FM_GITEA_RESPONSE" 2>/dev/null) \
