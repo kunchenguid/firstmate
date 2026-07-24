@@ -79,6 +79,7 @@ let retryFailures = 0;
 let stopping = false;
 let seq = 0;
 let restoring = false;
+let sessionGeneration = 0;
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 
@@ -245,13 +246,15 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  async function restoreAfterActionableClose(predecessorArmPid: string): Promise<string> {
+  async function restoreAfterActionableClose(predecessorArmPid: string, generation: number): Promise<string> {
     let failure = "";
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
-      if (stopping) return "";
+      if (stopping || generation !== sessionGeneration) return "";
       const replacement = startArm(predecessorArmPid);
       const successorChild = child;
-      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) return "";
+      const ready = replacement.ok && successorChild && await waitForReadiness(successorChild);
+      if (generation !== sessionGeneration) return "";
+      if (ready) return "";
       if (replacement.ok) {
         failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
         if (!(await retireArm(successorChild))) {
@@ -265,6 +268,7 @@ export default function (pi: ExtensionAPI) {
       }
       if (attempt === retryLimit) break;
       await waitForRetry(attempt + 1);
+      if (generation !== sessionGeneration) return "";
     }
     return `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity after ${retryLimit} retries`;
   }
@@ -376,9 +380,11 @@ export default function (pi: ExtensionAPI) {
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
         retryFailures = 0;
+        const generation = sessionGeneration;
         restoring = true;
         void (async () => {
-          const failure = await restoreAfterActionableClose(predecessor);
+          const failure = await restoreAfterActionableClose(predecessor, generation);
+          if (generation !== sessionGeneration) return;
           restoring = false;
           if (stopping) return;
           const message = failure ? `${classification.message}\n\n${failure}` : classification.message;
@@ -408,6 +414,8 @@ export default function (pi: ExtensionAPI) {
 
   pi.on?.("session_start", () => {
     // /new keeps this module loaded; clear the shutdown latch so arm works again.
+    sessionGeneration += 1;
+    restoring = false;
     stopping = false;
     retryFailures = 0;
     if (retryTimer) clearTimeout(retryTimer);

@@ -1064,6 +1064,74 @@ EOF
   pass "Pi session_start clears shutdown latch and quiet-rearms when lock-owned"
 }
 
+test_pi_session_start_cancels_prior_restoration() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-session-restoration-root"
+  home="$TMP_ROOT/pi-session-restoration-home"
+  log="$TMP_ROOT/pi-session-restoration.log"
+  stop="$TMP_ROOT/pi-session-restoration.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: prior session wake\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  trap 'exit 0' TERM INT
+  while :; do sleep 0.02; done
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_PI_ARM_READY_TIMEOUT_MS=100 FM_WATCH_REARM_RETRY_BASE_MS=5 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const prompts = [];
+let tool = null;
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  registerCommand() {},
+  registerTool(candidate) { if (candidate.name === "fm_watch_arm_pi") tool = candidate; },
+  sendUserMessage: async (message) => { prompts.push(message); },
+};
+const rows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("initial-arm", {}, undefined, undefined, {});
+for (let i = 0; i < 100 && rows().length < 2; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (rows().length !== 2) throw new Error(`prior restoration did not start: ${rows().join(" | ")}`);
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
+await handlers.get("session_start")({ type: "session_start" }, {});
+for (let i = 0; i < 100 && rows().length < 3; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+await new Promise((resolve) => setTimeout(resolve, 180));
+if (rows().length !== 3) throw new Error(`prior restoration launched into the new session: ${rows().join(" | ")}`);
+if (prompts.length !== 0) throw new Error(`prior session wake reached the new session: ${prompts.join(" | ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi session_start must cancel prior-session actionable restoration"
+  [ -z "$out" ] || fail "Pi session-restoration test printed output: $out"
+  pass "Pi session_start cancels prior-session actionable restoration"
+}
+
 test_pi_process_exit_cleanup_stops_arm_child() {
   local repo home plugin cleanup_log pid_file out status pid i
   repo="$TMP_ROOT/pi-process-exit-root"
@@ -2105,6 +2173,7 @@ test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_session_start_clears_shutdown_latch_and_quiet_rearms
+test_pi_session_start_cancels_prior_restoration
 test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_primary_watch_plugin_static_wiring
 test_opencode_plugin_package_boundary_is_explicit_esm
