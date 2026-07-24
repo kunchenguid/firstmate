@@ -113,21 +113,6 @@ printf 'signal: task.status done: slow fixture\n'
 exit 0
 SH
       ;;
-    queued-handoff)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
-if mkdir "$FM_HOME/state/first-clean-arm" 2>/dev/null; then
-  : > "$FM_HOME/state/first-clean-arm-running"
-  sleep 2
-  printf 'watcher: cycle closed with a delivered wake pid=%s (reported by its owning arm)\n' "$$"
-  exit 0
-fi
-printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
-printf 'signal: task.status done: queued handoff fixture\n'
-exit 0
-SH
-      ;;
     meta-vanishes)
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -330,40 +315,6 @@ test_single_flight_admits_exactly_one_owner() {
   pass "auto-arm: concurrent firings admit one owner and one rewake translation"
 }
 
-test_contending_stop_waits_for_clean_owner_handoff() {
-  local dir rc1 rc2 count
-  dir=$(make_primary_dir "$TMP_ROOT/queued-handoff")
-  : > "$dir/state/task.meta"
-  write_arm_fixture "$dir" queued-handoff
-  FM_HOME="$dir" "$FAKE_CLAUDE" -c '
-    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
-    printf "%s\n" "{\"session_id\":\"s\"}" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >/dev/null 2>"$FM_HOME/state/err1" &
-    p1=$!
-    i=0
-    while [ "$i" -lt 50 ] && [ ! -e "$FM_HOME/state/first-clean-arm-running" ]; do
-      sleep 0.1
-      i=$((i + 1))
-    done
-    [ -e "$FM_HOME/state/first-clean-arm-running" ] || exit 90
-    printf "%s\n" "{\"session_id\":\"s\"}" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >/dev/null 2>"$FM_HOME/state/err2" &
-    p2=$!
-    wait "$p1"; echo $? > "$FM_HOME/state/rc1"
-    wait "$p2"; echo $? > "$FM_HOME/state/rc2"
-  ' || fail "queued handoff fixture did not complete"
-  rc1=$(cat "$dir/state/rc1")
-  rc2=$(cat "$dir/state/rc2")
-  count=$(wc -l < "$dir/state/arm-ran" | tr -d ' ')
-  [ "$rc1" = 0 ] || fail "the predecessor's delivered close must stay clean, got $rc1"
-  [ "$rc2" = 2 ] || fail "the contending Stop did not own and translate the successor cycle, got $rc2"
-  [ "$count" -eq 2 ] || fail "the queued handoff must foreground one successor arm, saw $count arm runs"
-  grep -q 'firstmate watcher wake' "$dir/state/err2" || fail "the successor arm did not retain notification ownership"
-  ! grep -q 'watcher cycle FAILED' "$dir/state/err1" "$dir/state/err2" \
-    || fail "the durable handoff was misclassified as a watcher failure"
-  [ ! -e "$dir/state/.claude-autoarm.lock" ] || fail "owner lock remained after the handoff cycle"
-  [ ! -e "$dir/state/.claude-autoarm-handoff.lock" ] || fail "handoff lock remained after the handoff cycle"
-  pass "auto-arm: a contending Stop durably owns the successor after a clean close"
-}
-
 test_need_vanished_mid_cycle_closes_quietly() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/vanished")
@@ -418,7 +369,6 @@ test_failed_close_rewakes_with_failure_banner
 test_clean_close_exits_silently
 test_arms_for_x_mode_poll_need_without_inflight
 test_single_flight_admits_exactly_one_owner
-test_contending_stop_waits_for_clean_owner_handoff
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home

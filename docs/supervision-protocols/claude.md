@@ -4,23 +4,21 @@ When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
 2. Routine watcher arm and re-arm are owned by the Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`), never by you.
    Every turn end while supervision is needed launches or attaches one home-scoped watcher cycle with no model command and no model tokens.
-   If that Stop overlaps an older attached auto-arm, one coalesced hook waits to own the next cycle instead of dropping the re-arm request.
    An actionable close wakes you through the hook's exit-2 rewake, delivered as a `Stop hook feedback` message.
 3. On a `Stop hook feedback` wake (`signal:`, `stale:`, `check:`, or `heartbeat`), run `bin/fm-wake-drain.sh` first and handle the wake.
    Do not run `bin/fm-watch-arm.sh` after an ordinary wake; the next turn end re-arms automatically when supervision is still needed.
    Do not invent a wake from an attach-status line alone; drain and act only on real wake records or a real watcher reason line.
-4. On a `Stop hook feedback` watcher-failure wake (`watcher: FAILED ...`), treat it as an alarm: drain, then repair supervision before ending the turn.
+4. On a `Stop hook feedback` watcher-failure wake (`watcher: FAILED ...`) or loud delivered-close wake (`watcher: cycle closed with a delivered wake ...; no live cycle remains`), treat it as an alarm: drain, then repair supervision before ending the turn.
 5. Manual arm is recovery only.
    When a repair is genuinely needed - the Stop hook did not claim this home, or a forced restart is required - run `bin/fm-watch-arm.sh` (or `bin/fm-watch-arm.sh --restart`) as its own Claude Code background task, never bundled with other commands, never with shell `&`.
    Source `__FM_X_MODE_ENV__` first when X mode is active.
    A shell `&`, a truncating pipe, or bundling is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) registered in `.claude/settings.json`.
 6. Treat `watcher: started ...` and `watcher: attached ...` inside arm output as proof that one live cycle exists.
    On attach, the arm follows verified identity-matched successors instead of exiting when the first cycle ends.
-   `watcher: cycle closed with a delivered wake ...` means an attached arm's cycle closed for a wake its owning arm already reported: it is neither a failure nor a second wake, so do not act on it or re-arm for it.
-   A Stop that arrived before that clean close is durably handed the next cycle before the earlier hook leaves.
-7. The continuity PreToolUse gate allows wake drain, watcher arm recovery, and fail-closed teardown, and refuses only other `bin/fm-*.sh` fleet commands while tasks are in flight, no identity-matched live watcher holds the home lock, and that missing watcher is unexplained.
-   The gap between a rewake and the next Stop-launched arm is expected, not a failure, so handling a wake in that gap - reading crew state, merging, tearing down, dispatching - is allowed on the strength of the recorded delivered-wake close.
-   A refusal here means the missing watcher is genuinely unaccounted for: follow its recovery guidance rather than re-arming by reflex.
+   `watcher: cycle closed with a delivered wake ...; no live cycle remains` means an attached arm's cycle closed for a wake its owning arm already reported, so do not act on it as a second wake.
+   The line stays loud and exits nonzero because supervision is down; repair or re-arm before ending the turn.
+7. The continuity PreToolUse gate allows wake drain, watcher arm recovery, and fail-closed teardown, and refuses other `bin/fm-*.sh` fleet commands whenever tasks are in flight and no identity-matched live watcher holds the home lock.
+   This refusal also applies during the expected post-wake gap, so establish a recovery arm before reading crew state, merging, or dispatching.
 8. The turn-end guard (`bin/fm-turnend-guard.sh --claude`) remains the final backstop.
    It allows the stop when a watcher is healthy, when the auto-arm already owns recovery for this event epoch, or when a fresh rewake is recorded; it re-blocks only when none of those materialize, within a bounded budget.
 9. Waiting on the hook-owned cycle is silent: do not send idle progress while the watcher is parked.

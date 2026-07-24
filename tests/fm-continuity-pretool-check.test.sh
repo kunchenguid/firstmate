@@ -88,78 +88,6 @@ test_live_lock_allows_fleet_command_even_with_stale_beacon() {
   pass "continuity gate classifies the lock by live PID identity rather than beacon age"
 }
 
-# The watcher is one-shot and the arm's exit IS the wake notification, so a home
-# is deliberately unwatched for the whole handling turn. Refusing there never
-# restored supervision - it only blocked the handling of the wake and pushed the
-# model onto the recovery-only manual arm. The ledger says which case this is.
-cycle_row() {  # <watcher-pid> <cycle-id> <origin> <started-at> <ended-at> <reason>
-  printf 'arm_pid=1\twatcher_pid=%s\tcycle_id=%s\torigin=%s\tstarted_at=%s\tended_at=%s\texit_code=0\tsignal=none\treason=%s\tbeacon_age=1\tlock_before=pid:none|identity:none\tlock_after=pid:none|identity:none\tsuccessor=none\n' \
-    "$1" "$2" "$3" "$4" "$5" "$6" >> "$STATE/.watch-cycle-exits.log"
-}
-
-test_delivered_wake_gap_is_allowed_and_unexplained_absence_is_not() {
-  local now
-  now=$(date +%s)
-  rm -rf "$STATE/.watch.lock"
-  rm -f "$STATE/.watch-cycle-exits.log"
-  [ -e "$STATE/task.meta" ] || printf 'project=fixture\n' > "$STATE/task.meta"
-
-  expect_deny "no lifecycle record at all" 'bin/fm-crew-state.sh task' 'fm-crew-state.sh'
-
-  cycle_row 4242 cycle-a started "$(( now - 30 ))" "$(( now - 20 ))" actionable-signal
-  expect_allow "post-wake gap after a delivered wake" 'bin/fm-crew-state.sh task'
-  expect_allow "post-wake gap still permits a merge" 'bin/fm-pr-merge.sh task'
-  expect_allow "post-wake gap still permits a dispatch" 'bin/fm-spawn.sh next'
-
-  # A second arm observing the same cycle cannot see the reason and records only
-  # that the cycle ended; that must not overturn the owner's own record.
-  cycle_row 4242 cycle-a attached "$(( now - 30 ))" "$(( now - 15 ))" attached-cycle-ended
-  expect_allow "same cycle also observed by an attached arm" 'bin/fm-crew-state.sh task'
-
-  cycle_row 9191 cycle-b started "$(( now - 12 ))" "$(( now - 8 ))" unexpected-clean-exit
-  cycle_row 4242 cycle-a attached "$(( now - 30 ))" "$(( now - 2 ))" attached-cycle-ended
-  expect_deny "late observer for an older cycle cannot outrank a newer unexplained cycle" 'bin/fm-crew-state.sh task' 'fm-crew-state.sh'
-
-  rm -f "$STATE/.watch-cycle-exits.log"
-  cycle_row 4242 cycle-old started "$(( now - 40 ))" "$(( now - 30 ))" actionable-signal
-  cycle_row 4242 cycle-reused started "$(( now - 20 ))" "$(( now - 10 ))" unexpected-clean-exit
-  expect_deny "reused watcher pid cannot borrow an older cycle reason" 'bin/fm-crew-state.sh task' 'fm-crew-state.sh'
-
-  # An old delivered wake no longer accounts for the current turn.
-  rm -f "$STATE/.watch-cycle-exits.log"
-  cycle_row 4242 cycle-old-gap started "$(( now - 3610 ))" "$(( now - 3600 ))" actionable-signal
-  expect_deny "delivered wake older than the gap window" 'bin/fm-crew-state.sh task' 'fm-crew-state.sh'
-
-  # An arm that never confirmed a watcher is not a delivered wake either.
-  rm -f "$STATE/.watch-cycle-exits.log"
-  cycle_row 4242 cycle-timeout started "$(( now - 20 ))" "$(( now - 10 ))" confirmation-timeout
-  expect_deny "arm that never confirmed a watcher" 'bin/fm-crew-state.sh task' 'fm-crew-state.sh'
-
-  # The window is a real bound, not decoration.
-  rm -f "$STATE/.watch-cycle-exits.log"
-  cycle_row 4242 cycle-heartbeat started "$(( now - 40 ))" "$(( now - 30 ))" actionable-heartbeat
-  expect_allow "delivered wake inside the default window" 'bin/fm-crew-state.sh task'
-  export FM_CONTINUITY_GAP_GRACE=5
-  expect_deny "same record outside a shortened window" 'bin/fm-crew-state.sh task' 'fm-crew-state.sh'
-  unset FM_CONTINUITY_GAP_GRACE
-
-  rm -f "$STATE/.watch-cycle-exits.log"
-  printf 'arm_pid=1\twatcher_pid=4242\tcycle_id=cycle-truncated\torigin=started\tstarted_at=%s\tended_at=%s\texit_code=0\tsignal=none\treason=actionable-signal' \
-    "$(( now - 20 ))" "$(( now - 10 ))" > "$STATE/.watch-cycle-exits.log"
-  expect_deny "prefix-truncated actionable row" 'bin/fm-crew-state.sh task' 'fm-crew-state.sh'
-
-  rm -f "$STATE/.watch-cycle-exits.log"
-  cycle_row 4242 cycle-future started "$(( now + 5 ))" "$(( now + 10 ))" actionable-signal
-  expect_deny "future-dated delivered wake" 'bin/fm-crew-state.sh task' 'fm-crew-state.sh'
-
-  rm -f "$STATE/.watch-cycle-exits.log"
-  cycle_row 4242 cycle-owner-missing attached "$(( now - 20 ))" "$(( now - 10 ))" actionable-signal
-  expect_deny "cycle without one owning row" 'bin/fm-crew-state.sh task' 'fm-crew-state.sh'
-
-  rm -f "$STATE/.watch-cycle-exits.log"
-  pass "continuity gate allows the recorded post-wake gap and still refuses an unexplained one"
-}
-
 test_child_worktree_and_malformed_input_fail_open() {
   local child="$TMP_ROOT/child" rc=0
   rm -rf "$STATE/.watch.lock"
@@ -196,6 +124,5 @@ test_claude_hook_registration_preserves_stop_backstop() {
 
 test_gate_scope_and_recovery_exceptions
 test_live_lock_allows_fleet_command_even_with_stale_beacon
-test_delivered_wake_gap_is_allowed_and_unexplained_absence_is_not
 test_child_worktree_and_malformed_input_fail_open
 test_claude_hook_registration_preserves_stop_backstop
