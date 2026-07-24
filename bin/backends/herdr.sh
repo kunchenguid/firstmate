@@ -721,9 +721,9 @@ fm_backend_herdr_workspace_find() {  # <session>
 # its pane cwd's basename, so a captain launching herdr directly inside a
 # directory named "firstmate" produces a workspace that looks byte-identical,
 # by label alone, to firstmate's own auto-created container - one tab, label
-# "1". workspace_find adopted that pre-existing (captain-owned, LIVE) workspace
+# "1". workspace_find adopted that pre-existing live reference-environment workspace
 # by the label match, the heuristic matched too, and the very next spawn
-# closed the captain's own live pane 27ms after creating its task tab. The
+# closed the reference environment's live pane 27ms after creating its task tab. The
 # fix is structural, not another heuristic: only a workspace THIS SAME
 # fm_backend_herdr_workspace_ensure call just created carries a non-empty
 # seeded_tab_id at all (see FM_BACKEND_HERDR_WS_SEEDED_TAB_ID below); an

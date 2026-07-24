@@ -190,7 +190,7 @@ Verified live (2026-07-03 pass): running any socket-backed CLI command (`cmux pi
 
 The setting is `automation.socketControlMode` in cmux's settings (`~/.config/cmux/cmux.json` or Settings > Automation), with values `off`, `cmuxOnly` (the default), `automation`, `password`, and `allowAll` (three more legacy aliases - `openAccess`, `fullOpenAccess`, `full` - normalize onto `allowAll`; `notifications` normalizes onto `automation`).
 
-The per-mode enforcement was traced through the shipped source on 2026-07-04 (`github.com/manaflow-ai/cmux` at commit `9c91710e3f58`, cloned read-only as scratch; verified from source, not live, except where noted - the reference machine's live app is the captain's own, in Password mode, and was not reconfigured to exercise the other modes).
+The per-mode enforcement was traced through the shipped source on 2026-07-04 (`github.com/manaflow-ai/cmux` at commit `9c91710e3f58`, cloned read-only as scratch; verified from source, not live, except where noted - the reference environment's live app was in Password mode and was not reconfigured to exercise the other modes).
 There are exactly four enforcement points, and NO per-command/verb restrictions by mode - a mode either admits a client fully or not at all:
 
 - **Listener start** (`Sources/AppDelegate.swift`, `socketListenerConfigurationIfEnabled`): `off` means the listener is never started; every other mode starts it.
