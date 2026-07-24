@@ -93,3 +93,11 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-x-dismiss.sh`        | Dismiss a skipped X-mode mention at the relay without replying                       |
 | `fm-x-link.sh`           | Link a spawned task to its originating X-mode mention in task meta                   |
 | `fm-x-followup.sh`       | Detect, post, and cap completion follow-ups for an X-mode-linked task                |
+| `fm-telegram-bridge.sh`  | Install, configure, start, stop, inspect, or uninstall the Hermes Telegram bridge (docs/telegram-bridge.md) |
+| `fm-telegram-bridge.py`  | Semantic owner of the Hermes Telegram bridge: signed intake, correlation, dedupe, idempotent delivery, and lifecycle (docs/telegram-bridge.md) |
+| `fm-telegram-ingest.sh`  | Accept one HMAC-signed Hermes Telegram envelope on stdin, refusing intake without live supervision |
+| `fm-telegram-poll.sh`    | Trusted watcher check: emit one compact wake when signed Telegram inbox work exists  |
+| `fm-telegram-link.sh`    | Link a normal Firstmate task's metadata to its originating Telegram request          |
+| `fm-telegram-reply.sh`   | Send one idempotent, request-correlated private Telegram reply through Hermes        |
+| `fm-telegram-followup.sh`| Check or post a bounded task milestone/final reply to its Telegram origin            |
+| `fm-telegram-ack.sh`     | Mark a correlated Telegram inbox request processed after its reply or link succeeds  |
