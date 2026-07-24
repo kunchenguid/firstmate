@@ -61,9 +61,13 @@ export function installCalmOperationalUserLayout(): void {
     [key: symbol]: CalmOperationalUserLayoutPatch | undefined;
   };
   const hidesOperationalInput = (): boolean => calmPresentationHides("synthetic-user");
-  const isOperationalInput = (text: string): boolean =>
-    classifyFirstmateCurrentOperationalText(text) !== undefined ||
-    text.startsWith(LEGACY_CALM_OPERATIONAL_PREFIX);
+  const isOperationalInput = (text: string): boolean => {
+    if (!text.includes("\u2063")) return false;
+    return (
+      classifyFirstmateCurrentOperationalText(text) !== undefined ||
+      text.startsWith(LEGACY_CALM_OPERATIONAL_PREFIX)
+    );
+  };
   const installed = registry[CALM_OPERATIONAL_USER_LAYOUT_PATCH];
   if (installed) {
     installed.hidesOperationalInput = hidesOperationalInput;
