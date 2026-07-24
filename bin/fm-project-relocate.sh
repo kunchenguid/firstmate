@@ -177,7 +177,7 @@ EOF
 }
 
 metadata_references_source() {
-  local meta line recorded recorded_abs
+  local meta line recorded recorded_abs contents
   [ -n "${STATE_ABS:-}" ] || return 1
   local -a metas=("$STATE_ABS"/*.meta "$STATE_ABS"/.*.meta)
   for meta in "${metas[@]}"; do
@@ -190,7 +190,11 @@ metadata_references_source() {
       printf 'REFUSED: task metadata is not a regular file: %s\n' "$meta" >&2
       return 2
     fi
-    while IFS= read -r line; do
+    contents=$(cat -- "$meta") || {
+      printf 'REFUSED: cannot read task metadata: %s\n' "$meta" >&2
+      return 2
+    }
+    while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in
         project=*)
           recorded=${line#project=}
@@ -212,13 +216,13 @@ metadata_references_source() {
           fi
           ;;
       esac
-    done < "$meta"
+    done <<< "$contents"
   done
   return 1
 }
 
 registered_secondmate_references_project() {
-  local ref
+  local ref contents status
   [ -n "${DATA_ABS:-}" ] || return 1
   [ -e "$SECONDMATES" ] || [ -L "$SECONDMATES" ] || return 1
   if [ -L "$SECONDMATES" ]; then
@@ -229,7 +233,12 @@ registered_secondmate_references_project() {
     printf 'REFUSED: secondmate registry is not a regular file: %s\n' "$SECONDMATES" >&2
     return 2
   fi
-  ref=$(awk -v project="$NAME" '
+  contents=$(cat -- "$SECONDMATES") || {
+    printf 'REFUSED: cannot read secondmate registry: %s\n' "$SECONDMATES" >&2
+    return 2
+  }
+  status=0
+  ref=$(printf '%s\n' "$contents" | awk -v project="$NAME" '
     $1 == "-" {
       line = $0
       if (match(line, /projects:[[:space:]]*[^;)]*/)) {
@@ -248,7 +257,15 @@ registered_secondmate_references_project() {
       }
     }
     END { exit found ? 0 : 1 }
-  ' "$SECONDMATES") || return 1
+  ') || status=$?
+  case "$status" in
+    0) ;;
+    1) return 1 ;;
+    *)
+      printf 'REFUSED: cannot inspect secondmate registry: %s\n' "$SECONDMATES" >&2
+      return 2
+      ;;
+  esac
   printf '%s\n' "$ref"
 }
 

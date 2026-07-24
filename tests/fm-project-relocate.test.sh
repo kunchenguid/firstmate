@@ -265,6 +265,32 @@ test_refuses_root_replacement_and_busy_registry() {
   pass "root replacement and a busy project registry refuse relocation"
 }
 
+test_refuses_unreadable_reference_data() {
+  local pair home destination
+  pair=$(make_case alpha)
+  home=${pair%%$'\t'*}
+  destination="$TMP_ROOT/destination-unreadable-metadata"
+  mkdir -p "$destination"
+  printf 'project=other\n' > "$home/state/unreadable.meta"
+  chmod 000 "$home/state/unreadable.meta"
+
+  assert_refused_unchanged "$home" "$destination" alpha "cannot read task metadata" \
+    "unreadable task metadata"
+
+  pair=$(make_case beta)
+  home=${pair%%$'\t'*}
+  destination="$TMP_ROOT/destination-unreadable-secondmates"
+  mkdir -p "$destination"
+  printf '%s\n' \
+    '- design - design work (home: /tmp/design; scope: design; projects: other; added 2026-07-24)' \
+    > "$home/data/secondmates.md"
+  chmod 000 "$home/data/secondmates.md"
+
+  assert_refused_unchanged "$home" "$destination" beta "cannot read secondmate registry" \
+    "unreadable secondmate registry"
+  pass "unreadable task metadata and secondmate registry refuse relocation"
+}
+
 test_refuses_task_and_secondmate_references() {
   local pair home clone destination source_abs
   pair=$(make_case alpha)
@@ -329,5 +355,6 @@ test_refuses_linked_worktree_and_dirty_worktree
 test_refuses_unpushed_and_pushed_unlanded_branches
 test_refuses_unlanded_tags_and_stashes
 test_refuses_root_replacement_and_busy_registry
+test_refuses_unreadable_reference_data
 test_refuses_task_and_secondmate_references
 test_refuses_traversal_duplicate_registry_and_gate_agent
