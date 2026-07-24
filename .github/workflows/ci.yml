@@ -175,12 +175,23 @@ jobs:
           set -eu
           bin/fm-install-herdr.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Set up Go toolchain for Treehouse source build
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
       - name: Install pinned Treehouse
         run: |
           set -eu
           # Several real-herdr-gated E2E scripts require treehouse for spawn
           # worktree acquisition (presentation, workspace-per-home, autodetect).
-          bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
+          # fm-install-treehouse.sh builds treehouse from source at the pinned
+          # tag/commit. Its default source is the internal Codebase mirror, which
+          # these public GitHub runners cannot reach, so point it at the identical
+          # github.com mirror (same v2.0.1 commit; the script's commit-SHA pin
+          # verifies it either way). Go 1.25+ is provided by the step above.
+          command -v go >/dev/null || { echo "::error::go toolchain missing for treehouse source build"; exit 1; }
+          FM_TREEHOUSE_SRC_REPO=https://github.com/kunchenguid/treehouse.git \
+            bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Assert Herdr pin and protocol floor
         run: |

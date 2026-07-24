@@ -1,22 +1,41 @@
 #!/usr/bin/env bash
-# fm-install-treehouse.sh - install CI's pinned, verified Treehouse build.
+# fm-install-treehouse.sh - build and install CI's pinned Treehouse from source.
 #
 # Used only by the required real-Herdr CI lane for E2E scripts that genuinely
-# need treehouse (spawn worktree acquisition). Same pin/checksum discipline as
-# fm-install-herdr.sh: official release URL, exact asset, SHA-256, bounded
-# download, post-install version check. Never a floating package-manager latest.
+# need treehouse (spawn worktree acquisition). Firstmate builds treehouse from
+# its Codebase source mirror rather than downloading a prebuilt GitHub release
+# binary, because Codebase releases cannot host binary attachments. Same pin
+# discipline as before: an exact tag AND the exact commit that tag must resolve
+# to, never a floating latest. Build-time dependency integrity is guaranteed by
+# the checked-out repo's go.sum.
+#
+# Source of truth is code.byted.org/obric/treehouse, kept in step with the
+# github.com/kunchenguid/treehouse upstream by bin/fm-sync-treehouse-upstream.sh.
+# The clone URL is overridable via FM_TREEHOUSE_SRC_REPO for environments that
+# cannot reach code.byted.org: the required real-Herdr lane runs on GitHub's
+# public runners, which cannot reach the internal host, so that lane points this
+# at the identical github.com mirror instead. Both mirrors carry the same commit
+# for v2.0.1, so the commit-SHA pin below verifies either source.
 #
 # Usage:
 #   fm-install-treehouse.sh <destination-directory>
 #
-# Pins Treehouse v2.0.1, the version exercised by the local real-Herdr suite.
+# Env:
+#   FM_TREEHOUSE_SRC_REPO  override the clone URL (default: the Codebase mirror)
+#   FM_TREEHOUSE_GO        override the go binary name/path (default: go)
+#
+# Requires a Go 1.25+ toolchain and git. Pins Treehouse v2.0.1, the version
+# exercised by the local real-Herdr suite. Bumping the pin is a deliberate,
+# separate change here (tag AND commit); the upstream sync script never bumps it.
 set -eu
 
 FM_TREEHOUSE_CI_VERSION=2.0.1
 FM_TREEHOUSE_CI_TAG="v${FM_TREEHOUSE_CI_VERSION}"
-# Bounded download ceiling (bytes). Official 2.0.1 archives are under 8 MiB.
-FM_TREEHOUSE_CI_MAX_BYTES=15000000
-FM_TREEHOUSE_CI_REPO=kunchenguid/treehouse
+# Exact commit the v2.0.1 tag resolves to in both mirrors. Verified after clone
+# so a moved or forged tag cannot substitute different source.
+FM_TREEHOUSE_CI_COMMIT=5b8ecdec49034fe6861d63b8ea331490bb14c946
+FM_TREEHOUSE_SRC_REPO=${FM_TREEHOUSE_SRC_REPO:-https://code.byted.org/obric/treehouse.git}
+GO=${FM_TREEHOUSE_GO:-go}
 
 die() {
   printf 'fm-install-treehouse.sh: %s\n' "$*" >&2
@@ -25,64 +44,46 @@ die() {
 
 DESTINATION=${1:?usage: fm-install-treehouse.sh <destination-directory>}
 
-os=$(uname -s)
-arch=$(uname -m)
-case "${os}-${arch}" in
-  Linux-x86_64)
-    ARCHIVE=treehouse-v${FM_TREEHOUSE_CI_VERSION}-linux-amd64.tar.gz
-    SHA256=1d5a32751ab921670103fd201ddb2b91b47338cb13976f45642b827cf8976af2
-    ;;
-  Linux-aarch64|Linux-arm64)
-    ARCHIVE=treehouse-v${FM_TREEHOUSE_CI_VERSION}-linux-arm64.tar.gz
-    SHA256=eaccc9c5b98125df8bd77425598eeecee66cb0371db4eb1cf75f0d813c18fab9
-    ;;
-  Darwin-arm64)
-    ARCHIVE=treehouse-v${FM_TREEHOUSE_CI_VERSION}-darwin-arm64.tar.gz
-    SHA256=7ee5078f3d1f33c01196548797fce65408e459d53530b77d4ba56e074fa1c1a2
-    ;;
-  Darwin-x86_64)
-    ARCHIVE=treehouse-v${FM_TREEHOUSE_CI_VERSION}-darwin-amd64.tar.gz
-    SHA256=1cf44580a5837f995e1d3bb74f4fbd3112b642acd20406087d9735a8106112fd
-    ;;
-  *)
-    die "unsupported platform ${os}-${arch}; official Treehouse assets are linux/darwin amd64 and arm64"
-    ;;
-esac
+# Toolchain preflight. Building from source needs Go 1.25+ and git; there is no
+# floating package-manager fallback.
+command -v "$GO" >/dev/null 2>&1 \
+  || die "Go toolchain not found (need Go 1.25+); install go and re-run, or set FM_TREEHOUSE_GO"
+command -v git >/dev/null 2>&1 || die "git is required to fetch the pinned Treehouse source"
 
-URL="https://github.com/${FM_TREEHOUSE_CI_REPO}/releases/download/${FM_TREEHOUSE_CI_TAG}/${ARCHIVE}"
+go_version=$("$GO" version 2>/dev/null | awk '{print $3}' | sed 's/^go//')
+case "$go_version" in
+  ''|*[!0-9.]*) die "could not parse '$GO version' output" ;;
+esac
+lowest=$(printf '%s\n1.25\n' "$go_version" | sort -V | head -n1)
+[ "$lowest" = "1.25" ] \
+  || die "Go $go_version is older than the required 1.25 toolchain"
+
 TMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fm-treehouse.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
+SRC="$TMP/src"
 
-printf 'fm-install-treehouse.sh: downloading %s from %s\n' "$ARCHIVE" "$URL" >&2
-curl -fsSL --max-filesize "$FM_TREEHOUSE_CI_MAX_BYTES" "$URL" -o "$TMP/$ARCHIVE" \
-  || die "download failed for $URL (bounded at $FM_TREEHOUSE_CI_MAX_BYTES bytes)"
+printf 'fm-install-treehouse.sh: cloning %s at %s\n' "$FM_TREEHOUSE_SRC_REPO" "$FM_TREEHOUSE_CI_TAG" >&2
+git -c advice.detachedHead=false clone --depth 1 --branch "$FM_TREEHOUSE_CI_TAG" \
+  "$FM_TREEHOUSE_SRC_REPO" "$SRC" \
+  || die "could not clone $FM_TREEHOUSE_SRC_REPO at tag $FM_TREEHOUSE_CI_TAG"
 
-if command -v sha256sum >/dev/null 2>&1; then
-  ACTUAL_SHA256=$(sha256sum "$TMP/$ARCHIVE" | awk '{print $1}')
-elif command -v shasum >/dev/null 2>&1; then
-  ACTUAL_SHA256=$(shasum -a 256 "$TMP/$ARCHIVE" | awk '{print $1}')
-else
-  die "need sha256sum or shasum to verify the Treehouse archive"
-fi
+# Integrity pin: the checked-out commit must be exactly the verified v2.0.1 commit.
+actual_commit=$(git -C "$SRC" rev-parse HEAD)
+[ "$actual_commit" = "$FM_TREEHOUSE_CI_COMMIT" ] \
+  || die "tag $FM_TREEHOUSE_CI_TAG resolved to $actual_commit, expected pinned $FM_TREEHOUSE_CI_COMMIT"
 
-[ "$ACTUAL_SHA256" = "$SHA256" ] || die "checksum mismatch for $ARCHIVE (expected $SHA256, got $ACTUAL_SHA256)"
-
-tar -xzf "$TMP/$ARCHIVE" -C "$TMP"
-# Archive layout: a single `treehouse` binary at the archive root (verified for v2.0.1).
-if [ -f "$TMP/treehouse" ]; then
-  BIN="$TMP/treehouse"
-elif [ -f "$TMP/treehouse-v${FM_TREEHOUSE_CI_VERSION}/treehouse" ]; then
-  BIN="$TMP/treehouse-v${FM_TREEHOUSE_CI_VERSION}/treehouse"
-else
-  BIN=$(find "$TMP" -type f -name treehouse | head -n 1)
-  [ -n "$BIN" ] || die "archive $ARCHIVE did not contain a treehouse binary"
-fi
+# Build from source with the version baked in via ldflags, exactly as the
+# upstream Makefile's `build` target does (make build VERSION=v2.0.1).
+printf 'fm-install-treehouse.sh: building treehouse %s from source\n' "$FM_TREEHOUSE_CI_TAG" >&2
+( cd "$SRC" && "$GO" build -ldflags "-X main.version=${FM_TREEHOUSE_CI_TAG}" -o treehouse . ) \
+  || die "go build failed for treehouse $FM_TREEHOUSE_CI_TAG"
+[ -f "$SRC/treehouse" ] || die "build did not produce a treehouse binary"
 
 mkdir -p "$DESTINATION"
-install -m 0755 "$BIN" "$DESTINATION/treehouse"
+install -m 0755 "$SRC/treehouse" "$DESTINATION/treehouse"
 
 installed_version=$("$DESTINATION/treehouse" --version 2>/dev/null | tr -d '[:space:]')
-# treehouse prints "v2.0.1" (leading v) on --version.
+# treehouse prints "v2.0.1" (leading v) on --version; the ldflags inject it.
 case "$installed_version" in
   "v${FM_TREEHOUSE_CI_VERSION}"|"${FM_TREEHOUSE_CI_VERSION}") ;;
   *)
