@@ -27,12 +27,11 @@
 #       signals without its file being touched
 #   (k) a re-armed watch (a new run id) can report a park again
 #
-# Cases (c) through (i) and (k) are gated off while the poll's extra questions
-# have no consumer. (c), (d), (f), (h), and (k) assert wakes nothing can produce
-# today; (e), (g), and (i) assert the ABSENCE of such a wake, which is trivially
-# true when nothing asks the question at all, so leaving them running would report
-# passes that prove nothing. tests/lib.sh's fm_extra_poll_questions_have_consumer
-# owns why and what turns them all back on.
+# Cases (a) to (i) and (k) drive the poll the way bin/fm-watch.sh does, through
+# bin/fm-pr-poll.sh with the published poll path, because that path is what
+# carries the task identity the watch questions need; bin/fm-poll-extra.sh is
+# what answers them. Case (j) drives its own frozen file instead, which is the
+# whole point of that case.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -132,7 +131,19 @@ arm_poll() {  # <case-dir>
     || fail "fm-pr-check.sh failed to arm the poll"
 }
 
+# One poll cycle exactly as bin/fm-watch.sh runs it: the tracked program under
+# bin/, the validated PR data, and the poll's published path so the task behind
+# it can be named. The copy under state/ is the watcher's byte-identity record,
+# not what it executes; tests/fm-pr-merge.test.sh covers running that copy alone.
 run_poll() {  # <case-dir>
+  local case_dir=$1
+  PATH="$case_dir/fakebin:$PATH" "$ROOT/bin/fm-pr-poll.sh" --validated \
+    github "$PR_URL" github.com example/repo 7 \
+    "$case_dir/state/task-p1.check.sh" 2>/dev/null
+}
+
+# The pre-library poll runs itself: its whole judgement is its own file.
+run_legacy_poll() {  # <case-dir>
   local case_dir=$1
   PATH="$case_dir/fakebin:$PATH" bash "$case_dir/state/task-p1.check.sh" 2>/dev/null
 }
@@ -188,10 +199,6 @@ test_merged_wakes_and_clears_state() {
 
 test_park_wakes_once() {
   local case_dir first second
-  if ! fm_extra_poll_questions_have_consumer; then
-    pass "SKIP ($FM_EXTRA_POLL_SKIP): this task's parked watch run wakes firstmate once and stays quiet while it stays parked"
-    return
-  fi
   case_dir=$(make_case park-once)
   arm_poll "$case_dir"
   watch_run "$case_dir" "$MY_RUN"
@@ -211,10 +218,6 @@ test_park_wakes_once() {
 
 test_park_clearing_rearms_the_one_shot() {
   local case_dir first cleared again
-  if ! fm_extra_poll_questions_have_consumer; then
-    pass "SKIP ($FM_EXTRA_POLL_SKIP): a park that clears re-arms the one-shot so a later park wakes firstmate again"
-    return
-  fi
   case_dir=$(make_case park-rearm)
   arm_poll "$case_dir"
   watch_run "$case_dir" "$MY_RUN"
@@ -237,10 +240,6 @@ test_park_clearing_rearms_the_one_shot() {
 
 test_another_runs_park_is_never_reported() {
   local case_dir out
-  if ! fm_extra_poll_questions_have_consumer; then
-    pass "SKIP ($FM_EXTRA_POLL_SKIP): a park belonging to another run is never read as this task's"
-    return
-  fi
   case_dir=$(make_case park-not-mine)
   arm_poll "$case_dir"
   watch_run "$case_dir" "$MY_RUN"
@@ -258,10 +257,6 @@ test_another_runs_park_is_never_reported() {
 
 test_gone_watch_wakes_once_with_the_rearm() {
   local case_dir first second
-  if ! fm_extra_poll_questions_have_consumer; then
-    pass "SKIP ($FM_EXTRA_POLL_SKIP): a watch run that is gone or ended wakes firstmate once with the re-arm instruction"
-    return
-  fi
   case_dir=$(make_case watch-gone)
   arm_poll "$case_dir"
   watch_run "$case_dir" "$MY_RUN"
@@ -286,10 +281,6 @@ test_gone_watch_wakes_once_with_the_rearm() {
 
 test_unknown_status_is_not_reported_as_gone() {
   local case_dir out
-  if ! fm_extra_poll_questions_have_consumer; then
-    pass "SKIP ($FM_EXTRA_POLL_SKIP): a run status the poll does not recognize is left undecided, not reported as gone"
-    return
-  fi
   case_dir=$(make_case watch-unknown)
   arm_poll "$case_dir"
   watch_run "$case_dir" "$MY_RUN"
@@ -302,10 +293,6 @@ test_unknown_status_is_not_reported_as_gone() {
 
 test_watch_lookup_failure_fails_closed() {
   local case_dir first second third fourth
-  if ! fm_extra_poll_questions_have_consumer; then
-    pass "SKIP ($FM_EXTRA_POLL_SKIP): a watch lookup that cannot answer fails closed instead of inventing a signal"
-    return
-  fi
   case_dir=$(make_case watch-unreadable)
   arm_poll "$case_dir"
   watch_run "$case_dir" "$MY_RUN"
@@ -334,10 +321,6 @@ test_watch_lookup_failure_fails_closed() {
 
 test_no_recorded_run_asks_no_watch_question() {
   local case_dir out
-  if ! fm_extra_poll_questions_have_consumer; then
-    pass "SKIP ($FM_EXTRA_POLL_SKIP): a task with no recorded watch run asks no watch question at all"
-    return
-  fi
   case_dir=$(make_case no-run-id)
   arm_poll "$case_dir"
   # No nm_watch_run in the meta, but the captain's own run IS parked.
@@ -353,10 +336,6 @@ test_no_recorded_run_asks_no_watch_question() {
 
 test_rearmed_watch_can_park_again() {
   local case_dir first second
-  if ! fm_extra_poll_questions_have_consumer; then
-    pass "SKIP ($FM_EXTRA_POLL_SKIP): a re-armed watch run reports its own park rather than inheriting the answered one"
-    return
-  fi
   case_dir=$(make_case park-rearmed-run)
   arm_poll "$case_dir"
   watch_run "$case_dir" "$MY_RUN"
@@ -433,18 +412,18 @@ test_legacy_poll_gains_todays_signals_untouched() {
   watch_run "$case_dir" "$MY_RUN"
   run_record "$case_dir" "$MY_RUN" running
   parked_record "$case_dir" "$MY_RUN"
-  parked=$(run_poll "$case_dir")
+  parked=$(run_legacy_poll "$case_dir")
   assert_contains "$parked" "watch parked" \
     "legacy-upgrade: a poll armed before the library must still gain the park signal"
 
   parked_record "$case_dir"
   rm -f "$case_dir/run-$MY_RUN.toon"
-  gone=$(run_poll "$case_dir")
+  gone=$(run_legacy_poll "$case_dir")
   assert_contains "$gone" "watch gone" \
     "legacy-upgrade: a poll armed before the library must still gain the gone-watch signal"
 
   printf 'MERGED\n' > "$case_dir/pr-state"
-  merged=$(run_poll "$case_dir")
+  merged=$(run_legacy_poll "$case_dir")
   [ "$merged" = merged ] || fail "legacy-upgrade: the signal it already had must keep working (got '$merged')"
 
   after=$(cksum < "$case_dir/state/task-p1.check.sh")

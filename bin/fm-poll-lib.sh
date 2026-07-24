@@ -2,6 +2,12 @@
 # The decision logic behind a task's armed PR/MR poll.
 # Usage: . bin/fm-poll-lib.sh ; fm_poll_run <state-dir> <task-id> [pr-url]
 #
+# Two callers reach it. bin/fm-poll-extra.sh, which today's polls run beside the
+# byte-static bin/fm-pr-poll.sh, uses the pieces below and owns how the questions
+# are split between the two files. fm_poll_run is the whole cycle in one call,
+# which is what bin/fm-scm-lib.sh's legacy shim needs to upgrade a poll generated
+# before this library existed.
+#
 # Why the logic lives in a library instead of the generated poll:
 # bin/fm-pr-check.sh WRITES state/<id>.check.sh when a PR is recorded, so
 # anything inlined into that file is frozen at the version that armed it. A poll
@@ -75,9 +81,10 @@ fm_poll_one_line() {  # <text> [max]
   printf '%s' "$1" | LC_ALL=C tr '\t\r\n' '   ' | LC_ALL=C tr -s ' ' | cut -c "1-${2:-240}"
 }
 
-# Report the poll as broken exactly once per episode: the marker survives until
-# bin/fm-pr-check.sh re-arms the poll, so a permanently broken lookup costs one
-# wake rather than one per cycle.
+# Report the poll as broken exactly once per episode: the marker survives every
+# later cycle, so a permanently broken lookup costs one wake rather than one per
+# cycle. Ending the episode belongs to whoever owns the cycle - bin/fm-poll-extra.sh
+# clears the marker on a cycle in which everything answered.
 fm_poll_report_broken() {  # <marker> <detail> <subject>
   local marker=$1 detail=$2 subject=$3
   [ -e "$marker" ] && return 0

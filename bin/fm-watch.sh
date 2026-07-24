@@ -847,8 +847,11 @@ while :; do
           host=$FM_PR_DATA_HOST
           path=$FM_PR_DATA_PATH
           number=$FM_PR_DATA_NUMBER
+          # The published poll path travels with the validated PR data so the
+          # poll can name the task it belongs to; only bin/fm-poll-extra.sh
+          # reads it, and only to answer this task's own watch questions.
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
-            "$provider" "$url" "$host" "$path" "$number" || exit 1
+            "$provider" "$url" "$host" "$path" "$number" "$c" || exit 1
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT

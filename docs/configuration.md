@@ -117,7 +117,7 @@ Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](f
 
 ## Orphaned no-mistakes park scan (data/nm-armed-runs)
 
-A no-mistakes run that parks announces itself three ways: the durable record (`no-mistakes parked`, read without the daemon), the reminder cascade, and - for a run a live task still owns - firstmate's own armed poll (`bin/fm-poll-lib.sh`).
+A no-mistakes run that parks announces itself three ways: the durable record (`no-mistakes parked`, read without the daemon), the reminder cascade, and - for a run a live task still owns - firstmate's own armed poll (`bin/fm-poll-extra.sh`, whose judgement is `bin/fm-poll-lib.sh`'s).
 The one park nobody covers is the run whose task is gone: a direct-PR task cancelled or torn down leaves its watch run parked, its meta deleted, and the reminder cascade re-sending into silence.
 
 `bin/fm-nm-orphan-scan.sh` closes that gap by ownership, not by a machine-wide push hook.
