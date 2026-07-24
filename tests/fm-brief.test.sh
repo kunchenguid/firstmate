@@ -42,12 +42,14 @@ test_script_parses() {
 # apostrophe inside a heredoc body that sits in a `$(...)` command
 # substitution breaks `bash -n` under bash 3.2 but parses fine under bash 5,
 # so `test_script_parses` alone cannot catch it on a Linux host. Scan every
-# `VAR=$(cat <<EOF ... EOF)` body in bin/fm-brief.sh and reject apostrophes
-# outright, regardless of the bash version running the test.
+# `VAR=$(cat <<EOF ... EOF)` and `VAR=$(cat <<'EOF' ... EOF)` body in
+# bin/fm-brief.sh and reject apostrophes outright, regardless of the bash
+# version running the test. Bash 3.2 is equally vulnerable whether the
+# heredoc delimiter is quoted or not, so both forms must be scanned.
 test_dod_heredocs_carry_no_apostrophes() {
   local hits
   hits=$(awk '
-    /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=\$\(cat <<[A-Za-z_]+[[:space:]]*$/ {
+    /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=\$\(cat <<'"'"'?[A-Za-z_]+'"'"'?[[:space:]]*$/ {
       in_heredoc=1
       next
     }
