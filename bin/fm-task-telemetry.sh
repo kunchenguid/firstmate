@@ -21,7 +21,11 @@
 #     session file is used.
 #   - Claude JSONL transcripts under ~/.claude/projects/<cwd encoded with slash
 #     as dash>; repeated content chunks for one assistant message are deduped by
-#     message id or request id.
+#     message id or request id. Per-turn cache_read_input_tokens (the growing
+#     context re-read from cache each turn) is excluded from the prompt sum so
+#     the total stays comparable to Codex cumulative usage instead of inflating
+#     with turn count; input_tokens plus cache_creation_input_tokens (the newly
+#     supplied prompt each turn) is counted.
 # Unknown or unsupported harness logs still get a durable row with source=unavailable.
 set -u
 
@@ -33,7 +37,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 LEDGER="$DATA/task-telemetry.tsv"
 
 usage() {
-  sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 meta_get() {
@@ -145,7 +149,7 @@ json_usage_claude() {
           else
             .seen[$key] = true
             | ($e.message.usage) as $u
-            | .prompt += (n($u.input_tokens?) + n($u.cache_creation_input_tokens?) + n($u.cache_read_input_tokens?))
+            | .prompt += (n($u.input_tokens?) + n($u.cache_creation_input_tokens?))
             | .completion += n($u.output_tokens?)
           end
       else .
@@ -165,7 +169,12 @@ claude_project_dir() {
 }
 
 candidate_files() {
-  local id=$1 meta=$2 harness=$3 worktree=$4 file dir
+  local id=$1 meta=$2 harness=$3 worktree=$4 file dir ref
+  # Prefer the spawn-time marker, whose mtime is never bumped by later meta
+  # rewrites (e.g. fm-pr-check on a green PR); fall back to meta for tasks
+  # spawned before the marker existed.
+  ref="$STATE/$id.spawn-ref"
+  [ -f "$ref" ] || ref="$meta"
   for file in "$STATE/$id.usage.json" "$STATE/$id.usage.jsonl" "$STATE/$id.usage"; do
     [ -f "$file" ] && printf 'generic\t%s\n' "$file"
   done
@@ -178,7 +187,7 @@ candidate_files() {
     codex)
       dir="$HOME/.codex/sessions"
       [ -d "$dir" ] || return 0
-      find "$dir" -type f -name '*.jsonl' -newer "$meta" 2>/dev/null \
+      find "$dir" -type f -name '*.jsonl' -newer "$ref" 2>/dev/null \
         | while IFS= read -r file; do
             grep -F "\"cwd\":\"$worktree\"" "$file" >/dev/null 2>&1 && printf 'codex\t%s\n' "$file"
           done
@@ -186,7 +195,7 @@ candidate_files() {
     claude)
       dir=$(claude_project_dir "$worktree") || return 0
       [ -d "$dir" ] || return 0
-      find "$dir" -maxdepth 1 -type f -name '*.jsonl' -newer "$meta" 2>/dev/null \
+      find "$dir" -maxdepth 1 -type f -name '*.jsonl' -newer "$ref" 2>/dev/null \
         | while IFS= read -r file; do
             printf 'claude\t%s\n' "$file"
           done

@@ -1497,6 +1497,10 @@ TASK_DIFFICULTY=$("$SCRIPT_DIR/fm-task-telemetry.sh" estimate "$BRIEF" 2>/dev/nu
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
+# Stable spawn-time reference for telemetry log discovery. Unlike the meta file,
+# this marker is never rewritten later (e.g. by fm-pr-check), so its mtime stays
+# an accurate lower bound for the task's own session logs at teardown.
+: > "$STATE/$ID.spawn-ref"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
