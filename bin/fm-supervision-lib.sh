@@ -23,7 +23,7 @@ fm_sup_stat_mtime() {
 # fm_supervision_status <state-dir> [grace-seconds] [home-dir]
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
-#   FM_SUP_TOPIC_BOARD    true/false - a local topic-board credential file exists
+#   FM_SUP_TOPIC_BOARD    true/false - a local topic-board or direct-message-line credential file exists (both demand a live watcher; docs/dm-line.md)
 #   FM_SUP_REQUIRED       true/false - work or the topic board needs a live watcher
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
@@ -53,6 +53,12 @@ fm_supervision_status() {
   else
     config="$data/test-bot-token.txt"
   fi
+  if [ -f "$config" ] && [ ! -L "$config" ]; then
+    FM_SUP_TOPIC_BOARD=true
+  fi
+  # The direct-message line's wakes ride the same queue key, so its enabled
+  # credential file creates the identical supervision demand.
+  config="${FM_DM_DATA_DIR:-$home/data/fm-telegram-dm}/config.env"
   if [ -f "$config" ] && [ ! -L "$config" ]; then
     FM_SUP_TOPIC_BOARD=true
   fi
