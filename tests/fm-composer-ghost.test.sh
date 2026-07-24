@@ -65,6 +65,73 @@ SH
   printf '%s\n' "$fb"
 }
 
+# A fake tmux that serves a MULTI-ROW composer box, addressable by row, so the
+# cursor_y row-window re-anchor (incident afk-daemon-composer-wedge-fix) can be
+# exercised. Rows are 1-indexed from a FM_FAKE_ROWS file (one styled row per
+# line); cursor_y comes from FM_FAKE_CY. capture-pane honours -S/-E as absolute
+# row bounds (mirroring how fm_tmux_composer_state addresses rows by cursor_y),
+# returns the styled rows verbatim WITH -e, and SGR-stripped WITHOUT -e. A row
+# index outside the file yields a blank line, as a real pane's empty rows do.
+make_fake_tmux_box() {  # <dir>
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+rows_file="${FM_FAKE_ROWS:-/dev/null}"
+row_at() {  # <1-indexed row> -> that row's styled bytes, or blank
+  local want=$1 n=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    if [ "$n" = "$want" ]; then printf '%s\n' "$line"; return 0; fi
+  done < "$rows_file"
+  printf '\n'
+}
+case "${1:-}" in
+  display-message)
+    for a in "$@"; do case "$a" in *cursor_y*) printf '%s\n' "${FM_FAKE_CY:-0}"; exit 0 ;; esac; done
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane)
+    has_e=0; S=""; E=""; prev=""
+    for a in "$@"; do
+      [ "$a" = "-e" ] && has_e=1
+      case "$prev" in -S) S=$a ;; -E) E=$a ;; esac
+      prev=$a
+    done
+    [ -n "$S" ] || S="${FM_FAKE_CY:-0}"; [ -n "$E" ] || E=$S
+    r=$S
+    while [ "$r" -le "$E" ]; do
+      if [ "$r" -ge 1 ]; then styled=$(row_at "$r"); else styled=""; fi
+      if [ "$has_e" = 1 ]; then
+        printf '%s\n' "$styled"
+      else
+        printf '%s\n' "$styled" | LC_ALL=C awk '{gsub(/\033\[[0-9;]*m/, ""); print}'
+      fi
+      r=$((r + 1))
+    done
+    exit 0 ;;
+  list-windows) exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fb/tmux"
+  printf '%s\n' "$fb"
+}
+
+# A pristine, rule-bordered agent composer box: a top rule, the bare prompt-glyph
+# input row, and a bottom rule. <glyph> is the agent prompt glyph bytes (❯ or ›);
+# [input_tail] optional real typed text after the glyph. tmux's cursor_y lands on
+# the BOTTOM rule (row 3), one below the input row (row 2) - the off-by-one this
+# fixture exists to exercise.
+write_composer_box() {  # <file> <glyph-bytes> [input_tail]
+  local file=$1 glyph=$2 tail=${3:-}
+  {
+    printf '\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n'
+    printf '%s %s\n' "$glyph" "$tail"
+    printf '\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n'
+  } > "$file"
+}
+
 # --- fm_tmux_strip_ghost (pure) ---------------------------------------------
 
 test_strip_ghost_drops_dim_keeps_normal() {
@@ -250,6 +317,102 @@ test_real_text_with_trailing_ghost_is_pending() {
   pass "fm_pane_input_pending: real text plus a trailing ghost run is still pending"
 }
 
+# --- cursor_y row-window re-anchor (incident afk-daemon-composer-wedge-fix) --
+#
+# A pristine, never-typed-into claude/codex composer renders its input row inside
+# a rule-bordered box (─────/❯/─────), and tmux's #{cursor_y} points one row BELOW
+# the ❯ input row, at the box's bottom rule. Reading only that single cursor row,
+# the rule glyphs classify as pending, so the away-mode injector read firstmate's
+# OWN idle composer as pending input and deferred 100% of escalations for ~15h.
+# fm_tmux_composer_state now re-anchors from a pure rule row onto the neighbouring
+# ❯/› input row. These pin the fix AND its safety envelope: it only ever turns a
+# rule-masked empty composer back into empty, never forces a busy/half-typed pane.
+
+test_row_is_rule_recognizes_only_pure_rule_rows() {
+  # Pure light and heavy rules (any length >=1) are rules; anything with other
+  # glyphs, or a blank row, is not.
+  fm_tmux_row_is_rule "$(printf '\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80')" \
+    || fail "light rule ───  not recognized"
+  fm_tmux_row_is_rule "$(printf '\xe2\x94\x81\xe2\x94\x81')" \
+    || fail "heavy rule ━━ not recognized"
+  if fm_tmux_row_is_rule "$(printf '\xe2\x9d\xaf ')"; then fail "❯ prompt row misread as a rule"; fi
+  if fm_tmux_row_is_rule ""; then fail "blank row misread as a rule"; fi
+  if fm_tmux_row_is_rule "$(printf '\xe2\x94\x80\xe2\x94\x80 typed')"; then
+    fail "rule with trailing text misread as a pure rule"
+  fi
+  pass "fm_tmux_row_is_rule: only pure ─/━ rows are rules"
+}
+
+test_pristine_composer_box_cursor_on_bottom_rule_is_empty() {
+  local dir fb rows glyph out
+  dir="$TMP_ROOT/box-wedge"; mkdir -p "$dir"
+  fb=$(make_fake_tmux_box "$dir")
+  rows="$dir/rows.txt"
+  # The exact overnight-wedge shape: pristine claude composer box, cursor_y on
+  # the bottom rule (row 3), input row (row 2) is a bare ❯. This is the case that
+  # returned `pending` before the fix; it must now read `empty`.
+  for glyph in '\xe2\x9d\xaf' '\xe2\x80\xba'; do  # ❯ (claude), › (codex)
+    write_composer_box "$rows" "$(printf '%b' "$glyph")"
+    out=$(PATH="$fb:$PATH" FM_FAKE_ROWS="$rows" FM_FAKE_CY=3 \
+      fm_tmux_composer_state "fakepane")
+    [ "$out" = empty ] \
+      || fail "pristine composer box (glyph '$glyph') with cursor_y on the bottom rule must read empty, got '$out'"
+  done
+  pass "fm_tmux_composer_state: pristine composer box, cursor_y on the bottom rule, reads empty (wedge fix)"
+}
+
+test_pristine_composer_box_cursor_on_input_row_is_empty() {
+  local dir fb rows out
+  dir="$TMP_ROOT/box-aligned"; mkdir -p "$dir"
+  fb=$(make_fake_tmux_box "$dir")
+  rows="$dir/rows.txt"
+  # Same box, but cursor_y correctly on the ❯ input row (row 2): unchanged, empty.
+  write_composer_box "$rows" "$(printf '\xe2\x9d\xaf')"
+  out=$(PATH="$fb:$PATH" FM_FAKE_ROWS="$rows" FM_FAKE_CY=2 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] || fail "composer box with cursor_y on the ❯ input row must read empty, got '$out'"
+  pass "fm_tmux_composer_state: composer box, cursor_y on the ❯ input row, reads empty (no regression)"
+}
+
+test_composer_box_with_real_text_stays_pending() {
+  local dir fb rows out cy
+  dir="$TMP_ROOT/box-real"; mkdir -p "$dir"
+  fb=$(make_fake_tmux_box "$dir")
+  rows="$dir/rows.txt"
+  # Real unsubmitted text inside the box. Whether cursor_y sits on the bottom
+  # rule (re-anchor path) or on the input row, the safety guard must hold: real
+  # text reads pending, never forced empty.
+  write_composer_box "$rows" "$(printf '\xe2\x9d\xaf')" 'fix findings 1 and 3, skip 2'
+  for cy in 3 2; do
+    out=$(PATH="$fb:$PATH" FM_FAKE_ROWS="$rows" FM_FAKE_CY=$cy \
+      fm_tmux_composer_state "fakepane")
+    [ "$out" = pending ] \
+      || fail "real text in composer box (cursor_y=$cy) must read pending, got '$out'"
+  done
+  pass "fm_tmux_composer_state: real text in a composer box stays pending (cursor on rule OR input row)"
+}
+
+test_rule_cursor_never_reanchors_onto_a_shell_prompt() {
+  local dir fb rows out
+  dir="$TMP_ROOT/box-shellnear"; mkdir -p "$dir"
+  fb=$(make_fake_tmux_box "$dir")
+  rows="$dir/rows.txt"
+  # A pure rule on the cursor row (row 2) with a BARE shell prompt one row above
+  # (row 1) and nothing agent-composer-shaped. Re-anchor is ❯/›-ONLY, so it must
+  # NOT latch a shell prompt and force empty: the injector must never type into a
+  # dead shell. The rule row itself carries no agent glyph, so the verdict stays
+  # non-empty (the rule text reads pending) - a safe defer, not a forced inject.
+  {
+    printf '$ \n'
+    printf '\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n'
+  } > "$rows"
+  out=$(PATH="$fb:$PATH" FM_FAKE_ROWS="$rows" FM_FAKE_CY=2 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" != empty ] \
+    || fail "rule cursor row near a bare shell prompt must NOT be forced empty, got '$out'"
+  pass "fm_tmux_composer_state: a rule cursor row never re-anchors onto a bare shell prompt"
+}
+
 # --- fm-peek.sh stays escape-free (LLM-facing path) -------------------------
 
 test_peek_output_is_escape_free() {
@@ -287,4 +450,9 @@ test_colored_text_with_2_payload_still_pending
 test_dark_truecolor_ghost_only_composer_is_not_pending
 test_dark_truecolor_bare_shell_prompt_is_unknown
 test_real_text_with_trailing_ghost_is_pending
+test_row_is_rule_recognizes_only_pure_rule_rows
+test_pristine_composer_box_cursor_on_bottom_rule_is_empty
+test_pristine_composer_box_cursor_on_input_row_is_empty
+test_composer_box_with_real_text_stays_pending
+test_rule_cursor_never_reanchors_onto_a_shell_prompt
 test_peek_output_is_escape_free

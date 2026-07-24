@@ -74,36 +74,40 @@ FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 # so the tmux and herdr adapters cannot drift apart on what counts as ghost text.
 fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 
-# fm_tmux_composer_state: classify the cursor/composer line of <target> as
-#   empty   - no pending input (blank, a busy footer, an empty agent composer, or
-#             only de-emphasised ghost/placeholder text). Safe to inject; also the positive
-#             acknowledgement that a submit landed.
-#   pending - real, unsubmitted text on the cursor line (a human mid-typing, or a
-#             previous injection whose Enter was swallowed). Defer / retry.
-#   unknown - the pane could not be read (tmux error), OR the cursor line is a
-#             bare shell prompt (`$`/`%`/`#`/`>`) - a dead shell, not an agent
-#             composer, so NOT a safe injection target. The caller decides.
-#
-# The cursor line is captured WITH ANSI styling (capture-pane -e) and bounded to
-# the single composer row (-S/-E). The bordered flag (a genuine composer box) is
-# read from the PLAIN row (fm_composer_strip_ansi keeps ghost text so the box
-# border is still visible), while the real-typed CONTENT is extracted with the
-# shared fm_composer_strip_ghost so dim/faint AND dark-truecolor ghost text drops
-# out before classification (grok's dark box border drops with the ghost, which
-# is why the bordered flag is read from the plain row, not the ghost-stripped
-# one). Both are internal only, never surfaced. The detector strips the harness's
-# box-drawing composer borders ("│ … │", heavy "┃", or a plain ASCII "|") using
-# literal-string substitution (bash 3.2 safe, locale-independent - no \u escapes,
-# no multibyte character classes), and delegates the empty/pending/unknown
-# decision to the shared owner fm_composer_classify_content
-# (bin/fm-composer-lib.sh). The bordered flag is what lets a bordered `│ > │`
-# (claude's own idle composer) read empty while a bare, unbordered `$ ` dead-shell
-# prompt reads unknown.
-fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cy raw plain stripped bordered=0
-  cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
-  case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
-  raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || { printf 'unknown'; return 0; }
+# fm_tmux_row_is_rule: 0 (true) when a TRIMMED plain row consists solely of the
+# composer box's horizontal rule glyphs - light ─ (U+2500) or heavy ━ (U+2501),
+# the top/bottom border of claude's and codex's rule-bordered composer. Such a
+# row is box DECORATION, never composer content. Detected here so the tmux
+# cursor_y off-by-one (see fm_tmux_composer_state) can re-anchor. Non-empty rows
+# only; a blank row is not a rule. bash 3.2 safe: literal multibyte substitution,
+# no \u escapes or multibyte character classes (matches herdr's Pi-separator
+# check, bin/backends/herdr.sh).
+fm_tmux_row_is_rule() {  # <trimmed-plain-row>
+  local r=$1 stripped
+  [ -n "$r" ] || return 1
+  stripped=${r//─/}
+  stripped=${stripped//━/}
+  [ -z "$stripped" ]
+}
+
+# fm_tmux_classify_raw_row: given the RAW (ANSI-styled) bytes of a single chosen
+# composer row, produce the empty|pending|unknown verdict. Split out of
+# fm_tmux_composer_state so the row-window re-anchoring there can hand it whatever
+# row it settled on. The bordered flag (a genuine composer box) is read from the
+# PLAIN row (fm_composer_strip_ansi keeps ghost text so the box border survives an
+# all-ANSI strip), while the real-typed CONTENT is extracted with the shared
+# fm_composer_strip_ghost so dim/faint AND dark-truecolor ghost text drops out
+# before classification (grok's dark box border drops with the ghost, which is why
+# the bordered flag is read from the plain row, not the ghost-stripped one). The
+# detector strips the harness's box-drawing composer borders ("│ … │", heavy "┃",
+# or a plain ASCII "|") using literal-string substitution (bash 3.2 safe,
+# locale-independent - no \u escapes, no multibyte character classes), and
+# delegates the empty/pending/unknown decision to the shared owner
+# fm_composer_classify_content (bin/fm-composer-lib.sh). The bordered flag is what
+# lets a bordered `│ > │` (a harness's own idle composer) read empty while a bare,
+# unbordered `$ ` dead-shell prompt reads unknown.
+fm_tmux_classify_raw_row() {  # <raw-styled-row> -> empty|pending|unknown
+  local raw=$1 plain stripped bordered=0
   # bordered: from the plain row (borders survive an all-ANSI strip).
   plain=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
   plain="${plain#"${plain%%[![:space:]]*}"}"
@@ -129,6 +133,75 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
     printf 'empty'; return 0
   fi
   fm_composer_classify_content "$bordered" "$stripped" "${FM_COMPOSER_IDLE_RE:-}" insensitive "$plain"
+}
+
+# fm_tmux_composer_state: classify the cursor/composer line of <target> as
+#   empty   - no pending input (blank, a busy footer, an empty agent composer, or
+#             only de-emphasised ghost/placeholder text). Safe to inject; also the positive
+#             acknowledgement that a submit landed.
+#   pending - real, unsubmitted text on the cursor line (a human mid-typing, or a
+#             previous injection whose Enter was swallowed). Defer / retry.
+#   unknown - the pane could not be read (tmux error), OR the cursor line is a
+#             bare shell prompt (`$`/`%`/`#`/`>`) - a dead shell, not an agent
+#             composer, so NOT a safe injection target. The caller decides.
+#
+# The cursor line is captured WITH ANSI styling (capture-pane -e) and bounded to
+# the single composer row (-S/-E), then classified by fm_tmux_classify_raw_row.
+#
+# Cursor-row off-by-one re-anchor (incident afk-daemon-composer-wedge-fix):
+# a pristine, never-typed-into claude/codex composer renders its input row inside
+# a rule-bordered box (─────/❯/─────), and tmux's own #{cursor_y} points one row
+# BELOW the ❯ input row, at the box's bottom rule (the box appears to render one
+# row lower before any real typing starts; documented as the "Residual gap,
+# tmux-only" quirk in the harness-adapters skill). Reading only that single row,
+# the rule glyphs classify as pending, so the away-mode escalation injector
+# (bin/fm-supervise-daemon.sh) read firstmate's OWN idle composer as pending input
+# and deferred 100% of escalations for ~15 hours with no delivery. When the cursor
+# row is a pure rule, this widens to a small row window around cursor_y and
+# re-anchors on the adjacent genuine agent-composer input row (a row whose trimmed
+# content starts with the agent prompt glyph ❯ or ›, which appears ONLY on the
+# live composer input row, never in transcript). If no such row is found the
+# cursor row is kept, so the verdict defers safely and injection is never forced;
+# the fix only ever turns a rule-masked EMPTY composer back into empty, and a
+# rule-row that carries real ❯ text still reads pending. herdr locates its
+# composer structurally, not by cursor_y (bin/backends/herdr.sh), so this is
+# tmux-path-scoped; see docs/tmux-backend.md.
+fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
+  local target=$1 cy raw plain win row rp anchored=""
+  cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
+  case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
+  raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || { printf 'unknown'; return 0; }
+  # If cursor_y landed on the composer box's horizontal rule (the off-by-one
+  # above), re-anchor on the neighbouring ❯/› input row.
+  plain=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
+  plain="${plain#"${plain%%[![:space:]]*}"}"
+  plain="${plain%"${plain##*[![:space:]]}"}"
+  if fm_tmux_row_is_rule "$plain"; then
+    win=$(tmux capture-pane -e -p -t "$target" -S "$((cy - 2))" -E "$((cy + 2))" 2>/dev/null) || win=""
+    if [ -n "$win" ]; then
+      while IFS= read -r row; do
+        rp=$(printf '%s\n' "$row" | fm_composer_strip_ghost)
+        rp="${rp#"${rp%%[![:space:]]*}"}"
+        rp="${rp%"${rp##*[![:space:]]}"}"
+        # Strip an agent box's side borders before testing the glyph (defensive:
+        # claude's rule box has no side borders, but a boxed harness may).
+        case "$rp" in
+          '│'*'│') rp=${rp#│}; rp=${rp%│} ;;
+          '┃'*'┃') rp=${rp#┃}; rp=${rp%┃} ;;
+          '|'*'|') rp=${rp#|}; rp=${rp%|} ;;
+        esac
+        rp="${rp#"${rp%%[![:space:]]*}"}"
+        rp="${rp%"${rp##*[![:space:]]}"}"
+        case "$rp" in
+          '❯'*|'›'*) anchored=$row ;;
+        esac
+      done <<EOF
+$win
+EOF
+      if [ -n "$anchored" ]; then raw=$anchored; fi
+    fi
+  fi
+  fm_tmux_classify_raw_row "$raw"
 }
 
 # fm_pane_input_pending: 0 (pending) if the cursor line holds real unsubmitted

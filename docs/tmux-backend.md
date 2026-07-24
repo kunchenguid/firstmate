@@ -57,6 +57,15 @@ Agent liveness and composer safety are separate checks.
 The shared classifier in `bin/fm-composer-lib.sh` accepts a shell glyph as an empty agent composer only inside a verified bordered composer.
 A bare shell prompt is `unknown`, so away-mode escalation is never injected into a dead shell.
 
+### Composer cursor_y off-by-one re-anchor
+
+A pristine, never-typed-into claude or codex composer renders its input row inside a rule-bordered box, and tmux's `#{cursor_y}` points one row below that input row, at the box's bottom rule.
+Reading only that single cursor row classified the rule glyphs as pending input, which read firstmate's own idle composer as pending.
+`fm_tmux_composer_state` (`bin/fm-tmux-lib.sh`) now detects a pure horizontal-rule cursor row and re-anchors on the adjacent agent-composer input row within a small window around `#{cursor_y}`.
+Re-anchoring only ever matches an `❯` (claude) or `›` (codex) agent prompt glyph, never a bare shell prompt, so a rule-masked empty composer reads `empty` again while real unsubmitted text still reads `pending` and a dead or unreadable pane still reads `unknown`.
+tmux is the only backend that keys composer detection off `#{cursor_y}`; herdr scans for its composer structurally, and orca, cmux, and zellij have no cursor-row composer primitive.
+[`verification/runtime-backends.md`](verification/runtime-backends.md#tmux) records the dated incident, live reproduction, and regression coverage.
+
 `bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics.
 It types a message once and retries Enter only until the composer clears.
 A cleared composer is the positive delivery acknowledgement; text left in the composer remains `pending`, and `fm-send.sh` reports the failure instead of retyping.

@@ -39,6 +39,39 @@ tests/fm-tmux-submit-busy.test.sh
 
 Expected matrix: pending plus busy is accepted as queued; pending plus idle remains pending; a cleared composer succeeds in either state.
 
+### Composer cursor_y off-by-one re-anchor
+
+The re-anchor guarantee for the `bin/fm-tmux-lib.sh` composer classifier follows the incident afk-daemon-composer-wedge-fix, where an away-mode escalation daemon read firstmate's own idle claude composer as pending input and deferred every escalation for roughly fifteen hours.
+
+The row-selection mechanism was reproduced live on 2026-07-24 with tmux 3.6a on macOS (Darwin 25.5.0) by classifying each row of a live idle claude composer box (a rule-bordered `❯` box on absolute rows 17-19) as if `#{cursor_y}` pointed there:
+
+```sh
+. bin/fm-tmux-lib.sh
+for r in 17 18 19; do
+  raw=$(tmux capture-pane -e -p -t firstmate:1 -S "$r" -E "$r")
+  printf 'row %s -> %s\n' "$r" "$(fm_tmux_classify_raw_row "$raw")"
+done
+```
+
+Observed output:
+
+```text
+row 17 -> pending  (top rule)
+row 18 -> empty    (input row)
+row 19 -> pending  (bottom rule, where cursor_y lands in the pristine box)
+```
+
+A single-row read landing on row 17 or 19 yields `pending`; only row 18 yields `empty`, which is why the re-anchor widens to a small window around `#{cursor_y}`.
+
+Regression coverage is pinned by `tests/fm-composer-ghost.test.sh`:
+
+```sh
+tests/fm-composer-ghost.test.sh
+```
+
+Cases: `test_row_is_rule_recognizes_only_pure_rule_rows`, `test_pristine_composer_box_cursor_on_bottom_rule_is_empty`, `test_pristine_composer_box_cursor_on_input_row_is_empty`, `test_composer_box_with_real_text_stays_pending`, and `test_rule_cursor_never_reanchors_onto_a_shell_prompt`.
+The wedge case `test_pristine_composer_box_cursor_on_bottom_rule_is_empty` fails against the pre-fix single-row classifier (`got 'pending'`) and passes after.
+
 ## Herdr
 
 The compatibility floor is protocol 14.

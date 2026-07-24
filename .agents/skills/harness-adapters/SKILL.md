@@ -294,11 +294,11 @@ Verified live against grok 0.2.93: real input is the bright `38;2;224;222;244` (
 This assumes a dark terminal theme, the fleet reality; the SGR-2 signal stays theme-independent.
 Regression coverage: `tests/fm-composer-ghost.test.sh` (`test_strip_ghost_drops_dark_truecolor_ghost`, `test_dark_truecolor_ghost_only_composer_is_not_pending`) and `tests/fm-backend-herdr.test.sh` (`test_composer_state_grok_dark_truecolor_placeholder_is_empty`, `test_composer_state_grok_bright_truecolor_real_text_is_pending`).
 
-**Residual gap, tmux-only (unfixed):**
-in that same pristine placeholder-only state, tmux's own `#{cursor_y}` points at the composer box's BOTTOM BORDER row, one row below the actual text row (the box appears to render one row lower before any real typing starts); once real text is typed the cursor correctly aligns with the text row again.
+**Cursor-row off-by-one, tmux-only (FIXED 2026-07-24, incident afk-daemon-composer-wedge-fix):**
+in a pristine, never-typed-into rule-bordered composer box, tmux's own `#{cursor_y}` points at the composer box's BOTTOM RULE row, one row below the actual input row (the box appears to render one row lower before any real typing starts); once real text is typed the cursor correctly aligns with the input row again.
 This is a row-SELECTION quirk, orthogonal to the styling fix above, and affects only the tmux path (herdr uses a structural composer-row scan, not `cursor_y`, so it is unaffected).
-A correct fix needs a row-window read near `cursor_y` rather than the single `cursor_y` row.
-In practice `fm-spawn` launches grok with the brief as its initial prompt, so a live task's composer is never observed in this pristine pre-typing state - but this is unverified for every path (e.g. a steer sent before grok's first real turn settles) and needs dedicated investigation before relying on it.
+It is not grok-only: it bit firstmate's OWN idle claude composer, whose rule-bordered box read as pending input, wedging the away-mode escalation injector into deferring every escalation for ~15h.
+`fm_tmux_composer_state` (`bin/fm-tmux-lib.sh`) now re-anchors from a pure rule cursor row onto the adjacent `❯`/`›` agent-composer input row via a small row-window read; see [tmux-backend.md](../../../docs/tmux-backend.md) "Composer cursor_y off-by-one re-anchor" for the full account and regression coverage.
 
 Turn-end hook: grok fires a `Stop` hook at every turn boundary, giving firstmate a precise per-turn wake instead of only stale-pane detection.
 grok loads PROJECT hooks (`<worktree>/.grok/hooks/`, `<worktree>/.claude/settings.local.json`) only after the folder is granted hook-trust in `~/.grok/trusted_folders.toml`, which is not automatic and which firstmate will not establish by editing grok's own managed trust store.
