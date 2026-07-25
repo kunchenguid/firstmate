@@ -36,11 +36,24 @@
 # narrow on purpose: they name the merge ENDPOINTS rather than gating "gh api"
 # wholesale, which would break the ordinary reads a crewmate needs to do its
 # job. See tests/fm-crew-settings.test.sh for the enforced invariants.
+#
+# Rules are per-executable, because a rule is a prefix match on the literal
+# argv[0] token: "Bash(gh pr merge:*)" cannot match "gh-axi pr merge". gh-axi is
+# the GitHub tool the briefs hand a crewmate (AGENTS.md, bin/fm-brief.sh) and the
+# one bin/fm-pr-merge.sh lands PRs with, so it needs its own rule or the most
+# likely merge command is the one left open.
+#
+# Known residual: the REST endpoints and the inline GraphQL mergePullRequest
+# mutation are covered, but a GraphQL merge whose query text never reaches the
+# command line - read from a file or piped in on stdin - matches no pattern here.
+# Command-line rules cannot see that, so it is out of scope by construction
+# rather than by oversight; AGENTS.md section 1's captain-only landing boundary
+# is what covers it.
 
 # Print the merge-block permission rules as a JSON array.
 # Kept as one canonical list so the rules and their regression test cannot drift.
 fm_crew_merge_block_rules() {
-  printf '%s' '["Bash(gh pr merge:*)","Bash(gh api *pulls/*/merge*)","Bash(gh api *repos/*/merges*)","Bash(tk-feature land:*)","Bash(tk-feature-land:*)"]'
+  printf '%s' '["Bash(gh pr merge:*)","Bash(gh-axi pr merge:*)","Bash(gh api *pulls/*/merge*)","Bash(gh api *repos/*/merges*)","Bash(gh api graphql*mergePullRequest*)","Bash(tk-feature land:*)","Bash(tk-feature-land:*)"]'
 }
 
 # Quote a string as one literal POSIX shell word.

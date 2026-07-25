@@ -121,6 +121,9 @@ test_every_rule_is_valid_syntax() {
 # The verbs that must be blocked. Landing is the captain's call, so both the
 # gh porcelain and the gh api merge endpoints have to be covered - blocking only
 # `gh pr merge` leaves `gh api --method PUT .../pulls/N/merge` wide open.
+# gh-axi needs its own row: a rule is a prefix match on the literal argv[0]
+# token, so `Bash(gh pr merge:*)` never matches `gh-axi pr merge` - the exact
+# command the briefs hand a crewmate and bin/fm-pr-merge.sh lands PRs with.
 test_blocks_every_merge_verb() {
   local all row label pattern
   all=$(rules)
@@ -130,15 +133,30 @@ test_blocks_every_merge_verb() {
       || fail "merge block is missing the $label rule ($pattern)"
   done <<'ROWS'
 gh porcelain merge|Bash(gh pr merge:*)
+gh-axi porcelain merge|Bash(gh-axi pr merge:*)
 gh api pull-request merge endpoint|Bash(gh api *pulls/*/merge*)
 gh api branch merges endpoint|Bash(gh api *repos/*/merges*)
+gh api graphql merge mutation|Bash(gh api graphql*mergePullRequest*)
 tk-feature land|Bash(tk-feature land:*)
 tk-feature-land|Bash(tk-feature-land:*)
 ROWS
   # Guard the count so a future edit cannot quietly drop one.
   row=$(printf '%s\n' "$all" | grep -c .)
-  [ "$row" -eq 5 ] || fail "expected 5 merge-block rules, found $row"
-  pass "every merge verb is blocked (gh porcelain, gh api endpoints, tk-feature)"
+  [ "$row" -eq 7 ] || fail "expected 7 merge-block rules, found $row"
+  pass "every merge verb is blocked (gh, gh-axi, gh api endpoints, tk-feature)"
+}
+
+# A rule that names one executable must not be assumed to cover a differently
+# named one. This is the gh/gh-axi gap stated as an invariant rather than as a
+# single table row, so a future rewrite cannot lose it by editing the table.
+test_each_merge_executable_has_its_own_rule() {
+  local all exe
+  all=$(rules)
+  for exe in 'gh pr merge' 'gh-axi pr merge'; do
+    printf '%s\n' "$all" | grep -qF "Bash($exe:" \
+      || fail "no rule starts with the '$exe' executable+verb; a rule for a differently named executable does not cover it"
+  done
+  pass "each merge executable (gh, gh-axi) carries its own rule"
 }
 
 # The block must stay narrow. A crewmate needs ordinary `gh api` reads and must
@@ -168,6 +186,43 @@ test_uses_ask_not_allow_or_deny() {
   pass "merge block uses permissions.ask"
 }
 
+# The turn-end path is derived from FM_HOME/FM_STATE_OVERRIDE, so it is not
+# guaranteed to be free of quotes or backslashes. An unescaped one makes the
+# document invalid JSON, and a rejected file loses BOTH guarantees at once while
+# stopping the spawn on a settings dialog - the exact failure mode this library
+# exists to prevent. The hook command must also survive the shell that runs it.
+test_hostile_turnend_path_stays_valid() {
+  local path doc cmd tmproot canary name
+  tmproot=$(fm_test_tmproot fm-crew-settings)
+  mkdir -p "$tmproot"
+  canary="$tmproot/substitution-ran"
+  # The Stop command is "touch <path>; <busy-event ...>", so this asserts by
+  # RUNNING it rather than by parsing it apart: the busy half is harmless here
+  # (the script does not exist, and every hook command ends "2>/dev/null || true"),
+  # and executing is the only check that proves the shell reconstructs exactly
+  # the intended path. A substitution that survived quoting would fire the canary.
+  # shellcheck disable=SC2016  # single quotes are deliberate: these are hostile literal paths, not expansions
+  for name in \
+    "fm crew/it's a \"quoted\" \\path/x.turn-ended" \
+    'fm-$(touch '"$canary"')/y.turn-ended' \
+    'fm-`touch '"$canary"'`/z.turn-ended'
+  do
+    path="$tmproot/$name"
+    doc=$(fm_crew_settings_local_json "$path" "$tmproot/no-such-busy-event.sh" \
+      "$tmproot/state" some-task 1-1)
+    printf '%s' "$doc" | jq -e . >/dev/null 2>&1 \
+      || fail "hostile turn-end path produced invalid JSON: $path"
+    cmd=$(printf '%s' "$doc" | jq -r '.hooks.Stop[0].hooks[0].command')
+    mkdir -p "$(dirname "$path")"
+    sh -c "$cmd" || fail "hook command failed for turn-end path: $path"
+    [ -f "$path" ] \
+      || fail "hook command did not touch the turn-end path: $path (cmd: $cmd)"
+  done
+  [ ! -e "$canary" ] \
+    || fail "hook command let a substitution in the turn-end path execute"
+  pass "turn-end paths with quotes, backslashes, and shell metacharacters stay safe"
+}
+
 # fm-spawn must actually use the library rather than re-rolling the JSON inline,
 # which is how the two guarantees drifted apart before.
 test_spawn_delegates_to_the_library() {
@@ -190,6 +245,8 @@ test_busy_state_hooks_survive
 test_merge_block_rides_with_stop_hook
 test_every_rule_is_valid_syntax
 test_blocks_every_merge_verb
+test_each_merge_executable_has_its_own_rule
 test_does_not_overblock_delivery_verbs
 test_uses_ask_not_allow_or_deny
+test_hostile_turnend_path_stays_valid
 test_spawn_delegates_to_the_library
