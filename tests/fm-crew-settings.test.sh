@@ -192,34 +192,45 @@ test_uses_ask_not_allow_or_deny() {
 # stopping the spawn on a settings dialog - the exact failure mode this library
 # exists to prevent. The hook command must also survive the shell that runs it.
 test_hostile_turnend_path_stays_valid() {
-  local path doc cmd tmproot canary name
+  local path doc cmd tmproot canary
+  # Per-run canary under the suite's own temp root: a fixed /tmp name would
+  # survive a genuine regression and wedge every later run on a stale file, and
+  # would collide with another user's file on a shared runner. The canary name
+  # stays relative and is resolved by running the hook from inside the temp root,
+  # so the payload carries no quotes or spaces of its own to blunt it.
   tmproot=$(fm_test_tmproot fm-crew-settings)
   mkdir -p "$tmproot"
-  canary="$tmproot/substitution-ran"
-  # The Stop command is "touch <path>; <busy-event ...>", so this asserts by
-  # RUNNING it rather than by parsing it apart: the busy half is harmless here
-  # (the script does not exist, and every hook command ends "2>/dev/null || true"),
-  # and executing is the only check that proves the shell reconstructs exactly
-  # the intended path. A substitution that survived quoting would fire the canary.
-  # shellcheck disable=SC2016  # single quotes are deliberate: these are hostile literal paths, not expansions
-  for name in \
-    "fm crew/it's a \"quoted\" \\path/x.turn-ended" \
-    'fm-$(touch '"$canary"')/y.turn-ended' \
-    'fm-`touch '"$canary"'`/z.turn-ended'
+  canary=substitution-ran
+  # A substitution only escapes a naive '...' wrapper if single quotes close it
+  # around the substitution and reopen after it, so the payloads are built that
+  # way: $( ) alone stays inert inside the wrapper, and a lone unbalanced quote
+  # makes the whole line a parse error before anything can run.
+  for path in \
+    "$tmproot/fm crew/it's a \"quoted\" \\path/x.turn-ended" \
+    "$tmproot/quote'\$(touch $canary)'end/y.turn-ended" \
+    "$tmproot/quote'\`touch $canary\`'end/z.turn-ended"
   do
-    path="$tmproot/$name"
     doc=$(fm_crew_settings_local_json "$path" "$tmproot/no-such-busy-event.sh" \
       "$tmproot/state" some-task 1-1)
     printf '%s' "$doc" | jq -e . >/dev/null 2>&1 \
       || fail "hostile turn-end path produced invalid JSON: $path"
     cmd=$(printf '%s' "$doc" | jq -r '.hooks.Stop[0].hooks[0].command')
+    # The Stop command is "touch <path>; <busy-event ...>", so the turn-end
+    # argument can no longer be isolated by stripping a "touch " prefix. Assert
+    # by RUNNING the command instead, which is the stronger check anyway: the
+    # busy half is inert here (the script does not exist, and every hook command
+    # ends "2>/dev/null || true"), and only execution proves the shell
+    # reconstructs exactly the intended path. Run it from inside the temp root so
+    # a substitution that survived quoting drops the canary where it is checked.
     mkdir -p "$(dirname "$path")"
-    sh -c "$cmd" || fail "hook command failed for turn-end path: $path"
+    ( cd "$tmproot" && sh -c "$cmd" ) \
+      || fail "hook command failed for turn-end path: $path (cmd: $cmd)"
     [ -f "$path" ] \
       || fail "hook command did not touch the turn-end path: $path (cmd: $cmd)"
   done
-  [ ! -e "$canary" ] \
+  [ ! -e "$tmproot/$canary" ] \
     || fail "hook command let a substitution in the turn-end path execute"
+  rm -rf "$tmproot"
   pass "turn-end paths with quotes, backslashes, and shell metacharacters stay safe"
 }
 

@@ -53,8 +53,8 @@ The negative control was re-run in the same session: a directory carrying the ma
 
 ## `permissions.ask` stops a crewmate that runs under `--dangerously-skip-permissions`
 
-This is the load-bearing premise of the whole guard, so it was exercised in the crewmate's own shape rather than argued from documentation.
-A session was launched non-interactively with exactly the flag `bin/fm-spawn.sh` uses, in a directory holding the generated file above, and asked to run each command and report whether the tool call executed:
+This is the load-bearing premise of the whole guard, so it was exercised against the live permission engine rather than argued from documentation.
+A session was launched with exactly the flag `bin/fm-spawn.sh` uses, in a directory holding the generated file above, and asked to run each command and report whether the tool call executed:
 
 ```sh
 claude -p --dangerously-skip-permissions '...run each command and report whether it executed...'
@@ -73,6 +73,16 @@ Each block surfaced as `Claude requested permissions to use Bash, but you haven'
 That message is the mechanism in one line: bypass mode skips the *prompt*, not the *rule*, and an unattended crewmate has no approver, so an ask it cannot answer is a stop.
 `ask` rather than `deny` is therefore a proven control here, not an assumption.
 The gated commands were chosen to be inert - `--help`, and a GraphQL mutation carrying a deliberately invalid node id - so a hypothetical non-match could only have printed help text or returned a GraphQL error, never landed a PR.
+
+### What this transcript does and does not prove
+
+The flag matches production; the mode does not.
+`bin/fm-spawn.sh` launches a crewmate interactively (`claude --dangerously-skip-permissions "$(... launch-brief ...)"`, no `-p`), while the run above used `-p`.
+What carries across is the part that matters here: the rule is evaluated, and the merge verb does not execute, under `--dangerously-skip-permissions`.
+What does not carry across is the *shape of the stop*.
+With no TTY, `-p` returns the unanswerable ask to the model as an immediate tool-call refusal, which is why the transcript shows the session continuing to the next command.
+In the interactive TUI a crewmate actually runs in, the same rule can instead surface as a pane-blocking prompt: the merge is stopped just as effectively, but the turn never ends, so the Stop hook never fires and the watcher sees a wedged crewmate rather than a refused one.
+Either outcome satisfies the guard - the crewmate does not land its own work - but they reach the watcher differently, so do not read this transcript as evidence about the interactive surface.
 
 ## The rules match the merge verbs and nothing else
 
