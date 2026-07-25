@@ -378,9 +378,19 @@ while pending:
     directory_fd, path = pending.pop()
     for name in sorted(os.listdir(directory_fd)):
         item = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        if stat.S_ISLNK(item.st_mode):
-            raise SystemExit(74)
-        if not stat.S_ISDIR(item.st_mode):
+        # A symlink INSIDE the tree is skipped, never refused and never
+        # descended. Refusing outright made this boundary reject any repository
+        # whose own committed layout uses symlinks - relvino puts 177 in every
+        # worktree (its CLAUDE.md -> AGENTS.md convention and symlinked skills),
+        # so no crew there could ever be reaped. What this walk exists to prove
+        # is that the destructive return cannot ESCAPE the tree, and a symlink
+        # entry cannot cause that here: it is inspected with
+        # follow_symlinks=False, it is not a directory so it is never queued,
+        # and every descent below
+        # opens with O_NOFOLLOW and re-proves dev/ino, single-device, and
+        # non-mount. The path-component loop above still refuses a symlinked
+        # ANCESTOR, which is the real redirection vector.
+        if stat.S_ISLNK(item.st_mode) or not stat.S_ISDIR(item.st_mode):
             continue
         child_path = os.path.join(path, name)
         child = os.open(name, flags, dir_fd=directory_fd)
