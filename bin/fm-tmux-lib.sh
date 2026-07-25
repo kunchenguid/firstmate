@@ -63,17 +63,10 @@
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Esc:cancel"
 # on 0.2.112 (mid-turn keybind bar only) plus "Ctrl+c:cancel" for older installs.
-# Keep both tokens in lockstep with fm-watch.sh BUSY_REGEX (watch does not
-# source this default).
-# Evidence, grok 0.2.112: "Esc:cancel" is present mid-turn and ABSENT from the
-# last 6 nonblank lines of every captured non-busy overlay -
-#   slash autocomplete    Enter:send | Shift+Tab:mode | Ctrl+.:shortcuts
-#   idle keybind bar      Shift+Tab:mode | Ctrl+.:shortcuts
-#   project-dir chooser   Esc:unselect | Tab:scrollback | Shift+x:dismiss
-#   tool-permission       1/4:select | Ctrl+o:always-approve | Ctrl+c:cancel
-# so the token does not misclassify a human-blocked pane as busy. The permission
-# dialog does print the legacy "Ctrl+c:cancel", which this regex has always
-# matched; that predates the 0.2.112 token and is kept for older installs.
+# Keep this value byte-identical to fm-watch.sh BUSY_REGEX (watch does not
+# source this default); that header owns the captured grok 0.2.112 footer
+# evidence for both grok tokens, and tests/fm-grok-harness.test.sh pins the two
+# copies against each other.
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|Esc:cancel'
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
