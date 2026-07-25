@@ -240,7 +240,7 @@ posture = [
     f'| wall duration_ms | **{summary["duration_ms"]}** (~{summary["duration_ms"] / 1000:.1f}s) |',
     f'| `production_sharding_enabled` | `{str(proof["production_sharding_enabled"]).capitalize()}` |',
     f'| `fm_test_run_jobs_enabled` | `{str(proof["fm_test_run_jobs_enabled"]).capitalize()}` |',
-    f'| host proof date | {proof["started_at"][:10]} (UTC day of archive write) |',
+    f'| host proof date | {proof["finished_at"][:10]} (UTC day of archive write) |',
 ]
 assert all(line in markdown for line in posture)
 section = markdown.split("## Per-candidate durations (concurrent run)", 1)[1]

@@ -46,11 +46,13 @@ Phase 1 averages used for balance (mean of available serial `duration_ms` across
 | 36 | `tests/fm-stow-contract.test.sh` |
 | 28 | `tests/fm-no-mistakes-ownership.test.sh` |
 
-## Balancing method
+## Balancing history
 
-Longest-processing-time (LPT) assignment onto two workers using the Phase 1 averages above.
+The original 30-script set used longest-processing-time (LPT) assignment onto two workers with the Phase 1 averages above.
+After selector removal, the lanes retain that assignment with `tests/fm-dispatch-select.test.sh` removed from `portable-parallel-1`.
+The current totals are therefore intentionally not a fresh LPT balance of the 29-script set.
 Do not rebalance alphabetically or by family intuition.
-Shard execution order is longest-first so wall-clock tracks the balanced sum.
+Shard execution order remains longest-first within each retained lane.
 
 | Lane | Script count | Sum of Phase 1 averages |
 |---|---:|---:|
