@@ -312,7 +312,7 @@ test_crew_absorb_class_classifier() {
 # crew_progress_advanced_since: the wedge timer's only reason to stay quiet past
 # the threshold. It must answer yes ONLY on positive proof that the pipeline did
 # something at or after the anchor, and no for every unprovable case - an unknown
-# or unparseable age, a missing id or anchor, and a crew-state binary too old to
+# or malformed verdict, a missing id or anchor, and a crew-state binary too old to
 # understand --progress at all.
 test_crew_progress_advanced_since_classifier() {
   local dir fakebin now anchor
@@ -321,33 +321,29 @@ test_crew_progress_advanced_since_classifier() {
   export FM_FAKE_CREW_PROGRESS
   now=$(date +%s)
   anchor=$(( now - 300 ))
-  FM_FAKE_CREW_PROGRESS=30
-  crew_progress_advanced_since a "$anchor" || fail "activity inside the window was not read as advancement"
-  FM_FAKE_CREW_PROGRESS=900
-  ! crew_progress_advanced_since a "$anchor" || fail "activity older than the anchor was read as advancement"
+  FM_FAKE_CREW_PROGRESS=advanced
+  crew_progress_advanced_since a "$anchor" || fail "the exact advanced verdict was not accepted"
   FM_FAKE_CREW_PROGRESS=unknown
   ! crew_progress_advanced_since a "$anchor" || fail "an unknown progress read was treated as proof"
-  FM_FAKE_CREW_PROGRESS='a while'
-  ! crew_progress_advanced_since a "$anchor" || fail "an unparseable age was treated as proof"
-  FM_FAKE_CREW_PROGRESS=30
+  FM_FAKE_CREW_PROGRESS='advanced with caveat'
+  ! crew_progress_advanced_since a "$anchor" || fail "a malformed verdict was treated as proof"
+  FM_FAKE_CREW_PROGRESS=advanced
   ! crew_progress_advanced_since "" "$anchor" || fail "an empty id was treated as proof"
   ! crew_progress_advanced_since a "" || fail "a missing anchor was treated as proof"
   ! crew_progress_advanced_since a "not-an-epoch" || fail "an unparseable anchor was treated as proof"
 
-  # A crew-state binary that predates --progress prints its ordinary state line
-  # and ignores the flag. That is a read that could not determine progress, so it
-  # must never suppress an alarm.
+  # Older helper contracts must fail closed.
   cat > "$fakebin/fm-crew-state-old.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
-printf 'state: working · source: run-step · validating (running)\n'
+printf 'activity_age: 30\n'
 SH
   chmod +x "$fakebin/fm-crew-state-old.sh"
   FM_CREW_STATE_BIN="$fakebin/fm-crew-state-old.sh" \
-    crew_progress_advanced_since a "$anchor" && fail "a --progress-unaware helper's state line was read as advancement"
+    crew_progress_advanced_since a "$anchor" && fail "an old activity-age answer was read as advancement"
 
   unset FM_FAKE_CREW_PROGRESS
-  pass "crew_progress_advanced_since: proof only from a fresh activity stamp, never from an unprovable read"
+  pass "crew_progress_advanced_since: proof only from the exact strict verdict"
 }
 
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
@@ -1122,7 +1118,7 @@ test_wedge_timer_absorbs_when_the_pipeline_advanced() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
-  export FM_FAKE_CREW_PROGRESS=20
+  export FM_FAKE_CREW_PROGRESS=advanced
 
   # Priming round: first sighting of this stale hash absorbs it and starts the
   # wedge timer, without reaching wedge_timer_check.
@@ -1184,9 +1180,7 @@ test_wedge_timer_still_escalates_a_non_advancing_pipeline() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
-  # The pipeline last did something an hour ago - long before this idle window
-  # opened, so there is nothing to prove advancement.
-  export FM_FAKE_CREW_PROGRESS=3600
+  export FM_FAKE_CREW_PROGRESS=unknown
 
   # Priming round establishes the stale hash and the wedge timer. It also clears
   # escalation bookkeeping, so the counter is seeded afterwards.

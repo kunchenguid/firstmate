@@ -25,7 +25,7 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
-#   (l) --progress: the activity age the wedge timer reads before escalating,
+#   (l) --progress: the progress verdict the wedge timer reads before escalating,
 #       under the same attribution, and `unknown` for every unprovable case.
 set -u
 
@@ -79,6 +79,8 @@ case "${1:-}" in
   runs)
     printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
 esac
+[ "${FM_FAKE_NM_SLEEP:-0}" = 0 ] || sleep "$FM_FAKE_NM_SLEEP"
+[ "${FM_FAKE_NM_SIGNAL:-0}" = 0 ] || kill "-$FM_FAKE_NM_SIGNAL" "$$"
 exit "${FM_FAKE_NM_EXIT:-0}"
 SH
   cat > "$fb/tmux" <<'SH'
@@ -145,9 +147,9 @@ run_crew_state() {  # <case-dir> <id>
   PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
 }
 
-# The narrower --progress read: same attribution, one `activity_age:` line.
-run_crew_progress() {  # <case-dir> <id>
-  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" --progress "$2"
+# The narrower --progress read: same attribution, one progress verdict.
+run_crew_progress() {  # <case-dir> <id> [anchor-epoch]
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" --progress "$2" "${3:-}"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -178,9 +180,11 @@ reset_fakes() {
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
   FM_FAKE_NM_EXIT=0
+  FM_FAKE_NM_SLEEP=0
+  FM_FAKE_NM_SIGNAL=0
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
-  export FM_FAKE_NM_EXIT
+  export FM_FAKE_NM_EXIT FM_FAKE_NM_SLEEP FM_FAKE_NM_SIGNAL
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -1360,84 +1364,130 @@ test_missing_run_head_falls_back_to_current_state() {
 
 # ---------------------------------------------------------------------------
 # (l) --progress: the activity read the wedge timer consults before escalating.
-# It must report a real age only from THIS crew's attributed run, and `unknown`
-# for every case it cannot prove, because the caller reads `unknown` as "could
-# not determine" and escalates.
+# It must report `advanced` only from THIS crew's complete attributed run and
+# `unknown` for every case it cannot prove.
 
-test_progress_reports_active_step_activity_age() {
+test_progress_accepts_the_renderer_no_prefix_stamp() {
   reset_fakes
-  local d out; d=$(new_case progress-active)
+  local d out anchor; d=$(new_case progress-no-prefix)
   make_repo_on_branch "$d/wt" fm/feat-p1
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-p1.meta" "window=fm:fm-feat-p1" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p1 'active 1m43s ago: log: reviewing internal/watch.go')"
-  out=$(run_crew_progress "$d" feat-p1)
-  assert_contains "$out" "activity_age: 103" "1m43s stamp reads as 103 seconds"
-  pass "--progress reports the active step's activity age"
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p1 '1m43s ago: reviewing internal/watch.go')"
+  anchor=$(( $(date +%s) - 200 ))
+  out=$(run_crew_progress "$d" feat-p1 "$anchor")
+  assert_contains "$out" "progress: advanced" "a recent no-prefix renderer stamp proves advancement"
+  pass "--progress accepts the renderer's recent no-prefix stamp"
 }
 
-test_progress_parses_a_quiet_multi_unit_stamp() {
+test_progress_accepts_quiet_and_arbitrary_activity_suffixes() {
   reset_fakes
-  local d out; d=$(new_case progress-quiet)
+  local d out anchor; d=$(new_case progress-quiet)
   make_repo_on_branch "$d/wt" fm/feat-p2
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-p2.meta" "window=fm:fm-feat-p2" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p2 'quiet 1h2m3s ago: log: no CI checks reported - still monitoring until merged or closed')"
-  out=$(run_crew_progress "$d" feat-p2)
-  assert_contains "$out" "activity_age: 3723" "1h2m3s stamp reads as 3723 seconds"
-  # The installed CLI also drops trailing zero components on a long wait
-  # (observed live: active_for 1h23m, last_activity "quiet 1h22m ago: ...").
-  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p2 'quiet 1h22m ago: log: no CI checks reported - still monitoring until merged or closed')"
-  out=$(run_crew_progress "$d" feat-p2)
-  assert_contains "$out" "activity_age: 4920" "1h22m stamp reads as 4920 seconds"
-  pass "--progress parses a multi-unit quiet stamp"
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p2 'quiet 53m38s ago: log: no CI checks reported - still monitoring until merged or closed')"
+  anchor=$(( $(date +%s) - 3300 ))
+  out=$(run_crew_progress "$d" feat-p2 "$anchor")
+  assert_contains "$out" "progress: advanced" "the observed quiet renderer stamp proves advancement"
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p2 'quiet 11m0s ago: codex started pid=4242')"
+  anchor=$(( $(date +%s) - 700 ))
+  out=$(run_crew_progress "$d" feat-p2 "$anchor")
+  assert_contains "$out" "progress: advanced" "a non-log activity suffix remains valid"
+  pass "--progress accepts quiet stamps and arbitrary activity suffixes"
 }
 
-test_progress_reads_only_each_row_leading_activity_stamp() {
+test_progress_requires_the_whole_rendered_interval_after_the_anchor() {
   reset_fakes
-  local d out; d=$(new_case progress-leading-stamp)
-  make_repo_on_branch "$d/wt" fm/feat-p-leading
+  local d out anchor; d=$(new_case progress-interval)
+  make_repo_on_branch "$d/wt" fm/feat-p-interval
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-p-leading.meta" "window=fm:fm-feat-p-leading" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p-leading 'quiet 1h ago: log: retried 5m ago')"
-  out=$(run_crew_progress "$d" feat-p-leading)
-  assert_contains "$out" "activity_age: 3600" "only the last_activity field's leading stamp is read"
-  assert_not_contains "$out" "activity_age: 300" "trailing log prose cannot become progress evidence"
-  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p-leading 'quiet 1h 5m ago: log: malformed stamp')"
-  out=$(run_crew_progress "$d" feat-p-leading)
-  assert_contains "$out" "activity_age: unknown" "a non-canonical leading stamp is unprovable"
-  pass "--progress isolates and validates the last_activity leading stamp"
+  fm_write_meta "$d/state/feat-p-interval.meta" "window=fm:fm-feat-p-interval" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p-interval 'quiet 1h22m ago: log: no CI checks reported - still monitoring until merged or closed')"
+  anchor=$(( $(date +%s) - 4950 ))
+  out=$(run_crew_progress "$d" feat-p-interval "$anchor")
+  assert_contains "$out" "progress: unknown" "the 4920-4979 second interval straddles the anchor"
+  anchor=$(( $(date +%s) - 5000 ))
+  out=$(run_crew_progress "$d" feat-p-interval "$anchor")
+  assert_contains "$out" "progress: advanced" "the full 4920-4979 second interval follows the older anchor"
+  # Synthetic negative for the renderer's day-and-hour precision boundary.
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p-interval 'quiet 1d2h ago: lifecycle activity')"
+  anchor=$(( $(date +%s) - 95000 ))
+  out=$(run_crew_progress "$d" feat-p-interval "$anchor")
+  assert_contains "$out" "progress: unknown" "the 93600-97199 second interval straddles the anchor"
+  pass "--progress proves advancement only from a wholly recent age interval"
 }
 
 test_progress_uses_the_freshest_valid_active_step_row() {
   reset_fakes
-  local d out; d=$(new_case progress-multiple-rows)
+  local d out anchor; d=$(new_case progress-multiple-rows)
   make_repo_on_branch "$d/wt" fm/feat-p-rows
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-p-rows.meta" "window=fm:fm-feat-p-rows" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_running_with_two_activities fm/feat-p-rows \
-    'quiet 1h ago: log: intent work' 'active 2m ago: log: review work')"
-  out=$(run_crew_progress "$d" feat-p-rows)
-  assert_contains "$out" "activity_age: 120" "freshest last_activity stamp wins across rows"
+    'quiet 53m38s ago: log: intent work' 'quiet 27m37s ago: log: review work')"
+  anchor=$(( $(date +%s) - 1700 ))
+  out=$(run_crew_progress "$d" feat-p-rows "$anchor")
+  assert_contains "$out" "progress: advanced" "the freshest complete activity interval wins across rows"
   FM_FAKE_AXI_STATUS="$(run_running_with_two_activities fm/feat-p-rows \
-    'quiet 1h ago: log: intent work' 'active 2m 5s ago: log: malformed review stamp')"
-  out=$(run_crew_progress "$d" feat-p-rows)
-  assert_contains "$out" "activity_age: unknown" "one malformed row invalidates the whole activity answer"
+    'quiet 53m38s ago: log: intent work' 'quiet 27m 37s ago: malformed review stamp')"
+  out=$(run_crew_progress "$d" feat-p-rows "$anchor")
+  assert_contains "$out" "progress: unknown" "one malformed row invalidates the whole activity answer"
   pass "--progress chooses the freshest validated active-step row"
 }
 
-test_progress_rejects_parseable_output_from_a_failed_call() {
+test_progress_rejects_mismatched_active_step_row_counts() {
   reset_fakes
-  local d out; d=$(new_case progress-failed-call)
+  local d out anchor; d=$(new_case progress-row-count)
+  make_repo_on_branch "$d/wt" fm/feat-p-row-count
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-p-row-count.meta" "window=fm:fm-feat-p-row-count" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running_with_two_activities fm/feat-p-row-count \
+    'quiet 53m38s ago: log: intent work' 'quiet 27m37s ago: log: review work' \
+    | sed 's/active_steps\[2\]/active_steps[1]/')"
+  anchor=$(( $(date +%s) - 4000 ))
+  out=$(run_crew_progress "$d" feat-p-row-count "$anchor")
+  assert_contains "$out" "progress: unknown" "an extra row invalidates the declared table count"
+  pass "--progress requires the declared active-step row count"
+}
+
+test_progress_rejects_incomplete_strict_status_reads() {
+  reset_fakes
+  local d out anchor; d=$(new_case progress-failed-call)
   make_repo_on_branch "$d/wt" fm/feat-p-failed-call
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-p-failed-call.meta" "window=fm:fm-feat-p-failed-call" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p-failed-call 'active 5s ago: log: partial output')"
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p-failed-call '5s ago: codex started pid=4242')"
+  anchor=$(( $(date +%s) - 30 ))
   FM_FAKE_NM_EXIT=7
-  out=$(run_crew_progress "$d" feat-p-failed-call)
-  assert_contains "$out" "activity_age: unknown" "nonzero command result invalidates parseable stdout"
-  assert_not_contains "$out" "activity_age: 5" "failed output cannot suppress a wedge alarm"
-  pass "--progress rejects parseable output from a failed bounded call"
+  out=$(run_crew_progress "$d" feat-p-failed-call "$anchor")
+  assert_contains "$out" "progress: unknown" "nonzero status invalidates parseable stdout"
+  FM_FAKE_NM_EXIT=0
+  FM_FAKE_NM_SIGNAL=KILL
+  out=$(run_crew_progress "$d" feat-p-failed-call "$anchor")
+  assert_contains "$out" "progress: unknown" "signal termination invalidates parseable partial stdout"
+  FM_FAKE_NM_SIGNAL=0
+  FM_FAKE_NM_SLEEP=3
+  out=$(FM_CREW_STATE_NM_TIMEOUT=1 run_crew_progress "$d" feat-p-failed-call "$anchor")
+  assert_contains "$out" "progress: unknown" "timeout invalidates parseable partial stdout"
+  pass "--progress rejects every incomplete strict status read"
+}
+
+test_progress_rejects_synthetic_prefix_and_missing_anchor() {
+  reset_fakes
+  local d out anchor; d=$(new_case progress-synthetic-prefix)
+  make_repo_on_branch "$d/wt" fm/feat-p-synthetic-prefix
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-p-synthetic-prefix.meta" "window=fm:fm-feat-p-synthetic-prefix" "worktree=$d/wt" "kind=ship"
+  # Synthetic negative for the unobserved active prefix used by the old fixture.
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p-synthetic-prefix 'active 5s ago: partial output')"
+  anchor=$(( $(date +%s) - 30 ))
+  out=$(run_crew_progress "$d" feat-p-synthetic-prefix "$anchor")
+  assert_contains "$out" "progress: unknown" "the invented active prefix is not accepted"
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p-synthetic-prefix '5s ago: codex started pid=4242')"
+  out=$(run_crew_progress "$d" feat-p-synthetic-prefix)
+  assert_contains "$out" "progress: unknown" "a missing anchor cannot prove advancement"
+  pass "--progress rejects invented prefix vocabulary and a missing anchor"
 }
 
 # active_for is elapsed time, not activity, and carries no ` ago` suffix. Reading
@@ -1445,25 +1495,27 @@ test_progress_rejects_parseable_output_from_a_failed_call() {
 # with no last_activity stamp must answer unknown rather than borrow it.
 test_progress_ignores_elapsed_time_without_an_activity_stamp() {
   reset_fakes
-  local d out; d=$(new_case progress-no-stamp)
+  local d out anchor; d=$(new_case progress-no-stamp)
   make_repo_on_branch "$d/wt" fm/feat-p3
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-p3.meta" "window=fm:fm-feat-p3" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p3 'log: no activity stamp here')"
-  out=$(run_crew_progress "$d" feat-p3)
-  assert_contains "$out" "activity_age: unknown" "an active_for column alone is not an activity age"
+  anchor=$(( $(date +%s) - 300 ))
+  out=$(run_crew_progress "$d" feat-p3 "$anchor")
+  assert_contains "$out" "progress: unknown" "an active_for column alone is not activity"
   pass "--progress ignores elapsed time when no activity stamp is present"
 }
 
 test_progress_without_active_steps_is_unknown() {
   reset_fakes
-  local d out; d=$(new_case progress-no-active-steps)
+  local d out anchor; d=$(new_case progress-no-active-steps)
   make_repo_on_branch "$d/wt" fm/feat-p4
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-p4.meta" "window=fm:fm-feat-p4" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_running fm/feat-p4)"
-  out=$(run_crew_progress "$d" feat-p4)
-  assert_contains "$out" "activity_age: unknown" "no active_steps table -> unknown"
+  anchor=$(( $(date +%s) - 300 ))
+  out=$(run_crew_progress "$d" feat-p4 "$anchor")
+  assert_contains "$out" "progress: unknown" "no active_steps table is unprovable"
   pass "--progress reports unknown when the run exposes no active step"
 }
 
@@ -1471,37 +1523,40 @@ test_progress_without_active_steps_is_unknown() {
 # progress, or a healthy-looking neighbour would suppress a real wedge alarm.
 test_progress_ignores_another_branch_run() {
   reset_fakes
-  local d out; d=$(new_case progress-other-branch)
+  local d out anchor; d=$(new_case progress-other-branch)
   make_repo_on_branch "$d/wt" fm/feat-p5
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-p5.meta" "window=fm:fm-feat-p5" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/someone-else 'active 5s ago: log: busy elsewhere')"
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/someone-else '5s ago: codex started pid=4242')"
   FM_FAKE_RUNS_LIST="running fm/feat-p5 ${FM_FAKE_RUN_HEAD:-abc1234} 2026-07-24"
-  out=$(run_crew_progress "$d" feat-p5)
-  assert_contains "$out" "activity_age: unknown" "another branch's activity must not be attributed here"
+  anchor=$(( $(date +%s) - 30 ))
+  out=$(run_crew_progress "$d" feat-p5 "$anchor")
+  assert_contains "$out" "progress: unknown" "another branch's activity must not be attributed here"
   pass "--progress never attributes another branch's activity"
 }
 
 test_progress_without_a_run_is_unknown() {
   reset_fakes
-  local d out; d=$(new_case progress-no-run)
+  local d out anchor; d=$(new_case progress-no-run)
   make_repo_on_branch "$d/wt" fm/feat-p6
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-p6.meta" "window=fm:fm-feat-p6" "worktree=$d/wt" "kind=ship"
   printf 'working: still compiling\n' > "$d/state/feat-p6.status"
   FM_FAKE_BUSY=1
-  out=$(run_crew_progress "$d" feat-p6)
-  assert_contains "$out" "activity_age: unknown" "a busy pane is liveness, not pipeline progress"
+  anchor=$(( $(date +%s) - 300 ))
+  out=$(run_crew_progress "$d" feat-p6 "$anchor")
+  assert_contains "$out" "progress: unknown" "a busy pane is liveness, not pipeline progress"
   pass "--progress reports unknown when no run is attributed"
 }
 
 test_progress_torn_down_worktree_is_unknown() {
   reset_fakes
-  local d out; d=$(new_case progress-torn-down)
+  local d out anchor; d=$(new_case progress-torn-down)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-p7.meta" "window=fm:fm-feat-p7" "worktree=$d/gone" "kind=ship"
-  out=$(run_crew_progress "$d" feat-p7)
-  assert_contains "$out" "activity_age: unknown" "a torn-down worktree cannot prove progress"
+  anchor=$(( $(date +%s) - 300 ))
+  out=$(run_crew_progress "$d" feat-p7 "$anchor")
+  assert_contains "$out" "progress: unknown" "a torn-down worktree cannot prove progress"
   pass "--progress reports unknown for a torn-down worktree"
 }
 
@@ -1554,11 +1609,13 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
-test_progress_reports_active_step_activity_age
-test_progress_parses_a_quiet_multi_unit_stamp
-test_progress_reads_only_each_row_leading_activity_stamp
+test_progress_accepts_the_renderer_no_prefix_stamp
+test_progress_accepts_quiet_and_arbitrary_activity_suffixes
+test_progress_requires_the_whole_rendered_interval_after_the_anchor
 test_progress_uses_the_freshest_valid_active_step_row
-test_progress_rejects_parseable_output_from_a_failed_call
+test_progress_rejects_mismatched_active_step_row_counts
+test_progress_rejects_incomplete_strict_status_reads
+test_progress_rejects_synthetic_prefix_and_missing_anchor
 test_progress_ignores_elapsed_time_without_an_activity_stamp
 test_progress_without_active_steps_is_unknown
 test_progress_ignores_another_branch_run

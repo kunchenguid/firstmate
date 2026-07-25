@@ -47,19 +47,19 @@
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
 #
-# `--progress <id>` is a second, narrower mode over the SAME run attribution:
-# instead of the state line it prints one line,
+# `--progress <id> <anchor-epoch>` is a second, narrower mode over the SAME run
+# attribution.
+# Instead of the state line it prints one line,
 #
-#   activity_age: <seconds> | activity_age: unknown
+#   progress: advanced | progress: unknown
 #
-# the age of the most recent thing the attributed pipeline actually did, read
-# from the active_steps table's last_activity stamp. It answers only "has this
-# crew's work advanced", never "what state is it in", and it reports `unknown`
-# for every case it cannot prove - no attributed run, a coarse-only match, a
-# bounded call that timed out, an absent or unparseable stamp - so a caller can
-# never mistake a failed read for evidence of progress. The coarse runs-list
-# fallback is skipped in this mode: it carries no step detail, so it could only
-# ever answer unknown, and skipping it halves the worst-case call budget.
+# It reports `advanced` only when a separate strict status read completes
+# normally with zero status, the attributed active_steps table is complete, and
+# the oldest possible instant represented by its newest activity stamp is at or
+# after the anchor.
+# Every other outcome is `unknown`.
+# The ordinary state reader remains tolerant of partial stdout and the coarse
+# runs-list fallback, while this mode uses neither.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
@@ -85,7 +85,8 @@ if [ "${1:-}" = --progress ]; then
   shift
 fi
 ID=${1:-}
-[ -n "$ID" ] || { echo "usage: fm-crew-state.sh [--progress] <id>" >&2; exit 2; }
+PROGRESS_ANCHOR=${2:-}
+[ -n "$ID" ] || { echo "usage: fm-crew-state.sh [--progress] <id> [anchor-epoch]" >&2; exit 2; }
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
@@ -100,13 +101,10 @@ case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;;
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
-# In --progress mode every emit call is on a path that produced no attributed
-# run detail to read (missing meta, torn-down worktree, pane/log fallback), so
-# it answers `unknown` - the progress answer itself is printed earlier, from the
-# run attribution, and never reaches here.
+# In --progress mode every emit call is on a path that cannot prove advancement.
 emit() {  # <state> <source> [detail]
   if [ "$PROGRESS_MODE" = 1 ]; then
-    printf 'activity_age: unknown\n'
+    printf 'progress: unknown\n'
     exit 0
   fi
   local line="state: $1${SEP}source: $2"
@@ -230,8 +228,86 @@ nm_run() {  # <args...>
   nm_run_bounded "$@" || true
 }
 
-# Scalar value of a TOON key in the captured run output ($RUN_OUT).
 RUN_OUT=""
+PROGRESS_OBSERVED_AFTER=""
+
+# Strict progress status read.
+# It publishes stdout only after a bounded command exits normally with status
+# zero, and returns nonzero for every other result.
+nm_progress_status() {
+  local output observed_after
+  observed_after=$(date +%s) || return 1
+  case "$observed_after" in ''|*[!0-9]*) return 1 ;; esac
+  case "$HAVE_TIMEOUT" in
+    timeout)
+      output=$( ( cd "$WT" && timeout "$NM_TIMEOUT" no-mistakes axi status ) 2>/dev/null) || return 1
+      ;;
+    gtimeout)
+      output=$( ( cd "$WT" && gtimeout "$NM_TIMEOUT" no-mistakes axi status ) 2>/dev/null) || return 1
+      ;;
+    perl)
+      output=$( ( cd "$WT" && perl -e '
+        my $timeout = shift;
+        my $pid = fork;
+        exit 125 unless defined $pid;
+        if (!$pid) {
+          setpgrp(0, 0);
+          exec @ARGV;
+          exit 127;
+        }
+        local $SIG{ALRM} = sub {
+          kill "TERM", -$pid;
+          select undef, undef, undef, 0.2;
+          kill "KILL", -$pid;
+          waitpid $pid, 0;
+          exit 124;
+        };
+        alarm $timeout;
+        waitpid $pid, 0;
+        my $status = $?;
+        exit 125 if $status == -1;
+        exit(128 + ($status & 127)) if $status & 127;
+        exit($status >> 8);
+      ' "$NM_TIMEOUT" no-mistakes axi status ) 2>/dev/null) || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  [ -n "$output" ] || return 1
+  RUN_OUT=$output
+  PROGRESS_OBSERVED_AFTER=$observed_after
+}
+
+nm_progress_field() {  # <key>
+  local values count
+  values=$(printf '%s\n' "$RUN_OUT" | sed -n "s/^  $1:[[:space:]]*//p")
+  count=$(printf '%s\n' "$RUN_OUT" | sed -n "s/^  $1:[[:space:]]*//p" | awk 'END { print NR }')
+  [ "$count" = 1 ] || return 1
+  [ -n "$values" ] || return 1
+  printf '%s' "$values"
+}
+
+nm_progress_run_matches_worktree() {
+  local run_count run_branch run_status run_head local_full run_full
+  run_count=$(printf '%s\n' "$RUN_OUT" | grep -Ec '^run:[[:space:]]*$')
+  [ "$run_count" = 1 ] || return 1
+  printf '%s\n' "$RUN_OUT" | grep -Eq '^  outcome:' && return 1
+  run_branch=$(nm_progress_field branch) || return 1
+  run_branch=$(strip_quotes "$run_branch")
+  [ "$run_branch" = "$CREW_BRANCH" ] || return 1
+  run_status=$(nm_progress_field status) || return 1
+  run_status=$(strip_quotes "$run_status")
+  case "$run_status" in running|fixing|ci) ;; *) return 1 ;; esac
+  run_head=$(nm_progress_field head) || return 1
+  run_head=$(strip_quotes "$run_head")
+  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  run_full=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
+  [ "$run_full" = "$local_full" ] && return 0
+  git -C "$WT" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
+}
+
+# Scalar value of a TOON key in the captured run output ($RUN_OUT).
 nm_field() {  # <key>
   printf '%s\n' "$RUN_OUT" | sed -n "s/^[[:space:]]*$1:[[:space:]]*\(.*\)/\1/p" | head -1
 }
@@ -355,43 +431,37 @@ nm_ci_checks_state() {
     *) printf 'unknown' ;;
   esac
 }
-# Seconds encoded by one compact duration token, the form no-mistakes renders
-# inside an active step's last_activity stamp (verified against the installed
-# CLI: `quiet 53m38s ago: log: no CI checks reported ...`). Accepts d/h/m/s
-# components in any combination, and treats a sub-second `ms` component as 0.
-# Prints NOTHING for anything outside that grammar - including a bare number
-# with no unit - because a caller that cannot parse the stamp must report
-# unknown rather than guess an age.
-duration_token_secs() {  # <token>
-  local t=$1 total=0 num
-  [ -n "$t" ] || return 0
-  printf '%s\n' "$t" \
-    | grep -Eq '^([0-9]+d([0-9]+h)?([0-9]+m)?([0-9]+s)?|[0-9]+h([0-9]+m)?([0-9]+s)?|[0-9]+m([0-9]+s)?|[0-9]+s|[0-9]+ms)$' \
-    || return 0
-  while [ -n "$t" ]; do
-    num=${t%%[dhms]*}
-    case "$num" in ''|*[!0-9]*) return 0 ;; esac
-    t=${t#"$num"}
-    case "$t" in
-      ms*) t=${t#ms} ;;
-      d*)  total=$(( total + num * 86400 )); t=${t#d} ;;
-      h*)  total=$(( total + num * 3600 ));  t=${t#h} ;;
-      m*)  total=$(( total + num * 60 ));    t=${t#m} ;;
-      s*)  total=$(( total + num ));         t=${t#s} ;;
-      *)   return 0 ;;
-    esac
-  done
-  printf '%s' "$total"
+# Youngest and oldest ages represented by one installed-renderer duration token.
+duration_token_bounds() {  # <token>
+  local token=$1 major minor lower upper
+  if [[ $token =~ ^(0|[1-5][0-9])s$ ]]; then
+    lower=${BASH_REMATCH[1]}
+    upper=$lower
+  elif [[ $token =~ ^([1-9]|[1-5][0-9])m(0|[1-5][0-9])s$ ]]; then
+    major=${BASH_REMATCH[1]}
+    minor=${BASH_REMATCH[2]}
+    lower=$(( major * 60 + minor ))
+    upper=$lower
+  elif [[ $token =~ ^([1-9]|1[0-9]|2[0-3])h(0|[1-5][0-9])m$ ]]; then
+    major=${BASH_REMATCH[1]}
+    minor=${BASH_REMATCH[2]}
+    lower=$(( major * 3600 + minor * 60 ))
+    upper=$(( lower + 59 ))
+  elif [[ $token =~ ^([1-9][0-9]{0,7})d(0|[1-9]|1[0-9]|2[0-3])h$ ]]; then
+    major=${BASH_REMATCH[1]}
+    minor=${BASH_REMATCH[2]}
+    lower=$(( major * 86400 + minor * 3600 ))
+    upper=$(( lower + 3599 ))
+  else
+    return 1
+  fi
+  printf '%s %s' "$lower" "$upper"
 }
 
-# Age in seconds of the most recent activity across the attributed run's active
-# steps, from each active_steps row's fourth, double-quoted last_activity field.
-# The table's other duration column, active_for, is never read. Every declared
-# row must carry exactly one leading "active|quiet <duration> ago" stamp; any
-# malformed table, row, or stamp makes the whole answer unknown. With several
-# valid rows the smallest age wins.
-nm_active_activity_age() {
-  local rows expected="" row_count=0 row activity rest suffix token secs best=""
+# Bounds for the newest activity represented by a complete active_steps table.
+nm_active_activity_bounds() {
+  local rows expected="" row_count=0 row activity rest suffix token bounds
+  local lower upper newest_lower="" newest_upper=""
   rows=$(printf '%s\n' "$RUN_OUT" | awk '
     /^[[:space:]]*active_steps\[/ {
       if (seen) exit 1
@@ -410,40 +480,58 @@ nm_active_activity_age() {
       remaining--
       next
     }
+    seen && remaining == 0 && /^    / && /,/ {
+      exit 1
+    }
     END {
       if (!seen || remaining != 0) exit 1
     }
-  ') || return 0
+  ') || return 1
   while IFS= read -r row; do
     if [ -z "$expected" ]; then
       expected=$row
       continue
     fi
     activity=$(printf '%s\n' "$row" \
-      | sed -n 's/^[[:space:]]*[^,]*,[^,]*,[^,]*,"\([^"]*\)",[^,]*,[^,]*[[:space:]]*$/\1/p')
-    [ -n "$activity" ] || return 0
+      | sed -E -n 's/^[[:space:]]*[^,]+,(running|fixing),[^,]+,"([^"]*)",[^,]*,[^,]+[[:space:]]*$/\2/p')
+    [ -n "$activity" ] || return 1
     case "$activity" in
-      active\ *) rest=${activity#active } ;;
       quiet\ *)  rest=${activity#quiet } ;;
-      *)         return 0 ;;
+      *)         rest=$activity ;;
     esac
     token=${rest%% *}
-    [ -n "$token" ] || return 0
+    [ -n "$token" ] || return 1
     suffix=${rest#"$token"}
     case "$suffix" in
       " ago") ;;
-      " ago: log: "?*) ;;
-      *) return 0 ;;
+      " ago: "?*) ;;
+      *) return 1 ;;
     esac
-    secs=$(duration_token_secs "$token")
-    [ -n "$secs" ] || return 0
-    if [ -z "$best" ] || [ "$secs" -lt "$best" ]; then
-      best=$secs
+    bounds=$(duration_token_bounds "$token") || return 1
+    lower=${bounds%% *}
+    upper=${bounds#* }
+    if [ -z "$newest_lower" ] || [ "$lower" -lt "$newest_lower" ]; then
+      newest_lower=$lower
+    fi
+    if [ -z "$newest_upper" ] || [ "$upper" -lt "$newest_upper" ]; then
+      newest_upper=$upper
     fi
     row_count=$((row_count + 1))
   done <<< "$rows"
-  [ -n "$expected" ] && [ "$row_count" -eq "$expected" ] && [ -n "$best" ] \
-    && printf '%s' "$best"
+  [ -n "$expected" ] && [ "$row_count" -eq "$expected" ] \
+    && [ -n "$newest_lower" ] && [ -n "$newest_upper" ] || return 1
+  printf '%s %s' "$newest_lower" "$newest_upper"
+}
+
+nm_progress_advanced_since() {  # <anchor-epoch>
+  local anchor=$1 bounds oldest
+  [[ $anchor =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+  [ "${#anchor}" -le 10 ] || return 1
+  [ -n "$PROGRESS_OBSERVED_AFTER" ] || return 1
+  [ "$anchor" -le "$PROGRESS_OBSERVED_AFTER" ] || return 1
+  bounds=$(nm_active_activity_bounds) || return 1
+  oldest=${bounds#* }
+  [ "$oldest" -le "$(( PROGRESS_OBSERVED_AFTER - anchor ))" ]
 }
 
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
@@ -544,6 +632,21 @@ nm_coarse_head_matches_worktree() {  # <short-sha>
   return 1
 }
 
+# --- progress verdict (--progress) ------------------------------------------
+
+if [ "$PROGRESS_MODE" = 1 ]; then
+  if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] \
+    && command -v no-mistakes >/dev/null 2>&1 \
+    && nm_progress_status \
+    && nm_progress_run_matches_worktree \
+    && nm_progress_advanced_since "$PROGRESS_ANCHOR"; then
+    printf 'progress: advanced\n'
+    exit 0
+  fi
+  printf 'progress: unknown\n'
+  exit 0
+fi
+
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
 # $RUN_OUT is real `axi status` TOON with step/gate detail; "coarse" means only
@@ -551,17 +654,11 @@ HAVE_RUN=0
 # run-step block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
-RUN_RESULT=0
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
-  if [ "$PROGRESS_MODE" = 1 ]; then
-    RUN_OUT=$(nm_run_bounded axi status)
-    RUN_RESULT=$?
-  else
-    RUN_OUT=$(nm_run axi status)
-  fi
-  if [ "$RUN_RESULT" = 0 ] && [ -n "$RUN_OUT" ]; then
+  RUN_OUT=$(nm_run axi status)
+  if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
@@ -572,34 +669,14 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
-      # for no better answer. Skipped entirely in --progress mode: a coarse
-      # match carries no step detail, so it could only answer unknown anyway.
-      if [ "$PROGRESS_MODE" != 1 ]; then
-        COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-        if [ -n "$COARSE_STATUS" ]; then
-          HAVE_RUN=1
-          RUN_SOURCE=coarse
-        fi
+      # for no better answer.
+      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
+      if [ -n "$COARSE_STATUS" ]; then
+        HAVE_RUN=1
+        RUN_SOURCE=coarse
       fi
     fi
   fi
-fi
-
-# --- progress answer (--progress) -------------------------------------------
-# Answered from the SAME attribution as the state path above, so a run that
-# belongs to another branch, or to a rewritten head, can never be mistaken for
-# this crew's progress. Every unproven case answers unknown.
-
-if [ "$PROGRESS_MODE" = 1 ]; then
-  ACTIVITY_AGE=""
-  if [ "$HAVE_RUN" = 1 ] && [ "$RUN_SOURCE" = full ]; then
-    ACTIVITY_AGE=$(nm_active_activity_age)
-  fi
-  case "$ACTIVITY_AGE" in
-    ''|*[!0-9]*) printf 'activity_age: unknown\n' ;;
-    *)           printf 'activity_age: %s\n' "$ACTIVITY_AGE" ;;
-  esac
-  exit 0
 fi
 
 # --- run-step authoritative path -------------------------------------------
