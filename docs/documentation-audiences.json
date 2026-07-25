@@ -144,6 +144,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/fleet-supervision/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/fmx-respond/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -165,6 +169,10 @@
     },
     {
       "path": ".agents/skills/stuck-crewmate-recovery/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/task-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
     {
