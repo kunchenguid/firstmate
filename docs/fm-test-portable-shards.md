@@ -49,7 +49,7 @@ Phase 1 averages used for balance (mean of available serial `duration_ms` across
 ## Balancing history
 
 The original 30-script set used longest-processing-time (LPT) assignment onto two workers with the Phase 1 averages above.
-After selector removal, the lanes retain that assignment with `tests/fm-dispatch-select.test.sh` removed from `portable-parallel-1`.
+The current 29-script lanes retain that assignment after one 283 ms candidate was removed from `portable-parallel-1`.
 The current totals are therefore intentionally not a fresh LPT balance of the 29-script set.
 Do not rebalance alphabetically or by family intuition.
 Shard execution order remains longest-first within each retained lane.
