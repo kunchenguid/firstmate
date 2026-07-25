@@ -16,47 +16,14 @@
 #   5. a plain absolute path (no ~/$HOME) passes through unchanged.
 #   6. shell metacharacters in the value stay single-quoted, never re-parsed
 #      or executed at launch (injection guard).
+#   7. blank and `#` comment lines above the value are skipped, matching the
+#      single-value reader config/backend and config/secondmate-harness use.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fm-spawn-helpers.sh disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/fm-spawn-helpers.sh"
 
-SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-ccd)
-
-# A fake tmux that satisfies fm-spawn's tmux backend and records the literal
-# launch string. The launch command is the only send-keys call that uses `-l`
-# (fm_backend_tmux_send_literal); the `treehouse get` and GOTMPDIR sends use the
-# text-line form (trailing Enter, no -l) and the final Enter uses send_key, so
-# capturing the argument after `-l` isolates the launch string. The pane-path
-# query returns FM_FAKE_PANE_PATH so worktree discovery resolves immediately.
-make_spawn_fakebin() {
-  local dir=$1 fakebin
-  fakebin=$(fm_fakebin "$dir")
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
-case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-  new-window) printf '@1\n'; exit 0 ;;
-  list-windows|has-session|new-session|set-window-option|kill-window) exit 0 ;;
-  send-keys)
-    prev=
-    for a in "$@"; do
-      [ "$prev" = "-l" ] && printf '%s' "$a" > "${FM_SEND_LOG:?}"
-      prev=$a
-    done
-    exit 0 ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
-  printf '%s\n' "$fakebin"
-}
 
 # Build one isolated case (home + project + worktree + fakebin), returning its
 # fields. Each case gets a fresh id so state/data never collide across cases.
@@ -66,24 +33,19 @@ make_spawn_case() {
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  fakebin=$(fm_spawn_fakebin "$case_dir/fake" gh-axi gh)
   id="ccd-$name-x1"
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  printf 'brief\n' > "$home/data/$id/brief.md"
+  fm_spawn_home_skeleton "$home"
+  fm_spawn_seed_task "$home" "$id"
   fm_git_worktree "$proj" "$wt" "fm/$id"
-  touch "$home/state/.last-watcher-beat"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$id"
 }
 
 # Drive a real claude ship spawn and echo the recorded launch string.
 run_claude_spawn() {
   local home=$1 proj=$2 wt=$3 fakebin=$4 id=$5 send_log=$6 out
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
-    FM_SEND_LOG="$send_log" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$proj" claude 2>&1) || { echo "SPAWN-FAILED: $out" >&2; return 1; }
+  out=$(fm_spawn_run "$home" "$wt" "$fakebin" "$send_log" "$id" "$proj" claude) \
+    || { echo "SPAWN-FAILED: $out" >&2; return 1; }
   cat "$send_log"
 }
 
@@ -227,9 +189,59 @@ EOF
   pass "shell metacharacters in the config dir stay single-quoted (injection guard)"
 }
 
+test_config_dir_skips_blank_and_comment_lines() {
+  local rec case_dir home proj wt fakebin id send_log launch ccd
+  rec=$(make_spawn_case blank-and-comment)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  # A leading blank line (an editor-added newline) must not blank the knob, and a
+  # leading `#` comment must never become the config dir itself - the same
+  # first-non-empty-non-comment-line reader config/backend and
+  # config/secondmate-harness use.
+  ccd="$case_dir/commented-claude-home"
+  printf '\n  \n# the authenticated account for crewmates\n%s\n' "$ccd" \
+    > "$home/config/crew-config-dir"
+  send_log="$case_dir/launch.log"
+
+  launch=$(run_claude_spawn "$home" "$proj" "$wt" "$fakebin" "$id" "$send_log") \
+    || fail "claude spawn with blank and comment lines failed"
+
+  case "$launch" in
+    "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CONFIG_DIR='$ccd' claude --dangerously-skip-permissions "*) : ;;
+    *) fail "blank/comment lines were not skipped by the config reader"$'\n'"--- launch ---"$'\n'"$launch" ;;
+  esac
+  assert_not_contains "$launch" "the authenticated account for crewmates" \
+    "a comment line must never reach the launch as the config dir"
+  pass "blank and comment lines above the value are skipped, not taken as the config dir"
+}
+
+test_comment_only_file_is_backward_compatible() {
+  local rec case_dir home proj wt fakebin id send_log launch
+  rec=$(make_spawn_case comment-only)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  # A file with no real value must behave exactly like an absent file.
+  printf '\n# no config dir chosen yet\n' > "$home/config/crew-config-dir"
+  send_log="$case_dir/launch.log"
+
+  launch=$(run_claude_spawn "$home" "$proj" "$wt" "$fakebin" "$id" "$send_log") \
+    || fail "claude spawn with a comment-only config file failed"
+
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR" "a comment-only knob must not add a CLAUDE_CONFIG_DIR prefix"
+  case "$launch" in
+    "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions "*) : ;;
+    *) fail "comment-only knob changed the bare-claude launch prefix"$'\n'"--- launch ---"$'\n'"$launch" ;;
+  esac
+  pass "a blank/comment-only config/crew-config-dir keeps the bare-claude launch byte-identical"
+}
+
 test_config_dir_adds_prefix
 test_absent_knob_is_backward_compatible
 test_config_dir_expands_tilde
 test_config_dir_expands_home_var
 test_config_dir_plain_path_unchanged
 test_config_dir_metachars_stay_quoted
+test_config_dir_skips_blank_and_comment_lines
+test_comment_only_file_is_backward_compatible

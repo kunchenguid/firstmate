@@ -651,8 +651,12 @@ esac
 # crewmate authenticates with. On a multi-account machine the default ~/.claude
 # can be empty/unauthenticated, stranding a bare-`claude` crewmate on the login
 # wall; pointing it at an authenticated dir makes the spawn hands-free. The
-# trimmed value becomes a `CLAUDE_CONFIG_DIR=<dir> ` env prefix scoped to this
-# firstmate-launched agent, so it never mutates the captain's global config.
+# value is the FIRST NON-EMPTY, NON-COMMENT line, trimmed - the same
+# single-value config reader the sibling knobs use (config/backend in
+# fm-backend.sh, config/secondmate-harness in fm-harness.sh), so a leading blank
+# line cannot silently blank the knob and a leading `#` comment cannot become
+# the config dir. It becomes a `CLAUDE_CONFIG_DIR=<dir> ` env prefix scoped to
+# this firstmate-launched agent, so it never mutates the captain's global config.
 # A leading `~`/`~/` and any `$HOME`/`${HOME}` are expanded HERE and the RESULT
 # is shell-quoted, so the launch string carries a fully resolved absolute path.
 # We deliberately do not drop the quoting and let the shell re-parse the raw
@@ -662,12 +666,19 @@ esac
 # today's bare-`claude`, default-config-dir behavior. Only the claude template
 # carries the placeholder.
 claude_config_dir_prefix() {
-  local harness=$1 dir=
+  local harness=$1 line dir=
   [ "$harness" = claude ] || return 0
   [ -f "$CONFIG/crew-config-dir" ] || return 0
-  dir=$(head -n 1 "$CONFIG/crew-config-dir")
-  dir="${dir#"${dir%%[![:space:]]*}"}"   # trim leading whitespace
-  dir="${dir%"${dir##*[![:space:]]}"}"   # trim trailing whitespace
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"   # trim leading whitespace
+    line="${line%"${line##*[![:space:]]}"}"   # trim trailing whitespace
+    [ -n "$line" ] || continue
+    case "$line" in
+      '#'*) continue ;;
+    esac
+    dir=$line
+    break
+  done < "$CONFIG/crew-config-dir"
   [ -n "$dir" ] || return 0
   # shellcheck disable=SC2088  # Literal tilde is matched here, not expanded by the shell.
   case "$dir" in
