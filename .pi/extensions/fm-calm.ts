@@ -1,10 +1,11 @@
 // Firstmate's home-persistent Pi transcript presentation toggle.
 //
-// Compatibility boundary: Pi 0.81.1 exposes built-in ToolDefinitions, per-slot
-// renderers, renderShell: "self", session_start replacement reasons,
+// Compatibility boundary: Pi 0.82.0 exposes session_start replacement reasons,
 // ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), and
 // setHiddenThinkingLabel(). The focused tests pin those assumptions. Exact-version
-// presentation adapters cover collapsed assistant thinking and operational user rows;
+// presentation adapters cover collapsed assistant thinking and operational user rows.
+// Calm intentionally does not re-register Pi's built-in tools, because same-name
+// extension tools replace their built-in source identity in pi.getAllTools().
 // Pi still exposes no global renderer for arbitrary built-in or custom rows.
 // docs/configuration.md owns the home-local Calm preference contract.
 import { randomUUID } from "node:crypto";
@@ -17,58 +18,17 @@ import {
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type {
-  ExtensionAPI,
-  ToolDefinition,
-  ToolRenderResultOptions,
-} from "@earendil-works/pi-coding-agent";
-import {
-  createBashToolDefinition,
-  createEditToolDefinition,
-  createFindToolDefinition,
-  createGrepToolDefinition,
-  createLsToolDefinition,
-  createReadToolDefinition,
-  createWriteToolDefinition,
-} from "@earendil-works/pi-coding-agent";
-import { Box, Container, getKeybindings, type Component } from "@earendil-works/pi-tui";
-import type { TSchema } from "typebox";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getKeybindings } from "@earendil-works/pi-tui";
 import { installCalmAssistantLayout } from "./lib/fm-calm-assistant-layout.ts";
 import { installCalmOperationalUserLayout } from "./lib/fm-calm-operational-user-layout.ts";
 import {
-  calmPresentationHides,
   calmPresentationIsActive,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
   registerFirstmateSyntheticPresentation,
   setCalmPresentation,
   setCalmStockExportRendering,
 } from "./lib/fm-calm-visibility.ts";
-
-type DefinitionFactory<TParams extends TSchema, TDetails, TState> = (
-  cwd: string,
-) => ToolDefinition<TParams, TDetails, TState>;
-
-type RenderContext<TParams extends TSchema, TDetails, TState> = Parameters<
-  NonNullable<ToolDefinition<TParams, TDetails, TState>["renderCall"]>
->[2];
-
-type RenderArgs<TParams extends TSchema, TDetails, TState> = Parameters<
-  NonNullable<ToolDefinition<TParams, TDetails, TState>["renderCall"]>
->[0];
-
-type RenderTheme<TParams extends TSchema, TDetails, TState> = Parameters<
-  NonNullable<ToolDefinition<TParams, TDetails, TState>["renderCall"]>
->[1];
-
-type RenderResult<TParams extends TSchema, TDetails, TState> = Parameters<
-  NonNullable<ToolDefinition<TParams, TDetails, TState>["renderResult"]>
->[0];
-
-type StandardShellState = {
-  shell?: Box;
-  call?: Component;
-  result?: Component;
-};
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
@@ -114,114 +74,6 @@ export default function (pi: ExtensionAPI) {
   };
 
   registerFirstmateSyntheticPresentation(pi);
-
-  function registerBuiltIn<TParams extends TSchema, TDetails, TState>(
-    factory: DefinitionFactory<TParams, TDetails, TState>,
-  ): void {
-    const definitions = new Map<string, ToolDefinition<TParams, TDetails, TState>>();
-    const definitionFor = (cwd: string): ToolDefinition<TParams, TDetails, TState> => {
-      let definition = definitions.get(cwd);
-      if (!definition) {
-        definition = factory(cwd);
-        definitions.set(cwd, definition);
-      }
-      return definition;
-    };
-
-    const original = definitionFor(process.cwd());
-    const originalRenderCall = original.renderCall;
-    const originalRenderResult = original.renderResult;
-    const originalSelfShell = original.renderShell === "self";
-    const standardShells = new WeakMap<object, StandardShellState>();
-
-    if (!originalRenderCall || !originalRenderResult) {
-      throw new Error(`Firstmate calm mode requires both render slots for Pi built-in tool ${original.name}`);
-    }
-
-    const shellStateFor = (
-      context: RenderContext<TParams, TDetails, TState>,
-    ): StandardShellState => {
-      const rowState = context.state as object;
-      let shellState = standardShells.get(rowState);
-      if (!shellState) {
-        shellState = {};
-        standardShells.set(rowState, shellState);
-      }
-      return shellState;
-    };
-
-    const refreshStandardShell = (
-      state: StandardShellState,
-      theme: RenderTheme<TParams, TDetails, TState>,
-      context: RenderContext<TParams, TDetails, TState>,
-    ): Box => {
-      const background = context.isPartial
-        ? (text: string) => theme.bg("toolPendingBg", text)
-        : context.isError
-          ? (text: string) => theme.bg("toolErrorBg", text)
-          : (text: string) => theme.bg("toolSuccessBg", text);
-      const shell = state.shell ?? new Box(1, 1, background);
-      state.shell = shell;
-      shell.setBgFn(background);
-      shell.clear();
-      if (state.call) shell.addChild(state.call);
-      if (state.result) shell.addChild(state.result);
-      return shell;
-    };
-
-    pi.registerTool({
-      ...original,
-      renderShell: "self",
-
-      async execute(toolCallId, params, signal, onUpdate, ctx) {
-        return definitionFor(ctx.cwd).execute(toolCallId, params, signal, onUpdate, ctx);
-      },
-
-      renderCall(
-        args: RenderArgs<TParams, TDetails, TState>,
-        theme: RenderTheme<TParams, TDetails, TState>,
-        context: RenderContext<TParams, TDetails, TState>,
-      ) {
-        if (exportRendering) return originalRenderCall(args, theme, context);
-        if (calmPresentationHides("assistant-tool-call")) return new Container();
-        if (originalSelfShell) return originalRenderCall(args, theme, context);
-
-        const state = shellStateFor(context);
-        state.call = originalRenderCall(args, theme, {
-          ...context,
-          lastComponent: state.call,
-        });
-        return refreshStandardShell(state, theme, context);
-      },
-
-      renderResult(
-        result: RenderResult<TParams, TDetails, TState>,
-        options: ToolRenderResultOptions,
-        theme: RenderTheme<TParams, TDetails, TState>,
-        context: RenderContext<TParams, TDetails, TState>,
-      ) {
-        if (exportRendering) return originalRenderResult(result, options, theme, context);
-        if (calmPresentationHides("tool-result")) return new Container();
-        if (originalSelfShell) return originalRenderResult(result, options, theme, context);
-
-        const state = shellStateFor(context);
-        state.result = originalRenderResult(result, options, theme, {
-          ...context,
-          lastComponent: state.result,
-        });
-        refreshStandardShell(state, theme, context);
-        return new Container();
-      },
-    });
-  }
-
-  registerBuiltIn(createReadToolDefinition);
-  registerBuiltIn(createBashToolDefinition);
-  registerBuiltIn(createEditToolDefinition);
-  registerBuiltIn(createWriteToolDefinition);
-  registerBuiltIn(createGrepToolDefinition);
-  registerBuiltIn(createFindToolDefinition);
-  registerBuiltIn(createLsToolDefinition);
 
   pi.on("session_start", (_event, ctx) => {
     exportRendering = false;

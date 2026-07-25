@@ -1,4 +1,4 @@
-// Pi 0.81.1's transcript owner adds the ordinary-user spacer and row together.
+// Pi 0.82.0's transcript owner adds the ordinary-user spacer and row together.
 // This exact-version adapter changes only that presentation and never message delivery.
 import {
   InteractiveMode,
@@ -40,7 +40,7 @@ type CalmOperationalUserLayoutPatch = {
 };
 
 const CALM_OPERATIONAL_USER_LAYOUT_PATCH = Symbol.for(
-  "firstmate:calm-operational-user-layout:pi-0.81.1",
+  "firstmate:calm-operational-user-layout:pi-0.82.0",
 );
 const LEGACY_CALM_OPERATIONAL_PREFIX = "\u2063Supervisor escalate (";
 

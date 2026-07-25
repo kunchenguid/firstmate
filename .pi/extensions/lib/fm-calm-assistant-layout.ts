@@ -14,7 +14,7 @@ type CalmAssistantLayoutPatch = {
 };
 
 const CALM_ASSISTANT_LAYOUT_PATCH = Symbol.for(
-  "firstmate:calm-assistant-layout:pi-0.81.1",
+  "firstmate:calm-assistant-layout:pi-0.82.0",
 );
 
 export function installCalmAssistantLayout(): void {

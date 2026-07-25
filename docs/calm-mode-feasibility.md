@@ -5,17 +5,17 @@ This document owns the version-scoped feasibility evidence, Pi transcript taxono
 
 ## Required extension surface
 
-A qualifying implementation must auto-load from the trusted project, persist the toggle choice for the effective Firstmate home across Pi session starts and resumes, keep Pi's built-in working activity visible, emit no Calm status row, redraw already-rendered controllable rows, remove supported hidden rows without gaps, restore ordinary rendering, and leave delivery, tool execution, model context, session storage, export and share operation, diagnostics, and expansion state unchanged.
+A qualifying implementation must auto-load from the trusted project, persist the toggle choice for the effective Firstmate home across Pi session starts and resumes, keep Pi's built-in working activity visible, preserve built-in tool source identity, emit no Calm status row, redraw already-rendered controllable rows, remove supported hidden rows without gaps, restore ordinary rendering, and leave delivery, tool execution, model context, session storage, export and share operation, diagnostics, and expansion state unchanged.
 The governing presentation policy allows genuine original user prompts, genuine user-facing assistant text, and Pi's native working activity.
 Changing persisted context to remove hidden content, filtering provider context, patching installed harness code, or claiming coverage outside a supported renderer does not satisfy that boundary.
 
-## Pi 0.81.1 end-to-end reproduction
+## Pi 0.82.0 activation recheck
 
-The current installed and regression-supported Pi version was verified on 2026-07-22.
+The current installed and regression-supported Pi version was verified on 2026-07-25.
 
 ```text
 $ pi --version
-0.81.1
+0.82.0
 ```
 
 ### Original transcript cleanup
@@ -24,10 +24,12 @@ The pre-cleanup reproduction used a real isolated Pi TUI at 180 columns by 44 ro
 The model called `fm_watch_arm_pi`, the real tool returned `watcher: started Pi extension arm child 1`, and a `done:` status write caused the watcher extension to inject `FIRSTMATE WATCHER WAKE: signal: ...` followed by the stable drain instruction.
 With Calm off, the captured transcript contained the genuine user prompt, the full watcher tool shell, the synthetic user-role wake, four collapsed `Thinking...` labels, built-in tool rows from wake handling, and the final assistant response.
 With the pre-cleanup implementation's Calm mode on, the existing seven built-in tool rows disappeared, but the watcher tool shell, synthetic wake, and all four `Thinking...` labels remained.
-The final screenshot-scale regression reproduced the same transcript after the cleanup and verified that Calm removed those remaining controlled rows while retaining the genuine prompt, a watcher-shaped genuine near-miss prompt, and the genuine assistant responses.
+The final screenshot-scale regression reproduced the same transcript after the cleanup and verified that Calm removed the remaining supported controlled rows while retaining the genuine prompt, a watcher-shaped genuine near-miss prompt, and the genuine assistant responses.
 
 The original proven comparison path was a built-in text tool.
 Calm owned both of that tool's supported renderer slots and switched its shell to `renderShell: "self"`, so returning empty components removed the complete row and `setToolsExpanded` redrew existing tool components.
+That same-name registration path is no longer acceptable for enforced/default Firstmate because Pi reports extension-registered same-name tools with extension provenance instead of `sourceInfo.source: "builtin"`.
+Calm therefore does not re-register Pi's built-in `read`, `bash`, `edit`, `write`, `grep`, `find`, or `ls` tools in the current implementation.
 Adding supported empty renderer slots to a scratch copy of `fm_watch_arm_pi` likewise removed its row while the real watcher still started and the model still returned `PROBE_COMPLETE`.
 Legacy synthetic presentation entries use `CustomEntryComponent`, whose host adds spacing only when its renderer returns content, so an undefined Calm renderer result removes the complete row and can later restore it through the ordinary expansion redraw.
 The later duplicate-turn evidence below supersedes custom-message rerouting as an acceptable implementation for current operational input.
@@ -50,20 +52,20 @@ The earliest divergent layout path was `AssistantMessageComponent.updateContent`
 Pi computed `hasVisibleContent` from the original thinking data and added a leading `Spacer` before applying the hidden-thinking presentation.
 Pi then styled the empty label before constructing `Text`, so the resulting ANSI-only string occupied one rendered row, and a thinking block followed by assistant text also added its ordinary inter-block spacer.
 Each thinking-only tool turn therefore retained two empty rows, while the final thinking-plus-text turn retained two extra rows beyond the final response's normal leading separator.
-The proven tool path diverged through `ToolExecutionComponent`, where the Calm self-render shell returned zero lines for both call and result slots and contributed no residual height.
+The earlier wrapped built-in tool path diverged through `ToolExecutionComponent`, where the Calm self-render shell returned zero lines for both call and result slots and contributed no residual height.
 
 The smallest counterfactual was the thinking-only removal from the same persisted session, which preserved the skill, tools, results, final response, session ordering, and terminal settings while eliminating every unwanted row.
 The single-thinking, tool-call-only, tool-result, Calm-off, and `clearOnShrink` controls deliberately sought disconfirming evidence and isolated collapsed thinking layout from skill, tool, result, and terminal-cache candidates.
 PR 927 made Calm persistent and described controlled rows as gapless while retaining a documented unsupported boundary for collapsed-thinking spacing.
 PR 936 removed the unsafe operational-input reroute and preserved legacy zero-height entries but did not change assistant-message layout.
 
-The fix installs one idempotent Pi 0.81.1 presentation adapter on the exported `AssistantMessageComponent.updateContent` method.
+The fix installs one idempotent Pi 0.82.0 presentation adapter on the exported `AssistantMessageComponent.updateContent` method.
 Only while Calm is active and Pi has collapsed thinking does the adapter pass a shallow thinking-free presentation copy into Pi's ordinary layout calculation, then retain the original message on the component for invalidation and thinking expansion.
 The persisted assistant message, provider context, tool execution, export data, and expansion history remain unchanged.
 Collapsed thinking-only assistant messages now render zero rows, thinking before visible assistant text adds no spacing beyond the text-only baseline, and expanding thinking still renders the original reasoning.
 
 The disconfirming checks deliberately retain supported boundaries.
-An arbitrary third-party custom tool and a built-in read image remain visible because Pi exposes neither a global tool renderer nor image-row control.
+An arbitrary third-party custom tool plus built-in tool rows and images remain visible because Pi exposes neither a global tool renderer nor renderer-only built-in override.
 Expanded thinking remains visible by design, while re-collapsing it returns to zero-height Calm presentation.
 Ordinary user-role near misses remain visible, including quoted current markers, ASCII-only labels, unrelated text before a marker, unrelated text after U+2063, and image-bearing input.
 
@@ -114,7 +116,7 @@ The real Pi viewport moved the unchanged assistant text from row 7 to row 2, ren
 The leading cause would have been falsified if the row or height remained, the provider lost or duplicated the message, or the persisted role or bytes changed.
 None occurred.
 
-The fix installs a separate idempotent Pi 0.81.1 presentation adapter on the exported `InteractiveMode.addMessageToChat` method.
+The fix installs a separate idempotent Pi 0.82.0 presentation adapter on the exported `InteractiveMode.addMessageToChat` method.
 It delegates current recognition to `bin/fm-operational-input.sh`, adds only the evidence-backed bare-U+2063 `Supervisor escalate (` presentation compatibility shape, mounts a `UserMessageComponent` subclass that preserves Pi's stock row plus leading spacer while Calm is off, and returns zero rendered lines while Calm is on.
 It never intercepts the input event, rewrites the message, changes its role, filters model context, or changes session data.
 Messages containing an image are left on Pi's ordinary path even when their text equals an operational envelope because Firstmate's authoritative producers are text-only.
@@ -141,21 +143,21 @@ The session-start nudge already originates as a non-displayed custom message, so
 Legacy Calm custom entries and messages remain in existing session artifacts, and their presentation entry still uses the supported zero-height renderer while active.
 Cycling tool expansion and restoring its original value rebuilds controllable rows and leaves final `Ctrl+O` state unchanged.
 Exported and shared HTML retain genuine user prompts, genuine assistant responses, current operational user messages, ordinary tool rendering, and the complete session artifact.
-Serialized session data and Pi 0.81.1's sidebar tree also retain legacy hidden operational custom messages.
+Serialized session data and Pi 0.82.0's sidebar tree also retain legacy hidden operational custom messages.
 
 ## Complete currently reachable Pi transcript taxonomy
 
-The taxonomy was derived from Pi 0.81.1's installed public declarations, documentation, examples, `interactive-mode.js`, and its exported component implementations.
+The taxonomy was originally derived from Pi 0.81.1's installed public declarations, documentation, examples, `interactive-mode.js`, and its exported component implementations, then rechecked against Pi 0.82.0 for activation.
 The test fixture enumerates every class below through the centralized policy, and the interactive fixture exercises the screenshot classes, current user-role operational input, and legacy synthetic presentation entries.
 
-| Policy class | Pi transcript path | Calm result on Pi 0.81.1 |
+| Policy class | Pi transcript path | Calm result on Pi 0.82.0 |
 | --- | --- | --- |
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including every tested operational near miss. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
 | `assistant-thinking` | Thinking content in `AssistantMessageComponent` | Collapsed reasoning is removed from the shallow presentation copy before layout and occupies zero rows; explicit expansion renders the original reasoning. |
-| `assistant-tool-call` | `ToolExecutionComponent` | Seven built-ins and `fm_watch_arm_pi` hidden; arbitrary custom tools remain an unsupported boundary. |
-| `tool-result` | `ToolExecutionComponent` | Text results for the controlled tools hidden; arbitrary custom results remain an unsupported boundary. |
-| `tool-image` | Image children appended outside tool renderer slots | Unsupported boundary; remains visible. |
+| `assistant-tool-call` | `ToolExecutionComponent` | `fm_watch_arm_pi` is hidden through its extension-owned renderer; Pi built-ins and arbitrary custom tools remain visible. |
+| `tool-result` | `ToolExecutionComponent` | `fm_watch_arm_pi` text results are hidden through its extension-owned renderer; Pi built-in results and arbitrary custom results remain visible. |
+| `tool-image` | Image children appended outside tool renderer slots | Unsupported boundary; remains visible, including built-in read images. |
 | `user-bash` | `BashExecutionComponent` for `!` and `!!` | Unsupported boundary; remains visible. |
 | `skill-invocation` | `SkillInvocationMessageComponent` plus parsed user text | Unsupported boundary; remains visible. |
 | `custom-message` | `CustomMessageComponent` when `display` is true | The session-start nudge and legacy Calm context messages use `display: false`; arbitrary extension messages remain an unsupported boundary. |
@@ -167,17 +169,19 @@ The test fixture enumerates every class below through the centralized policy, an
 | `system-notice` | `showStatus`, `showError`, compaction, retry, and startup warning rows | Unsupported boundary; remains visible. |
 | `cache-notice` | Non-persisted cache-miss `Text` row | Unsupported boundary; remains visible. |
 | `project-trust-warning` | Non-persisted startup `Text` row | Unsupported boundary; remains visible. |
-| `synthetic-user` | Firstmate extension `sendUserMessage`, terminal-injected input, Firstmate-generated Pi positional brief, or the already non-displayed session-start nudge | Canonically classified text-only operational user messages stay ordinary semantic user messages but render through the zero-height Pi 0.81.1 adapter under Calm; legacy entries stay gaplessly controllable, and the session-start nudge retains its existing non-displayed custom-message path. |
+| `synthetic-user` | Firstmate extension `sendUserMessage`, terminal-injected input, Firstmate-generated Pi positional brief, or the already non-displayed session-start nudge | Canonically classified text-only operational user messages stay ordinary semantic user messages but render through the zero-height Pi 0.82.0 adapter under Calm; legacy entries stay gaplessly controllable, and the session-start nudge retains its existing non-displayed custom-message path. |
 | `synthetic-assistant` | No authoritative Firstmate source found | Policy-hidden, but Pi exposes no generic assistant-role renderer. |
 | `unknown` | Future or unclassified transcript component | Policy-hidden, but no generic renderer exists; never claimed as covered. |
 
 The installed extension API has no supported global transcript filter, user-message renderer, assistant-message renderer, chat-container API, or generic custom-tool wrapper.
-Pi 0.81.1 exports `AssistantMessageComponent` and `InteractiveMode`, so Calm uses separate exact-version, idempotent adapters for assistant thinking layout and the complete operational-user transcript row while leaving all message data and non-Calm rendering unchanged.
-General component replacement, ANSI cursor erasure, provider-context mutation, and installed-file patching remain rejected as unsupported or preservation-breaking workarounds.
+Pi 0.82.0 exports `AssistantMessageComponent` and `InteractiveMode`, so Calm uses separate exact-version, idempotent adapters for assistant thinking layout and the complete operational-user transcript row while leaving all message data and non-Calm rendering unchanged.
+Pi's documented built-in tool renderer example uses same-name `registerTool()` replacement, not a renderer-only built-in hook, so default Calm does not wrap built-ins.
+General component replacement, ANSI cursor erasure, provider-context mutation, built-in tool replacement, and installed-file patching remain rejected as unsupported or preservation-breaking workarounds.
 
 ## Cross-harness verification record
 
-The original five-harness inspection was performed on 2026-07-22, with every integration surface rechecked and Pi reverified at 0.81.1 on 2026-07-23 for the latest Calm presentation change.
+The original five-harness inspection was performed on 2026-07-22, with every integration surface rechecked and Pi reverified at 0.81.1 on 2026-07-23 for the earlier Calm presentation change.
+The Pi surface was rechecked at 0.82.0 on 2026-07-25 for activation and built-in source identity.
 
 ```text
 $ claude --version
@@ -187,7 +191,7 @@ codex-cli 0.144.6
 $ opencode --version
 1.17.18
 $ pi --version
-0.81.1
+0.82.0
 $ grok --version
 grok 0.2.106 (bde89716f679)
 ```
@@ -197,7 +201,7 @@ grok 0.2.106 (bde89716f679)
 | Claude Code 2.1.218 | Not feasible through the inspected supported project surface. | Project hooks can observe lifecycle and tool events, while the plugin CLI packages supported components; neither inspected surface exposes a transcript-row renderer or transcript-wide redraw API. |
 | Codex CLI 0.144.6 | Not feasible through the inspected supported project surface. | The tracked hooks expose session, pre-tool, and stop handling, while the plugin and feature inventories expose no TUI tool-row renderer or transcript redraw control. |
 | OpenCode 1.17.18 | Not feasible without violating the preservation boundary. | Plugins expose events and tool execution hooks, not a built-in transcript-row renderer; same-name tool replacement changes execution rather than presentation alone. |
-| Pi 0.81.1 | Partially feasible with two exact-version exported-class adapters. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, and expansion redraws; exported assistant and interactive-mode classes provide the version-pinned collapsed-thinking and operational-user layout boundaries, while generic user, tool, and status filtering remains unavailable. |
+| Pi 0.82.0 | Partially feasible with two exact-version exported-class adapters. | Public APIs control working visibility, collapsed labels, custom entries, and expansion redraws; exported assistant and interactive-mode classes provide the version-pinned collapsed-thinking and operational-user layout boundaries, while generic user, built-in tool, and status filtering remains unavailable. |
 | Grok CLI 0.2.106 | Not feasible through the inspected supported project surface. | Project hooks expose lifecycle and tool interception, while the plugin CLI exposes no row-renderer contract; `--minimal` changes the whole screen mode rather than selected transcript rows. |
 
 These conclusions are deliberately limited to the named versions and supported surfaces.
@@ -208,14 +212,14 @@ Only Pi's Calm presentation implementation changed; every producer and non-Pi tr
 
 ## Regression coverage
 
-`tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers, verifies all seven built-ins plus `fm_watch_arm_pi`, exercises redraw of already-rendered tool, thinking, current operational-user, and legacy synthetic rows, and covers every policy class.
+`tests/fm-calm-pi-extension.test.sh` asserts Calm registers no tool replacements, verifies the seven Pi built-ins keep builtin provenance while `fm_watch_arm_pi` remains extension-owned, exercises redraw of already-rendered thinking, current operational-user, and legacy synthetic rows, and covers every policy class.
 It covers persisted preference restoration across every session-start reason and a real restart, proves Pi's native `Working...` row through a delayed deterministic provider, asserts no Calm status row, verifies operational messages remain exact ordinary user-role session entries and complete exports, and drives genuine 100 by 44, 160 by 36, and 180 by 44 terminal fixtures.
-A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool-result blocks, asserts that the collapsed skill-to-final gap equals the two-row visible-only baseline, expands and re-collapses original thinking, restores Calm-off rendering, verifies persisted hidden history, and repeats the geometry assertion after restart with `terminal.clearOnShrink` explicitly off.
+A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool-result blocks, asserts collapsed thinking remains hidden while built-in read rows stay visible, expands and re-collapses original thinking, verifies persisted history, and repeats the restart check with `terminal.clearOnShrink` explicitly off.
 The operational provider path covers Calm loaded on, loaded off, default preference, extension absent, exact watcher delivery, narrow bare-marker legacy input, persisted restart replay, a genuine captain prompt, and adjacent notifications coalesced into one intended processing turn.
 It asserts one persisted and rendered captain answer, exact user-role operational envelopes in order, no replacement custom messages, one processing result, zero operational transcript rows, and the two-row neighboring-assistant geometry for live, adjacent, and restart paths.
 Quoted current markers, ASCII-only labels, ordinary text before a marker, unrelated U+2063 placement, and image-bearing input remain visible in component and native transcript checks.
 `tests/fm-pi-primary-live-e2e.test.sh` also proves the unchanged built-in `Working...` row while Calm is active on the credentialed provider path before continuing its ordinary watcher lifecycle.
-`tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against the installed Pi 0.81.1 declarations.
+`tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against the installed Pi 0.82.0 declarations.
 
 The relevant commands are:
 
@@ -225,25 +229,25 @@ FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 tests/fm-pi-primary-types.test.sh
 ```
 
-## 2026-07-23 verification record
+## 2026-07-25 verification record
 
 The deterministic provider preserves the complete real Pi TUI rendering path without using credentials.
 The credentialed live regression remains opt-in and was not required because this change does not alter watcher delivery or provider integration.
 
 ```text
 $ pi --version
-0.81.1
+0.82.0
 
 $ tests/fm-calm-pi-extension.test.sh
-ok - Pi calm extension is presentation-only with one persisted visibility choice, no Calm status row, native working visibility, supported redraw controls, and the Firstmate watcher-tool integration
+ok - Pi calm extension is presentation-only with one persisted visibility choice, no built-in tool replacements, native working visibility, supported redraw controls, and the Firstmate watcher-tool integration
 ok - Pi calm resolves its persistent home independently of Pi's launch directory
-ok - Pi calm centralizes transcript visibility, preserves execution/export data, keeps native working visible, and persists its choice across session starts
+ok - Pi calm preserves built-in tool identity, centralizes transcript visibility, preserves export data, keeps native working visible, and persists its choice across session starts
 ok - Pi operational follow-up E2E processes exact user-role notifications once while Calm hides current and adjacent rows, Calm off and absent render them, and restart preserves semantics
-ok - Pi Calm native /skill:ahoy geometry keeps every collapsed thinking and tool block at zero height while preserving expansion, history, restart, and Calm-off rendering
+ok - Pi Calm native /skill:ahoy geometry keeps collapsed thinking at zero height while preserving built-in tool rows, expansion, history, and restart
 ok - Pi calm native E2E keeps Working and captain turns visible, hides exact operational user rows without changing persistence, restores them Calm-off, survives restart, and preserves export plus Ctrl+O behavior
 
 $ tests/fm-pi-primary-types.test.sh
-ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.81.1
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.82.0
 
 $ bin/fm-lint.sh
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
