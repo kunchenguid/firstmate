@@ -100,6 +100,31 @@ SH
   done
 }
 
+# fm_fake_stamped_harnesses <fakebin>: install one fake binary per harness
+# recorded in harness-adapters/SKILL.md, each reporting exactly its recorded
+# build.
+#
+# bin/fm-bootstrap.sh runs the read-only harness build-drift check, which
+# compares those stamps against the harnesses on PATH. A hermetic fakebin PATH
+# has none of them, so without this every bootstrap silence assertion would fail
+# on a drift line per harness. Declaring them present at their recorded build
+# keeps the real check running while silence still means silence. The drift
+# outcomes themselves belong to tests/fm-harness-drift.test.sh.
+fm_fake_stamped_harnesses() {
+  local fakebin=$1 harness version
+  while read -r harness version; do
+    [ -n "$harness" ] || continue
+    cat > "$fakebin/$harness" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" = --version ] && { printf '%s\n' '$version'; exit 0; }
+exit 0
+SH
+    chmod +x "$fakebin/$harness"
+  done <<EOF
+$("$ROOT/bin/fm-harness-drift.sh" --stamps)
+EOF
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so

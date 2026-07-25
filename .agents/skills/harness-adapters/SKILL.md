@@ -35,6 +35,27 @@ If `config/crew-harness` or `config/secondmate-harness` names an unverified adap
 Do not pause current work for that future-verification choice, and never launch an unverified adapter.
 If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
 
+## Recorded build stamps
+
+Every fact in the per-harness sections below was established by one manual observation against one build, so a fact stops describing reality the moment that harness updates.
+The block below is the single machine-readable owner of the newest build each harness section's facts were checked against.
+`bin/fm-harness-drift.sh` parses it, compares it to the installed binaries, and prints one `HARNESS_DRIFT:` line per mismatch at session start; the dated stamps inside the prose stay as historical observation records.
+When you re-verify a harness against a newer build, update its line here in the same change.
+
+```fm-harness-builds
+claude 2.1.219
+codex 0.144.4
+grok 0.2.103
+opencode 1.18.4
+pi 0.80.6
+```
+
+`docs/verification/harness-builds.md` owns the mechanism record and its active dated evidence.
+
+Drift is expected and blocks nothing.
+A drift line means the facts for that harness need re-verification before you rely on them, in either direction: a stamp ahead of the installed build is as stale as one behind it, because neither describes the build that is actually running.
+An absent harness means none of its recorded facts are verified against anything present on this machine.
+
 ## Detection
 
 `bin/fm-harness.sh` prints firstmate's own harness, using verified env markers first and then process ancestry.
@@ -251,6 +272,11 @@ The companion `.opencode/plugins/fm-primary-watch-arm.js` owns normal TUI watche
 The follow-up was verified in the interactive TUI; `opencode run` can exit before displaying a queued follow-up, so the adapter is fail-open in headless mode.
 
 ## pi (VERIFIED 2026-06-11)
+
+**Pi is not installed on this machine (observed 2026-07-25): `command -v pi` resolves nothing.**
+Every fact in this section, including the launch-profile row and the primary-session guard fact, is therefore unverified against any currently present Pi build; treat it as knowledge awaiting re-verification, not as a current description.
+Re-verify against the installed build before dispatching a crewmate or secondmate on pi, and re-stamp the recorded build above in the same change.
+`bin/fm-harness-drift.sh` reports this absence at session start, so it self-corrects on a home where pi is present.
 
 | Fact | Value |
 |---|---|

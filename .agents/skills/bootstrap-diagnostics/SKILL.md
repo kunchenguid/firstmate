@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, HARNESS_DRIFT, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -48,5 +48,10 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Investigate the reason because that secondmate is not guaranteed live.
 - `NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>` - the secondmate sweep fast-forwarded a running secondmate home and its loaded instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) changed, but the deterministic `fm-send.sh fm-<id>` re-read nudge failed.
   Inspect the reason, keep the pending marker under `state/.secondmate-nudge-pending/` intact, and rerun session start after the endpoint or metadata issue is fixed so bootstrap can retry the exact same marked send.
+- `HARNESS_DRIFT: <harness> recorded <stamp>, installed <version>|not installed here|installed build unreadable` - the build a harness's recorded facts were checked against no longer matches what is installed, in either direction, or that harness is absent from this machine.
+  This never blocks work and needs no captain report on its own: drift is expected whenever a harness updates.
+  Treat it as a standing caveat on the [`harness-adapters` skill](../harness-adapters/SKILL.md)'s facts for that harness - busy signature, exit command, interrupt, dialogs, resume, skill invocation, and quirks - and re-verify the ones a task actually depends on before trusting them.
+  A drifted busy signature is the failure mode that already bit: it makes healthy workers look stopped.
+  When you do re-verify a fact against the current build, update that harness's line in the skill's recorded-build-stamps block in the same change, which is what clears the line.
 - `FMX: X mode on ...` / `FMX: X mode off ...` - bootstrap confirmed or removed the local X-mode poll artifacts (`docs/configuration.md` "X mode (.env)").
   Only when a running watcher needs the cadence transition applied immediately, restart the home-scoped watcher through the emitted harness supervision protocol; bootstrap deliberately never restarts the watcher itself.

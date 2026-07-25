@@ -777,6 +777,7 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
+  fm_fake_stamped_harnesses "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
