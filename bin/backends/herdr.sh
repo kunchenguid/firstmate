@@ -1813,8 +1813,19 @@ fm_backend_herdr_events_capable() {  # <session>
   case "$protocol" in ''|*[!0-9]*) return 1 ;; esac
   [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL" ] || return 1
   schema=$(herdr api schema --json 2>/dev/null) || return 1
-  printf '%s' "$schema" | grep -Fq 'events.subscribe' || return 1
-  printf '%s' "$schema" | grep -Fq 'pane.agent_status_changed' || return 1
+  # Schema is ~220KB. Do not stream it through an early-exit matcher (a quiet
+  # fixed-string search that returns on the first hit): that closes the pipe
+  # while the producer is still writing and prints
+  # "printf: write error: Broken pipe" on a TTY every watcher probe.
+  # case substring matching stays in-process, so no early-close SIGPIPE occurs.
+  case "$schema" in
+    *'events.subscribe'*) ;;
+    *) return 1 ;;
+  esac
+  case "$schema" in
+    *'pane.agent_status_changed'*) ;;
+    *) return 1 ;;
+  esac
   return 0
 }
 

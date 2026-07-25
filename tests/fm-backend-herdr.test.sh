@@ -2417,6 +2417,129 @@ test_wait_transition_clean_timeout_returns_1() {
   pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
 }
 
+# Large synthetic schema (~250KB) with both event-surface needles mid-body so an
+# early-exit grep -Fq on a printf pipe would SIGPIPE the producer (the real
+# herdr api schema payload is ~220KB and both needles land past the first
+# 80KB). Used only by the events_capable regression cases below.
+make_large_events_schema() {  # <path> [omit-needle]
+  local path=$1 omit=${2:-} pad
+  # Pad both sides so a match is neither at offset 0 nor at EOF: that is the
+  # shape that exposed "printf: write error: Broken pipe" under a TTY.
+  pad=$(head -c 120000 /dev/zero | tr '\0' 'x')
+  {
+    printf '%s' "$pad"
+    [ "$omit" = "events.subscribe" ] || printf 'events.subscribe'
+    printf '%s' "$pad"
+    [ "$omit" = "pane.agent_status_changed" ] || printf 'pane.agent_status_changed'
+    printf '%s' "$pad"
+  } > "$path"
+}
+
+test_events_capable_accepts_large_schema_without_broken_pipe() {
+  local dir log resp fb schema_path out
+  dir="$TMP_ROOT/events-cap-ok"; mkdir -p "$dir"
+  log="$dir/log"; resp="$dir/resp"; : > "$log"; mkdir -p "$resp"
+  schema_path="$dir/schema.out"
+  make_large_events_schema "$schema_path"
+  # Call order: status --json (protocol), then api schema --json.
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":true}}' > "$resp/1.out"
+  cp "$schema_path" "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  if ! command -v python3 >/dev/null 2>&1; then
+    # Without a PTY we can still assert the capability verdict; the TTY-visible
+    # broken-pipe symptom needs python3's pty module (same as the live path).
+    out=$(
+      PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+        FM_BACKEND_HERDR_EVENT_READER=/bin/true \
+        bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_events_capable sess; echo rc=$?' "$ROOT" 2>&1
+    )
+    case "$out" in
+      *'Broken pipe'*|*'write error'*)
+        fail "events_capable must not emit a broken-pipe write error, got: $out"
+        ;;
+    esac
+    case "$out" in
+      *'rc=0'*) ;;
+      *) fail "events_capable must return 0 when protocol>=16 and both event needles are present, got: $out" ;;
+    esac
+    pass "fm_backend_herdr_events_capable: large schema with both needles is capable (no python3 for PTY)"
+    return 0
+  fi
+  # Drive under a PTY so bash reports "printf: write error: Broken pipe" the
+  # same way a live watcher terminal does (redirected stderr hides it).
+  out=$(
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+      FM_BACKEND_HERDR_EVENT_READER=/bin/true \
+      python3 - "$ROOT" <<'PY'
+import os, pty, sys
+root = sys.argv[1]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv("/bin/bash", [
+        "bash", "-c",
+        '. "$1/bin/backends/herdr.sh"; fm_backend_herdr_events_capable sess; echo rc=$?',
+        "bash", root,
+    ])
+data = b""
+while True:
+    try:
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            break
+        data += chunk
+    except OSError:
+        break
+os.waitpid(pid, 0)
+sys.stdout.buffer.write(data)
+PY
+  )
+  case "$out" in
+    *'Broken pipe'*|*'write error'*)
+      fail "events_capable must not emit a broken-pipe write error on a TTY, got: $out"
+      ;;
+  esac
+  case "$out" in
+    *'rc=0'*) ;;
+    *) fail "events_capable must return 0 when protocol>=16 and both event needles are present, got: $out" ;;
+  esac
+  pass "fm_backend_herdr_events_capable: large schema with both needles is capable and silent on a TTY"
+}
+
+test_events_capable_rejects_schema_missing_a_needle() {
+  local dir log resp fb schema_path rc
+  dir="$TMP_ROOT/events-cap-miss"; mkdir -p "$dir"
+  log="$dir/log"; resp="$dir/resp"; : > "$log"; mkdir -p "$resp"
+  schema_path="$dir/schema.out"
+  make_large_events_schema "$schema_path" "pane.agent_status_changed"
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":true}}' > "$resp/1.out"
+  cp "$schema_path" "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_EVENT_READER=/bin/true \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_events_capable sess' "$ROOT"
+  rc=$?
+  [ "$rc" = 1 ] || fail "events_capable must return 1 when pane.agent_status_changed is absent, got $rc"
+  pass "fm_backend_herdr_events_capable: schema missing an event needle fails closed"
+}
+
+test_events_capable_does_not_pipe_schema_through_grep_q() {
+  # Source-shape lock: the ~220KB schema must not be fed to an early-exit
+  # consumer via a pipe. That pattern is the broken-pipe defect; reintroducing
+  # it would re-pollute every watcher cycle. Strip comments so the lock looks
+  # only at executable lines.
+  local body code
+  body=$(sed -n '/^fm_backend_herdr_events_capable()/,/^}/p' "$ROOT/bin/backends/herdr.sh")
+  [ -n "$body" ] || fail "could not extract fm_backend_herdr_events_capable from herdr.sh"
+  code=$(printf '%s\n' "$body" | sed -e 's/[[:space:]]*#.*//' -e '/^[[:space:]]*$/d')
+  if printf '%s\n' "$code" | grep -E '(^|[^[:alnum:]_])grep[[:space:]]' >/dev/null; then
+    fail "events_capable must not invoke grep on the schema (broken-pipe regression)"
+  fi
+  if printf '%s\n' "$code" | grep -E 'printf.*\|' >/dev/null; then
+    fail "events_capable must not pipe printf of the schema into a consumer (broken-pipe regression)"
+  fi
+  pass "fm_backend_herdr_events_capable: source does not pipe schema through early-exit grep -q"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -2535,3 +2658,6 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+test_events_capable_accepts_large_schema_without_broken_pipe
+test_events_capable_rejects_schema_missing_a_needle
+test_events_capable_does_not_pipe_schema_through_grep_q
