@@ -62,7 +62,7 @@
 # runs-list fallback, while this mode uses neither.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
-# of state; exit 2 only on a usage error (no id).
+# of state; exit 2 on a usage or configuration error.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -88,8 +88,25 @@ PROGRESS_ANCHOR=${2:-}
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
-NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
-case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
+NM_TIMEOUT_MAX=86400
+if [ "${FM_CREW_STATE_NM_TIMEOUT+x}" = x ]; then
+  NM_TIMEOUT=$FM_CREW_STATE_NM_TIMEOUT
+else
+  NM_TIMEOUT=10
+fi
+invalid_nm_timeout() {
+  printf "fm-crew-state.sh: FM_CREW_STATE_NM_TIMEOUT value '%s' must be a positive integer from 1 through %s seconds\n" \
+    "$NM_TIMEOUT" "$NM_TIMEOUT_MAX" >&2
+  exit 2
+}
+case "$NM_TIMEOUT" in ''|*[!0-9]*) invalid_nm_timeout ;; esac
+NM_TIMEOUT_DECIMAL=${NM_TIMEOUT#"${NM_TIMEOUT%%[!0]*}"}
+[ -n "$NM_TIMEOUT_DECIMAL" ] || NM_TIMEOUT_DECIMAL=0
+if [ "$NM_TIMEOUT_DECIMAL" = 0 ] \
+  || [ "${#NM_TIMEOUT_DECIMAL}" -gt "${#NM_TIMEOUT_MAX}" ] \
+  || [ "$NM_TIMEOUT_DECIMAL" -gt "$NM_TIMEOUT_MAX" ]; then
+  invalid_nm_timeout
+fi
 # How many of the most recent `no-mistakes runs` rows the cross-branch fallback
 # (nm_runs_status_for_branch, below) scans. Generous enough to still find a
 # branch's own run on a busy multi-crew fleet without listing the entire

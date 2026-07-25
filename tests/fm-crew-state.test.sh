@@ -1099,6 +1099,68 @@ SH
   pass "no timeout command uses perl bound"
 }
 
+test_timeout_configuration_is_shared_and_strict() {
+  reset_fakes
+  local d out err rc value anchor timeout_args
+  d=$(new_case timeout-config)
+  make_repo_on_branch "$d/wt" fm/feat-timeout-config
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-timeout-config.meta" "window=fm:fm-feat-timeout-config" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-timeout-config '1m43s ago: reviewing internal/watch.go')"
+  anchor=$(( $(date +%s) - 200 ))
+  timeout_args="$d/timeout.args"
+  export FM_FAKE_TIMEOUT_ARGS="$timeout_args"
+  cat > "$d/fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$FM_FAKE_TIMEOUT_ARGS"
+shift
+exec "$@"
+SH
+  chmod +x "$d/fakebin/timeout"
+
+  unset FM_CREW_STATE_NM_TIMEOUT
+  : > "$timeout_args"
+  out=$(run_crew_state "$d" feat-timeout-config)
+  assert_contains "$out" "state: working" "an unset timeout keeps the state read unchanged"
+  out=$(run_crew_progress "$d" feat-timeout-config "$anchor")
+  assert_contains "$out" "progress: advanced" "an unset timeout keeps the progress read unchanged"
+  [ -s "$timeout_args" ] || fail "the unset timeout did not execute either bounded path"
+  ! grep -vFx '10' "$timeout_args" >/dev/null \
+    || fail "the unset timeout did not use the documented 10 second default"
+
+  : > "$timeout_args"
+  out=$(FM_CREW_STATE_NM_TIMEOUT=1 run_crew_state "$d" feat-timeout-config)
+  assert_contains "$out" "state: working" "a valid timeout keeps the state read unchanged"
+  out=$(FM_CREW_STATE_NM_TIMEOUT=1 run_crew_progress "$d" feat-timeout-config "$anchor")
+  assert_contains "$out" "progress: advanced" "a valid timeout keeps the progress read unchanged"
+  [ -s "$timeout_args" ] || fail "the valid timeout did not execute either bounded path"
+  ! grep -vFx '1' "$timeout_args" >/dev/null \
+    || fail "the valid timeout was not passed unchanged to both bounded paths"
+
+  for value in 0 '' -1 not-a-number 86401 99999999999999999999; do
+    : > "$timeout_args"
+    err="$d/timeout-${value:-empty}.err"
+    rc=0
+    out=$(FM_CREW_STATE_NM_TIMEOUT="$value" PATH="$d/fakebin:$PATH" \
+      FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" feat-timeout-config 2>"$err") || rc=$?
+    [ "$rc" -eq 2 ] || fail "invalid timeout '$value' exited $rc instead of 2"
+    [ -z "$out" ] || fail "invalid timeout '$value' emitted a state or progress verdict"
+    assert_contains "$(cat "$err")" "value '$value'" "timeout refusal names the invalid value"
+    assert_contains "$(cat "$err")" "positive integer from 1 through 86400 seconds" \
+      "timeout refusal states the usable bound"
+    [ ! -s "$timeout_args" ] || fail "invalid timeout '$value' executed a bounded command"
+  done
+  : > "$timeout_args"
+  rc=0
+  out=$(FM_CREW_STATE_NM_TIMEOUT=0 PATH="$d/fakebin:$PATH" \
+    FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" --progress feat-timeout-config "$anchor" 2>"$d/progress-timeout.err") || rc=$?
+  [ "$rc" -eq 2 ] || fail "an invalid progress timeout exited $rc instead of 2"
+  [ -z "$out" ] || fail "an invalid progress timeout emitted a suppressing verdict"
+  [ ! -s "$timeout_args" ] || fail "an invalid progress timeout executed a bounded command"
+  unset FM_FAKE_TIMEOUT_ARGS
+  pass "timeout configuration is positive, bounded, shared, and refused on invalid input"
+}
+
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
 test_scout_skips_run_lookup() {
   reset_fakes
@@ -1520,6 +1582,7 @@ test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
+test_timeout_configuration_is_shared_and_strict
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta
