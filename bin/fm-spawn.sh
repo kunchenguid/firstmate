@@ -2927,6 +2927,36 @@ finally:
 fi
 
 # prepare_launch_environment: every step the launch-command construction below
+# The PATH a crewmate's tool commands run with. A harness executes tool commands
+# through a NON-interactive shell, and on this class of host that shell reads only
+# ~/.zshenv - never ~/.zprofile or ~/.zshrc, which is where Homebrew puts itself.
+# zsh's compiled-in default is /bin:/usr/bin:/usr/ucb:/usr/local/bin, so a crew can
+# end up unable to see gh, node, or the axi tooling even though every one of them is
+# installed and its worktree is perfectly fine. Crews burned whole CI-repair rounds
+# on "gh is absent" before this was traced to shell startup rather than the worktree.
+#
+# Firstmate's own PATH is the seed because it is proven by construction: firstmate
+# runs gh-axi, treehouse, and tasks-axi itself. Seeding from it also preserves the
+# exact resolution ORDER the host already has, so this cannot silently repoint a
+# command (notably `claude`, which a host may front with a shim) - it only ever adds
+# reach. The standard locations are appended for the case where firstmate itself was
+# launched with a thin PATH; missing directories and duplicates are dropped.
+crew_tool_path() {
+  local seed dir out= brew=/opt/homebrew
+  [ -d "$brew" ] || brew=/usr/local
+  seed="$PATH:$HOME/.local/bin:$brew/bin:$brew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  local IFS=:
+  for dir in $seed; do
+    [ -n "$dir" ] || continue
+    [ -d "$dir" ] || continue
+    # A single quote would break the quoting of the typed pane export below.
+    case $dir in *"'"*) continue ;; esac
+    case ":$out:" in *":$dir:"*) continue ;; esac
+    out="${out:+$out:}$dir"
+  done
+  printf '%s' "$out"
+}
+
 # depends on - worktree canonicalization, the per-task temp root, the per-harness
 # turn-end hook, delivery mode/yolo, and account selection. The body is unchanged
 # and deliberately NOT re-indented (it contains heredocs whose bodies are written
@@ -2955,8 +2985,13 @@ fi
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
 # herdr sets GOTMPDIR natively at agent start. Every other backend exports it into
-# the pane shell just before the launch line, further down.
-[ "$BACKEND" != herdr ] || HERDR_AGENT_ENV+=("GOTMPDIR=$TASK_TMP/gotmp")
+# the pane shell just before the launch line, further down. CREW_PATH rides the same
+# two channels for the same reason.
+CREW_PATH=$(crew_tool_path)
+if [ "$BACKEND" = herdr ]; then
+  HERDR_AGENT_ENV+=("GOTMPDIR=$TASK_TMP/gotmp")
+  HERDR_AGENT_ENV+=("PATH=$CREW_PATH")
+fi
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
@@ -3614,9 +3649,9 @@ META_WRITE_LOCK=
 if [ "$BACKEND" != herdr ]; then
   build_launch_command
 fi
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
+# Export the crew PATH and GOTMPDIR into the crewmate's pane shell so the agent and
+# every child process (go build, go test, ...) inherit them. Sent before the launch
+# command so the env is set when the agent starts; the brief sleep lets it land.
 if [ "$BACKEND" = orca ]; then
   [ "$(fm_backend_orca_terminal_state "$T" "$ORCA_WORKTREE_ID" "$W")" = present ] \
     && fm_backend_orca_worktree_terminal_contains "$ORCA_WORKTREE_ID" "$W" "$T" || {
@@ -3629,10 +3664,10 @@ if [ "$BACKEND" = orca ]; then
   }
 fi
 # herdr already launched the agent natively during endpoint creation, with the
-# same LAUNCH string as its argv and GOTMPDIR injected via --env, so there is
+# same LAUNCH string as its argv and PATH/GOTMPDIR injected via --env, so there is
 # nothing to type into a pane here.
 if [ "$BACKEND" != herdr ]; then
-  spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+  spawn_send_text_line "$T" "export PATH='$CREW_PATH' GOTMPDIR=$TASK_TMP/gotmp"
   sleep 0.3
   spawn_send_literal "$T" "$LAUNCH"
   sleep 0.3
