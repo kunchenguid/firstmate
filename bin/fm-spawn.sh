@@ -143,6 +143,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-config-value-lib.sh
+. "$SCRIPT_DIR/fm-config-value-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -651,11 +653,13 @@ esac
 # crewmate authenticates with. On a multi-account machine the default ~/.claude
 # can be empty/unauthenticated, stranding a bare-`claude` crewmate on the login
 # wall; pointing it at an authenticated dir makes the spawn hands-free. The
-# value is the FIRST NON-EMPTY, NON-COMMENT line, trimmed - the same
-# single-value config reader the sibling knobs use (config/backend in
-# fm-backend.sh, config/secondmate-harness in fm-harness.sh), so a leading blank
-# line cannot silently blank the knob and a leading `#` comment cannot become
-# the config dir. It becomes a `CLAUDE_CONFIG_DIR=<dir> ` env prefix scoped to
+# value is the FIRST NON-EMPTY, NON-COMMENT line, trimmed - the shared
+# fm_config_first_value reader in fm-config-value-lib.sh, whose sole other
+# caller is config/secondmate-harness in fm-harness.sh, so a leading blank line
+# cannot silently blank the knob and a leading `#` comment cannot become the
+# config dir. (config/backend in fm-backend.sh is NOT that reader: it strips all
+# whitespace and has no comment case, so a `#` line there IS the value.)
+# It becomes a `CLAUDE_CONFIG_DIR=<dir> ` env prefix scoped to
 # this firstmate-launched agent, so it never mutates the captain's global config.
 # A leading `~`/`~/` and any `$HOME`/`${HOME}` are expanded HERE and the RESULT
 # is shell-quoted, so the launch string carries a fully resolved absolute path.
@@ -665,20 +669,18 @@ esac
 # byte-identical. Absent, empty, or a non-claude harness -> nothing, i.e.
 # today's bare-`claude`, default-config-dir behavior. Only the claude template
 # carries the placeholder.
+# A resolved dir that does not exist WARNS loudly on stderr and still launches:
+# claude would create it empty and show the login wall, which is exactly the
+# failure this knob exists to prevent, so the captain needs the diagnostic naming
+# config/crew-config-dir and the resolved path. It is deliberately not fatal -
+# the knob is an authentication convenience, not a spawn precondition, and a
+# stale path must never block a fleet spawn. The same check covers the degenerate
+# post-expansion-empty case (a bare `~` under an empty HOME), which the
+# pre-expansion non-empty guard below cannot see.
 claude_config_dir_prefix() {
-  local harness=$1 line dir=
+  local harness=$1 dir
   [ "$harness" = claude ] || return 0
-  [ -f "$CONFIG/crew-config-dir" ] || return 0
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="${line#"${line%%[![:space:]]*}"}"   # trim leading whitespace
-    line="${line%"${line##*[![:space:]]}"}"   # trim trailing whitespace
-    [ -n "$line" ] || continue
-    case "$line" in
-      '#'*) continue ;;
-    esac
-    dir=$line
-    break
-  done < "$CONFIG/crew-config-dir"
+  dir=$(fm_config_first_value "$CONFIG/crew-config-dir")
   [ -n "$dir" ] || return 0
   # shellcheck disable=SC2088  # Literal tilde is matched here, not expanded by the shell.
   case "$dir" in
@@ -689,6 +691,9 @@ claude_config_dir_prefix() {
   dir="${dir//'${HOME}'/$HOME}"        # ${HOME} anywhere -> real home
   # shellcheck disable=SC2016  # The single-quoted pattern is a literal $HOME to match, not expand.
   dir="${dir//'$HOME'/$HOME}"          # $HOME anywhere -> real home
+  if [ ! -d "$dir" ]; then
+    echo "warning: config/crew-config-dir resolves to '$dir', which is not an existing directory; the claude crewmate may strand on the login wall because claude will create it empty and unauthenticated. Spawn continues with CLAUDE_CONFIG_DIR set - point config/crew-config-dir at an authenticated Claude config dir to fix it." >&2
+  fi
   printf 'CLAUDE_CONFIG_DIR=%s ' "$(shell_quote "$dir")"
 }
 

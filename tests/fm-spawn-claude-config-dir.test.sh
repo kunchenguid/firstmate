@@ -17,7 +17,10 @@
 #   6. shell metacharacters in the value stay single-quoted, never re-parsed
 #      or executed at launch (injection guard).
 #   7. blank and `#` comment lines above the value are skipped, matching the
-#      single-value reader config/backend and config/secondmate-harness use.
+#      shared fm_config_first_value reader config/secondmate-harness uses.
+#   8. a resolved dir that does not exist warns loudly on stderr AND still
+#      launches with the prefix intact - the knob is an authentication
+#      convenience, never a spawn precondition.
 set -u
 
 # shellcheck source=tests/fm-spawn-helpers.sh disable=SC1091
@@ -56,6 +59,7 @@ test_config_dir_adds_prefix() {
 $rec
 EOF
   ccd="$case_dir/alt-claude-home"
+  mkdir -p "$ccd"
   printf '%s\n' "$ccd" > "$home/config/crew-config-dir"
   send_log="$case_dir/launch.log"
 
@@ -149,6 +153,7 @@ $rec
 EOF
   # A plain absolute path with no ~ / $HOME must pass through untouched by expansion.
   plain="$case_dir/plain-claude-home"
+  mkdir -p "$plain"
   printf '%s\n' "$plain" > "$home/config/crew-config-dir"
   send_log="$case_dir/launch.log"
 
@@ -196,10 +201,10 @@ test_config_dir_skips_blank_and_comment_lines() {
 $rec
 EOF
   # A leading blank line (an editor-added newline) must not blank the knob, and a
-  # leading `#` comment must never become the config dir itself - the same
-  # first-non-empty-non-comment-line reader config/backend and
-  # config/secondmate-harness use.
+  # leading `#` comment must never become the config dir itself - the shared
+  # first-non-empty-non-comment-line reader config/secondmate-harness uses.
   ccd="$case_dir/commented-claude-home"
+  mkdir -p "$ccd"
   printf '\n  \n# the authenticated account for crewmates\n%s\n' "$ccd" \
     > "$home/config/crew-config-dir"
   send_log="$case_dir/launch.log"
@@ -237,6 +242,40 @@ EOF
   pass "a blank/comment-only config/crew-config-dir keeps the bare-claude launch byte-identical"
 }
 
+test_missing_config_dir_warns_and_still_launches() {
+  local rec case_dir home proj wt fakebin id send_log out launch missing
+  rec=$(make_spawn_case missing-dir)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  # A typo'd or stale path reproduces the exact login wall this knob exists to
+  # prevent: claude creates the dir empty and shows onboarding. That must be
+  # DIAGNOSED loudly, naming the knob and the resolved path - and it must NOT be
+  # fatal, because an authentication convenience may never block a fleet spawn.
+  missing="$case_dir/never-created-claude-home"
+  [ ! -d "$missing" ] || fail "test setup: $missing must not exist"
+  printf '%s\n' "$missing" > "$home/config/crew-config-dir"
+  send_log="$case_dir/launch.log"
+
+  # fm_spawn_run folds stderr into stdout, so $out carries the warning.
+  out=$(fm_spawn_run "$home" "$wt" "$fakebin" "$send_log" "$id" "$proj" claude) \
+    || fail "a non-existent config dir must NOT fail the spawn"$'\n'"--- output ---"$'\n'"$out"
+  launch=$(cat "$send_log")
+
+  assert_contains "$out" "config/crew-config-dir" \
+    "the warning must name the knob so the captain knows what to fix"
+  assert_contains "$out" "$missing" \
+    "the warning must name the resolved path that does not exist"
+  assert_contains "$out" "login wall" \
+    "the warning must say what breaks when the config dir is not authenticated"
+  # Half two: the spawn still carries the prefix, byte-identical to the happy path.
+  case "$launch" in
+    "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CONFIG_DIR='$missing' claude --dangerously-skip-permissions "*) : ;;
+    *) fail "the warning dropped or altered the CLAUDE_CONFIG_DIR prefix"$'\n'"--- launch ---"$'\n'"$launch" ;;
+  esac
+  pass "a non-existent config dir warns loudly on stderr yet still launches with the prefix intact"
+}
+
 test_config_dir_adds_prefix
 test_absent_knob_is_backward_compatible
 test_config_dir_expands_tilde
@@ -245,3 +284,4 @@ test_config_dir_plain_path_unchanged
 test_config_dir_metachars_stay_quoted
 test_config_dir_skips_blank_and_comment_lines
 test_comment_only_file_is_backward_compatible
+test_missing_config_dir_warns_and_still_launches

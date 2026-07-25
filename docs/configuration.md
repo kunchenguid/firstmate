@@ -212,9 +212,12 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 `config/crew-config-dir` is a local, gitignored file naming the Claude config dir (`CLAUDE_CONFIG_DIR`) a spawned `claude` crewmate authenticates with.
 It exists for multi-account machines, where the default `~/.claude` can be empty or unauthenticated so a bare-`claude` crewmate lands on the login wall and never starts.
 The first non-empty, non-comment line's trimmed value becomes a per-launch `CLAUDE_CONFIG_DIR=<dir>` env prefix on the claude launch command only, scoped to that firstmate-launched agent, so it never mutates the captain's global config.
-That is the same single-value reader `config/backend` and `config/secondmate-harness` use, so blank lines and `#` comment lines above the value are skipped instead of blanking the knob or being taken as the config dir.
+That is the shared `fm_config_first_value` reader in `bin/fm-config-value-lib.sh`, which `config/secondmate-harness` also uses, so blank lines and `#` comment lines above the value are skipped instead of blanking the knob or being taken as the config dir.
+`config/backend` is deliberately not cited here: `fm_backend_name` strips all whitespace and has no comment case, so a `#` line in that file is read as a backend name.
 A leading `~` or `~/` and any `$HOME` or `${HOME}` in the value are expanded to the captain's home directory, then the resolved path is quoted, so a value like `~/.claude-account2` or `$HOME/.claude-account2` reaches the launch as a real absolute path; the expansion is explicit, so shell metacharacters in the value are never re-parsed or executed at launch.
+When the resolved path is not an existing directory, `fm-spawn.sh` prints one warning to stderr naming `config/crew-config-dir` and the resolved path, then still sets the prefix and launches; the knob is an authentication convenience, not a spawn precondition, so a stale or typo'd path never blocks a spawn.
 It applies to the `claude` harness only; other harnesses ignore it.
+`config/crew-config-dir` is NOT inherited into secondmate homes, so a secondmate's own claude crewmates still launch on the default config dir; propagating it into secondmate homes is a separate follow-up tracked outside this change.
 When the file is absent, empty, or carries only blank and comment lines, launch behavior is byte-identical to before: bare `claude` on its default config dir.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)

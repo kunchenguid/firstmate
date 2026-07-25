@@ -26,6 +26,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck source=bin/fm-config-value-lib.sh
+. "$SCRIPT_DIR/fm-config-value-lib.sh"
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
@@ -87,18 +89,7 @@ resolve_crew() {
 # (leading/trailing whitespace trimmed), or nothing when the file is absent or
 # holds only blank/comment lines.
 secondmate_line() {
-  local line
-  [ -f "$CONFIG/secondmate-harness" ] || return 0
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
-    [ -n "$line" ] || continue
-    case "$line" in
-      '#'*) continue ;;
-    esac
-    printf '%s\n' "$line"
-    return 0
-  done < "$CONFIG/secondmate-harness"
+  fm_config_first_value "$CONFIG/secondmate-harness"
 }
 
 # Print the 1-based whitespace-separated token (1=harness, 2=model, 3=effort) of
