@@ -781,9 +781,14 @@ unsupported codex max effort is flagged^{"rules":[{"when":"big feature","use":{"
 unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:max
 unsupported grok xhigh effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:xhigh
 pi max effort is accepted^{"rules":[{"when":"deep coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
+kimi k3 high effort is accepted^{"rules":[{"when":"kimi coding","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^empty^
+kimi k3 max effort is accepted^{"rules":[{"when":"kimi coding","use":{"harness":"kimi","model":"kimi-code/k3-256k","effort":"max"}}]}^empty^
+kimi medium effort without a model is accepted for record-and-omit^{"rules":[{"when":"kimi coding","use":{"harness":"kimi","effort":"medium"}}]}^empty^
+kimi xhigh effort on a custom model is accepted for record-and-omit^{"rules":[{"when":"kimi coding","use":{"harness":"kimi","model":"custom/kimi","effort":"xhigh"}}]}^empty^
+kimi unsupported medium effort is flagged^{"rules":[{"when":"kimi coding","use":{"harness":"kimi","model":"kimi-code/k3","effort":"medium"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:medium
+kimi unknown effort on a custom model is flagged^{"rules":[{"when":"kimi coding","use":{"harness":"kimi","model":"custom/kimi","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:ultra
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
 kimi model profile is accepted^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3"}}]}^empty^
-unsupported kimi effort is flagged^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:high
 array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^empty^
 array use without select is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}]}]}^empty^
 one-element array use is accepted^{"rules":[{"when":"focused feature","use":[{"harness":"claude"}]}]}^empty^

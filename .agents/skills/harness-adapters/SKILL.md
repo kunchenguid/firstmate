@@ -25,15 +25,17 @@ If `config/crew-harness` is unset or `default`, there is no concrete value to in
 Inheritance also copies the literal `config/crew-dispatch.json` file, so secondmates apply the same best-fit profile rules for their own crewmates.
 
 Each adapter splits into mechanics and knowledge.
-The per-task mechanics, including launch command, autonomy flag, and any enabled crewmate turn-end hook, live in `bin/fm-spawn.sh`.
+The per-task mechanics, including launch command, autonomy flag, and crewmate turn-end hook, live in `bin/fm-spawn.sh`.
 The primary-session "no turn ends blind" guard contract and harness hook installation paths live in `docs/turnend-guard.md`.
 The primary-session watcher wake protocols are rendered from `docs/supervision-protocols/` by `bin/fm-supervision-instructions.sh`.
 The supervision knowledge lives here: busy signature, exit command, interrupt, dialogs, resume behavior, skill invocation, and quirks.
 
 Never dispatch a crewmate or secondmate on an unverified adapter.
+`kimi` is verified only for crewmate/scout spawns, not for primary firstmate or secondmate launches.
+A secondmate is a primary firstmate session in its own home, so `fm-spawn.sh --secondmate` refuses `kimi`.
 If `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, tell the captain under `AGENTS.md` section 9 that the requested worker runtime is not verified yet, use firstmate's own verified runtime for current work, and ask only whether to verify the requested runtime before future use.
 Do not pause current work for that future-verification choice, and never launch an unverified adapter.
-If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
+If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), any required tmux agent-process liveness classification in `bin/backends/tmux.sh`, and the verified knowledge here.
 
 ## Detection
 
@@ -50,17 +52,16 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 
 ## Primary turn-end guard
 
-The primary integrations for `claude`, `codex`, `opencode`, `pi`, and `grok` have empirically validated hook paths for the "no turn ends blind" guard.
+Every verified primary harness has an empirically validated hook path for the "no turn ends blind" guard.
 `claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
 `opencode`, `pi`, and `grok` expose passive lifecycle callbacks for this purpose, so their tracked primary adapters force one bounded follow-up or resume when the shared predicate blocks.
-Kimi is outside the primary turn-end guard scope, while `docs/turnend-guard.md` owns its separate guarded global hook for crew wake signals.
 The exact hook files, commands, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
 `docs/verification/supervision.md` "Turn-end guard" owns active validation evidence.
 When changing any primary turn-end hook, validate the real harness behavior in a scratch project or throwaway home before trusting it, then update that doc and the relevant concise fact below.
 
 ## Primary pre-arm (PreToolUse) seatbelt
 
-The primary integrations for `claude`, `codex`, `opencode`, `pi`, and `grok` also have wired PreToolUse-equivalent hooks that deny a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
+Every verified primary harness also has a wired PreToolUse-equivalent hook that denies a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
 `claude` and `codex` block directly through PreToolUse hooks; `grok` blocks the same way but requires every `$VAR` reference in its hook `command` string to carry an inline `:-default` or it fails to launch the hook entirely.
 `opencode` and `pi` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
 The exact hook files, commands, output-shaping quirks (Claude Code only honors the deny when stdout is empty), and validation transcripts are owned by `docs/arm-pretool-check.md`.
@@ -122,7 +123,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-13 on Pi 0.80.6. `pi --help` advertises `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; `pi --print --model openai-codex/gpt-5.6-sol --thinking max 'Reply with exactly OK.'` completed successfully. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
-| kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
+| kimi | `--model <model>` | `KIMI_MODEL_THINKING_EFFORT=<low\|high\|max>` for explicit `kimi-code/k3` and `kimi-code/k3-256k` only | Verified 2026-07-25 on Kimi Code CLI 0.29.1; `fm-spawn` preflights the selected model before writing metadata, passes the effort environment only for the verified K3 models, and record-and-omits effort for every other model or a default-resolved model. |
 
 ### Model support discovery
 
@@ -136,13 +137,16 @@ Use the discovery surface in the current authenticated environment because suppo
 | opencode | Run `opencode models [provider]`, which lists available provider/model identifiers. |
 | pi | Run `pi --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
-| kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
+| kimi | Read `KIMI_CODE_HOME/config.toml` (default `~/.kimi-code/config.toml`) and run `kimi provider list`; Kimi 0.29.1's help does not expose a separate model-list command. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 If those sources do not establish the relationship needed for dispatch, fail loudly and report the unresolved candidate.
 
-When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
-This preserves launch success instead of passing a known-bad value.
+When a requested effort value is outside most harness-specific accepted sets, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
+Kimi model selection is stricter: `fm-spawn` runs one prompt-mode preflight with the requested model before writing meta or launching the pane.
+Kimi's own exit status validates the model, and a rejection is surfaced without reparsing `config.toml`.
+The effort environment is emitted only for explicit `kimi-code/k3` and `kimi-code/k3-256k`; other models preserve the requested effort in metadata and omit the operational hint.
+For adapters that omit instead of rejecting, this preserves launch success instead of passing a known-bad value.
 
 ## no-mistakes skill invocation
 
@@ -153,13 +157,15 @@ Natural language is acceptable if uncertain.
 - codex: `$<skill>`, for example `$no-mistakes`; `/<skill>` is claude-only and codex rejects it as "Unrecognized command".
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
-- grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the structural composer reader; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
+- grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) already handles this correctly by reading the cursor row; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
+  Verified 2026-07-25 on Kimi Code CLI 0.29.1 in a scratch session: typing `/no-mistakes` and Enter activated the `no-mistakes` skill.
+  Kimi's composer is a bordered `│ > │` row, so the shared tmux submit verifier treats an empty composer as submitted.
 
 ## Submission acknowledgement hazards
 
 A send or key action reporting success is not proof that the intended action happened.
-OpenCode can accept and queue an Enter while leaving text visible, Grok can consume Enter in its slash popup without submitting, and Kimi can silently drop a message sent before readiness even though the send returns success.
+OpenCode can accept and queue an Enter while leaving text visible, and Grok can consume Enter in its slash popup without submitting.
 The shared symptom is a healthy-looking pane with no work in progress, so each adapter must verify the observable postcondition that is specific to its TUI.
 
 ## claude (VERIFIED; busy signature re-verified 2026-07-25 on Claude Code 2.1.220)
@@ -306,8 +312,8 @@ For Grok's supported reasoning-effort values and omission behavior, see the [lau
 
 **Incident (2026-07-03, herdr backend only, grok 0.2.82):** two grok/herdr crewmates were sent `/no-mistakes` via `fm-send`; both left it fully typed but unsubmitted in the composer for minutes (footer still `Enter:send`), and `fm-send` exited 0 with no error.
 Reproduced live: the herdr adapter's submit-verification at the time treated ANY pane-content change after Enter as "submitted", and the popup-close-with-placeholder-fill described above IS a visible content change even though nothing was actually sent.
-The tmux backend's structural `fm_tmux_composer_state` read sees placeholder-filled text on any content row as still pending, so its retry loop sends the needed second Enter.
-The Herdr adapter (`fm_backend_herdr_composer_state`, `bin/backends/herdr.sh`) classifies the composer's own row structurally instead of diffing raw content; see `docs/herdr-backend.md` "Composer and injection safety" for the current boundary and `tests/fm-backend-herdr.test.sh` for regression coverage.
+The tmux backend was never affected - `fm_tmux_composer_state` reads the actual cursor row, correctly sees the placeholder text as still-pending, and its retry loop already sends the needed second Enter.
+Fixed in the Herdr adapter (`fm_backend_herdr_composer_state`, `bin/backends/herdr.sh`) by classifying the composer's own row structurally instead of diffing raw content; see `docs/herdr-backend.md` "Composer and injection safety" for the current boundary and `tests/fm-backend-herdr.test.sh` for regression coverage.
 
 Startup dialog: the "Run Grok Build in a project directory?" project picker appears ONLY when grok is launched from a non-project directory (home, Desktop, Downloads, `/tmp`).
 `fm-spawn` launches inside the treehouse worktree (a git repo root), so the picker never appears and grok treats the worktree as a trusted project automatically - no post-launch keystroke is needed.
@@ -320,10 +326,11 @@ Verified live against grok 0.2.93: real input is the bright `38;2;224;222;244` (
 This assumes a dark terminal theme, the fleet reality; the SGR-2 signal stays theme-independent.
 Regression coverage: `tests/fm-composer-ghost.test.sh` (`test_strip_ghost_drops_dark_truecolor_ghost`, `test_dark_truecolor_ghost_only_composer_is_not_pending`) and `tests/fm-backend-herdr.test.sh` (`test_composer_state_grok_dark_truecolor_placeholder_is_empty`, `test_composer_state_grok_bright_truecolor_real_text_is_pending`).
 
-**Tmux bottom-border cursor quirk (fixed):**
-In a pristine placeholder-only composer, tmux's `#{cursor_y}` can point at the box's bottom border instead of its text row.
-The shared tmux reader now locates the complete box structurally and classifies every content row, so the cursor may sit on a content row or the bottom border without changing the result.
-The same structural read covers multi-row composers without fixed cursor offsets, while Herdr retains its own structural composer-row scan.
+**Residual gap, tmux-only (unfixed):**
+in that same pristine placeholder-only state, tmux's own `#{cursor_y}` points at the composer box's BOTTOM BORDER row, one row below the actual text row (the box appears to render one row lower before any real typing starts); once real text is typed the cursor correctly aligns with the text row again.
+This is a row-SELECTION quirk, orthogonal to the styling fix above, and affects only the tmux path (herdr uses a structural composer-row scan, not `cursor_y`, so it is unaffected).
+A correct fix needs a row-window read near `cursor_y` rather than the single `cursor_y` row.
+In practice `fm-spawn` launches grok with the brief as its initial prompt, so a live task's composer is never observed in this pristine pre-typing state - but this is unverified for every path (e.g. a steer sent before grok's first real turn settles) and needs dedicated investigation before relying on it.
 
 Turn-end hook: grok fires a `Stop` hook at every turn boundary, giving firstmate a precise per-turn wake instead of only stale-pane detection.
 grok loads PROJECT hooks (`<worktree>/.grok/hooks/`, `<worktree>/.claude/settings.local.json`) only after the folder is granted hook-trust in `~/.grok/trusted_folders.toml`, which is not automatic and which firstmate will not establish by editing grok's own managed trust store.
@@ -344,43 +351,55 @@ It does not pass `--permission-mode`, so the passive hook cannot escalate the pr
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
 
-## kimi (VERIFIED 2026-07-25, kimi 0.29.1)
+## kimi (VERIFIED 2026-07-25, Kimi Code CLI 0.29.1)
 
-Kimi Code CLI launches from the absolute path resolved from `PATH`, falling back to the executable `$HOME/.kimi-code/bin/kimi`.
+Kimi Code CLI (`kimi`) is verified as a crewmate/scout adapter only.
+It is not verified as a primary firstmate harness and is not verified for secondmate launches.
+`fm-spawn.sh --secondmate` refuses `kimi` because a secondmate is a primary firstmate session in an isolated home.
+[`docs/verification/kimi-harness.md`](../../../docs/verification/kimi-harness.md) owns the dated commands and observed output supporting this adapter.
+
+The verified local binary is `${KIMI_CODE_BIN:-$HOME/.kimi-code/bin/kimi}`.
+The legacy `~/.kimi` install is not part of this adapter.
+The verified config home is `${KIMI_CODE_HOME:-$HOME/.kimi-code}`.
 
 | Fact | Value |
 |---|---|
-| Binary | Executable `kimi` from `PATH`, then executable `$HOME/.kimi-code/bin/kimi`; spawning refuses if neither exists. |
-| Launch | Bare interactive TUI with `--auto`, followed by readiness-gated pointer delivery; positional prompts are rejected. |
-| Models | `kimi-code/kimi-for-coding` (default), `kimi-code/kimi-for-coding-highspeed`, `kimi-code/k3`, and `kimi-code/k3-256k`. |
 | Busy-pane signature | A transient line with optional leading whitespace, a rotating moon-phase glyph, required whitespace on both sides of `·`, and optional trailing content; the line is absent when idle. |
-| Exit command | `/exit` |
-| Interrupt | Single Escape, which prints `Interrupted by user`. |
-| Skill invocation | `/<skill>`, for example `/no-mistakes`; firstmate skills are discovered. |
-| Autonomy | `--auto`; `-y` and `--yolo` are weaker and are not used. |
-| Trust dialog | None on a clean first launch in a fresh pooled worktree. |
-| Slash submission | One Enter submits, with no popup swallow or settle hazard. |
-| Environment marker | None; detection relies on process ancestry command name `kimi`. |
-| Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
-| Effort | No reasoning-effort flag exists, so requested effort is recorded in task metadata but omitted from launch. |
+| Idle composer | Bordered row `│ > │`, classified correctly by the shared tmux composer reader. |
+| Exit command | `/exit` then Enter; the TUI prints `Bye!` and a resume hint. |
+| Interrupt | single `Ctrl+C`; verified to stop an active turn and render `Interrupted by user`. |
+| Skill invocation | `/<skill>`, for example `/no-mistakes`; verified to activate the user-level `no-mistakes` skill. |
+| Autonomy | `--auto`; verified TUI banner says `Permission mode: auto`. |
+| Resume | `kimi -S <session-id>` from the same working directory; prompt-mode resume hints also print `kimi -r <session-id>`, but `-S` is the documented help flag in 0.29.1. |
 
-`fm-spawn.sh` launches Kimi bare, waits for the composer box or `Welcome to Kimi Code!`, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires a cleared composer plus either the echoed `✨` submission or nonzero context before accepting delivery.
-This launch-then-send shape is mandatory because Kimi rejects a positional brief as an unknown command.
-Sending before readiness was reproduced as a silent drop with a zero exit status, an empty composer, `context: 0%`, no echoed user message, and a healthy-looking idle pane.
-The brief path must be absolute because the brief lives outside the task worktree, and Kimi reads it there without `--add-dir`.
+Kimi 0.29.1 does not accept a positional launch prompt.
+Kimi 0.29.1 also refuses `--auto` with prompt mode.
+Therefore `fm-spawn` seeds Kimi by running prompt mode first, parsing the emitted `session_id`, then resuming that same cwd-bound session with `--auto -S <session-id>`.
+The prompt-mode bootstrap is the first Kimi turn for the launch brief, and the pane exits loudly if the stream-json output does not include a `session_id`.
+This makes brief ingestion part of spawn rather than a supervisor nudge.
+Resuming from a different directory is refused by Kimi with a directory-mismatch error, so firstmate must seed and resume from the task worktree.
 
-Observed live spinner captures included optional leading whitespace, a moon-phase glyph, whitespace around `·`, and rotating tip text, with the same shape observed during tool execution.
-Because every captured spinner row had whitespace on both sides of `·`, the matcher requires that whitespace, deliberately does not match the never-observed zero-whitespace form, and does not require trailing tip text.
-The startup input-readiness window is the established cause of Kimi's first-Enter delivery defect, while the banner is not the cause.
-An early Enter can expand Kimi's composer to multiple content rows, leaving the pointer text on the first row and the cursor on an empty later row, which is the same single-cursor-row reading defect exposed by Grok's bottom-border cursor quirk.
-The shared tmux reader now locates the complete bordered composer and treats real text on any content row as positive evidence that submission is still pending.
-No rendering signal is trustworthy for proving that Kimi will accept input during this window, so delivery retries Enter through the shared submit core and retains the existing postcondition verification rather than relaxing readiness or delivery checks.
-Kimi's footer tip rotates independently and can display `ctrl+c: cancel` while completely idle, so tip text is never used as its busy signature without the leading moon-plus-middot spinner structure.
-The idle status bar can contain lowercase `thinking`, which is the model's effort label rather than a busy signal.
-The spinner match covers the full moon-phase glyph set rather than one frame, but it remains locale- and emoji-font-sensitive because Kimi exposes no stable ASCII busy token.
+Kimi model selection uses `--model <model>`.
+An unknown or unavailable model makes Kimi's prompt-mode preflight fail before firstmate writes task metadata.
 
-[`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns Kimi's verified global hook surface and captain-approved crew wake integration.
-`fm-spawn.sh` installs one marker-delimited Firstmate entry in `$HOME/.kimi-code/config.toml`, one silent always-zero hook script, and one private token registry under `$HOME/.kimi-code/fm-turn-end.d/`.
-Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, and the global hook touches that task's `state/<id>.turn-ended` only when the Stop payload's `cwd`, pointer, and registry entry all agree.
-A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
-The guarded turn-end signal supplements the pane busy signature, whose locale- and emoji-font-sensitive limits still apply while a turn is running.
+Kimi's public 0.29.1 help exposes no `--effort`, `--thinking-effort`, or `--reasoning-effort` flag.
+Those flags were verified as rejected.
+The installed CLI does honor `KIMI_MODEL_THINKING_EFFORT=<value>`: with `kimi-code/k3`, `low` completed successfully, and with `kimi-code/k3-256k`, `max` completed successfully.
+An unsupported effort override for either verified K3 model makes the Kimi preflight fail before firstmate writes task metadata.
+`fm-spawn` therefore runs one cheap prompt-mode preflight with the requested model before writing metadata.
+For explicit `kimi-code/k3` and `kimi-code/k3-256k`, the preflight and launch also receive the requested `KIMI_MODEL_THINKING_EFFORT` when it is `low`, `high`, or `max`.
+For every other model, including a model resolved through Kimi's default, firstmate records the requested effort and omits the environment override.
+The preflight validates the model: exit zero permits launch, while any Kimi rejection refuses spawn and surfaces Kimi's error.
+Firstmate does not parse `config.toml`; the explicit two-model allowlist reflects only the verified K3 evidence above.
+
+Kimi steers use the normal `fm-send` text path.
+A real tmux reproduction showed the composer empty before send, `fm_tmux_submit_core` returning `empty` after Enter, and Kimi showing the submitted turn while rendering `Running a command` during tool execution.
+Because Kimi uses a bordered composer row and clears it after submit, the shared tmux submit verifier designs out the false-negative resend class for idle sends.
+Observed live TUI spinner captures included optional leading whitespace, a moon-phase glyph, whitespace around `·`, and rotating tip text.
+The harness-scoped matcher requires the observed whitespace on both sides of `·`, accepts the full moon-phase glyph set, and does not treat Kimi's independently rotating idle footer tip or lowercase `thinking` effort label as busy.
+This matcher is used by `fm-crew-state.sh`, `fm-watch.sh`, and the busy-queued Enter fallback.
+
+Kimi exposes `kimi acp` in 0.29.1 help, but this adapter uses the TUI and does not use ACP server mode.
+No Kimi crew turn-end hook is wired in firstmate.
+Although Kimi's current public docs describe hooks for some versions, this adapter did not verify an installed 0.29.1 hook-backed crew turn-end path.
+Kimi crewmate/scout supervision is therefore stale-based, corroborated by the pane busy signatures.

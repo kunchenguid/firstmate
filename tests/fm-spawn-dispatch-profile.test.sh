@@ -21,11 +21,41 @@ make_spawn_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_command}"*)
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ] \
+       && [ -f "$FM_FAKE_LAUNCH_LOG.kimi-busy" ]; then
+      printf '%s\n' kimi
+    else
+      printf '%s\n' zsh
+    fi
+    exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  list-windows)
+    [ -z "${FM_FAKE_EXISTING_WINDOW:-}" ] || printf '%s\n' "$FM_FAKE_EXISTING_WINDOW"
+    [ ! -f "${FM_FAKE_LAUNCH_LOG:-}.window" ] || cat "$FM_FAKE_LAUNCH_LOG.window"
+    exit 0
+    ;;
+  capture-pane)
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ] \
+       && [ -f "$FM_FAKE_LAUNCH_LOG.kimi-busy" ]; then
+      printf '%s\n' '🌑 · Kimi prompt bootstrap'
+    fi
+    exit 0
+    ;;
+  new-window)
+    prev=
+    for a in "$@"; do
+      if [ "$prev" = "-n" ] && [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+        printf '%s\n' "$a" > "$FM_FAKE_LAUNCH_LOG.window"
+      fi
+      prev=$a
+    done
+    exit 0
+    ;;
+  has-session|new-session|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -35,6 +65,19 @@ case "${1:-}" in
         fi
         prev=$a
       done
+      case " $* " in
+        *" Enter "*)
+          control=$(sed -n "s/.*fm-kimi-bootstrap\\.sh' marker '\\([^']*\\)'.*/\\1/p" \
+            "$FM_FAKE_LAUNCH_LOG" | tail -1)
+          if [ -n "$control" ] && [ -d "$control" ]; then
+            sleep 60 &
+            bootstrap=$!
+            printf 'bootstrap=%s\n' "$bootstrap" > "$control/live"
+            printf '%s\n' "$bootstrap" > "$FM_FAKE_LAUNCH_LOG.kimi-pids"
+            : > "$FM_FAKE_LAUNCH_LOG.kimi-busy"
+          fi
+          ;;
+      esac
     fi
     exit 0
     ;;
@@ -42,7 +85,40 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+exit 0
+SH
+  cat > "$fakebin/kimi" <<'SH'
+#!/usr/bin/env bash
+set -u
+case " $* " in
+  *" -p "*)
+    [ -z "${FM_FAKE_KIMI_BOOTSTRAP_DELAY:-}" ] || sleep "$FM_FAKE_KIMI_BOOTSTRAP_DELAY"
+    if [ -n "${FM_FAKE_KIMI_PREFLIGHT_LOG:-}" ]; then
+      printf 'effort=%s args=%s\n' "${KIMI_MODEL_THINKING_EFFORT:-default}" "$*" \
+        > "$FM_FAKE_KIMI_PREFLIGHT_LOG"
+    fi
+    if [ "${FM_FAKE_KIMI_PREFLIGHT_FAIL:-0}" = 1 ]; then
+      echo "config.invalid: Kimi profile preflight rejected" >&2
+      exit 1
+    fi
+    printf '%s\n' '{"role":"assistant","content":"KIMI_PREFLIGHT_OK"}'
+    printf '%s\n' '{"role":"meta","type":"session.resume_hint","session_id":"preflight-session"}'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+SH
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+exit 99
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/kimi" "$fakebin/python3"
   printf '%s\n' "$fakebin"
 }
 
@@ -84,12 +160,50 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
+  : > "$launchlog.preflight"
+  : > "$launchlog.treehouse"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    KIMI_CODE_BIN="$fakebin/kimi" KIMI_CODE_HOME="$home/kimi-code" \
+    FM_FAKE_KIMI_PREFLIGHT_LOG="$launchlog.preflight" \
+    FM_FAKE_TREEHOUSE_LOG="$launchlog.treehouse" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
+  local status=$? pid
+  if [ -f "$launchlog.kimi-pids" ]; then
+    while IFS= read -r pid; do
+      kill "$pid" 2>/dev/null || true
+    done < "$launchlog.kimi-pids"
+    rm -f "$launchlog.kimi-pids" "$launchlog.kimi-busy"
+  fi
+  return "$status"
+}
+
+write_kimi_config() {  # <home>
+  local home=$1
+  mkdir -p "$home/kimi-code"
+  cat > "$home/kimi-code/config.toml" <<'EOF'
+default_model = "kimi-code/kimi-for-coding"
+
+[models."kimi-code/kimi-for-coding"]
+provider = "managed:kimi-code"
+model = "kimi-for-coding"
+max_context_size = 262144
+
+[models."kimi-code/k3"]
+provider = "managed:kimi-code"
+model = "k3"
+max_context_size = 262144
+support_efforts = [ "low", "high", "max" ]
+
+[models."kimi-code/k3-256k"]
+provider = "managed:kimi-code"
+model = "k3-256k"
+max_context_size = 262144
+support_efforts = [ "low", "high", "max" ]
+EOF
 }
 
 read_case_record() {
@@ -351,6 +465,234 @@ test_pi_threads_model_and_max_effort() {
   pass "pi receives --model and --thinking max profile flags"
 }
 
+test_kimi_bootstraps_prompt_then_resumes_with_model_and_effort() {
+  local rec id out status launch
+  id=profile-kimi-z8b
+  rec=$(make_spawn_case profile-kimi kimi "$id")
+  read_case_record "$rec"
+  write_kimi_config "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model kimi-code/k3 --effort high)
+  status=$?
+  expect_code 0 "$status" "kimi spawn with k3 high effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" kimi kimi-code/k3 high
+  assert_contains "$(cat "$LAUNCH_LOG.preflight")" \
+    "effort=high args=--model kimi-code/k3 -p Reply with exactly KIMI_PREFLIGHT_OK. --output-format stream-json" \
+    "kimi profile preflight did not use the requested model and effort"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'$ROOT/bin/fm-kimi-bootstrap.sh' marker" \
+    "kimi launch did not start the live-process marker"
+  assert_contains "$launch" "/bin/bash -c 'printf \"bootstrap=%s\\n\" \"\$\$\" > \"\$1\"; shift; exec \"\$@\"'" \
+    "kimi launch did not exec prompt mode into the pane foreground"
+  assert_contains "$launch" "env KIMI_CODE_HOME='$HOME_DIR/kimi-code' KIMI_MODEL_THINKING_EFFORT='high' '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' -p" \
+    "kimi launch did not seed the brief through prompt mode with the requested model and effort"
+  assert_contains "$launch" "'$ROOT/bin/fm-kimi-bootstrap.sh' finish \"\$KIMI_STATUS\" '$FAKEBIN_DIR/kimi'" \
+    "kimi launch did not finish the captured bootstrap result"
+  assert_not_contains "$launch" '🌑 · Kimi prompt bootstrap' \
+    "kimi launch command text can impersonate the emitted busy marker"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
+    "kimi launch lost the canonical launch-brief envelope"
+  pass "kimi seeds the launch brief with -p, then resumes that session with model and effort"
+}
+
+test_kimi_preflight_follows_local_validation() {
+  local rec id out status
+  id=profile-kimi-local-validation-z8i
+  rec=$(make_spawn_case profile-kimi-local-validation kimi "$id")
+  read_case_record "$rec"
+  write_kimi_config "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$CASE_DIR/missing-project" --model kimi-code/k3 --effort high)
+  status=$?
+  expect_code 1 "$status" "kimi spawn with a missing project should fail"
+  [ ! -s "$LAUNCH_LOG.preflight" ] || fail "kimi preflight ran before project validation"
+
+  out=$(FM_FAKE_EXISTING_WINDOW="fm-$id" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --model kimi-code/k3 --effort high)
+  status=$?
+  expect_code 1 "$status" "kimi spawn with an existing endpoint should fail"
+  assert_contains "$out" "already exists" "kimi duplicate endpoint refusal was not surfaced"
+  [ ! -s "$LAUNCH_LOG.preflight" ] || fail "kimi preflight ran before duplicate endpoint validation"
+  assert_absent "$HOME_DIR/state/$id.meta" "locally rejected kimi spawn should not write meta"
+  pass "kimi preflight runs only after local spawn validation"
+}
+
+test_kimi_control_validation_precedes_preflight() {
+  local rec id out status
+  id=profile-kimi-control-validation-z8j
+  rec=$(make_spawn_case profile-kimi-control-validation kimi "$id")
+  read_case_record "$rec"
+  write_kimi_config "$HOME_DIR"
+  chmod 2775 "$HOME_DIR/state"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model kimi-code/k3 --effort high)
+  status=$?
+  expect_code 1 "$status" "kimi spawn with group-writable special-bit state should fail"
+  assert_contains "$out" "state directory is writable by another user" \
+    "kimi special-bit state refusal was not surfaced"
+  [ ! -s "$LAUNCH_LOG.preflight" ] || fail "kimi preflight ran before secure-control validation"
+  assert_grep "return --force $WT_DIR" "$LAUNCH_LOG.treehouse" \
+    "kimi control-validation abort did not return the leased worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "rejected kimi control setup should not write meta"
+  pass "kimi control validation handles special bits before preflight"
+}
+
+test_kimi_records_and_omits_effort_for_non_k3_model() {
+  local rec id out status launch preflight
+  id=profile-kimi-nosupport-z8c
+  rec=$(make_spawn_case profile-kimi-nosupport kimi "$id")
+  read_case_record "$rec"
+  write_kimi_config "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model kimi-code/kimi-for-coding --effort low)
+  status=$?
+  expect_code 0 "$status" "kimi spawn should record and omit effort for a non-K3 model"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" kimi kimi-code/kimi-for-coding low
+  preflight=$(cat "$LAUNCH_LOG.preflight")
+  assert_contains "$preflight" "effort=default args=--model kimi-code/kimi-for-coding" \
+    "kimi non-K3 preflight should omit the effort environment"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "KIMI_MODEL_THINKING_EFFORT=" \
+    "kimi non-K3 launch should omit the effort environment"
+  pass "kimi records and omits effort for models without verified effort support"
+}
+
+test_kimi_rejects_unsupported_effort_value() {
+  local rec id out status
+  id=profile-kimi-medium-z8d
+  rec=$(make_spawn_case profile-kimi-medium kimi "$id")
+  read_case_record "$rec"
+  write_kimi_config "$HOME_DIR"
+
+  out=$(FM_FAKE_KIMI_PREFLIGHT_FAIL=1 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --model kimi-code/k3 --effort medium)
+  status=$?
+  expect_code 1 "$status" "kimi spawn should reject medium effort"
+  assert_contains "$out" "config.invalid: Kimi profile preflight rejected" \
+    "kimi unsupported effort rejection did not surface Kimi's preflight error"
+  assert_absent "$HOME_DIR/state/$id.meta" "kimi rejected medium effort should not write meta"
+  assert_grep "return --force $WT_DIR" "$LAUNCH_LOG.treehouse" \
+    "kimi preflight abort did not return the leased worktree"
+  [ -z "$(find "$HOME_DIR/state" -maxdepth 1 -name '.kimi-bootstrap-*' -print -quit)" ] \
+    || fail "kimi preflight abort left secure-control state behind"
+  pass "kimi rejects unsupported effort values before spawning"
+}
+
+test_kimi_bootstrap_launcher_owns_marker_and_secure_capture() {
+  local control output pid marker status mode
+  control="$TMP_ROOT/kimi-launcher-control"
+  output="$TMP_ROOT/kimi-launcher-output"
+  mkdir -m 700 "$control"
+  for name in capture live; do
+    : > "$control/$name"
+    chmod 600 "$control/$name"
+  done
+
+  sleep 60 &
+  pid=$!
+  printf 'bootstrap=%s\n' "$pid" > "$control/live"
+  "$ROOT/bin/fm-kimi-bootstrap.sh" marker "$control" > "$output" 2>&1 &
+  marker=$!
+  for _ in $(seq 1 50); do
+    grep -q 'Kimi prompt bootstrap' "$output" 2>/dev/null && break
+    sleep 0.1
+  done
+  kill -0 "$pid" 2>/dev/null || fail "kimi bootstrap pid was not live with its busy marker"
+  kill -0 "$marker" 2>/dev/null || fail "kimi marker did not follow the live bootstrap pid"
+  mode=$(if stat -f '%Lp' "$control/capture" >/dev/null 2>&1; then stat -f '%Lp' "$control/capture"; else stat -c '%a' "$control/capture"; fi)
+  [ "$mode" = 600 ] || fail "kimi bootstrap capture mode was $mode, expected 600"
+  [ ! -L "$control/capture" ] || fail "kimi bootstrap capture was a symlink"
+  kill "$pid"
+  wait "$pid" 2>/dev/null || true
+  wait "$marker"
+  printf '%s\n' 'bootstrap failure detail' > "$control/capture"
+  output=$("$ROOT/bin/fm-kimi-bootstrap.sh" finish 7 \
+    "$FAKEBIN_DIR/kimi" "$control" --model kimi-code/k3 2>&1)
+  status=$?
+  expect_code 7 "$status" "kimi bootstrap finisher should preserve prompt-mode failure status"
+  assert_contains "$output" "bootstrap failure detail" \
+    "kimi bootstrap finisher discarded captured failure output"
+  assert_absent "$control" "kimi bootstrap finisher did not remove its secure control directory"
+  pass "kimi bootstrap marker and failure capture follow the live process lifecycle"
+}
+
+test_kimi_default_model_requires_real_section() {
+  local rec id out status
+  id=profile-kimi-missing-default-z8e
+  rec=$(make_spawn_case profile-kimi-missing-default kimi "$id")
+  read_case_record "$rec"
+  mkdir -p "$HOME_DIR/kimi-code"
+  printf '%s\n' 'default_model = "missing/model"' > "$HOME_DIR/kimi-code/config.toml"
+
+  out=$(FM_FAKE_KIMI_PREFLIGHT_FAIL=1 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "kimi spawn should reject a default_model without a model section"
+  assert_contains "$out" "config.invalid: Kimi profile preflight rejected" \
+    "kimi missing default model section rejection did not surface Kimi's preflight error"
+  assert_absent "$HOME_DIR/state/$id.meta" "kimi missing default model section should not write meta"
+  pass "kimi requires the default model to have a real model section"
+}
+
+test_kimi_accepts_literal_config_and_omits_default_effort() {
+  local rec id out status
+  id=profile-kimi-literal-config-z8g
+  rec=$(make_spawn_case profile-kimi-structured-config kimi "$id")
+  read_case_record "$rec"
+  mkdir -p "$HOME_DIR/kimi-code"
+  cat > "$HOME_DIR/kimi-code/config.toml" <<'EOF'
+default_model = 'custom/kimi'
+
+[models.'custom/kimi']
+support_efforts = [
+  'low',
+  'high', # 'max' is intentionally disabled
+]
+EOF
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --effort high)
+  status=$?
+  expect_code 0 "$status" "kimi spawn should accept literal-string TOML"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" kimi default high
+  assert_contains "$(cat "$LAUNCH_LOG.preflight")" "effort=default args=-p" \
+    "kimi default-model preflight should omit the unverified effort environment"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "KIMI_MODEL_THINKING_EFFORT=" \
+    "kimi default-model launch should omit the unverified effort environment"
+  pass "kimi records and omits effort when the resolved default model is unknown"
+}
+
+test_kimi_rejects_duplicate_toml_declarations() {
+  local rec id out status
+  id=profile-kimi-duplicate-config-z8h
+  rec=$(make_spawn_case profile-kimi-duplicate-config kimi "$id")
+  read_case_record "$rec"
+  mkdir -p "$HOME_DIR/kimi-code"
+  cat > "$HOME_DIR/kimi-code/config.toml" <<'EOF'
+default_model = "custom/kimi"
+
+[models."custom/kimi"]
+support_efforts = ["low", "high"]
+support_efforts = ["low", "high", "max"]
+EOF
+
+  out=$(FM_FAKE_KIMI_PREFLIGHT_FAIL=1 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --effort max)
+  status=$?
+  expect_code 1 "$status" "kimi spawn should reject duplicate TOML declarations"
+  assert_contains "$out" "config.invalid: Kimi profile preflight rejected" \
+    "kimi duplicate declaration rejection did not surface Kimi's preflight error"
+  assert_absent "$HOME_DIR/state/$id.meta" "kimi duplicate TOML declaration should not write meta"
+  pass "kimi rejects duplicate TOML declarations before writing metadata"
+}
+
 test_batch_forwards_shared_profile_flags() {
   local rec id1 id2 out status
   id1=profile-batch-a-z9
@@ -388,6 +730,33 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_kimi_secondmate_launch_is_refused() {
+  local rec id id_pos sm out status
+  id=profile-kimi-secondmate-z17
+  id_pos=profile-kimi-secondmate-pos-z18
+  rec=$(make_spawn_case profile-kimi-secondmate codex "$id" "$id_pos")
+  read_case_record "$rec"
+  write_kimi_config "$HOME_DIR"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$sm" --secondmate --harness kimi)
+  status=$?
+  expect_code 1 "$status" "kimi secondmate spawn should be refused"
+  assert_contains "$out" "kimi is verified for crewmate/scout spawns only" \
+    "kimi secondmate refusal did not explain the scope boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" "refused kimi secondmate launch should not write meta"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id_pos" kimi --secondmate)
+  status=$?
+  expect_code 1 "$status" "positional kimi secondmate spawn should be refused"
+  assert_contains "$out" "kimi is verified for crewmate/scout spawns only" \
+    "positional kimi secondmate refusal did not explain the scope boundary"
+  assert_absent "$HOME_DIR/state/$id_pos.meta" "refused positional kimi secondmate launch should not write meta"
+  pass "kimi is refused for secondmate primary launches"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
@@ -402,7 +771,17 @@ test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
+test_kimi_bootstraps_prompt_then_resumes_with_model_and_effort
+test_kimi_preflight_follows_local_validation
+test_kimi_control_validation_precedes_preflight
+test_kimi_bootstrap_launcher_owns_marker_and_secure_capture
+test_kimi_records_and_omits_effort_for_non_k3_model
+test_kimi_rejects_unsupported_effort_value
+test_kimi_default_model_requires_real_section
+test_kimi_accepts_literal_config_and_omits_default_effort
+test_kimi_rejects_duplicate_toml_declarations
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_kimi_secondmate_launch_is_refused
 
 echo "# all fm-spawn-dispatch-profile tests passed"

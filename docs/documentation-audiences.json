@@ -304,6 +304,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/kimi-harness.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/supervision.md",
       "audience": "maintainer-verification"
     },

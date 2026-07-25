@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # Shared session-lock harness identity.
 #
-# ONE owner of the "which verified-harness process holds this home's session
+# ONE owner of the "which verified-primary-harness process holds this home's session
 # lock, and does the current process descend from that same harness?" decision.
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock;
 # bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
 # lock-owning primary session before it may arm or rewake.
 # This file is sourced by scripts and has no side effects on source.
 
-# Known harness command names; extend when a new adapter is verified.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$'
+# Known primary harness command names; extend when a new primary adapter is verified.
+FM_HARNESS_RE='claude|codex|opencode|grok|^pi$'
 
 # Walk the current process ancestry (up to 8 hops) and print the first pid whose
-# command looks like a verified harness. The harness pid lives as long as the
+# command looks like a verified primary harness. The harness pid lives as long as the
 # session, unlike the transient subshell pid of any one tool call.
 fm_harness_ancestry_pid() {
   local pid=$$ comm args
@@ -32,7 +32,7 @@ fm_harness_ancestry_pid() {
   return 1
 }
 
-# True if $1 is a live process that looks like a verified harness.
+# True if $1 is a live process that looks like a verified primary harness.
 fm_harness_pid_alive() {
   local pid=$1 comm
   kill -0 "$pid" 2>/dev/null || return 1

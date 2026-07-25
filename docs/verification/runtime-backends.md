@@ -29,7 +29,7 @@ zsh
 
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Claude, Codex, OpenCode, and Grok were observed under their own process names.
-Kimi Code CLI 0.29.1 was observed under `kimi` on 2026-07-25.
+Kimi's separately version-stamped foreground-process evidence is recorded in [`kimi-harness.md`](kimi-harness.md#launch-and-ingestion).
 Pi remained a generic `node` process and is intentionally inconclusive.
 
 The structural multi-row composer reader, Kimi pointer-delivery path, and OpenCode 1.18.4 busy-queue behavior are pinned by:
