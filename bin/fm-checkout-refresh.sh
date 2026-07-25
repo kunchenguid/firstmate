@@ -494,7 +494,7 @@ PY
 
 backing_checkout() {
   local worktree=$1 pool=$2 state=$3 worktree_root pool_root state_root main
-  local worktree_common main_common listed line listed_root matches=0
+  local worktree_common main_common listed line listed_root listed_roots matches=0
   worktree_root=$(exact_git_root "$worktree") || return 1
   pool_root=$(canonical_dir "$pool") || return 1
   [ "$worktree_root" != "$pool_root" ] || return 1
@@ -531,44 +531,64 @@ try:
 except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
     raise SystemExit(1)
 PY
-  listed=$(git -C "$worktree_root" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || return 1
-  main=$(printf '%s\n' "$listed" | sed -n 's/^worktree //p' | sed -n '1p')
-  [ -n "$main" ] || return 1
-  main=$(exact_git_root "$main") || return 1
+  # POOL-SCOPED MEMOIZATION (opt-in, off by default).
+  #
+  # Every worktree in a pool belongs to the same repository, so `git worktree
+  # list`, the primary checkout, and the canonical form of each registration are
+  # IDENTICAL for all of them. Recomputing them per worktree is what makes a
+  # whole-pool walk scale as pools x worktrees x registrations - the shape that
+  # gets worse as the fleet grows, which is precisely the wrong direction.
+  #
+  # A caller sweeping one pool sets BACKING_CHECKOUT_POOL_CACHE=1 and clears the
+  # cache when it is done. Single-shot callers leave it unset and behave exactly
+  # as before, recomputing everything - which is what a one-off destructive
+  # decision should do.
+  #
+  # The cache is keyed on the pool and is only ever consulted for that same pool,
+  # so it can never leak one repository's answers into another's.
+  if [ "${BACKING_CHECKOUT_POOL_CACHE:-0}" = 1 ] && [ "${BC_CACHE_POOL:-}" = "$pool_root" ]; then
+    main=$BC_CACHE_MAIN
+    main_common=$BC_CACHE_MAIN_COMMON
+    listed_roots=$BC_CACHE_LISTED_ROOTS
+  else
+    listed=$(git -C "$worktree_root" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || return 1
+    main=$(printf '%s\n' "$listed" | sed -n 's/^worktree //p' | sed -n '1p')
+    [ -n "$main" ] || return 1
+    main=$(exact_git_root "$main") || return 1
+    main_common=$(fm_checkout_git_common_dir "$main") || return 1
+    # Canonicalize every registration ONCE. Downstream this is pure string
+    # comparison, so the per-worktree cost of alias detection becomes zero.
+    listed_roots=''
+    while IFS= read -r line; do
+      case "$line" in
+        worktree\ *)
+          listed_root=$(canonical_dir "${line#worktree }" 2>/dev/null) || continue
+          listed_roots="${listed_roots}${listed_root}"$'\n'
+          ;;
+      esac
+    done <<EOF
+$listed
+EOF
+    if [ "${BACKING_CHECKOUT_POOL_CACHE:-0}" = 1 ]; then
+      BC_CACHE_POOL=$pool_root
+      BC_CACHE_MAIN=$main
+      BC_CACHE_MAIN_COMMON=$main_common
+      BC_CACHE_LISTED_ROOTS=$listed_roots
+    fi
+  fi
   [ "$main" != "$worktree_root" ] || return 1
   worktree_common=$(fm_checkout_git_common_dir "$worktree_root") || return 1
-  main_common=$(fm_checkout_git_common_dir "$main") || return 1
   [ "$worktree_common" = "$main_common" ] || return 1
-  # This loop exists ONLY to prove that exactly one registered worktree resolves
-  # to $worktree_root - it detects duplicate/aliased registrations. It is not
-  # establishing the authority of any other path: $worktree_root and $main were
-  # each already proven exact Git roots above, with full metadata validation.
-  #
-  # It used to call exact_git_root on every listed path, which costs three or
-  # four subprocesses each (canonicalize, `git rev-parse --show-toplevel`,
-  # canonicalize again, validate metadata). Across a pool that is quadratic:
-  # every worktree in the pool re-resolves every registration, so a 14-worktree
-  # pool with 19 registrations paid ~266 full resolutions per preflight. That was
-  # the dominant cost of the pre-spawn check, and therefore of every spawn.
-  #
-  # Canonicalization alone answers the aliasing question this loop asks, and it
-  # is the same comparison basis: exact_git_root RETURNS its canonicalized path,
-  # so comparing canonical_dir output against $worktree_root (itself canonical)
-  # is equivalent for equality purposes while dropping the git and metadata work
-  # that only mattered for establishing authority we are not establishing here.
-  #
-  # A path that cannot even be canonicalized is skipped rather than fatal: it
-  # cannot be an alias of $worktree_root, which canonicalized successfully, so it
-  # cannot change the count this loop is computing.
-  while IFS= read -r line; do
-    case "$line" in
-      worktree\ *)
-        listed_root=$(canonical_dir "${line#worktree }" 2>/dev/null) || continue
-        [ "$listed_root" != "$worktree_root" ] || matches=$(( matches + 1 ))
-        ;;
-    esac
+  # Alias detection: prove exactly one registration resolves to THIS worktree.
+  # Pure string comparison over the already-canonicalized registrations above, so
+  # it costs no subprocesses regardless of how many registrations the pool has.
+  # Authority for the paths that matter ($worktree_root, $main) was established
+  # by exact_git_root above; this loop only counts.
+  while IFS= read -r listed_root; do
+    [ -n "$listed_root" ] || continue
+    [ "$listed_root" != "$worktree_root" ] || matches=$(( matches + 1 ))
   done <<EOF
-$listed
+$listed_roots
 EOF
   [ "$matches" -eq 1 ] || return 1
   printf '%s\n' "$main"
@@ -1796,6 +1816,11 @@ prepare_hygiene_discovery() {
       failed=1
     fi
   done < "$treehouse_paths"
+  BACKING_CHECKOUT_POOL_CACHE=0
+  BC_CACHE_POOL=''
+  BC_CACHE_MAIN=''
+  BC_CACHE_MAIN_COMMON=''
+  BC_CACHE_LISTED_ROOTS=''
   rm -f "$treehouse_paths" || failed=1
   [ "$failed" -eq 0 ] || return 1
   manifest_sort_unique "$hygiene_file"
@@ -2633,6 +2658,15 @@ pool_preflight() {
     rm -f "$treehouse_paths"
     return 1
   fi
+  # This sweep walks one pool's worktrees, all of which share a repository, so
+  # let backing_checkout reuse its pool-scoped facts across them instead of
+  # recomputing per worktree. Scoped to this loop and cleared straight after, so
+  # no other caller inherits a cache. See backing_checkout for the rationale.
+  BACKING_CHECKOUT_POOL_CACHE=1
+  BC_CACHE_POOL=''
+  BC_CACHE_MAIN=''
+  BC_CACHE_MAIN_COMMON=''
+  BC_CACHE_LISTED_ROOTS=''
   while IFS=$'\t' read -r treehouse_state pool worktree; do
     [ -n "$worktree" ] || continue
     # FOREIGN-POOL SHORT CIRCUIT. This loop visits every Treehouse worktree on the
