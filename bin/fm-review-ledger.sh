@@ -7,9 +7,11 @@
 # date, and a one-line verdict). They are firstmate-private (data/ is gitignored),
 # because what firstmate has reviewed for the user is the user's operational
 # record, not the project's. <track> is codebase or docs.
-# Selection is pure git against the stored commit: a unit that has not moved since
-# its last-reviewed sha is skipped, a unit that moved is a candidate, and units
-# are then greedily filled into one bounded run by an estimated-token budget.
+# Selection is git-based against the stored commit and time-based against the 
+# review date: a unit that has not moved and has not expired is skipped. A unit 
+# that has moved, has untracked changes, or has exceeded its TTL (FM_LEDGER_TTL_DAYS) 
+# is a candidate. Units are then greedily filled into one bounded run by an 
+# estimated-token budget.
 # Usage: fm-review-ledger.sh select <project> <track> [--paths]
 #              print the next slice to review and why, within the token budget.
 #              --paths prints only the selected git pathspecs (one per line), for
@@ -91,16 +93,31 @@ git_r() { git -C "$REPO" "$@"; }
 # names a top-level entry with a space.
 auto_units() {
   local has_root_files=0 name type
+  local -A seen=()
   while read -r type name; do
     case "$name" in
       *' '*) echo "warning: skipping top-level path with space: $name" >&2; continue ;;
     esac
+    seen["$name"]=1
     if [ "$type" = tree ]; then
       printf '%s\n' "$name"
     else
       has_root_files=1
     fi
   done < <(git_r ls-tree HEAD --format='%(objecttype) %(path)')
+  
+  while read -r name; do
+    name="${name%%/*}"
+    case "$name" in *' '*) continue ;; esac
+    [ -n "${seen["$name"]:-}" ] && continue
+    seen["$name"]=1
+    if [ -d "$REPO/$name" ]; then
+      printf '%s\n' "$name"
+    else
+      has_root_files=1
+    fi
+  done < <(git_r ls-files --others --exclude-standard)
+
   [ "$has_root_files" -eq 1 ] && printf '%s\n' "$ROOT_UNIT"
   return 0
 }
@@ -188,7 +205,7 @@ ledger_upsert() {
 #   touch_date: commit date (%cs) of the unit's most recent change, or empty
 #   churn: commit count since last review (0 for never/clean)
 classify_unit() {
-  local unit=$1 row sha date state churn touch
+  local unit=$1 row sha date state churn touch ttl_days dirty=0
   row=$(ledger_lookup "$LEDGER" "$unit")
   # shellcheck disable=SC2046
   touch=$(git_r log -1 --format='%cs' -- $(unit_pathspec "$unit") 2>/dev/null || true)
@@ -206,8 +223,22 @@ classify_unit() {
     # shellcheck disable=SC2046
     churn=$(git_r log --oneline --since="$date" -- $(unit_pathspec "$unit") 2>/dev/null | wc -l | tr -d ' ')
   fi
-  if [ "${churn:-0}" -gt 0 ]; then
+  
+  if [ -n "$(git_r status --porcelain -- "$(unit_pathspec "$unit")" 2>/dev/null)" ]; then
+    dirty=1
+  fi
+  
+  ttl_days=${FM_LEDGER_TTL_DAYS:-30}
+  local now then diff=0
+  now=$(date +%s)
+  if [ -n "$date" ] && then=$(date -d "$date" +%s 2>/dev/null); then
+    diff=$(( (now - then) / 86400 ))
+  fi
+
+  if [ "${churn:-0}" -gt 0 ] || [ "$dirty" -eq 1 ]; then
     state=changed
+  elif [ "$diff" -gt "$ttl_days" ]; then
+    state=expired
   else
     state=clean
   fi
@@ -227,7 +258,8 @@ ranked_candidates() {
     churn=$(printf '%s\n' "$line" | cut -f3)
     case "$state" in
       changed) printf '1\t%s\t%s\t%s\t%s\n' "$touch" "$churn" "$unit" "$state" ;;
-      never)   printf '2\t%s\t%s\t%s\t%s\n' "$touch" "$churn" "$unit" "$state" ;;
+      expired) printf '2\t%s\t%s\t%s\t%s\n' "$touch" "$churn" "$unit" "$state" ;;
+      never)   printf '3\t%s\t%s\t%s\t%s\n' "$touch" "$churn" "$unit" "$state" ;;
       clean)   : ;;
     esac
   done < <(units_for "$PROJECT" "$TRACK")
@@ -267,6 +299,7 @@ cmd_select() {
     if [ "$paths_only" -eq 0 ]; then
       case "$state" in
         changed) reason="changed since review ($churn commit(s), last touched $touch)" ;;
+        expired) reason="expired (last reviewed > ${FM_LEDGER_TTL_DAYS:-30} days ago)" ;;
         never)   reason="never reviewed (last touched ${touch:-unknown})" ;;
       esac
       local flag=""
@@ -314,7 +347,7 @@ cmd_record() {
 # --- status -----------------------------------------------------------------
 
 cmd_status() {
-  local total=0 reviewed=0 changed=0 never=0 unit line state
+  local total=0 reviewed=0 changed=0 expired=0 never=0 unit line state
   local -A seen=()
   while IFS= read -r unit; do
     [ -n "$unit" ] || continue
@@ -333,6 +366,7 @@ cmd_status() {
       printf '  %-24s %s\n' "$unit" "$state"
     fi
     [ "$state" = changed ] && changed=$(( changed + 1 ))
+    [ "$state" = expired ] && expired=$(( expired + 1 ))
     [ "$state" = never ] && never=$(( never + 1 ))
   done < <(units_for "$PROJECT" "$TRACK")
 
@@ -343,8 +377,8 @@ cmd_status() {
   done)
   [ -n "$orphans" ] && printf '%s\n' "$orphans"
 
-  printf 'coverage: %s/%s units reviewed, %s changed since review, %s never reviewed\n' \
-    "$reviewed" "$total" "$changed" "$never"
+  printf 'coverage: %s/%s units reviewed, %s changed, %s expired, %s never reviewed\n' \
+    "$reviewed" "$total" "$changed" "$expired" "$never"
 }
 
 # --- dispatch ---------------------------------------------------------------
