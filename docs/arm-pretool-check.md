@@ -19,9 +19,10 @@ This policy is not a post-arm liveness guarantee.
 
 Claude also registers `bin/fm-continuity-pretool-check.sh` for Bash PreToolUse events.
 This is a separate, tightly bounded recovery gate rather than another watcher-shape policy.
-It runs only in a primary home, and it denies only an executed `bin/fm-*.sh` command other than `bin/fm-wake-drain.sh`, `bin/fm-watch-arm.sh`, or the ordinary literal `bin/fm-teardown.sh` when task metadata is in flight and no identity-matched live watcher holds that home's lock.
-Ordinary shell commands, fleet-script names used as data, all commands in an idle fleet, child worktrees, wake drain, watcher arm, and ordinary literal teardown remain allowed.
-The denial gives Claude reason-specific recovery guidance - drain, use fail-closed `bin/fm-teardown.sh` for completed tasks, then end the turn so the Stop-owned auto-arm re-establishes the watcher, with a manual tracked Claude background-task arm only when the Stop auto-arm itself failed - per the contract in [`watcher-continuity.md`](watcher-continuity.md).
+It runs only in a primary home and considers only executed `bin/fm-*.sh` commands while task metadata is in flight.
+Ordinary shell commands, fleet-script names used as data, all commands in an idle fleet, and child worktrees remain allowed.
+[`watcher-continuity.md`](watcher-continuity.md) owns the recovery exemptions, the recorded post-wake handling gap, and the refusal boundary when no live watcher or recent delivered-wake owner record explains the gap.
+The denial gives Claude reason-specific recovery guidance - drain, use fail-closed `bin/fm-teardown.sh` for completed tasks, then end the turn so the Stop-owned auto-arm re-establishes the watcher, with a manual tracked Claude background-task arm only when the Stop auto-arm itself failed.
 `bin/fm-continuity-command-policy.mjs` reuses this document's shell lexer and command-position analysis but owns the recovery-versus-other-fleet classification.
 Malformed transport or opaque dynamic syntax fails open so this narrow gate cannot become a blanket Bash block.
 The existing `bin/fm-turnend-guard.sh` Stop integration remains the final backstop, cooperating with the Stop-owned auto-arm in its `--claude` mode ([`turnend-guard.md`](turnend-guard.md)).

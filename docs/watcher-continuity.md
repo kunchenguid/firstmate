@@ -29,7 +29,7 @@ The owner-row append order decides which cycle is latest, so a later unexplained
 An absent, malformed, truncated, stale, or superseded delivered-wake record keeps the refusal.
 Allowing an ordinary literal teardown prevents a terminal wake from creating a recovery circle: forced or dynamically constructed teardown remains blocked, ordinary teardown itself still refuses dirty, unlanded, incomplete-scout, and unresolved-decision cases, and the turn-end guard continues to require supervision for any tasks left in flight.
 The model no longer re-arms after ordinary wakes.
-Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
+Terminal arm-output classification (`started`, `attached`, delivered close, or `FAILED`) remains defense in depth for the manual recovery path.
 Codex retains its bounded foreground checkpoint protocol.
 Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.
@@ -49,7 +49,7 @@ Before an attached arm calls a close unexplained it reads the owner's own ledger
 Proof of a delivered wake changes the claim to `watcher: cycle closed with a delivered wake pid=<N> (reported by its owning arm); no live cycle remains`, because the owner already reported the reason and a second reason would be false.
 That attached close returns zero so Claude's Stop hook stays silent instead of rewaking for the wake the owner already delivered.
 No proof keeps `watcher: FAILED - cycle ended without an actionable reason` and the same nonzero exit.
-The ledger informs wording only; it is not proof that supervision is healthy.
+The ledger explains attached-close wording and Claude's bounded post-wake handling gap; it never proves that a live supervision cycle exists.
 Pi's and OpenCode's adapters are unchanged by it: their close classifiers already treat every non-actionable close as a failure that triggers continuity restoration, which is what those homes did with the previous typed failure too.
 Grok must re-arm after the clean delivered-close completion because it has no automatic successor.
 
@@ -69,8 +69,8 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops, then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
-Its source-dependent delivered-wake regression drives two real arms against one real watcher and proves this change: an attached arm must not call an owner-delivered wake unexplained, must exit cleanly, and must reject truncated, future-dated, or same-second wrong-identity owner evidence.
-Its killed-watcher case is a no-false-negative preservation guard that asserts the ledger consult does not regress the exact upstream unexplained-close failure and nonzero exit; it cannot fail against this diff because the alarm path is deliberately unchanged.
+Its delivered-wake regression drives two real arms against one real watcher and requires an attached arm to account for the owner's wake, exit cleanly, and reject truncated, future-dated, or wrong-identity owner evidence.
+Its killed-watcher case preserves the unexplained-close alarm and nonzero exit when no delivered-wake owner record explains the close.
 `tests/fm-continuity-pretool-check.test.sh` proves the Claude gate rejects only non-recovery fleet execution in the precise unexplained state, allows the bounded post-wake gap, and preserves the registered Stop hooks.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, identity, AFK, need, single-flight, exit-2 translation, and the complete real-arm overlap path that must close without a duplicate failure rewake.
 `tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard.

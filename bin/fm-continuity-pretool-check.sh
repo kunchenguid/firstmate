@@ -17,7 +17,7 @@
 # The turn-end guard remains the final backstop, cooperating with the
 # Stop-owned auto-arm in its --claude mode, and prevents a turn from ending in
 # the explained gap. This gate still closes an unexplained supervision gap
-# before another fleet mutation, but does not replace or weaken the Stop hooks.
+# before another fleet command, but does not replace or weaken the Stop hooks.
 #
 # Input is Claude PreToolUse JSON on stdin. Tests may pass --command directly.
 # Malformed transport, missing jq/Node, a missing classifier, or classifier
