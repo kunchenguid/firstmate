@@ -65,7 +65,29 @@ SH
 echo "curl $*" >> "$NET_LOG"
 exit 1
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh" "$fb/gh-axi" "$fb/curl"
+  # A bytedcli that RECORDS every call to $NET_LOG so a test can prove the default path
+  # makes no Codebase call, and returns one fixture open MR whose live check-run status
+  # `mr status` reports. FAKE_BYTEDCLI_FAIL fails the whole tool; FAKE_BYTEDCLI_STATUS_FAIL
+  # fails only the per-MR status read (so the row's CI must degrade to unknown, never
+  # "passing"); FAKE_BYTEDCLI_CHECKS overrides the check-run counts JSON.
+  cat > "$fb/bytedcli" <<'SH'
+#!/usr/bin/env bash
+echo "bytedcli $*" >> "$NET_LOG"
+[ "${FAKE_BYTEDCLI_FAIL:-0}" = 1 ] && exit 1
+[ "${FAKE_BYTEDCLI_SLEEP:-0}" = 1 ] && sleep 30
+case "$*" in
+  *"codebase mr list"*)
+    printf '%s\n' '{"status":"success","data":{"merge_requests":[{"Number":99,"SourceBranchName":"fm/cb-ship","Status":"open"}],"total_count":1}}'
+    ;;
+  *"codebase mr status"*)
+    [ "${FAKE_BYTEDCLI_STATUS_FAIL:-0}" = 1 ] && exit 1
+    printf '{"status":"success","data":{"mergeability":{"mergeable":true},"review":{"status":"pending"},"check_runs":%s}}\n' \
+      "${FAKE_BYTEDCLI_CHECKS:-{\"summary\":\"has_failure\",\"total_count\":3,\"passed_count\":1,\"failed_count\":1,\"running_count\":0}}"
+    ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh" "$fb/gh-axi" "$fb/curl" "$fb/bytedcli"
   printf '%s\n' "$fb"
 }
 
@@ -954,9 +976,87 @@ test_include_prs_is_the_only_fetch_path() {
     .prs | startswith("checked")
   ' >/dev/null || fail "--include-prs must report checked PR state"
   printf '%s' "$json" | jq -e '
-    .candidate_prs | any(.[]; .num == "9" and .task == "ship-task" and .checks == "passing" and .review == "APPROVED")
+    .candidate_prs | any(.[]; .num == "9" and .task == "ship-task" and .checks == "passing" and .review == "APPROVED" and .verification == "live")
   ' >/dev/null || fail "candidate_prs must carry the fetched PR cross-referenced to its task: $json"
   pass "--include-prs is the only path that fetches, and it enriches correctly"
+}
+
+# A Codebase-hosted ship task: its recorded PR is a code.byted.org merge request, the
+# opposite of write_fixture's GitHub PR. The status line is a worker self-report that
+# claims the suite passed, which must NEVER be surfaced as verified CI.
+write_codebase_fixture() {  # <home>
+  local home=$1
+  mkdir -p "$home/projects/cb-wt"
+  : > "$home/data/secondmates.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] cb-ship - Ship on Codebase (repo: firstmate) (kind: ship) (since 2026-07-20)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/cb-ship.meta" \
+    "window=firstmate:fm-cb-ship" \
+    "worktree=$home/projects/cb-wt" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=direct-PR" \
+    "pr=https://code.byted.org/obric/firstmate/merge_requests/99"
+  printf 'done: PR https://code.byted.org/obric/firstmate/merge_requests/99 lint clean; suite passed\n' \
+    > "$home/state/cb-ship.status"
+}
+
+# The reported defect, end to end: for a Codebase (code.byted.org) merge request, the
+# default local path must label its data as a worker self-report - never verified CI -
+# and --include-prs must fetch real-time MR check-run status through the Codebase seam.
+test_codebase_mr_ci_is_fetched_live_and_self_reports_are_labeled() {
+  local home fakebin default json
+  home=$(make_home codebase-ci); write_codebase_fixture "$home"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+
+  # Default local path: no live CI at all, and every self-reported surface is labeled.
+  default=$(run "$home" "$fakebin" --json)
+  printf '%s' "$default" | jq -e '
+    (.in_flight | length) > 0
+      and (.in_flight | all(.[]; .reported == "self"))
+      and (.recorded_prs | any(.[]; .id == "cb-ship"
+            and (.url | test("code.byted.org/obric/firstmate/merge_requests/99")) and .ci == "unverified"))
+      and (has("candidate_prs") | not)
+      and (.prs | startswith("not_requested"))
+  ' >/dev/null || fail "default path must label self-reports and expose no verified CI: $default"
+  # The worker's "suite passed" claim must not appear as any verified-CI signal.
+  [ ! -s "$home/net.log" ] || fail "default Codebase path made a network call: $(cat "$home/net.log")"
+
+  # --include-prs: real-time MR check-run status is fetched through the Codebase seam.
+  : > "$home/net.log"
+  json=$(run "$home" "$fakebin" --include-prs --json)
+  grep -q '^bytedcli --json codebase mr list ' "$home/net.log" \
+    || fail "--include-prs must list open Codebase MRs"
+  grep -q '^bytedcli --json codebase mr status ' "$home/net.log" \
+    || fail "--include-prs must read live Codebase MR check-run status"
+  printf '%s' "$json" | jq -e '
+    (.prs | startswith("checked"))
+      and (.candidate_prs | any(.[]; .num == "99" and .repo == "obric/firstmate"
+            and .task == "cb-ship" and .checks == "failing" and .verification == "live"
+            and (.url | test("code.byted.org/obric/firstmate/merge_requests/99"))))
+  ' >/dev/null || fail "--include-prs must surface live-verified Codebase MR CI: $json"
+  pass "Codebase MR CI is fetched live under --include-prs and self-reports stay labeled"
+}
+
+# A Codebase MR whose live status read cannot answer must degrade to an explicit
+# unknown, never a false "passing" - an unreadable check must not read as green.
+test_codebase_mr_status_failure_is_unknown_not_passing() {
+  local home fakebin json
+  home=$(make_home codebase-ci-unknown); write_codebase_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  json=$(FAKE_BYTEDCLI_STATUS_FAIL=1 run "$home" "$fakebin" --include-prs --json)
+  printf '%s' "$json" | jq -e '
+    (.candidate_prs | any(.[]; .num == "99" and .checks == "unknown" and .verification == "live"))
+      and (.candidate_prs | all(.[]; .checks != "passing"))
+  ' >/dev/null || fail "an unreadable Codebase MR check must be unknown, never passing: $json"
+  pass "an unreadable Codebase MR check degrades to unknown, not a false pass"
 }
 
 test_partial_github_failure_degrades() {
@@ -1926,6 +2026,8 @@ test_open_decision_surfaces_end_to_end
 test_report_pointers_surface
 test_superseded_queued_item_dropped_by_default
 test_include_prs_is_the_only_fetch_path
+test_codebase_mr_ci_is_fetched_live_and_self_reports_are_labeled
+test_codebase_mr_status_failure_is_unknown_not_passing
 test_partial_github_failure_degrades
 test_perl_fallback_bounds_github_call
 test_section_caps_and_expansion_flags
