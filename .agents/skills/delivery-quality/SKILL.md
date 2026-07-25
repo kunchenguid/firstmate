@@ -18,7 +18,7 @@ The selected delivery path remains authoritative, and this procedure must not cr
 
 Apply dispatch precedence exactly once: an explicit per-task captain instruction, then the best-fit `config/crew-dispatch.json` rule, then its configured default, then the static crew harness.
 A per-task instruction always wins, including its requested harness or interface, model, and effort axes, unless the requested harness or exact model cannot be established as supported in the current authenticated environment.
-Use the current discovery surface in `harness-adapters` before passing a configured exact model to `fm-spawn`.
+Use the current discovery surface in `harness-adapters`, then the selected runtime's reference file under `.agents/skills/harness-adapters/`, before passing a configured exact model to `fm-spawn`.
 Do not infer an alias, silently substitute a similarly named model, or claim that an unavailable route ran.
 
 A rule's optional `fallback` is a concrete unavailable-model fallback, not a quota candidate or a lower-precedence default.

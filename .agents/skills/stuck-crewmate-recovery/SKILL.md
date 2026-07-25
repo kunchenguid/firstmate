@@ -13,7 +13,7 @@ metadata:
 
 Use this playbook when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or when a direct report is stale, looping, repeatedly confused, asking a question its brief already answers, unresponsive, or when a steer failed to land.
 
-Load `harness-adapters` before sending an interrupt, exit command, resume command, or harness-specific skill invocation.
+Load `harness-adapters` and the target window's recorded runtime reference under `.agents/skills/harness-adapters/` before sending an interrupt, exit command, resume command, or harness-specific skill invocation.
 The target window's harness is recorded as `harness=` in `state/<id>.meta`.
 
 ## Session-start reconciliation for a dead ordinary direct report
