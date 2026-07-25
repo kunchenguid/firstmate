@@ -42,7 +42,15 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse cursor-agent
+  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf '%s\n' '2026.07.23-e383d2b' ;;
+  status) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/cursor-agent"
   printf '%s\n' "$fakebin"
 }
 
@@ -369,6 +377,58 @@ test_cursor_secondmate_is_rejected() {
   pass "cursor is rejected for persistent secondmates"
 }
 
+test_cursor_raw_wrappers_cannot_bypass_secondmate_rejection() {
+  local wrapper label rec id sm out status
+  label=0
+  for wrapper in \
+    "env FOO=1 cursor-agent --force" \
+    "command cursor-agent --force" \
+    "bash -lc 'cursor-agent --force'"; do
+    label=$((label + 1))
+    id="profile-cursor-raw-secondmate-z8d$label"
+    rec=$(make_spawn_case "profile-cursor-raw-secondmate-$label" codex "$id")
+    read_case_record "$rec"
+    sm="$CASE_DIR/cursor-secondmate-home"
+    make_seeded_secondmate_home "$sm" "$id"
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$sm" --secondmate --harness "$wrapper")
+    status=$?
+    expect_code 1 "$status" "wrapped cursor secondmate launch must be rejected: $wrapper"
+    assert_contains "$out" "supports ordinary ship/scout workers only" \
+      "wrapped cursor secondmate refusal did not preserve the supported boundary: $wrapper"
+    assert_absent "$HOME_DIR/state/$id.meta" "wrapped cursor secondmate refusal must precede metadata: $wrapper"
+  done
+  pass "cursor wrappers cannot bypass the persistent-secondmate boundary"
+}
+
+test_cursor_unverified_version_is_rejected_before_endpoint_creation() {
+  local rec id out status
+  id=profile-cursor-version-z8g
+  rec=$(make_spawn_case profile-cursor-version codex "$id")
+  read_case_record "$rec"
+  cat > "$FAKEBIN_DIR/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf '%s\n' '2026.05.28-a70ca7c' ;;
+  status) exit 0 ;;
+esac
+SH
+  chmod +x "$FAKEBIN_DIR/cursor-agent"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness cursor)
+  status=$?
+  expect_code 1 "$status" "unverified cursor version must be rejected"
+  assert_contains "$out" "requires verified cursor-agent version 2026.07.23-e383d2b" \
+    "cursor version refusal did not name the verified version"
+  assert_contains "$out" "found '2026.05.28-a70ca7c'" \
+    "cursor version refusal did not report the installed version"
+  assert_absent "$HOME_DIR/state/$id.meta" "cursor version refusal must happen before metadata publication"
+  [ ! -s "$LAUNCH_LOG" ] || fail "cursor version refusal unexpectedly created or typed into an endpoint"
+  pass "cursor rejects CLI versions outside the empirical verification record"
+}
+
 test_cursor_authentication_is_checked_before_endpoint_creation() {
   local rec id out status
   id=profile-cursor-auth-z8f
@@ -376,7 +436,10 @@ test_cursor_authentication_is_checked_before_endpoint_creation() {
   read_case_record "$rec"
   cat > "$FAKEBIN_DIR/cursor-agent" <<'SH'
 #!/usr/bin/env bash
-exit 1
+case "${1:-}" in
+  --version) printf '%s\n' '2026.07.23-e383d2b' ;;
+  status) exit 1 ;;
+esac
 SH
   chmod +x "$FAKEBIN_DIR/cursor-agent"
 
@@ -391,21 +454,40 @@ SH
   pass "cursor authentication is checked before endpoint creation"
 }
 
-test_cursor_herdr_is_rejected_before_endpoint_creation() {
+test_cursor_unverified_backends_are_rejected_before_endpoint_creation() {
+  local backend rec id out status
+  for backend in zellij orca cmux herdr; do
+    id="profile-cursor-$backend-z8e"
+    rec=$(make_spawn_case "profile-cursor-$backend" codex "$id")
+    read_case_record "$rec"
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness cursor --backend "$backend")
+    status=$?
+    expect_code 1 "$status" "cursor launch on unverified backend=$backend must be rejected"
+    assert_contains "$out" "verified only on backend=tmux; backend=$backend is not supported" \
+      "cursor backend refusal did not name the verified boundary for backend=$backend"
+    assert_absent "$HOME_DIR/state/$id.meta" "cursor backend refusal must precede metadata for backend=$backend"
+    [ ! -s "$LAUNCH_LOG" ] || fail "cursor backend refusal unexpectedly used an endpoint for backend=$backend"
+  done
+  pass "cursor rejects every unverified session-provider backend"
+}
+
+test_cursor_raw_wrapper_cannot_bypass_backend_rejection() {
   local rec id out status
-  id=profile-cursor-herdr-z8e
-  rec=$(make_spawn_case profile-cursor-herdr codex "$id")
+  id=profile-cursor-raw-herdr-z8h
+  rec=$(make_spawn_case profile-cursor-raw-herdr codex "$id")
   read_case_record "$rec"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness cursor --backend herdr)
+    "$id" "$PROJ_DIR" --harness "env FOO=1 cursor-agent --force" --backend herdr)
   status=$?
-  expect_code 1 "$status" "cursor Herdr launch must be rejected"
-  assert_contains "$out" "Herdr native agent registration is required" \
-    "cursor Herdr refusal did not name the liveness boundary"
-  assert_absent "$HOME_DIR/state/$id.meta" "cursor Herdr refusal must happen before metadata publication"
-  [ ! -s "$LAUNCH_LOG" ] || fail "cursor Herdr refusal unexpectedly created or typed into an endpoint"
-  pass "cursor is rejected on Herdr before endpoint creation"
+  expect_code 1 "$status" "wrapped cursor launch on Herdr must be rejected"
+  assert_contains "$out" "verified only on backend=tmux; backend=herdr is not supported" \
+    "wrapped cursor launch bypassed the verified backend boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" "wrapped cursor backend refusal must happen before metadata publication"
+  [ ! -s "$LAUNCH_LOG" ] || fail "wrapped cursor backend refusal unexpectedly used an endpoint"
+  pass "cursor wrappers cannot bypass the session-provider boundary"
 }
 
 test_pi_threads_model_and_max_effort() {
@@ -481,8 +563,11 @@ test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_cursor_threads_exact_model_and_omits_effort_axis
 test_cursor_secondmate_is_rejected
+test_cursor_raw_wrappers_cannot_bypass_secondmate_rejection
+test_cursor_unverified_version_is_rejected_before_endpoint_creation
 test_cursor_authentication_is_checked_before_endpoint_creation
-test_cursor_herdr_is_rejected_before_endpoint_creation
+test_cursor_unverified_backends_are_rejected_before_endpoint_creation
+test_cursor_raw_wrapper_cannot_bypass_backend_rejection
 test_pi_threads_model_and_max_effort
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch

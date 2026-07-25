@@ -64,8 +64,8 @@
 #   Cursor is ordinary-worker/scout only; --secondmate rejects both its verified
 #   adapter name and a cursor-agent raw launch. A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new ordinary adapters. A verified Cursor spawn checks `cursor-agent status`
-#   before endpoint creation and directs an unauthenticated operator to login.
+#   new ordinary adapters. A verified Cursor spawn requires the empirically tested
+#   CLI version and authenticated status before endpoint creation.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -220,9 +220,6 @@ fi
 if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
   echo "error: backend=cmux does not support --secondmate spawns yet" >&2
   exit 1
-fi
-if [ "$BACKEND" = orca ]; then
-  fm_backend_orca_runtime_check || exit 1
 fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
@@ -474,6 +471,9 @@ case "$ARG3" in
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
+    case "$LAUNCH" in
+      *cursor-agent*) HARNESS=cursor-agent ;;
+    esac
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -515,15 +515,24 @@ if [ "$KIND" = secondmate ]; then
   esac
 fi
 case "$HARNESS:$BACKEND" in
-  cursor:herdr|cursor-agent:herdr)
-    echo "error: harness 'cursor' is not verified on backend=herdr because Herdr native agent registration is required for safe liveness and recovery" >&2
+  cursor:tmux|cursor-agent:tmux) ;;
+  cursor:*|cursor-agent:*)
+    echo "error: harness 'cursor' is verified only on backend=tmux; backend=$BACKEND is not supported" >&2
     exit 1
     ;;
 esac
+if [ "$BACKEND" = orca ]; then
+  fm_backend_orca_runtime_check || exit 1
+fi
 case "$HARNESS" in
   cursor|cursor-agent)
     command -v cursor-agent >/dev/null 2>&1 || {
       echo "error: harness 'cursor' requires cursor-agent on PATH" >&2
+      exit 1
+    }
+    CURSOR_AGENT_VERSION=$(cursor-agent --version 2>/dev/null) || CURSOR_AGENT_VERSION=
+    [ "$CURSOR_AGENT_VERSION" = 2026.07.23-e383d2b ] || {
+      echo "error: harness 'cursor' requires verified cursor-agent version 2026.07.23-e383d2b; found '${CURSOR_AGENT_VERSION:-unknown}'" >&2
       exit 1
     }
     cursor-agent status >/dev/null 2>&1 || {

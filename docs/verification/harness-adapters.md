@@ -96,10 +96,11 @@ The current shared classifier returned `empty` for that idle placeholder, `pendi
 
 ### Supported boundary
 
-The verified launch is an ordinary worker/scout adapter on tmux, Zellij, Orca, and cmux.
+The verified launch is an ordinary worker/scout adapter on Linux x64 under tmux.
 Cursor is not a verified primary harness or persistent secondmate and is deliberately absent from primary detection, session-lock matching, turn-end guards, and rendered supervision protocols.
-Herdr is also excluded because its native agent registration is required for safe liveness and recovery and was not verified for Cursor.
+Zellij, Orca, cmux, and Herdr are rejected until each session-provider lifecycle is empirically verified for Cursor; Herdr additionally requires native agent registration for safe liveness and recovery.
 Cursor exposes no verified per-turn hook, so task status writes and session-provider pane polling remain the completion path.
-`fm-spawn` checks `cursor-agent` availability and authenticated status before endpoint creation.
+`fm-spawn` requires the exact verified `cursor-agent` version and authenticated status before endpoint creation.
+Raw launch commands containing `cursor-agent` are conservatively classified as Cursor so wrappers cannot bypass its secondmate or backend boundary.
 The launch uses `--force` for unattended built-in tools and commands, but deliberately omits `--approve-mcps` because MCP server approval is a separate trust boundary.
 Cursor exposes no separate effort flag; exact model IDs and parameterized model strings carry model-specific effort.
