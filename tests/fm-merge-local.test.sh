@@ -24,15 +24,21 @@
 #   refuses  (k) a merge left in progress with its resolution staged, in a linked
 #                worktree, where the git dir is not <project>/.git
 #   refuses  (l) a cherry-pick left in progress with its resolution staged
-#   refuses  (m) an unrecognized git status code
-#   proceeds (n) untracked file at a path the fast-forward never touches
-#   proceeds (o) modified path the fast-forward never touches
-#   proceeds (p) ignored file, even at a path the fast-forward adds
-#   proceeds (q) clean tree
-#   proceeds (r) a staged rename at paths the fast-forward never touches, proving
+#   refuses  (m) a conflicted rebase, which detaches HEAD, so the named refusal
+#                has to come before the default-branch check to be reachable
+#   refuses  (n) a conflicted apply-backend rebase, which leaves the same state
+#                directory git am uses but without its marker
+#   refuses  (o) a failed git am, which keeps HEAD attached and needs the git am
+#                commands rather than the rebase ones
+#   refuses  (p) an unrecognized git status code
+#   proceeds (q) untracked file at a path the fast-forward never touches
+#   proceeds (r) modified path the fast-forward never touches
+#   proceeds (s) ignored file, even at a path the fast-forward adds
+#   proceeds (t) clean tree
+#   proceeds (u) a staged rename at paths the fast-forward never touches, proving
 #                the rename's second NUL field is consumed and not misread as the
 #                next record's status code
-#   regression (s) the observed deadlock: two untracked operator files plus one
+#   regression (v) the observed deadlock: two untracked operator files plus one
 #                modified tracked pointer that the incoming commit removes from
 #                the index. It must refuse, naming only the pointer, and must
 #                merge once that single path is settled - the cure can no longer
@@ -447,6 +453,85 @@ test_refuses_in_progress_cherry_pick() {
   pass "fm-merge-local refuses a cherry-pick left in progress, not just a merge"
 }
 
+test_refuses_in_progress_rebase() {
+  local case_dir proj
+  case_dir=$(make_case refuse-in-progress-rebase)
+  proj="$case_dir/project"
+  prepare_conflicting_sideline "$proj"
+  # A real conflicted rebase, not a hand-made sentinel: it parks the checkout on
+  # a DETACHED HEAD, which is the whole point. The default-branch check would
+  # otherwise report an empty branch name and never reach the sentinels, so this
+  # fails if that ordering regresses.
+  git -C "$proj" checkout -q sideline
+  git -C "$proj" rebase main >/dev/null 2>&1 \
+    && fail "refuse-in-progress-rebase: fixture rebase was expected to conflict"
+  [ -z "$(git -C "$proj" symbolic-ref --short HEAD 2>/dev/null || true)" ] \
+    || fail "refuse-in-progress-rebase: fixture did not leave a detached HEAD"
+
+  attempt_merge "$case_dir"
+
+  expect_code 1 "$RC" "refuse-in-progress-rebase: expected a refusal"
+  assert_grep 'a rebase is in progress here' "$case_dir/stderr" \
+    "refuse-in-progress-rebase: refusal did not name the rebase"
+  assert_grep 'git rebase --abort' "$case_dir/stderr" \
+    "refuse-in-progress-rebase: refusal was not actionable"
+  assert_no_grep 'expected default branch' "$case_dir/stderr" \
+    "refuse-in-progress-rebase: the detached-HEAD branch check preempted the named refusal"
+  assert_not_merged "$proj" refuse-in-progress-rebase
+  pass "fm-merge-local names a conflicted rebase rather than reporting an empty branch name"
+}
+
+test_refuses_in_progress_apply_backend_rebase() {
+  local case_dir proj
+  case_dir=$(make_case refuse-in-progress-rebase-apply)
+  proj="$case_dir/project"
+  prepare_conflicting_sideline "$proj"
+  # The apply backend leaves rebase-apply/ WITHOUT the `applying` marker, so this
+  # pins that the shared directory is still read as a rebase once the git am
+  # marker checked before it does not match.
+  git -C "$proj" checkout -q sideline
+  git -C "$proj" rebase --apply main >/dev/null 2>&1 \
+    && fail "refuse-in-progress-rebase-apply: fixture rebase was expected to conflict"
+
+  attempt_merge "$case_dir"
+
+  expect_code 1 "$RC" "refuse-in-progress-rebase-apply: expected a refusal"
+  assert_grep 'a rebase is in progress here' "$case_dir/stderr" \
+    "refuse-in-progress-rebase-apply: refusal did not name the rebase"
+  assert_no_grep 'git am --abort' "$case_dir/stderr" \
+    "refuse-in-progress-rebase-apply: an apply-backend rebase was mistaken for a patch application"
+  assert_no_grep 'expected default branch' "$case_dir/stderr" \
+    "refuse-in-progress-rebase-apply: the detached-HEAD branch check preempted the named refusal"
+  assert_not_merged "$proj" refuse-in-progress-rebase-apply
+  pass "fm-merge-local names an apply-backend rebase, which shares git am's state directory"
+}
+
+test_refuses_in_progress_patch_application() {
+  local case_dir proj
+  case_dir=$(make_case refuse-in-progress-am)
+  proj="$case_dir/project"
+  prepare_conflicting_sideline "$proj"
+  # A real failing `git am`. It keeps HEAD attached and leaves a clean tree, so
+  # nothing but the `applying` marker inside the shared rebase-apply directory
+  # says an operation is open - and `git rebase --abort` refuses outright here,
+  # so naming this a rebase would send the operator to a command that errors.
+  git -C "$proj" format-patch --stdout main..sideline > "$case_dir/sideline.patch"
+  git -C "$proj" am "$case_dir/sideline.patch" >/dev/null 2>&1 \
+    && fail "refuse-in-progress-am: fixture patch was expected to fail to apply"
+
+  attempt_merge "$case_dir"
+
+  expect_code 1 "$RC" "refuse-in-progress-am: expected a refusal"
+  assert_grep 'a patch application is in progress here' "$case_dir/stderr" \
+    "refuse-in-progress-am: refusal did not name the patch application"
+  assert_grep 'git am --abort' "$case_dir/stderr" \
+    "refuse-in-progress-am: refusal did not offer the command that actually abandons an am"
+  assert_no_grep 'git rebase --abort' "$case_dir/stderr" \
+    "refuse-in-progress-am: a patch application was mislabelled as a rebase"
+  assert_not_merged "$proj" refuse-in-progress-am
+  pass "fm-merge-local tells a patch application apart from the rebase that shares its state directory"
+}
+
 test_refuses_unrecognized_status_code() {
   local case_dir proj fakebin stderr
   case_dir=$(make_case refuse-unknown-code)
@@ -632,6 +717,9 @@ test_refuses_untracked_file_at_an_incoming_copy_destination
 test_refuses_unresolved_conflict
 test_refuses_in_progress_merge_in_a_linked_worktree
 test_refuses_in_progress_cherry_pick
+test_refuses_in_progress_rebase
+test_refuses_in_progress_apply_backend_rebase
+test_refuses_in_progress_patch_application
 test_refuses_unrecognized_status_code
 test_proceeds_on_untracked_file_the_merge_never_touches
 test_proceeds_on_modified_path_the_merge_never_touches

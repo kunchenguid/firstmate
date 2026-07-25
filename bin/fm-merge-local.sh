@@ -18,8 +18,9 @@
 # be clobbered by it, so they do not block it, and a refusal names every
 # colliding path and what the incoming commits do to it. A state this guard
 # cannot classify confidently - an unresolved conflict, a merge, cherry-pick,
-# revert, rebase, or bisect left in progress, an unrecognized status code, a git
-# command that fails - refuses instead of proceeding.
+# revert, rebase, bisect, or patch application left in progress, an unrecognized
+# status code, a git command that fails - refuses instead of proceeding, naming
+# the operation it found and how to conclude or abandon it.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
@@ -57,9 +58,71 @@ git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { e
 
 DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 
+# --- unclassifiable-state refusals -------------------------------------------
+#
+# An unclassifiable state is not a safe state, so every parse or command failure
+# lands here rather than degrading into an empty - and therefore silent - change set.
+refuse_unreadable() {  # <detail>
+  echo "REFUSED: cannot classify the state of $PROJ, so refusing to merge into it." >&2
+  echo "  $1" >&2
+  echo "Resolve that state in $PROJ (finish or abort the operation in progress, or report an unexpected git status), then retry." >&2
+  exit 1
+}
+
+# A merge, cherry-pick, revert, rebase, bisect, or patch application left
+# half-finished is such a state, and one no other check can see on its own: once
+# its conflicts are staged, git status reports plain modifications
+# indistinguishable from ordinary dirt. Resolve each sentinel through
+# rev-parse --git-path rather than assuming "$PROJ/.git": in a linked worktree
+# the git dir is elsewhere, and a hardcoded path would silently never fire.
+IN_PROGRESS_PATH=
+in_progress_path() {  # <git-dir-entry>
+  local rel
+  rel=$(git -C "$PROJ" rev-parse --git-path "$1") \
+    || refuse_unreadable "git rev-parse --git-path $1 failed in $PROJ"
+  case "$rel" in
+    /*) IN_PROGRESS_PATH=$rel ;;
+    *) IN_PROGRESS_PATH="$PROJ/$rel" ;;
+  esac
+}
+
+refuse_if_in_progress() {  # <git-dir-entry> <detail>
+  in_progress_path "$1"
+  [ -e "$IN_PROGRESS_PATH" ] || return 0
+  refuse_unreadable "$2"
+}
+
+# `git am` and the apply-backend rebase share the rebase-apply directory but need
+# different advice - `git rebase --abort` refuses outright while an am is open.
+# git's own status tells them apart by the `applying` marker inside it, so this
+# does too, and checks that marker before the directory it lives in.
+refuse_if_operation_in_progress() {
+  refuse_if_in_progress MERGE_HEAD \
+    "a merge is in progress here; conclude it with 'git commit' or abandon it with 'git merge --abort'"
+  refuse_if_in_progress CHERRY_PICK_HEAD \
+    "a cherry-pick is in progress here; conclude it with 'git cherry-pick --continue' or abandon it with 'git cherry-pick --abort'"
+  refuse_if_in_progress REVERT_HEAD \
+    "a revert is in progress here; conclude it with 'git revert --continue' or abandon it with 'git revert --abort'"
+  refuse_if_in_progress rebase-merge \
+    "a rebase is in progress here; conclude it with 'git rebase --continue' or abandon it with 'git rebase --abort'"
+  refuse_if_in_progress rebase-apply/applying \
+    "a patch application is in progress here; conclude it with 'git am --continue' or abandon it with 'git am --abort'"
+  refuse_if_in_progress rebase-apply \
+    "a rebase is in progress here; conclude it with 'git rebase --continue' or abandon it with 'git rebase --abort'"
+  refuse_if_in_progress BISECT_LOG \
+    "a bisect is in progress here; end it with 'git bisect reset'"
+}
+
 # The project's main checkout must be on its default branch, so the fast-forward
 # lands predictably (firstmate never writes here otherwise).
 cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
+if [ -z "$cur" ]; then
+  # A rebase and a bisect both park the checkout on a detached HEAD, so the
+  # sentinels have to answer here or they never run at all: the generic refusal
+  # below reports an empty branch name and says nothing about the operation that
+  # caused it.
+  refuse_if_operation_in_progress
+fi
 [ "$cur" = "$DEFAULT" ] || { echo "error: $PROJ is on '$cur', expected default branch '$DEFAULT'; cannot merge safely" >&2; exit 1; }
 
 # Clean fast-forward only: DEFAULT must be an ancestor of BRANCH. Settled before
@@ -96,33 +159,6 @@ trap guard_tmp_cleanup EXIT
 GUARD_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-merge-local.XXXXXX") || {
   echo "error: cannot create a temporary directory to inspect $PROJ" >&2
   exit 1
-}
-
-# An unclassifiable state is not a safe state, so every parse or command failure
-# lands here rather than degrading into an empty - and therefore silent - change set.
-refuse_unreadable() {  # <detail>
-  echo "REFUSED: cannot classify the state of $PROJ, so refusing to merge into it." >&2
-  echo "  $1" >&2
-  echo "Resolve that state in $PROJ (finish or abort the operation in progress, or report an unexpected git status), then retry." >&2
-  exit 1
-}
-
-# A merge, cherry-pick, revert, rebase, or bisect left half-finished is another
-# such state, and one the status listing cannot show on its own: once its
-# conflicts are staged, git reports plain modifications indistinguishable from
-# ordinary dirt. Resolve the sentinel through rev-parse --git-path rather than
-# assuming "$PROJ/.git": in a linked worktree the git dir is elsewhere, and a
-# hardcoded path would silently never fire.
-refuse_if_in_progress() {  # <git-dir-entry> <detail>
-  local rel path
-  rel=$(git -C "$PROJ" rev-parse --git-path "$1") \
-    || refuse_unreadable "git rev-parse --git-path $1 failed in $PROJ"
-  case "$rel" in
-    /*) path=$rel ;;
-    *) path="$PROJ/$rel" ;;
-  esac
-  [ -e "$path" ] || return 0
-  refuse_unreadable "$2"
 }
 
 DIRTY_PATHS=()      # tracked paths carrying staged or unstaged changes
@@ -165,21 +201,11 @@ while IFS= read -r -d '' entry; do
   esac
 done < "$GUARD_TMP/status"
 
-# Checked after the listing above, so an operation still carrying live conflicts
-# is named by the conflicted path it left behind; these sentinels then catch the
-# same operation once its resolutions are staged and it has nothing left to show.
-refuse_if_in_progress MERGE_HEAD \
-  "a merge is in progress here; conclude it with 'git commit' or abandon it with 'git merge --abort'"
-refuse_if_in_progress CHERRY_PICK_HEAD \
-  "a cherry-pick is in progress here; conclude it with 'git cherry-pick --continue' or abandon it with 'git cherry-pick --abort'"
-refuse_if_in_progress REVERT_HEAD \
-  "a revert is in progress here; conclude it with 'git revert --continue' or abandon it with 'git revert --abort'"
-refuse_if_in_progress rebase-merge \
-  "a rebase is in progress here; conclude it with 'git rebase --continue' or abandon it with 'git rebase --abort'"
-refuse_if_in_progress rebase-apply \
-  "a rebase is in progress here; conclude it with 'git rebase --continue' or abandon it with 'git rebase --abort'"
-refuse_if_in_progress BISECT_LOG \
-  "a bisect is in progress here; end it with 'git bisect reset'"
+# An operation that kept HEAD attached reaches the sentinels here rather than at
+# the detached-HEAD check above, deliberately after the listing: one still
+# carrying live conflicts is named by the conflicted path it left behind, and
+# these catch it once its resolutions are staged and it has nothing left to show.
+refuse_if_operation_in_progress
 
 git -C "$PROJ" diff -z --name-status "$DEFAULT" "$BRANCH" > "$GUARD_TMP/incoming" \
   || refuse_unreadable "git diff failed between $DEFAULT and $BRANCH in $PROJ"
