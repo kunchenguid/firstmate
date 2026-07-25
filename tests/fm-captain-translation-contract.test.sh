@@ -178,6 +178,8 @@ test_ahoy_owns_only_the_visible_session_recap() {
     "ahoy lacks an explicit captain-authored boundary rule"
   assert_grep 'Exclude messages that begin with the current U+2063 `FIRSTMATE_OP:` injection prefix.' "$AHOY" \
     "ahoy does not exclude current marked operational injections"
+  assert_grep 'Exclude messages that begin with the unmarked `FIRSTMATE_OP: v1 launch-brief: ` header' "$AHOY" \
+    "ahoy does not exclude the unmarked launch-brief header a secondmate carries in its own transcript"
   assert_grep 'Exclude legacy bare-marker away-mode injections only when U+2063 is immediately followed by `Supervisor escalate (`.' "$AHOY" \
     "ahoy does not narrowly exclude the legacy away-mode injection shape"
   assert_grep 'Exclude the exact legacy unmarked session-start payload ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.``' "$AHOY" \
