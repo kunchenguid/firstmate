@@ -11,17 +11,19 @@
 #   refuses  (a) modified path the fast-forward changes
 #   refuses  (b) modified path the fast-forward removes
 #   refuses  (c) untracked file at a path the fast-forward adds (name with spaces)
-#   refuses  (d) either endpoint of a staged rename that the fast-forward removes
-#   refuses  (e) an unresolved merge conflict (state it cannot classify)
-#   refuses  (f) an unrecognized git status code
-#   proceeds (g) untracked file at a path the fast-forward never touches
-#   proceeds (h) modified path the fast-forward never touches
-#   proceeds (i) ignored file, even at a path the fast-forward adds
-#   proceeds (j) clean tree
-#   proceeds (k) a staged rename at paths the fast-forward never touches, proving
+#   refuses  (d) untracked file nested inside an otherwise untracked directory,
+#                which a collapsed status listing would hide
+#   refuses  (e) either endpoint of a staged rename that the fast-forward removes
+#   refuses  (f) an unresolved merge conflict (state it cannot classify)
+#   refuses  (g) an unrecognized git status code
+#   proceeds (h) untracked file at a path the fast-forward never touches
+#   proceeds (i) modified path the fast-forward never touches
+#   proceeds (j) ignored file, even at a path the fast-forward adds
+#   proceeds (k) clean tree
+#   proceeds (l) a staged rename at paths the fast-forward never touches, proving
 #                the rename's second NUL field is consumed and not misread as the
 #                next record's status code
-#   regression (l) the observed deadlock: two untracked operator files plus one
+#   regression (m) the observed deadlock: two untracked operator files plus one
 #                modified tracked pointer that the incoming commit removes from
 #                the index. It must refuse, naming only the pointer, and must
 #                merge once that single path is settled - the cure can no longer
@@ -174,6 +176,31 @@ test_refuses_untracked_file_at_an_added_path() {
   assert_grep 'the operators own copy' "$proj/docs/Knowledge Graphs.pdf" \
     "refuse-untracked-added: the operator's untracked file was overwritten"
   pass "fm-merge-local refuses an untracked file at a path the fast-forward adds"
+}
+
+test_refuses_untracked_file_inside_an_untracked_directory() {
+  local case_dir proj
+  case_dir=$(make_case refuse-untracked-in-new-dir)
+  proj="$case_dir/project"
+  mkdir -p "$proj/reports"
+  printf 'theirs\n' > "$proj/reports/Quarterly Review.pdf"
+  commit_in "$proj" 'add a report in a new directory'
+  git -C "$proj" checkout -q main
+  # The whole directory is untracked here. git status collapses that to
+  # "reports/" unless untracked files are listed individually, which would hide
+  # the collision at the nested path the fast-forward actually adds.
+  mkdir -p "$proj/reports"
+  printf 'the operators own copy\n' > "$proj/reports/Quarterly Review.pdf"
+
+  attempt_merge "$case_dir"
+
+  expect_code 1 "$RC" "refuse-untracked-in-new-dir: expected a refusal"
+  assert_grep 'reports/Quarterly Review.pdf - untracked file here, and this merge creates a file at that path' \
+    "$case_dir/stderr" "refuse-untracked-in-new-dir: the collapsed untracked directory hid the nested collision"
+  assert_not_merged "$proj" refuse-untracked-in-new-dir
+  assert_grep 'the operators own copy' "$proj/reports/Quarterly Review.pdf" \
+    "refuse-untracked-in-new-dir: the operator's untracked file was overwritten"
+  pass "fm-merge-local sees an untracked file nested inside an otherwise untracked directory"
 }
 
 test_refuses_rename_endpoint_the_merge_removes() {
@@ -407,6 +434,7 @@ test_regression_untracked_documents_plus_removed_pointer() {
 test_refuses_modified_path_the_merge_changes
 test_refuses_modified_path_the_merge_removes
 test_refuses_untracked_file_at_an_added_path
+test_refuses_untracked_file_inside_an_untracked_directory
 test_refuses_rename_endpoint_the_merge_removes
 test_refuses_unresolved_conflict
 test_refuses_unrecognized_status_code
