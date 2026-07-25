@@ -8,7 +8,7 @@ The proven-isolated candidate set remains owned by `bin/fm-test-isolation-proof.
 
 | Input | Owner / source |
 |---|---|
-| Proven-isolated set (30 scripts) | `bin/fm-test-isolation-proof.sh --list` and `docs/fm-test-isolation-proof.md` |
+| Proven-isolated set (29 scripts) | `bin/fm-test-isolation-proof.sh --list` and `docs/fm-test-isolation-proof.md` |
 | Phase 1 serial durations | CI timing artifacts `fm-test-timing` from main after #825 / #832 / #834 |
 | Real-Herdr family | `bin/fm-test-run.sh --family real-herdr-gated` (dedicated required CI lane) |
 
@@ -33,7 +33,6 @@ Phase 1 averages used for balance (mean of available serial `duration_ms` across
 | 627 | `tests/fm-tmux-submit-busy.test.sh` |
 | 525 | `tests/fm-brief.test.sh` |
 | 321 | `tests/fm-composer-ghost.test.sh` |
-| 283 | `tests/fm-dispatch-select.test.sh` |
 | 276 | `tests/fm-send-settle.test.sh` |
 | 189 | `tests/fm-ensure-agents-md.test.sh` |
 | 175 | `tests/fm-supervision-instructions.test.sh` |

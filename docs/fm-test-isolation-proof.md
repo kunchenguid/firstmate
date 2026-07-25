@@ -20,7 +20,7 @@ The archived proof JSON below still records the Phase 2 proof-time flags (`produ
 | `started_at` | `2026-07-22T04:05:55Z` |
 | `finished_at` | `2026-07-22T04:08:06Z` |
 | concurrency | **4** |
-| candidates | **30** |
+| candidates | **29** |
 | failed | **0** |
 | wall duration_ms | **131001** (~131.0s) |
 | `production_sharding_enabled` | `False` |
@@ -48,7 +48,6 @@ Sorted paths as selected by `bin/fm-test-isolation-proof.sh --list` at proof tim
 - `tests/fm-composer-lib.test.sh`
 - `tests/fm-crew-state.test.sh`
 - `tests/fm-decision-hold-lifecycle.test.sh`
-- `tests/fm-dispatch-select.test.sh`
 - `tests/fm-ensure-agents-md.test.sh`
 - `tests/fm-grok-harness.test.sh`
 - `tests/fm-herdr-lab.test.sh`
@@ -93,7 +92,6 @@ Sorted paths as selected by `bin/fm-test-isolation-proof.sh --list` at proof tim
 | 1274 | 0 | 15 | `tests/fm-lint.test.sh` |
 | 1056 | 0 | 18 | `tests/fm-pi-primary-types.test.sh` |
 | 897 | 0 | 3 | `tests/fm-brief.test.sh` |
-| 874 | 0 | 10 | `tests/fm-dispatch-select.test.sh` |
 | 684 | 0 | 24 | `tests/fm-spawn-batch.test.sh` |
 | 348 | 0 | 11 | `tests/fm-ensure-agents-md.test.sh` |
 | 283 | 0 | 26 | `tests/fm-supervision-instructions.test.sh` |
