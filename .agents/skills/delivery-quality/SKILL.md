@@ -84,16 +84,17 @@ Route an actual product or engineering-contract choice through the normal decisi
 Continue independently only when the correction is clearly required by accepted intent.
 Do not use a discovery as permission for drive-by cleanup, adjacent feature work, or a broader redesign.
 
-## Direct delivery and PR-ready reconciliation
+## Delivery and PR-ready reconciliation
 
 After implementation and any proportionate cross-model validation, run the repository's existing focused tests, hooks, and quality gates.
-Push only the task branch and open its PR through `gh-axi`; never push the default branch and never merge.
-Verify all configured required CI checks are green before reporting the PR ready.
+For `local-only`, stop with a clean validated task branch, do not push or open a PR, and return the result to `task-lifecycle` for captain-approved landing.
+For `direct-PR`, push only the task branch and open or update its PR through `gh-axi`; never push the default branch and never merge.
+Verify all configured required CI checks are green before reporting a direct PR ready.
 Inspect current automated review feedback through `gh-axi`, including CodeRabbit when the repository configures it or it has posted on the PR.
 Route every actionable finding that could affect correctness, scope, risk, or product behavior back to the implementation worker, then rerun affected checks and push the focused fix on the same task branch.
 Do not wait forever for an optional service that is absent or silent.
 If no required check or posted review establishes that service as active, make one final refresh after required CI turns green and then treat its absence as non-blocking.
 A pending required check, an already-posted actionable finding, or a repository-documented bot requirement remains blocking until it resolves or reports a concrete failure.
 
-Report readiness to the captain in one concise outcome: what changed, the actual implementation and validation models when useful or when fallback occurred, checks and browser or media evidence, material residual risk, and the full PR URL.
+Report readiness to the captain in one concise outcome: what changed, the actual implementation and validation models when useful or when fallback occurred, checks and browser or media evidence, material residual risk, and the full PR URL or clean local branch as applicable.
 Do not relay delivery mechanics or a checklist dump.

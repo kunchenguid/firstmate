@@ -21,8 +21,8 @@ TMP_ROOT=$(fm_test_tmproot fm-ask-user-authority)
 
 approval_contract() {
   awk '
-    /^### Selected delivery path and approval authority$/ { found = 1; next }
-    found && /^### Validate$/ { exit }
+    /^## 7\. Task intake, delivery, and authority$/ { found = 1; next }
+    found && /^## 8\./ { exit }
     found { print }
   ' "$AGENTS"
 }
@@ -31,18 +31,14 @@ test_owner_and_always_loaded_boundary() {
   local contract trigger_count
   contract=$(approval_contract)
 
-  assert_contains "$contract" "only within the captain's original request and accepted task criteria" \
-    "standing authority lost the accepted-contract boundary"
-  assert_contains "$contract" 'never approves an ask-user Fix that would materially expand that product or engineering contract' \
+  assert_contains "$contract" 'Corrections clearly required by accepted intent may proceed under configured routine authority' \
+    "standing authority lost the accepted-intent boundary"
+  assert_contains "$contract" 'product or engineering-contract expansion requires the captain' \
     "standing authority lost the contract-expansion exception"
-  assert_contains "$contract" 'destructive, irreversible, and security-sensitive choices remain stronger captain boundaries' \
+  assert_grep 'Never expand authority for destructive, irreversible, or security-sensitive action' "$AGENTS" \
     "contract expansion weakened stronger captain boundaries"
-  assert_contains "$contract" 'Complexity alone is not expansion' \
-    "standing authority incorrectly treats complexity as expansion"
-  assert_contains "$contract" 'load `ask-user-authority`' \
-    "standing authority lost the detailed-procedure trigger"
-  assert_contains "$contract" 'implementation worker never answers its own finding' \
-    "implementation worker can answer its own finding"
+  assert_contains "$contract" 'The worker never decides its own escalated finding.' \
+    "worker can answer its own finding"
 
   assert_present "$OWNER" "ask-user authority owner is missing"
   assert_grep 'name: ask-user-authority' "$OWNER" "ask-user authority skill has the wrong name"
@@ -52,7 +48,7 @@ test_owner_and_always_loaded_boundary() {
   assert_grep 'With `yolo` off, every ask-user finding belongs to the captain' "$OWNER" \
     "detailed procedure permits autonomous ask-user decisions with yolo off"
   trigger_count=$(grep -Fc -- '- `ask-user-authority` -' "$AGENTS")
-  [ "$trigger_count" -eq 1 ] || fail "ask-user-authority must have exactly one section 12 trigger, found $trigger_count"
+  [ "$trigger_count" -eq 1 ] || fail "ask-user-authority must have exactly one section 13 trigger, found $trigger_count"
   assert_no_grep 'Hi Bit' "$AGENTS" "AGENTS.md encoded an incident-specific authority rule"
   assert_no_grep 'Hi Bit' "$OWNER" "authority owner encoded an incident-specific rule"
   pass "ask-user authority has one conditional owner and a concise always-loaded boundary"

@@ -134,9 +134,10 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 
 ## Two task shapes
 
-Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
+Ship tasks change projects by project mode (`direct-PR` or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
 The intake and authority contract in `AGENTS.md` owns when separate scout research is warranted.
-The [`task-lifecycle` skill](../.agents/skills/task-lifecycle/SKILL.md) owns the conditional backlog, briefing, validation, landing, cleanup, and promotion procedure after that classification.
+The [`delivery-quality` skill](../.agents/skills/delivery-quality/SKILL.md) owns route selection, proportional validation and evidence, and direct PR readiness.
+The [`task-lifecycle` skill](../.agents/skills/task-lifecycle/SKILL.md) owns the surrounding backlog, briefing, handoff, landing, cleanup, and promotion procedure.
 
 ## Dispatch profiles
 

@@ -25,7 +25,7 @@ assert_file_not_contains() {
 
 test_trigger_and_precedence_contract() {
   assert_file_contains "$ROOT/AGENTS.md" \
-    'load before writing any ship or scout brief and before treating a PR as ready' \
+    'load before writing any ship or scout instructions and before treating a PR as review-ready' \
     "AGENTS.md lost the delivery-quality load trigger"
   assert_file_contains "$SKILL" \
     'an explicit per-task captain instruction, then the best-fit `config/crew-dispatch.json` rule, then its configured default, then the static crew harness' \
@@ -75,7 +75,7 @@ test_proportional_validation_and_visual_triggers() {
     'Do not turn it into a second generic code reviewer, repeat checks already answered by the implementation worker, or add another review after it.' \
     "focused cross-model validation can become redundant ceremony"
   assert_file_contains "$SKILL" \
-    'Push only the task branch and open its PR through `gh-axi`; never push the default branch and never merge.' \
+    'For `direct-PR`, push only the task branch and open or update its PR through `gh-axi`; never push the default branch and never merge.' \
     "direct delivery lost its task-branch PR boundary"
   assert_file_contains "$SKILL" \
     'Require browser verification with `chrome-devtools-axi` for user-facing behavior when a real browser can materially validate the changed result.' \
@@ -110,8 +110,10 @@ test_ship_brief_preserves_delivery_discipline() {
     "direct PR brief lost the task-branch push boundary"
   assert_file_contains "$brief_script" 'required CI, and configured review feedback are reconciled' \
     "direct PR brief reports ready before CI and review reconciliation"
-  assert_file_contains "$ROOT/AGENTS.md" '`direct-PR` reports `done: PR <url> checks green` only after' \
+  assert_file_contains "$ROOT/AGENTS.md" 'reconcile required CI and configured review, then report the concise review-ready outcome' \
     "always-loaded lifecycle still treats PR creation as review-ready"
+  assert_file_contains "$ROOT/AGENTS.md" 'clean branch without push or PR' \
+    "always-loaded lifecycle lost the local-only boundary"
   pass "ship brief scaffolding carries the compact worker-facing delivery invariants"
 }
 

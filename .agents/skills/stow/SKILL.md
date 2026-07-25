@@ -53,7 +53,7 @@ The goal is a session that is safe to reset or destroy because everything durabl
    Do not invent other graduation paths.
 
 5. **Report to the captain.**
-   Summarize, in plain outcome language (section 9): what was stowed and where, what was filed to the backlog, and whether the session is now safe to reset or destroy - i.e. whether every durable finding from this sweep now lives on disk rather than only in this conversation.
+   Use `captain-communication` to summarize what was stowed and where, what was filed to the backlog, and whether the session is now safe to reset or destroy because every durable finding now lives on disk.
    If something could not be captured yet (for example, project-intrinsic knowledge waiting on a crewmate to land it), say so explicitly rather than reporting the session fully safe.
 
 ## Scope exclusion: no skill storage

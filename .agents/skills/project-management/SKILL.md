@@ -30,26 +30,26 @@ Do not overwrite or repurpose an existing path.
 
 Choose the delivery mode when adding or creating the project:
 
-- `no-mistakes` runs the full validation pipeline before a PR and is the default when the captain does not specify a mode.
-- `direct-PR` pushes and opens a PR without the no-mistakes pipeline.
-- `local-only` has no required remote or PR and lands only through the approved local fast-forward path.
+- `direct-PR` is the default and follows proportional validation, repository gates, CI, and configured review before the captain receives the review-ready URL.
+- `no-mistakes` is an alternate explicitly configured path that runs its own full validation pipeline before a PR.
+- `local-only` has no required remote or PR and lands only through the captain-approved local fast-forward path.
 
-The optional `+yolo` posture changes routine approval authority but does not change the delivery mode.
-Default it off, and enable it only on the captain's explicit instruction.
-`AGENTS.md` section 7 owns the complete authority boundary and exceptions when it is on.
+The optional `+yolo` posture changes routine within-scope decision authority but never merge, destructive, irreversible, security-sensitive, or product-contract authority.
+Default it off and enable it only on the captain's explicit instruction.
+`AGENTS.md` section 7 owns the authority boundary.
 
 ## Add or clone an existing project
 
 Confirm the source URL, local project name, delivery mode, and autonomy posture.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
-A `no-mistakes` project must have an `origin` remote and must complete the initialization procedure below.
-A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
-A `local-only` project may have no remote and skips no-mistakes initialization.
+A `direct-PR` project needs an `origin` remote.
+A `no-mistakes` project needs an `origin` remote and the initialization below.
+A `local-only` project may have no remote.
 
 ## Create a project
 
 Creating a GitHub repository is outward-facing.
-Before making that remote change, propose the repository name, owner or organization, visibility, and delivery mode, defaulting visibility to private and delivery mode to `no-mistakes`, then obtain the captain's explicit consent for those values.
+Before making that remote change, propose the repository name, owner or organization, visibility, and delivery mode, defaulting visibility to private and delivery mode to `direct-PR`, then obtain the captain's explicit consent for those values.
 Use `gh-axi` for the approved GitHub operation and consult its current help rather than relying on remembered flags.
 After remote creation succeeds, clone it locally, add the registry entry, and initialize it according to its delivery mode.
 
@@ -58,15 +58,16 @@ The captain's request to create that local project authorizes this local initial
 
 ## Initialize
 
-Run no-mistakes initialization only for `no-mistakes` projects:
+Preserve every repository's existing hooks and quality gates.
+Run no-mistakes initialization only for a project explicitly configured with that alternate mode:
 
 ```sh
 cd projects/<name> && no-mistakes init && no-mistakes doctor
 ```
 
-Initialization configures the local gate and does not vendor a no-mistakes skill into the project.
+Initialization configures that local gate and does not vendor a skill into the project.
 Do not create a commit merely because initialization ran.
-If doctor reports an environment, authentication, or daemon problem, resolve that blocker before dispatching work and never restart the shared daemon from a project operation.
+Resolve any environment, authentication, or daemon blocker before dispatching work, and never restart a shared daemon from a project operation.
 
 ## Remove
 

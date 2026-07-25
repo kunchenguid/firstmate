@@ -10,7 +10,7 @@ metadata:
 
 # task-lifecycle
 
-This skill is the single owner of Firstmate's conditional ship and scout procedure after the always-loaded intake, delivery-rigor, and authority rules in `AGENTS.md` sections 6 and 7 have classified the work.
+This skill owns Firstmate's conditional ship and scout procedure after `AGENTS.md` classifies the work and authority.
 Exact command syntax and flags remain with each script's header and current help.
 
 ## Backlog intake
@@ -23,7 +23,7 @@ Use compatible `tasks-axi` when the selected backend enables it and the document
 `.tasks.toml`, `docs/configuration.md`, and current `tasks-axi --help` own schema, compatibility, retention, archive behavior, and routine command syntax.
 Inspect the current item before replacing its considered body, archive a superseded body when recoverability matters, and avoid append-only note growth.
 Keep free-form notes free of temporary paths, moving versions, ephemeral identifiers, and copied current state that will rot.
-Verify volatile facts against their authoritative live source before acting, preserve durable ids, dependencies, and artifact links, and route reusable knowledge through `AGENTS.md` section 5.
+Verify volatile facts against their authoritative live source before acting, preserve durable ids, dependencies, and artifact links, and route reusable knowledge through `AGENTS.md` section 6.
 
 Record a ship or scout as under way when dispatching it.
 Update the item on every task decision and completion.
@@ -35,6 +35,7 @@ Use `secondmate-provisioning` and `bin/fm-backlog-handoff.sh` for cross-home han
 ## Brief and spawn
 
 Generate the task instructions through `bin/fm-brief.sh` and follow its current help.
+Use `delivery-quality` to add the selected route and proportional validation and evidence plan.
 Replace every `{TASK}` placeholder with a clear task description, acceptance criteria, constraints, and necessary context.
 Keep additions task-specific rather than repeating standard lifecycle instructions, and alter generated sections only when the work genuinely differs from the scaffold.
 
@@ -57,42 +58,45 @@ A secondmate's routed reply returns through status or a document pointer, never 
 A failed steer triggers `stuck-crewmate-recovery` rather than an unverified resend loop.
 After dispatch, keep the supervision required by `AGENTS.md` section 8 and `fleet-supervision`.
 
-## Delivery-path rigor
+## Direct delivery rigor
 
-The delivery path and authority boundaries in `AGENTS.md` section 7 govern every later step.
-No-mistakes alone owns review, fixes, tests, documentation, push, PR creation, and CI for a no-mistakes task.
-A direct-PR task follows its faster path without an independent reviewer.
-A local-only task stops on a clean ready branch and waits for configured landing authority.
-Never park work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer a new review gate from security, architecture, or risk language.
-If faster-path risk warrants the full pipeline, escalate whether to switch paths rather than inventing another gate.
+The authority boundaries in `AGENTS.md` section 7 govern every later step.
+`delivery-quality` alone owns route selection, proportional validation, repository gates, browser or media evidence, task-branch push and PR creation, automated-review reconciliation, and the review-ready verdict.
+This skill owns the surrounding work-item transitions, worker handoffs, decision return, landing, and cleanup.
+A `local-only` task applies the same proportional local evidence, stops on a clean ready branch without push or PR, and waits for the captain's landing authority.
 
-## No-mistakes validation
-
-After a no-mistakes worker creates its implementation commit, invoke validation on that same worker using the runtime-specific skill form from `harness-adapters`.
-The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
-Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
-Firstmate never starts a duplicate run.
-
-An ask-user finding appears as a worker decision request.
-Firstmate loads `ask-user-authority`, decides only within configured authority, and otherwise escalates to the captain.
-Return one exact decision to the same worker, naming the decision key, step, action, affected finding ids, any required instructions, and the exact response command.
-Require a matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
+When a worker raises a decision, firstmate loads `ask-user-authority`, decides only within configured authority, and otherwise escalates to the captain.
+Return the exact decision to the same worker and require the matching resolved event before treating it as handled.
 Resume fleet supervision immediately after the decision lands.
 
-Judge validation through the current-code-matched run step returned by `bin/fm-crew-state.sh <id>`, not shell liveness or the latest status event.
+## Alternate no-mistakes delivery
+
+Use this section only when the project's explicitly selected mode is `no-mistakes`; it is not the active default.
+After the worker creates its implementation commit, invoke validation on that same worker using the runtime-specific skill form from `harness-adapters`.
+The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
+Firstmate never invokes `no-mistakes axi respond` for a crew-owned run and never starts a duplicate run.
+
+An ask-user finding returns as a worker decision request.
+Firstmate loads `ask-user-authority`, decides only within configured authority, and otherwise escalates to the captain.
+Return one exact decision to the same worker, naming the decision key, step, action, affected finding ids, required instructions, and exact response command.
+Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
+Resume fleet supervision immediately after the decision lands.
+
+Judge validation through the current-code-matched run step returned by `bin/fm-crew-state.sh <id>`, not shell liveness or the latest event.
 A running, fixing, or CI result remains working.
 A parked approval or fix-review result requires the worker to follow the active gate help.
 A passed or checks-passed result is complete, and a failed or cancelled result is a failure.
-If the worker hand-edits, commits, aborts, or restarts while the run is active, steer it back to the pipeline response flow because the active run owns those changes.
+If the worker hand-edits, commits, aborts, or restarts while the run is active, steer it back to the pipeline response flow because the run owns those changes.
 The worker reports its PR when CI first becomes green rather than waiting for merge monitoring to finish.
 
 ## PR readiness and landing
 
-For a no-mistakes ship, the ready event is `done: PR <url> checks green` after CI is green.
-For a direct-PR ship, the ready event is `done: PR <url>` after the PR opens.
-Run `bin/fm-pr-check.sh <id> <PR url>` so canonical PR and forge-head identity are recorded and merge monitoring is registered.
-Tell the captain the complete `https://...` URL, a concise outcome, and the no-mistakes risk level when applicable.
-A captain instruction to merge supplies explicit authority, and `yolo` is the only standing routine merge authority.
+For `direct-PR`, use the `delivery-quality` readiness verdict.
+For an explicitly selected `no-mistakes` project, require its `done: PR <url> checks green` result.
+For either PR mode, run `bin/fm-pr-check.sh <id> <PR url>` so canonical PR and forge-head identity are recorded and merge monitoring is registered.
+For `local-only`, report readiness only after proportional validation leaves a clean local branch.
+Tell the captain one concise outcome with the complete `https://...` URL or local branch as applicable.
+Only the captain's explicit instruction authorizes merge.
 Never merge red work.
 
 Use `bin/fm-pr-merge.sh` for every authorized task PR merge and `bin/fm-merge-local.sh` for every authorized local-only landing.

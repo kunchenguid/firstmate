@@ -38,7 +38,7 @@ test_new_skill_metadata_and_triggers() {
     "AGENTS.md lost the diagnostic-reasoning trigger"
   assert_grep 'Use before adding, creating, removing, or initializing a project.' "$PROJECT" \
     "project-management skill metadata lost its precise load trigger"
-  assert_grep '`project-management` - load before adding, creating, removing, or initializing a project.' "$ROOT/AGENTS.md" \
+  assert_grep '`project-management` - load before adding, creating, cloning, initializing, removing, or registering a project' "$ROOT/AGENTS.md" \
     "AGENTS.md lost the project-management trigger"
   pass "new internal skills have one precise AGENTS.md trigger each"
 }
@@ -67,17 +67,20 @@ test_project_management_owner_covers_guarded_operations() {
     "project-management skill does not declare ownership"
   for phrase in \
     'bin/fm-project-mode.sh' \
-    '`no-mistakes`' \
-    '`direct-PR`' \
+    '`direct-PR` is the default' \
+    '`no-mistakes` is an alternate explicitly configured path' \
     '`local-only`' \
     'Default it off' \
     'Creating a GitHub repository is outward-facing.' \
     "captain's explicit consent" \
-    'Never issue a raw removal command from Firstmate.' \
-    'no-mistakes init && no-mistakes doctor'; do
+    'Preserve every repository' \
+    'no-mistakes init && no-mistakes doctor' \
+    'Never issue a raw removal command from Firstmate.'; do
     assert_grep "$phrase" "$PROJECT" "project-management owner is missing '$phrase'"
   done
-  pass "project-management owns registry, delivery posture, consent, initialization, and removal safety"
+  assert_no_grep 'default when the captain does not specify a mode' "$PROJECT" \
+    "project-management still presents the alternate as default"
+  pass "project-management owns direct-default posture, alternate initialization, consent, and removal safety"
 }
 
 test_generic_effort_fallback_respects_precedence() {
@@ -213,7 +216,7 @@ test_state_startup_and_ordinary_recovery_placement() {
     "ordinary recovery lost treehouse inventory inspection"
   assert_grep "recorded \`orca_worktree_id=\` and \`terminal=\`" "$RECOVERY" \
     "ordinary recovery lost Orca inventory inspection"
-  assert_grep '`stuck-crewmate-recovery` - load when startup reports an ordinary direct report dead or without a window' "$AGENTS" \
+  assert_grep '`stuck-crewmate-recovery` - load for a dead or missing ordinary direct report' "$AGENTS" \
     "AGENTS.md does not trigger ordinary dead-report recovery"
   pass "state, startup, and ordinary recovery have focused owners and triggers"
 }
@@ -223,25 +226,27 @@ test_compressed_agents_owner_map() {
     "AGENTS.md lost the state-layout owner pointer"
   assert_grep 'Run `bin/fm-session-start.sh` exactly once' "$AGENTS" \
     "AGENTS.md lost the session-start behavioral owner"
-  assert_grep '`harness-adapters` owns runtime operations, profile choice' "$AGENTS" \
-    "AGENTS.md lost the dispatch-procedure owner"
-  assert_grep '`project-management` - load before adding, creating, removing, or initializing a project.' "$AGENTS" \
+  assert_grep '`harness-adapters` - load before selecting a dispatch profile' "$AGENTS" \
+    "AGENTS.md lost the dispatch-procedure trigger"
+  assert_grep '`project-management` - load before adding, creating, cloning, initializing, removing, or registering a project' "$AGENTS" \
     "AGENTS.md lost the project-management trigger"
-  assert_grep 'which owns briefing through cleanup, scout promotion, custom checks, and backlog procedure' "$AGENTS" \
+  assert_grep '`task-lifecycle` owns backlog, task records, dispatch, steering, decision return, landing, cleanup, and scout promotion' "$AGENTS" \
     "AGENTS.md lost the task-lifecycle owner pointer"
-  assert_grep 'Load `fleet-supervision`' "$AGENTS" \
+  assert_grep '`delivery-quality` owns route selection, proportional validation and evidence, repository gates' "$AGENTS" \
+    "AGENTS.md lost the delivery-quality owner pointer"
+  assert_grep '`fleet-supervision` owns ordinary notification handling and repair' "$AGENTS" \
     "AGENTS.md lost the notification-procedure owner pointer"
-  assert_grep '`.tasks.toml`, `docs/configuration.md`, and `tasks-axi --help` own schema' "$AGENTS" \
+  assert_grep '`.tasks.toml`, `docs/configuration.md`, and current `tasks-axi --help` own schema' "$AGENTS" \
     "AGENTS.md lost the backlog-mechanics owner pointer"
-  assert_grep '`bin/fm-brief.sh` help owns scaffold variants' "$AGENTS" \
+  assert_grep '`bin/fm-brief.sh` help owns scaffold mechanics and safety assertions' "$AGENTS" \
     "AGENTS.md lost the brief-mechanics owner pointer"
-  assert_grep '`docs/configuration.md` owns activation, generated state, cadence, wire protocol' "$AGENTS" \
+  assert_grep '`fmx-respond` owns classification, public-safety policy' "$AGENTS" \
     "AGENTS.md lost the X-mode owner pointer"
-  pass "compressed AGENTS.md records the approved one-owner map"
+  pass "slim AGENTS.md records the approved one-owner map"
 }
 
 test_intake_reuses_evidence_and_parallelizes_safe_work() {
-  assert_grep 'Consult existing reports and established evidence before commissioning research.' "$AGENTS" \
+  assert_grep 'Relay established answers without speculative work' "$AGENTS" \
     "intake no longer reuses established evidence"
   assert_grep 'A **ship** is the default after implementation authorization' "$AGENTS" \
     "intake lost the ship default"
@@ -259,22 +264,24 @@ test_intake_reuses_evidence_and_parallelizes_safe_work() {
 }
 
 test_compressed_agents_retains_authority_and_supervision_safety() {
-  assert_grep 'remain read-only without spawning, steering, merging, draining notifications' "$AGENTS" \
+  assert_grep 'remain read-only: do not spawn, steer, merge, drain notifications' "$AGENTS" \
     "lock-refusal safety is missing"
-  assert_grep 'Do not add a reviewer to a faster path' "$AGENTS" \
-    "selected delivery rigor is missing"
-  assert_grep "A separate review or audit requires the captain's request" "$AGENTS" \
-    "separate-review authority is missing"
-  assert_grep 'Never merge red work.' "$AGENTS" \
+  assert_grep 'default active delivery model is `direct-PR`' "$AGENTS" \
+    "direct delivery model is missing"
+  assert_grep 'Do not create a second review pipeline, stack manual reviewers' "$AGENTS" \
+    "single delivery-quality path is missing"
+  assert_grep 'Never merge red work' "$AGENTS" \
     "red-merge prohibition is missing"
+  assert_grep 'captain alone approves merge' "$AGENTS" \
+    "captain merge authority is missing"
   assert_grep 'No turn ends blind while supervision is required' "$AGENTS" \
     "no-blind-turn safety is missing"
-  assert_grep 'While `state/.afk` exists, the away daemon owns supervision' "$AGENTS" \
+  assert_grep 'While `state/.afk` exists, the away daemon alone owns supervision' "$AGENTS" \
     "away-mode ownership is missing"
   assert_grep 'Before terminal cleanup, always post the final follow-up' "$SUPERVISION" \
     "X terminal follow-up procedure is missing"
-  assert_no_grep 'Firstmate does not personally review code or deliverables' "$AGENTS" \
-    "AGENTS.md retained the weaker duplicate review prohibition"
+  assert_no_grep 'no-mistakes' "$AGENTS" \
+    "AGENTS.md retained the superseded active delivery model"
   assert_no_grep 'firstmate reviews your branch' "$AGENTS" \
     "AGENTS.md retained a personal branch-review requirement"
   assert_no_grep 'firstmate reviews, captain approves' "$BRIEF" \
@@ -282,7 +289,7 @@ test_compressed_agents_retains_authority_and_supervision_safety() {
   if grep -q "$(printf '\342\200\224')" "$AGENTS"; then
     fail "AGENTS.md contains an em dash"
   fi
-  pass "compressed AGENTS.md retains authority, supervision, AFK, and X safety"
+  pass "slim AGENTS.md retains authority, supervision, AFK, and direct-delivery safety"
 }
 
 test_new_skill_metadata_and_triggers
