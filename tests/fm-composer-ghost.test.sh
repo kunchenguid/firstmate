@@ -323,8 +323,7 @@ test_cursor_row_scan_glyph_match_is_locale_safe() {
   # locale.
   printf '\xe2\x94\x80\xe2\x94\x80 not a prompt \xe2\x94\x80\xe2\x94\x80\n' > "$capture"
   out=$(
-    export LC_ALL=C
-    PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=10 \
+    LC_ALL=C PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=10 \
       FM_FAKE_BLANK_CURSOR=1 FM_FAKE_COMMAND=node \
       fm_tmux_composer_state fakepane
   )
@@ -333,8 +332,7 @@ test_cursor_row_scan_glyph_match_is_locale_safe() {
   # A genuine agent glyph in the same window must still be found under LC_ALL=C.
   printf 'transcript\n  \xe2\x9d\xaf fix findings 1 and 3\nfooter\n' > "$capture"
   out=$(
-    export LC_ALL=C
-    PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=10 \
+    LC_ALL=C PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=10 \
       FM_FAKE_BLANK_CURSOR=1 FM_FAKE_COMMAND=node \
       fm_tmux_composer_state fakepane
   )
