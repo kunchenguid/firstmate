@@ -71,7 +71,8 @@
 #      attempts. Retries key off the error text, not whether the lock file still
 #      exists after the failed attempt - a lock that self-clears mid-check still
 #      deserves a retry of the return.
-#   2. Other treehouse return failures still abort immediately and loudly (no retry).
+#   2. Other treehouse return failures still abort immediately and loudly (no retry
+#      inside teardown_treehouse_return itself).
 #   3. If every retry still hits the lock signature and the lock remains, it is removed
 #      and the return tried once more ONLY when the lock is provably stale per
 #      bin/fm-lock-lib.sh's fm_lock_is_provably_stale, passing the worktree dir as the
@@ -86,6 +87,18 @@
 # is present; teardown clears only a provably stale lock, then re-runs the safety
 # checks before any destructive return. Teardown output notes every wait, retry, and
 # removal so the operator can see what happened.
+#
+# Separately, and only for the worktree return call site (the ship/scout worktree
+# path, not the secondmate-home or child-worktree return calls): treehouse has also
+# been observed to fail the return outright on a freshly-reused pool worktree, citing
+# a signature distinct from the index.lock race - the benign stderr of what looks like
+# a successful `git checkout --detach --force` (e.g. "Previous HEAD position was
+# <sha> ..." / "HEAD is now at <sha> ...") - and then succeed unmodified on an
+# immediate retry with no other change. Rather than chase that signature, the worktree
+# return call is wrapped in one generic outer retry (FM_WORKTREE_RETURN_RETRIES,
+# default 1; FM_WORKTREE_RETURN_RETRY_WAIT_SECS, default 0s) on top of
+# teardown_treehouse_return's own index.lock handling, so this class of flake no
+# longer requires firstmate to notice the failure and manually re-run teardown.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -518,6 +531,24 @@ fi
 STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS
 TEARDOWN_TREEHOUSE_LOCK_REFUSED=2
 TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED=3
+
+# Outer retry for the worktree return call only (see script header): treehouse
+# has been observed to fail the first `treehouse return --force` against a
+# freshly-reused pool worktree with a signature distinct from the index.lock
+# race above - it reports failure but attaches the benign stderr of a
+# successful-looking `git checkout --detach --force`, e.g. "Previous HEAD
+# position was <sha> ..." / "HEAD is now at <sha> ..." - then succeeds
+# unmodified on an immediate retry with no other change. This retry is
+# intentionally generic (any non-zero exit from the worktree return, after
+# teardown_treehouse_return's own index.lock retries are exhausted) rather
+# than signature-matched, and applies to the worktree return call site only.
+WORKTREE_RETURN_RETRIES=${FM_WORKTREE_RETURN_RETRIES:-1}
+case "$WORKTREE_RETURN_RETRIES" in ''|*[!0-9]*) WORKTREE_RETURN_RETRIES=1 ;; esac
+WORKTREE_RETURN_RETRY_WAIT_SECS=${FM_WORKTREE_RETURN_RETRY_WAIT_SECS:-0}
+if ! retry_wait_secs_is_valid "$WORKTREE_RETURN_RETRY_WAIT_SECS"; then
+  echo "teardown: invalid worktree return retry wait '$WORKTREE_RETURN_RETRY_WAIT_SECS'; using 0s" >&2
+  WORKTREE_RETURN_RETRY_WAIT_SECS=0
+fi
 
 # True when treehouse/git stderr shows the transient index.lock "File exists" race.
 # Other return failures must not enter the retry path.
@@ -1135,10 +1166,24 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
+  # Outer retry for a separate treehouse flake seen only on this call site: see the
+  # "Separately" paragraph in the script header. teardown_treehouse_return's own
+  # index.lock handling still runs on every attempt.
+  worktree_return_attempt=0
+  while :; do
+    if teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check"; then
+      break
+    fi
+    if [ "$worktree_return_attempt" -ge "$WORKTREE_RETURN_RETRIES" ]; then
+      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+      exit 1
+    fi
+    worktree_return_attempt=$(( worktree_return_attempt + 1 ))
+    echo "teardown: worktree return failed; retrying ($worktree_return_attempt/${WORKTREE_RETURN_RETRIES})" >&2
+    if [ "$WORKTREE_RETURN_RETRY_WAIT_SECS" != 0 ]; then
+      sleep "$WORKTREE_RETURN_RETRY_WAIT_SECS"
+    fi
+  done
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"

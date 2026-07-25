@@ -49,6 +49,8 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#   (z) worktree return fails once with a non-lock signature  -> outer retry ALLOW
+#   (aa) worktree return always fails with a non-lock signature -> outer retry exhausts, REFUSE loudly
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -391,6 +393,53 @@ if [ "${1:-}" = return ]; then
   fi
   echo "fatal: Unable to create '$lock': File exists." >&2
   exit 128
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# treehouse return fails once with a signature distinct from the index.lock
+# race - the benign-looking stderr of what looks like a successful
+# `git checkout --detach --force` - then succeeds on the next attempt with no
+# other change. This drives the outer worktree-return-only retry added for that
+# flake (see the "Separately" paragraph in bin/fm-teardown.sh's header).
+add_generic_failure_once_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  shift
+  count_file="${TREEHOUSE_ATTEMPT_FILE:?}"
+  count=0
+  if [ -f "$count_file" ]; then
+    count=$(cat "$count_file")
+  fi
+  count=$(( count + 1 ))
+  printf '%s\n' "$count" > "$count_file"
+  if [ "$count" -eq 1 ]; then
+    echo "failed to return worktree: git checkout --detach --force refs/remotes/origin/main: Previous HEAD position was abc1234 origin baseline" >&2
+    echo "HEAD is now at def5678 origin baseline" >&2
+    exit 1
+  fi
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# treehouse return always fails with the same non-lock signature; used to assert
+# the outer worktree-return retry still exhausts and refuses loudly.
+add_generic_failure_always_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  shift
+  echo "failed to return worktree: git checkout --detach --force refs/remotes/origin/main: Previous HEAD position was abc1234 origin baseline" >&2
+  echo "HEAD is now at def5678 origin baseline" >&2
+  exit 1
 fi
 exit 0
 SH
@@ -1226,6 +1275,64 @@ test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
   pass "fractional legacy retry wait remains supported without arithmetic"
 }
 
+test_worktree_return_generic_failure_succeeds_on_retry() {
+  local case_dir rc attempt_file
+  case_dir=$(make_case worktree-return-generic-retry)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_generic_failure_once_treehouse "$case_dir"
+
+  attempt_file="$case_dir/treehouse-attempts"
+  : > "$attempt_file"
+
+  set +e
+  TREEHOUSE_ATTEMPT_FILE="$attempt_file" \
+  FM_WORKTREE_RETURN_RETRIES=1 \
+  FM_WORKTREE_RETURN_RETRY_WAIT_SECS=0 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "worktree-return-generic-retry: teardown should succeed on retry after a non-lock treehouse failure"
+  assert_grep "worktree return failed; retrying" "$case_dir/stderr" \
+    "worktree-return-generic-retry: teardown did not report the outer retry"
+  [ "$(cat "$attempt_file")" = 2 ] \
+    || fail "worktree-return-generic-retry: expected exactly 2 treehouse return attempts, got $(cat "$attempt_file")"
+  pass "worktree return failing with a benign-looking checkout message on first attempt succeeds on immediate retry"
+}
+
+test_worktree_return_generic_failure_exhausts_retries_and_refuses() {
+  local case_dir rc
+  case_dir=$(make_case worktree-return-generic-exhausted)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+
+  add_generic_failure_always_treehouse "$case_dir"
+
+  set +e
+  FM_WORKTREE_RETURN_RETRIES=1 \
+  FM_WORKTREE_RETURN_RETRY_WAIT_SECS=0 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "worktree-return-generic-exhausted: teardown should refuse when treehouse return never succeeds"
+  assert_grep "worktree return failed; retrying" "$case_dir/stderr" \
+    "worktree-return-generic-exhausted: teardown did not report the outer retry"
+  assert_grep "treehouse return failed for worktree" "$case_dir/stderr" \
+    "worktree-return-generic-exhausted: teardown did not report the final failure"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "worktree-return-generic-exhausted: teardown completed despite persistent treehouse failure"
+  pass "worktree return that never succeeds still exhausts the outer retry and refuses loudly"
+}
+
 test_local_only_force_overrides_unpushed() {
   local case_dir rc
   case_dir=$(make_case force-override)
@@ -1403,3 +1510,5 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+test_worktree_return_generic_failure_succeeds_on_retry
+test_worktree_return_generic_failure_exhausts_retries_and_refuses
