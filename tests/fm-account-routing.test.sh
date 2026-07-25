@@ -193,10 +193,35 @@ SH
 [ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
 [ -z "${FM_FAKE_LIFECYCLE_LOG:-}" ] || printf 'treehouse %s\n' "$*" >> "$FM_FAKE_LIFECYCLE_LOG"
 [ -z "${FM_FAKE_TREEHOUSE_SLEEP:-}" ] || sleep "$FM_FAKE_TREEHOUSE_SLEEP"
-if [ "${1:-}" = return ] && [ -n "${FM_EXPECT_CHECKOUT_LOCK:-}" ]; then
-  [ -e "$FM_EXPECT_CHECKOUT_LOCK" ] || [ -L "$FM_EXPECT_CHECKOUT_LOCK" ] || exit 91
-  lock_pid=$(cat "$FM_EXPECT_CHECKOUT_LOCK/pid" 2>/dev/null || true)
+if [ "${1:-}" = return ] && [ -n "${FM_EXPECT_CHECKOUT_LOCK_ROOT:-}" ]; then
+  # Prove the live lock through the guarded owner exported to the bounded return.
+  # Recomputing the private lock hash here made the assertion depend on path-normalization details instead of the lock guarantee.
+  lock_owner=${FM_PROCESS_TREE_GUARD_FILE%/process-group}
+  [ -d "$lock_owner" ] && [ ! -L "$lock_owner" ] || exit 91
+  lock_owner=$(cd "$lock_owner" 2>/dev/null && pwd -P) || exit 91
+  lock_owner_parent=$(cd "$(dirname "$lock_owner")" 2>/dev/null && pwd -P) || exit 91
+  expected_lock_root=$(cd "$FM_EXPECT_CHECKOUT_LOCK_ROOT" 2>/dev/null && pwd -P) || exit 91
+  [ "$lock_owner_parent" = "$expected_lock_root" ] || exit 91
+  case "$(basename "$lock_owner")" in
+    *.lock.owner.*) ;;
+    *) exit 91 ;;
+  esac
+  lock_pid=$(cat "$lock_owner/pid" 2>/dev/null || true)
   kill -0 "$lock_pid" 2>/dev/null || exit 92
+  lock_link=
+  for candidate in "$expected_lock_root"/*.lock; do
+    [ -L "$candidate" ] || continue
+    candidate_owner=$(readlink "$candidate" 2>/dev/null) || continue
+    case "$candidate_owner" in
+      /*) ;;
+      *) candidate_owner=$(dirname "$candidate")/$candidate_owner ;;
+    esac
+    candidate_owner=$(cd "$candidate_owner" 2>/dev/null && pwd -P) || continue
+    [ "$candidate_owner" = "$lock_owner" ] || continue
+    lock_link=$candidate
+    break
+  done
+  [ -n "$lock_link" ] || exit 92
   [ -z "${FM_EXPECT_CHECKOUT_LOCK_MARKER:-}" ] || touch "$FM_EXPECT_CHECKOUT_LOCK_MARKER"
 fi
 if [ "${1:-}" = return ] && [ -n "${FM_FAKE_TREEHOUSE_RETURN_CHILD_PID_FILE:-}" ]; then
@@ -368,7 +393,7 @@ make_case() {
   proj="$case_dir/project"
   wt="$case_dir/wt"
   fakebin=$(make_fakebin "$case_dir/fake")
-  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
+  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config" "$case_dir/treehouse-pools"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   git -C "$wt" checkout --quiet --detach
@@ -409,7 +434,7 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="${FM_TEST_PANE_PATH:-$WT_DIR}" FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
     FM_FAKE_TMUX_LOG="$TMUX_LOG" FM_FAKE_AF_LOG="$AF_LOG" \
     FM_FAKE_TREEHOUSE_LOG="$TREEHOUSE_LOG" FM_FAKE_LIFECYCLE_LOG="$LIFECYCLE_LOG" \
-    FM_EXPECT_CHECKOUT_LOCK="${FM_EXPECT_CHECKOUT_LOCK:-}" \
+    FM_EXPECT_CHECKOUT_LOCK_ROOT="${FM_EXPECT_CHECKOUT_LOCK_ROOT:-}" \
     FM_EXPECT_CHECKOUT_LOCK_MARKER="${FM_EXPECT_CHECKOUT_LOCK_MARKER:-}" \
     FM_FAKE_TREEHOUSE_PATH="$WT_DIR" FM_TREEHOUSE_ROOT="$CASE_DIR/treehouse-pools" \
     FM_FAKE_TREEHOUSE_SLEEP="${FM_FAKE_TREEHOUSE_SLEEP:-}" \
@@ -502,7 +527,7 @@ test_off_is_byte_compatible_and_never_calls_agent_fleet() {
 
 test_failed_freshness_proof_rolls_back_unmanaged_resources() {
   local id rec out status default_branch
-  id=checkout-freshness-rollback-z1a
+  id='checkout-freshness-rollback-z1a'
   rec=$(make_case checkout-freshness-rollback claude "$id")
   read_case "$rec"
   default_branch=$(git -C "$PROJ_DIR" branch --show-current)
@@ -536,7 +561,7 @@ test_failed_freshness_proof_rolls_back_unmanaged_resources() {
 
 test_local_only_spawn_uses_local_default_tip() {
   local id rec out status
-  id=checkout-local-only-z1b
+  id='checkout-local-only-z1b'
   rec=$(make_case checkout-local-only claude "$id")
   read_case "$rec"
   git -C "$PROJ_DIR" remote remove origin
@@ -555,7 +580,7 @@ test_local_only_spawn_uses_local_default_tip() {
 
 test_dirty_acquisition_is_retained_without_force_return() {
   local id rec draft out status
-  id=checkout-dirty-retain-z1c
+  id='checkout-dirty-retain-z1c'
   rec=$(make_case checkout-dirty-retain claude "$id")
   read_case "$rec"
   draft="$WT_DIR/.agents/skills/unlanded/SKILL.md"
@@ -587,7 +612,7 @@ test_dirty_acquisition_is_retained_without_force_return() {
 
 test_treehouse_acquisition_timeout_is_bounded_before_endpoint_creation() {
   local id rec out status
-  id=checkout-acquire-timeout-z1f
+  id='checkout-acquire-timeout-z1f'
   rec=$(make_case checkout-acquire-timeout claude "$id")
   read_case "$rec"
 
@@ -609,7 +634,7 @@ test_treehouse_acquisition_timeout_is_bounded_before_endpoint_creation() {
 
 test_changed_acquisition_is_retained_during_unmanaged_rollback() {
   local id rec marker release out_file spawn_pid
-  id=checkout-changed-rollback-z1g
+  id='checkout-changed-rollback-z1g'
   rec=$(make_case checkout-changed-rollback pi "$id")
   read_case "$rec"
   marker="$CASE_DIR/gotmp-send-started"
@@ -644,8 +669,8 @@ test_changed_acquisition_is_retained_during_unmanaged_rollback() {
 }
 
 test_unmanaged_postinstall_failure_restores_prior_state() {
-  local id rec expected out status artifact common key expected_lock lock_marker
-  id=checkout-unmanaged-restore-z1d
+  local id rec expected out status artifact lock_root lock_marker
+  id='checkout-unmanaged-restore-z1d'
   rec=$(make_case checkout-unmanaged-restore pi "$id")
   read_case "$rec"
   fm_write_meta "$HOME_DIR/state/$id.meta" \
@@ -657,18 +682,15 @@ test_unmanaged_postinstall_failure_restores_prior_state() {
     "mode=no-mistakes" \
     "custom_extension=retain-me"
   expected="$CASE_DIR/original.meta"
-  common=$(git -C "$WT_DIR" rev-parse --git-common-dir)
-  case "$common" in /*) ;; *) common="$WT_DIR/$common" ;; esac
-  common=$(cd "$common" && pwd -P)
-  key=$(printf '%s' "$common" | shasum -a 256 | awk '{print substr($1,1,24)}')
-  expected_lock="$CASE_DIR/checkout-refresh-locks/$key.lock"
+  lock_root="$CASE_DIR/checkout-refresh-locks"
+  mkdir -p "$lock_root"
   lock_marker="$CASE_DIR/checkout-return-held-lock"
   cp "$HOME_DIR/state/$id.meta" "$expected"
   for artifact in status turn-ended check.sh pi-ext.ts grok-turnend-token; do
     printf 'prior-%s\n' "$artifact" > "$HOME_DIR/state/$id.$artifact"
   done
 
-  if out=$(FM_EXPECT_CHECKOUT_LOCK="$expected_lock" \
+  if out=$(FM_EXPECT_CHECKOUT_LOCK_ROOT="$lock_root" \
       FM_EXPECT_CHECKOUT_LOCK_MARKER="$lock_marker" \
       FM_FAKE_TMUX_FAIL_SEND_MATCH=GOTMPDIR run_spawn "$id" "$PROJ_DIR"); then
     status=0
@@ -685,7 +707,7 @@ test_unmanaged_postinstall_failure_restores_prior_state() {
   done
   assert_absent "$CASE_DIR/endpoint-live" \
     "post-metadata unmanaged failure left its endpoint alive"
-  assert_grep "return --force $WT_DIR" "$TREEHOUSE_LOG" \
+  assert_grep "return --force ." "$TREEHOUSE_LOG" \
     "post-metadata unmanaged failure did not return its clean worktree"
   assert_present "$lock_marker" \
     "spawn rollback did not hold the common checkout lock during Treehouse return"
@@ -695,7 +717,7 @@ test_unmanaged_postinstall_failure_restores_prior_state() {
 
 test_spawn_rollback_relays_unverified_treehouse_cleanup() {
   local id rec out status real_ps common key lock group owner child_pid
-  id=checkout-unverified-return-z1h
+  id='checkout-unverified-return-z1h'
   rec=$(make_case checkout-unverified-return pi "$id")
   read_case "$rec"
   real_ps=$(command -v ps)
@@ -752,7 +774,7 @@ SH
 
 test_unmanaged_rollback_waits_for_metadata_lock() {
   local id rec marker release out_file spawn_pid held
-  id=checkout-unmanaged-rollback-lock-z1e
+  id='checkout-unmanaged-rollback-lock-z1e'
   rec=$(make_case checkout-unmanaged-rollback-lock pi "$id")
   read_case "$rec"
   fm_write_meta "$HOME_DIR/state/$id.meta" \

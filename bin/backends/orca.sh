@@ -411,7 +411,7 @@ EOF
 }
 
 fm_backend_orca_quiesce_terminal() {  # <terminal-id> [expected-worktree-id] [expected-label]
-  local terminal=$1 expected_worktree_id=${2:-} expected_label=${3:-} attempt state
+  local terminal=$1 expected_worktree_id=${2:-} expected_label=${3:-} state
   [ -n "$terminal" ] || return 1
   if [ -n "$expected_worktree_id" ] || [ -n "$expected_label" ]; then
     state=$(fm_backend_orca_terminal_state "$terminal" "$expected_worktree_id" "$expected_label")
@@ -424,7 +424,7 @@ fm_backend_orca_quiesce_terminal() {  # <terminal-id> [expected-worktree-id] [ex
     echo "error: failed to close Orca terminal $terminal" >&2
     return 1
   }
-  for attempt in 1 2 3 4 5; do
+  for _ in 1 2 3 4 5; do
     state=$(fm_backend_orca_terminal_state "$terminal" "$expected_worktree_id" "$expected_label")
     [ "$state" != absent ] || return 0
     sleep 0.1

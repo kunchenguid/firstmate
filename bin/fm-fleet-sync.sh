@@ -652,6 +652,7 @@ sync_project() (
 
 run_sync_project_bounded() (
   local project=$1 status label checkout_lock lock_owner_dir lock_owner_pid cleanup_status canonical
+  local FM_PROCESS_TREE_GUARD_FILE
   if [ ! -d "$project" ] \
     || ! git -C "$project" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     sync_project "$project"
@@ -682,7 +683,8 @@ run_sync_project_bounded() (
     echo "$project: skipped: refresh lock ownership cannot be proved"
     return 0
   }
-  export FM_PROCESS_TREE_GUARD_FILE="$lock_owner_dir/process-group"
+  FM_PROCESS_TREE_GUARD_FILE="$lock_owner_dir/process-group"
+  export FM_PROCESS_TREE_GUARD_FILE
   trap 'fm_lock_release "$checkout_lock"' EXIT
   if fm_run_bounded "$FLEET_SYNC_TIMEOUT" \
       env FM_FLEET_SYNC_BOUNDED_CHILD=1 \

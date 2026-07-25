@@ -109,8 +109,14 @@ test_ship_completion_report_contract() {
   brief="$home/data/$id/brief.md"
   assert_grep "# Completion report" "$brief" "ship brief has no completion-report contract"
   assert_grep "data/$id/completion.md" "$brief" "ship brief has no durable report path"
-  assert_grep "Summary, What changed, Verification, Visual evidence, Artifacts, and Follow-ups" "$brief" \
-    "ship brief has no review-oriented report schema"
+  assert_grep "six sections, each as a LEVEL-TWO markdown heading spelled exactly" "$brief" \
+    "ship brief does not require exact level-two report headings"
+  assert_grep "\`## Summary\`, \`## What changed\`, \`## Verification\`, \`## Visual evidence\`, \`## Artifacts\`, \`## Follow-ups\`" "$brief" \
+    "ship brief has no exact review-oriented report schema"
+  assert_grep "a level-one \`# Summary\` fails" "$brief" \
+    "ship brief does not reject completion sections at the wrong heading level"
+  assert_grep "When a section genuinely does not apply, say so in a sentence under the heading rather than omitting the heading." "$brief" \
+    "ship brief permits inapplicable report sections to be omitted"
   assert_grep "data/$id/visuals/" "$brief" "ship brief has no visual evidence path"
   assert_grep "Before the final \`done:\` status" "$brief" "ship brief does not order report publication before done"
   assert_grep "no-mistakes pipeline changes the implementation" "$brief" \

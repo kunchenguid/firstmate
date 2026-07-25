@@ -323,13 +323,6 @@ validate_direct_launch_worktree_identity() {
   fi
 }
 
-direct_worktree_return_confirmed() {
-  local project=$1 worktree=$2 listed
-  [ ! -e "$worktree" ] && [ ! -L "$worktree" ] && return 0
-  listed=$(git_repository_probe -C "$project" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || return 1
-  ! printf '%s\n' "$listed" | grep -Fqx "worktree $worktree"
-}
-
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -1584,7 +1577,6 @@ spawn_abort_cleanup() {
   fi
   if [ "$ACCOUNT_SPAWN_COMMITTED" != 1 ] \
     && [ "${BACKEND:-tmux}" != orca ] \
-    && { [ "${ACCOUNT_EFFECTIVE_MODE:-off}" = enforce ] || [ "${DIRECT_ACCOUNT_ROUTING:-0}" = 1 ]; } \
     && [ "$ENDPOINT_CREATED" = 1 ] && [ -n "${T:-}" ]; then
     spawn_managed_endpoint_kill "${BACKEND:-tmux}" "$T" "${ZELLIJ_TAB_ID:-}" "fm-${ID:-unknown}" "${KIND:-ship}" "${PROJ_ABS:-}" "${META_WINDOW:-}" 2>/dev/null || true
     endpoint_state=$(spawn_managed_endpoint_state "${BACKEND:-tmux}" "$T" "fm-${ID:-unknown}" "${KIND:-ship}" "${PROJ_ABS:-}" "${META_WINDOW:-}" 2>/dev/null)
@@ -1601,12 +1593,15 @@ spawn_abort_cleanup() {
     esac
   fi
   if [ "$ACCOUNT_SPAWN_COMMITTED" != 1 ] && [ "$endpoint_gone" = 1 ] \
-    && [ "${ACCOUNT_EFFECTIVE_MODE:-off}" != enforce ]; then
+    && [ "${ACCOUNT_EFFECTIVE_MODE:-off}" != enforce ] \
+    && [ "${DIRECT_ACCOUNT_ROUTING:-0}" != 1 ]; then
     spawn_restore_unmanaged_state "$rollback_lock" || state_clean=0
     if [ "$state_clean" = 1 ]; then
       spawn_return_created_worktree || worktree_clean=0
     else
       worktree_clean=0
+      WORKTREE_RETAIN_ON_ABORT=1
+      spawn_return_created_worktree || true
       echo "warning: retained failed spawn resources for ${ID:-unknown} because prior task state could not be restored" >&2
     fi
     [ "$worktree_clean" = 1 ] || echo "warning: failed to return rollback worktree for ${ID:-unknown}" >&2
@@ -1666,12 +1661,7 @@ spawn_abort_cleanup() {
   if [ "$ACCOUNT_SPAWN_COMMITTED" != 1 ] && [ "${DIRECT_ACCOUNT_ROUTING:-0}" = 1 ] \
     && [ "${DIRECT_ACCOUNT_RECOVERY:-0}" != 1 ] && [ "$endpoint_gone" = 1 ]; then
     if [ "$WORKTREE_CREATED" = 1 ] && [ -n "${WT:-}" ] && [ -d "$WT" ]; then
-      rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
-      if ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1; then
-        direct_worktree_return_confirmed "$PROJ_ABS" "$WT" || worktree_clean=0
-      else
-        worktree_clean=0
-      fi
+      spawn_return_created_worktree || worktree_clean=0
       [ "$worktree_clean" = 1 ] || echo "warning: failed to return direct spawn worktree for ${ID:-unknown}; retaining cleanup metadata" >&2
     fi
     if [ -z "$rollback_lock" ]; then
