@@ -12,7 +12,7 @@ When this session owns supervision and away mode is not active:
 5. `watcher: started ...` or `watcher: attached ...` means a live cycle exists.
    On attach, the background task follows verified identity-matched successors instead of exiting when the first cycle ends.
 6. Failure or missing cycle only: `watcher: FAILED ...` means supervision is down; fix and re-arm.
-   `watcher: cycle closed with a delivered wake ...; no live cycle remains` is also a loud nonzero close: another arm owned that cycle and already reported its wake, so do not act on it as a second wake, and re-arm because supervision is down.
+   `watcher: cycle closed with a delivered wake ...; no live cycle remains` is a clean close: another arm owned that cycle and already reported its wake, so do not act on it as a second wake, but re-arm because Grok has no automatic successor.
 7. After a successful start or attach status, end the turn.
    The background arm remains the live wait until it returns an actionable wake or failure.
 8. Waiting is silent.

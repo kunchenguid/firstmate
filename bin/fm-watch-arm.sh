@@ -32,7 +32,7 @@
 #            no live cycle remains
 #                                                        - an ATTACHED arm's cycle closed for a real
 #                                                          wake that the owning arm reported, but
-#                                                          supervision still requires recovery
+#                                                          this arm has nothing to add
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
@@ -44,9 +44,10 @@
 # reason; on attached it stays live across identity-matched successors. An
 # attached cycle that ends without a healthy successor is a typed nonzero failure
 # unless the ledger proves the owning arm delivered that cycle's wake, and is
-# never a clean EMPTY completion either way. On FAILED it exits non-zero so the
-# failure is loud. A live cycle already present means re-arm attaches - do not
-# start a second watcher.
+# never a clean EMPTY completion. A proven delivered close returns zero so an
+# attached Claude Stop arm cannot duplicate the wake as a failure. On FAILED it
+# exits non-zero so the failure is loud. A live cycle already present means
+# re-arm attaches - do not start a second watcher.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
@@ -59,10 +60,9 @@
 # Only the OWNING arm sees a cycle's wake output, so an arm merely attached to
 # that watcher cannot tell a delivered wake apart from a watcher that vanished.
 # Before an attached arm calls a close unexplained it reads the owner's own
-# ledger record for that exact watcher pid. Proof of a delivered wake changes
-# the claim but not the loudness: the owner already reported the reason, no live
-# cycle remains, and this arm still returns nonzero so every harness recovers.
-# No proof keeps the unexplained-close failure.
+# ledger record for that exact watcher identity. Proof of a delivered wake ends
+# this arm cleanly because the owner already reported the reason and a second
+# wake would be a duplicate. No proof keeps the unexplained-close failure.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
@@ -276,7 +276,7 @@ report_delivered_close() {
 # to a verified successor. With no successor, fail loudly instead of returning a
 # clean empty completion that an adapter could mistake for a no-op.
 attach_and_wait() {
-  local attached_pid=$1 followed_since
+  local attached_pid=$1 followed_since followed_identity
   while :; do
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ]; then
@@ -296,10 +296,11 @@ attach_and_wait() {
       continue
     fi
     followed_since=$cycle_started_at
+    followed_identity=$cycle_lock_before
     cycle_log_append unknown unknown attached-cycle-ended none
-    if fm_cycle_pid_closed_actionably "$STATE" "$attached_pid" "$followed_since"; then
+    if fm_cycle_pid_closed_actionably "$STATE" "$attached_pid" "$followed_since" "$followed_identity"; then
       report_delivered_close "$attached_pid"
-      return 1
+      return 0
     fi
     fail_unexplained_cycle
     return 1
