@@ -61,7 +61,7 @@ The detailed reconciliation and task chronology stay in the private audit report
 
 ## Turn-end guard
 
-The direct and passive mechanisms were validated across all five harnesses on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24.
+The direct and passive mechanisms were validated across all five primary harnesses on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24.
 
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |

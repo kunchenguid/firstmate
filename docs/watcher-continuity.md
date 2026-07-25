@@ -65,4 +65,4 @@ No zero-latency guarantee is claimed because lock verification, watcher startup,
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
 Claude depends on the Stop `asyncRewake` rewake, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
 
-[`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.
+[`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current live evidence for all five primary harnesses, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.

@@ -33,7 +33,7 @@ The supervision knowledge lives here: busy signature, exit command, interrupt, d
 Never dispatch an adapter outside its verified role.
 Cursor is verified only for ordinary crewmates and scouts on Linux x64 under tmux; it is not verified for a primary session, persistent secondmate, another platform, or another session provider.
 If `config/crew-harness` or `config/secondmate-harness` names an adapter unverified for the requested role, tell the captain under `AGENTS.md` section 9 that the requested worker runtime is not verified for that role, use a fitting verified runtime for current work, and ask only whether to verify the requested runtime before future use.
-Do not pause current work for that future-verification choice, and never launch an unverified adapter.
+Do not pause current work for that future-verification choice, and never launch an adapter outside its verified boundary.
 If the captain asks for a new harness, propose verifying it first: spawn a trivial ordinary tmux task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
 
 ## Detection

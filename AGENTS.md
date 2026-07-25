@@ -158,9 +158,9 @@ A silent bootstrap section needs no action; for any printed actionable diagnosti
 ## 4. Harness and runtime dispatch
 
 Load `harness-adapters` before every spawn or recovery and before trust handling, skill invocation, interrupt, exit, resume, or adapter verification.
-The verified ordinary worker/scout harnesses are `claude`, `codex`, `opencode`, `pi`, `grok`, `kimi`, and `cursor`; never dispatch on an unverified adapter.
+The verified ordinary worker/scout harnesses are `claude`, `codex`, `opencode`, `pi`, `grok`, `kimi`, and `cursor`; never dispatch an adapter outside its verified role.
 Cursor is verified only on Linux x64 under tmux and is not verified for primary sessions or persistent secondmates, so reject it outside that boundary.
-If configured harness data names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
+If configured harness data selects an adapter outside its verified role, report it and fall back only to a role-appropriate verified adapter rather than launching it.
 
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.
 When dispatch profiles exist, consult them at every crewmate or scout intake and pass the resolved concrete profile required by `fm-spawn`.
