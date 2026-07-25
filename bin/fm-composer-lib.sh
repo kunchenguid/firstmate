@@ -205,10 +205,24 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   if fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
   fi
-  # Strip a leading prompt glyph, then re-judge the remainder.
+  # Strip a leading prompt glyph, then re-judge the remainder. Quoted-literal
+  # patterns compare bytes exactly; `?` counts one locale-dependent character
+  # (one byte under LC_ALL=C) and would corrupt the 3-byte UTF-8 glyphs (❯ › →).
   case "$content" in
-    '❯ '*|'› '*|'→ '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
-    '❯'*|'›'*|'→'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
+    '❯ '*) content=${content#'❯ '} ;;
+    '› '*) content=${content#'› '} ;;
+    '→ '*) content=${content#'→ '} ;;
+    '> '*) content=${content#'> '} ;;
+    '$ '*) content=${content#'$ '} ;;
+    '% '*) content=${content#'% '} ;;
+    '# '*) content=${content#'# '} ;;
+    '❯'*) content=${content#'❯'} ;;
+    '›'*) content=${content#'›'} ;;
+    '→'*) content=${content#'→'} ;;
+    '>'*) content=${content#'>'} ;;
+    '$'*) content=${content#'$'} ;;
+    '%'*) content=${content#'%'} ;;
+    '#'*) content=${content#'#'} ;;
   esac
   content="${content#"${content%%[![:space:]]*}"}"
   content="${content%"${content##*[![:space:]]}"}"

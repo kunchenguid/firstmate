@@ -116,6 +116,23 @@ test_idle_placeholder_case_mode_is_explicit() {
   pass "fm_composer_classify_content: idle matching preserves the caller's case mode"
 }
 
+test_idle_placeholder_after_glyph_strip_is_locale_safe() {
+  local idle='^(Type a message\.\.\.|Add a follow-up)$' out g
+  # Regression: the leading-glyph strip used `${content#??}`, whose `?` counts
+  # one locale-dependent character - one BYTE under LC_ALL=C. The 3-byte UTF-8
+  # glyphs (❯ › →) would lose only 2 of their 3 bytes, leaving a stray byte
+  # ahead of the placeholder text so the post-strip idle match never fired.
+  for g in '❯' '›' '→'; do
+    out=$(LC_ALL=C classify 0 "$g Add a follow-up" "$idle" insensitive)
+    [ "$out" = empty ] \
+      || fail "LC_ALL=C: '$g Add a follow-up' idle placeholder must read empty, got '$out'"
+  done
+  out=$(LC_ALL=C classify 0 '→ fix findings 1 and 3' "$idle" insensitive)
+  [ "$out" = pending ] \
+    || fail "LC_ALL=C: real text after a cursor glyph must still read pending, got '$out'"
+  pass "fm_composer_classify_content: glyph-strip before idle matching is byte-safe under LC_ALL=C"
+}
+
 # --- Real text is pending ---------------------------------------------------
 
 test_real_text_is_pending() {
@@ -136,4 +153,5 @@ test_agent_glyphs_are_empty_bordered_and_bare
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
+test_idle_placeholder_after_glyph_strip_is_locale_safe
 test_real_text_is_pending
