@@ -17,16 +17,16 @@
 # means the observer could not account for the close.
 #
 # That asymmetry is the reason this library exists. Only the owning arm can see a
-# cycle's wake output, so an arm merely ATTACHED to that same watcher, and the
-# PreToolUse continuity gate looking at the home afterwards, otherwise have no
-# way to tell a delivered wake apart from a watcher that vanished. Reading the
-# owner's own record keeps both verdicts honest.
+# cycle's wake output, so an arm merely ATTACHED to that same watcher otherwise
+# has no way to tell a delivered wake apart from a watcher that vanished, and
+# reports a delivered wake as unexplained. Reading the owner's own record keeps
+# that verdict honest.
 #
-# Readers:
-#   bin/fm-watch-arm.sh                  attached-close classification
-#   bin/fm-continuity-pretool-check.sh   explained post-wake gap
+# Reader: bin/fm-watch-arm.sh, for attached-close wording only.
 #
-# Every query is evidence-based and fails toward "not explained": a missing,
+# This evidence explains WORDING, never supervision health. The attached close
+# stays nonzero and loud either way, so a wrong answer here can only misword an
+# alarm, never suppress one. The query fails toward "not explained": a missing,
 # unreadable, noncanonical, ambiguous, or truncated ledger returns false, so an
 # absent record can never change the attached arm's unexplained-close claim.
 
@@ -45,7 +45,8 @@ fm_cycle_clean_field() {
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-512
 }
 
-# One canonical parser backs both readers so the ledger schema has one owner.
+# One canonical parser owns the ledger schema. A file whose last line is not
+# newline-terminated is treated as truncated and answers nothing.
 fm_cycle_query() {
   local log='' final_newline='' now=''
   log=$(fm_cycle_log_path "$1")
@@ -54,7 +55,7 @@ fm_cycle_query() {
   [ "$final_newline" = 1 ] || return 1
   now=$(date +%s)
   awk -v mode="$2" -v want_pid="${3:-}" -v floor="${4:-}" \
-    -v want_lock="${5:-}" -v maxage="${6:-}" -v now="$now" '
+    -v want_lock="${5:-}" -v now="$now" '
     BEGIN { FS = "\t" }
     {
       if (NF != 12 ||
@@ -88,11 +89,6 @@ fm_cycle_query() {
         matches += 1
         matched_reason = reason
       }
-      if (mode == "latest" && origin == "started") {
-        latest_found = 1
-        latest_ended = ended
-        latest_reason = reason
-      }
     }
     END {
       if (invalid) exit 1
@@ -102,12 +98,6 @@ fm_cycle_query() {
             want_lock == "" ||
             matches != 1) exit 1
         exit matched_reason ~ /^actionable-/ ? 0 : 1
-      }
-      if (mode == "latest") {
-        if (maxage !~ /^[0-9][0-9]*$/ || !latest_found) exit 1
-        age = now - latest_ended
-        if (age < 0 || age > maxage + 0) exit 1
-        exit latest_reason ~ /^actionable-/ ? 0 : 1
       }
       exit 1
     }
@@ -122,13 +112,4 @@ fm_cycle_pid_closed_actionably() {
   case "$3" in ''|*[!0-9]*) return 1 ;; esac
   [ -n "$4" ] || return 1
   fm_cycle_query "$1" instance "$2" "$3" "$4"
-}
-
-# fm_cycle_close_explained <state-dir> <max-age-seconds>
-# True when the latest owner record in append order is a delivered wake no older
-# than <max-age-seconds>. Append order, not wall-clock ordering, decides which
-# cycle supersedes which; timestamps only bound the resulting handling gap.
-fm_cycle_close_explained() {
-  case "$2" in ''|*[!0-9]*) return 1 ;; esac
-  fm_cycle_query "$1" latest '' '' '' "$2"
 }

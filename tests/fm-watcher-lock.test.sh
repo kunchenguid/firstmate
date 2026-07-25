@@ -640,12 +640,14 @@ test_attached_arm_reports_the_owners_delivered_wake_not_a_failure() {
     || fail "attached arm did not account for the owner-delivered close: $(cat "$TWO_ARM_DIR/attached.out")"
   grep -qF 'no live cycle remains' "$TWO_ARM_DIR/attached.out" \
     || fail "attached arm did not identify the closed cycle: $(cat "$TWO_ARM_DIR/attached.out")"
-  [ "$attached_status" -eq 0 ] \
-    || fail "attached arm exited $attached_status after an owner-delivered close"
+  # Wording changes; loudness does not. No live cycle remains, so a silent return
+  # would let a harness treat an unwatched home as healthy.
+  [ "$attached_status" -ne 0 ] && [ "$attached_status" -ne 124 ] \
+    || fail "attached arm went quiet on an owner-delivered close (status $attached_status)"
   # The observer must not manufacture a second wake for an already-delivered one.
   ! grep -qE '^(signal:|stale:|check:|heartbeat)' "$TWO_ARM_DIR/attached.out" \
     || fail "attached arm duplicated the owner's wake reason: $(cat "$TWO_ARM_DIR/attached.out")"
-  pass "an attached arm reports the owner's delivered wake and exits cleanly"
+  pass "an attached arm names the owner's delivered wake instead of calling it unexplained, and stays loud"
 }
 
 # Preservation guard: the ledger consult must not regress upstream's unexplained-close alarm, and this cannot fail against the diff because that path is deliberately unchanged.

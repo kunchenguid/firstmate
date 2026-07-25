@@ -31,8 +31,8 @@
 #   watcher: cycle closed with a delivered wake pid=<N> (reported by its owning arm);
 #            no live cycle remains
 #                                                        - an ATTACHED arm's cycle closed for a real
-#                                                          wake that the owning arm reported, but
-#                                                          this arm has nothing to add
+#                                                          wake that the owning arm reported; still a
+#                                                          nonzero close, because no live cycle remains
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
@@ -42,12 +42,13 @@
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
 # reason; on attached it stays live across identity-matched successors. An
-# attached cycle that ends without a healthy successor is a typed nonzero failure
-# unless the ledger proves the owning arm delivered that cycle's wake, and is
-# never a clean EMPTY completion. A proven delivered close returns zero so an
-# attached Claude Stop arm cannot duplicate the wake as a failure. On FAILED it
-# exits non-zero so the failure is loud. A live cycle already present means
-# re-arm attaches - do not start a second watcher.
+# attached cycle that ends without a healthy successor is always a typed nonzero
+# close, never a clean completion. The ledger only decides WHICH typed line it
+# carries: a proven owner-delivered wake names that benign cause instead of
+# claiming the cycle ended for no reason. Loudness is not negotiable either way,
+# because no live cycle remains and a silent return would let a harness treat an
+# unwatched home as healthy. A live cycle already present means re-arm attaches -
+# do not start a second watcher.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
@@ -298,9 +299,12 @@ attach_and_wait() {
     followed_since=$cycle_started_at
     followed_identity=$cycle_lock_before
     cycle_log_append unknown unknown attached-cycle-ended none
+    # Wording only. The close stays nonzero either way: no live cycle remains,
+    # and a silent return here would let a harness treat a now-unwatched home as
+    # healthy. A wrong answer can misword this alarm; it can never suppress it.
     if fm_cycle_pid_closed_actionably "$STATE" "$attached_pid" "$followed_since" "$followed_identity"; then
       report_delivered_close "$attached_pid"
-      return 0
+      return 1
     fi
     fail_unexplained_cycle
     return 1

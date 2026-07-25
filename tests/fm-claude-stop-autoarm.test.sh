@@ -483,13 +483,21 @@ test_real_arm_overlap_delivered_close_stays_clean() {
   [ "$owner_rc" -eq 0 ] || fail "real owner arm failed after its delivered wake: $(cat "$dir/state/owner.out")"
   grep -q '^signal:' "$dir/state/owner.out" || fail "real owner arm omitted its delivered wake"
   [ "$harness_rc" -eq 0 ] || fail "fake Claude harness timed out waiting for the real Stop hook"
-  [ "$autoarm_rc" = 0 ] || fail "real Stop auto-arm returned $autoarm_rc for an already-delivered wake: $(cat "$dir/state/stop.out")"
-  [ ! -s "$dir/state/stop.out" ] || fail "real Stop auto-arm duplicated the delivered wake: $(cat "$dir/state/stop.out")"
+  # The overlap still rewakes, because no live cycle remains after the close.
+  # What changed is the wording the model is handed: the benign cause is named
+  # instead of the cycle being called unexplained.
+  [ "$autoarm_rc" = 2 ] || fail "real Stop auto-arm returned $autoarm_rc instead of rewaking after an unwatched close: $(cat "$dir/state/stop.out")"
+  grep -qF 'cycle closed with a delivered wake' "$dir/state/stop.out" \
+    || fail "real Stop rewake did not carry the honest delivered-wake wording: $(cat "$dir/state/stop.out")"
+  ! grep -qF 'cycle ended without an actionable reason' "$dir/state/stop.out" \
+    || fail "real Stop rewake still called an owner-delivered wake unexplained: $(cat "$dir/state/stop.out")"
+  ! grep -qE '^(signal:|stale:|check:|heartbeat)' "$dir/state/stop.out" \
+    || fail "real Stop auto-arm duplicated the delivered wake: $(cat "$dir/state/stop.out")"
   grep -q "watcher_pid=$watcher_pid.*origin=started.*reason=actionable-" "$dir/state/.watch-cycle-exits.log" \
     || fail "real owner arm did not record the delivered wake"
   grep -q "watcher_pid=$watcher_pid.*origin=attached.*reason=attached-cycle-ended" "$dir/state/.watch-cycle-exits.log" \
     || fail "real Stop-owned attached arm did not record its observation"
-  pass "auto-arm: real Stop overlap closes cleanly after the owner delivers one wake"
+  pass "auto-arm: real Stop overlap rewakes with the owner-delivered wording, never the unexplained claim"
 }
 
 test_fm_lock_status_still_works_with_shared_lib() {
