@@ -13,6 +13,7 @@ set -u
 RUNNER="$ROOT/bin/fm-test-run.sh"
 CI="$ROOT/.github/workflows/ci.yml"
 CONTRIB="$ROOT/CONTRIBUTING.md"
+SHARD_DOC="$ROOT/docs/fm-test-portable-shards.md"
 
 assert_present "$RUNNER" "bin/fm-test-run.sh is missing"
 [ -x "$RUNNER" ] || fail "bin/fm-test-run.sh must be executable"
@@ -466,6 +467,35 @@ test_portable_shard_union_and_coverage_guard() {
   pass "portable shard union, disjointness, and coverage guard hold"
 }
 
+test_portable_shard_docs_match_lanes() {
+  python3 - "$RUNNER" "$SHARD_DOC" <<'PY' \
+    || fail "portable shard documentation must match lane counts and timing sums"
+import re
+import subprocess
+import sys
+
+runner, doc_path = sys.argv[1:3]
+markdown = open(doc_path, encoding="utf-8").read()
+averages = {
+    path: int(duration)
+    for duration, path in re.findall(r"^\| (\d+) \| `([^`]+)` \|$", markdown, re.MULTILINE)
+}
+totals = {}
+for lane in ("portable-parallel-1", "portable-parallel-2"):
+    scripts = subprocess.check_output(
+        [runner, "--list", "--lane", lane], text=True
+    ).splitlines()
+    totals[lane] = (len(scripts), sum(averages[path] for path in scripts))
+
+for lane, (count, duration) in totals.items():
+    expected = f"| `{lane}` | {count} | {duration} ms (~{duration / 1000:.1f} s) |"
+    assert expected in markdown
+imbalance = abs(totals["portable-parallel-1"][1] - totals["portable-parallel-2"][1])
+assert f"| imbalance | | {imbalance} ms |" in markdown
+PY
+  pass "portable shard documentation matches lane counts and timing sums"
+}
+
 test_jobs_requires_proven_isolated() {
   local tmp rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs.XXXXXX")
@@ -660,6 +690,7 @@ test_fail_on_gate_skip_token
 test_exclude_family
 test_ci_and_docs_call_the_owner
 test_portable_shard_union_and_coverage_guard
+test_portable_shard_docs_match_lanes
 test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
 test_aggregate_json

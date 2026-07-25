@@ -16,7 +16,7 @@
         { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
         { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
       ],
-      "why": "Arrays are quota-aware automatically, so use a strong coding profile with the most available relevant quota."
+      "why": "Firstmate compares every candidate with current relevant quota before dispatch, so use a strong coding profile."
     }
   ],
   "default": [

@@ -169,7 +169,6 @@ Preserve malformed profile configuration as an actionable error rather than sele
 When every candidate is tight, preserve the captain's strongest-reasoning class rather than silently downgrading it solely to conserve quota; stop and report the tight choice if that class cannot proceed.
 Break genuine headroom ties without array-order or harness bias.
 `quota-axi` owns how model or product windows relate to bounding account windows; as an explicitly interim rule until successor `quota-axi-interpretation-hints-h3` lands, use the weakest applicable remaining headroom, then remove this interim rule.
-`bin/fm-dispatch-select.sh` is vestigial during this transition and must not be called.
 The generic effort fallback and its precedence are owned by `harness-adapters`: explicit captain and standing configured effort win; otherwise use low for well-understood explicit work, xhigh for ambiguous investigation or design, intermediate levels proportionally, and never max without explicit captain preference.
 Do not add model-specific versions of that policy.
 

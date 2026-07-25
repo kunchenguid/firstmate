@@ -116,8 +116,7 @@ test_agent_owned_quota_array_dispatch_contract() {
     "preserve the captain's strongest-reasoning class rather than silently downgrading it" \
     'Break genuine headroom ties without array-order or harness bias' \
     '`quota-axi` owns how model or product windows relate to bounding account windows' \
-    'explicitly interim rule until successor `quota-axi-interpretation-hints-h3` lands' \
-    '`bin/fm-dispatch-select.sh` is vestigial during this transition and must not be called'; do
+    'explicitly interim rule until successor `quota-axi-interpretation-hints-h3` lands'; do
     assert_grep "$phrase" "$AGENTS" "array-dispatch contract lost '$phrase'"
   done
 
@@ -135,16 +134,10 @@ test_agent_owned_quota_array_dispatch_contract() {
     "model discovery guidance permits a fixed provider table"
   assert_grep '`AGENTS.md` section 4 owns the dispatch and array-selection procedure.' "$CONFIG" \
     "configuration docs do not point to the agent-owned array procedure"
-  assert_grep '`bin/fm-dispatch-select.sh` is vestigial during the instruction transition and must not be called' "$CONFIG" \
-    "configuration docs still permit the vestigial selector"
   assert_grep 'quota-axi is required for the' "$BOOTSTRAP" \
     "bootstrap docs lost the quota-axi dependency pointer"
   assert_grep 'agent-owned dispatch-profile array procedure in AGENTS.md section 4.' "$BOOTSTRAP" \
     "bootstrap docs do not point to the agent-owned array procedure"
-  assert_no_grep 'every crew-dispatch profile array calls it automatically' "$BOOTSTRAP" \
-    "bootstrap docs still claim automatic selector invocation"
-  assert_no_grep 'OS-backed random selection across' "$BOOTSTRAP" \
-    "bootstrap docs still promise quota-unavailable random fallback"
   pass "firstmate directly compares every quota candidate with authoritative model discovery"
 }
 
