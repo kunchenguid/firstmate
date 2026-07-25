@@ -731,6 +731,7 @@ crew_dispatch_validate() {
       end;
     def configured_profiles:
       ([(.rules // [])[]? | profiles(.use?)[]?]
+        + [(.rules // [])[]? | .fallback? // empty]
         + (if has("default") then [profiles(.default)[]?] else [] end));
     def malformed_optional_fields($items):
       ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
@@ -752,6 +753,11 @@ crew_dispatch_validate() {
     elif [(.rules // [])[]? | profiles(.use?)[]? | select(type != "object")] | length > 0 then "each use profile must be an object"
     elif [(.rules // [])[]? | profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
     elif malformed_optional_fields([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile model and effort must be non-empty strings when present"
+    elif [(.rules // [])[]? | select(has("fallback") and (.use | type) == "array")] | length > 0 then "fallback requires a single preferred use profile"
+    elif [(.rules // [])[]? | select(has("fallback") and (.fallback | type) != "object")] | length > 0 then "fallback must be a profile object"
+    elif [(.rules // [])[]? | .fallback? // empty | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each fallback profile needs harness"
+    elif [(.rules // [])[]? | .fallback? // empty | select((.model? | type) != "string" or (.model | length) == 0)] | length > 0 then "each fallback profile needs an exact model"
+    elif malformed_optional_fields([(.rules // [])[]? | .fallback? // empty]) then "fallback profile effort must be a non-empty string when present"
     elif [(.rules // [])[]? | select(has("select") and ((.select? | type) != "string" or (.select | length) == 0))] | length > 0 then "select must be a non-empty string"
     elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced")] | length > 0 then
       "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced") ] | unique | join(", "))
@@ -790,7 +796,8 @@ crew_dispatch_validate() {
       else profile($value)
       end;
     (["BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json"]
-      + [(.rules // [])[]? | "BOOTSTRAP_INFO: crew dispatch rule: " + (.when | tostring) + " -> " + profile_set(.use; .select?)]
+      + [(.rules // [])[]? | "BOOTSTRAP_INFO: crew dispatch rule: " + (.when | tostring) + " -> " + profile_set(.use; .select?)
+        + (if .fallback? != null then " (unavailable fallback: " + profile(.fallback) + ")" else "" end)]
       + (if has("default") then ["BOOTSTRAP_INFO: crew dispatch default: " + profile_set(.default; null)] else [] end))
     | .[]
   ' "$file"

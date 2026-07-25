@@ -141,7 +141,8 @@ The intake and authority contract in `AGENTS.md` owns when separate scout resear
 
 Crewmate and scout dispatch can stay on the static crewmate harness resolved by `config/crew-harness`, or it can use local dispatch profiles in `config/crew-dispatch.json`.
 The dispatch file is intentionally judgment-based: firstmate reads the natural-language rules at intake, chooses the best matching rule, resolves profile arrays itself from current quota output under `AGENTS.md` section 4, and passes only concrete `--harness`, `--model`, and `--effort` axes to `fm-spawn.sh`.
-The shell scripts validate the JSON shape and verified harness/effort combinations, but they do not parse task intent, match natural-language rules, or own array selection.
+The shell scripts validate the JSON shape and verified harness/effort combinations, but they do not parse task intent, match natural-language rules, discover model availability, or own array selection.
+A single-profile rule may declare one validated concrete `fallback` for an unavailable exact model; `delivery-quality` owns the current-discovery and fallback decision, while the dispatch schema remains in `docs/configuration.md`.
 `fm-dispatch-select.sh` is vestigial and not called during this transition; its separately based removal follows after the replacement instruction lands.
 The session-start bootstrap step keeps valid dispatch configuration silent unless verbose facts are enabled and surfaces a concise invalid-config line when validation fails.
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
@@ -187,7 +188,7 @@ The `data/secondmates.md` line contract is owned by the [`secondmate-provisionin
 ## Project modes are explicit
 
 `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
-`no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
+`no-mistakes` projects run their configured validation pipeline, `direct-PR` projects follow the proportional validation, repository-gate, task-branch PR, CI, and review-feedback path owned by `delivery-quality`, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
 When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
 For target project repos shipped through their own no-mistakes pipeline, commits under `.no-mistakes/evidence/` are the pipeline's PR-viewable validation evidence and are expected to stay in the crew branch until the evidence-hosting design changes.
 The firstmate repo itself is the exception: its `.no-mistakes/` directory is local state, stays gitignored, and is rejected by CI if tracked.

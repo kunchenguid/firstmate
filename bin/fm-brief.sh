@@ -30,7 +30,7 @@
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
-#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
+#   direct-PR    implement -> direct validation/gates -> task-branch PR -> CI/review reconciliation -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
@@ -287,10 +287,12 @@ case "$MODE" in
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
-This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+This project ships through the direct PR path.
+The task is complete only after the task's explicit validation and evidence requirements, the repository's existing hooks and quality gates, required CI, and configured review feedback are reconciled.
+Commit on your task branch, push only that branch, and open its PR with \`gh-axi\`; never push the default branch and never merge.
+Address actionable CI or configured review findings on the same task branch, rerun affected checks, and use the task's bounded rule for an optional review service that stays absent.
+Then append \`done: PR {url} checks green\` to the status file and stop.
+The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
 )
     ;;
@@ -374,6 +376,11 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+# Delivery discipline
+Follow the task's explicit validation, browser, and review-evidence requirements without adding redundant workers or review layers.
+Preserve the repository's existing pre-commit hooks and quality gates; do not reinstall, replace, or bypass them merely because setup guidance is absent.
+Surface discoveries that could materially change correctness, accepted scope, risk, security, migration behavior, or product behavior, but do not make drive-by changes.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

@@ -137,6 +137,7 @@ Use the discovery surface in the current authenticated environment because suppo
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 If those sources do not establish the relationship needed for dispatch, fail loudly and report the unresolved candidate.
+`docs/verification/model-routing.md` records dated empirical probes for the exact identifiers in the copyable dispatch example, while `delivery-quality` owns the per-task unavailable-model fallback decision.
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
 This preserves launch success instead of passing a known-bad value.

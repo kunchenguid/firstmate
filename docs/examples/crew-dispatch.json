@@ -1,26 +1,41 @@
 {
   "rules": [
     {
-      "when": "The task depends on fresh news, current events, live public facts, or recent market and product changes.",
-      "use": { "harness": "grok" },
-      "why": "Grok is the preferred dispatch when current web-connected context is central to the work."
+      "when": "The task is a trivial mechanical or nonvisual fix with an explicit bounded path.",
+      "use": { "harness": "pi", "model": "anthropic/claude-haiku-4-5-20251001", "effort": "low" },
+      "fallback": { "harness": "pi", "model": "openai/gpt-5.5", "effort": "low" },
+      "why": "Use the cheapest verified capable route and only the focused existing checks appropriate to the edit."
     },
     {
-      "when": "The task is a trivial mechanical edit such as a rote rename, formatting sweep, targeted typo fix, or simple file gathering.",
-      "use": { "harness": "claude", "model": "haiku", "effort": "low" },
-      "why": "Use the cheapest fast profile when the task is narrow and low ambiguity."
+      "when": "The task is quick, well-understood backend implementation with low ambiguity and a bounded change path.",
+      "use": { "harness": "pi", "model": "openai/gpt-5.5", "effort": "low" },
+      "fallback": { "harness": "pi", "model": "openai/gpt-5.6-sol", "effort": "low" },
+      "why": "Prefer GPT-5.5 for fast bounded backend work and fall back only when its exact model is unavailable."
     },
     {
-      "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
-      "use": [
-        { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
-        { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
-      ],
-      "why": "Arrays are quota-aware automatically, so use a strong coding profile with the most available relevant quota."
+      "when": "The task is substantive frontend implementation whose user-facing behavior or visual result needs careful engineering.",
+      "use": { "harness": "pi", "model": "anthropic/claude-opus-5", "effort": "high" },
+      "fallback": { "harness": "pi", "model": "openai/gpt-5.6-sol", "effort": "high" },
+      "why": "Prefer Claude Opus 5 through Pi for substantive frontend implementation, with GPT-5.6 as the concrete unavailable-model fallback."
+    },
+    {
+      "when": "The task is a focused cross-model validation scout for substantive frontend implementation authored with Pi and anthropic/claude-opus-5, and it asks one distinct correctness or browser-behavior question not already answered by focused checks.",
+      "use": { "harness": "pi", "model": "openai/gpt-5.6-sol", "effort": "high" },
+      "fallback": { "harness": "pi", "model": "openai/gpt-5.5", "effort": "high" },
+      "why": "Use GPT-5.6 through Pi for one materially useful focused validation, never as a redundant generic reviewer."
+    },
+    {
+      "when": "The task is medium engineering work that is not a better match for the quick-backend or substantive-frontend rules.",
+      "use": { "harness": "pi", "model": "openai/gpt-5.6-sol", "effort": "medium" },
+      "fallback": { "harness": "pi", "model": "openai/gpt-5.5", "effort": "medium" },
+      "why": "Use GPT-5.6 through Pi with proportional reasoning for ordinary multi-step engineering."
+    },
+    {
+      "when": "The task is complex, ambiguous, high-blast-radius, design-heavy, or requires holding many interacting engineering constraints.",
+      "use": { "harness": "pi", "model": "openai/gpt-5.6-sol", "effort": "high" },
+      "fallback": { "harness": "pi", "model": "anthropic/claude-opus-5", "effort": "high" },
+      "why": "Use GPT-5.6 through Pi for complex engineering and preserve a verified strong-model fallback rather than silently downgrading."
     }
   ],
-  "default": [
-    { "harness": "codex", "model": "gpt-5.5", "effort": "medium" },
-    { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium" }
-  ]
+  "default": { "harness": "pi", "model": "openai/gpt-5.6-sol", "effort": "medium" }
 }
