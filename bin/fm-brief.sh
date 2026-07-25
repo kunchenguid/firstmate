@@ -288,9 +288,9 @@ case "$MODE" in
     DOD=$(cat <<EOF
 # Definition of done
 This project ships through the direct PR path.
-The task is complete only after the task's explicit validation and evidence requirements, the repository's existing hooks and quality gates, required CI, and configured review feedback are reconciled.
+The task is complete only after explicit task validation and evidence requirements, existing repository hooks and quality gates, required CI, and configured review feedback are reconciled.
 Commit on your task branch, push only that branch, and open its PR with \`gh-axi\`; never push the default branch and never merge.
-Address actionable CI or configured review findings on the same task branch, rerun affected checks, and use the task's bounded rule for an optional review service that stays absent.
+Address actionable CI or configured review findings on the same task branch, rerun affected checks, and use the bounded task rule for an optional review service that stays absent.
 Then append \`done: PR {url} checks green\` to the status file and stop.
 The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
