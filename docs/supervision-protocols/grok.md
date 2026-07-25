@@ -29,7 +29,7 @@ When you see a background-task-completed system reminder for the arm:
 5. Do not invent a wake from an attach-status line alone.
    Drain the queue and act only on real wake records or a real watcher reason line.
    Re-arm attaches to an existing healthy cycle when one is already present and follows its verified successor chain.
-   See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer successor and clean-close failure contract.
+   See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer successor and cycle-close contract.
 
 Grok Stop hooks are passive.
 The primary project hook runs `bin/fm-turnend-guard-grok.sh`, which forces at most one same-session follow-up via `grok --resume` when a turn would end blind.

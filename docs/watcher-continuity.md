@@ -27,7 +27,7 @@ Claude's Stop hook starts the successor arm at the next Stop after the handling 
 The durable wake queue preserves actionable events during the residual active-turn window, and the unchanged bounded turn-end guard enforces recovery at Stop when no watcher or auto-arm claim is present.
 No PreToolUse hook denies fleet commands based on watcher status.
 The model no longer re-arms after ordinary wakes.
-Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
+Terminal arm-output classification (`started`, `attached`, delivered close, or `FAILED`) remains defense in depth for the manual recovery path.
 Codex retains its bounded foreground checkpoint protocol.
 Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.
@@ -47,13 +47,13 @@ Before an attached arm calls a close unexplained it reads the owner's own ledger
 Proof of a delivered wake changes the claim to `watcher: cycle closed with a delivered wake pid=<N> (reported by its owning arm); no live cycle remains`, because the owner already reported the reason and a second reason would be false.
 That attached close returns zero so Claude's Stop hook stays silent instead of rewaking for the wake the owner already delivered.
 No proof keeps `watcher: FAILED - cycle ended without an actionable reason` and the same nonzero exit.
-The ledger informs wording only; it is not proof that supervision is healthy.
+The ledger explains the attached-close wording; it never proves that a live supervision cycle exists.
 Pi's and OpenCode's adapters are unchanged by it: their close classifiers already treat every non-actionable close as a failure that triggers continuity restoration, which is what those homes did with the previous typed failure too.
 Grok must re-arm after the clean delivered-close completion because it has no automatic successor.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
 Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
-`bin/fm-watch-cycle-lib.sh` owns that record format, the exact-identity attached-close reader, and the bounded post-wake-gap reader; `bin/fm-watch-arm.sh` owns the write side and the arm lifecycle state machine.
+`bin/fm-watch-cycle-lib.sh` owns that record format and the exact-identity attached-close reader; `bin/fm-watch-arm.sh` owns the write side and the arm lifecycle state machine.
 A reason carrying the `actionable-` prefix means the cycle closed because the watcher had a real wake to deliver; every other reason means the observer could not account for the close.
 The attached-close query requires complete canonical rows and one owner record for the exact watcher PID and lock identity at or after the moment the arm began following it.
 Missing, malformed, truncated, or ambiguous evidence keeps the unexplained wording and nonzero alarm.
@@ -80,7 +80,6 @@ The goal is continuity without a Pi or OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
 Claude depends on the Stop `asyncRewake` rewake, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
-The Claude continuity gate tolerates one bounded wake-handling turn and then reasserts its refusal if the session never re-arms.
 The turn-end guard remains responsible for preventing that handling turn from ending without a live watcher or an owned Stop-hook recovery.
 
 [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.

@@ -26,4 +26,4 @@ When this session owns supervision and away mode is not active:
 
 The watcher itself remains `bin/fm-watch.sh`, and `bin/fm-watch-arm.sh` remains the verified arm wrapper that the Stop hook foregrounds.
 Re-arm attaches to an existing healthy cycle when one is already present and follows its verified successor chain.
-See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer successor and clean-close failure contract and the Claude ownership model.
+See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer successor and cycle-close contract and the Claude ownership model.
