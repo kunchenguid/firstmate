@@ -648,7 +648,8 @@ test_attached_arm_reports_the_owners_delivered_wake_not_a_failure() {
   pass "an attached arm reports the owner's delivered wake accurately and exits non-zero"
 }
 
-test_attached_arm_still_alarms_when_the_close_is_unexplained() {
+# Preservation guard: the ledger consult must not regress upstream's unexplained-close alarm, and this cannot fail against the diff because that path is deliberately unchanged.
+test_ledger_consult_preserves_upstream_unexplained_close_alarm() {
   local attached_status
   run_two_arms_on_one_watcher attached-unexplained-close
 
@@ -668,7 +669,7 @@ test_attached_arm_still_alarms_when_the_close_is_unexplained() {
     || fail "no lifecycle record was written for the watcher under test"
   ! grep -q "watcher_pid=$TWO_ARM_WATCHER_PID.*reason=actionable-" "$TWO_ARM_STATE/.watch-cycle-exits.log" \
     || fail "fixture recorded a delivered wake, so it cannot prove the unexplained path"
-  pass "an attached arm still alarms when the ledger shows no delivered wake"
+  pass "ledger consult preserves the upstream unexplained-close alarm"
 }
 
 test_attached_cycle_reader_requires_canonical_current_owner_row() {
@@ -1099,7 +1100,7 @@ test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_reports_the_owners_delivered_wake_not_a_failure
-test_attached_arm_still_alarms_when_the_close_is_unexplained
+test_ledger_consult_preserves_upstream_unexplained_close_alarm
 test_attached_cycle_reader_requires_canonical_current_owner_row
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
