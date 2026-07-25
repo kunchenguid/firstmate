@@ -837,8 +837,11 @@ fm_backend_herdr_workspace_find() {  # <session>
   # compile error that `2>/dev/null` would silently swallow, making this find
   # ALWAYS return empty and every spawn mint a fresh "firstmate" workspace
   # (the workspace leak).
+  # Select inside jq rather than piping all matches through head. Early head
+  # closure made the upstream pipeline emit cosmetic broken-pipe noise while
+  # watcher arming even though the first workspace was resolved correctly.
   printf '%s' "$list" | jq -r --arg want "$label" \
-    '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null | head -1
+    '[.result.workspaces[]? | select(.label == $want) | .workspace_id][0] // empty' 2>/dev/null
 }
 
 # fm_backend_herdr_workspace_prune_seeded_default_tab: close EXACTLY

@@ -2,10 +2,9 @@
 # Scaffold a crewmate brief or persistent secondmate charter at
 # data/<task-id>/brief.md under the active firstmate home.
 # For ordinary tasks, the standard Setup/Rules/Definition-of-done contract is
-# filled in. Firstmate then replaces the {TASK} placeholder with the task
-# description, acceptance criteria, and context, and may adjust other sections
-# when the task genuinely deviates (e.g. working an existing external PR instead
-# of shipping a new one).
+# filled in. Firstmate then fills every task-contract and unattended-envelope
+# placeholder, and may adjust other sections when the task genuinely deviates
+# (e.g. working an existing external PR instead of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -106,6 +105,47 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+SESSION_STATE_TOOL=$(shell_quote "$FM_ROOT/bin/fm-session-state.sh")
+SESSION_STATE_CANDIDATE=$(shell_quote "$DATA/$ID/session-state.candidate.json")
+SESSION_STATE_FILE=$(shell_quote "$DATA/$ID/session-state.json")
+
+emit_crewmate_contracts() {  # <one-line authority class>
+  local authority_class=$1
+  cat <<EOF
+# Task contract
+## Objective and scope
+{TASK}
+
+Source set: {SOURCE_SET}
+Acceptance criteria: {ACCEPTANCE_CRITERIA}
+Authority class: $authority_class
+Load-bearing assumptions: {LOAD_BEARING_ASSUMPTIONS}
+Commissioning remains valid only while these fields match the approved task-class template; a material change returns the brief to the configured approval authority before work continues.
+
+# Unattended-run envelope
+Every autonomous run uses this envelope, and every placeholder must be resolved before dispatch.
+Success predicate: {SUCCESS_PREDICATE}
+Named evaluator: {EVALUATOR}
+Iteration cap: {ITERATION_CAP}
+Wall-clock deadline: {WALL_CLOCK_DEADLINE}
+Token budget: {TOKEN_BUDGET}
+Allowed side effects: {ALLOWED_SIDE_EFFECTS}
+Terminal outcomes: \`done | needs-decision | blocked | failed\`.
+Prefer a deterministic success predicate; when judgment is unavoidable, name \`host-worker\` as evaluator and preserve the evidence it judged.
+Stop at the first reached cap or deadline and report \`blocked\` with the bound and remaining work rather than extending the run implicitly.
+At run end, use exactly one terminal outcome as the final status state and preserve its evidence.
+
+# Session state and phase handoff
+Contract: \`firstmate.session-state/v1\`.
+Schema and validator owner: \`$SESSION_STATE_TOOL\`; its \`schema\`, \`validate\`, and \`compile\` interfaces are authoritative, and \`--help\` owns mechanics.
+Phase candidate: \`$SESSION_STATE_CANDIDATE\`.
+Canonical state: \`$SESSION_STATE_FILE\`.
+At every phase boundary, compile one candidate containing the completed checklist, deviations, decisions, evidence pointers, budget position, next acceptance criteria, and exact resume action.
+The compiler validates before atomically replacing canonical state, so readers see only a complete boundary.
+Do not start the next phase or resume in a fresh session unless canonical state validates; validate and read it before continuation.
+Use a fresh-session handoff at about 200K working or 250K hard-stop context tokens on Claude, and about 140K working or 180K hard-stop context tokens on Codex and Pi.
+EOF
+}
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -227,11 +267,14 @@ EOF
 fi
 
 if [ "$KIND" = scout ]; then
-cat > "$BRIEF" <<EOF
+SCOUT_AUTHORITY="worker investigates accepted scope, reads and writes only authorized sources and paths, and spends only the envelope budget; firstmate decides routine execution questions above the worker within configured authority; captain decides scope expansion, broader read or write access, sending or publishing outside the brief, overspending, and destructive, irreversible, or security-sensitive actions; no landing is authorized"
+{
+cat <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
-# Task
-{TASK}
+EOF
+emit_crewmate_contracts "$SCOUT_AUTHORITY"
+cat <<EOF
 
 $HERDR_SECTION
 
@@ -243,7 +286,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+2. Stay inside this worktree; the only files you may write outside it are the report, session-state files in the task workspace, and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -270,7 +313,8 @@ Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-l
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
-echo "scaffolded: $BRIEF (scout; replace {TASK})"
+} > "$BRIEF"
+echo "scaffolded: $BRIEF (scout; fill task contract)"
 exit 0
 fi
 
@@ -313,31 +357,35 @@ EOF
     RULE1='1. Never push to the default branch. Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+The task is complete only after implementation is committed, the no-mistakes pipeline reaches CI green, and the PR URL is available.
+Immediately after your implementation commit, invoke the no-mistakes skill yourself and drive it through the CI-ready return point without waiting for a firstmate steer.
+Do not append \`done:\` after the implementation commit or stop between implementation and pipeline start.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke the no-mistakes skill, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+Process every synchronous return until completion or a genuinely new escalation.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
   Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
+- Avoid \`--yes\`: it would silently bypass the authority check by firstmate and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
 )
     ;;
 esac
 
-cat > "$BRIEF" <<EOF
+SHIP_AUTHORITY="worker implements accepted scope, reads and writes only authorized sources and paths, drives the selected delivery path, and spends only the envelope budget; firstmate decides routine execution questions and ask-user findings within configured authority; captain decides scope expansion, broader read or write access, sending or publishing outside the selected delivery path, overspending, and destructive, irreversible, or security-sensitive actions; configured merge authority decides landing"
+{
+cat <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
-# Task
-{TASK}
+EOF
+emit_crewmate_contracts "$SHIP_AUTHORITY"
+cat <<EOF
 
 $HERDR_SECTION
 
@@ -352,7 +400,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+2. Stay inside this worktree; the only files you may write outside it are session-state files in the task workspace and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -384,4 +432,5 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+} > "$BRIEF"
+echo "scaffolded: $BRIEF (ship, mode=$MODE; fill task contract)"

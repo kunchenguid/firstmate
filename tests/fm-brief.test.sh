@@ -116,7 +116,91 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must render literal backticks around help"
   assert_no_grep "no-mistakes' own guidance" "$brief" \
     "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
-  pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
+  assert_grep "Immediately after your implementation commit, invoke the no-mistakes skill yourself" "$brief" \
+    "no-mistakes DOD did not make the worker start validation unaided"
+  assert_grep "without waiting for a firstmate steer" "$brief" \
+    "no-mistakes DOD retained the stop-short handoff"
+  assert_grep "Process every synchronous return until completion or a genuinely new escalation." "$brief" \
+    "no-mistakes DOD did not make the worker drive the active run"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "no-mistakes DOD still requires a firstmate steer after implementation"
+  assert_no_grep "When you believe it is complete, append \`done: {summary}\`" "$brief" \
+    "no-mistakes DOD still permits done before validation"
+  pass "fm-brief.sh: no-mistakes DOD parses and makes the worker drive validation"
+}
+
+test_crewmate_contracts_are_structured_and_bounded() {
+  local home kind id brief authority_count
+  home="$TMP_ROOT/crewmate-contract-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-contract-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+
+    assert_grep "# Task contract" "$brief" "$kind brief omitted the structured task contract"
+    for field in "Source set: {SOURCE_SET}" "Acceptance criteria: {ACCEPTANCE_CRITERIA}" \
+      "Load-bearing assumptions: {LOAD_BEARING_ASSUMPTIONS}"; do
+      assert_grep "$field" "$brief" "$kind brief omitted task-contract field $field"
+    done
+    authority_count=$(grep -c '^Authority class:' "$brief")
+    [ "$authority_count" -eq 1 ] || fail "$kind brief must carry exactly one authority class"
+    assert_grep "firstmate decides" "$brief" "$kind authority class did not name firstmate decisions"
+    assert_grep "captain decides" "$brief" "$kind authority class did not name captain decisions"
+    assert_grep "a material change returns the brief to the configured approval authority" "$brief" \
+      "$kind brief did not re-gate material task-contract changes"
+
+    assert_grep "# Unattended-run envelope" "$brief" "$kind brief omitted the unattended envelope"
+    for field in "Success predicate: {SUCCESS_PREDICATE}" "Named evaluator: {EVALUATOR}" \
+      "Iteration cap: {ITERATION_CAP}" "Wall-clock deadline: {WALL_CLOCK_DEADLINE}" \
+      "Token budget: {TOKEN_BUDGET}" "Allowed side effects: {ALLOWED_SIDE_EFFECTS}"; do
+      assert_grep "$field" "$brief" "$kind brief omitted unattended field $field"
+    done
+    # shellcheck disable=SC2016  # Literal backticks and terminal names must remain unchanged.
+    assert_grep 'Terminal outcomes: `done | needs-decision | blocked | failed`.' "$brief" \
+      "$kind brief omitted the fixed terminal-outcome set"
+    # shellcheck disable=SC2016  # Literal status name must remain unchanged.
+    assert_grep 'report `blocked` with the bound and remaining work' "$brief" \
+      "$kind brief did not map exhausted bounds to the existing status protocol"
+    assert_grep "name \`host-worker\` as evaluator" "$brief" \
+      "$kind brief omitted the judgment-evaluator fallback"
+
+    assert_grep "# Session state and phase handoff" "$brief" "$kind brief omitted session state"
+    assert_grep "Contract: \`firstmate.session-state/v1\`." "$brief" \
+      "$kind brief omitted the versioned state contract"
+    assert_grep "$ROOT/bin/fm-session-state.sh" "$brief" \
+      "$kind brief omitted the schema and validator owner"
+    assert_grep "$home/data/$id/session-state.candidate.json" "$brief" \
+      "$kind brief omitted the task-workspace phase candidate"
+    assert_grep "validates before atomically replacing canonical state" "$brief" \
+      "$kind brief omitted atomic phase-boundary compilation"
+    assert_grep "Do not start the next phase" "$brief" \
+      "$kind brief did not refuse an unvalidated next phase"
+    assert_grep "200K working or 250K hard-stop" "$brief" \
+      "$kind brief omitted Claude handoff thresholds"
+    assert_grep "140K working or 180K hard-stop" "$brief" \
+      "$kind brief omitted Codex and Pi handoff thresholds"
+  done
+  pass "fm-brief.sh: ship and scout briefs carry structured authority, run, and state contracts"
+}
+
+test_secondmate_omits_crewmate_run_contracts() {
+  local home brief
+  home="$TMP_ROOT/secondmate-contract-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='route domain work' \
+    "$ROOT/bin/fm-brief.sh" contract-mate --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/contract-mate/brief.md"
+  assert_no_grep "# Unattended-run envelope" "$brief" \
+    "persistent secondmate charter inherited a per-task unattended envelope"
+  assert_no_grep "# Session state and phase handoff" "$brief" \
+    "persistent secondmate charter inherited per-task phase state"
+  pass "fm-brief.sh: persistent secondmate charters omit per-task run contracts"
 }
 
 test_ship_project_memory_wording() {
@@ -387,6 +471,8 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_crewmate_contracts_are_structured_and_bounded
+test_secondmate_omits_crewmate_run_contracts
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

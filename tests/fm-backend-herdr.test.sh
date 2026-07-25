@@ -1567,6 +1567,21 @@ test_workspace_find_matches_only_this_homes_own_label() {
   pass "fm_backend_herdr_workspace_find: matches only THIS home's own label among several coexisting workspaces"
 }
 
+test_workspace_find_selects_first_match_without_head_pipe() {
+  local dir log resp fb out err source
+  dir="$TMP_ROOT/find-duplicate"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; err="$dir/stderr"; : > "$log"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"firstmate"}]}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_find fmtest' "$ROOT" 2>"$err" )
+  [ "$out" = "w1" ] || fail "workspace_find should select the first duplicate match, got '$out'"
+  [ ! -s "$err" ] || fail "workspace_find emitted cosmetic stderr: $(cat "$err")"
+  source=$(awk '/^fm_backend_herdr_workspace_find\(\)/,/^}/' "$ROOT/bin/backends/herdr.sh")
+  assert_not_contains "$source" '| head -1' \
+    "workspace_find retained the early-closing head pipe that causes broken-pipe noise"
+  pass "fm_backend_herdr_workspace_find: first-match selection emits no broken-pipe stderr"
+}
+
 # --- list_live: scoped to this home's own workspace only ---------------------
 
 test_list_live_scoped_to_this_homes_workspace_only() {
@@ -3035,6 +3050,7 @@ test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
+test_workspace_find_selects_first_match_without_head_pipe
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target
 test_normalize_key
