@@ -78,7 +78,7 @@ SH
 make_herdr_statefake() {  # <dir> -> echoes fakebin dir; seeds an empty state file
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
-  printf '{"next":1,"workspaces":[],"tabs":[],"agent_status":{}}\n' > "$dir/state.json"
+  printf '{"next":1,"workspaces":[],"tabs":[],"agent_status":{},"titles":{}}\n' > "$dir/state.json"
   cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -94,12 +94,13 @@ jq_state() { jq "$@" "$STATE"; }
 save() { local tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
 
 cmd=${1:-}; sub=${2:-}
-ws=""; label=""
+ws=""; label=""; title=""
 args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
   case "${args[$i]}" in
     --workspace) ws=${args[$((i+1))]:-} ;;
     --label) label=${args[$((i+1))]:-} ;;
+    --title) title=${args[$((i+1))]:-} ;;
   esac
 done
 
@@ -132,6 +133,15 @@ case "$cmd $sub" in
     ;;
   "pane list")
     jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id}]}}'
+    ;;
+  "pane get")
+    pane=${3:-}
+    jq_state --arg p "$pane" '{result:{pane:(.tabs[]|select(.pane_id==$p)|{pane_id:.pane_id, tab_id:.tab_id, workspace_id:.workspace_id})}}' |
+      jq --arg p "$pane" --slurpfile state "$STATE" '.result.pane.title = ($state[0].titles[$p] // null)'
+    ;;
+  "pane report-metadata")
+    pane=${3:-}
+    jq_state --arg p "$pane" --arg title "$title" '.titles[$p] = $title' | save
     ;;
   "pane close")
     pane=${3:-}
@@ -280,6 +290,88 @@ test_cli_helper_sets_env_and_appends_trailing_session_flag() {
   assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''list'$'\x1f''--session'$'\x1f''fmtest' \
     "fm_backend_herdr_cli did not append a trailing --session <name> flag (the fix for the env-var-alone routing bug)"
   pass "fm_backend_herdr_cli: sets HERDR_SESSION AND appends a trailing --session flag on every call"
+}
+
+# --- human-readable pane titles ---------------------------------------------
+
+test_task_title_metadata_preserves_stable_recovery_label() {
+  local dir log fb brief out title label live unsafe
+  dir="$TMP_ROOT/task-title-metadata"; mkdir -p "$dir"; log="$dir/log"; : > "$log"
+  brief="$dir/brief.md"
+  cat > "$brief" <<'EOF'
+You are a worker.
+
+# Task
+Add readable Herdr worker titles.
+
+# Setup
+Keep the stable identity.
+EOF
+  fb=$(make_herdr_statefake "$dir")
+  printf '%s\n' '{"next":2,"workspaces":[{"workspace_id":"w1","label":"firstmate"}],"tabs":[{"tab_id":"w1:t1","label":"fm-title-task","workspace_id":"w1","pane_id":"w1:p1"}],"agent_status":{},"titles":{}}' > "$dir/state.json"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$dir/state.json" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_report_task_title fmtest w1:p1 "$1" title-task
+      title=$(fm_backend_herdr_cli fmtest pane get w1:p1 | jq -r ".result.pane.title // empty")
+      label=$(fm_backend_herdr_cli fmtest tab list --workspace w1 | jq -r ".result.tabs[0].label // empty")
+      live=$(fm_backend_herdr_list_live fmtest)
+      printf "%s|%s|%s\n" "$title" "$label" "$live"
+    ' "$ROOT" "$brief") || fail "task title metadata publication should succeed"
+  title=${out%%|*}
+  label=${out#*|}; label=${label%%|*}
+  live=${out#*|*|}
+  [ "$title" = "Add readable Herdr worker titles." ] \
+    || fail "pane metadata did not contain the brief-derived human title: $out"
+  [ "$label" = "fm-title-task" ] \
+    || fail "presentation metadata changed the authoritative task tab label: $label"
+  assert_contains "$live" $'fmtest:w1:p1\tfm-title-task' \
+    "label-based recovery discovery did not retain the byte-identical stable label"
+  assert_contains "$(cat "$log")" $'pane\x1freport-metadata\x1fw1:p1\x1f--source\x1ffirstmate\x1f--title\x1fAdd readable Herdr worker titles.\x1f--session\x1ffmtest' \
+    "title publication did not use Herdr pane metadata in the isolated named session"
+  unsafe=$(grep -v $'\x1f--session\x1ffmtest$' "$log" || true)
+  [ -z "$unsafe" ] || fail "a title-path Herdr call escaped explicit named-session targeting: $unsafe"
+  assert_not_contains "$(cat "$log")" $'\x1fdefault' \
+    "the title path must never address the default Herdr session"
+  pass "herdr pane titles: human metadata appears while tab identity and label-based recovery stay byte-identical and named-session scoped"
+}
+
+test_task_title_fallback_is_safe_and_bounded() {
+  local dir placeholder missing long normalized
+  dir="$TMP_ROOT/task-title-fallback"; mkdir -p "$dir"
+  printf '# Task\n{TASK}\n\n# Setup\n' > "$dir/placeholder.md"
+  printf '# Task\n%s\n' "$(printf 'A%.0s' {1..100})" > "$dir/long.md"
+  placeholder=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_title "$1" fm-herdr-friendly-task-titles' "$ROOT" "$dir/placeholder.md")
+  missing=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_title "$1" fm-herdr-friendly-task-titles' "$ROOT" "$dir/missing.md")
+  long=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_title "$1" task-id' "$ROOT" "$dir/long.md")
+  normalized=$(printf '# Task\n  Readable\t worker   title.  \n' > "$dir/normalized.md"; \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_title "$1" task-id' "$ROOT" "$dir/normalized.md")
+  [ "$placeholder" = "Herdr friendly task titles" ] \
+    || fail "placeholder title should fall back to a humanized stable id: $placeholder"
+  [ "$missing" = "Herdr friendly task titles" ] \
+    || fail "missing brief should fall back to a humanized stable id: $missing"
+  [ "${#long}" -eq 64 ] && [ "${long:61}" = "..." ] \
+    || fail "overlong pane title should be bounded to 64 characters with an ellipsis: ${#long} '$long'"
+  [ "$normalized" = "Readable worker title." ] \
+    || fail "title whitespace should normalize to one safe line: '$normalized'"
+  pass "herdr pane titles: malformed, unavailable, and overlong brief input has a readable bounded fallback"
+}
+
+test_task_title_metadata_failure_is_nonfatal() {
+  local dir log resp fb brief out status
+  dir="$TMP_ROOT/task-title-failure"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  brief="$dir/brief.md"; printf '# Task\nReadable title\n' > "$brief"
+  printf '1\n' > "$resp/1.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_report_task_title fmtest w1:p1 "$1" title-task; printf survived' "$ROOT" "$brief" 2>&1)
+  status=$?
+  expect_code 0 "$status" "pane metadata failure must not fail an already-created worker"
+  assert_contains "$out" "warning: herdr could not publish the human-readable title" \
+    "pane metadata failure should emit one proportionate warning"
+  assert_contains "$out" "survived" \
+    "pane metadata failure should let the spawn path continue"
+  pass "herdr pane titles: metadata failure warns without stranding or duplicating an already-created worker"
 }
 
 # --- container_ensure / create_task ------------------------------------------
@@ -1311,6 +1403,25 @@ test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication() {
   [ "$acquire_line" -lt "$backend_line" ] && [ "$backend_line" -lt "$meta_line" ] \
     || fail "the task lock does not span backend creation through metadata publication"
   pass "fm-spawn: one task lock spans every backend creation path through metadata publication"
+}
+
+test_spawn_reports_human_title_without_changing_stable_label() {
+  local label_pattern title_pattern target_pattern label_line title_line target_line
+  # These are literal source patterns for grep, so shell expansion would invalidate the assertions.
+  # shellcheck disable=SC2016
+  label_pattern='W="fm-$ID"'
+  # shellcheck disable=SC2016
+  title_pattern='fm_backend_herdr_report_task_title "$HERDR_SES" "$HERDR_PANE_ID" "$BRIEF" "$ID"'
+  # shellcheck disable=SC2016
+  target_pattern='T="$HERDR_SES:$HERDR_PANE_ID"'
+  label_line=$(grep -nF "$label_pattern" "$ROOT/bin/fm-spawn.sh" | head -1 | cut -d: -f1)
+  title_line=$(grep -nF "$title_pattern" "$ROOT/bin/fm-spawn.sh" | head -1 | cut -d: -f1)
+  target_line=$(grep -nF "$target_pattern" "$ROOT/bin/fm-spawn.sh" | head -1 | cut -d: -f1)
+  [ -n "$label_line" ] && [ -n "$title_line" ] && [ -n "$target_line" ] \
+    || fail "could not locate the stable label, pane-title publication, and endpoint assignment"
+  [ "$label_line" -lt "$title_line" ] && [ "$title_line" -lt "$target_line" ] \
+    || fail "Herdr spawn must publish title metadata only after retaining the stable fm-<id> identity"
+  pass "fm-spawn: every Herdr pane receives brief-derived title metadata without replacing the stable fm-<id> identity"
 }
 
 test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission() {
@@ -2982,6 +3093,9 @@ test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
+test_task_title_metadata_preserves_stable_recovery_label
+test_task_title_fallback_is_safe_and_bounded
+test_task_title_metadata_failure_is_nonfatal
 test_container_ensure_starts_server_and_workspace
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag
@@ -3029,6 +3143,7 @@ test_presentation_lock_malformed_socket_falls_back
 test_projection_order_rejects_malformed_socket
 test_presentation_lock_insecure_namespace_falls_back
 test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication
+test_spawn_reports_human_title_without_changing_stable_label
 test_projected_spawn_disarms_cleanup_before_ambiguous_launch_submission
 test_projected_abort_cleanup_holds_presentation_lock
 test_projection_reclaim_refusal_matrix_is_non_mutating

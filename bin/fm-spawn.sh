@@ -1032,6 +1032,9 @@ EOF
       echo "error: herdr did not return a tab/pane id for $W" >&2
       exit 1
     fi
+    # Pane title metadata is presentation-only. The authoritative tab label
+    # remains byte-identical as fm-<id> for duplicate detection and recovery.
+    fm_backend_herdr_report_task_title "$HERDR_SES" "$HERDR_PANE_ID" "$BRIEF" "$ID"
     T="$HERDR_SES:$HERDR_PANE_ID"
     ;;
   zellij)

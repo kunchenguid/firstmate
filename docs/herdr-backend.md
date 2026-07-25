@@ -41,6 +41,10 @@ The secondmate process and every child it launches resolve the same home label; 
 Attach to the selected named Herdr session and switch to the relevant home workspace to watch its task tabs.
 Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` without attaching.
 
+Every spawned pane receives a presentation-only title from the first content line in its durable task brief, bounded to 64 characters, with a humanized task-id fallback when that line is unavailable or malformed.
+The tab label remains byte-identical as `fm-<task-id>` because duplicate detection and recovery use that stable label rather than display metadata.
+Title publication is best-effort: a failure warns but does not retry or fail an otherwise-created worker.
+
 Workspace and tab creation use `--no-focus`.
 The first workspace in a completely empty Herdr session must become focused because no prior target exists, but later task creation does not intentionally steal focus.
 

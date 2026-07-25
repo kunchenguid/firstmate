@@ -109,6 +109,9 @@ FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
 # spawn can replace one verified agent-free husk under the session lock.
 # No send, capture, Treehouse, or general task-ownership path reads it.
 FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
+# Sidebar titles are presentation-only and deliberately shorter than the
+# authoritative fm-<id> tab labels used for lookup and recovery.
+FM_BACKEND_HERDR_TASK_TITLE_MAX=64
 
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
 # label (docs/herdr-backend.md "Default task container shape"). The PRIMARY home (no
@@ -1089,6 +1092,67 @@ fm_backend_herdr_agent_alive() {  # <target>
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;
   esac
+}
+
+# fm_backend_herdr_task_title: derive a concise presentation-only pane title
+# from the first content line under the generated brief's Task or Charter
+# heading. Briefs exist independently of the configured backlog backend, so
+# this avoids coupling display text to tasks-axi or manual backlog parsing.
+# Missing, placeholder, malformed, or empty content falls back to a readable
+# form of the stable task id. Output is always one line and at most 64
+# characters; an overlong title ends in "...".
+fm_backend_herdr_task_title() {  # <brief> <task-id>
+  local brief=$1 id=$2 title fallback
+  title=""
+  if [ -f "$brief" ]; then
+    title=$(awk '
+      $0 == "# Task" || $0 == "# Charter" { in_title = 1; next }
+      in_title && /^#/ { exit }
+      in_title && $0 !~ /^[[:space:]]*$/ {
+        gsub(/[[:cntrl:]]/, " ")
+        gsub(/[[:space:]]+/, " ")
+        sub(/^ /, "")
+        sub(/ $/, "")
+        print
+        exit
+      }
+    ' "$brief" 2>/dev/null || true)
+  fi
+  case "$title" in
+    ''|'{TASK}'*) title="" ;;
+  esac
+  if [ -z "$title" ]; then
+    fallback=$id
+    case "$fallback" in
+      firstmate/*) fallback=${fallback#firstmate/} ;;
+      2ndmate-*/*) fallback=${fallback#*/} ;;
+    esac
+    case "$fallback" in
+      fm-*) fallback=${fallback#fm-} ;;
+    esac
+    fallback=$(printf '%s' "$fallback" | tr '_-' '  ' | awk '{$1=$1; print}')
+    [ -n "$fallback" ] || fallback="Firstmate worker"
+    title=$(printf '%s' "$fallback" | awk '{printf "%s%s", toupper(substr($0, 1, 1)), substr($0, 2)}')
+  fi
+  if [ "${#title}" -gt "$FM_BACKEND_HERDR_TASK_TITLE_MAX" ]; then
+    title="${title:0:$((FM_BACKEND_HERDR_TASK_TITLE_MAX - 3))}..."
+  fi
+  printf '%s' "$title"
+}
+
+# fm_backend_herdr_report_task_title: publish non-authoritative Herdr pane
+# metadata after the pane exists. Like optional presentation ordering, a
+# metadata failure warns and leaves the worker running: failing or retrying the
+# spawn after endpoint creation could strand or duplicate a live worker, while
+# the unchanged fm-<id> tab label still provides complete recovery authority.
+fm_backend_herdr_report_task_title() {  # <session> <pane-id> <brief> <task-id>
+  local session=$1 pane_id=$2 brief=$3 id=$4 title
+  title=$(fm_backend_herdr_task_title "$brief" "$id")
+  if ! fm_backend_herdr_cli "$session" pane report-metadata "$pane_id" \
+    --source firstmate --title "$title" >/dev/null 2>&1; then
+    echo "warning: herdr could not publish the human-readable title for fm-$id; leaving the worker running with its stable tab label" >&2
+  fi
+  return 0
 }
 
 # fm_backend_herdr_create_task: create the task's tab (one pane) in
