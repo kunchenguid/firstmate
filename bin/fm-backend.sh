@@ -742,8 +742,10 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
 # nonexistent/already-gone target is not an error - callers already swallow
 # failures here exactly as the inline `tmux kill-window ... || true` did).
 # Empty/non-concrete targets are refused fail-closed before any adapter command
-# runs (tmux especially: kill-window -t '' kills the active window - see
-# fm_backend_tmux_kill).
+# runs: teardown rejects metadata without a concrete endpoint
+# (fm_backend_validate_task_endpoint), this wrapper rejects an empty target, and
+# the tmux adapter independently rejects empty or empty-component selectors
+# because kill-window -t '' kills the active window; see fm_backend_tmux_kill.
 fm_backend_kill() {  # <backend> <target>
   local backend=$1
   shift
