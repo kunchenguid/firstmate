@@ -18,7 +18,7 @@ Three consequences were observed, not hypothesized.
 
 The deeper defect is that the bypass did not merely skip dispatch, it made the in-flight-work branch of the guard stack structurally inert.
 Only `bin/fm-spawn.sh` writes `state/<id>.meta`, so untracked project work contributes nothing to the in-flight count used by `bin/fm-supervision-lib.sh` and `bin/fm-turnend-guard.sh`.
-Work started through the harness's own delegation tool writes no metadata, so the in-flight count stayed at zero, the turn-end guard never blocked a blind turn end, and the continuity gate was inert.
+Work started through the harness's own delegation tool writes no metadata, so the in-flight count stayed at zero and the turn-end guard never blocked a blind turn end.
 
 That is the reason the fence has to sit on the harness tool surface, before the primary can create untracked work.
 No additional guard keyed on task metadata can catch this class of failure, because the failure is precisely the absence of that metadata.

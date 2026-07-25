@@ -15,14 +15,14 @@ When this session owns supervision and away mode is not active:
    A shell `&`, a truncating pipe, or bundling is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) registered in `.claude/settings.json`.
 6. Treat `watcher: started ...` and `watcher: attached ...` inside arm output as proof that one live cycle exists.
    On attach, the arm follows verified identity-matched successors instead of exiting when the first cycle ends.
-   `watcher: cycle closed with a delivered wake ...; no live cycle remains` means an attached arm's cycle closed for a wake its owning arm already reported, so do not act on it as a second wake.
-   That attached arm exits cleanly so the Stop hook stays silent instead of duplicating the owner's wake.
-7. The continuity PreToolUse gate allows wake drain, watcher arm recovery, fail-closed teardown, and the expected post-wake handling gap.
-   A recent delivered-wake owner record allows crew-state reads and other fleet commands for `FM_CONTINUITY_GAP_GRACE` seconds, default 1800; an absent, stale, or superseded record keeps the normal refusal.
+   `watcher: cycle closed with a delivered wake ...` names the benign cause of an alarm rather than silencing it: an attached arm's cycle closed for a wake its owning arm already reported, so the wake was neither lost nor duplicated, but no live cycle remains and step 4 still applies.
+7. The durable wake queue preserves actionable events between a rewake and the next Stop-launched arm, while the bounded turn-end guard prevents a blind Stop when recovery did not start.
+   No PreToolUse hook denies fleet commands based on watcher status.
+   [`watcher-continuity.md`](../watcher-continuity.md) owns the exact session-lock recovery boundary.
 8. The turn-end guard (`bin/fm-turnend-guard.sh --claude`) remains the final backstop.
    It allows the stop when a watcher is healthy, when the auto-arm already owns recovery for this event epoch, or when a fresh rewake is recorded; it re-blocks only when none of those materialize, within a bounded budget.
 9. Waiting on the hook-owned cycle is silent: do not send idle progress while the watcher is parked.
 
 The watcher itself remains `bin/fm-watch.sh`, and `bin/fm-watch-arm.sh` remains the verified arm wrapper that the Stop hook foregrounds.
 Re-arm attaches to an existing healthy cycle when one is already present and follows its verified successor chain.
-See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer successor and cycle-close contract and the Claude ownership model.
+See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer successor and clean-close failure contract and the Claude ownership model.
