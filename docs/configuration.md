@@ -175,16 +175,24 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 ## Harness support
 
 claude, codex, opencode, pi, grok, and kimi are empirically verified for crewmate and secondmate launches; [README requirements](../README.md#requirements) own the narrower set supported for the primary session.
+Cursor Agent CLI is empirically verified only for ordinary workers and scouts on tmux, Zellij, Orca, and cmux; primary-session, persistent-secondmate, and Herdr launches reject `cursor`.
+Herdr remains excluded because its native agent registration drives liveness and recovery, and Cursor has not been verified on that provider.
 New harnesses get verified through a supervised trial task before joining the set.
 The verified adapter knowledge - busy signatures, interrupt and exit commands, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
+Active version-scoped worker-adapter evidence lives in [`docs/verification/harness-adapters.md`](verification/harness-adapters.md).
 Enabled primary-session turn-end guard integrations are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
 Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
 Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
+Set it to `cursor`, or select `cursor` in `config/crew-dispatch.json`, to launch Cursor workers.
+Cursor spawns require `cursor-agent` on `PATH` and an authenticated `cursor-agent status` before any task endpoint is created.
+Copy model IDs exactly from the live `cursor-agent models` output; the repository deliberately carries no Cursor model catalog.
+Cursor has no separate verified effort flag, so choose a model ID that carries the intended effort variant and omit the dispatch profile's `effort` field.
 When it is absent or contains `default`, crewmates mirror the firstmate's own harness.
 `config/secondmate-harness` is a separate local, gitignored file containing the adapter the primary uses to launch secondmate agents, optionally followed by model and effort tokens on the same line.
+`cursor` is rejected in this file because Cursor persistent-secondmate lifecycle hooks are not verified.
 The first non-empty, non-comment line is parsed as `<harness> [<model>] [<effort>]`.
 A bare `<harness>` preserves the previous behavior: harness only, with no model or effort launch flag.
 When the harness token is absent or `default`, secondmate launch falls back through `config/crew-harness` and then the primary's own harness, and no model or effort is read from that file.

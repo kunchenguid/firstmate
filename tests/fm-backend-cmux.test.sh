@@ -685,6 +685,27 @@ test_composer_state_bare_prompt_is_empty() {
   pass "fm_backend_cmux_composer_state: a bare '❯' composer row reads empty"
 }
 
+test_composer_state_cursor_bare_prompt() {
+  local dir fb out target
+  target="aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"
+  dir="$TMP_ROOT/composer-cursor-idle"; mkdir -p "$dir/responses"
+  cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_read_screen_response "$dir" 2 $'transcript\n  → Add a follow-up\nCursor footer'
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "$1"' "$ROOT" "$target" )
+  [ "$out" = empty ] || fail "Cursor's bare idle prompt should read empty, got '$out'"
+
+  dir="$TMP_ROOT/composer-cursor-pending"; mkdir -p "$dir/responses"
+  cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_read_screen_response "$dir" 2 $'transcript\n  → fix findings 1 and 3\nCursor footer'
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "$1"' "$ROOT" "$target" )
+  [ "$out" = pending ] || fail "Cursor's bare real input should read pending, got '$out'"
+  pass "fm_backend_cmux_composer_state: Cursor's bare prompt distinguishes idle and pending text"
+}
+
 test_composer_state_ghost_placeholder_is_empty() {
   local dir fb out
   dir="$TMP_ROOT/composer-ghost"; mkdir -p "$dir/responses"
@@ -1044,6 +1065,7 @@ test_send_key_recovers_stale_target_by_label
 test_send_literal_uses_separator_for_option_shaped_text
 test_current_path_probes_with_marker
 test_composer_state_bare_prompt_is_empty
+test_composer_state_cursor_bare_prompt
 test_composer_state_ghost_placeholder_is_empty
 test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending

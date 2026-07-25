@@ -46,7 +46,7 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 A target-existence check proves only that the pane exists.
 The deeper tmux agent-liveness probe first verifies exact window membership, then reads `#{pane_current_command}` to distinguish a running harness process from a bare idle shell.
-It classifies recognized Claude, Codex, OpenCode, Grok, and Kimi process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
+It classifies recognized Claude, Codex, OpenCode, Grok, Kimi, and Cursor Agent process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
 
 Pi runs through a generic `node` process name and cannot be attributed confidently from the tmux foreground-process field.
@@ -56,6 +56,7 @@ This is the active tmux liveness limitation.
 Agent liveness and composer safety are separate checks.
 The shared classifier in `bin/fm-composer-lib.sh` accepts a shell glyph as an empty agent composer only inside a verified bordered composer.
 A bare shell prompt is `unknown`, so away-mode escalation is never injected into a dead shell.
+Cursor reports a blank cursor row below its `→` composer, so the tmux adapter scans a bounded row window for the bottom-most verified agent prompt, recognizes `Add a follow-up` as empty, and still checks the foreground command first so stale Cursor rows cannot turn a returned shell into an injection target.
 
 Rendered busy detection is also harness-scoped.
 Task metadata selects only that harness's verified signature, so output from one harness cannot make another harness appear busy.
@@ -79,6 +80,7 @@ After the normal retry budget, a provably busy pane is accepted as queued, while
 ```sh
 tests/fm-backend-tmux-smoke.test.sh
 tests/fm-tmux-submit-busy.test.sh
+tests/fm-composer-ghost.test.sh
 tests/fm-bootstrap.test.sh
 ```
 

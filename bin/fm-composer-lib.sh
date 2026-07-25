@@ -39,8 +39,8 @@
 # bold-wrapped) and no adapter covered grok's truecolor placeholder at all.
 #
 # Each adapter still owns its own CAPTURE and structural row-finding, because
-# those use genuinely different primitives (tmux's cursor-row read, herdr's ANSI
-# tail scan, orca/cmux's plain read-screen). Once an adapter has a candidate
+# those use genuinely different primitives (tmux's cursor-row or bounded nearby-row
+# read, herdr's ANSI tail scan, orca/cmux's plain read-screen). Once an adapter has a candidate
 # composer row it hands the RAW styled row to fm_composer_strip_ghost for the
 # real-typed-content extraction, strips the box borders, trims, and hands the
 # result plus a <bordered> flag to fm_composer_classify_content for the shared
@@ -184,13 +184,13 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   plain_content=${5:-$content}
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
-      '❯'|'›') printf 'empty'; return 0 ;;
+      '❯'|'›'|'→') printf 'empty'; return 0 ;;
       *) printf 'unknown'; return 0 ;;
     esac
   fi
   # A bare prompt glyph on its own row.
   case "$content" in
-    '❯'|'›')
+    '❯'|'›'|'→')
       # Agent prompt glyph: a genuine empty agent composer, bordered or bare.
       printf 'empty'; return 0 ;;
     '>'|'$'|'%'|'#')
@@ -207,8 +207,8 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   fi
   # Strip a leading prompt glyph, then re-judge the remainder.
   case "$content" in
-    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
-    '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
+    '❯ '*|'› '*|'→ '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
+    '❯'*|'›'*|'→'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
   esac
   content="${content#"${content%%[![:space:]]*}"}"
   content="${content%"${content##*[![:space:]]}"}"

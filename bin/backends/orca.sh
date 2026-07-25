@@ -263,35 +263,38 @@ fm_backend_orca_read_text_paged() {  # <terminal-id> <limit>
 }
 
 FM_BACKEND_ORCA_COMPOSER_LINES=${FM_BACKEND_ORCA_COMPOSER_LINES:-200}
-FM_BACKEND_ORCA_IDLE_RE=${FM_BACKEND_ORCA_IDLE_RE:-'^Type a message\.\.\.$'}
+FM_BACKEND_ORCA_IDLE_RE=${FM_BACKEND_ORCA_IDLE_RE:-'^(Type a message\.\.\.|Add a follow-up)$'}
 
-# fm_backend_orca_composer_state: classify the composer's own bordered row as
-# empty|pending|unknown. Real text stays pending, including a slash-command
+# fm_backend_orca_composer_state: classify the bottom-most bordered composer or
+# verified bare-agent prompt row as empty|pending|unknown. Real text stays
+# pending, including a slash-command
 # popup that closed by filling an argument-hint placeholder into the composer;
 # that first Enter selected the popup item, it did not submit the command.
 fm_backend_orca_composer_state() {  # <terminal-id> -> empty|pending|unknown
-  local terminal=$1 cap line trimmed stripped="" found=0
+  local terminal=$1 cap line trimmed stripped="" found=0 shape=""
   cap=$(fm_backend_orca_read_text_paged "$terminal" "$FM_BACKEND_ORCA_COMPOSER_LINES") || { printf 'unknown'; return 0; }
   while IFS= read -r line; do
     trimmed="${line#"${line%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     [ -n "$trimmed" ] || continue
     case "$trimmed" in
-      '│'*'│'|'┃'*'┃'|'|'*'|') : ;;
+      '│'*'│'|'┃'*'┃'|'|'*'|') shape=bordered ;;
+      '→'*) shape=bare ;;
       *) continue ;;
     esac
     stripped=$trimmed
     found=1
   done < <(printf '%s\n' "$cap")
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
-  stripped=${stripped//│/}
-  stripped=${stripped//┃/}
-  stripped=${stripped//|/}
-  stripped="${stripped#"${stripped%%[![:space:]]*}"}"
-  stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  # A row was found only by the bordered shape above, so content came from a
-  # genuine composer box - delegate to the shared owner with bordered=1. A bare
-  # dead-shell prompt has no bordered row and already returned 'unknown' above.
+  if [ "$shape" = bordered ]; then
+    stripped=${stripped//│/}
+    stripped=${stripped//┃/}
+    stripped=${stripped//|/}
+    stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+    stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  fi
+  # Both shapes prove a genuine agent composer. A bare dead-shell prompt has no
+  # verified agent glyph and already returned unknown above.
   fm_composer_classify_content 1 "$stripped" "$FM_BACKEND_ORCA_IDLE_RE"
 }
 

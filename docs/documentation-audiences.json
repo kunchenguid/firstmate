@@ -300,6 +300,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/verification/harness-adapters.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/runtime-backends.md",
       "audience": "maintainer-verification"
     },

@@ -50,7 +50,7 @@ Exact command flags and response parsing are owned by `bin/backends/orca.sh` and
 
 `fm-peek.sh` reads with `orca terminal read`.
 `fm-send.sh` types and verifies composer clearance, follows `oldestCursor` when Orca returns a limited page, and retries Enter without retyping when a slash popup first fills an argument placeholder.
-A bare shell row is `unknown`, not an empty agent composer.
+A bare shell row is `unknown`, not an empty agent composer; Cursor's verified bare `→` row is recognized separately.
 The watcher has no native Orca busy signal and uses the shared terminal-tail fallback.
 
 Cleanup keeps all shared Firstmate safety checks.

@@ -59,10 +59,13 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|kimi)
-#   overrides it for this spawn (either kind). A non-flag string containing
+#   /updatefirstmate, restart). A bare adapter name
+#   (claude|codex|opencode|pi|grok|kimi|cursor) overrides it for this spawn.
+#   Cursor is ordinary-worker/scout only; --secondmate rejects both its verified
+#   adapter name and a cursor-agent raw launch. A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters.
+#   new ordinary adapters. A verified Cursor spawn checks `cursor-agent status`
+#   before endpoint creation and directs an unauthenticated operator to login.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -388,7 +391,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok|kimi)
+    ''|claude|codex|opencode|pi|grok|kimi|cursor)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -454,6 +457,12 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    # Cursor Agent CLI: --force enables unattended built-in command execution,
+    # while --trust suppresses the per-worktree trust prompt for the isolated
+    # worktree Firstmate already selected. MCP servers remain separately gated;
+    # the adapter does not add --approve-mcps. Cursor model IDs already encode
+    # model-specific effort variants, so no separate effort placeholder is used.
+    cursor) printf '%s' 'cursor-agent --force --trust __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -491,6 +500,36 @@ case "$ARG3" in
   *)
     HARNESS=$ARG3
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    ;;
+esac
+
+# Cursor's verified boundary is ordinary ship/scout work only. Keep this check
+# after raw-command harness extraction so the verification escape hatch cannot
+# accidentally turn cursor-agent into an unsupported persistent secondmate.
+if [ "$KIND" = secondmate ]; then
+  case "$HARNESS" in
+    cursor|cursor-agent)
+      echo "error: harness 'cursor' supports ordinary ship/scout workers only; primary sessions and persistent secondmates are not verified" >&2
+      exit 1
+      ;;
+  esac
+fi
+case "$HARNESS:$BACKEND" in
+  cursor:herdr|cursor-agent:herdr)
+    echo "error: harness 'cursor' is not verified on backend=herdr because Herdr native agent registration is required for safe liveness and recovery" >&2
+    exit 1
+    ;;
+esac
+case "$HARNESS" in
+  cursor|cursor-agent)
+    command -v cursor-agent >/dev/null 2>&1 || {
+      echo "error: harness 'cursor' requires cursor-agent on PATH" >&2
+      exit 1
+    }
+    cursor-agent status >/dev/null 2>&1 || {
+      echo "error: harness 'cursor' is not authenticated; run 'cursor-agent login' and retry" >&2
+      exit 1
+    }
     ;;
 esac
 
@@ -565,7 +604,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok|kimi)
+    claude|codex|opencode|pi|grok|kimi|cursor)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1334,6 +1373,11 @@ EOF
       ;;
     codex*)
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
+      ;;
+    cursor*)
+      # Cursor exposes no verified per-turn hook. Ordinary task status writes and
+      # the watcher's pane polling remain the supervision path; cursor's busy
+      # footer is part of the shared busy regex.
       ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the

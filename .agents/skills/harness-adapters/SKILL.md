@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, and kimi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, kimi, and cursor.
 user-invocable: false
 metadata:
   internal: true
@@ -30,8 +30,9 @@ The primary-session "no turn ends blind" guard contract and harness hook install
 The primary-session watcher wake protocols are rendered from `docs/supervision-protocols/` by `bin/fm-supervision-instructions.sh`.
 The supervision knowledge lives here: busy signature, exit command, interrupt, dialogs, resume behavior, skill invocation, and quirks.
 
-Never dispatch a crewmate or secondmate on an unverified adapter.
-If `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, tell the captain under `AGENTS.md` section 9 that the requested worker runtime is not verified yet, use firstmate's own verified runtime for current work, and ask only whether to verify the requested runtime before future use.
+Never dispatch an adapter outside its verified role.
+Cursor is verified only for ordinary crewmates and scouts on tmux, Zellij, Orca, and cmux; it is not verified for a primary session, persistent secondmate, or Herdr.
+If `config/crew-harness` or `config/secondmate-harness` names an adapter unverified for the requested role, tell the captain under `AGENTS.md` section 9 that the requested worker runtime is not verified for that role, use a fitting verified runtime for current work, and ask only whether to verify the requested runtime before future use.
 Do not pause current work for that future-verification choice, and never launch an unverified adapter.
 If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
 
@@ -123,6 +124,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-13 on Pi 0.80.6. `pi --help` advertises `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; `pi --print --model openai-codex/gpt-5.6-sol --thinking max 'Reply with exactly OK.'` completed successfully. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
+| cursor | `--model <exact-id>` | none; model IDs carry effort variants | Verified on Cursor Agent CLI 2026.07.23-e383d2b. Copy exact IDs from `cursor-agent models`; do not maintain a catalog in Firstmate. |
 
 ### Model support discovery
 
@@ -137,6 +139,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | pi | Run `pi --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
+| cursor | Run `cursor-agent models`, which lists the exact model IDs available to the current Cursor installation and account. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 If those sources do not establish the relationship needed for dispatch, fail loudly and report the unresolved candidate.
@@ -155,6 +158,7 @@ Natural language is acceptable if uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) already handles this correctly by reading the cursor row; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
+- cursor: `/<skill>`, for example `/no-mistakes`. Cursor shows project skills in its slash autocomplete; `fm-send` already gives slash commands the required popup-settle delay.
 
 ## Submission acknowledgement hazards
 
@@ -288,7 +292,37 @@ The model arms through `fm_watch_arm_pi`, never a foreground bash arm; the watch
 `bin/fm-session-start.sh` reports when the live Pi session has not loaded both the turn-end guard and watcher extensions, and points at plain `pi` after project trust as the fix, with `-e` as a trust-free fallback.
 When a secondmate is launched on Pi, `fm-spawn.sh --secondmate` launches Pi with both `-e .pi/extensions/fm-primary-turnend-guard.ts` and `-e .pi/extensions/fm-primary-pi-watch.ts`, both already present in the secondmate home's git worktree.
 
-## grok (VERIFIED 2026-06-29, grok 0.2.73; slash-submit re-verified 2026-07-03 on 0.2.82; reasoning-effort ceiling re-verified 2026-07-13 on 0.2.99; exit paths re-verified 2026-07-19 on grok 0.2.103)
+## cursor (ORDINARY WORKER/SCOUT VERIFIED 2026-07-25, Cursor Agent CLI 2026.07.23-e383d2b)
+
+Launch with `cursor-agent --force --trust --model <exact-id> "<typed brief>"`.
+`--force` enables Cursor's `Run Everything` mode for unattended built-in tool and command execution.
+`--trust` suppresses the otherwise blocking per-worktree trust dialog for the isolated worktree Firstmate already selected.
+Do not add `--approve-mcps`: MCP server approval is a separate trust boundary and ordinary built-in tools do not require it.
+Authentication comes from Cursor login state; `fm-spawn` checks `cursor-agent status` before endpoint creation and directs the operator to `cursor-agent login` on failure.
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | `ctrl+c to stop`, shown in the follow-up footer only while a turn is running. Cursor's spinner label changes between `Working` and `Composing`, so do not match it. |
+| Exit command | `/exit`; a clean exit prints `To resume this session: agent --resume=<chat-id>`. |
+| Interrupt | Single `Ctrl+C`. Cursor restores the interrupted prompt into the composer and shows `Press Ctrl+C again to exit`; send `Ctrl+U` once to clear it before a replacement steer. Never send the second `Ctrl+C` unless exit is intended. |
+| Skill invocation | `/<skill>`, for example `/no-mistakes`; slash autocomplete is handled by `fm-send`'s existing settle. |
+| Resume | `cursor-agent --force --trust --resume=<chat-id>` in the same worktree. The resumed session retains its model. |
+
+Cursor's tmux composer sits several rows above tmux's reported blank cursor row and starts with `→`.
+The shared tmux composer scanner therefore uses a bounded row window, recognizes `Add a follow-up` as empty, recognizes real text after `→` as pending, and refuses a returned shell after exit.
+Orca and cmux use the same verified bare prompt shape; Zellij keeps its provider-level content-diff submission contract.
+The tmux process-liveness classifier recognizes the launched `cursor-agent` command.
+Cursor exposes no verified per-turn hook, so ordinary status writes plus pane polling own turn completion.
+
+Cursor model IDs are dynamic account data.
+Run `cursor-agent models`, copy the exact ID into the dispatch profile or explicit `--model`, and do not normalize or mirror the catalog in repository files.
+The CLI exposes no separate effort flag; IDs and parameterized model strings carry model-specific effort, so omit the dispatch `effort` field.
+Composer 2.5 (`composer-2.5`) and Cursor Grok 4.5 Low (`cursor-grok-4.5-low`) completed bounded headless selection probes on the verified version; [`docs/verification/harness-adapters.md`](../../../docs/verification/harness-adapters.md) owns the exact commands and output.
+
+Cursor is deliberately not detected as Firstmate's own harness and has no primary supervision protocol, session lock marker, or turn-end guard.
+`fm-spawn` rejects Cursor for persistent secondmates and on Herdr; Herdr's native agent registration is load-bearing for liveness and recovery and has not been verified for Cursor.
+
+## grok (VERIFIED 2026-06-29, grok 0.2.73; slash-submit re-verified 2026-07-03 on 0.2.82; reasoning-effort ceiling re-verified 2026-07-13 on grok 0.2.99; exit paths re-verified 2026-07-19 on grok 0.2.103)
 
 Grok Build TUI (`grok`), a Claude-Code-compatible CLI from xAI.
 Launch with a positional prompt: `grok --always-approve "$(cat <brief>)"`.

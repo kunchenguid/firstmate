@@ -44,13 +44,25 @@ make_fake_tmux() {  # <dir>
 set -u
 case "${1:-}" in
   display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '%s\n' "${FM_FAKE_CY:-0}"; exit 0 ;; esac; done
+    for a in "$@"; do
+      case "$a" in
+        *cursor_y*) printf '%s\n' "${FM_FAKE_CY:-0}"; exit 0 ;;
+        *pane_current_command*) printf '%s\n' "${FM_FAKE_COMMAND:-fakepane}"; exit 0 ;;
+      esac
+    done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
-    has_e=0
-    for a in "$@"; do [ "$a" = "-e" ] && has_e=1; done
+    has_e=0 start= end= prev=
+    for a in "$@"; do
+      [ "$a" = "-e" ] && has_e=1
+      [ "$prev" = "-S" ] && start=$a
+      [ "$prev" = "-E" ] && end=$a
+      prev=$a
+    done
     f="${FM_FAKE_STYLED:-/dev/null}"
-    if [ "$has_e" = 1 ]; then
+    if [ "${FM_FAKE_BLANK_CURSOR:-0}" = 1 ] && [ -n "$start" ] && [ "$start" = "$end" ]; then
+      printf '\n'
+    elif [ "$has_e" = 1 ]; then
       cat "$f" 2>/dev/null
     else
       # Plain capture: drop SGR sequences, as real `tmux capture-pane -p` does.
@@ -250,6 +262,36 @@ test_real_text_with_trailing_ghost_is_pending() {
   pass "fm_pane_input_pending: real text plus a trailing ghost run is still pending"
 }
 
+# --- Cursor's composer sits above tmux's reported blank cursor row -----------
+
+test_cursor_row_window_classifies_idle_pending_and_dead_shell() {
+  local dir fb capture out
+  dir="$TMP_ROOT/cursor-row-window"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+
+  # Exact structural shape from Cursor 2026.07.23: the prompt row is above a
+  # blank reported cursor row, and the placeholder is mostly dim with one
+  # reverse-video character.
+  printf 'transcript\n \033[48;2;21;21;21m \033[2m→ \033[0;7m\033[48;2;21;21;21mA\033[0;2m\033[48;2;21;21;21mdd a follow-up\033[0m\nfooter\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=10 \
+    FM_FAKE_BLANK_CURSOR=1 FM_FAKE_COMMAND=cursor-agent \
+    fm_tmux_composer_state fakepane)
+  [ "$out" = empty ] || fail "Cursor idle placeholder above blank cursor must read empty, got '$out'"
+
+  printf 'transcript\n  → fix findings 1 and 3\nfooter\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=10 \
+    FM_FAKE_BLANK_CURSOR=1 FM_FAKE_COMMAND=cursor-agent \
+    fm_tmux_composer_state fakepane)
+  [ "$out" = pending ] || fail "Cursor real input above blank cursor must read pending, got '$out'"
+
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=10 \
+    FM_FAKE_BLANK_CURSOR=1 FM_FAKE_COMMAND=bash \
+    fm_tmux_composer_state fakepane)
+  [ "$out" = unknown ] || fail "a returned shell with stale Cursor rows must read unknown, got '$out'"
+  pass "fm_tmux_composer_state: Cursor's row window distinguishes idle, pending, and exited shell"
+}
+
 # --- fm-peek.sh stays escape-free (LLM-facing path) -------------------------
 
 test_peek_output_is_escape_free() {
@@ -287,4 +329,5 @@ test_colored_text_with_2_payload_still_pending
 test_dark_truecolor_ghost_only_composer_is_not_pending
 test_dark_truecolor_bare_shell_prompt_is_unknown
 test_real_text_with_trailing_ghost_is_pending
+test_cursor_row_window_classifies_idle_pending_and_dead_shell
 test_peek_output_is_escape_free

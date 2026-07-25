@@ -61,7 +61,8 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel".
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel";
+# cursor: "ctrl+c to stop".
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this
 # signature separate from the shared default because that shape is not generic
@@ -83,6 +84,9 @@ FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
+FM_TMUX_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
+FM_TMUX_IDLE_RE_DEFAULT='^(Type a message\.\.\.|Add a follow-up)$'
+FM_TMUX_BARE_PROMPT_RE_DEFAULT='^[❯›→]'
 
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex
@@ -97,6 +101,7 @@ fm_busy_lines_match() {  # [harness]
       pi) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_TMUX_GROK_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_TMUX_KIMI_BUSY_REGEX_DEFAULT ;;
+      cursor) regex=$FM_TMUX_CURSOR_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_TMUX_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.
@@ -127,8 +132,9 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 #             bare shell prompt (`$`/`%`/`#`/`>`) - a dead shell, not an agent
 #             composer, so NOT a safe injection target. The caller decides.
 #
-# The cursor line is captured WITH ANSI styling (capture-pane -e) and bounded to
-# the single composer row (-S/-E). The bordered flag (a genuine composer box) is
+# The reported cursor line is captured WITH ANSI styling (capture-pane -e) and
+# normally bounded to one row (-S/-E); a blank reported row triggers the bounded
+# nearby-agent-prompt scan documented below. The bordered flag (a genuine composer box) is
 # read from the PLAIN row (fm_composer_strip_ansi keeps ghost text so the box
 # border is still visible), while the real-typed CONTENT is extracted with the
 # shared fm_composer_strip_ghost so dim/faint AND dark-truecolor ghost text drops
@@ -142,8 +148,23 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 # (bin/fm-composer-lib.sh). The bordered flag is what lets a bordered `│ > │`
 # (claude's own idle composer) read empty while a bare, unbordered `$ ` dead-shell
 # prompt reads unknown.
+#
+# Cursor keeps tmux's reported cursor on a blank row below its real `→` input
+# row. When the reported row is blank, scan a bounded window above it for the
+# bottom-most verified agent prompt glyph and classify that structural row.
+# This also closes the previously documented pristine-grok row-selection gap.
 fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cy raw plain stripped bordered=0
+  local target=$1 cy raw plain stripped bordered=0 bare=0 current start scan line candidate
+  current=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  current=${current#-}
+  case "$current" in
+    zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish)
+      # A returned login shell is never an agent composer, even when stale TUI
+      # prompt rows remain in scrollback after a clean slash-command exit.
+      printf 'unknown'; return 0
+      ;;
+  esac
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || { printf 'unknown'; return 0; }
@@ -154,8 +175,41 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   case "$plain" in
     '│'*'│'|'┃'*'┃'|'|'*'|') bordered=1 ;;
   esac
+  # Cursor and pristine Grok render their prompt above a blank reported cursor
+  # row. Keep only the bottom-most verified bare-agent row in a tight window.
+  if [ "$bordered" -eq 0 ] && [ -z "$plain" ]; then
+    start=$((cy > 10 ? cy - 10 : 0))
+    scan=$(tmux capture-pane -e -p -t "$target" -S "$start" -E "$cy" 2>/dev/null) \
+      || { printf 'unknown'; return 0; }
+    candidate=
+    while IFS= read -r line; do
+      plain=$(printf '%s\n' "$line" | fm_composer_strip_ansi)
+      plain="${plain#"${plain%%[![:space:]]*}"}"
+      plain="${plain%"${plain##*[![:space:]]}"}"
+      if printf '%s' "$plain" | grep -qE "$FM_TMUX_BARE_PROMPT_RE_DEFAULT"; then
+        candidate=$line
+      fi
+    done <<EOF
+$scan
+EOF
+    if [ -n "$candidate" ]; then
+      raw=$candidate
+      bordered=1
+      bare=1
+      plain=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
+      plain="${plain#"${plain%%[![:space:]]*}"}"
+      plain="${plain%"${plain##*[![:space:]]}"}"
+    fi
+  fi
   # content: from the ghost-stripped row (real typed text only).
-  stripped=$(printf '%s\n' "$raw" | fm_composer_strip_ghost)
+  if [ "$bare" -eq 1 ]; then
+    # Bare prompt rows use known literal idle placeholders, so retain their
+    # plain text. Cursor styles most of `Add a follow-up` as dim and highlights
+    # one character; ghost extraction would otherwise leave that character.
+    stripped=$plain
+  else
+    stripped=$(printf '%s\n' "$raw" | fm_composer_strip_ghost)
+  fi
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
   case "$stripped" in
@@ -171,7 +225,8 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
      && printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
     printf 'empty'; return 0
   fi
-  fm_composer_classify_content "$bordered" "$stripped" "${FM_COMPOSER_IDLE_RE:-}" insensitive "$plain"
+  fm_composer_classify_content "$bordered" "$stripped" \
+    "${FM_COMPOSER_IDLE_RE:-$FM_TMUX_IDLE_RE_DEFAULT}" insensitive "$plain"
 }
 
 # fm_pane_input_pending: 0 (pending) if the cursor line holds real unsubmitted

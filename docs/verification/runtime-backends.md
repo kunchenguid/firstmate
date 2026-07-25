@@ -28,14 +28,16 @@ zsh
 ```
 
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
-Claude, Codex, OpenCode, and Grok were observed under their own process names.
+Claude, Codex, OpenCode, Grok, and Cursor Agent were observed under their own process names.
 Kimi Code CLI 0.29.1 was observed under `kimi` on 2026-07-25.
 Pi remained a generic `node` process and is intentionally inconclusive.
+[`harness-adapters.md`](harness-adapters.md#cursor-agent-cli) owns the versioned Cursor command and lifecycle evidence.
 
 The OpenCode 1.18.4 busy-queue behavior and the tmux fallback are pinned by:
 
 ```sh
 tests/fm-tmux-submit-busy.test.sh
+tests/fm-composer-ghost.test.sh
 ```
 
 Expected matrix: pending plus busy is accepted as queued; pending plus idle remains pending; a cleared composer succeeds in either state.

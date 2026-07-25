@@ -187,6 +187,22 @@ test_send_text_submit_retries_when_composer_stays_pending() {
   pass "fm_backend_orca_send_text_submit: retries Enter while composer remains pending"
 }
 
+test_composer_state_cursor_bare_prompt() {
+  local out
+  orca_case composer-cursor-idle
+  printf '{"ok":true,"result":{"terminal":{"tail":["transcript","  → Add a follow-up","Cursor footer"]}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state term-123' "$ROOT" )
+  [ "$out" = empty ] || fail "Cursor's bare idle prompt should read empty, got '$out'"
+
+  orca_case composer-cursor-pending
+  printf '{"ok":true,"result":{"terminal":{"tail":["transcript","  → fix findings 1 and 3","Cursor footer"]}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state term-123' "$ROOT" )
+  [ "$out" = pending ] || fail "Cursor's bare real input should read pending, got '$out'"
+  pass "fm_backend_orca_composer_state: Cursor's bare prompt distinguishes idle and pending text"
+}
+
 test_composer_state_popup_placeholder_fill_is_pending() {
   local out
   orca_case composer-popup-placeholder
@@ -1285,6 +1301,7 @@ test_runtime_check_refuses_unready_orca_status
 test_send_text_submit_verifies_empty_composer_after_enter
 test_send_text_submit_keeps_current_tail_when_limited
 test_send_text_submit_retries_when_composer_stays_pending
+test_composer_state_cursor_bare_prompt
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_bare_shell_prompt_is_unknown
 test_send_text_submit_popup_autocomplete_requires_second_enter

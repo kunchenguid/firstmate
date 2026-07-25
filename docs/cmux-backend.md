@@ -92,7 +92,7 @@ Spawn-time worktree discovery sends begin and end markers around `pwd`, captures
 
 Literal send and Enter are separate calls.
 Enter, Escape, and Ctrl-C are supported.
-The composer verifier locates the last bordered composer row and delegates the content decision to `bin/fm-composer-lib.sh`.
+The composer verifier locates the last bordered composer or verified Cursor `→` row and delegates the content decision to `bin/fm-composer-lib.sh`.
 A bare shell prompt is `unknown`, and a slash-popup placeholder remains `pending`, so only Enter is retried and text is never retyped.
 cmux exposes no native generic agent busy signal, so supervision uses the shared capture/hash and busy-regex path.
 

@@ -42,7 +42,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_exit0 "$fakebin" treehouse cursor-agent
   printf '%s\n' "$fakebin"
 }
 
@@ -330,6 +330,84 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   pass "opencode receives --model and omits the unsupported effort axis"
 }
 
+test_cursor_threads_exact_model_and_omits_effort_axis() {
+  local rec id out status launch
+  id=profile-cursor-z8c
+  rec=$(make_spawn_case profile-cursor cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model composer-2.5 --effort high)
+  status=$?
+  expect_code 0 "$status" "cursor spawn with an exact model and ignored effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor composer-2.5 high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "cursor-agent --force --trust --model 'composer-2.5'" \
+    "cursor launch did not preserve the exact model ID"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
+    "cursor launch lost the canonical typed launch brief"
+  assert_not_contains "$launch" "--effort" "cursor launch must not invent a separate effort flag"
+  assert_not_contains "$launch" "--approve-mcps" "cursor launch must preserve the separate MCP trust boundary"
+  pass "cursor receives the exact --model ID, unattended built-in permissions, and no invented effort or MCP approval"
+}
+
+test_cursor_secondmate_is_rejected() {
+  local rec id sm out status
+  id=profile-cursor-secondmate-z8d
+  rec=$(make_spawn_case profile-cursor-secondmate codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/cursor-secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$sm" --secondmate --harness cursor)
+  status=$?
+  expect_code 1 "$status" "cursor secondmate launch must be rejected"
+  assert_contains "$out" "supports ordinary ship/scout workers only" \
+    "cursor secondmate refusal did not name the supported boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" "cursor secondmate refusal must happen before metadata publication"
+  pass "cursor is rejected for persistent secondmates"
+}
+
+test_cursor_authentication_is_checked_before_endpoint_creation() {
+  local rec id out status
+  id=profile-cursor-auth-z8f
+  rec=$(make_spawn_case profile-cursor-auth codex "$id")
+  read_case_record "$rec"
+  cat > "$FAKEBIN_DIR/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$FAKEBIN_DIR/cursor-agent"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness cursor)
+  status=$?
+  expect_code 1 "$status" "unauthenticated cursor launch must be rejected"
+  assert_contains "$out" "run 'cursor-agent login'" \
+    "cursor authentication refusal did not provide the login remediation"
+  assert_absent "$HOME_DIR/state/$id.meta" "cursor authentication refusal must happen before metadata publication"
+  [ ! -s "$LAUNCH_LOG" ] || fail "cursor authentication refusal unexpectedly created or typed into an endpoint"
+  pass "cursor authentication is checked before endpoint creation"
+}
+
+test_cursor_herdr_is_rejected_before_endpoint_creation() {
+  local rec id out status
+  id=profile-cursor-herdr-z8e
+  rec=$(make_spawn_case profile-cursor-herdr codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness cursor --backend herdr)
+  status=$?
+  expect_code 1 "$status" "cursor Herdr launch must be rejected"
+  assert_contains "$out" "Herdr native agent registration is required" \
+    "cursor Herdr refusal did not name the liveness boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" "cursor Herdr refusal must happen before metadata publication"
+  [ ! -s "$LAUNCH_LOG" ] || fail "cursor Herdr refusal unexpectedly created or typed into an endpoint"
+  pass "cursor is rejected on Herdr before endpoint creation"
+}
+
 test_pi_threads_model_and_max_effort() {
   local rec id out status launch
   id=profile-pi-z8
@@ -401,6 +479,10 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
+test_cursor_threads_exact_model_and_omits_effort_axis
+test_cursor_secondmate_is_rejected
+test_cursor_authentication_is_checked_before_endpoint_creation
+test_cursor_herdr_is_rejected_before_endpoint_creation
 test_pi_threads_model_and_max_effort
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
