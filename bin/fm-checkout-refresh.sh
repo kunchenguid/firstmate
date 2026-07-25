@@ -539,10 +539,31 @@ PY
   worktree_common=$(fm_checkout_git_common_dir "$worktree_root") || return 1
   main_common=$(fm_checkout_git_common_dir "$main") || return 1
   [ "$worktree_common" = "$main_common" ] || return 1
+  # This loop exists ONLY to prove that exactly one registered worktree resolves
+  # to $worktree_root - it detects duplicate/aliased registrations. It is not
+  # establishing the authority of any other path: $worktree_root and $main were
+  # each already proven exact Git roots above, with full metadata validation.
+  #
+  # It used to call exact_git_root on every listed path, which costs three or
+  # four subprocesses each (canonicalize, `git rev-parse --show-toplevel`,
+  # canonicalize again, validate metadata). Across a pool that is quadratic:
+  # every worktree in the pool re-resolves every registration, so a 14-worktree
+  # pool with 19 registrations paid ~266 full resolutions per preflight. That was
+  # the dominant cost of the pre-spawn check, and therefore of every spawn.
+  #
+  # Canonicalization alone answers the aliasing question this loop asks, and it
+  # is the same comparison basis: exact_git_root RETURNS its canonicalized path,
+  # so comparing canonical_dir output against $worktree_root (itself canonical)
+  # is equivalent for equality purposes while dropping the git and metadata work
+  # that only mattered for establishing authority we are not establishing here.
+  #
+  # A path that cannot even be canonicalized is skipped rather than fatal: it
+  # cannot be an alias of $worktree_root, which canonicalized successfully, so it
+  # cannot change the count this loop is computing.
   while IFS= read -r line; do
     case "$line" in
       worktree\ *)
-        listed_root=$(exact_git_root "${line#worktree }" 2>/dev/null) || return 1
+        listed_root=$(canonical_dir "${line#worktree }" 2>/dev/null) || continue
         [ "$listed_root" != "$worktree_root" ] || matches=$(( matches + 1 ))
         ;;
     esac
@@ -2601,7 +2622,7 @@ preflight() {
 }
 
 pool_preflight() {
-  local expected_source=$1 expected_common treehouse_paths treehouse_state pool worktree canonical common dirty example failed=0
+  local expected_source=$1 expected_common treehouse_paths treehouse_state pool worktree canonical common dirty example failed=0 probe_common
   expected_source=$(require_exact_git_root "$expected_source" "expected Treehouse source") || return 1
   expected_common=$(fm_checkout_git_common_dir "$expected_source") || {
     echo "error: cannot resolve expected Treehouse repository identity for $expected_source" >&2
@@ -2614,6 +2635,32 @@ pool_preflight() {
   fi
   while IFS=$'\t' read -r treehouse_state pool worktree; do
     [ -n "$worktree" ] || continue
+    # FOREIGN-POOL SHORT CIRCUIT. This loop visits every Treehouse worktree on the
+    # machine, but the checks below only ever report on worktrees belonging to
+    # THIS repository - the `common = expected_common` test further down discards
+    # every other one after the expensive work has already been paid for.
+    #
+    # That was the whole spawn cost. `backing_checkout` runs `git worktree list`
+    # and then calls exact_git_root on EVERY listed worktree, so across a pool it
+    # is quadratic in registered worktrees; run over unrelated multi-gigabyte
+    # pools it dominated everything. Measured before this change: 343 seconds of
+    # preflight to spawn into a 12 MB repository, paid on every single launch and
+    # growing with total fleet size rather than with the repo being spawned into.
+    #
+    # So ask the cheap question first: does this worktree even belong to the
+    # repository we are preflighting? fm_checkout_git_common_dir is a metadata
+    # read, not a traversal, and it is the SAME identity comparison the loop
+    # already relies on below.
+    #
+    # Fail-safe by construction: we skip only when the probe SUCCEEDS and
+    # positively proves the worktree belongs to a different repository. If the
+    # probe fails for any reason, we fall through to the original path unchanged,
+    # so an unreadable worktree is still inspected and still reported exactly as
+    # before. This can never skip a worktree that is ours.
+    probe_common=$(fm_checkout_git_common_dir "$worktree" 2>/dev/null) || probe_common=''
+    if [ -n "$probe_common" ] && [ "$probe_common" != "$expected_common" ]; then
+      continue
+    fi
     # A worktree we cannot fully inspect is SKIPPED, not fatal. The preflight
     # iterates every Treehouse worktree in every pool, so a single busy,
     # foreign, or half-torn-down worktree anywhere (including unrelated pools)
