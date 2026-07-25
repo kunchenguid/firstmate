@@ -27,8 +27,11 @@ setup_repo_with_tracked_gitignore() {
   local repo=$1
   mkdir -p "$repo"
   git init -q -b main "$repo"
-  # Empty exclude so only .gitignore can match.
+  # Empty exclude and a neutralized excludes file so only .gitignore can match;
+  # a host core.excludesFile (commonly ~/.gitignore with .env*) would otherwise
+  # satisfy the assertions even with the tracked rule missing.
   : > "$repo/.git/info/exclude"
+  git -C "$repo" config core.excludesFile /dev/null
   cp "$GITIGNORE" "$repo/.gitignore"
   git -C "$repo" add .gitignore
   git -C "$repo" commit -q -m 'seed gitignore'
@@ -40,8 +43,9 @@ assert_ignored_via_gitignore() {
   local out
   out=$(git -C "$repo" check-ignore -v -- "$path") \
     || fail "expected $path to be ignored (check-ignore exit $?)"
-  # Must cite the tracked .gitignore, not info/exclude or another source.
-  printf '%s\n' "$out" | grep -F '.gitignore:' >/dev/null \
+  # Must cite the repo-root .gitignore, not info/exclude, a global excludes
+  # file (~/.gitignore would match an unanchored pattern), or another source.
+  printf '%s\n' "$out" | grep -Eq '^\.gitignore:' \
     || fail "ignore for $path did not come from .gitignore: $out"
   pass "ignored via .gitignore: $path"
 }
@@ -66,7 +70,7 @@ pass "tracked .gitignore lists .env and .env.bak* rules with a comment"
 
 # --- no intentionally tracked file matches the backup patterns --------------
 
-matched=$(git -C "$ROOT" ls-files | grep -E '^\.env\.bak(-.*)?$' || true)
+matched=$(git -C "$ROOT" ls-files | grep -E '(^|/)\.env\.bak(-.*)?$' || true)
 [ -z "$matched" ] \
   || fail "tracked file(s) match .env.bak patterns (would be newly untracked only if removed from index): $matched"
 pass "no tracked file matches .env.bak / .env.bak-*"
