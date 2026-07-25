@@ -669,19 +669,18 @@ esac
 # byte-identical. Absent, empty, or a non-claude harness -> nothing, i.e.
 # today's bare-`claude`, default-config-dir behavior. Only the claude template
 # carries the placeholder.
-# A resolved dir that does not exist WARNS loudly on stderr and still launches:
-# claude would create it empty and show the login wall, which is exactly the
-# failure this knob exists to prevent, so the captain needs the diagnostic naming
-# config/crew-config-dir and the resolved path. It is deliberately not fatal -
-# the knob is an authentication convenience, not a spawn precondition, and a
-# stale path must never block a fleet spawn. The same check covers the degenerate
-# post-expansion-empty case (a bare `~` under an empty HOME), which the
-# pre-expansion non-empty guard below cannot see.
-claude_config_dir_prefix() {
+# Resolution is separate from the two consumers below because the existence
+# warning must be emitted LATE (see claude_config_dir_warn_if_missing), while the
+# prefix is needed early to build the launch string. It prints the resolved dir
+# and returns non-zero when the knob does not apply at all (non-claude harness,
+# or an absent/blank/comment-only file), so the degenerate post-expansion-empty
+# value (a bare `~` under an empty HOME) stays distinguishable from "knob unset"
+# and keeps drawing both the prefix and the warning, exactly as before.
+claude_config_dir_resolved() {
   local harness=$1 dir
-  [ "$harness" = claude ] || return 0
+  [ "$harness" = claude ] || return 1
   dir=$(fm_config_first_value "$CONFIG/crew-config-dir")
-  [ -n "$dir" ] || return 0
+  [ -n "$dir" ] || return 1
   # shellcheck disable=SC2088  # Literal tilde is matched here, not expanded by the shell.
   case "$dir" in
     '~')   dir="$HOME" ;;              # bare tilde -> home
@@ -691,10 +690,29 @@ claude_config_dir_prefix() {
   dir="${dir//'${HOME}'/$HOME}"        # ${HOME} anywhere -> real home
   # shellcheck disable=SC2016  # The single-quoted pattern is a literal $HOME to match, not expand.
   dir="${dir//'$HOME'/$HOME}"          # $HOME anywhere -> real home
-  if [ ! -d "$dir" ]; then
-    echo "warning: config/crew-config-dir resolves to '$dir', which is not an existing directory; the claude crewmate may strand on the login wall because claude will create it empty and unauthenticated. Spawn continues with CLAUDE_CONFIG_DIR set - point config/crew-config-dir at an authenticated Claude config dir to fix it." >&2
-  fi
-  printf 'CLAUDE_CONFIG_DIR=%s ' "$(shell_quote "$dir")"
+  printf '%s\n' "$dir"
+}
+
+claude_config_dir_prefix() {
+  printf 'CLAUDE_CONFIG_DIR=%s ' "$(shell_quote "$1")"
+}
+
+# A resolved dir that does not exist WARNS loudly on stderr and still launches:
+# claude would create it empty and show the login wall, which is exactly the
+# failure this knob exists to prevent, so the captain needs the diagnostic naming
+# config/crew-config-dir and the resolved path. It is deliberately not fatal -
+# the knob is an authentication convenience, not a spawn precondition, and a
+# stale path must never block a fleet spawn. The same check covers the degenerate
+# post-expansion-empty case (a bare `~` under an empty HOME), which the
+# pre-expansion non-empty guard in claude_config_dir_resolved cannot see.
+# The call site emits this AFTER the launch send and after the `spawned ...`
+# line, never at prefix-build time: fm-bootstrap.sh captures a secondmate respawn
+# with 2>&1 and reports only first_line "$out", so a warning emitted early would
+# name a stale config dir as the cause of an unrelated later failure (window
+# creation, send failure). Emitted last, it can never occupy that first line.
+claude_config_dir_warn_if_missing() {
+  local dir=$1
+  [ -d "$dir" ] || echo "warning: config/crew-config-dir resolves to '$dir', which is not an existing directory; the claude crewmate may strand on the login wall because claude will create it empty and unauthenticated. Spawn continues with CLAUDE_CONFIG_DIR set - point config/crew-config-dir at an authenticated Claude config dir to fix it." >&2
 }
 
 json_escape() {
@@ -1542,7 +1560,13 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
-CLAUDECONFIGDIR=$(claude_config_dir_prefix "$HARNESS")
+CLAUDECONFIGDIR=''
+CLAUDECONFIGDIRVALUE=''
+CLAUDECONFIGDIRACTIVE=0
+if CLAUDECONFIGDIRVALUE=$(claude_config_dir_resolved "$HARNESS"); then
+  CLAUDECONFIGDIRACTIVE=1
+  CLAUDECONFIGDIR=$(claude_config_dir_prefix "$CLAUDECONFIGDIRVALUE")
+fi
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__CLAUDECONFIGDIR__/$CLAUDECONFIGDIR}
@@ -1603,3 +1627,9 @@ if [ "$KIND" = secondmate ]; then
 fi
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
+
+# Last of all, so this advisory can never be the first line of a failure report
+# (see claude_config_dir_warn_if_missing).
+if [ "$CLAUDECONFIGDIRACTIVE" = 1 ]; then
+  claude_config_dir_warn_if_missing "$CLAUDECONFIGDIRVALUE"
+fi

@@ -20,8 +20,11 @@
 #      shared fm_config_first_value reader config/secondmate-harness uses.
 #   8. a resolved dir that does not exist warns loudly on stderr AND still
 #      launches with the prefix intact - the knob is an authentication
-#      convenience, never a spawn precondition. Case 1 pins the other half:
-#      an existing dir draws NO warning, so an inverted guard cannot stay green.
+#      convenience, never a spawn precondition - and the warning lands AFTER the
+#      launch send, so fm-bootstrap.sh's first-line failure report can never name
+#      a stale config dir as the cause of an unrelated failure. Case 1 pins the
+#      other half: an existing dir draws NO warning, so an inverted guard cannot
+#      stay green.
 set -u
 
 # shellcheck source=tests/fm-spawn-helpers.sh disable=SC1091
@@ -250,6 +253,7 @@ EOF
 
 test_missing_config_dir_warns_and_still_launches() {
   local rec case_dir home proj wt fakebin id send_log out launch missing
+  local warn_line spawned_line
   rec=$(make_spawn_case missing-dir)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
@@ -279,7 +283,18 @@ EOF
     "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CONFIG_DIR='$missing' claude --dangerously-skip-permissions "*) : ;;
     *) fail "the warning dropped or altered the CLAUDE_CONFIG_DIR prefix"$'\n'"--- launch ---"$'\n'"$launch" ;;
   esac
-  pass "a non-existent config dir warns loudly on stderr yet still launches with the prefix intact"
+  # Half three - ORDER: fm-bootstrap.sh captures a secondmate respawn with 2>&1
+  # and reports only the FIRST line of that stream, so a warning emitted before
+  # the launch send would name a stale config dir as the cause of any unrelated
+  # later failure (window creation, send failure). It must land after the launch
+  # send, i.e. after the terminal `spawned ...` line.
+  warn_line=$(printf '%s\n' "$out" | grep -n 'crew-config-dir resolves' | head -n 1 | cut -d: -f1)
+  spawned_line=$(printf '%s\n' "$out" | grep -n "^spawned $id " | head -n 1 | cut -d: -f1)
+  [ -n "$spawned_line" ] \
+    || fail "no 'spawned $id' line to order the warning against"$'\n'"--- output ---"$'\n'"$out"
+  [ "$warn_line" -gt "$spawned_line" ] \
+    || fail "the warning must be emitted AFTER the launch send, never as the first line of a failure report"$'\n'"--- output ---"$'\n'"$out"
+  pass "a non-existent config dir warns after the launch send yet still launches with the prefix intact"
 }
 
 test_config_dir_adds_prefix
