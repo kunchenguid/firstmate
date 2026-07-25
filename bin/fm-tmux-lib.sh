@@ -61,9 +61,11 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
-# (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Esc:cancel"
+# on 0.2.112 (mid-turn keybind bar only; absent when idle) plus "Ctrl+c:cancel"
+# for older installs. Verified on grok 0.2.112; keep both tokens in lockstep
+# with fm-watch.sh BUSY_REGEX (watch does not source this default).
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|Esc:cancel'
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised

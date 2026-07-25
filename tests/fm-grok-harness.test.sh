@@ -137,6 +137,38 @@ SH
   pass "fm-lock recognizes grok harness processes"
 }
 
+# Grok 0.2.112 mid-turn keybind bar uses Esc:cancel (not Ctrl+c:cancel). Both
+# defaults must stay in lockstep: fm-watch.sh does not source fm-tmux-lib.sh.
+# Fixtures use the real U+2502 separator and the idle-vs-mid-turn distinction
+# captured from live panes (mid-turn has Esc:cancel; idle does not).
+test_grok_busy_regex_matches_realistic_footer_fixtures() {
+  local watch_default tmux_default mid_footer idle_footer
+  watch_default=$(sed -n "s/^BUSY_REGEX=\${FM_BUSY_REGEX:-'\\(.*\\)'}/\\1/p" "$ROOT/bin/fm-watch.sh")
+  tmux_default=$(sed -n "s/^FM_TMUX_BUSY_REGEX_DEFAULT='\\(.*\\)'/\\1/p" "$ROOT/bin/fm-tmux-lib.sh")
+  [ -n "$watch_default" ] || fail "could not extract BUSY_REGEX default from fm-watch.sh"
+  [ -n "$tmux_default" ] || fail "could not extract FM_TMUX_BUSY_REGEX_DEFAULT from fm-tmux-lib.sh"
+  [ "$watch_default" = "$tmux_default" ] \
+    || fail "BUSY_REGEX default and FM_TMUX_BUSY_REGEX_DEFAULT diverged: watch=[$watch_default] tmux=[$tmux_default]"
+  printf '%s' "$watch_default" | grep -Fq 'Esc:cancel' \
+    || fail "default busy regex missing Esc:cancel (Grok 0.2.112 mid-turn token)"
+  # Source form is the ERE token Ctrl\+c:cancel (plus escaped for grep -E).
+  printf '%s' "$watch_default" | grep -Fq 'Ctrl\+c:cancel' \
+    || fail "default busy regex dropped Ctrl+c:cancel (older Grok installs)"
+
+  # Exact mid-turn keybind bar shape from grok 0.2.112 (separators are U+2502).
+  mid_footer=$'  Shift+Tab:mode  \u2502  Esc:cancel  \u2502  Ctrl+b:send to bg  \u2502  Ctrl+.:shortcuts\n'
+  idle_footer=$'  Shift+Tab:mode  \u2502  Ctrl+.:shortcuts\n'
+  printf '%s' "$mid_footer" | grep -v '^[[:space:]]*$' | tail -6 \
+    | grep -qiE "$watch_default" \
+    || fail "default busy regex does not match realistic Grok mid-turn footer"
+  if printf '%s' "$idle_footer" | grep -v '^[[:space:]]*$' | tail -6 \
+    | grep -qiE "$watch_default"; then
+    fail "default busy regex matches idle Grok keybind bar (false busy would suppress stuck detection)"
+  fi
+  pass "Grok busy regex matches mid-turn footer fixture and rejects idle fixture"
+}
+
 test_grok_hook_requires_registered_token
 test_grok_teardown_removes_pointer_and_token
 test_fm_lock_recognizes_grok_holder
+test_grok_busy_regex_matches_realistic_footer_fixtures
