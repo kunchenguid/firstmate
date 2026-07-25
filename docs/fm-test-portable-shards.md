@@ -54,9 +54,9 @@ Shard execution order is longest-first so wall-clock tracks the balanced sum.
 
 | Lane | Script count | Sum of Phase 1 averages |
 |---|---:|---:|
-| `portable-parallel-1` | 15 | 64579 ms (~64.6 s) |
+| `portable-parallel-1` | 14 | 64296 ms (~64.3 s) |
 | `portable-parallel-2` | 15 | 64579 ms (~64.6 s) |
-| imbalance | | 0 ms |
+| imbalance | | 283 ms |
 
 Exact ordered membership is the heredoc lists in `bin/fm-test-run.sh` (`list_portable_parallel_1` / `list_portable_parallel_2`).
 

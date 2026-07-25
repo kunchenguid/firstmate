@@ -16,16 +16,16 @@ The archived proof JSON below still records the Phase 2 proof-time flags (`produ
 
 | Field | Value |
 |---|---|
-| `run_id` | `fm-isolation-1784693155237-99474` |
-| `started_at` | `2026-07-22T04:05:55Z` |
-| `finished_at` | `2026-07-22T04:08:06Z` |
+| `run_id` | `fm-isolation-1784968984050-13742` |
+| `started_at` | `2026-07-25T08:43:04Z` |
+| `finished_at` | `2026-07-25T08:44:54Z` |
 | concurrency | **4** |
 | candidates | **29** |
 | failed | **0** |
-| wall duration_ms | **131001** (~131.0s) |
+| wall duration_ms | **110623** (~110.6s) |
 | `production_sharding_enabled` | `False` |
 | `fm_test_run_jobs_enabled` | `False` |
-| host proof date | 2026-07-22 (UTC day of archive write) |
+| host proof date | 2026-07-25 (UTC day of archive write) |
 
 Isolation checks that passed with this run:
 
@@ -73,35 +73,35 @@ Sorted paths as selected by `bin/fm-test-isolation-proof.sh --list` at proof tim
 
 | duration_ms | exit | worker | script |
 |---:|---:|---:|---|
-| 38449 | 0 | 30 | `tests/fm-x-mode.test.sh` |
-| 35417 | 0 | 2 | `tests/fm-backend-herdr.test.sh` |
-| 29102 | 0 | 1 | `tests/fm-arm-pretool-check.test.sh` |
-| 21133 | 0 | 9 | `tests/fm-decision-hold-lifecycle.test.sh` |
-| 19896 | 0 | 8 | `tests/fm-crew-state.test.sh` |
-| 18610 | 0 | 5 | `tests/fm-cd-pretool-check.test.sh` |
-| 12517 | 0 | 13 | `tests/fm-herdr-lab.test.sh` |
-| 8939 | 0 | 19 | `tests/fm-pr-merge.test.sh` |
-| 6953 | 0 | 21 | `tests/fm-send-popup-settle.test.sh` |
-| 5963 | 0 | 12 | `tests/fm-grok-harness.test.sh` |
-| 4645 | 0 | 27 | `tests/fm-test-run.test.sh` |
-| 3524 | 0 | 22 | `tests/fm-send-settle.test.sh` |
-| 2803 | 0 | 6 | `tests/fm-composer-ghost.test.sh` |
-| 2552 | 0 | 28 | `tests/fm-tmux-submit-busy.test.sh` |
-| 2549 | 0 | 20 | `tests/fm-review-diff.test.sh` |
-| 1551 | 0 | 23 | `tests/fm-send-strict.test.sh` |
-| 1274 | 0 | 15 | `tests/fm-lint.test.sh` |
-| 1056 | 0 | 18 | `tests/fm-pi-primary-types.test.sh` |
-| 897 | 0 | 3 | `tests/fm-brief.test.sh` |
-| 684 | 0 | 24 | `tests/fm-spawn-batch.test.sh` |
-| 348 | 0 | 11 | `tests/fm-ensure-agents-md.test.sh` |
-| 283 | 0 | 26 | `tests/fm-supervision-instructions.test.sh` |
-| 232 | 0 | 14 | `tests/fm-instruction-owners.test.sh` |
-| 201 | 0 | 16 | `tests/fm-nm-test-contract.test.sh` |
-| 104 | 0 | 29 | `tests/fm-transition-lib.test.sh` |
-| 90 | 0 | 4 | `tests/fm-captain-translation-contract.test.sh` |
-| 68 | 0 | 7 | `tests/fm-composer-lib.test.sh` |
-| 57 | 0 | 25 | `tests/fm-stow-contract.test.sh` |
-| 36 | 0 | 17 | `tests/fm-no-mistakes-ownership.test.sh` |
+| 34920 | 0 | 29 | `tests/fm-x-mode.test.sh` |
+| 29446 | 0 | 2 | `tests/fm-backend-herdr.test.sh` |
+| 26535 | 0 | 1 | `tests/fm-arm-pretool-check.test.sh` |
+| 18509 | 0 | 9 | `tests/fm-decision-hold-lifecycle.test.sh` |
+| 17218 | 0 | 5 | `tests/fm-cd-pretool-check.test.sh` |
+| 15250 | 0 | 8 | `tests/fm-crew-state.test.sh` |
+| 11199 | 0 | 12 | `tests/fm-herdr-lab.test.sh` |
+| 8900 | 0 | 26 | `tests/fm-test-run.test.sh` |
+| 6630 | 0 | 18 | `tests/fm-pr-merge.test.sh` |
+| 5276 | 0 | 11 | `tests/fm-grok-harness.test.sh` |
+| 4882 | 0 | 14 | `tests/fm-lint.test.sh` |
+| 4496 | 0 | 20 | `tests/fm-send-popup-settle.test.sh` |
+| 2410 | 0 | 19 | `tests/fm-review-diff.test.sh` |
+| 2179 | 0 | 21 | `tests/fm-send-settle.test.sh` |
+| 1845 | 0 | 27 | `tests/fm-tmux-submit-busy.test.sh` |
+| 1842 | 0 | 17 | `tests/fm-pi-primary-types.test.sh` |
+| 1810 | 0 | 6 | `tests/fm-composer-ghost.test.sh` |
+| 1390 | 0 | 22 | `tests/fm-send-strict.test.sh` |
+| 973 | 0 | 3 | `tests/fm-brief.test.sh` |
+| 626 | 0 | 23 | `tests/fm-spawn-batch.test.sh` |
+| 358 | 0 | 10 | `tests/fm-ensure-agents-md.test.sh` |
+| 336 | 0 | 25 | `tests/fm-supervision-instructions.test.sh` |
+| 297 | 0 | 13 | `tests/fm-instruction-owners.test.sh` |
+| 181 | 0 | 4 | `tests/fm-captain-translation-contract.test.sh` |
+| 180 | 0 | 15 | `tests/fm-nm-test-contract.test.sh` |
+| 96 | 0 | 28 | `tests/fm-transition-lib.test.sh` |
+| 66 | 0 | 7 | `tests/fm-composer-lib.test.sh` |
+| 52 | 0 | 24 | `tests/fm-stow-contract.test.sh` |
+| 35 | 0 | 16 | `tests/fm-no-mistakes-ownership.test.sh` |
 
 ## Audit notes (why this set)
 
