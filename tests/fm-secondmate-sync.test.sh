@@ -247,7 +247,8 @@ test_no_fetch_in_local_path() {
 
   fakebin="$w/fakebin"
   log="$w/fetch.log"
-  real_git=$(command -v git)
+  # Absolute real binary from lib.sh - not `command -v git` (function name).
+  real_git=$FM_TEST_REAL_GIT
   mkdir -p "$fakebin"
   cat > "$fakebin/git" <<SH
 #!/usr/bin/env bash

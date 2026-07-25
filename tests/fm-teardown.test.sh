@@ -58,7 +58,9 @@ fm_git_identity fmtest fmtest@example.invalid
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
-REAL_GIT_FOR_TEST=$(command -v git)
+# Absolute real binary (lib.sh shadows `git` with a path-safe wrapper; do not
+# use `command -v git` here - that returns the function name after lib is sourced).
+REAL_GIT_FOR_TEST=$FM_TEST_REAL_GIT
 export REAL_GIT_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:

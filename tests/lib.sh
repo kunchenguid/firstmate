@@ -15,6 +15,26 @@
 #
 # ROOT is exported as the firstmate repo root (this file lives in tests/), so a
 # sourcing test can use "$ROOT/bin/..." without recomputing it.
+#
+# Git hook stdout and path capture
+# --------------------------------
+# Fixture helpers often do `dir=$(make_case ...)` / `w=$(new_world ...)` while
+# the helper runs `git commit` or `git push` and then prints a path. Any hook
+# that writes to stdout (global core.hooksPath leak scanners, local hooks, ...)
+# joins that capture and corrupts the path: the next `git -C "$dir/..."` dies
+# with `fatal: cannot change to '[SCAN-SET]...'`.
+#
+# The capture shape predates hooks and is fragile against ANY git stdout, not
+# just one scanner. Disabling hooks in fixtures would only green this machine
+# and leave the shape intact for the next author.
+#
+# Durability: this library wraps `git` so hook-bearing subcommands
+# (commit/push/merge/...) send their stdout to stderr by default. Instruments
+# stay visible; command-substitution path capture cannot pick them up. New
+# tests can keep writing the obvious `dir=$(helper)` form and stay correct.
+# Escape hatch for deliberate probes: FM_TEST_GIT_HOOK_STDOUT=keep.
+# tests/fm-fixture-git-stdout.test.sh pins both the safe default and the
+# keep-mode failure so the shape cannot silently regress.
 
 # Idempotent guard: behavior-area helper files (secondmate-helpers.sh,
 # wake-helpers.sh) source this library for ROOT/fail/pass, and the test that
@@ -38,6 +58,72 @@ export FM_GATE_REFUSE_BYPASS=1
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# --- git wrapper: keep fixture path captures pure ---------------------------
+#
+# Hook instruments (and ordinary porcelain chatter from commit/push) write to
+# the git process's stdout. Relocate that stream to stderr for mutation
+# subcommands so `path=$(fixture_helper)` cannot absorb them. Read-only
+# subcommands (rev-parse, status, diff, ...) keep stdout so callers can capture
+# their results. Production scripts invoked as separate processes are unaffected
+# - they use the real git binary, not this shell function.
+#
+# FM_TEST_REAL_GIT is the absolute path of the real binary, captured before the
+# shell function shadows the name. After this library is sourced, `command -v git`
+# returns the function name "git", not a path - tests that need the binary for
+# PATH mocks must use "$FM_TEST_REAL_GIT" (see fm-teardown, fm-fleet-sync,
+# fm-secondmate-sync).
+
+FM_TEST_REAL_GIT=$(type -P git 2>/dev/null || true)
+if [ -z "$FM_TEST_REAL_GIT" ] || [ ! -x "$FM_TEST_REAL_GIT" ]; then
+  printf 'tests/lib.sh: cannot resolve a real git binary for fixture wrapping\n' >&2
+  return 1 2>/dev/null || exit 1
+fi
+export FM_TEST_REAL_GIT
+
+git() {
+  local subcmd= skip=0 arg
+  for arg in "$@"; do
+    if [ "$skip" -eq 1 ]; then
+      skip=0
+      continue
+    fi
+    case "$arg" in
+      -C|--git-dir|--work-tree|--namespace|--config-env|-c)
+        skip=1
+        continue
+        ;;
+      --git-dir=*|--work-tree=*|--namespace=*|--config-env=*)
+        continue
+        ;;
+      --bare|--no-replace-objects|--literal-pathspecs|--glob-pathspecs|\
+      --noglob-pathspecs|--icase-pathspecs)
+        continue
+        ;;
+      -*)
+        continue
+        ;;
+      *)
+        subcmd=$arg
+        break
+        ;;
+    esac
+  done
+  case "$subcmd" in
+    commit|push|merge|am|rebase|cherry-pick|pull)
+      if [ "${FM_TEST_GIT_HOOK_STDOUT:-relocate}" = keep ]; then
+        "$FM_TEST_REAL_GIT" "$@"
+      else
+        # stdout -> stderr: hooks and porcelain stay human-visible, never join
+        # a caller's command-substitution capture of a fixture path.
+        "$FM_TEST_REAL_GIT" "$@" 1>&2
+      fi
+      ;;
+    *)
+      "$FM_TEST_REAL_GIT" "$@"
+      ;;
+  esac
+}
 
 # --- reporters --------------------------------------------------------------
 
