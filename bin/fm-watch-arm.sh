@@ -28,6 +28,11 @@
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
+#   watcher: cycle closed with a delivered wake pid=<N> (reported by its owning arm);
+#            no live cycle remains
+#                                                        - an ATTACHED arm's cycle closed for a real
+#                                                          wake that the owning arm reported; still a
+#                                                          nonzero close, because no live cycle remains
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
@@ -37,17 +42,28 @@
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
 # reason; on attached it stays live across identity-matched successors. An
-# attached cycle that ends without a healthy successor is a typed nonzero failure,
-# never a clean empty completion. On FAILED it exits non-zero so the failure is
-# loud. A live cycle already present means re-arm attaches - do not start a second
-# watcher.
+# attached cycle that ends without a healthy successor is always a typed nonzero
+# close, never a clean completion. The ledger only decides WHICH typed line it
+# carries: a proven owner-delivered wake names that benign cause instead of
+# claiming the cycle ended for no reason. Loudness is not negotiable either way,
+# because no live cycle remains and a silent return would let a harness treat an
+# unwatched home as healthy. A live cycle already present means re-arm attaches -
+# do not start a second watcher.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
-# lock identity before and after close, and successor disposition. The separate
+# lock identity before and after close, and successor disposition. Its record
+# format and every read of it belong to bin/fm-watch-cycle-lib.sh. The separate
 # state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
 # log and is never written here.
+#
+# Only the OWNING arm sees a cycle's wake output, so an arm merely attached to
+# that watcher cannot tell a delivered wake apart from a watcher that vanished.
+# Before an attached arm calls a close unexplained it reads the owner's own
+# ledger record for that exact watcher identity. Proof of a delivered wake ends
+# this arm cleanly because the owner already reported the reason and a second
+# wake would be a duplicate. No proof keeps the unexplained-close failure.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
@@ -61,6 +77,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-watch-cycle-lib.sh
+. "$SCRIPT_DIR/fm-watch-cycle-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
@@ -77,7 +95,7 @@ esac
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
-CYCLE_LOG="$STATE/.watch-cycle-exits.log"
+CYCLE_LOG=$(fm_cycle_log_path "$STATE")
 CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
 CYCLE_LOG_KEEP_LINES=${FM_WATCH_CYCLE_LOG_KEEP_LINES:-1000}
@@ -85,18 +103,14 @@ ARM_PID=${BASHPID:-$$}
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
 
-# The lifecycle ledger is diagnostic evidence, not a supervision dependency.
-# Writes are bounded and best-effort so an observability failure cannot stall an
-# otherwise healthy watcher cycle.
-cycle_clean_field() {
-  printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-512
-}
-
+# The lifecycle ledger is bounded and best-effort on the WRITE side, so an
+# observability failure cannot stall an otherwise healthy watcher cycle. Its
+# record format, and every read of it, belong to bin/fm-watch-cycle-lib.sh.
 lock_snapshot() {
   local pid identity
   pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
-  printf 'pid:%s|identity:%s' "$(cycle_clean_field "${pid:-none}")" "$(cycle_clean_field "${identity:-none}")"
+  printf 'pid:%s|identity:%s' "$(fm_cycle_clean_field "${pid:-none}")" "$(fm_cycle_clean_field "${identity:-none}")"
 }
 
 cycle_active=0
@@ -143,17 +157,17 @@ cycle_log_append() {
   done
   printf 'arm_pid=%s\twatcher_pid=%s\torigin=%s\tstarted_at=%s\tended_at=%s\texit_code=%s\tsignal=%s\treason=%s\tbeacon_age=%s\tlock_before=%s\tlock_after=%s\tsuccessor=%s\n' \
     "$ARM_PID" \
-    "$(cycle_clean_field "$cycle_watcher_pid")" \
-    "$(cycle_clean_field "$cycle_origin")" \
+    "$(fm_cycle_clean_field "$cycle_watcher_pid")" \
+    "$(fm_cycle_clean_field "$cycle_origin")" \
     "$cycle_started_at" \
     "$ended_at" \
-    "$(cycle_clean_field "$exit_code")" \
-    "$(cycle_clean_field "$signal")" \
-    "$(cycle_clean_field "$reason")" \
+    "$(fm_cycle_clean_field "$exit_code")" \
+    "$(fm_cycle_clean_field "$signal")" \
+    "$(fm_cycle_clean_field "$reason")" \
     "$beacon_age" \
-    "$(cycle_clean_field "$cycle_lock_before")" \
-    "$(cycle_clean_field "$lock_after")" \
-    "$(cycle_clean_field "$successor")" >> "$CYCLE_LOG" 2>/dev/null || true
+    "$(fm_cycle_clean_field "$cycle_lock_before")" \
+    "$(fm_cycle_clean_field "$lock_after")" \
+    "$(fm_cycle_clean_field "$successor")" >> "$CYCLE_LOG" 2>/dev/null || true
 
   size=$(wc -c < "$CYCLE_LOG" 2>/dev/null | tr -d '[:space:]')
   case "$size" in
@@ -191,7 +205,7 @@ cycle_mark_predecessor_successor() {
     i=$((i + 1))
   done
   tmp="$CYCLE_LOG.link.$ARM_PID"
-  awk -v target="arm_pid=$predecessor" -v replacement="successor=$(cycle_clean_field "$successor")" '
+  awk -v target="arm_pid=$predecessor" -v replacement="successor=$(fm_cycle_clean_field "$successor")" '
     {
       lines[NR] = $0
       count = split($0, fields, "\t")
@@ -261,11 +275,15 @@ fail_unexplained_cycle() {
   return 1
 }
 
+report_delivered_close() {
+  echo "watcher: cycle closed with a delivered wake pid=$1 (reported by its owning arm); no live cycle remains"
+}
+
 # Stay alive across identity-matched healthy holders. If one cycle ends, attach
 # to a verified successor. With no successor, fail loudly instead of returning a
 # clean empty completion that an adapter could mistake for a no-op.
 attach_and_wait() {
-  local attached_pid=$1
+  local attached_pid=$1 followed_since followed_identity
   while :; do
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ]; then
@@ -284,7 +302,16 @@ attach_and_wait() {
       report_attached
       continue
     fi
+    followed_since=$cycle_started_at
+    followed_identity=$cycle_lock_before
     cycle_log_append unknown unknown attached-cycle-ended none
+    # Wording only. The close stays nonzero either way: no live cycle remains,
+    # and a silent return here would let a harness treat a now-unwatched home as
+    # healthy. A wrong answer can misword this alarm; it can never suppress it.
+    if fm_cycle_pid_closed_actionably "$STATE" "$attached_pid" "$followed_since" "$followed_identity"; then
+      report_delivered_close "$attached_pid"
+      return 1
+    fi
     fail_unexplained_cycle
     return 1
   done

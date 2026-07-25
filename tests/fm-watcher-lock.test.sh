@@ -12,6 +12,7 @@ WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
+CYCLE_LIB="$ROOT/bin/fm-watch-cycle-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
@@ -575,6 +576,138 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   pass "arm attaches to a live fresh watcher and fails loudly when that cycle has no successor"
 }
 
+# Two arms following one watcher is the ordinary shape whenever a manual
+# recovery arm and the Stop-owned auto-arm overlap. Only the OWNER reads the
+# watcher's wake output, so an attached observer used to report the very cycle
+# that woke firstmate as a supervision failure. Drive the real sequence with a
+# real wake and hold both arms to their honest verdicts.
+run_two_arms_on_one_watcher() {  # <case-name> <owner-out-var> <attached-out-var> <wpid-var>
+  local name=$1 dir state fakebin i
+  dir=$(make_case "$name")
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mark_pr_check_migration_complete "$state"
+  printf 'project=fixture\nwindow=w\n' > "$state/t1.meta"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=2 \
+    "$WATCH_ARM" > "$dir/owner.out" 2>&1 &
+  TWO_ARM_OWNER_PID=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -q 'watcher: started pid=' "$dir/owner.out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  TWO_ARM_WATCHER_PID=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).*/\1/p' "$dir/owner.out" | head -1)
+  [ -n "$TWO_ARM_WATCHER_PID" ] || fail "owner arm never started a confirmed watcher: $(cat "$dir/owner.out")"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=2 \
+    "$WATCH_ARM" > "$dir/attached.out" 2>&1 &
+  TWO_ARM_ATTACHED_PID=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF "watcher: attached pid=$TWO_ARM_WATCHER_PID" "$dir/attached.out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$TWO_ARM_WATCHER_PID" "$dir/attached.out" \
+    || fail "second arm did not attach to the owner's watcher: $(cat "$dir/attached.out")"
+  TWO_ARM_DIR=$dir
+  TWO_ARM_STATE=$state
+}
+
+test_attached_arm_reports_the_owners_delivered_wake_not_a_failure() {
+  local owner_status attached_status
+  run_two_arms_on_one_watcher attached-delivered-close
+
+  # A real captain-relevant status append: the watcher enqueues it, prints the
+  # reason, and closes. This is supervision working, not supervision failing.
+  printf 'done: PR opened\n' >> "$TWO_ARM_STATE/t1.status"
+
+  wait_for_exit "$TWO_ARM_OWNER_PID" 150
+  owner_status=$?
+  wait_for_exit "$TWO_ARM_ATTACHED_PID" 150
+  attached_status=$?
+
+  [ "$owner_status" -eq 0 ] || fail "owner arm did not return its wake cleanly (status $owner_status): $(cat "$TWO_ARM_DIR/owner.out")"
+  grep -q '^signal:' "$TWO_ARM_DIR/owner.out" || fail "owner arm did not surface the real wake: $(cat "$TWO_ARM_DIR/owner.out")"
+
+  ! grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$TWO_ARM_DIR/attached.out" \
+    || fail "attached arm falsely called the owner-delivered wake unexplained: $(cat "$TWO_ARM_DIR/attached.out")"
+  grep -qF "watcher: cycle closed with a delivered wake pid=$TWO_ARM_WATCHER_PID" "$TWO_ARM_DIR/attached.out" \
+    || fail "attached arm did not account for the owner-delivered close: $(cat "$TWO_ARM_DIR/attached.out")"
+  grep -qF 'no live cycle remains' "$TWO_ARM_DIR/attached.out" \
+    || fail "attached arm did not identify the closed cycle: $(cat "$TWO_ARM_DIR/attached.out")"
+  # Wording changes; loudness does not. No live cycle remains, so a silent return
+  # would let a harness treat an unwatched home as healthy.
+  [ "$attached_status" -ne 0 ] && [ "$attached_status" -ne 124 ] \
+    || fail "attached arm went quiet on an owner-delivered close (status $attached_status)"
+  # The observer must not manufacture a second wake for an already-delivered one.
+  ! grep -qE '^(signal:|stale:|check:|heartbeat)' "$TWO_ARM_DIR/attached.out" \
+    || fail "attached arm duplicated the owner's wake reason: $(cat "$TWO_ARM_DIR/attached.out")"
+  pass "an attached arm names the owner's delivered wake instead of calling it unexplained, and stays loud"
+}
+
+# Preservation guard: the ledger consult must not regress upstream's unexplained-close alarm, and this cannot fail against the diff because that path is deliberately unchanged.
+test_ledger_consult_preserves_upstream_unexplained_close_alarm() {
+  local attached_status
+  run_two_arms_on_one_watcher attached-unexplained-close
+
+  # Same two-arm shape, but the watcher dies instead of waking. The owner records
+  # a non-delivering close, so the ledger must NOT excuse the missing watcher.
+  kill "$TWO_ARM_WATCHER_PID" 2>/dev/null || fail "could not stop the watcher under test"
+
+  wait_for_exit "$TWO_ARM_OWNER_PID" 150 || true
+  wait_for_exit "$TWO_ARM_ATTACHED_PID" 150
+  attached_status=$?
+
+  grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$TWO_ARM_DIR/attached.out" \
+    || fail "attached arm swallowed a genuinely unexplained close: $(cat "$TWO_ARM_DIR/attached.out")"
+  [ "$attached_status" -ne 0 ] && [ "$attached_status" -ne 124 ] \
+    || fail "attached arm did not exit non-zero on an unexplained close (status $attached_status)"
+  grep -q "watcher_pid=$TWO_ARM_WATCHER_PID" "$TWO_ARM_STATE/.watch-cycle-exits.log" \
+    || fail "no lifecycle record was written for the watcher under test"
+  ! grep -q "watcher_pid=$TWO_ARM_WATCHER_PID.*reason=actionable-" "$TWO_ARM_STATE/.watch-cycle-exits.log" \
+    || fail "fixture recorded a delivered wake, so it cannot prove the unexplained path"
+  pass "ledger consult preserves the upstream unexplained-close alarm"
+}
+
+test_attached_cycle_reader_requires_canonical_current_owner_row() {
+  local dir state now
+  dir=$(make_case attached-cycle-reader)
+  state="$dir/state"
+  now=$(date +%s)
+  printf 'arm_pid=1\twatcher_pid=4242\torigin=started\tstarted_at=%s\tended_at=%s\texit_code=0\tsignal=none\treason=actionable-signal\tbeacon_age=1\tlock_before=pid:none|identity:none\tlock_after=pid:none|identity:none\tsuccessor=none\n' \
+    "$((now - 2))" "$now" > "$state/.watch-cycle-exits.log"
+  bash -c '. "$1"; fm_cycle_pid_closed_actionably "$2" "$3" "$4" "$5"' \
+    _ "$CYCLE_LIB" "$state" 4242 "$((now - 5))" 'pid:none|identity:none' \
+    || fail "canonical current owner row did not prove the delivered wake"
+
+  printf 'arm_pid=1\twatcher_pid=4242\torigin=started\tstarted_at=%s\tended_at=%s\texit_code=0\tsignal=none\treason=actionable-signal' \
+    "$((now - 2))" "$now" > "$state/.watch-cycle-exits.log"
+  if bash -c '. "$1"; fm_cycle_pid_closed_actionably "$2" "$3" "$4" "$5"' \
+    _ "$CYCLE_LIB" "$state" 4242 "$((now - 5))" 'pid:none|identity:none'; then
+    fail "truncated owner row was accepted as delivered-wake proof"
+  fi
+
+  printf 'arm_pid=1\twatcher_pid=4242\torigin=started\tstarted_at=%s\tended_at=%s\texit_code=0\tsignal=none\treason=actionable-signal\tbeacon_age=1\tlock_before=pid:none|identity:none\tlock_after=pid:none|identity:none\tsuccessor=none\n' \
+    "$((now + 1))" "$((now + 2))" > "$state/.watch-cycle-exits.log"
+  if bash -c '. "$1"; fm_cycle_pid_closed_actionably "$2" "$3" "$4" "$5"' \
+    _ "$CYCLE_LIB" "$state" 4242 "$((now - 5))" 'pid:none|identity:none'; then
+    fail "future-dated owner row was accepted as delivered-wake proof"
+  fi
+
+  printf 'arm_pid=1\twatcher_pid=4242\torigin=started\tstarted_at=%s\tended_at=%s\texit_code=0\tsignal=none\treason=actionable-signal\tbeacon_age=1\tlock_before=pid:4242|identity:old-instance\tlock_after=pid:none|identity:none\tsuccessor=none\n' \
+    "$((now - 2))" "$now" > "$state/.watch-cycle-exits.log"
+  if bash -c '. "$1"; fm_cycle_pid_closed_actionably "$2" "$3" "$4" "$5"' \
+    _ "$CYCLE_LIB" "$state" 4242 "$now" 'pid:4242|identity:new-instance'; then
+    fail "same-second row from a different watcher identity answered for a reused pid"
+  fi
+  pass "attached-cycle reader accepts only canonical current owner evidence"
+}
+
 test_attached_arm_signal_is_recorded_in_cycle_ledger() {
   local dir state fakebin out armout i wpid armpid status
   dir=$(make_case attached-arm-signal-ledger)
@@ -1031,6 +1164,9 @@ test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
+test_attached_arm_reports_the_owners_delivered_wake_not_a_failure
+test_ledger_consult_preserves_upstream_unexplained_close_alarm
+test_attached_cycle_reader_requires_canonical_current_owner_row
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
