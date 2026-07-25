@@ -1,24 +1,5 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-brief.sh.
-#
-# Regression coverage for the heredoc-in-command-substitution parse bug (issue
-# #166, reintroduced by #945/issue #1000): on bash 3.2 (macOS system bash), a
-# heredoc nested inside a `$(...)` command substitution - `VAR=$(cat <<EOF
-# ... EOF)` - breaks the lexer's quote tracking the moment the heredoc body
-# contains a single unescaped apostrophe, and the failure surfaces as a parse
-# error for the *entire rest of the script*, not just that assignment. The bug
-# is not specific to `case` bodies (an `if`/`else` branch hit it too) and does
-# not reproduce under a newer bash, which is how #945 passed CI (Linux, bash
-# 5+) while breaking every macOS crewmate. `bin/fm-brief.sh` now avoids the
-# idiom entirely, building each such variable with `read -r -d '' VAR <<EOF
-# ... EOF || true` instead - a heredoc with no enclosing command substitution,
-# so no quote state leaks past it regardless of content. A plain
-# `cat > file <<EOF ... EOF` (redirected straight to a file, not captured
-# through `$(...)`) was never affected either. test_no_command_substitution_
-# heredocs below pins the structural fix so the vulnerable idiom cannot
-# quietly return; a previous version of this suite instead pinned the exact
-# wording of one known-bad line, which is how the #945 regression - different
-# wording, same bug - slipped past it.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -28,9 +9,7 @@ TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
-# The script itself must always parse. This is the direct regression test for
-# issue #166: a stray apostrophe in any of the three DOD heredoc bodies
-# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
+# The script itself must always parse.
 test_script_parses() {
   local out rc
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
@@ -39,14 +18,10 @@ test_script_parses() {
   pass "fm-brief.sh: bash -n succeeds"
 }
 
-# Structural guard for the bug class itself (issue #166 / #1000), independent
-# of any particular line's wording: bin/fm-brief.sh must never build a
-# variable with a heredoc nested inside a `$(...)` command substitution, since
-# that idiom breaks bash 3.2 parsing the moment its body picks up a stray
-# apostrophe. A wording-only pin (see test_no_mistakes_dod_wording) already
-# failed to catch this once, because #945 introduced a *new* apostrophe in
-# *different* text. This test would fail on plain `bash -n` only under bash
-# 3.2, so it checks the source text directly and runs under any bash.
+# Bash 3.2 can misparse the rest of a script when an apostrophe appears in a
+# heredoc nested inside command substitution.
+# Check the vulnerable structure directly so the regression is caught on
+# newer bash versions too.
 test_no_command_substitution_heredocs() {
   local hits
   # shellcheck disable=SC2016  # single quotes are deliberate: this is a literal grep pattern, not an expansion.
@@ -74,10 +49,9 @@ EOF
 }
 
 # fm-brief.sh must exit 0 and produce a brief with no unreplaced shell
-# metacharacter corruption for every ship delivery mode. This also guards
-# against any *new* unescaped apostrophe or unbalanced quote later added to
-# one of these DOD blocks, since a broken heredoc corrupts or empties the
-# generated brief content, not just the script's own syntax.
+# metacharacter corruption for every ship delivery mode.
+# This also guards against malformed heredoc edits that corrupt or empty the
+# generated brief content.
 test_ship_modes_generate_clean_briefs() {
   local home id brief status
   home="$TMP_ROOT/ship-home"
@@ -122,8 +96,7 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
-# Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
-# reference must render as plain prose with no dangling apostrophe artifact.
+# Preserve the established no-mistakes guidance wording and literal markup.
 test_no_mistakes_dod_wording() {
   local home id brief
   home="$TMP_ROOT/wording-home"
