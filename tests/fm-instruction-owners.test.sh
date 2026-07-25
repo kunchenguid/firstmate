@@ -16,6 +16,7 @@ SECONDMATE="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
 CONFIG="$ROOT/docs/configuration.md"
 AGENTS="$ROOT/AGENTS.md"
 BRIEF="$ROOT/bin/fm-brief.sh"
+BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
 
 test_new_skill_metadata_and_triggers() {
   local skill name count
@@ -136,6 +137,14 @@ test_agent_owned_quota_array_dispatch_contract() {
     "configuration docs do not point to the agent-owned array procedure"
   assert_grep '`bin/fm-dispatch-select.sh` is vestigial during the instruction transition and must not be called' "$CONFIG" \
     "configuration docs still permit the vestigial selector"
+  assert_grep 'quota-axi is required for the' "$BOOTSTRAP" \
+    "bootstrap docs lost the quota-axi dependency pointer"
+  assert_grep 'agent-owned dispatch-profile array procedure in AGENTS.md section 4.' "$BOOTSTRAP" \
+    "bootstrap docs do not point to the agent-owned array procedure"
+  assert_no_grep 'every crew-dispatch profile array calls it automatically' "$BOOTSTRAP" \
+    "bootstrap docs still claim automatic selector invocation"
+  assert_no_grep 'OS-backed random selection across' "$BOOTSTRAP" \
+    "bootstrap docs still promise quota-unavailable random fallback"
   pass "firstmate directly compares every quota candidate with authoritative model discovery"
 }
 
