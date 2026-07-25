@@ -40,6 +40,10 @@ detect_own() {
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
     return
   fi
+  # Codex exposes a stable per-session marker to tool processes. This is
+  # required in PID-isolated tool sandboxes where Codex is not visible in the
+  # child process ancestry.
+  [ -n "${CODEX_THREAD_ID:-}" ] && { echo codex; return; }
   # grok sets GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
   # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
   # is unambiguous when firstmate runs natively on grok.

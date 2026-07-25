@@ -20,6 +20,11 @@
 #     does not reimplement their logic
 set -u
 
+# The suite supplies harness identity explicitly per case. Do not let the
+# surrounding Codex session turn direct fm-lock.sh cases into same-thread
+# acquisitions.
+unset CODEX_THREAD_ID 2>/dev/null || true
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/wake-helpers.sh
@@ -406,21 +411,47 @@ SH
 # Drop every harness env marker from bin/fm-harness.sh detect_own so the
 # surrounding interactive shell cannot leak past the suite's fake ps harness.
 # Markers today: CLAUDECODE (claude), PI_CODING_AGENT plus FM_PI_HARNESS
-# (Pi family), GROK_AGENT (grok).
-# codex and opencode have no env markers (ancestry only). Without this, a local
-# claude/pi/grok session fails cases that pin a different fake harness while CI
-# (no ambient markers) still passes.
+# (Pi family), CODEX_THREAD_ID (codex), and GROK_AGENT (grok).
+# Without this, a local claude/pi/codex/grok session fails cases that pin a
+# different fake harness while CI (no ambient markers) still passes.
 run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
-    env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+    env -u CLAUDECODE -u CODEX_THREAD_ID -u GROK_AGENT \
+      PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   else
-    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS \
+      -u CODEX_THREAD_ID -u GROK_AGENT \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   fi
+}
+
+test_session_start_accepts_codex_pid_isolated_marker() {
+  local rec root home fakebin out status
+  rec=$(new_world codex-pid-isolated)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  # No harness is visible through the fake ancestry. The Codex marker is the
+  # only available identity, matching the PID-isolated tool-sandbox failure.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  status=0
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" CODEX_THREAD_ID=codex-test-thread \
+    PATH="$fakebin:$BASE_PATH" "$SESSION_START") || status=$?
+
+  expect_code 0 "$status" "Codex marker should allow session start without visible ancestry"
+  assert_contains "$out" "lock acquired: Codex session owner" "Codex marker lock acquisition was not reported"
+  assert_contains "$out" "codex:codex-test-thread" "Codex thread marker was not persisted in the lock owner"
+  pass "session start accepts Codex's PID-isolated process marker"
 }
 
 # prepare_session_start_secondmate <name>: a throwaway main home and Pi
@@ -1386,6 +1417,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_session_start_accepts_codex_pid_isolated_marker
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_session_lock_concurrent_single_winner

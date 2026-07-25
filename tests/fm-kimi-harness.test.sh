@@ -2,6 +2,10 @@
 # Behavior tests for the verified Kimi Code CLI crewmate adapter.
 set -u
 
+# Kimi identity cases supply their own harness marker or ancestry. Do not let
+# the surrounding Codex session win detect_own() before those fixtures run.
+unset CODEX_THREAD_ID 2>/dev/null || true
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 

@@ -41,8 +41,25 @@ make_fake_toolchain() {
   fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
+mode=${FM_FAKE_GH_MODE:-success}
 if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
+  case "$mode" in
+    success) printf 'success\tfake-user\tkeyring\t\n' ;;
+    missing) printf '\t\t\t\n' ;;
+    invalid) printf 'error\tfake-user\tkeyring\tHTTP 401: Bad credentials\n' ;;
+    network) printf 'error\tfake-user\tkeyring\tdial tcp: lookup api.github.com: no such host\n' ;;
+    credential-store) printf 'error\tfake-user\tdefault\tconfigured credential unavailable\n' ;;
+    sandbox) printf 'error\tfake-user\tdefault\tdial tcp: lookup api.github.com: connection refused\n' ;;
+    inspect-failure) exit 1 ;;
+    *) exit 2 ;;
+  esac
   exit 0
+fi
+if [ "${1:-}" = auth ] && [ "${2:-}" = token ]; then
+  case "$mode" in
+    missing|credential-store|sandbox) exit 1 ;;
+    *) exit 0 ;;
+  esac
 fi
 exit 0
 SH
@@ -291,6 +308,33 @@ ROWS
   pass "bootstrap reports treehouse lease + tasks-axi/quota-axi bootstrap contracts"
 }
 
+test_github_access_diagnostics() {
+  local case_dir fakebin mode expected out
+  case_dir="$TMP_ROOT/github-access"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  while IFS='^' read -r mode expected; do
+    [ -n "$mode" ] || continue
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_GH_MODE="$mode" "$ROOT/bin/fm-bootstrap.sh")
+    if [ "$mode" = success ]; then
+      [ -z "$out" ] || fail "authenticated GitHub access should stay silent, got: $out"
+    else
+      [ "$out" = "$expected" ] || fail "$mode: expected '$expected', got: '$out'"
+    fi
+  done <<'ROWS'
+success^
+missing^NEEDS_GH_AUTH: missing or invalid GitHub authentication - run gh auth login -h github.com
+invalid^NEEDS_GH_AUTH: missing or invalid GitHub authentication - run gh auth login -h github.com
+network^GH_NETWORK: GitHub API unreachable - check network and DNS access to api.github.com, then rerun
+credential-store^GH_CREDENTIAL_STORE: configured GitHub credential is inaccessible - rerun Firstmate where the OS credential store is available; if it still fails, run gh auth login -h github.com
+sandbox^GH_SANDBOX: restricted environment blocks api.github.com and the configured GitHub credential store - rerun Firstmate outside that sandbox
+inspect-failure^GH_AUTH_CHECK: unable to inspect GitHub authentication - run gh auth status -h github.com outside Firstmate and resolve its diagnostic
+ROWS
+  pass "bootstrap distinguishes authenticated, invalid, network, credential-store, and sandbox GitHub states without live access"
+}
+
 test_no_mistakes_min_version() {
   local label version mode case_dir fakebin out missing n
   missing='MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)'
@@ -349,15 +393,24 @@ SH
 }
 
 test_orca_backend_gates_orca_tool_only_when_selected() {
-  local case_dir fakebin out missing_orca
+  local case_dir fakebin out missing_orca bash_env
   missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
+  bash_env="$TMP_ROOT/no-orca.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = orca ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+SH
 
   case_dir="$TMP_ROOT/orca-backend-selected"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' orca > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = "$missing_orca" ] || fail "backend=orca should require only the Orca-specific missing tool, got: $out"
 
@@ -365,7 +418,7 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_not_contains "$out" "MISSING: orca" "bootstrap should not require orca unless backend=orca is selected"
   pass "bootstrap: backend=orca gates the Orca CLI without requiring it on the default backend"
@@ -804,6 +857,7 @@ ROWS
 }
 
 test_bootstrap_reporting
+test_github_access_diagnostics
 test_no_mistakes_min_version
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected

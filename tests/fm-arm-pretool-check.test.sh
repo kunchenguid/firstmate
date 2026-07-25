@@ -8,6 +8,10 @@
 # Empirical harness evidence lives in docs/arm-pretool-check.md.
 set -u
 
+# Matrix roots are this disposable checkout. A supervisor's separate FM_HOME
+# would make absolute blessed setup paths compare against the wrong home.
+unset FM_HOME 2>/dev/null || true
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 

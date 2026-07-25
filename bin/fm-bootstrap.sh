@@ -6,7 +6,12 @@
 #          exits 0.
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
-#                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "MISSING_MANUAL: <tool> (instructions: <url>)",
+#                 "NEEDS_GH_AUTH: missing or invalid GitHub authentication - run gh auth login -h github.com",
+#                 "GH_NETWORK: GitHub API unreachable - check network and DNS access to api.github.com, then rerun",
+#                 "GH_CREDENTIAL_STORE: configured GitHub credential is inaccessible - rerun Firstmate where the OS credential store is available; if it still fails, run gh auth login -h github.com",
+#                 "GH_SANDBOX: restricted environment blocks api.github.com and the configured GitHub credential store - rerun Firstmate outside that sandbox",
+#                 "GH_AUTH_CHECK: unable to inspect GitHub authentication - run gh auth status -h github.com outside Firstmate and resolve its diagnostic",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
@@ -844,7 +849,48 @@ fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
 fi
-gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+
+# GitHub CLI's plain `auth status` exit code collapses bad credentials, DNS or
+# network failure, and an inaccessible OS credential store. Its structured
+# status keeps those causes separate without exposing the token. A second
+# `auth token` probe uses only the exit code and discards all credential bytes.
+github_auth_diagnostic() {
+  local record state login token_source error token_available network_error
+  record=$(gh auth status -h github.com --json hosts \
+    --jq '.hosts["github.com"] // [] | (map(select(.active == true)) + .) | .[0] // {} | [.state // "", .login // "", .tokenSource // "", .error // ""] | @tsv' \
+    2>/dev/null) || {
+    echo "GH_AUTH_CHECK: unable to inspect GitHub authentication - run gh auth status -h github.com outside Firstmate and resolve its diagnostic"
+    return
+  }
+  IFS="$(printf '\t')" read -r state login token_source error <<EOF
+$record
+EOF
+  [ "$state" = success ] && return
+
+  token_available=0
+  if [ -n "$login" ] && gh auth token -h github.com -u "$login" >/dev/null 2>&1; then
+    token_available=1
+  fi
+  network_error=0
+  case "$error" in
+    *"api.github.com"*"lookup"*|*"lookup api.github.com"*|*"dial tcp"*|*"Could not resolve host"*|*"could not resolve host"*|*"no such host"*|*"Network is unreachable"*|*"network is unreachable"*|*"connection refused"*|*"Connection refused"*|*"i/o timeout"*|*"Client.Timeout"*|*"error connecting to api.github.com"*)
+      network_error=1
+      ;;
+  esac
+
+  if [ "$network_error" -eq 1 ]; then
+    if [ -n "$login" ] && [ "$token_source" = default ] && [ "$token_available" -eq 0 ]; then
+      echo "GH_SANDBOX: restricted environment blocks api.github.com and the configured GitHub credential store - rerun Firstmate outside that sandbox"
+    else
+      echo "GH_NETWORK: GitHub API unreachable - check network and DNS access to api.github.com, then rerun"
+    fi
+  elif [ -n "$login" ] && [ "$token_available" -eq 0 ]; then
+    echo "GH_CREDENTIAL_STORE: configured GitHub credential is inaccessible - rerun Firstmate where the OS credential store is available; if it still fails, run gh auth login -h github.com"
+  else
+    echo "NEEDS_GH_AUTH: missing or invalid GitHub authentication - run gh auth login -h github.com"
+  fi
+}
+github_auth_diagnostic
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.

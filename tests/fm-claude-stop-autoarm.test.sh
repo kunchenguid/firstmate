@@ -11,6 +11,10 @@
 # shellcheck disable=SC2016 # single quotes are deliberate: $FM_HOME expands inside the fake harness child, and grep needles are literal strings
 set -u
 
+# These are Claude fixtures. An ambient Codex thread marker would otherwise
+# override their fake ancestry and change the lock owner format under test.
+unset CODEX_THREAD_ID 2>/dev/null || true
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 

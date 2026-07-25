@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, GH_NETWORK, GH_CREDENTIAL_STORE, GH_SANDBOX, GH_AUTH_CHECK, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -23,7 +23,11 @@ When any diagnostic needs captain attention, report the plain consequence and re
   For `quota-axi`, bootstrap requires it because firstmate reads its current output directly before resolving every crew-dispatch profile array; without it, report the missing requirement and do not choose around an unexamined candidate.
 - `MISSING_MANUAL: <tool> (instructions: <url>)` - tell the captain why the tool is required and give them the printed instructions URL, but do not pass the tool to `bin/fm-bootstrap.sh install`; wait for the captain to complete the manual installation, then rerun session start to confirm the dependency is present.
 - `BACKEND_INVALID: <name> (known: <names>)` - the resolved runtime backend has no verified dependency or lifecycle contract, so do not dispatch work until the invalid `FM_BACKEND` or `config/backend` value is corrected to one of the listed backends.
-- `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
+- `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login -h github.com` because the credential is genuinely missing or invalid.
+- `GH_NETWORK` - report that GitHub authentication could not be verified because `api.github.com` is unreachable, and ask the captain to restore DNS/network access before retrying.
+- `GH_CREDENTIAL_STORE` - report that a configured GitHub account exists but its OS credential-store entry is inaccessible; ask the captain to rerun Firstmate where the credential store is available, and suggest `! gh auth login -h github.com` only if the same diagnostic persists there.
+- `GH_SANDBOX` - report that the restricted environment blocks both GitHub API access and the configured credential store; ask the captain to rerun Firstmate outside that sandbox, not to re-authenticate.
+- `GH_AUTH_CHECK` - report that the structured authentication check itself failed and ask the captain to run `! gh auth status -h github.com` outside Firstmate, then resolve the exact diagnostic it prints.
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.

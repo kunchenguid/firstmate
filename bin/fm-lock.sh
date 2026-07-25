@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Acquire or inspect the per-home firstmate session lock.
-# Writes the harness (agent) process PID found by walking the shell's ancestry,
-# which lives as long as the firstmate session - unlike the transient subshell
-# PID of any one tool call, which is dead moments after it is written.
+# Acquire or inspect the per-home Firstmate session lock.
+# Writes a verified harness process PID, which lives as long as the session.
+# Codex adds its stable thread marker and whether the PID was verified from
+# ancestry or is a PID-isolated fallback. A same-thread Codex tool keeps the
+# existing owner record, while a different thread can reclaim only a verified
+# harness PID that is provably dead. Legacy and fallback Codex owners remain
+# fail-closed until the matching SessionEnd hook releases them.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -17,23 +20,37 @@ mkdir -p "$STATE" 2>/dev/null || {
   exit 1
 }
 
-# Harness identity (FM_HARNESS_RE, ancestry walk, holder liveness) is owned by
-# the shared session-lock lib so the Claude Stop auto-arm applies the exact
-# same identity contract.
+# Harness identity, owner format, ancestry, and holder liveness are shared with
+# the Claude Stop auto-arm and the Codex SessionEnd release hook.
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
-if [ "${1:-}" = "status" ]; then
+if [ "${1:-}" = status ]; then
   if [ ! -f "$LOCK" ]; then echo "lock: free"; exit 0; fi
   old=$(cat "$LOCK" 2>/dev/null) || {
     echo "lock: unreadable"
     exit 0
   }
-  if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  fm_session_lock_holder_state "$old"
+  holder_status=$?
+  case "$holder_status" in
+    0)
+      case "$old" in
+        *'|codex:'*) echo "lock: held by live Codex session owner $old" ;;
+        *) echo "lock: held by live harness pid $old" ;;
+      esac
+      ;;
+    1) echo "lock: stale (owner $old dead or not a harness)" ;;
+    2) echo "lock: held by unverifiable Codex session owner $old" ;;
+    *) echo "lock: invalid owner record; manual inspection required" ;;
+  esac
   exit 0
 fi
 
-me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+owner=$(fm_session_lock_owner) || {
+  echo "error: cannot locate harness process in ancestry" >&2
+  exit 1
+}
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
@@ -66,12 +83,30 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
-    echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
-    exit 1
+  old_marker=$(fm_codex_owner_marker "$old" 2>/dev/null || true)
+  owner_marker=$(fm_codex_owner_marker "$owner" 2>/dev/null || true)
+  if [ -n "$old_marker" ] && [ "$old_marker" = "$owner_marker" ]; then
+    owner=$old
+  elif [ "$old" != "$owner" ]; then
+    fm_session_lock_holder_state "$old"
+    holder_status=$?
+    case "$holder_status" in
+      0)
+        echo "error: another live firstmate session holds the lock (owner $old); operate read-only until resolved" >&2
+        exit 1
+        ;;
+      2)
+        echo "error: cannot verify whether another Codex session holds the lock (owner $old); operate read-only until resolved" >&2
+        exit 1
+        ;;
+      3)
+        echo "error: session lock has an invalid owner record; operate read-only until resolved" >&2
+        exit 1
+        ;;
+    esac
   fi
 fi
-if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
+if ! { printf '%s\n' "$owner" > "$LOCK"; } 2>/dev/null; then
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
 fi
@@ -79,9 +114,12 @@ written=$(cat "$LOCK" 2>/dev/null) || {
   echo "error: cannot verify session lock ownership; operate read-only until resolved" >&2
   exit 1
 }
-if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
+if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$owner" ]; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
   exit 1
 fi
 release_claim_lock
-echo "lock acquired: harness pid $me"
+case "$owner" in
+  *'|codex:'*) echo "lock acquired: Codex session owner $owner" ;;
+  *) echo "lock acquired: harness pid $owner" ;;
+esac
