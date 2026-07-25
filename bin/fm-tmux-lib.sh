@@ -86,7 +86,12 @@ FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 FM_TMUX_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
 FM_TMUX_IDLE_RE_DEFAULT='^(Type a message\.\.\.|Add a follow-up)$'
-FM_TMUX_BARE_PROMPT_RE_DEFAULT='^[❯›→]'
+# Bare-agent prompt glyphs are matched with a literal `case` prefix check (below,
+# in fm_tmux_composer_state), not a regex: a grep -E bracket expression built
+# from these raw multi-byte glyphs decomposes to individual BYTES under a
+# byte-oriented C/POSIX locale, matching any line starting with an unrelated
+# character that happens to share a leading UTF-8 byte. `case` prefix matching
+# on literal strings compares bytes directly and needs no locale-aware class.
 
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex
@@ -154,7 +159,7 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 # bottom-most verified agent prompt glyph and classify that structural row.
 # This also closes the previously documented pristine-grok row-selection gap.
 fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cy raw plain stripped bordered=0 bare=0 current start scan line candidate
+  local target=$1 cy raw plain stripped bordered=0 bare=0 current start scan line candidate scan_plain
   current=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) \
     || { printf 'unknown'; return 0; }
   current=${current#-}
@@ -183,12 +188,12 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
       || { printf 'unknown'; return 0; }
     candidate=
     while IFS= read -r line; do
-      plain=$(printf '%s\n' "$line" | fm_composer_strip_ansi)
-      plain="${plain#"${plain%%[![:space:]]*}"}"
-      plain="${plain%"${plain##*[![:space:]]}"}"
-      if printf '%s' "$plain" | grep -qE "$FM_TMUX_BARE_PROMPT_RE_DEFAULT"; then
-        candidate=$line
-      fi
+      scan_plain=$(printf '%s\n' "$line" | fm_composer_strip_ansi)
+      scan_plain="${scan_plain#"${scan_plain%%[![:space:]]*}"}"
+      scan_plain="${scan_plain%"${scan_plain##*[![:space:]]}"}"
+      case "$scan_plain" in
+        '❯'*|'›'*|'→'*) candidate=$line ;;
+      esac
     done <<EOF
 $scan
 EOF

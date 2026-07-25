@@ -292,6 +292,57 @@ test_cursor_row_window_classifies_idle_pending_and_dead_shell() {
   pass "fm_tmux_composer_state: Cursor's row window distinguishes idle, pending, and exited shell"
 }
 
+test_cursor_row_scan_no_candidate_preserves_blank_composer() {
+  local dir fb capture out
+  dir="$TMP_ROOT/scan-no-candidate"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  # No line in the scanned window is a bare-agent-glyph row; the LAST scanned
+  # line still carries real text. The scan loop must use its own temp var, not
+  # the outer `plain`, or this idle composer would read unknown instead of
+  # empty (the tmux-composer-plain-clobber regression).
+  printf 'some earlier transcript line\nanother line of output\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=10 \
+    FM_FAKE_BLANK_CURSOR=1 FM_FAKE_COMMAND=node \
+    fm_tmux_composer_state fakepane)
+  [ "$out" = empty ] \
+    || fail "a blank composer with no bare-glyph candidate in the scan window must read empty, got '$out'"
+  pass "fm_tmux_composer_state: a failed bare-glyph scan preserves the blank composer verdict"
+}
+
+test_cursor_row_scan_glyph_match_is_locale_safe() {
+  local dir fb capture out
+  dir="$TMP_ROOT/scan-locale-safe"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  # A box-drawing separator ('─', U+2500) shares its leading UTF-8 byte (0xE2)
+  # with the verified agent glyphs (❯ › →). Under a byte-oriented C/POSIX
+  # locale, a grep bracket-expression built from those glyphs decomposes to
+  # individual bytes and would wrongly treat this row as a bare-agent prompt.
+  # The literal `case` prefix match must not be fooled, with or without a C
+  # locale.
+  printf '\xe2\x94\x80\xe2\x94\x80 not a prompt \xe2\x94\x80\xe2\x94\x80\n' > "$capture"
+  out=$(
+    export LC_ALL=C
+    PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=10 \
+      FM_FAKE_BLANK_CURSOR=1 FM_FAKE_COMMAND=node \
+      fm_tmux_composer_state fakepane
+  )
+  [ "$out" = empty ] \
+    || fail "a byte-sharing non-glyph row under LC_ALL=C must not read as a bare-agent prompt, got '$out'"
+  # A genuine agent glyph in the same window must still be found under LC_ALL=C.
+  printf 'transcript\n  \xe2\x9d\xaf fix findings 1 and 3\nfooter\n' > "$capture"
+  out=$(
+    export LC_ALL=C
+    PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=10 \
+      FM_FAKE_BLANK_CURSOR=1 FM_FAKE_COMMAND=node \
+      fm_tmux_composer_state fakepane
+  )
+  [ "$out" = pending ] \
+    || fail "a genuine bare-agent glyph under LC_ALL=C must still be detected, got '$out'"
+  pass "fm_tmux_composer_state: bare-agent glyph scan is byte-safe under LC_ALL=C"
+}
+
 # --- fm-peek.sh stays escape-free (LLM-facing path) -------------------------
 
 test_peek_output_is_escape_free() {
@@ -330,4 +381,6 @@ test_dark_truecolor_ghost_only_composer_is_not_pending
 test_dark_truecolor_bare_shell_prompt_is_unknown
 test_real_text_with_trailing_ghost_is_pending
 test_cursor_row_window_classifies_idle_pending_and_dead_shell
+test_cursor_row_scan_no_candidate_preserves_blank_composer
+test_cursor_row_scan_glyph_match_is_locale_safe
 test_peek_output_is_escape_free
