@@ -314,6 +314,7 @@ make_spawn_case() {
   launch_log="$case_dir/launch.log"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
+  printf '%s\n' tmux > "$home/config/backend"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
   # A leased Treehouse worktree is handed over at detached HEAD on a clean
