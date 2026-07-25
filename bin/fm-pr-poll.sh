@@ -10,9 +10,9 @@ set -u
 LC_ALL=C
 export LC_ALL
 
-# Duplicated verbatim from bin/fm-pr-lib.sh's fm_pr_github_host_valid() because
-# this file must stay dependency-free; keep both copies identical when
-# changing this contract.
+# Reimplements bin/fm-pr-lib.sh's fm_pr_github_host_valid() contract because
+# this file must stay dependency-free; keep both validators behaviorally
+# identical when changing that contract.
 host_syntax_ok() {
   local h=$1 label old_ifs
   [ -n "$h" ] && [ "${#h}" -le 253 ] || return 1

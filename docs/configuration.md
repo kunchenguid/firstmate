@@ -48,12 +48,12 @@ The file format is unchanged in both modes; tasks-axi and manual edits produce t
 
 ## PR hosts (config/pr-hosts)
 
-The local, gitignored `config/pr-hosts` file allowlists GitHub Enterprise (GHE) hosts for the `github`-provider PR merge poll machinery, one bare hostname per line, no scheme, no path, no port.
+The local, gitignored `config/pr-hosts` file allowlists GitHub Enterprise (GHE) hosts for the `github`-provider PR merge poll machinery, one exact lowercase DNS hostname with at least one dot per line, no scheme, no path, no port, and no surrounding whitespace.
 Absent or empty means the built-in default of exactly `github.com`, so every existing home is unaffected with zero configuration; `github.com` itself is always allowed and never needs to be listed.
 This file is never tracked and no tracked file ever names a specific enterprise host; an operator adds a host here after confirming it themselves, the same local-config precedent as `config/backlog-backend` and `config/crew-harness`.
 `config/pr-hosts` is deliberately **not** inherited into secondmate homes, unlike `config/backlog-backend`: it is a security access-control boundary rather than an operational preference, so each home (primary or secondmate) sets its own allowlist independently.
 This allowlist applies only to the `github` provider; a `gitlab` merge request's host is its own self-hosted-instance identity (see [gitlab-merge-watch.md](gitlab-merge-watch.md)) and is not gated by this file.
-`bin/fm-pr-lib.sh`'s header owns the exact hostname syntax and allowlist matching contract (`fm_pr_github_host_valid`, `fm_pr_github_host_allowed`); the byte-static `bin/fm-pr-poll.sh` re-derives and re-checks the same allowlist independently on every poll, so narrowing this file after a poll was armed for a now-disallowed host takes effect without rearming.
+`fm_pr_github_host_valid` and `fm_pr_github_host_allowed` enforce this schema and exact-line matching when the poll is armed; the byte-static `bin/fm-pr-poll.sh` re-derives and re-checks the same allowlist independently on every poll, so narrowing this file after a poll was armed for a now-disallowed host takes effect without rearming.
 
 ## Runtime backend (config/backend / FM_BACKEND)
 
