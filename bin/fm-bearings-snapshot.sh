@@ -14,10 +14,26 @@
 # LOCAL-ONLY by default: a normal invocation makes ZERO GitHub/network/auth calls.
 # It MAY surface PR URLs already recorded locally in task meta (recorded_prs), but it
 # performs no live discovery or checks. Live PR discovery/checks happen ONLY under
-# --include-prs, which is the sole path that touches the network; all gh coupling
-# lives in that branch and never in the canonical snapshot. The default output states
-# explicitly (the prs: line and the omitted[] surfaces) what was not requested, so an
-# absence is never ambiguous.
+# --include-prs, which is the sole path that touches the network; all gh/bytedcli
+# coupling lives in that branch and never in the canonical snapshot. The default output
+# states explicitly (the prs: line and the omitted[] surfaces) what was not requested,
+# so an absence is never ambiguous.
+#
+# Live CI is provider-aware. --include-prs discovers each candidate repository from the
+# recorded PR/MR URLs and live worktree origins, classifies its provider with the shared
+# fm-scm-lib.sh URL parser, and fetches open PRs/MRs with their real-time check status:
+# GitHub via `gh pr list` (statusCheckRollup) and Codebase (code.byted.org) via
+# `bytedcli codebase mr list --state open` plus `bytedcli codebase mr status` (check_runs).
+# Every fetched row is stamped verification=live because its checks came from a real
+# provider read this run. Both providers' reads are bounded by FM_BEARINGS_PR_TIMEOUT.
+#
+# HONEST CI PROVENANCE (never present a self-report as verified CI): the only live-verified
+# CI signal in this output is candidate_prs[].checks, which exists ONLY under --include-prs.
+# Everything on the default local path is a worker self-report, not a verified check:
+# in_flight[].state/.doing is the crewmate's last status-log wake event (reported=self),
+# and recorded_prs[].url is a URL the worker reported with no CI verified here (ci=unverified).
+# A reader must treat "suite passed"-style text in a self-reported field as a claim, never
+# as current CI; run --include-prs for the live-verified signal.
 #
 # This wrapper consumes canonical status decisions plus canonically normalized
 # backlog roles, unresolved blockers, and captain actionability. It never infers
@@ -42,7 +58,8 @@
 # Flags:
 #   (default)        compact projection, TOON, local-only
 #   --json           the same projected model as JSON (machine/debug; parity form)
-#   --include-prs    ALSO do live open-PR discovery + checks (the only network path)
+#   --include-prs    ALSO do live open-PR/MR discovery + checks across GitHub and
+#                    Codebase (code.byted.org), the only network path
 #   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints
 #   --all-in-flight  include every in-flight task
 #   --all-decisions  include every open decision
@@ -60,6 +77,14 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
+
+# The provider-aware URL parser (fm_scm_parse_pr_url / fm_scm_parse_remote_url) and the
+# shared wall-clock bound (fm_res_bounded) used by the --include-prs live-fetch path.
+# Both libraries declare no side effects on source; nothing here touches the network.
+# shellcheck source=bin/fm-scm-lib.sh
+. "$SCRIPT_DIR/fm-scm-lib.sh"
+# shellcheck source=bin/fm-resource-lib.sh
+. "$SCRIPT_DIR/fm-resource-lib.sh"
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
@@ -101,11 +126,16 @@ usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
 
 Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
 Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
+--include-prs fetches live open-PR/MR checks for GitHub and Codebase (code.byted.org).
 
-Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
+The only live-verified CI signal is candidate_prs{...,checks,verification=live}, present
+only under --include-prs. On the default local path, in_flight{state,doing} (reported=self)
+and recorded_prs{url,ci=unverified} are worker self-reports, never verified CI.
+
+Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing,reported},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
-  gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
+  gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url,ci},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
@@ -118,8 +148,9 @@ For every registered secondmate, readable structured facts from its own home are
   evidence and never become current work.
 Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
   --all-decisions, --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
-  --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
-Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
+  --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs with live-verified
+  checks and verification=live; GitHub PRs and Codebase MRs).
+Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR/MR results.
 EOF
 }
 
@@ -184,92 +215,180 @@ PR_REPOS_SHOWN=0
 PR_ROWS_CAPPED=0
 PR_ROWS_MIN_TOTAL=0
 
-# Parse owner/repo from an https or ssh GitHub remote/PR URL; empty if not GitHub.
-repo_slug() {  # <url>
-  printf '%s' "$1" | sed -n 's#.*github\.com[:/]\([^/]*/[^/]*\)#\1#p' | sed 's#\.git$##; s#/pull/.*$##; s#/$##'
+# Host component of an https or ssh URL/remote; empty when it has none. Needed only
+# to reconstruct a Codebase MR URL, since `bytedcli codebase mr list` leaves URL empty.
+scm_url_host() {  # <url-or-remote>
+  case "$1" in
+    *://*) printf '%s' "$1" | sed -E 's#^[a-z]+://([^/@]*@)?([^/:]+).*#\2#' ;;
+    *@*:*) printf '%s' "$1" | sed -E 's#^[^@]*@([^:]+):.*#\1#' ;;
+    *) printf '' ;;
+  esac
 }
 
-# Bounded gh call; prints stdout, non-zero on timeout/failure. gh only.
+# Classify a full PR/MR URL into "provider|host|path"; empty when unsupported. The
+# provider and path come from the shared fm-scm-lib.sh parser so this stays in lockstep
+# with how the merge/state seam classifies the same URLs, never a divergent regex.
+pr_target_repo() {  # <pr-or-mr-url>
+  local url=$1 parsed provider path
+  parsed=$(fm_scm_parse_pr_url "$url" 2>/dev/null) || return 1
+  provider=$(printf '%s' "$parsed" | cut -f1)
+  path=$(printf '%s' "$parsed" | cut -f2)
+  [ -n "$provider" ] && [ -n "$path" ] || return 1
+  printf '%s|%s|%s\n' "$provider" "$(scm_url_host "$url")" "$path"
+}
+
+# Classify a git remote URL into "provider|host|path"; empty when unsupported.
+remote_target_repo() {  # <remote-url>
+  local remote=$1 parsed provider path
+  parsed=$(fm_scm_parse_remote_url "$remote" 2>/dev/null) || return 1
+  provider=$(printf '%s' "$parsed" | cut -f1)
+  path=$(printf '%s' "$parsed" | cut -f2)
+  [ -n "$provider" ] && [ -n "$path" ] || return 1
+  printf '%s|%s|%s\n' "$provider" "$(scm_url_host "$remote")" "$path"
+}
+
+# Bounded live reads (the ONLY network path). Both route through the shared wall-clock
+# bound; a timeout or failure returns non-zero and the caller degrades that repo softly.
 gh_bounded() {  # <args...>
-  if command -v timeout >/dev/null 2>&1; then
-    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 timeout "$FM_BEARINGS_PR_TIMEOUT" gh "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gtimeout "$FM_BEARINGS_PR_TIMEOUT" gh "$@"
-  elif command -v perl >/dev/null 2>&1; then
-    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$FM_BEARINGS_PR_TIMEOUT" gh "$@"
-  else
-    return 124
-  fi
+  ( export GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1
+    fm_res_bounded "$FM_BEARINGS_PR_TIMEOUT" gh "$@" )
+}
+bytedcli_bounded() {  # <args...>
+  fm_res_bounded "$FM_BEARINGS_PR_TIMEOUT" bytedcli "$@"
 }
 
 if [ "$INCLUDE_PRS" = 1 ]; then
-  if ! command -v gh >/dev/null 2>&1; then
-    PR_STATUS='unavailable (gh not found)'
-  else
-    # Candidate repos: recorded pr= URLs plus live worktree origins. Deduped.
-    repos=""
-    while IFS= read -r u; do
-      [ -n "$u" ] || continue
-      s=$(repo_slug "$u"); [ -n "$s" ] || continue
-      case " $repos " in *" $s "*) : ;; *) repos="$repos $s" ;; esac
-    done <<EOF
+  # Candidate repos: recorded pr= URLs plus live worktree origins, each classified into
+  # "provider|host|path" and deduped. GitHub and Codebase are both discoverable here.
+  repos=""
+  add_repo_entry() {  # <provider|host|path>
+    local e=$1
+    [ -n "$e" ] || return 0
+    case " $repos " in *" $e "*) : ;; *) repos="$repos $e" ;; esac
+  }
+  while IFS= read -r u; do
+    [ -n "$u" ] || continue
+    add_repo_entry "$(pr_target_repo "$u" 2>/dev/null)"
+  done <<EOF
 $(printf '%s' "$SNAP" | jq -r '.tasks[].pr.url // empty')
 EOF
-    while IFS= read -r wt; do
-      [ -n "$wt" ] || continue
-      [ -d "$wt" ] || continue
-      u=$(git -C "$wt" remote get-url origin 2>/dev/null) || continue
-      s=$(repo_slug "$u"); [ -n "$s" ] || continue
-      case " $repos " in *" $s "*) : ;; *) repos="$repos $s" ;; esac
-    done <<EOF
+  while IFS= read -r wt; do
+    [ -n "$wt" ] || continue
+    [ -d "$wt" ] || continue
+    u=$(git -C "$wt" remote get-url origin 2>/dev/null) || continue
+    add_repo_entry "$(remote_target_repo "$u" 2>/dev/null)"
+  done <<EOF
 $(printf '%s' "$SNAP" | jq -r '.tasks[] | select(.kind != "secondmate") | .paths.worktree.path // empty')
 EOF
 
-    for repo in $repos; do PR_REPOS_TOTAL=$((PR_REPOS_TOTAL + 1)); done
-    nrepos=0; npr=0; nwarn=0; ncapped=0; rows='[]'
-    pr_fetch_limit=$((FM_BEARINGS_PR_LIMIT + 1))
-    for repo in $repos; do
-      if [ "$ALL_PR_REPOS" != 1 ] && [ "$nrepos" -ge "$FM_BEARINGS_PR_REPOS" ]; then break; fi
-      nrepos=$((nrepos + 1))
-      out=$(gh_bounded pr list --repo "$repo" --state open --limit "$pr_fetch_limit" \
-        --json number,title,url,headRefName,reviewDecision,mergeable,statusCheckRollup 2>/dev/null) \
-        || { nwarn=$((nwarn + 1)); continue; }
-      [ -n "$out" ] || out='[]'
-      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" '
-        [ .[] | {
-          num:(.number|tostring),
-          repo:$repo,
-          task:(if (.headRefName // "" | startswith("fm/")) then (.headRefName | ltrimstr("fm/")) else "-" end),
-          url:(.url // "-"),
-          review:(.reviewDecision // "none"),
-          mergeable:(.mergeable // "UNKNOWN"),
-          checks:(
-            (.statusCheckRollup // []) as $c
-            | if ($c|length) == 0 then "none"
-              elif any($c[]; (.conclusion // .state // "") as $s | ($s=="FAILURE" or $s=="ERROR" or $s=="TIMED_OUT" or $s=="CANCELLED" or $s=="ACTION_REQUIRED")) then "failing"
-              elif any($c[]; ((.status // "") != "COMPLETED") and ((.state // "") != "SUCCESS")) then "pending"
-              else "passing" end)
-        } ] as $rows | {returned:($rows | length), rows:$rows[:$limit]}') || { nwarn=$((nwarn + 1)); continue; }
-      returned=$(printf '%s' "$repo_result" | jq '.returned')
-      repo_rows=$(printf '%s' "$repo_result" | jq '.rows')
-      cnt=$(printf '%s' "$repo_rows" | jq 'length')
-      [ "$returned" -gt "$FM_BEARINGS_PR_LIMIT" ] && ncapped=$((ncapped + 1))
-      npr=$((npr + cnt))
-      rows=$(jq -n --argjson a "$rows" --argjson b "$repo_rows" '$a + $b')
-    done
-    PR_REPOS_SHOWN=$nrepos
-    PR_ROWS_CAPPED=$ncapped
-    PR_ROWS_MIN_TOTAL=$((npr + ncapped))
-    CANDIDATE_PRS=$rows
-    warnnote=""
-    [ "$nwarn" -gt 0 ] && warnnote="; ${nwarn} repo(s) unavailable"
-    cappednote=""
-    [ "$ncapped" -gt 0 ] && cappednote="; ${npr} shown, at least ${PR_ROWS_MIN_TOTAL} open; capped in ${ncapped} repo(s)"
-    if [ "$ncapped" -gt 0 ]; then
-      PR_STATUS="checked (${nrepos} repos${cappednote}${warnnote})"
-    else
-      PR_STATUS="checked (${nrepos} repos, ${npr} open${warnnote})"
-    fi
+  for entry in $repos; do PR_REPOS_TOTAL=$((PR_REPOS_TOTAL + 1)); done
+  nrepos=0; npr=0; nwarn=0; ncapped=0; rows='[]'
+  pr_fetch_limit=$((FM_BEARINGS_PR_LIMIT + 1))
+  for entry in $repos; do
+    if [ "$ALL_PR_REPOS" != 1 ] && [ "$nrepos" -ge "$FM_BEARINGS_PR_REPOS" ]; then break; fi
+    nrepos=$((nrepos + 1))
+    provider=${entry%%|*}
+    entry_rest=${entry#*|}
+    host=${entry_rest%%|*}
+    repo=${entry_rest#*|}
+    returned=0
+    repo_rows='[]'
+    case "$provider" in
+      github)
+        command -v gh >/dev/null 2>&1 || { nwarn=$((nwarn + 1)); continue; }
+        out=$(gh_bounded pr list --repo "$repo" --state open --limit "$pr_fetch_limit" \
+          --json number,title,url,headRefName,reviewDecision,mergeable,statusCheckRollup 2>/dev/null) \
+          || { nwarn=$((nwarn + 1)); continue; }
+        [ -n "$out" ] || out='[]'
+        repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" '
+          [ .[] | {
+            num:(.number|tostring),
+            repo:$repo,
+            task:(if (.headRefName // "" | startswith("fm/")) then (.headRefName | ltrimstr("fm/")) else "-" end),
+            url:(.url // "-"),
+            review:(.reviewDecision // "none"),
+            mergeable:(.mergeable // "UNKNOWN"),
+            checks:(
+              (.statusCheckRollup // []) as $c
+              | if ($c|length) == 0 then "none"
+                elif any($c[]; (.conclusion // .state // "") as $s | ($s=="FAILURE" or $s=="ERROR" or $s=="TIMED_OUT" or $s=="CANCELLED" or $s=="ACTION_REQUIRED")) then "failing"
+                elif any($c[]; ((.status // "") != "COMPLETED") and ((.state // "") != "SUCCESS")) then "pending"
+                else "passing" end),
+            verification:"live"
+          } ] as $rows | {returned:($rows | length), rows:$rows[:$limit]}') || { nwarn=$((nwarn + 1)); continue; }
+        returned=$(printf '%s' "$repo_result" | jq '.returned')
+        repo_rows=$(printf '%s' "$repo_result" | jq '.rows')
+        ;;
+      codebase)
+        command -v bytedcli >/dev/null 2>&1 || { nwarn=$((nwarn + 1)); continue; }
+        out=$(bytedcli_bounded --json codebase mr list -R "$repo" --state open -L "$pr_fetch_limit" 2>/dev/null) \
+          || { nwarn=$((nwarn + 1)); continue; }
+        printf '%s' "$out" | jq -e '.status == "success"' >/dev/null 2>&1 \
+          || { nwarn=$((nwarn + 1)); continue; }
+        # Open MR numbers + head branches in listing order; the per-MR CI read below is
+        # what makes this real-time, so cap the reads to the same per-repo row limit.
+        mrs=$(printf '%s' "$out" | jq -c '[.data.merge_requests[]? | {num:(.Number|tostring), branch:(.SourceBranchName // .SourceBranch // "")}]') \
+          || { nwarn=$((nwarn + 1)); continue; }
+        returned=$(printf '%s' "$mrs" | jq 'length')
+        i=0
+        while [ "$i" -lt "$FM_BEARINGS_PR_LIMIT" ]; do
+          mr=$(printf '%s' "$mrs" | jq -c --argjson i "$i" '.[$i] // empty')
+          [ -n "$mr" ] || break
+          i=$((i + 1))
+          num=$(printf '%s' "$mr" | jq -r '.num')
+          branch=$(printf '%s' "$mr" | jq -r '.branch')
+          # Real-time CI: aggregated mergeability, review, and check-run counts for THIS
+          # MR. A status read that cannot answer yields checks=unknown, never "passing".
+          st=$(bytedcli_bounded --json codebase mr status "$num" -R "$repo" 2>/dev/null || true)
+          printf '%s' "$st" | jq -e '.status == "success"' >/dev/null 2>&1 || st=''
+          row=$(printf '%s' "${st:-null}" | jq -c \
+            --arg num "$num" --arg repo "$repo" --arg host "$host" --arg branch "$branch" '
+            (if (type == "object" and .status == "success") then .data else null end) as $d
+            | ($d.check_runs) as $c
+            | {
+                num:$num,
+                repo:$repo,
+                task:(if ($branch|startswith("fm/")) then ($branch|ltrimstr("fm/")) else "-" end),
+                url:("https://" + $host + "/" + $repo + "/merge_requests/" + $num),
+                review:($d.review.status // "none"),
+                mergeable:(if $d.mergeability.mergeable == true then "MERGEABLE"
+                           elif $d.mergeability.mergeable == false then "UNMERGEABLE"
+                           else "UNKNOWN" end),
+                checks:(
+                  if $d == null then "unknown"
+                  elif ($c == null) or (($c.total_count // 0) == 0) then "none"
+                  elif (($c.failed_count // 0) > 0) then "failing"
+                  elif (($c.running_count // 0) > 0) then "pending"
+                  elif (($c.passed_count // 0) >= ($c.total_count // 0)) then "passing"
+                  else "pending" end),
+                verification:"live"
+              }') || continue
+          [ -n "$row" ] || continue
+          repo_rows=$(jq -n --argjson a "$repo_rows" --argjson b "$row" '$a + [$b]')
+        done
+        ;;
+      *)
+        nwarn=$((nwarn + 1)); continue
+        ;;
+    esac
+    cnt=$(printf '%s' "$repo_rows" | jq 'length')
+    case "$returned" in ''|*[!0-9]*) returned=0 ;; esac
+    [ "$returned" -gt "$FM_BEARINGS_PR_LIMIT" ] && ncapped=$((ncapped + 1))
+    npr=$((npr + cnt))
+    rows=$(jq -n --argjson a "$rows" --argjson b "$repo_rows" '$a + $b')
+  done
+  PR_REPOS_SHOWN=$nrepos
+  PR_ROWS_CAPPED=$ncapped
+  PR_ROWS_MIN_TOTAL=$((npr + ncapped))
+  CANDIDATE_PRS=$rows
+  warnnote=""
+  [ "$nwarn" -gt 0 ] && warnnote="; ${nwarn} repo(s) unavailable"
+  cappednote=""
+  [ "$ncapped" -gt 0 ] && cappednote="; ${npr} shown, at least ${PR_ROWS_MIN_TOTAL} open; capped in ${ncapped} repo(s)"
+  if [ "$ncapped" -gt 0 ]; then
+    PR_STATUS="checked (${nrepos} repos${cappednote}${warnnote})"
+  else
+    PR_STATUS="checked (${nrepos} repos, ${npr} open${warnnote})"
   fi
 fi
 
@@ -376,12 +495,14 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | {id, kind,
         state: .current_state.state,
         doing: ((.current_state.detail // "") as $d
-                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
+                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90)),
+        reported: "self"
       } ]
      + [ $secondmate_views[]
          | select(.bearings_state == "active_child_work")
          | {id,kind:"secondmate",state:.bearings_state,
-            doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
+            doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90)),
+            reported:"self"} ]) as $in_flight_all
   | ([ .backlog.records[]
          | select(.structured and .captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",
@@ -419,7 +540,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | . as $r
        | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))
        | {id, path} ]) as $reports_all
-  | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta") | {id, url:.pr.url} ]) as $recorded_prs_all
+  | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta") | {id, url:.pr.url, ci:"unverified"} ]) as $recorded_prs_all
   | . as $snap
   | {
       schema: "fm-bearings.v1",

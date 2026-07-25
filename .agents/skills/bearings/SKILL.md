@@ -22,6 +22,9 @@ It never tears down a task, merges a PR, dispatches new work, or mutates any tas
    Do not hand-probe the snapshot schema and do not make ad-hoc `gh-axi`/`gh` calls to assemble fleet facts; this command already assembles them.
    The command's header and `--help` output own its exact fields, bounds, opt-ins, and output contract.
    When the captain asks to include PRs, use the command's live-PR opt-in; otherwise keep the default local-only read.
+   The live-PR opt-in fetches real-time check status for both GitHub PRs and Codebase (`code.byted.org`) merge requests, so a PR-readiness verdict works for either forge, not GitHub alone.
+   Never call a PR "ready to merge" or "green" from a local-only snapshot: on the default path `in_flight` state/doing (`reported=self`) and `recorded_prs` (`ci=unverified`) are worker self-reports, not verified CI, and a status-log line that claims the suite passed is a claim, not a check.
+   The only live-verified readiness signal is `candidate_prs[].checks` (`verification=live`) under the live-PR opt-in; a PR belongs in Captain's Call as merge-ready only when that live check reads `passing`.
    If the command is unavailable, fall back to `bin/fm-fleet-snapshot.sh --json` and `bin/fm-crew-state.sh <id>`; never infer current state from a raw `tail` of `state/<id>.status`, which is append-only wake-event history whose last line goes stale.
    For registered secondmates, use the snapshot's structured-home classification and provenance; a parent event or bounded terminal contradiction is fallback evidence, never authority over readable structured home state.
    Structured captain-held decisions come from `decision-hold-lifecycle` and appear under `decisions_open`; do not scrape reports or visual-review artifacts to supplement them.
