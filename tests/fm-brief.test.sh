@@ -1,32 +1,69 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-brief.sh.
 #
-# Regression coverage for the heredoc-in-command-substitution parse bug (issue
-# #166): each ship-mode branch builds its Definition-of-done text with
-# `VAR=$(cat <<EOF ... EOF)`. Bash's lexer tracks quote state through the
-# heredoc body while it scans for the matching `)` of the command
-# substitution, so a single unescaped apostrophe anywhere in that body breaks
-# parsing of the *entire rest of the script* - `bash -n` fails, not just the
-# generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
-# is unaffected, so the secondmate charter block does not need this guard.
+# Regression coverage for the heredoc-in-command-substitution parse bug (issues
+# #166 and #958): ship-mode Definition-of-done text and the unguarded Herdr
+# declaration used to be built with `VAR=$(cat <<EOF ... EOF)`. Bash's lexer
+# tracks quote state through the heredoc body while it scans for the matching
+# `)` of the command substitution, so a single unescaped apostrophe anywhere
+# in that body breaks parsing of the *entire rest of the script* - `bash -n`
+# fails, not just the generated brief. macOS system bash 3.2.57 is the
+# fail-closed target (issue #958); newer bash often still parses the same
+# file. The fix captures multi-line bodies with statement-level
+# `read -r -d '' VAR <<EOF` (heredoc outside `$(...)`). A plain
+# `cat > file <<EOF ... EOF` (not wrapped in `$(...)`) is unaffected, so the
+# secondmate charter block does not need this guard.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# Explicit macOS-system-bash path: issue #958 only reproduces on bash 3.2's
+# parser. Prefer /bin/bash so CI/dev machines with a newer `bash` on PATH still
+# exercise the captain-machine interpreter when it is present.
+SYSTEM_BASH=/bin/bash
+if [ ! -x "$SYSTEM_BASH" ]; then
+  SYSTEM_BASH=$(command -v bash)
+fi
+
 TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
-# The script itself must always parse. This is the direct regression test for
-# issue #166: a stray apostrophe in any of the three DOD heredoc bodies
-# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
+# The script itself must always parse under system bash. This is the direct
+# regression test for issues #166/#958: a stray apostrophe in any
+# `$(cat <<EOF)` multi-line capture (no-mistakes DOD currently carries
+# "firstmate's") breaks `bash -n` on the whole file under bash 3.2.
 test_script_parses() {
-  local out rc
-  out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
-  expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
-  [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
-  pass "fm-brief.sh: bash -n succeeds"
+  local out rc ver
+  ver=$("$SYSTEM_BASH" --version | head -1)
+  out=$("$SYSTEM_BASH" -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
+  expect_code 0 "$rc" "$SYSTEM_BASH -n bin/fm-brief.sh must parse cleanly under $ver (got: $out)"
+  [ -z "$out" ] || fail "$SYSTEM_BASH -n bin/fm-brief.sh emitted unexpected output: $out"
+  pass "fm-brief.sh: $SYSTEM_BASH -n succeeds ($ver)"
+}
+
+# End-to-end: actually run the scaffold under system bash (not only `bash -n`)
+# so a parse-time success that still fails at runtime cannot slip through, and
+# the no-mistakes DOD keeps its intentional apostrophe in the generated brief.
+test_scaffold_runs_under_system_bash() {
+  local home id brief status ver
+  home="$TMP_ROOT/system-bash-home"
+  mkdir -p "$home/data"
+  id="brief-system-bash-e1"
+  ver=$("$SYSTEM_BASH" --version | head -1)
+  FM_HOME="$home" "$SYSTEM_BASH" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "fm-brief.sh under $SYSTEM_BASH ($ver) should exit 0"
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "system-bash scaffold did not write a brief"
+  assert_grep "# Definition of done" "$brief" "system-bash brief missing Definition of done"
+  assert_grep "{TASK}" "$brief" "system-bash brief missing the {TASK} placeholder"
+  assert_grep "firstmate's authority check" "$brief" \
+    "system-bash brief lost the apostrophe wording that used to break bash 3.2 parsing"
+  assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
+    "system-bash brief missing nonterminal working: gate protection"
+  assert_no_grep "EOF" "$brief" "system-bash brief leaked a heredoc EOF marker"
+  pass "fm-brief.sh: scaffold runs under $SYSTEM_BASH ($ver)"
 }
 
 test_help_includes_entire_header() {
@@ -383,6 +420,7 @@ test_scout_and_secondmate_scaffold() {
 }
 
 test_script_parses
+test_scaffold_runs_under_system_bash
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
