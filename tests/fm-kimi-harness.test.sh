@@ -240,7 +240,7 @@ SH
   pass "fm-harness: markerless kimi is detected by ancestry after env-marker precedence"
 }
 
-test_kimi_busy_signature_uses_all_moon_frames_not_tip_text() {
+test_kimi_busy_signature_is_scoped_to_spinner_lines() {
   local capture phase
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-tmux-lib.sh"
@@ -254,18 +254,50 @@ test_kimi_busy_signature_uses_all_moon_frames_not_tip_text() {
   }
   for phase in 🌑 🌒 🌓 🌔 🌕 🌖 🌗 🌘; do
     printf '%s Thinking\n│ > │\n' "$phase" > "$capture"
-    fm_pane_is_busy fake || fail "kimi moon phase $phase was not recognized as busy"
+    fm_pane_is_busy fake kimi || fail "kimi moon phase $phase was not recognized as busy"
   done
+  printf 'ordinary response ending with 🌕\n│ > │\n' > "$capture"
+  if fm_pane_is_busy fake kimi; then
+    fail "a moon outside Kimi's spinner-line shape was misread as busy"
+  fi
+  printf '🌕 Thinking\n│ > │\n' > "$capture"
+  if fm_pane_is_busy fake codex; then
+    fail "Kimi's moon spinner signature leaked into another harness"
+  fi
   printf 'tip: ctrl+c: cancel\n│ > │\n' > "$capture"
-  if fm_pane_is_busy fake; then
+  if fm_pane_is_busy fake kimi; then
     fail "kimi's independently rotating idle tip was misread as busy"
   fi
   for phase in 🌑 🌒 🌓 🌔 🌕 🌖 🌗 🌘; do
     grep -Fq "$phase" "$ROOT/bin/fm-watch.sh" \
       || fail "fm-watch default is missing kimi moon phase $phase"
   done
-  pass "busy detection: every kimi moon phase is busy while idle tip text is ignored"
+  pass "busy detection: Kimi moon phases require its harness and spinner-line shape"
 }
+
+test_watcher_scopes_moon_spinner_to_recorded_kimi_task() (
+  local state="$TMP_ROOT/watch-state"
+  mkdir -p "$state"
+  printf 'window=fake\nharness=kimi\n' > "$state/kimi-watch.meta"
+  unset FM_BUSY_REGEX
+  FM_HOME="$TMP_ROOT/watch-home"
+  FM_STATE_OVERRIDE="$state"
+  export FM_HOME FM_STATE_OVERRIDE
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-watch.sh"
+  fm_backend_busy_state() { printf 'unknown'; }
+  window_is_busy fake '🌕 Thinking' \
+    || fail "fm-watch did not recognize a recorded Kimi spinner line"
+  printf 'window=fake\nharness=codex\n' > "$state/kimi-watch.meta"
+  if window_is_busy fake '🌕 Thinking'; then
+    fail "fm-watch applied Kimi's moon spinner to a recorded Codex task"
+  fi
+  printf 'window=fake\nharness=kimi\n' > "$state/kimi-watch.meta"
+  if window_is_busy fake 'ordinary response ending with 🌕'; then
+    fail "fm-watch treated an ordinary Kimi moon as a spinner line"
+  fi
+  pass "fm-watch: moon spinner matching is scoped by metadata and line shape"
+)
 
 test_kimi_bordered_prompt_needs_no_override() {
   local out
@@ -283,5 +315,6 @@ test_kimi_launch_then_send_is_verified
 test_kimi_unconfirmed_delivery_fails_loudly
 test_kimi_readiness_gate_precedes_pointer
 test_kimi_detection_uses_ancestry_after_markers
-test_kimi_busy_signature_uses_all_moon_frames_not_tip_text
+test_kimi_busy_signature_is_scoped_to_spinner_lines
+test_watcher_scopes_moon_spinner_to_recorded_kimi_task
 test_kimi_bordered_prompt_needs_no_override
