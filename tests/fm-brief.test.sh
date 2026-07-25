@@ -2,13 +2,23 @@
 # Behavior tests for bin/fm-brief.sh.
 #
 # Regression coverage for the heredoc-in-command-substitution parse bug (issue
-# #166): each ship-mode branch builds its Definition-of-done text with
-# `VAR=$(cat <<EOF ... EOF)`. Bash's lexer tracks quote state through the
-# heredoc body while it scans for the matching `)` of the command
-# substitution, so a single unescaped apostrophe anywhere in that body breaks
-# parsing of the *entire rest of the script* - `bash -n` fails, not just the
-# generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
-# is unaffected, so the secondmate charter block does not need this guard.
+# #166, reintroduced by #945/issue #1000): on bash 3.2 (macOS system bash), a
+# heredoc nested inside a `$(...)` command substitution - `VAR=$(cat <<EOF
+# ... EOF)` - breaks the lexer's quote tracking the moment the heredoc body
+# contains a single unescaped apostrophe, and the failure surfaces as a parse
+# error for the *entire rest of the script*, not just that assignment. The bug
+# is not specific to `case` bodies (an `if`/`else` branch hit it too) and does
+# not reproduce under a newer bash, which is how #945 passed CI (Linux, bash
+# 5+) while breaking every macOS crewmate. `bin/fm-brief.sh` now avoids the
+# idiom entirely, building each such variable with `read -r -d '' VAR <<EOF
+# ... EOF || true` instead - a heredoc with no enclosing command substitution,
+# so no quote state leaks past it regardless of content. A plain
+# `cat > file <<EOF ... EOF` (redirected straight to a file, not captured
+# through `$(...)`) was never affected either. test_no_command_substitution_
+# heredocs below pins the structural fix so the vulnerable idiom cannot
+# quietly return; a previous version of this suite instead pinned the exact
+# wording of one known-bad line, which is how the #945 regression - different
+# wording, same bug - slipped past it.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -27,6 +37,22 @@ test_script_parses() {
   expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
   [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
   pass "fm-brief.sh: bash -n succeeds"
+}
+
+# Structural guard for the bug class itself (issue #166 / #1000), independent
+# of any particular line's wording: bin/fm-brief.sh must never build a
+# variable with a heredoc nested inside a `$(...)` command substitution, since
+# that idiom breaks bash 3.2 parsing the moment its body picks up a stray
+# apostrophe. A wording-only pin (see test_no_mistakes_dod_wording) already
+# failed to catch this once, because #945 introduced a *new* apostrophe in
+# *different* text. This test would fail on plain `bash -n` only under bash
+# 3.2, so it checks the source text directly and runs under any bash.
+test_no_command_substitution_heredocs() {
+  local hits
+  # shellcheck disable=SC2016  # single quotes are deliberate: this is a literal grep pattern, not an expansion.
+  hits=$(grep -n '=\$(cat <<' "$ROOT/bin/fm-brief.sh" || true)
+  [ -z "$hits" ] || fail "fm-brief.sh reintroduced a heredoc-in-\$(...) assignment, which breaks bash 3.2 parsing on any apostrophe: $hits"
+  pass "fm-brief.sh: no variable is built with a heredoc nested inside \$(...)"
 }
 
 test_help_includes_entire_header() {
@@ -383,6 +409,7 @@ test_scout_and_secondmate_scaffold() {
 }
 
 test_script_parses
+test_no_command_substitution_heredocs
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
