@@ -255,13 +255,20 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
-printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
 # `treehouse get --lease` reports the leased worktree on stdout, and fm-spawn
 # refuses to launch without it. The stub has to answer that the same way.
-[ "${1:-}" != get ] || { printf '%s\n' "${FM_FAKE_TREEHOUSE_WORKTREE:?}"; exit 0; }
+[ "${1:-}" != get ] || {
+  printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
+  printf '%s\n' "${FM_FAKE_TREEHOUSE_WORKTREE:?}"
+  exit 0
+}
 [ "${1:-}" = return ] || exit 0
-[ "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-0}" != 1 ] || exit 71
 target=${@: -1}
+[ "$target" != . ] || target=$(pwd -P)
+printf 'return --force %s\n' "$target" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
+[ "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-0}" != 1 ] || exit 71
+project=${FM_TREEHOUSE_RETURN_PROJECT:-$(pwd -P)}
+cd "$project" || exit 72
 git worktree remove --force "$target"
 SH
   chmod +x "$fakebin/treehouse"
@@ -284,6 +291,7 @@ run_direct_spawn() {
     FM_FAKE_LAUNCH_LOG="$launch_log" FM_FAKE_ENDPOINT_FILE="$home/state/.fake-endpoint" \
     FM_FAKE_ENDPOINT_LABEL="fm-${1:-unknown}" FM_FAKE_KILL_RETAIN="${FM_FAKE_KILL_RETAIN:-0}" \
     FM_FAKE_HERDR_DRIFT_WORKTREE="${FM_FAKE_HERDR_DRIFT_WORKTREE:-}" \
+    T="${T:-}" \
     FM_FAKE_TREEHOUSE_LOG="$TREEHOUSE_LOG" FM_FAKE_TREEHOUSE_WORKTREE="$worktree" \
     FM_FAKE_TREEHOUSE_RETURN_FAIL="${FM_FAKE_TREEHOUSE_RETURN_FAIL:-0}" \
     PATH="$FAKEBIN:$PATH" \
@@ -876,6 +884,41 @@ test_failed_new_direct_spawn_retains_cleanup_when_worktree_return_fails() {
   pass "direct spawn persists cleanup state when worktree return cannot be confirmed"
 }
 
+test_failed_new_direct_spawn_never_records_an_uncreated_endpoint() {
+  local record id out status meta
+  reset_accounts
+  set_remaining 1 90,85
+  id=direct-new-no-endpoint-z9
+  record=$(make_spawn_case direct-new-no-endpoint codex "$id")
+  read_spawn_case "$record"
+  : > "$TREEHOUSE_LOG"
+  : > "/tmp/fm-$id"
+
+  if out=$(T=default:captain-pane FM_FAKE_TREEHOUSE_RETURN_FAIL=1 \
+    run_direct_spawn "$SPAWN_HOME" "$SPAWN_WORKTREE" "$SPAWN_LAUNCH_LOG" \
+      "$id" "$SPAWN_PROJECT" --backend herdr --account-pool legacy-codex-pool 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "pre-endpoint direct spawn failure fixture unexpectedly succeeded"
+  meta="$SPAWN_HOME/state/$id.meta"
+  [ -d "$SPAWN_WORKTREE" ] || fail "pre-endpoint return failure lost the retained worktree"
+  assert_grep "direct_spawn_cleanup=pending" "$meta" \
+    "pre-endpoint failure did not record pending worktree cleanup"
+  assert_grep "direct_spawn_endpoint=not-created" "$meta" \
+    "pre-endpoint failure did not distinguish an uncreated endpoint"
+  assert_grep "window=" "$meta" \
+    "pre-endpoint failure did not retain the metadata schema's empty window field"
+  assert_no_grep "window=default:captain-pane" "$meta" \
+    "pre-endpoint failure fabricated the currently focused pane as its endpoint"
+  assert_no_grep "herdr_pane_id=" "$meta" \
+    "pre-endpoint failure copied an ambient Herdr pane identity"
+  [ ! -e "$SPAWN_HOME/state/.fake-endpoint" ] || fail "pre-endpoint failure created an endpoint"
+  rm -f "/tmp/fm-$id"
+  pass "failed direct spawn never records an endpoint it did not create"
+}
+
 test_routing_off_keeps_default_provider_launch() {
   local record id out launch meta
   reset_accounts
@@ -907,6 +950,7 @@ if [ "${FM_TEST_FOCUSED:-}" = direct-recovery-lifecycle ]; then
   test_direct_recovery_rejects_secondmate_metadata
   test_failed_new_direct_spawn_returns_worktree_after_endpoint_cleanup
   test_failed_new_direct_spawn_retains_cleanup_when_worktree_return_fails
+  test_failed_new_direct_spawn_never_records_an_uncreated_endpoint
   exit 0
 fi
 
@@ -931,6 +975,7 @@ test_direct_recovery_tracks_retained_replacement_endpoint
 test_new_direct_spawn_tracks_retained_endpoint_and_worktree
 test_failed_new_direct_spawn_returns_worktree_after_endpoint_cleanup
 test_failed_new_direct_spawn_retains_cleanup_when_worktree_return_fails
+test_failed_new_direct_spawn_never_records_an_uncreated_endpoint
 test_routing_off_keeps_default_provider_launch
 
 echo "# all fm-account-directory tests passed"

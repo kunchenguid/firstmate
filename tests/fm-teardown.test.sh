@@ -3249,6 +3249,33 @@ SH
   pass "retained direct-spawn teardown requires confirmed endpoint quiescence"
 }
 
+test_never_created_direct_spawn_endpoint_is_not_quiesced() {
+  local case_dir meta_tmp rc
+  case_dir=$(make_case never-created-direct-spawn-endpoint)
+  write_meta "$case_dir" local-only ship
+  meta_tmp=$(mktemp "$case_dir/state/.never-created-meta.XXXXXX")
+  awk '!/^window=/ && !/^tmux_session_target=/' "$case_dir/state/task-x1.meta" > "$meta_tmp"
+  printf '%s\n' \
+    'window=' \
+    'account_home=/tmp/direct-account-home' \
+    'direct_spawn_endpoint=not-created' \
+    'direct_spawn_cleanup=pending' \
+    'rollback_pending=1' >> "$meta_tmp"
+  mv "$meta_tmp" "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "never-created endpoint teardown"
+  assert_present "$case_dir/fakebin/.tmux-live" \
+    "never-created endpoint cleanup acted on the currently focused tmux endpoint"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "never-created endpoint cleanup left completed task metadata"
+  pass "never-created direct-spawn endpoint skips endpoint quiescence"
+}
+
 test_secondmate_registry_duplicate_home_blocks_removal() {
   local case_dir home rc
   case_dir=$(make_case secondmate-registry-duplicate-home)
@@ -4316,6 +4343,7 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = direct-spawn-cleanup ]; then
   test_retained_direct_spawn_requires_confirmed_endpoint_quiescence
+  test_never_created_direct_spawn_endpoint_is_not_quiesced
   exit 0
 fi
 
@@ -4511,6 +4539,7 @@ test_secondmate_state_enumeration_fails_closed
 test_secondmate_missing_treehouse_child_is_retained
 test_secondmate_registry_home_drift_blocks_removal
 test_retained_direct_spawn_requires_confirmed_endpoint_quiescence
+test_never_created_direct_spawn_endpoint_is_not_quiesced
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows

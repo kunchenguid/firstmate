@@ -212,12 +212,41 @@ fi
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
 DIRECT_SPAWN_CLEANUP=$(fm_meta_get "$META" direct_spawn_cleanup)
+DIRECT_SPAWN_ENDPOINT=$(fm_meta_get "$META" direct_spawn_endpoint)
 DIRECT_SPAWN_BACKUP=$(fm_meta_get "$META" direct_spawn_backup)
 DIRECT_SPAWN_ARTIFACTS=$(fm_meta_get "$META" direct_spawn_artifacts)
 case "$DIRECT_SPAWN_CLEANUP" in
-  ''|pending) ;;
+  '')
+    [ -z "$DIRECT_SPAWN_ENDPOINT" ] || {
+      echo "error: direct_spawn_endpoint metadata exists without pending cleanup for $ID" >&2
+      exit 1
+    }
+    ;;
+  pending)
+    case "$DIRECT_SPAWN_ENDPOINT" in
+      ''|not-created) ;;
+      *) echo "error: invalid direct_spawn_endpoint metadata for $ID" >&2; exit 1 ;;
+    esac
+    ;;
   *) echo "error: invalid direct_spawn_cleanup metadata for $ID" >&2; exit 1 ;;
 esac
+if [ "$DIRECT_SPAWN_ENDPOINT" = not-created ]; then
+  [ -z "$T" ] \
+    && [ -z "$(fm_meta_get "$META" tmux_window_id)" ] \
+    && [ -z "$(fm_meta_get "$META" tmux_session_target)" ] \
+    && [ -z "$(fm_meta_get "$META" herdr_session)" ] \
+    && [ -z "$(fm_meta_get "$META" herdr_workspace_id)" ] \
+    && [ -z "$(fm_meta_get "$META" herdr_tab_id)" ] \
+    && [ -z "$(fm_meta_get "$META" herdr_pane_id)" ] \
+    && [ -z "$(fm_meta_get "$META" zellij_session)" ] \
+    && [ -z "$(fm_meta_get "$META" zellij_tab_id)" ] \
+    && [ -z "$(fm_meta_get "$META" zellij_pane_id)" ] \
+    && [ -z "$(fm_meta_get "$META" cmux_workspace_id)" ] \
+    && [ -z "$(fm_meta_get "$META" cmux_surface_id)" ] || {
+      echo "error: never-created endpoint metadata for $ID contains an endpoint identity" >&2
+      exit 1
+    }
+fi
 ORCA_CLEANUP_PENDING_COUNT=$(grep -c '^orca_cleanup_pending=' "$META" 2>/dev/null || true)
 ORCA_CLEANUP_PENDING=0
 if [ "$ORCA_CLEANUP_PENDING_COUNT" -ne 0 ]; then
@@ -3986,7 +4015,9 @@ post_quiescence_safety_refusal() {
 }
 
 if [ "$DIRECT_SPAWN_CLEANUP" = pending ]; then
-  quiesce_retained_direct_spawn_endpoint || exit 1
+  if [ "$DIRECT_SPAWN_ENDPOINT" != not-created ]; then
+    quiesce_retained_direct_spawn_endpoint || exit 1
+  fi
   validate_teardown_target_identity || { post_quiescence_safety_refusal; exit 1; }
 elif [ "$KIND" != secondmate ]; then
   quiesce_task_endpoint || exit 1

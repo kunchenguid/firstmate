@@ -986,6 +986,7 @@ fm_secondmate_registry_lock_acquire() {
 
 fm_secondmate_registry_query() {
   local registry=$1 mode=${2:-validate} expected_id=${3:-} key=${4:-}
+  # shellcheck disable=SC2016 # Perl source is intentionally a literal shell argument.
   fm_account_system_perl -MErrno=ENOENT -e '
     my ($registry, $mode, $expected_id, $key) = @ARGV;
     if (!lstat($registry)) {
@@ -1084,8 +1085,8 @@ fm_account_meta_lock_release() {  # <lock-path>
     return 1
   }
   if [ -f "$lock" ]; then
-    fm_account_system_exec "$FM_ACCOUNT_SYSTEM_RM_BIN" -f "$lock"
-    return
+    fm_account_system_exec "$FM_ACCOUNT_SYSTEM_RM_BIN" -f "$lock" || return 1
+    return 0
   fi
   released=$(fm_account_system_exec "$FM_ACCOUNT_SYSTEM_MKTEMP_BIN" -d "$lock.release.XXXXXX" 2>/dev/null) || return 1
   fm_account_system_exec "$FM_ACCOUNT_SYSTEM_RMDIR_BIN" "$released" || return 1
@@ -1103,7 +1104,7 @@ fm_account_safe_lineage_value() {
 
 fm_account_meta_key_owned() {  # <key>
   case "$1" in
-    window|worktree|worktree_git_dir|worktree_git_dir_identity|worktree_git_ref|worktree_git_head|worktree_git_setup_ref|worktree_git_setup_head|project|harness|kind|mode|yolo|tasktmp|model|effort|report_required|generation_id|backend|tmux_window_id|tmux_session_target|account_home|direct_spawn_cleanup|direct_spawn_backup|direct_spawn_artifacts|direct_recovery_cleanup|direct_recovery_backup|direct_recovery_artifacts|account_pool|account_profile|account_task|account_attempt|account_predecessor_task|account_predecessor_attempt|account_predecessor_provider|account_predecessor_profile|account_predecessor_pool|account_predecessor_session|account_predecessor_cleanup|account_rollback_cleanup|account_rollback_backup|account_rollback_artifacts|account_rollback_preserve_session|continuation_packet|provider_session_id|herdr_session|herdr_workspace_id|herdr_tab_id|herdr_pane_id|zellij_session|zellij_tab_id|zellij_pane_id|orca_worktree_id|terminal|orca_cleanup_pending|orca_cleanup_phase|orca_terminal_proof|orca_repo_id|orca_expected_task|orca_provider_task|orca_discovery_label|orca_provider_scope|cmux_workspace_id|cmux_surface_id|home|projects|rollback_pending) return 0 ;;
+    window|worktree|worktree_git_dir|worktree_git_dir_identity|worktree_git_ref|worktree_git_head|worktree_git_setup_ref|worktree_git_setup_head|project|harness|kind|mode|yolo|tasktmp|model|effort|report_required|generation_id|backend|tmux_window_id|tmux_session_target|account_home|direct_spawn_cleanup|direct_spawn_endpoint|direct_spawn_backup|direct_spawn_artifacts|direct_recovery_cleanup|direct_recovery_backup|direct_recovery_artifacts|account_pool|account_profile|account_task|account_attempt|account_predecessor_task|account_predecessor_attempt|account_predecessor_provider|account_predecessor_profile|account_predecessor_pool|account_predecessor_session|account_predecessor_cleanup|account_rollback_cleanup|account_rollback_backup|account_rollback_artifacts|account_rollback_preserve_session|continuation_packet|provider_session_id|herdr_session|herdr_workspace_id|herdr_tab_id|herdr_pane_id|zellij_session|zellij_tab_id|zellij_pane_id|orca_worktree_id|terminal|orca_cleanup_pending|orca_cleanup_phase|orca_terminal_proof|orca_repo_id|orca_expected_task|orca_provider_task|orca_discovery_label|orca_provider_scope|cmux_workspace_id|cmux_surface_id|home|projects|rollback_pending) return 0 ;;
     *) return 1 ;;
   esac
 }
