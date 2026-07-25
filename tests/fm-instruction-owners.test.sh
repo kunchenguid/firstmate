@@ -115,8 +115,7 @@ test_agent_owned_quota_array_dispatch_contract() {
     'Preserve malformed profile configuration as an actionable error' \
     "preserve the captain's strongest-reasoning class rather than silently downgrading it" \
     'Break genuine headroom ties without array-order or harness bias' \
-    '`quota-axi` owns how model or product windows relate to bounding account windows' \
-    'explicitly interim rule until successor `quota-axi-interpretation-hints-h3` lands'; do
+    '`quota-axi` owns how model or product windows relate to bounding account windows'; do
     assert_grep "$phrase" "$AGENTS" "array-dispatch contract lost '$phrase'"
   done
 
