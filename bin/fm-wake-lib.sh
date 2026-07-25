@@ -198,6 +198,42 @@ fm_lock_claim() {
   return 0
 }
 
+# Create lockdir as a symlink (or Windows junction) to ownerdir.
+# On MSYS/Git Bash without native symlink privilege, plain `ln -s` often creates
+# a directory *copy* instead of a link; readlink then fails and acquire_wait
+# spins forever. On MSYS/Cygwin always use `mklink /J` (junction). Elsewhere
+# use ln -s as before.
+fm_lock_is_msys() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_lock_link_owner_dir() {
+  local lockdir=$1 ownerdir=$2 win_lock win_owner
+  # Ensure no debris from a prior failed attempt.
+  if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
+    rm -f "$lockdir" 2>/dev/null || true
+    rm -rf "$lockdir" 2>/dev/null || true
+  fi
+  if fm_lock_is_msys && command -v cygpath >/dev/null 2>&1 && command -v cmd.exe >/dev/null 2>&1; then
+    win_lock=$(cygpath -w "$lockdir" 2>/dev/null) || return 1
+    win_owner=$(cygpath -w "$ownerdir" 2>/dev/null) || return 1
+    # Junctions show up as symlinks under MSYS and support readlink.
+    # Use //c and //J so MSYS does not rewrite the switches as paths.
+    cmd.exe //c mklink //J "$win_lock" "$win_owner" >/dev/null 2>&1 || return 1
+    fm_lock_points_to_owner "$lockdir" "$ownerdir"
+    return $?
+  fi
+  if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+    return 0
+  fi
+  rm -f "$lockdir" 2>/dev/null || true
+  rm -rf "$lockdir" 2>/dev/null || true
+  return 1
+}
+
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
@@ -210,7 +246,7 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+  if fm_lock_link_owner_dir "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
       return 0
