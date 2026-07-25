@@ -304,6 +304,9 @@ test_crew_absorb_class_classifier() {
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
   [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
   ! crew_is_paused a || fail "unknown crew classed paused"
+  export FM_FAKE_CREW_STATE_REFUSE=1
+  [ "$(crew_absorb_class a)" = none ] || fail "a refused crew-state read was classed absorbable"
+  unset FM_FAKE_CREW_STATE_REFUSE
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
   unset FM_FAKE_CREW_STATE
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
@@ -325,6 +328,9 @@ test_crew_progress_advanced_since_classifier() {
   crew_progress_advanced_since a "$anchor" || fail "the exact advanced verdict was not accepted"
   FM_FAKE_CREW_PROGRESS=unknown
   ! crew_progress_advanced_since a "$anchor" || fail "an unknown progress read was treated as proof"
+  export FM_FAKE_CREW_PROGRESS_REFUSE=1
+  ! crew_progress_advanced_since a "$anchor" || fail "a refused progress read was treated as proof"
+  unset FM_FAKE_CREW_PROGRESS_REFUSE
   FM_FAKE_CREW_PROGRESS='advanced with caveat'
   ! crew_progress_advanced_since a "$anchor" || fail "a malformed verdict was treated as proof"
   FM_FAKE_CREW_PROGRESS=advanced
@@ -1181,6 +1187,7 @@ test_wedge_timer_still_escalates_a_non_advancing_pipeline() {
   printf '1\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   export FM_FAKE_CREW_PROGRESS=unknown
+  export FM_FAKE_CREW_PROGRESS_REFUSE=1
 
   # Priming round establishes the stale hash and the wedge timer. It also clears
   # escalation bookkeeping, so the counter is seeded afterwards.
@@ -1205,7 +1212,7 @@ test_wedge_timer_still_escalates_a_non_advancing_pipeline() {
   grep -F "possible wedge" "$out" >/dev/null || fail "a non-advancing pipeline did not flag a possible wedge: $(cat "$out")"
   grep -F "escalation 3" "$out" >/dev/null || fail "the consecutive-escalation count did not continue: $(cat "$out")"
   grep -F "demand-deep-inspection" "$out" >/dev/null || fail "the demand-deep-inspection path became unreachable: $(cat "$out")"
-  unset FM_FAKE_CREW_STATE FM_FAKE_CREW_PROGRESS
+  unset FM_FAKE_CREW_STATE FM_FAKE_CREW_PROGRESS FM_FAKE_CREW_PROGRESS_REFUSE
   pass "preservation guard: a non-advancing pipeline still escalates and still reaches demand-deep-inspection"
 }
 

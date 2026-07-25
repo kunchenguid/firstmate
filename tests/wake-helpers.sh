@@ -114,11 +114,13 @@ if [ "${1:-}" = --progress ]; then mode=progress; shift; fi
 id=${1:-}
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
 if [ "$mode" = progress ]; then
+  [ "${FM_FAKE_CREW_PROGRESS_REFUSE:-0}" = 1 ] && exit 2
   var="FM_FAKE_CREW_PROGRESS_$key"
   val=${!var:-${FM_FAKE_CREW_PROGRESS:-}}
   printf 'progress: %s\n' "${val:-unknown}"
   exit 0
 fi
+[ "${FM_FAKE_CREW_STATE_REFUSE:-0}" = 1 ] && exit 2
 var="FM_FAKE_CREW_STATE_$key"
 val=${!var:-${FM_FAKE_CREW_STATE:-}}
 printf '%s\n' "${val:-state: unknown · source: none · fake default}"
