@@ -78,6 +78,14 @@ Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identiti
 Herdr uses native registered-agent state and needs no process-name branch.
 Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
 
+Empty and non-concrete endpoint-kill targets are refused before tmux is called, while a concrete `session:window` target still removes only that task window.
+The adapter-level real-tmux regression and the teardown metadata regression are pinned by:
+
+```sh
+tests/fm-backend-tmux-smoke.test.sh
+tests/fm-teardown.test.sh
+```
+
 The structural multi-row composer reader, Kimi pointer-delivery path, and OpenCode 1.18.4 busy-queue behavior are pinned by:
 
 ```sh

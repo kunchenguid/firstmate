@@ -85,8 +85,9 @@ Ambiguous pending text never receives the busy-queue conversion.
 tests/fm-backend-tmux-smoke.test.sh
 tests/fm-composer-ghost.test.sh
 tests/fm-kimi-harness.test.sh
+tests/fm-teardown.test.sh
 tests/fm-tmux-submit-busy.test.sh
 tests/fm-bootstrap.test.sh
 ```
 
-[`verification/runtime-backends.md`](verification/runtime-backends.md#tmux) records the active foreground-process and submit evidence.
+[`verification/runtime-backends.md`](verification/runtime-backends.md#tmux) records the active endpoint-kill, foreground-process, and submit evidence.
