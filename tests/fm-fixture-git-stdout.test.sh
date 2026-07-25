@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# Pin: fixture path capture must stay pure when git hooks write to stdout.
+# Pin: fixture path capture must stay pure when git hooks write to stdout,
+# without breaking PATH mocks that re-exec the "real" git.
 #
 # The classic shape is:
 #   w=$(new_world name)   # helper runs git commit/push, then prints a path
 #   git -C "$w/main" ...  # must see a real path, not hook banners
 #
 # Any core.hooksPath (or local hook) that prints instruments on commit/push
-# used to glue those lines onto the captured path. tests/lib.sh wraps git so
-# hook-bearing subcommands relocate stdout to stderr by default; this file
-# proves that default, and proves that turning the relocate off restores the
-# corruption - so the protection cannot be removed without a loud failure.
+# used to glue those lines onto the captured path. tests/lib.sh installs a
+# PATH shim so hook-bearing subcommands relocate stdout to stderr by default;
+# this file proves that default, proves that turning the relocate off restores
+# the corruption, and proves that command -v / PATH-mock re-exec stay safe
+# (a shell-function wrap made command -v return "git" and hung teardown).
 #
 # Do not "fix" a failure here by disabling hooks in fixtures. The scanner's
 # instruments are intentional; the capture shape is what must stay safe.
@@ -92,25 +94,60 @@ test_keep_mode_still_corrupts_capture() {
   pass "keep mode reintroduces capture corruption (wrapper is load-bearing)"
 }
 
-# --- real binary is pinned; production subprocesses stay unwrapped ---------
-test_real_git_binary_is_pinned_and_callable() {
-  local kind
-  # After sourcing lib.sh, `git` is a shell function and FM_TEST_REAL_GIT is the
-  # absolute binary. PATH mocks that re-exec "the real git" must use that pin
-  # (command -v git only returns the function name). Production bin/* scripts
-  # run as separate processes and always get the real binary from PATH.
+# --- command -v / PATH-mock re-exec must not hang or break toolbins --------
+test_command_v_git_is_absolute_and_reexec_safe() {
+  local resolved kind fakebin log
+  resolved=$(command -v git)
+  case "$resolved" in
+    /*) ;;
+    *) fail "command -v git must be absolute after lib.sh (got: $resolved) - a bare name hangs PATH mocks that re-exec it" ;;
+  esac
+  [ -x "$resolved" ] || fail "command -v git not executable: $resolved"
   kind=$(type -t git)
-  [ "$kind" = function ] || fail "expected shell function git after sourcing lib.sh, got: $kind"
+  [ "$kind" = file ] || fail "expected PATH shim file git, got type: $kind"
   case "$FM_TEST_REAL_GIT" in
     /*) ;;
     *) fail "FM_TEST_REAL_GIT must be absolute, got: $FM_TEST_REAL_GIT" ;;
   esac
   [ -x "$FM_TEST_REAL_GIT" ] || fail "FM_TEST_REAL_GIT not executable: $FM_TEST_REAL_GIT"
+  # The obvious PATH-mock pattern: capture command -v, re-exec under fakebin first.
+  # Must terminate (not recurse) and reach the real binary.
+  fakebin="$TMP_ROOT/fakebin-reexec"
+  log="$TMP_ROOT/reexec.log"
+  mkdir -p "$fakebin"
+  : > "$log"
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+printf 'mock-hit\n' >> '$log'
+exec '$resolved' "\$@"
+SH
+  chmod +x "$fakebin/git"
+  PATH="$fakebin:$PATH" git rev-parse --git-dir >/dev/null \
+    || fail "PATH mock re-exec of command -v git failed"
+  [ "$(cat "$log")" = mock-hit ] || fail "PATH mock was not entered"
+  # Absolute real pin also works (what teardown/fleet-sync/secondmate-sync use).
   "$FM_TEST_REAL_GIT" rev-parse --git-dir >/dev/null \
     || fail "pinned real git binary must still run"
-  pass "wrapper pins real git; PATH mocks and production subprocesses stay safe"
+  pass "command -v git is absolute re-exec-safe; FM_TEST_REAL_GIT pins real binary"
+}
+
+# --- toolbin ln -s "$(command -v git)" must not be a relative dead link ------
+test_toolbin_symlink_to_command_v_git_works() {
+  local tb resolved bash_path
+  tb="$TMP_ROOT/toolbin"
+  mkdir -p "$tb"
+  resolved=$(command -v git)
+  bash_path=$(type -P bash)
+  # Mirror fm-crew-state's make_no_timeout_toolbin: restricted PATH with the
+  # tools the shim and the test need, no ambient /usr/bin.
+  ln -s "$resolved" "$tb/git"
+  ln -s "$bash_path" "$tb/bash"
+  PATH="$tb" git rev-parse --git-dir >/dev/null \
+    || fail "toolbin symlink to command -v git is dead or non-functional (resolved=$resolved)"
+  pass "toolbin ln -s \"\$(command -v git)\" stays usable under restricted PATH"
 }
 
 test_default_capture_stays_pure_under_hooks
 test_keep_mode_still_corrupts_capture
-test_real_git_binary_is_pinned_and_callable
+test_command_v_git_is_absolute_and_reexec_safe
+test_toolbin_symlink_to_command_v_git_works
