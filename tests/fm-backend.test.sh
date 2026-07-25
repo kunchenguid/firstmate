@@ -284,7 +284,7 @@ test_backend_detect_cmux_fallback_ancestry_pid_match() {
   # $$ is this test script's own pid - the walk starts there. The cmux app
   # pid (66666) is matched via the lsappinfo bundle-id resolution, with a
   # deliberately non-standard install path so only the pid can match.
-  printf '%s\t77777\t/bin/zsh\n77777\t66666\t/usr/bin/login\n66666\t1\t/Users/x/Custom.app/Contents/MacOS/custom\n' "$$" > "$table"
+  printf '%s\t77777\t/bin/zsh\n77777\t66666\t/usr/bin/login\n66666\t1\t/home/x/Custom.app/Contents/MacOS/custom\n' "$$" > "$table"
 
   (
     unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier
@@ -304,7 +304,7 @@ test_backend_detect_cmux_fallback_ancestry_comm_match() {
   # lsappinfo resolves nothing (empty output, like the real one for a
   # non-running or non-GUI-visible app); the bundle-shaped comm path is the
   # remaining match, at a non-/Applications install location on purpose.
-  printf '%s\t77777\t/bin/zsh\n77777\t66666\t/usr/bin/login\n66666\t1\t/Users/x/Applications/cmux.app/Contents/MacOS/cmux\n' "$$" > "$table"
+  printf '%s\t77777\t/bin/zsh\n77777\t66666\t/usr/bin/login\n66666\t1\t/home/x/Applications/cmux.app/Contents/MacOS/cmux\n' "$$" > "$table"
 
   (
     unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier FM_FAKE_LSAPPINFO_OUT

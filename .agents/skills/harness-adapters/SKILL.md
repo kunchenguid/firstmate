@@ -347,11 +347,11 @@ Grok's primary watcher protocol is Claude-shaped background-notify around `bin/f
 
 ## kimi (VERIFIED 2026-07-25, kimi 0.29.1)
 
-Kimi Code CLI must be launched by the verified absolute binary path because it is not on `PATH`.
+Kimi Code CLI launches from the absolute path resolved from `PATH`, falling back to the executable `$HOME/.kimi-code/bin/kimi`.
 
 | Fact | Value |
 |---|---|
-| Binary | `/Users/kunchen/.kimi-code/bin/kimi` |
+| Binary | Executable `kimi` from `PATH`, then executable `$HOME/.kimi-code/bin/kimi`; spawning refuses if neither exists. |
 | Launch | Bare interactive TUI with `--auto`, followed by readiness-gated pointer delivery; positional prompts are rejected. |
 | Models | `kimi-code/kimi-for-coding` (default), `kimi-code/kimi-for-coding-highspeed`, `kimi-code/k3`, and `kimi-code/k3-256k`. |
 | Busy-pane signature | A transient line containing only a rotating moon-phase glyph followed by `Thinking`; the line is absent when idle. |
