@@ -10,14 +10,11 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-operational-input.sh
 . "$SCRIPT_DIR/fm-operational-input.sh"
 
-fm_is_gate_agent "$FM_ROOT" && exit 0
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 lock_is_in_ancestry() {

@@ -54,8 +54,7 @@ Sorted paths as selected by `bin/fm-test-isolation-proof.sh --list` at proof tim
 - `tests/fm-herdr-lab.test.sh`
 - `tests/fm-instruction-owners.test.sh`
 - `tests/fm-lint.test.sh`
-- `tests/fm-nm-test-contract.test.sh`
-- `tests/fm-no-mistakes-ownership.test.sh`
+- `tests/fm-direct-PR-ownership.test.sh`
 - `tests/fm-pi-primary-types.test.sh`
 - `tests/fm-pr-merge.test.sh`
 - `tests/fm-review-diff.test.sh`
@@ -98,12 +97,11 @@ Sorted paths as selected by `bin/fm-test-isolation-proof.sh --list` at proof tim
 | 348 | 0 | 11 | `tests/fm-ensure-agents-md.test.sh` |
 | 283 | 0 | 26 | `tests/fm-supervision-instructions.test.sh` |
 | 232 | 0 | 14 | `tests/fm-instruction-owners.test.sh` |
-| 201 | 0 | 16 | `tests/fm-nm-test-contract.test.sh` |
 | 104 | 0 | 29 | `tests/fm-transition-lib.test.sh` |
 | 90 | 0 | 4 | `tests/fm-captain-translation-contract.test.sh` |
 | 68 | 0 | 7 | `tests/fm-composer-lib.test.sh` |
 | 57 | 0 | 25 | `tests/fm-stow-contract.test.sh` |
-| 36 | 0 | 17 | `tests/fm-no-mistakes-ownership.test.sh` |
+| 36 | 0 | 17 | `tests/fm-direct-PR-ownership.test.sh` |
 
 ## Audit notes (why this set)
 

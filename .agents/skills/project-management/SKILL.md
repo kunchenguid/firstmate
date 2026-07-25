@@ -31,7 +31,6 @@ Do not overwrite or repurpose an existing path.
 Choose the delivery mode when adding or creating the project:
 
 - `direct-PR` is the default and follows proportional validation, repository gates, CI, and configured review before the captain receives the review-ready URL.
-- `no-mistakes` is an alternate explicitly configured path that runs its own full validation pipeline before a PR.
 - `local-only` has no required remote or PR and lands only through the captain-approved local fast-forward path.
 
 The optional `+yolo` posture changes routine within-scope decision authority but never merge, destructive, irreversible, security-sensitive, or product-contract authority.
@@ -43,7 +42,6 @@ Default it off and enable it only on the captain's explicit instruction.
 Confirm the source URL, local project name, delivery mode, and autonomy posture.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
 A `direct-PR` project needs an `origin` remote.
-A `no-mistakes` project needs an `origin` remote and the initialization below.
 A `local-only` project may have no remote.
 
 ## Create a project
@@ -59,15 +57,8 @@ The captain's request to create that local project authorizes this local initial
 ## Initialize
 
 Preserve every repository's existing hooks and quality gates.
-Run no-mistakes initialization only for a project explicitly configured with that alternate mode:
-
-```sh
-cd projects/<name> && no-mistakes init && no-mistakes doctor
-```
-
-Initialization configures that local gate and does not vendor a skill into the project.
-Do not create a commit merely because initialization ran.
-Resolve any environment, authentication, or daemon blocker before dispatching work, and never restart a shared daemon from a project operation.
+Do not create a commit merely because local setup ran.
+Resolve any environment or authentication blocker before dispatching work.
 
 ## Remove
 

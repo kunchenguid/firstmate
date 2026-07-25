@@ -112,7 +112,7 @@ BASE_REF=$(resolve_base_ref) \
 # tmux-only conformance run the tmux adapter's behavior is what is under test,
 # and that is unchanged by any later (e.g. non-tmux backend) addition to
 # fm-backend.sh's own dispatch surface.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh"
+OLD_BIN_UNCHANGED_SIBLINGS="fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh"
 # A pull-request merge may add a new main-only dependency that the branch's older baseline does not have yet.
 OLD_BIN_OPTIONAL_SIBLINGS="fm-pending-reply-lib.sh"
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh fm-marker-lib.sh"
@@ -933,10 +933,10 @@ test_teardown_conformance_old_vs_new() {
   mkdir -p "$state_old" "$state_new" "$config_old" "$config_new"
 
   fm_write_meta "$state_old/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=direct-PR" "yolo=off" \
     "decisions_reviewed=1" "decision_keys="
   fm_write_meta "$state_new/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=direct-PR" "yolo=off" \
     "decisions_reviewed=1" "decision_keys="
   touch "$state_old/.last-watcher-beat" "$state_new/.last-watcher-beat"
 

@@ -3,9 +3,8 @@
 # Classifies supervision wakes in bash. In normal mode it absorbs benign wakes
 # and keeps blocking; it queues and exits only for actionable wakes.
 # The no-verb signal and stale path is absorb-only-when-provably-working: a wake
-# is absorbed only when the crew shows POSITIVE evidence it is still working (an
-# actively-running no-mistakes step, or a backend busy signal), and surfaced
-# otherwise, so a crew that finishes (or stops and waits) without a current
+# is absorbed only when the crew shows POSITIVE backend evidence it is still
+# working, and surfaced otherwise, so a crew that finishes (or stops and waits) without a current
 # working signal is never silently swallowed. A declared external-wait pause is
 # the separate idle absorb case and re-surfaces only on its long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
@@ -17,9 +16,7 @@
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
-#                          line, since the crew's own log gets no new entry once
-#                          firstmate hands it to a no-mistakes validation. A declared
-#                          external-wait pause is absorbed instead with its own long
+#                          line. A declared external-wait pause is absorbed instead with its own long
 #                          re-surface cadence, never as a wedge. Only when neither
 #                          absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
@@ -112,9 +109,8 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # and ABSORBS the benign majority - it advances the suppression marker, logs to a
 # debug log, and keeps blocking WITHOUT enqueuing or exiting. The no-verb signal
 # / stale path is absorb-only-when-provably-working: such a wake is absorbed ONLY
-# while the crew shows positive evidence it is still working (an actively-running
-# no-mistakes step, or a busy pane, via crew_is_provably_working over
-# fm-crew-state.sh); a crew that stopped its turn with no running pipeline and no
+# while the crew shows positive backend evidence it is still working (via
+# crew_is_provably_working over fm-crew-state.sh); a crew that stopped its turn and has no
 # busy pane is SURFACED, so a finish reported only through interactive pane menus
 # (no done: status) is never swallowed. An ACTIONABLE wake (a captain-relevant
 # signal, a no-verb signal whose crew is not provably working, any check, a stale
@@ -781,8 +777,8 @@ EOF
     # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
     # whose crew IS provably working) in always-on mode -> advance the markers so it
     # will not re-fire, log, and keep blocking without enqueuing. The provably-working
-    # check is the only costly one (it may run a bounded no-mistakes call), so the ||
-    # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
+    # check reads the current backend target, so the || ordering evaluates it ONLY
+    # for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
       while IFS=$(printf '\t') read -r sf sig f; do
@@ -861,9 +857,8 @@ EOF
           fi
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's last line is captain-relevant - but that alone is not
-          # proof the crew is actually done: a crew's own status log gets no
-          # new entry once firstmate hands it to a no-mistakes validation
-          # (AGENTS.md's sparse status-reporting contract), so the log can
+          # proof the crew is actually done: AGENTS.md's sparse status-reporting
+          # contract means the log can
           # keep showing a "done:"/needs-decision/blocked leftover from
           # BEFORE that validation started for the run's entire (possibly
           # many-minutes) duration, while stale_is_terminal - which has no

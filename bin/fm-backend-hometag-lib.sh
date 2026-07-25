@@ -6,9 +6,8 @@
 # tab bar). Without a per-home discriminator embedded in the actual
 # title/name, two firstmate homes (two secondmates, a primary plus a
 # secondmate, or two independent primary installations) whose task ids
-# happen to collide can send/peek/close each other's tabs - the gap a
-# captain-directed no-mistakes review gate caught for cmux
-# (docs/cmux-backend.md) and this same tag mechanism was later ported to
+# happen to collide can send/peek/close each other's tabs.
+# The cmux backend first exposed that gap (docs/cmux-backend.md), and this same tag mechanism was later ported to
 # zellij to close for the same reason (docs/zellij-backend.md "Home-scoped
 # tab titles").
 #

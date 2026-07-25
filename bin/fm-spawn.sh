@@ -134,13 +134,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-# Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
-# a direct report (see bin/fm-gate-refuse-lib.sh).
-fm_refuse_if_gate_agent
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -285,7 +280,7 @@ spawn_abort_cleanup() {
             echo "project=$PROJ_ABS"
             echo "harness=$HARNESS"
             echo "kind=$KIND"
-            echo "mode=${MODE:-no-mistakes}"
+            echo "mode=${MODE:-direct-PR}"
             echo "yolo=${YOLO:-off}"
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"

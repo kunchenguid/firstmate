@@ -69,31 +69,10 @@ When a worker raises a decision, firstmate loads `ask-user-authority`, decides o
 Return the exact decision to the same worker and require the matching resolved event before treating it as handled.
 Resume fleet supervision immediately after the decision lands.
 
-## Alternate no-mistakes delivery
-
-Use this section only when the project's explicitly selected mode is `no-mistakes`; it is not the active default.
-After the worker creates its implementation commit, invoke validation on that same worker using the runtime-specific skill form from `harness-adapters`.
-The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
-Firstmate never invokes `no-mistakes axi respond` for a crew-owned run and never starts a duplicate run.
-
-An ask-user finding returns as a worker decision request.
-Firstmate loads `ask-user-authority`, decides only within configured authority, and otherwise escalates to the captain.
-Return one exact decision to the same worker, naming the decision key, step, action, affected finding ids, required instructions, and exact response command.
-Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
-Resume fleet supervision immediately after the decision lands.
-
-Judge validation through the current-code-matched run step returned by `bin/fm-crew-state.sh <id>`, not shell liveness or the latest event.
-A running, fixing, or CI result remains working.
-A parked approval or fix-review result requires the worker to follow the active gate help.
-A passed or checks-passed result is complete, and a failed or cancelled result is a failure.
-If the worker hand-edits, commits, aborts, or restarts while the run is active, steer it back to the pipeline response flow because the run owns those changes.
-The worker reports its PR when CI first becomes green rather than waiting for merge monitoring to finish.
-
 ## PR readiness and landing
 
 For `direct-PR`, use the `delivery-quality` readiness verdict.
-For an explicitly selected `no-mistakes` project, require its `done: PR <url> checks green` result.
-For either PR mode, run `bin/fm-pr-check.sh <id> <PR url>` so canonical PR and forge-head identity are recorded and merge monitoring is registered.
+Run `bin/fm-pr-check.sh <id> <PR url>` so canonical PR and forge-head identity are recorded and merge monitoring is registered.
 For `local-only`, report readiness only after proportional validation leaves a clean local branch.
 Tell the captain one concise outcome with the complete `https://...` URL or local branch as applicable.
 Only the captain's explicit instruction authorizes merge.

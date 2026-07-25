@@ -114,8 +114,6 @@ test_always_loaded_boundaries() {
   assert_regex "$delivery" 'configured `local-only` path.*clean branch without push or PR' "local-only boundary is missing"
   assert_regex "$delivery" 'captain alone approves merge' "captain merge authority is missing"
   assert_regex "$delivery" 'worker never decides its own escalated finding' "worker decision boundary is missing"
-  assert_no_grep 'no-mistakes' "$AGENTS" "AGENTS.md retained the superseded delivery model"
-
   assert_regex "$supervision" 'exactly one live supervision cycle' "one-cycle supervision is missing"
   assert_regex "$supervision" 'No turn ends blind' "no-blind-turn invariant is missing"
   assert_regex "$supervision" 'drain the durable queue before' "notification ordering is missing"
@@ -171,7 +169,6 @@ test_conditional_owners_are_complete() {
     '## Backlog intake' \
     '## Brief and spawn' \
     '## Direct delivery rigor' \
-    '## Alternate no-mistakes delivery' \
     '## PR readiness and landing' \
     '## Ship cleanup' \
     '## Scout completion and promotion'; do

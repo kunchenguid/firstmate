@@ -700,7 +700,7 @@ new_world() {
   touch "$w/home/state/.last-watcher-beat"
   git init -q -b main "$w/main"
   {
-    printf 'projects/\nstate/\ndata/\n.no-mistakes/\n'
+    printf 'projects/\nstate/\ndata/\n'
     [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
     printf 'config/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n'
   } > "$w/main/.gitignore"
@@ -768,15 +768,6 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
-  cat > "$fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'no-mistakes version v1.31.2 (fake)'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/no-mistakes"
   printf '%s\n' "$fakebin"
 }
 

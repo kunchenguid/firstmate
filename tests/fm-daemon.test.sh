@@ -732,7 +732,7 @@ test_afk_turn_exemption() {
   should_exit_afk "$state" "/afk back in an hour" \
     && fail "/afk with args should not exit afk"
   # a non-/afk skill invocation DOES exit (the captain is actively working)
-  should_exit_afk "$state" "/no-mistakes" \
+  should_exit_afk "$state" "/review" \
     || fail "non-afk skill should exit afk"
   pass "/afk invocation is exempt from afk exit (no self-cancel)"
 }

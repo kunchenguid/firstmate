@@ -38,8 +38,6 @@ test_trigger_and_precedence_contract() {
     "unavailable-model fallback can override a per-task captain route"
   assert_file_not_contains "$SKILL" 'fm-dispatch-select.sh' \
     "delivery-quality reintroduced the vestigial selector"
-  assert_file_not_contains "$SKILL" 'no-mistakes' \
-    "delivery-quality depends on the retiring pipeline"
   pass "delivery-quality is discoverable and preserves per-task routing precedence"
 }
 

@@ -8,7 +8,6 @@ The Ahoy skill owns the rule that this marked operational input is never a capta
 ## Shared wrapper and safety
 
 `bin/fm-sessionstart-nudge.sh` is the single command every harness adapter invokes.
-It sources `bin/fm-gate-refuse-lib.sh` and stays silent for a no-mistakes gate agent identified by `NO_MISTAKES_GATE` or a `.no-mistakes/repos/*.git` git-common-dir.
 It shares `bin/fm-primary-scope-lib.sh` with `bin/fm-turnend-guard.sh`, so the hooks use one primary-detection owner.
 The Shared Predicate section of [`turnend-guard.md`](turnend-guard.md#shared-predicate) owns marker validation, plain-checkout detection, and required Firstmate-shaped paths.
 

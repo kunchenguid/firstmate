@@ -491,7 +491,7 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
   expect_code 0 $? "fm-spawn.sh --backend orca should succeed with fake Orca"$'\n'"$out"
-  assert_contains "$out" "spawned $id harness=claude kind=ship mode=no-mistakes yolo=off window=fm-$id worktree=$wt" \
+  assert_contains "$out" "spawned $id harness=claude kind=ship mode=direct-PR yolo=off window=fm-$id worktree=$wt" \
     "spawn output missing Orca window/worktree summary"
   assert_grep "backend=orca" "$state/$id.meta" "meta missing backend=orca"
   assert_grep "window=fm-$id" "$state/$id.meta" "meta missing stable Orca window alias"
@@ -786,7 +786,7 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "terminal=term-teardown" "worktree=$wt" "project=$proj" \
-    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "harness=claude" "kind=scout" "mode=direct-PR" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-teardown" \
     "decisions_reviewed=1" "decision_keys="
   orca_case teardown
@@ -823,7 +823,7 @@ test_scout_teardown_refuses_orca_id_path_mismatch() {
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "terminal=term-scout-mismatch" "worktree=$wt" "project=$proj" \
-    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "harness=claude" "kind=scout" "mode=direct-PR" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-scout-mismatch" \
     "decisions_reviewed=1" "decision_keys="
   orca_case scout-mismatch
@@ -859,7 +859,7 @@ test_teardown_removes_orca_worktree_when_path_missing() {
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "terminal=term-missing-path" "worktree=$wt" "project=$proj" \
-    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "harness=claude" "kind=scout" "mode=direct-PR" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-missing-path" \
     "decisions_reviewed=1" "decision_keys="
   orca_case missing-path
@@ -892,7 +892,7 @@ test_teardown_preserves_metadata_when_orca_remove_error_json() {
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "worktree=$wt" "project=$proj" \
-    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "harness=claude" "kind=scout" "mode=direct-PR" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-remove-error" \
     "decisions_reviewed=1" "decision_keys="
   orca_case remove-error-teardown
@@ -922,7 +922,7 @@ test_scout_teardown_refuses_orca_missing_report_when_path_missing() {
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "terminal=term-missing-report" "worktree=$wt" "project=$proj" \
-    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "harness=claude" "kind=scout" "mode=direct-PR" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-missing-report"
   orca_case missing-report
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
@@ -952,7 +952,7 @@ test_ship_teardown_refuses_orca_missing_worktree_path() {
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "terminal=term-missing-ship" "worktree=$wt" "project=$proj" \
-    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
+    "harness=claude" "kind=ship" "mode=direct-PR" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-missing-ship"
   orca_case missing-ship-path
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
@@ -1095,7 +1095,7 @@ test_teardown_refuses_orca_missing_worktree_id() {
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "terminal=term-missing-id" "worktree=$wt" "project=$proj" \
-    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" "backend=orca" \
+    "harness=claude" "kind=scout" "mode=direct-PR" "yolo=off" "backend=orca" \
     "decisions_reviewed=1" "decision_keys="
   orca_case missing-id
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
@@ -1126,7 +1126,7 @@ test_teardown_removes_orca_worktree_without_terminal_handle() {
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "worktree=$wt" "project=$proj" \
-    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "harness=claude" "kind=scout" "mode=direct-PR" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-no-terminal" \
     "decisions_reviewed=1" "decision_keys="
   orca_case no-terminal
@@ -1165,7 +1165,7 @@ test_secondmate_force_teardown_removes_orca_child_via_orca() {
     > "$home/data/secondmates.md"
   fm_write_meta "$subhome/state/$child_id.meta" \
     "window=fm-$child_id" "terminal=term-child-cleanup" "worktree=$childwt" "project=$childproj" \
-    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
+    "harness=claude" "kind=ship" "mode=direct-PR" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-child-cleanup"
   orca_case secondmate-child-cleanup
   printf '{"ok":true,"result":{"worktree":{"id":"wt-child-cleanup","path":"%s"}}}\n' "$childwt" > "$RESP/1.out"
@@ -1207,7 +1207,7 @@ test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch() {
     > "$home/data/secondmates.md"
   fm_write_meta "$subhome/state/$child_id.meta" \
     "window=fm-$child_id" "terminal=term-child-mismatch" "worktree=$childwt" "project=$childproj" \
-    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
+    "harness=claude" "kind=ship" "mode=direct-PR" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-child-mismatch"
   orca_case secondmate-child-mismatch
   printf '{"ok":true,"result":{"worktree":{"id":"wt-child-mismatch","path":"%s"}}}\n' "$other_wt" > "$RESP/1.out"
@@ -1247,7 +1247,7 @@ test_secondmate_force_teardown_removes_partial_orca_child() {
     > "$home/data/secondmates.md"
   fm_write_meta "$subhome/state/$child_id.meta" \
     "window=fm-$child_id" "worktree=$childwt" "project=$childproj" \
-    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
+    "harness=claude" "kind=ship" "mode=direct-PR" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-partial-child"
   orca_case secondmate-partial-child-cleanup
   printf '{"ok":true,"result":{"worktree":{"id":"wt-partial-child","path":"%s"}}}\n' "$childwt" > "$RESP/1.out"

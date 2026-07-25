@@ -421,13 +421,9 @@ test_ci_and_docs_call_the_owner() {
     || fail "CONTRIBUTING must document changed-file selection"
   grep -Fq 'bin/fm-test-run.sh --proven-isolated --jobs' "$CONTRIB" \
     || fail "CONTRIBUTING must document proven-isolated --jobs"
-  grep -Fq 'intent-targeted' "$CONTRIB" \
-    || fail "CONTRIBUTING must document intent-targeted no-mistakes Test"
-  # Do not restore a complete-suite commands.test.
-  if grep -E '^[[:space:]]*test:[[:space:]].*tests/\*\.test\.sh' "$ROOT/.no-mistakes.yaml" >/dev/null 2>&1; then
-    fail ".no-mistakes.yaml must not set a full-suite commands.test"
-  fi
-  pass "CI and CONTRIBUTING call the one-owner runner; no full-suite local Test"
+  grep -Fq 'Family selection is the ordinary local path' "$CONTRIB" \
+    || fail "CONTRIBUTING must document family-scoped validation"
+  pass "CI and CONTRIBUTING call the one-owner runner"
 }
 
 test_portable_shard_union_and_coverage_guard() {
@@ -492,7 +488,7 @@ test_jobs_parallel_scheduler_and_failure_propagation() {
   runner="$repo/bin/fm-test-run.sh"
   evidence="$tmp/evidence"
   fake_bin="$tmp/fake-bin"
-  a=tests/fm-no-mistakes-ownership.test.sh
+  a=tests/fm-brief.test.sh
   b=tests/fm-stow-contract.test.sh
   c=tests/fm-lint.test.sh
   d=tests/fm-supervision-instructions.test.sh

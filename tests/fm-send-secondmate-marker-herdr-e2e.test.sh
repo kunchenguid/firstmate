@@ -127,7 +127,7 @@ path.write_text(source.replace(factory_anchor, replacement, 1))
 PY
 
 "$LAB_HELPER" provision "$SESSION"
-PATH="$FAKEBIN:$ORIGINAL_PATH" FM_GATE_REFUSE_BYPASS=1 FM_HOME="$SENDER_HOME" HERDR_SESSION="$SESSION" \
+PATH="$FAKEBIN:$ORIGINAL_PATH" FM_HOME="$SENDER_HOME" HERDR_SESSION="$SESSION" \
   "$ROOT/bin/fm-spawn.sh" "$ID" "$SECOND_HOME" --secondmate --harness pi --backend herdr >/dev/null
 
 META="$SENDER_HOME/state/$ID.meta"
@@ -175,7 +175,7 @@ wait_for_prompt 'Isolated marker capture secondmate' \
   || fail "real Pi before_agent_start capture did not load for the startup charter"
 wait_for_idle || fail "real Pi did not become idle after the startup capture"
 
-PATH="$FAKEBIN:$ORIGINAL_PATH" FM_GATE_REFUSE_BYPASS=1 FM_HOME="$SENDER_HOME" \
+PATH="$FAKEBIN:$ORIGINAL_PATH" FM_HOME="$SENDER_HOME" \
   "$ROOT/bin/fm-send.sh" "$ID" "$REQUEST" >/dev/null
 wait_for_prompt "$REQUEST" || fail "real Pi did not receive the exact-id fm-send request"
 GOT=$(jq -r --arg needle "$REQUEST" 'select(.prompt | contains($needle)) | .prompt' "$CAPTURE" | tail -1)

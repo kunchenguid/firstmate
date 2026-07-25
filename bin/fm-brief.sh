@@ -29,8 +29,7 @@
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
-#   direct-PR    implement -> direct validation/gates -> task-branch PR -> CI/review reconciliation -> captain merge
+#   direct-PR    implement -> direct validation/gates -> task-branch PR -> CI/review reconciliation -> captain merge (default)
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
@@ -259,9 +258,6 @@ The report is the only thing that survives, so anything worth keeping must be in
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
    When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` (add the same \`[key=<slug>]\` if you opened it with one) so the decision or blocker is durably closed and does not keep resurfacing.
-7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
-   every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
-   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -282,55 +278,36 @@ $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
 case "$MODE" in
-  direct-PR)
-    SETUP2=""
-    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-    DOD=$(cat <<EOF
-# Definition of done
-This project ships through the direct PR path.
-The task is complete only after explicit task validation and evidence requirements, existing repository hooks and quality gates, required CI, and configured review feedback are reconciled.
-Commit on your task branch, push only that branch, and open its PR with \`gh-axi\`; never push the default branch and never merge.
-Address actionable CI or configured review findings on the same task branch, rerun affected checks, and use the bounded task rule for an optional review service that stays absent.
-Then append \`done: PR {url} checks green\` to the status file and stop.
-The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
-EOF
-)
-    ;;
   local-only)
     SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
     DOD=$(cat <<EOF
 # Definition of done
-This project ships **local-only**: no remote, no PR, no pipeline.
+This project ships **local-only**: no remote and no PR.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
+Run proportionate focused and affected checks before committing.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
 )
     ;;
-  *)  # no-mistakes (default)
-    SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
-    RULE1='1. Never push to the default branch. Never merge a PR.'
+  direct-PR)
+    SETUP2=""
+    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
     # shellcheck disable=SC2016 # Literal backticks and braces must render in the generated brief.
     DOD=$(printf '%s\n' \
       '# Definition of done' \
-      'The task is complete only when committed on your branch.' \
-      'When you believe it is complete, append `done: {summary}` to the status file and stop.' \
-      'Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.' \
-      '' \
-      'You drive no-mistakes by responding to its gates, not by implementing fixes.' \
-      'Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and `no-mistakes axi run --help` plus the `help` lines in each `axi` response are authoritative and version-matched to the installed binary.' \
-      'Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.' \
-      '' \
-      'Two firstmate-specific rules layer on top of that guidance:' \
-      '- ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.' \
-      '  Firstmate applies the authority contract in its `AGENTS.md` and obtains any required captain decision.' \
-      '  When the decision comes back, feed it to the gate with `no-mistakes axi respond` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.' \
-      '- Avoid `--yes`: it would silently bypass firstmate'"'"'s authority check and any required captain escalation.' \
-      '' \
-      'After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append `done: PR {url} checks green` and stop. You are finished.')
+      'This project ships through the direct PR path.' \
+      'The task is complete only after the implementation is committed, proportionate focused and affected checks have passed, existing repository hooks and quality gates have passed, required CI, and configured review feedback are reconciled.' \
+      'Use browser or media evidence only when it is materially useful for this task.' \
+      'Commit on your task branch, push only that branch, and open its PR with `gh-axi`; never push the default branch and never merge.' \
+      'Address actionable CI or configured review findings on the same task branch, rerun affected checks, then append `done: PR {url} checks green` to the status file and stop.' \
+      'The configured merge authority decides whether to merge the PR; firstmate relays the outcome.')
+    ;;
+  *)
+    echo "error: unsupported delivery mode $MODE" >&2
+    exit 1
     ;;
 esac
 
@@ -372,9 +349,6 @@ $RULE1
 6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.
    When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` (add the same \`[key=<slug>]\` if you opened it with one) so the decision or blocker is durably closed and does not keep resurfacing.
-7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
-   every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
-   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
 # Delivery discipline
 Follow the task's explicit validation, browser, and review-evidence requirements without adding redundant workers or review layers.

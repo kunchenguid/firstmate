@@ -9,7 +9,6 @@ if [ "${FM_OPENCODE_LIVE_E2E:-0}" != 1 ]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-unset NO_MISTAKES_GATE
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
@@ -160,7 +159,7 @@ run_ahoy_transcript_regressions() {
   cp \
     "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" \
-    "$ROOT/bin/fm-gate-refuse-lib.sh" \
+    \
     "$ROOT/bin/fm-operational-input.sh" \
     "$AHOY_PROJECT/bin/"
   cp "$ROOT/.agents/skills/ahoy/SKILL.md" "$AHOY_PROJECT/.agents/skills/ahoy/SKILL.md"

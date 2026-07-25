@@ -123,8 +123,7 @@ family_for_basename() {
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|fm-delivery-quality.test.sh|\
     fm-dispatch-select.test.sh|fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-herdr-lab.test.sh|fm-instruction-owners.test.sh|fm-lint.test.sh|\
-    fm-install-herdr.test.sh|fm-nm-test-contract.test.sh|fm-no-mistakes-ownership.test.sh|\
-    fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
+    fm-install-herdr.test.sh|fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|fm-stow-contract.test.sh|\
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-tmux-submit-busy.test.sh|fm-transition-lib.test.sh|\
@@ -149,7 +148,7 @@ family_for_basename() {
     fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh)
       printf '%s\n' secondmate
       ;;
-    fm-bootstrap.test.sh|fm-fleet-sync.test.sh|fm-gate-refuse.test.sh|fm-gotmp.test.sh|\
+    fm-bootstrap.test.sh|fm-fleet-sync.test.sh|fm-gotmp.test.sh|\
     fm-session-start.test.sh|fm-sessionstart-nudge.test.sh|fm-tangle-guard.test.sh|\
     fm-update.test.sh)
       printf '%s\n' session-bootstrap
@@ -248,8 +247,6 @@ tests/fm-grok-harness.test.sh
 tests/fm-herdr-lab.test.sh
 tests/fm-instruction-owners.test.sh
 tests/fm-lint.test.sh
-tests/fm-nm-test-contract.test.sh
-tests/fm-no-mistakes-ownership.test.sh
 tests/fm-pi-primary-types.test.sh
 tests/fm-pr-merge.test.sh
 tests/fm-review-diff.test.sh
@@ -305,9 +302,7 @@ tests/fm-composer-ghost.test.sh
 tests/fm-send-settle.test.sh
 tests/fm-supervision-instructions.test.sh
 tests/fm-lint.test.sh
-tests/fm-nm-test-contract.test.sh
 tests/fm-captain-translation-contract.test.sh
-tests/fm-no-mistakes-ownership.test.sh
 EOF
 }
 
@@ -663,7 +658,7 @@ families_for_changed_path() {
       ;;
     bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-tangle*|bin/fm-update.sh|\
-    bin/fm-gate-refuse*|bin/fm-lock*)
+    bin/fm-lock*)
       printf '%s\n' session-bootstrap
       ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
@@ -695,7 +690,7 @@ families_for_changed_path() {
     .agents/skills/*/SKILL.md)
       printf '%s\n' pure-contract-unit
       ;;
-    .github/workflows/ci.yml|.no-mistakes.yaml)
+    .github/workflows/ci.yml)
       printf '%s\n' pure-contract-unit
       printf '%s\n' real-herdr-gated
       ;;

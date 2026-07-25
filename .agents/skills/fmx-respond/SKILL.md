@@ -81,7 +81,7 @@ The asker being your own captain (owner-only routing) does **not** relax this: a
 Never include, in any form:
 
 - Task ids, branch names, worktree paths, PR/issue numbers, or repo-internal identifiers.
-- Tooling/internal vocabulary: crewmate, scout, ship, secondmate, harness names, watcher, heartbeat, brief, teardown, no-mistakes, yolo, delivery modes.
+- Tooling/internal vocabulary: crewmate, scout, ship, secondmate, harness names, watcher, heartbeat, brief, teardown, yolo, delivery modes.
 - Captain-private material: the captain's name, product strategy, unreleased plans, revenue, internal URLs, file contents, or anything the captain has not made public.
 - Secrets of any kind: tokens, keys, credentials, the pairing token, hostnames.
 

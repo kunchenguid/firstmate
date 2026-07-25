@@ -9,13 +9,13 @@ metadata:
 # updatefirstmate
 
 Self-update firstmate in place.
-Firstmate is its own repo, behind the same no-mistakes gate as any project, so new tracked material (`AGENTS.md`, `bin/`, `.agents/skills/`, and public `skills/`) reaches `main` and then sits there until each running firstmate pulls it.
+New tracked material (`AGENTS.md`, `bin/`, `.agents/skills/`, and public `skills/`) reaches `main` only after captain-approved landing, then sits there until each running firstmate pulls it.
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are a running firstmate instruction surface; public `skills/` is installer-facing and is not loaded by firstmate.
 This skill performs that pull for the running main firstmate and every secondmate, without disturbing any in-flight work.
 
 The update is **fast-forward only** - the same sanctioned self-write as the fleet sync firstmate already runs.
 It never forces, never creates a merge commit, never stashes, and advances a target only on a clean fast-forward; anything dirty, diverged, offline, or on the wrong branch is skipped and reported.
-A tracked-files fast-forward leaves the gitignored operational dirs (data/, state/, config/, projects/, .no-mistakes/) untouched, so a secondmate's in-flight work is never disrupted.
+A tracked-files fast-forward leaves the gitignored operational dirs (data/, state/, config/, projects/) untouched, so a secondmate's in-flight work is never disrupted.
 This touches only the firstmate repo and its own worktrees, never anything under `projects/`.
 
 ## What it does

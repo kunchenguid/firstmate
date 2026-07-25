@@ -2,7 +2,7 @@
 # Tests for bin/fm-review-diff.sh: when a task has an open PR recorded in meta,
 # the review diff must compare the authoritative base against a freshly fetched
 # PR head, not a stale local branch or a stale recorded pr_head= left behind
-# after no-mistakes fix rounds push to the PR.
+# after direct-PR fix rounds push to the PR.
 #
 # Matrix:
 #   (a) pr= + reachable pr_head=, no remote pull ref -> offline fallback to recorded SHA

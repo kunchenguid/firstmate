@@ -286,7 +286,7 @@ EOF
   printf -- '- sm - fixture secondmate (home: %s; scope: fixture; projects: sample; added 2026-07-16)\n' "$sm" \
     > "$data_override/secondmates.md"
   fakebin=$(make_fake_spawn_toolchain "$w")
-  fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi gh treehouse no-mistakes tasks-axi quota-axi
+  fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi gh treehouse direct-PR tasks-axi quota-axi
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     FM_DATA_OVERRIDE="$data_override" \
@@ -336,7 +336,7 @@ test_session_start_digest_labels_shared_file_and_read_once_rule() {
 $rec
 EOF
   fakebin=$(make_fake_spawn_toolchain "$w")
-  fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi gh treehouse no-mistakes tasks-axi quota-axi pgrep
+  fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi gh treehouse direct-PR tasks-axi quota-axi pgrep
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     "$ROOT/bin/fm-session-start.sh")

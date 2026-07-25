@@ -40,12 +40,11 @@ Phase 1 averages used for balance (mean of available serial `duration_ms` across
 | 138 | `tests/fm-instruction-owners.test.sh` |
 | 133 | `tests/fm-lint.test.sh` |
 | 108 | `tests/fm-pi-primary-types.test.sh` |
-| 106 | `tests/fm-nm-test-contract.test.sh` |
 | 67 | `tests/fm-transition-lib.test.sh` |
 | 64 | `tests/fm-captain-translation-contract.test.sh` |
 | 48 | `tests/fm-composer-lib.test.sh` |
 | 36 | `tests/fm-stow-contract.test.sh` |
-| 28 | `tests/fm-no-mistakes-ownership.test.sh` |
+| 28 | `tests/fm-direct-PR-ownership.test.sh` |
 
 ## Balancing method
 

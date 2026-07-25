@@ -102,8 +102,6 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
@@ -112,9 +110,6 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
 fi
 ID=$1
 FORCE=${2:-}
-# Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
-# down a worktree (see bin/fm-gate-refuse-lib.sh).
-fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 "$FM_ROOT/bin/fm-guard.sh" || true
 
@@ -139,7 +134,7 @@ ORCA_PATH_MATCH_VERIFIED=0
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
-[ -n "$MODE" ] || MODE=no-mistakes
+[ -n "$MODE" ] || MODE=direct-PR
 
 default_branch() {
   local ref branch

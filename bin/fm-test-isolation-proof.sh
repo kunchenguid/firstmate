@@ -164,8 +164,6 @@ tests/fm-grok-harness.test.sh
 tests/fm-herdr-lab.test.sh
 tests/fm-instruction-owners.test.sh
 tests/fm-lint.test.sh
-tests/fm-nm-test-contract.test.sh
-tests/fm-no-mistakes-ownership.test.sh
 tests/fm-pi-primary-types.test.sh
 tests/fm-pr-merge.test.sh
 tests/fm-review-diff.test.sh

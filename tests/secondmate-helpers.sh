@@ -3,8 +3,7 @@
 # suites (fm-secondmate-lifecycle-e2e and fm-secondmate-safety).
 #
 # These mocks encode secondmate-lifecycle behavior (fake tmux that logs window
-# ops, fake treehouse that leases/returns homes, fake no-mistakes that records
-# init/doctor), so they live here rather than in the generic tests/lib.sh. The
+# ops, fake treehouse that leases/returns homes, shared fake tmux/treehouse behavior), so they live here rather than in the generic tests/lib.sh. The
 # generic git/identity/meta primitives come from lib.sh, which this file pulls in.
 
 # shellcheck source=tests/lib.sh

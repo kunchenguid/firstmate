@@ -24,9 +24,8 @@
 # task in every firstmate home - primary or secondmate - shares this ONE
 # session's tab bar with no per-home split, and zellij enforces no tab-name
 # uniqueness at all, two firstmate homes whose task ids happen to collide
-# could send/peek/close each other's tabs. This is the exact gap a
-# captain-directed no-mistakes review gate caught for the cmux backend
-# (docs/cmux-backend.md) and this same tag mechanism (bin/backends/cmux.sh's
+# could send/peek/close each other's tabs.
+# The cmux backend first exposed that gap (docs/cmux-backend.md), and this same tag mechanism (bin/backends/cmux.sh's
 # fm_backend_cmux_scoped_title, now shared via bin/fm-backend-hometag-lib.sh)
 # is ported here for the identical reason. Every NEW tab is created with a
 # title tagged with this installation's home label (fm_backend_zellij_scoped_title,

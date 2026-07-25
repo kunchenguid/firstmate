@@ -68,19 +68,17 @@ test_project_management_owner_covers_guarded_operations() {
   for phrase in \
     'bin/fm-project-mode.sh' \
     '`direct-PR` is the default' \
-    '`no-mistakes` is an alternate explicitly configured path' \
     '`local-only`' \
     'Default it off' \
     'Creating a GitHub repository is outward-facing.' \
     "captain's explicit consent" \
     'Preserve every repository' \
-    'no-mistakes init && no-mistakes doctor' \
     'Never issue a raw removal command from Firstmate.'; do
     assert_grep "$phrase" "$PROJECT" "project-management owner is missing '$phrase'"
   done
   assert_no_grep 'default when the captain does not specify a mode' "$PROJECT" \
     "project-management still presents the alternate as default"
-  pass "project-management owns direct-default posture, alternate initialization, consent, and removal safety"
+  pass "project-management owns direct-default posture, consent, and removal safety"
 }
 
 test_generic_effort_fallback_respects_precedence() {
@@ -280,7 +278,7 @@ test_compressed_agents_retains_authority_and_supervision_safety() {
     "away-mode ownership is missing"
   assert_grep 'Before terminal cleanup, always post the final follow-up' "$SUPERVISION" \
     "X terminal follow-up procedure is missing"
-  assert_no_grep 'no-mistakes' "$AGENTS" \
+  assert_no_grep 'pipeline -> PR' "$AGENTS" \
     "AGENTS.md retained the superseded active delivery model"
   assert_no_grep 'firstmate reviews your branch' "$AGENTS" \
     "AGENTS.md retained a personal branch-review requirement"
