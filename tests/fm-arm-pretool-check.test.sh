@@ -5,7 +5,7 @@
 # bin/fm-arm-command-policy.mjs is the single owner of command classification.
 # This suite drives the stable shell transport through all five harness entry
 # forms and asserts the per-harness wiring contract without spawning a harness.
-# Empirical harness evidence lives in docs/arm-pretool-check.md.
+# The concise contract and validation entry points live in docs/arm-pretool-check.md.
 set -u
 
 # shellcheck source=tests/lib.sh

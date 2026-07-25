@@ -107,7 +107,7 @@ For Pi, approve the project trust prompt once per clone on first launch so the t
 Pi's `/calm` toggle hides supported transcript chrome, including canonically classified Firstmate operational user rows, while retaining native working activity and all model context and session data.
 The hidden operational inputs remain ordinary user-role messages with unchanged delivery, ordering, authority, persistence, and exports.
 The preference persists for the effective Firstmate home, and toggling it off restores ordinary rendering.
-[Calm's current behavior and supported limits](docs/calm.md) are separate from its [version-scoped maintainer evidence](docs/calm-mode-feasibility.md).
+[Calm's current behavior, supported limits, and regression entry points](docs/calm.md) are maintained in one current operator page.
 
 ### Talk to it
 
@@ -189,7 +189,7 @@ Firstmate's skills live in two separate places with different audiences:
 
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional X mode, the files you set, and harness support.
-- [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior and supported presentation limits.
+- [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior, supported presentation limits, and regression entry points.
 - [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for an away-mode escalation delivery that gets stuck.
 - [docs/tmux-backend.md](docs/tmux-backend.md) - current setup and limits for the tmux reference backend.
 - [docs/herdr-backend.md](docs/herdr-backend.md) - current setup, safety boundaries, and limits for the experimental Herdr backend.

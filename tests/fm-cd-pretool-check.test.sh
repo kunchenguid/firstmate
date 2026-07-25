@@ -10,7 +10,7 @@
 # scoping (including the deliberate secondmate-home difference from the turn-end
 # guard), the fail-open transport behavior, the prefilter fast path, the
 # end-to-end cwd-leak regression, and the per-harness wiring. No harness is
-# spawned; live per-harness evidence lives in docs/cd-guard.md.
+# spawned; docs/cd-guard.md keeps only integration quirks that affect current behavior.
 set -u
 
 # shellcheck source=tests/lib.sh

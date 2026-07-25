@@ -8,7 +8,7 @@
 # This wrapper only acquires the harness payload, discovers the active roots,
 # invokes that policy, and renders the established harness-specific responses.
 # It never executes, sources, evaluates, or expands the submitted command.
-# See docs/arm-pretool-check.md for the complete contract and validation record.
+# See docs/arm-pretool-check.md for the concise contract and validation entry points.
 #
 # Usage:
 #   <PreToolUse JSON on stdin> | bin/fm-arm-pretool-check.sh

@@ -18,9 +18,9 @@ Pi's supported presentation API does not expose a global transcript filter.
 Expanded reasoning and its reserved spacing, built-in tool images, user-bash rows, skill and summary rows, generic status notices, and arbitrary custom-tool or extension rows remain visible.
 These are supported-API boundaries rather than hidden-content failures.
 
-[`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy and empirical evidence.
 [`configuration.md`](configuration.md#pi-calm-preference-configcalm) owns the persisted preference file and resolution rules.
 `.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, and `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter.
+The regression tests below own current evidence for the presentation boundary.
 
 Regression entry points:
 

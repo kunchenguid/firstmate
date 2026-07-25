@@ -102,9 +102,9 @@ Every verified primary harness has an empirically validated hook path for the "n
 `docs/verification/supervision.md` "Turn-end guard" owns active validation evidence.
 When changing any primary turn-end hook, validate the real harness behavior in a scratch project or throwaway home before trusting it, update that doc, and update the matching runtime reference.
 
-Every verified primary harness also has a wired PreToolUse-equivalent hook that denies a watcher-arm anti-pattern before it runs.
-The denied anti-patterns are shell `&`, truncating pipe, bundling, and broad `pkill -f fm-watch`.
-`docs/arm-pretool-check.md` owns the exact hook files, commands, output-shaping quirks, and validation transcripts.
+Every verified primary harness also has a wired PreToolUse-equivalent hook that denies watcher-arm anti-patterns before they run.
+The denied shapes include backgrounding, output hiding, nested or bundled launches, and broad `pkill -f fm-watch`.
+`docs/arm-pretool-check.md` owns the concise contract, reason codes, hook quirks, and validation entry points.
 When changing any watcher-arm PreToolUse hook, validate the real harness behavior in a scratch project before trusting it, update that doc, and update the matching runtime reference.
 
 `docs/subagent-guard.md` owns the primary delegation-shape guard contract, the local deny-list recommendation, the `FM_ALLOW_SUBAGENT=1` escape hatch, and the per-harness applicability review.
@@ -138,6 +138,15 @@ This preserves launch success instead of passing a known-bad value.
 
 Treat model and provider knowledge as current source-of-truth discovery, not as a permanent namespace or provider mapping.
 Use the discovery surface in the current authenticated environment because supported and available models can change by version, account, and configuration.
+
+| Harness | Current discovery surface |
+| --- | --- |
+| claude | Open the current interactive session and inspect the model picker or current harness help. |
+| codex | Open the current interactive session and inspect the model picker or current harness help. |
+| opencode | Run `opencode models [provider]`. |
+| pi | Run `pi --list-models [search]`. |
+| grok | Run `grok models`. |
+
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 If those sources do not establish the relationship needed for dispatch, fail loudly and report the unresolved candidate.
 `docs/verification/model-routing.md` records dated empirical probes for the exact identifiers in the copyable dispatch example, while `delivery-quality` owns the per-task unavailable-model fallback decision.

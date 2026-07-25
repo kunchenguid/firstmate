@@ -85,7 +85,7 @@ test_generic_effort_fallback_respects_precedence() {
   local section
   section=$(awk '
     /^Effort precedence is / { found = 1 }
-    found && /^The supported launch-profile flags / { exit }
+    found && /^Load the selected runtime reference / { exit }
     found { print }
   ' "$HARNESS")
   assert_contains "$section" "explicit per-task captain instruction first" \
