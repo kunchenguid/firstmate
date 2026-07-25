@@ -21,7 +21,7 @@ It is run deliberately rather than on every session start, because each recorded
 
 ## Verified on 2026-07-25
 
-Installed builds, from the harness binaries on PATH:
+Installed builds on the machine this record was made on, from the harness binaries on PATH:
 
 ```sh
 for h in claude codex opencode pi grok; do

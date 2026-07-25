@@ -277,6 +277,9 @@ The follow-up was verified in the interactive TUI; `opencode run` can exit befor
 
 ## pi (VERIFIED 2026-06-11)
 
+**Currency of this record: stamped 2026-06-11, with no later observation against a present Pi build recorded since.**
+Treat every fact in this section, including the launch-profile row and the primary-session guard fact, as knowledge awaiting re-verification rather than a current description.
+
 | Fact | Value |
 |---|---|
 | Busy-pane signature | `Working...` (braille spinner prefix; no `esc to interrupt` text) |
