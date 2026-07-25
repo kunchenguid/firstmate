@@ -1030,6 +1030,124 @@ EOF
   pass "Pi process-exit cleanup stops the attached arm child"
 }
 
+test_pi_extension_suspends_for_afk_and_resumes() {
+  local repo out status
+  repo=$(mktemp -d "$TMP_ROOT/pi-afk-handoff.XXXXXX")
+  install_pi_watch_extension_fixture "$repo"
+  mkdir -p "$repo/state"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+count_file="$FM_HOME/state/arm-count"
+count=0
+[ -f "$count_file" ] && count=$(cat "$count_file")
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$count" -eq 1 ]; then
+  while [ ! -e "$FM_HOME/state/close-first" ]; do sleep 0.02; done
+  printf 'signal: %s/task.status\n' "$FM_HOME/state"
+  exit 0
+fi
+while [ ! -e "$FM_HOME/state/stop" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(cd "$repo" && FM_HOME="$repo" FM_WATCH_REARM_RETRY_BASE_MS=20 FM_WATCH_REARM_RETRY_LIMIT=2 FM_PI_ARM_READY_TIMEOUT_MS=200 node --input-type=module <<'JS'
+import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const waitFor = async (predicate, label) => {
+  for (let i = 0; i < 100; i += 1) {
+    if (predicate()) return;
+    await sleep(20);
+  }
+  throw new Error(`timed out waiting for ${label}`);
+};
+const armCount = () => existsSync(`${process.env.FM_HOME}/state/arm-count`) ? Number(readFileSync(`${process.env.FM_HOME}/state/arm-count`, "utf8")) : 0;
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const tools = [];
+const sends = [];
+const handlers = new Map();
+const pi = {
+  registerTool(tool) { tools.push(tool); },
+  registerCommand() {},
+  on(name, handler) { handlers.set(name, handler); },
+  events: { on() {} },
+  async sendUserMessage(message) { sends.push(message); },
+};
+const plugin = await import(`${pathToFileURL(`${process.env.FM_HOME}/.pi/extensions/fm-primary-pi-watch.ts`).href}?test=${Date.now()}`);
+plugin.default(pi);
+const tool = tools.find((candidate) => candidate.name === "fm_watch_arm_pi");
+if (!tool) throw new Error("Pi watch tool was not registered");
+
+let result = await tool.execute({});
+if (!result.details.ok) throw new Error(`initial arm failed: ${result.details.message}`);
+await waitFor(() => armCount() === 1, "initial arm");
+writeFileSync(`${process.env.FM_HOME}/state/.afk`, "away\n");
+writeFileSync(`${process.env.FM_HOME}/state/close-first`, "close\n");
+await sleep(160);
+if (sends.length !== 0) throw new Error(`away close injected wake: ${sends.join("\n")}`);
+if (armCount() !== 1) throw new Error(`away close started duplicate/retry arm count=${armCount()}`);
+rmSync(`${process.env.FM_HOME}/state/.afk`);
+await waitFor(() => armCount() === 2, "resume after away exit");
+writeFileSync(`${process.env.FM_HOME}/state/stop`, "stop\n");
+handlers.get("session_shutdown")?.();
+JS
+)
+  status=$?
+  expect_code 0 "$status" "Pi extension must suspend an active arm during away mode and resume once .afk disappears"
+  [ -z "$out" ] || fail "Pi away handoff test printed output: $out"
+  pass "Pi watcher extension suspends during away mode and resumes after away exit"
+}
+
+test_pi_extension_already_away_and_shutdown_do_not_arm() {
+  local repo out status
+  repo=$(mktemp -d "$TMP_ROOT/pi-afk-startup.XXXXXX")
+  install_pi_watch_extension_fixture "$repo"
+  mkdir -p "$repo/state"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'armed\n' >> "$FM_HOME/state/arm-log"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(cd "$repo" && FM_HOME="$repo" FM_WATCH_REARM_RETRY_BASE_MS=20 node --input-type=module <<'JS'
+import { existsSync, writeFileSync, rmSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/.afk`, "away\n");
+const tools = [];
+const handlers = new Map();
+const sends = [];
+const pi = {
+  registerTool(tool) { tools.push(tool); },
+  registerCommand() {},
+  on(name, handler) { handlers.set(name, handler); },
+  events: { on() {} },
+  async sendUserMessage(message) { sends.push(message); },
+};
+const plugin = await import(`${pathToFileURL(`${process.env.FM_HOME}/.pi/extensions/fm-primary-pi-watch.ts`).href}?test=${Date.now()}`);
+plugin.default(pi);
+const tool = tools.find((candidate) => candidate.name === "fm_watch_arm_pi");
+const result = await tool.execute({});
+if (!result.details.message.includes("suspended")) throw new Error(`missing suspended result: ${result.details.message}`);
+await sleep(80);
+if (existsSync(`${process.env.FM_HOME}/state/arm-log`)) throw new Error("already-away startup armed watcher");
+if (sends.length !== 0) throw new Error("already-away startup injected wake");
+handlers.get("session_shutdown")?.();
+rmSync(`${process.env.FM_HOME}/state/.afk`);
+await sleep(80);
+if (existsSync(`${process.env.FM_HOME}/state/arm-log`)) throw new Error("shutdown while suspended resumed watcher");
+JS
+)
+  status=$?
+  expect_code 0 "$status" "Pi extension must not arm or inject while already away and must stay stopped after shutdown"
+  [ -z "$out" ] || fail "Pi already-away shutdown test printed output: $out"
+  pass "Pi watcher extension does not arm during already-away startup or after suspended shutdown"
+}
+
 test_opencode_primary_watch_plugin_static_wiring() {
   local plugin module_boundary text
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -2014,6 +2132,8 @@ test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
+test_pi_extension_suspends_for_afk_and_resumes
+test_pi_extension_already_away_and_shutdown_do_not_arm
 test_opencode_primary_watch_plugin_static_wiring
 test_opencode_plugin_package_boundary_is_explicit_esm
 test_opencode_primary_watch_plugin_uses_effective_state_home

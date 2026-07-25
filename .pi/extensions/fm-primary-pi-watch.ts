@@ -1,7 +1,7 @@
 // Firstmate primary watcher bridge for Pi.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -75,6 +75,8 @@ const repairOnlyHint = "call fm_watch_arm_pi again only after a later notificati
 
 let child: ChildProcess | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
+let suspendTimer: ReturnType<typeof setTimeout> | null = null;
+let awayDetectionTimer: ReturnType<typeof setTimeout> | null = null;
 let retryFailures = 0;
 let stopping = false;
 let seq = 0;
@@ -182,9 +184,60 @@ export default function (pi: ExtensionAPI) {
   function stopArm(): void {
     stopping = true;
     if (retryTimer) clearTimeout(retryTimer);
+    if (suspendTimer) clearTimeout(suspendTimer);
+    if (awayDetectionTimer) clearTimeout(awayDetectionTimer);
     retryTimer = null;
+    suspendTimer = null;
+    awayDetectionTimer = null;
     if (child) child.kill("SIGTERM");
     child = null;
+  }
+
+  function awayModeActive(): boolean {
+    return existsSync(`${state}/.afk`);
+  }
+
+  function scheduleAwayDetection(): void {
+    if (stopping || awayDetectionTimer) return;
+    const timer = setTimeout(() => {
+      if (awayDetectionTimer === timer) awayDetectionTimer = null;
+      if (stopping || !child) return;
+      if (awayModeActive()) {
+        suspendForAwayMode(child);
+        return;
+      }
+      scheduleAwayDetection();
+    }, retryBaseMs);
+    timer.unref();
+    awayDetectionTimer = timer;
+  }
+
+  function scheduleAwayResume(): void {
+    if (stopping || suspendTimer) return;
+    const timer = setTimeout(() => {
+      if (suspendTimer === timer) suspendTimer = null;
+      if (stopping) return;
+      if (awayModeActive()) {
+        scheduleAwayResume();
+        return;
+      }
+      const result = startArm();
+      if (!result.ok && !awayModeActive()) {
+        surfaceFailure(`watcher: FAILED - Pi extension could not resume after away mode\n${result.message}`);
+      }
+    }, retryBaseMs);
+    timer.unref();
+    suspendTimer = timer;
+  }
+
+  function suspendForAwayMode(armChild: ChildProcess | null): void {
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+    retryFailures = 0;
+    if (awayDetectionTimer) clearTimeout(awayDetectionTimer);
+    awayDetectionTimer = null;
+    if (armChild) armChild.kill("SIGTERM");
+    scheduleAwayResume();
   }
 
   const cleanupOnProcessExit = () => {
@@ -271,6 +324,10 @@ export default function (pi: ExtensionAPI) {
 
   function scheduleRetry(message: string, predecessorArmPid: string): void {
     if (stopping || child || retryTimer) return;
+    if (awayModeActive()) {
+      suspendForAwayMode(null);
+      return;
+    }
     const ownership = lockOwnership();
     if (ownership !== "owned") {
       surfaceFailure(`watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${message}`);
@@ -294,6 +351,13 @@ export default function (pi: ExtensionAPI) {
 
   function startArm(predecessorArmPid = ""): ArmResult {
     if (stopping) return { ok: false, message: "watcher: not armed - Pi session is shutting down" };
+    if (awayModeActive()) {
+      suspendForAwayMode(child);
+      return {
+        ok: true,
+        message: "watcher: suspended - away supervisor owns watcher classification until state/.afk is removed",
+      };
+    }
     const ownership = lockOwnership();
     if (ownership === "other") return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
     if (ownership === "missing") {
@@ -330,6 +394,7 @@ export default function (pi: ExtensionAPI) {
       stdio: ["ignore", "pipe", "pipe"],
     });
     child = armChild;
+    scheduleAwayDetection();
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -372,6 +437,10 @@ export default function (pi: ExtensionAPI) {
       settleReadiness(false);
       releaseChild();
       if (stopping) return;
+      if (awayModeActive()) {
+        suspendForAwayMode(null);
+        return;
+      }
       const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
@@ -397,6 +466,10 @@ export default function (pi: ExtensionAPI) {
       settleReadiness(false);
       releaseChild();
       if (stopping) return;
+      if (awayModeActive()) {
+        suspendForAwayMode(null);
+        return;
+      }
       if (restoring) return;
       scheduleRetry(`watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
     });
