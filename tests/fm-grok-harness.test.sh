@@ -139,10 +139,12 @@ SH
 
 # Grok 0.2.112 mid-turn keybind bar uses Esc:cancel (not Ctrl+c:cancel). Both
 # defaults must stay in lockstep: fm-watch.sh does not source fm-tmux-lib.sh.
-# Fixtures use the real U+2502 separator and the idle-vs-mid-turn distinction
-# captured from live panes (mid-turn has Esc:cancel; idle does not).
+# Fixtures use the real U+2502 separator and are the footers captured from live
+# 0.2.112 panes: mid-turn carries Esc:cancel, and none of the non-busy overlays
+# (idle bar, slash autocomplete, project-dir chooser) do. A false busy on any of
+# those would suppress stuck detection for a pane blocked on a human.
 test_grok_busy_regex_matches_realistic_footer_fixtures() {
-  local watch_default tmux_default mid_footer idle_footer
+  local watch_default tmux_default mid_footer perm_footer name footer
   watch_default=$(sed -n "s/^BUSY_REGEX=\${FM_BUSY_REGEX:-'\\(.*\\)'}/\\1/p" "$ROOT/bin/fm-watch.sh")
   tmux_default=$(sed -n "s/^FM_TMUX_BUSY_REGEX_DEFAULT='\\(.*\\)'/\\1/p" "$ROOT/bin/fm-tmux-lib.sh")
   [ -n "$watch_default" ] || fail "could not extract BUSY_REGEX default from fm-watch.sh"
@@ -157,15 +159,32 @@ test_grok_busy_regex_matches_realistic_footer_fixtures() {
 
   # Exact mid-turn keybind bar shape from grok 0.2.112 (separators are U+2502).
   mid_footer=$'  Shift+Tab:mode  \u2502  Esc:cancel  \u2502  Ctrl+b:send to bg  \u2502  Ctrl+.:shortcuts\n'
-  idle_footer=$'  Shift+Tab:mode  \u2502  Ctrl+.:shortcuts\n'
   printf '%s' "$mid_footer" | grep -v '^[[:space:]]*$' | tail -6 \
     | grep -qiE "$watch_default" \
     || fail "default busy regex does not match realistic Grok mid-turn footer"
-  if printf '%s' "$idle_footer" | grep -v '^[[:space:]]*$' | tail -6 \
-    | grep -qiE "$watch_default"; then
-    fail "default busy regex matches idle Grok keybind bar (false busy would suppress stuck detection)"
-  fi
-  pass "Grok busy regex matches mid-turn footer fixture and rejects idle fixture"
+
+  # Captured non-busy 0.2.112 overlays: a match here is a false busy, which
+  # would hide a pane that is actually blocked waiting on a human.
+  while IFS='|' read -r name footer; do
+    [ -n "$name" ] || continue
+    if printf '%s\n' "$footer" | grep -v '^[[:space:]]*$' | tail -6 \
+      | grep -qiE "$watch_default"; then
+      fail "default busy regex matches non-busy Grok overlay ($name): [$footer]"
+    fi
+  done <<'EOF'
+idle keybind bar|  Shift+Tab:mode  \u2502  Ctrl+.:shortcuts
+slash autocomplete|  Enter:send  \u2502  Shift+Tab:mode  \u2502  Ctrl+.:shortcuts
+project-dir chooser|  Esc:unselect  \u2502  Tab:scrollback  \u2502  Shift+x:dismiss
+EOF
+
+  # The tool-permission dialog prints the legacy Ctrl+c:cancel, which this regex
+  # has always matched. Pinned as known behaviour, not as a new regression.
+  perm_footer=$'  1/4:select  \u2502  Ctrl+o:always-approve  \u2502  Ctrl+c:cancel\n'
+  printf '%s' "$perm_footer" | grep -v '^[[:space:]]*$' | tail -6 \
+    | grep -qiE "$watch_default" \
+    || fail "legacy Ctrl+c:cancel token no longer matches the Grok permission dialog footer"
+
+  pass "Grok busy regex matches mid-turn footer and rejects captured non-busy overlays"
 }
 
 test_grok_hook_requires_registered_token

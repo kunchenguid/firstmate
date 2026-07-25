@@ -102,9 +102,18 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
                                       # turn-end hook) coalesce into one wake
 # Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
 # claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
-# grok: "Esc:cancel" on 0.2.112 (mid-turn keybind bar only; absent when idle) and
-# "Ctrl+c:cancel" kept for older installs that still print it. ASCII only - do not
-# match grok's braille spinner glyph (locale-fragile). Verified on grok 0.2.112.
+# grok: "Esc:cancel" on 0.2.112 (mid-turn keybind bar only) and "Ctrl+c:cancel"
+# kept for older installs that still print it. ASCII only - do not match grok's
+# braille spinner glyph (locale-fragile).
+# Evidence, grok 0.2.112: "Esc:cancel" is present mid-turn and ABSENT from the
+# last 6 nonblank lines of every captured non-busy overlay -
+#   slash autocomplete    Enter:send | Shift+Tab:mode | Ctrl+.:shortcuts
+#   idle keybind bar      Shift+Tab:mode | Ctrl+.:shortcuts
+#   project-dir chooser   Esc:unselect | Tab:scrollback | Shift+x:dismiss
+#   tool-permission       1/4:select | Ctrl+o:always-approve | Ctrl+c:cancel
+# so the token does not misclassify a human-blocked pane as busy. The permission
+# dialog does print the legacy "Ctrl+c:cancel", which this regex has always
+# matched; that predates the 0.2.112 token and is kept for older installs.
 BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|Esc:cancel'}
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
