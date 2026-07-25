@@ -457,6 +457,10 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       if (restoring) return;
+      if (/external healthy watcher/.test(classification.message)) {
+        surfaceFailure(classification.message);
+        return;
+      }
       scheduleRetry(classification.message, predecessor);
     });
     armChild.on("error", (error: Error) => {
