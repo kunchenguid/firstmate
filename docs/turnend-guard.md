@@ -3,7 +3,7 @@
 This is the authoritative current contract for the "no turn ends blind" primary backstop referenced from AGENTS.md section 8.
 The predicate lives in `bin/fm-turnend-guard.sh`.
 Primary scope lives in `bin/fm-primary-scope-lib.sh`, shared with the native session-start nudge in [`sessionstart-nudge.md`](sessionstart-nudge.md).
-Harness hook files only adapt each verified harness's turn-end mechanism to that shared predicate.
+Harness hook files adapt each enabled primary harness integration's turn-end mechanism to that shared predicate.
 
 Related PreToolUse guards deny unsafe commands before execution rather than detecting a blind turn end afterward.
 Their separate owners are [`arm-pretool-check.md`](arm-pretool-check.md), [`cd-guard.md`](cd-guard.md), and [`subagent-guard.md`](subagent-guard.md).
@@ -72,6 +72,8 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - A valid secondmate home is in scope; an idle secondmate endpoint with no X-mode relay poll remains healthy because it has no supervision need.
 - Claude and Codex block directly, while OpenCode, Pi, and Grok use bounded passive follow-ups.
 - OpenCode headless mode and untrusted Grok project hooks remain fail-open at the host boundary.
+- Kimi Code CLI 0.29.1 exposes only global `[[hooks]]` configuration in `~/.kimi-code/config.toml`, including a `Stop` event with snake_case payload fields `hook_event_name`, `session_id`, `cwd`, and `stop_hook_active`.
+- Kimi has no project-level hook configuration, so Firstmate does not modify that global file without captain approval, installs no Kimi hook, and writes no Kimi turn-end marker.
 - Missing `jq` or unreadable hook input remains fail-open.
 - No harness adapter uses a shell ampersand to manufacture supervision.
 

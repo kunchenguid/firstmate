@@ -53,7 +53,7 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 The primary integrations for `claude`, `codex`, `opencode`, `pi`, and `grok` have empirically validated hook paths for the "no turn ends blind" guard.
 `claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
 `opencode`, `pi`, and `grok` expose passive lifecycle callbacks for this purpose, so their tracked primary adapters force one bounded follow-up or resume when the shared predicate blocks.
-The kimi crewmate adapter has no enabled primary or per-turn hook integration because its only verified configuration surface is global and requires captain approval.
+Kimi is outside the current turn-end integration scope; `docs/turnend-guard.md` owns the global-configuration boundary.
 The exact hook files, commands, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
 `docs/verification/supervision.md` "Turn-end guard" owns active validation evidence.
 When changing any primary turn-end hook, validate the real harness behavior in a scratch project or throwaway home before trusting it, then update that doc and the relevant concise fact below.
@@ -373,7 +373,6 @@ The brief path must be absolute because the brief lives outside the task worktre
 Kimi's footer tip rotates independently and can display `ctrl+c: cancel` while completely idle, so tip text is never used as its busy signature.
 The spinner match covers the full moon-phase glyph set rather than one frame, but it remains locale- and emoji-font-sensitive because Kimi exposes no stable ASCII busy token.
 
-Kimi supports global `[[hooks]]` in `~/.kimi-code/config.toml`, including a `Stop` event with snake_case payload fields `hook_event_name`, `session_id`, `cwd`, and `stop_hook_active`.
-Kimi has no project-level hook configuration, so firstmate does not create or modify that global file without the captain's approval.
-The current adapter installs no Kimi hook, writes no Kimi turn-end marker, and falls back to idle detection.
+[`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns Kimi's verified global hook surface, approval boundary, and absence from the enabled integrations.
+The current adapter falls back to idle detection.
 That fallback is the weakest idle detection of any supported adapter because Kimi has no stable ASCII busy token, so turn completion can only be inferred from the fragile moon spinner disappearing and the pane becoming stable.
