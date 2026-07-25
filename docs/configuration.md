@@ -175,8 +175,8 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 ## Harness support
 
 claude, codex, opencode, pi, grok, and kimi are empirically verified for crewmate and secondmate launches; [README requirements](../README.md#requirements) own the narrower set supported for the primary session.
-Cursor Agent CLI is empirically verified only for ordinary workers and scouts on tmux, Zellij, Orca, and cmux; primary-session, persistent-secondmate, and Herdr launches reject `cursor`.
-Herdr remains excluded because its native agent registration drives liveness and recovery, and Cursor has not been verified on that provider.
+Cursor Agent CLI is empirically verified only for ordinary workers and scouts on Linux x64 under tmux.
+Primary-session, persistent-secondmate, other-platform, Zellij, Orca, cmux, and Herdr launches reject `cursor`; Herdr additionally depends on native agent registration for liveness and recovery.
 New harnesses get verified through a supervised trial task before joining the set.
 The verified adapter knowledge - busy signatures, interrupt and exit commands, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
@@ -187,7 +187,7 @@ Primary-session watcher wake protocols are rendered at session start by [`bin/fm
 Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
 Set it to `cursor`, or select `cursor` in `config/crew-dispatch.json`, to launch Cursor workers.
-Cursor spawns require `cursor-agent` on `PATH` and an authenticated `cursor-agent status` before any task endpoint is created.
+Cursor spawns require the exact verified CLI version on Linux x86_64, `cursor-agent` on `PATH`, and an authenticated `cursor-agent status` before any task endpoint is created.
 Copy model IDs exactly from the live `cursor-agent models` output; the repository deliberately carries no Cursor model catalog.
 Cursor has no separate verified effort flag, so choose a model ID that carries the intended effort variant and omit the dispatch profile's `effort` field.
 When it is absent or contains `default`, crewmates mirror the firstmate's own harness.
@@ -198,7 +198,8 @@ A bare `<harness>` preserves the previous behavior: harness only, with no model 
 When the harness token is absent or `default`, secondmate launch falls back through `config/crew-harness` and then the primary's own harness, and no model or effort is read from that file.
 `fm-harness.sh secondmate-model` and `fm-harness.sh secondmate-effort` expose only the optional tokens from `config/secondmate-harness`; `config/crew-harness` remains a bare adapter-name file.
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
-An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
+An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; an explicit named harness starts with clean model and effort defaults unless those flags are also passed.
+Raw launch commands are rejected for persistent secondmates.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
 The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
@@ -215,6 +216,7 @@ For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the sec
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
 The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
 When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
+Raw launch commands remain an ordinary-worker verification escape hatch on eligible providers, but are rejected on Herdr.
 Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
 This section is the single owner of the canonical schema and its per-field semantics; `AGENTS.md` section 4 owns the dispatch and array-selection procedure.

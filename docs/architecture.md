@@ -149,8 +149,8 @@ When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without 
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, grok, pi, opencode, kimi, and cursor while preserving the requested profile for later audit.
-Cursor is an ordinary worker/scout adapter only; the primary-session and persistent-secondmate integration surfaces reject it until their full lifecycle hooks are separately verified.
-Herdr also rejects Cursor because safe recovery depends on Herdr's native agent registration, which has not been empirically verified for Cursor.
+Cursor is a Linux x64/tmux ordinary worker/scout adapter only; primary-session, persistent-secondmate, other-platform, Zellij, Orca, cmux, and Herdr integration surfaces reject it until their full lifecycles are separately verified.
+Herdr additionally depends on native agent registration for safe recovery, which has not been empirically verified for Cursor.
 
 ## Optional secondmates
 
@@ -180,7 +180,7 @@ Secondmate agents can run on a different verified harness than crewmates.
 A bare harness line remains harness-only, so existing `config/secondmate-harness` files keep their previous behavior.
 When the harness token is unset or `default`, launch falls back to `config/crew-harness`, then to the primary's own harness, and the model and effort tokens are ignored.
 Those optional tokens are re-read on every secondmate spawn or respawn and are overridden by explicit per-spawn `--model` or `--effort` flags.
-An explicit per-spawn harness or raw launch command does not inherit model or effort tokens from `config/secondmate-harness`.
+An explicit per-spawn named harness does not inherit model or effort tokens from `config/secondmate-harness`; raw launch commands are not accepted for persistent secondmates.
 `config/crew-harness` remains the crewmate harness and is inherited into secondmate homes.
 `config/crew-dispatch.json` is inherited too; secondmates use the same natural-language dispatch profiles when spawning their own crewmates.
 The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the complete inherited-local-material allowlist and propagation contract.

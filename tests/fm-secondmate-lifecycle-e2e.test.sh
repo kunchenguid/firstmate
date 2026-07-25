@@ -199,7 +199,7 @@ phase_recovery() {
   # persistent home (no explicit home argument).
   rm -f "$HOME_DIR/state/design.meta"
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
-    "$ROOT/bin/fm-spawn.sh" design "echo relaunch" --secondmate >/dev/null 2>&1 \
+    "$ROOT/bin/fm-spawn.sh" design codex --secondmate >/dev/null 2>&1 \
     || fail "recovery respawn failed"
   local meta="$HOME_DIR/state/design.meta"
   assert_grep "home=$SUB_ABS" "$meta" "respawn did not preserve the persistent home from the registry"

@@ -2,7 +2,7 @@
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -61,17 +61,17 @@
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name
 #   (claude|codex|opencode|pi|grok|kimi|cursor) overrides it for this spawn.
-#   Cursor is ordinary-worker/scout only; --secondmate rejects both its verified
-#   adapter name and a cursor-agent raw launch. A non-flag string containing
+#   Cursor is Linux/tmux ordinary-worker/scout only. A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new ordinary adapters. A verified Cursor spawn requires the empirically tested
-#   CLI version and authenticated status before endpoint creation.
+#   new ordinary adapters. Raw commands are rejected for persistent secondmates
+#   and on Herdr. A verified Cursor spawn requires the empirically tested CLI
+#   version and authenticated status before endpoint creation.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
-#   harness from config/secondmate-harness. An explicit per-spawn --harness,
-#   positional harness arg, or raw launch command starts with clean model/effort
-#   defaults unless the caller also passes explicit --model/--effort flags. When
+#   harness from config/secondmate-harness. An explicit per-spawn --harness or
+#   positional named harness starts with clean model/effort defaults unless the
+#   caller also passes explicit --model/--effort flags. When
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
@@ -464,16 +464,15 @@ launch_template() {
   esac
 }
 
+RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
+    RAW_LAUNCH=1
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
-    case "$LAUNCH" in
-      *cursor-agent*) HARNESS=cursor-agent ;;
-    esac
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -495,17 +494,24 @@ case "$ARG3" in
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
     fi
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); use a verified named harness, or a raw launch command only for an ordinary worker on a non-Herdr backend" >&2; exit 1; }
     ;;
   *)
     HARNESS=$ARG3
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; use a verified named harness, or a raw launch command only for an ordinary worker on a non-Herdr backend" >&2; exit 1; }
     ;;
 esac
 
-# Cursor's verified boundary is ordinary ship/scout work only. Keep this check
-# after raw-command harness extraction so the verification escape hatch cannot
-# accidentally turn cursor-agent into an unsupported persistent secondmate.
+if [ "$RAW_LAUNCH" -eq 1 ] && [ "$KIND" = secondmate ]; then
+  echo "error: raw launch commands are not supported for persistent secondmates; use a verified named harness" >&2
+  exit 1
+fi
+if [ "$RAW_LAUNCH" -eq 1 ] && [ "$BACKEND" = herdr ]; then
+  echo "error: raw launch commands are not supported on backend=herdr; use a verified named harness" >&2
+  exit 1
+fi
+
+# Cursor's verified boundary is ordinary ship/scout work only.
 if [ "$KIND" = secondmate ]; then
   case "$HARNESS" in
     cursor|cursor-agent)
@@ -535,6 +541,13 @@ case "$HARNESS" in
       echo "error: harness 'cursor' requires verified cursor-agent version 2026.07.23-e383d2b; found '${CURSOR_AGENT_VERSION:-unknown}'" >&2
       exit 1
     }
+    CURSOR_AGENT_OS=$(uname -s 2>/dev/null) || CURSOR_AGENT_OS=unknown
+    CURSOR_AGENT_ARCH=$(uname -m 2>/dev/null) || CURSOR_AGENT_ARCH=unknown
+    CURSOR_AGENT_PLATFORM="$CURSOR_AGENT_OS-$CURSOR_AGENT_ARCH"
+    [ "$CURSOR_AGENT_PLATFORM" = Linux-x86_64 ] || {
+      echo "error: harness 'cursor' is verified only on Linux x86_64; found '$CURSOR_AGENT_PLATFORM'" >&2
+      exit 1
+    }
     cursor-agent status >/dev/null 2>&1 || {
       echo "error: harness 'cursor' is not authenticated; run 'cursor-agent login' and retry" >&2
       exit 1
@@ -544,7 +557,7 @@ esac
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
-# --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
+# --secondmate spawn and no explicit per-spawn harness was supplied, so
 # the harness itself came from the secondmate config fallback chain. Resolving
 # here on every spawn makes the pin durable across respawns. Precedence: explicit
 # --model/--effort flags still win over the file's tokens.

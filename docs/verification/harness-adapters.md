@@ -100,7 +100,7 @@ The verified launch is an ordinary worker/scout adapter on Linux x64 under tmux.
 Cursor is not a verified primary harness or persistent secondmate and is deliberately absent from primary detection, session-lock matching, turn-end guards, and rendered supervision protocols.
 Zellij, Orca, cmux, and Herdr are rejected until each session-provider lifecycle is empirically verified for Cursor; Herdr additionally requires native agent registration for safe liveness and recovery.
 Cursor exposes no verified per-turn hook, so task status writes and session-provider pane polling remain the completion path.
-`fm-spawn` requires the exact verified `cursor-agent` version and authenticated status before endpoint creation.
-Raw launch commands containing `cursor-agent` are conservatively classified as Cursor so wrappers cannot bypass its secondmate or backend boundary.
+`fm-spawn` requires Linux x86_64, the exact verified `cursor-agent` version, and authenticated status before endpoint creation.
+Raw launch commands are rejected categorically for persistent secondmates and on Herdr because arbitrary shell text cannot provide trustworthy adapter identity.
 The launch uses `--force` for unattended built-in tools and commands, but deliberately omits `--approve-mcps` because MCP server approval is a separate trust boundary.
 Cursor exposes no separate effort flag; exact model IDs and parameterized model strings carry model-specific effort.

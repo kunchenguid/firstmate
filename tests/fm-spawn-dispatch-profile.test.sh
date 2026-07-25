@@ -377,29 +377,28 @@ test_cursor_secondmate_is_rejected() {
   pass "cursor is rejected for persistent secondmates"
 }
 
-test_cursor_raw_wrappers_cannot_bypass_secondmate_rejection() {
-  local wrapper label rec id sm out status
+test_raw_launches_are_rejected_for_secondmates() {
+  local launch label rec id sm out status
   label=0
-  for wrapper in \
-    "env FOO=1 cursor-agent --force" \
-    "command cursor-agent --force" \
-    "bash -lc 'cursor-agent --force'"; do
+  for launch in \
+    "custom-agent --flag" \
+    "bash -lc 'cursor''-agent --force'"; do
     label=$((label + 1))
-    id="profile-cursor-raw-secondmate-z8d$label"
-    rec=$(make_spawn_case "profile-cursor-raw-secondmate-$label" codex "$id")
+    id="profile-raw-secondmate-z8d$label"
+    rec=$(make_spawn_case "profile-raw-secondmate-$label" codex "$id")
     read_case_record "$rec"
-    sm="$CASE_DIR/cursor-secondmate-home"
+    sm="$CASE_DIR/secondmate-home"
     make_seeded_secondmate_home "$sm" "$id"
 
     out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-      "$id" "$sm" --secondmate --harness "$wrapper")
+      "$id" "$sm" --secondmate --harness "$launch")
     status=$?
-    expect_code 1 "$status" "wrapped cursor secondmate launch must be rejected: $wrapper"
-    assert_contains "$out" "supports ordinary ship/scout workers only" \
-      "wrapped cursor secondmate refusal did not preserve the supported boundary: $wrapper"
-    assert_absent "$HOME_DIR/state/$id.meta" "wrapped cursor secondmate refusal must precede metadata: $wrapper"
+    expect_code 1 "$status" "raw secondmate launch must be rejected: $launch"
+    assert_contains "$out" "raw launch commands are not supported for persistent secondmates" \
+      "raw secondmate refusal did not preserve the named-harness boundary: $launch"
+    assert_absent "$HOME_DIR/state/$id.meta" "raw secondmate refusal must precede metadata: $launch"
   done
-  pass "cursor wrappers cannot bypass the persistent-secondmate boundary"
+  pass "persistent secondmates reject every raw launch command"
 }
 
 test_cursor_unverified_version_is_rejected_before_endpoint_creation() {
@@ -454,6 +453,31 @@ SH
   pass "cursor authentication is checked before endpoint creation"
 }
 
+test_cursor_unverified_platform_is_rejected_before_endpoint_creation() {
+  local rec id out status
+  id=profile-cursor-platform-z8i
+  rec=$(make_spawn_case profile-cursor-platform codex "$id")
+  read_case_record "$rec"
+  cat > "$FAKEBIN_DIR/uname" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -s) printf '%s\n' Darwin ;;
+  -m) printf '%s\n' arm64 ;;
+esac
+SH
+  chmod +x "$FAKEBIN_DIR/uname"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness cursor)
+  status=$?
+  expect_code 1 "$status" "cursor launch on an unverified platform must be rejected"
+  assert_contains "$out" "verified only on Linux x86_64; found 'Darwin-arm64'" \
+    "cursor platform refusal did not name the verified boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" "cursor platform refusal must happen before metadata publication"
+  [ ! -s "$LAUNCH_LOG" ] || fail "cursor platform refusal unexpectedly created or typed into an endpoint"
+  pass "cursor rejects platforms outside the empirical verification record"
+}
+
 test_cursor_unverified_backends_are_rejected_before_endpoint_creation() {
   local backend rec id out status
   for backend in zellij orca cmux herdr; do
@@ -473,21 +497,27 @@ test_cursor_unverified_backends_are_rejected_before_endpoint_creation() {
   pass "cursor rejects every unverified session-provider backend"
 }
 
-test_cursor_raw_wrapper_cannot_bypass_backend_rejection() {
-  local rec id out status
-  id=profile-cursor-raw-herdr-z8h
-  rec=$(make_spawn_case profile-cursor-raw-herdr codex "$id")
-  read_case_record "$rec"
+test_raw_launches_are_rejected_on_herdr() {
+  local launch label rec id out status
+  label=0
+  for launch in \
+    "custom-agent --flag" \
+    "bash -lc 'cursor''-agent --force'"; do
+    label=$((label + 1))
+    id="profile-raw-herdr-z8h$label"
+    rec=$(make_spawn_case "profile-raw-herdr-$label" codex "$id")
+    read_case_record "$rec"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness "env FOO=1 cursor-agent --force" --backend herdr)
-  status=$?
-  expect_code 1 "$status" "wrapped cursor launch on Herdr must be rejected"
-  assert_contains "$out" "verified only on backend=tmux; backend=herdr is not supported" \
-    "wrapped cursor launch bypassed the verified backend boundary"
-  assert_absent "$HOME_DIR/state/$id.meta" "wrapped cursor backend refusal must happen before metadata publication"
-  [ ! -s "$LAUNCH_LOG" ] || fail "wrapped cursor backend refusal unexpectedly used an endpoint"
-  pass "cursor wrappers cannot bypass the session-provider boundary"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness "$launch" --backend herdr)
+    status=$?
+    expect_code 1 "$status" "raw launch on Herdr must be rejected: $launch"
+    assert_contains "$out" "raw launch commands are not supported on backend=herdr" \
+      "raw Herdr refusal did not preserve the named-harness boundary: $launch"
+    assert_absent "$HOME_DIR/state/$id.meta" "raw Herdr refusal must precede metadata: $launch"
+    [ ! -s "$LAUNCH_LOG" ] || fail "raw Herdr refusal unexpectedly used an endpoint: $launch"
+  done
+  pass "Herdr rejects every raw launch command"
 }
 
 test_pi_threads_model_and_max_effort() {
@@ -563,11 +593,12 @@ test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_cursor_threads_exact_model_and_omits_effort_axis
 test_cursor_secondmate_is_rejected
-test_cursor_raw_wrappers_cannot_bypass_secondmate_rejection
+test_raw_launches_are_rejected_for_secondmates
 test_cursor_unverified_version_is_rejected_before_endpoint_creation
 test_cursor_authentication_is_checked_before_endpoint_creation
+test_cursor_unverified_platform_is_rejected_before_endpoint_creation
 test_cursor_unverified_backends_are_rejected_before_endpoint_creation
-test_cursor_raw_wrapper_cannot_bypass_backend_rejection
+test_raw_launches_are_rejected_on_herdr
 test_pi_threads_model_and_max_effort
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch

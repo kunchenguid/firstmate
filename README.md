@@ -73,7 +73,7 @@ All three have verified turn-end guard paths when launched with their documented
 Pick whichever one matches your subscription and workflow.
 
 Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
-Cursor Agent CLI is verified only for ordinary workers and scouts selected through static or dispatch-profile configuration, not for a primary session or persistent secondmate.
+Cursor Agent CLI is verified only for ordinary workers and scouts on Linux x64 under tmux, selected through static or dispatch-profile configuration.
 
 ### Install and launch
 

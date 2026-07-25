@@ -537,8 +537,8 @@ fm_backend_cmux_capture() {  # <target> <lines> [expected-label]
 # `pane read --format ansi` path. The cmux classifier intentionally remains
 # border-row based: locate the
 # composer row as either a line whose TRIMMED content both STARTS and ENDS with
-# the same border glyph (│, ┃, or a plain ASCII |), or Cursor's verified bare
-# `→` row. It scans forward and keeps the LAST match so an earlier transcript or
+# the same border glyph (│, ┃, or a plain ASCII |), or a bare `→` row. It scans
+# forward and keeps the LAST match so an earlier transcript or
 # popup row never outranks the real bottom-anchored composer row.
 FM_BACKEND_CMUX_COMPOSER_LINES=${FM_BACKEND_CMUX_COMPOSER_LINES:-20}
 FM_BACKEND_CMUX_IDLE_RE=${FM_BACKEND_CMUX_IDLE_RE:-'^(Type a message\.\.\.|Add a follow-up)$'}

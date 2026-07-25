@@ -248,8 +248,13 @@ printf 'workspace-move\t%s\t%s\t%s\n' "$before" "$after" "$2" >> "$FOCUS_AUDIT_L
 [ -z "$out" ] || printf '%s\n' "$out"
 exit "$status"
 SH
+
+cat > "$FAKEBIN/claude" <<'SH'
+#!/usr/bin/env bash
+exec sleep 120
+SH
 chmod +x "$FAKEBIN/herdr" "$FAKEBIN/treehouse"
-chmod +x "$FAKEBIN/herdr-workspace-mover"
+chmod +x "$FAKEBIN/herdr-workspace-mover" "$FAKEBIN/claude"
 export PATH="$FAKEBIN:$PATH"
 export FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAKEBIN/herdr-workspace-mover"
 
@@ -385,13 +390,13 @@ make_project() {  # <dir>
 spawn_task() {  # <id> <home> <project>
   local id=$1 home=$2 project=$3
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'sleep 120'" --backend herdr
+    "$ROOT/bin/fm-spawn.sh" "$id" "$project" claude --backend herdr
 }
 
 spawn_secondmate_task() {
   local id=$1 home=$2
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$home" "sh -c 'sleep 120'" --secondmate --backend herdr
+    "$ROOT/bin/fm-spawn.sh" "$id" "$home" claude --secondmate --backend herdr
 }
 
 teardown_task() {  # <id> <home>

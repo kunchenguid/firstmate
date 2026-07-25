@@ -31,10 +31,10 @@ The primary-session watcher wake protocols are rendered from `docs/supervision-p
 The supervision knowledge lives here: busy signature, exit command, interrupt, dialogs, resume behavior, skill invocation, and quirks.
 
 Never dispatch an adapter outside its verified role.
-Cursor is verified only for ordinary crewmates and scouts on tmux, Zellij, Orca, and cmux; it is not verified for a primary session, persistent secondmate, or Herdr.
+Cursor is verified only for ordinary crewmates and scouts on Linux x64 under tmux; it is not verified for a primary session, persistent secondmate, another platform, or another session provider.
 If `config/crew-harness` or `config/secondmate-harness` names an adapter unverified for the requested role, tell the captain under `AGENTS.md` section 9 that the requested worker runtime is not verified for that role, use a fitting verified runtime for current work, and ask only whether to verify the requested runtime before future use.
 Do not pause current work for that future-verification choice, and never launch an unverified adapter.
-If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
+If the captain asks for a new harness, propose verifying it first: spawn a trivial ordinary tmux task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
 
 ## Detection
 
@@ -299,6 +299,7 @@ Launch with `cursor-agent --force --trust --model <exact-id> "<typed brief>"`.
 `--trust` suppresses the otherwise blocking per-worktree trust dialog for the isolated worktree Firstmate already selected.
 Do not add `--approve-mcps`: MCP server approval is a separate trust boundary and ordinary built-in tools do not require it.
 Authentication comes from Cursor login state; `fm-spawn` checks `cursor-agent status` before endpoint creation and directs the operator to `cursor-agent login` on failure.
+`fm-spawn` also requires the exact verified CLI version, Linux x86_64, and the tmux provider.
 
 | Fact | Value |
 |---|---|
@@ -310,7 +311,6 @@ Authentication comes from Cursor login state; `fm-spawn` checks `cursor-agent st
 
 Cursor's tmux composer sits several rows above tmux's reported blank cursor row and starts with `→`.
 The shared tmux composer scanner therefore uses a bounded row window, recognizes `Add a follow-up` as empty, recognizes real text after `→` as pending, and refuses a returned shell after exit.
-Orca and cmux use the same verified bare prompt shape; Zellij keeps its provider-level content-diff submission contract.
 The tmux process-liveness classifier recognizes the launched `cursor-agent` command.
 Cursor exposes no verified per-turn hook, so ordinary status writes plus pane polling own turn completion.
 
@@ -320,7 +320,7 @@ The CLI exposes no separate effort flag; IDs and parameterized model strings car
 Composer 2.5 (`composer-2.5`) and Cursor Grok 4.5 Low (`cursor-grok-4.5-low`) completed bounded headless selection probes on the verified version; [`docs/verification/harness-adapters.md`](../../../docs/verification/harness-adapters.md) owns the exact commands and output.
 
 Cursor is deliberately not detected as Firstmate's own harness and has no primary supervision protocol, session lock marker, or turn-end guard.
-`fm-spawn` rejects Cursor for persistent secondmates and on Herdr; Herdr's native agent registration is load-bearing for liveness and recovery and has not been verified for Cursor.
+`fm-spawn` rejects Cursor for persistent secondmates and on Zellij, Orca, cmux, or Herdr; Herdr's native agent registration is load-bearing for liveness and recovery and has not been verified for Cursor.
 
 ## grok (VERIFIED 2026-06-29, grok 0.2.73; slash-submit re-verified 2026-07-03 on 0.2.82; reasoning-effort ceiling re-verified 2026-07-13 on grok 0.2.99; exit paths re-verified 2026-07-19 on grok 0.2.103)
 
