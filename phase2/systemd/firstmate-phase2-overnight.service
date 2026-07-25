@@ -1,0 +1,19 @@
+[Unit]
+Description=FirstMate Phase 2 overnight auto-continue daemon
+After=default.target
+Wants=firstmate-phase2-eventd.service
+
+[Service]
+Type=simple
+Environment=FM_HOME=%h/agentic/firstmate
+Environment=FM_PHASE2_PROGRAMME=overnight-gallery
+Environment=PATH=%h/.npm-global/bin:%h/.local/bin:/usr/bin
+WorkingDirectory=%h/agentic/firstmate
+ExecStart=%h/agentic/firstmate/bin/fm-phase2-overnight-daemon.sh --programme overnight-gallery --interval 45
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

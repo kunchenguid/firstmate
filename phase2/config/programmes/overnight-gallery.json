@@ -1,0 +1,82 @@
+{
+  "id": "overnight-gallery",
+  "title": "Overnight northscapes-gallery continuous delivery",
+  "phase": "overnight",
+  "project": "projects/northscapes-gallery",
+  "harness": "cursor",
+  "model": "auto",
+  "effort": "xhigh",
+  "tasks": [
+    {
+      "id": "og-collection-submit-api",
+      "title": "Wire collection submit-for-review in repository/API",
+      "objective": "Expose submitCollectionForReview / approveCollection through collections.repository + studio server functions so draft → pending_review → published is reachable without UI redesign. Keep changes inside ownership paths. Commit, tests, packet/RESULT.md, status done:.",
+      "worker_type": "backend_engineer",
+      "priority": 10,
+      "ownership": ["src/infrastructure/db/collections.repository.ts", "src/features/studio/collections.fn.ts", "src/domain/catalogue/**"],
+      "acceptance": [
+        "Studio/server function can move an artist collection draft to pending_review",
+        "Approve path can publish from pending_review",
+        "Illegal transitions still rejected",
+        "Focused tests pass; RESULT.md complete"
+      ],
+      "context": "Domain already has pending_review helpers from fm/pilot-db-collection. Merge or cherry-pick that work if missing on main, then wire repository/API. Do not build full admin UI in this task."
+    },
+    {
+      "id": "og-collection-submit-ui",
+      "title": "Studio UI: Submit collection for review button",
+      "objective": "Add a minimal Submit for review control on artist collection detail for draft collections calling the new API. No redesign. Commit, RESULT.md, done:.",
+      "worker_type": "frontend_engineer",
+      "priority": 20,
+      "deps": ["og-collection-submit-api"],
+      "ownership": ["src/routes/studio/collections/**", "src/features/studio/**"],
+      "acceptance": [
+        "Draft collection shows Submit for review",
+        "After submit, status shows pending_review",
+        "No unrelated UI churn",
+        "RESULT.md complete"
+      ]
+    },
+    {
+      "id": "og-admin-collection-approve",
+      "title": "Admin: approve pending_review collections",
+      "objective": "Minimal admin list/action to approve pending_review artist collections to published. Commit, RESULT.md, done:.",
+      "worker_type": "frontend_engineer",
+      "priority": 30,
+      "deps": ["og-collection-submit-api"],
+      "ownership": ["src/routes/admin/**", "src/features/**"],
+      "acceptance": [
+        "Admin can see pending_review collections",
+        "Approve publishes them",
+        "RESULT.md complete"
+      ]
+    },
+    {
+      "id": "og-public-collection-visible",
+      "title": "Public storefront shows approved collections",
+      "objective": "Ensure published artist collections appear on public collections routes. Fix gaps only. Commit, RESULT.md, done:.",
+      "worker_type": "frontend_engineer",
+      "priority": 40,
+      "deps": ["og-admin-collection-approve"],
+      "ownership": ["src/routes/collections*.tsx", "src/features/storefront/**", "src/features/site/**"],
+      "acceptance": [
+        "Published collection visible publicly by slug",
+        "Draft/pending_review not publicly listed",
+        "RESULT.md complete"
+      ]
+    },
+    {
+      "id": "og-playwright-collection-smoke",
+      "title": "Playwright smoke: public collection page loads",
+      "objective": "Add or extend a Playwright smoke that hits PLAYWRIGHT_BASE_URL collections page; screenshot on failure. Commit, RESULT.md, done:.",
+      "worker_type": "test_engineer",
+      "priority": 50,
+      "deps": ["og-public-collection-visible"],
+      "ownership": ["**/e2e/**", "**/*playwright*", "phase2/playwright/**"],
+      "acceptance": [
+        "Smoke test exists and passes against local or documented base URL",
+        "RESULT.md includes command output"
+      ]
+    }
+  ]
+}
