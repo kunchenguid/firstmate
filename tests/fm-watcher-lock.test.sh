@@ -916,6 +916,75 @@ test_pid_identity_is_locale_invariant() {
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
 }
 
+test_macos_pid_identity_uses_ps_fallback_without_proc() {
+  local dir state fakebin no_proc marker identity
+  dir=$(make_case macos-pid-identity-ps-fallback)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  no_proc="$dir/no-proc"
+  marker="$dir/ps-called"
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+SH
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' called > "$FM_TEST_PS_MARKER"
+printf '   Sat Jul 25 01:33:07 2026 bash /portable/fm-watch.sh\n'
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ps"
+
+  identity=$(PATH="$fakebin:$PATH" FM_TEST_PS_MARKER="$marker" FM_PROC_ROOT_OVERRIDE="$no_proc" \
+    FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$$") \
+    || fail "could not read process identity through the ps fallback"
+
+  [ -e "$marker" ] || fail "fm_pid_identity did not invoke ps when proc was unavailable"
+  [ "$identity" = 'Sat Jul 25 01:33:07 2026 bash /portable/fm-watch.sh' ] \
+    || fail "fm_pid_identity changed the portable ps fallback output ('$identity')"
+  pass "macOS fm_pid_identity preserves the ps fallback when proc is unavailable"
+}
+
+test_linux_pid_identity_is_stable_across_immediate_reads() {
+  local dir state fakebin counter live first second
+  [ "$(uname)" = Linux ] || {
+    pass "Linux fresh-process identity regression skipped on non-Linux host"
+    return
+  }
+  dir=$(make_case linux-fresh-pid-identity)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  counter="$dir/ps-calls"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -e "$FM_TEST_PS_COUNTER" ] || read -r count < "$FM_TEST_PS_COUNTER"
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_TEST_PS_COUNTER"
+printf 'Sat Jul 25 01:33:0%s 2026 sleep 300\n' "$count"
+SH
+  chmod +x "$fakebin/ps"
+
+  sleep 300 &
+  live=$!
+  first=$(PATH="$fakebin:$PATH" FM_TEST_PS_COUNTER="$counter" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+    || fail "could not read fresh Linux process identity"
+  second=$(PATH="$fakebin:$PATH" FM_TEST_PS_COUNTER="$counter" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+    || fail "could not immediately re-read fresh Linux process identity"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+
+  [ "$second" = "$first" ] \
+    || fail "fresh Linux process identity changed across immediate reads (first '$first', second '$second')"
+  case "$first" in
+    linux-starttime=*) ;;
+    *) fail "fresh Linux process identity did not use proc starttime ('$first')" ;;
+  esac
+  [ ! -e "$counter" ] || fail "fresh Linux process identity invoked the drifting ps fallback"
+  pass "fresh Linux process identity is immediately stable and bypasses ps"
+}
+
 write_fake_proc_identity() {
   local proc_root=$1 pid=$2 starttime=$3
   mkdir -p "$proc_root/$pid"
@@ -958,6 +1027,8 @@ test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
 
 test_singleton_start
 test_pid_identity_is_locale_invariant
+test_macos_pid_identity_uses_ps_fallback_without_proc
+test_linux_pid_identity_is_stable_across_immediate_reads
 test_linux_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
