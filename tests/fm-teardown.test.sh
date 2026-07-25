@@ -58,8 +58,9 @@ fm_git_identity fmtest fmtest@example.invalid
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
-# Absolute real binary (lib.sh shadows `git` with a path-safe wrapper; do not
-# use `command -v git` here - that returns the function name after lib is sourced).
+# Absolute real binary. Do not use `command -v git` here: after lib.sh is
+# sourced that resolves to the test PATH shim, and a mock re-execing it under
+# its own fakebin-first PATH would re-enter a PATH fake instead of real git.
 REAL_GIT_FOR_TEST=$FM_TEST_REAL_GIT
 export REAL_GIT_FOR_TEST
 
