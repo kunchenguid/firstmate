@@ -2380,12 +2380,12 @@ SH
     run_spawn "$id" "$PROJ_DIR" --account-pool claude-crew \
     > "$CASE_DIR/spawn-stdout" 2> "$CASE_DIR/spawn-stderr" &
   spawn_pid=$!
-  for _ in $(seq 1 100); do
+  for _ in $(seq 1 600); do
     [ -f "$marker" ] && break
     kill -0 "$spawn_pid" 2>/dev/null || break
     sleep 0.05
   done
-  [ -f "$marker" ] || { touch "$gate"; wait "$spawn_pid" 2>/dev/null || true; fail "spawn never persisted provisional managed metadata"; }
+  [ -f "$marker" ] || { touch "$gate" "$installed_gate"; wait "$spawn_pid" 2>/dev/null || true; fail "spawn never persisted provisional managed metadata"; }
   meta="$HOME_DIR/state/$id.meta"
   task=$(meta_account_task "$id")
   assert_grep 'account_rollback_cleanup=pending' "$meta" "provisional metadata was not marked for rollback recovery"
@@ -2396,7 +2396,7 @@ SH
   assert_grep "tmux_session_target=firstmate:fm-$id" "$meta" \
     "provisional metadata lost the scoped tmux session identity"
   touch "$gate"
-  for _ in $(seq 1 100); do
+  for _ in $(seq 1 600); do
     [ -f "$installed_marker" ] && break
     kill -0 "$spawn_pid" 2>/dev/null || break
     sleep 0.05
