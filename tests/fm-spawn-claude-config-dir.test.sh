@@ -20,7 +20,8 @@
 #      shared fm_config_first_value reader config/secondmate-harness uses.
 #   8. a resolved dir that does not exist warns loudly on stderr AND still
 #      launches with the prefix intact - the knob is an authentication
-#      convenience, never a spawn precondition.
+#      convenience, never a spawn precondition. Case 1 pins the other half:
+#      an existing dir draws NO warning, so an inverted guard cannot stay green.
 set -u
 
 # shellcheck source=tests/fm-spawn-helpers.sh disable=SC1091
@@ -53,7 +54,7 @@ run_claude_spawn() {
 }
 
 test_config_dir_adds_prefix() {
-  local rec case_dir home proj wt fakebin id send_log ccd launch
+  local rec case_dir home proj wt fakebin id send_log ccd launch out
   rec=$(make_spawn_case with-knob)
   IFS='|' read -r case_dir home proj wt fakebin id <<EOF
 $rec
@@ -63,8 +64,11 @@ EOF
   printf '%s\n' "$ccd" > "$home/config/crew-config-dir"
   send_log="$case_dir/launch.log"
 
-  launch=$(run_claude_spawn "$home" "$proj" "$wt" "$fakebin" "$id" "$send_log") \
-    || fail "claude spawn with config/crew-config-dir failed"
+  # fm_spawn_run folds stderr into stdout, so $out also pins the silence half of
+  # the existence guard: a REAL config dir must never draw the login-wall warning.
+  out=$(fm_spawn_run "$home" "$wt" "$fakebin" "$send_log" "$id" "$proj" claude) \
+    || fail "claude spawn with config/crew-config-dir failed"$'\n'"--- output ---"$'\n'"$out"
+  launch=$(cat "$send_log")
 
   # The prefix must sit between the ghost-text env var and the claude verb, with
   # the config dir shell-quoted (single quotes, no special chars in the path).
@@ -72,7 +76,9 @@ EOF
     "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CONFIG_DIR='$ccd' claude --dangerously-skip-permissions "*) : ;;
     *) fail "launch missing CLAUDE_CONFIG_DIR prefix"$'\n'"--- launch ---"$'\n'"$launch" ;;
   esac
-  pass "config/crew-config-dir prefixes the claude launch with CLAUDE_CONFIG_DIR"
+  assert_not_contains "$out" "crew-config-dir resolves" \
+    "an existing config dir must NOT draw the login-wall warning"$'\n'"--- output ---"$'\n'"$out"
+  pass "config/crew-config-dir prefixes the claude launch with CLAUDE_CONFIG_DIR and stays warning-free"
 }
 
 test_absent_knob_is_backward_compatible() {

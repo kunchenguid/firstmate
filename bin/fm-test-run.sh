@@ -675,6 +675,14 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       ;;
+    # Sourced by both fm-spawn.sh (config/crew-config-dir) and fm-harness.sh
+    # (config/secondmate-harness), whose suites sit in different families, so
+    # select both consumers' coverage rather than the bin/*) grep fallback.
+    bin/fm-config-value-lib.sh)
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' secondmate
+      ;;
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings
       ;;
