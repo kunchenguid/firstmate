@@ -44,7 +44,9 @@
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
 #          HARNESS_DRIFT facts compare the build stamps recorded in
 #          .agents/skills/harness-adapters/SKILL.md against the harness binaries
-#          installed here, so a documented harness fact cannot silently expire.
+#          installed here. The comparison is opt-in and no session start runs it
+#          by default, so a documented harness fact CAN expire unobserved until
+#          someone runs the check deliberately.
 #          bin/fm-harness-drift.sh owns that comparison and its exact wording; it
 #          is read-only and never blocks work. Because it probes every recorded
 #          harness with its own --version and drift needs no action, bootstrap

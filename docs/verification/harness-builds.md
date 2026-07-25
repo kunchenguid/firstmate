@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports the current guarantee that a documented harness fact cannot silently expire.
+This record supports a comparison that is run deliberately, not a standing guarantee that a documented harness fact cannot silently expire.
 Every fact in the `harness-adapters` skill was established by one manual observation against one build, and nothing used to compare those stamps to the installed runtimes.
 `bin/fm-harness-drift.sh` is that comparison; its header owns the exact flags and line formats, and the `harness-adapters` skill's "Recorded build stamps" section owns both the stamps and the response to a reported line.
 Task chronology and delivery transcripts stay in private reports or PR evidence.
@@ -76,7 +76,11 @@ All five verified harnesses had drifted when the check was introduced, which is 
 The opencode line shows the doc-ahead direction, and the pi line shows the absent case.
 The silent case is covered by `tests/fm-harness-drift.test.sh`, which also pins the version-parsing shapes above, the malformed and missing stamp-source reports, and the read-only property.
 
-## Known limit
+## Known limits
+
+The check only says something when someone runs it.
+It is opt-in, no session start runs it by default, and nothing else watches the installed builds, so on a home where nobody runs it a harness update expires a documented fact with no signal at all.
+That gap is real and is left open here on purpose: the earlier unconditional session-start invocation cost every home a `--version` probe per recorded harness for a fact that needs no action, and closing the gap without that cost is separate work.
 
 The check compares build identity, not fact validity.
 A harness can update without changing any documented fact, so a drift line means "re-verify before relying on this", never "this fact is wrong".

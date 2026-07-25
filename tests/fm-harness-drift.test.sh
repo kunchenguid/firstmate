@@ -200,7 +200,7 @@ EOF
 }
 
 test_bootstrap_runs_the_check_only_as_an_opt_in_fact() {
-  local guarded
+  local calls guarded
   assert_grep 'BOOTSTRAP_INFO: HARNESS_DRIFT:' "$ROOT/bin/fm-bootstrap.sh" \
     "bootstrap's header does not own the emitted HARNESS_DRIFT fact format"
   assert_grep 'HARNESS_DRIFT' "$ROOT/.agents/skills/harness-adapters/SKILL.md" \
@@ -209,16 +209,27 @@ test_bootstrap_runs_the_check_only_as_an_opt_in_fact() {
   # The comparison costs one `--version` launch per recorded harness and a drift
   # line needs no action, so bootstrap may only run it inside the existing
   # verbose-facts opt-in, and only ever as a BOOTSTRAP_INFO fact.
+  #
+  # Both halves are asserted, because proving one guarded call exists does not
+  # prove no unguarded call does: a second unconditional invocation would restore
+  # the per-session-start probe cost while leaving a guarded-call check green.
   # Comment lines are skipped deliberately: the header names both the env var and
   # the script, so a comment-blind scan would pass on prose alone.
+  calls=$(awk '
+    /^[[:space:]]*#/ { next }
+    /fm-harness-drift\.sh/ { print }
+  ' "$ROOT/bin/fm-bootstrap.sh")
+  [ "$(printf '%s\n' "$calls" | grep -c .)" -eq 1 ] \
+    || fail "bootstrap must invoke fm-harness-drift.sh exactly once, found:"$'\n'"$calls"
+
   guarded=$(awk '
     /^[[:space:]]*#/ { next }
-    /^if \[ "\$\{FM_BOOTSTRAP_VERBOSE_FACTS:-0\}" = 1 \]/ { guard = 1; next }
-    /^fi$/ { guard = 0 }
+    /FM_BOOTSTRAP_VERBOSE_FACTS/ && /then$/ { guard = 1; next }
+    /^[[:space:]]*fi$/ { guard = 0 }
     guard && /fm-harness-drift\.sh/ { print }
   ' "$ROOT/bin/fm-bootstrap.sh")
-  [ -n "$guarded" ] \
-    || fail "bootstrap must run fm-harness-drift.sh only under FM_BOOTSTRAP_VERBOSE_FACTS"
+  [ "$guarded" = "$calls" ] \
+    || fail "bootstrap must run fm-harness-drift.sh only under FM_BOOTSTRAP_VERBOSE_FACTS"$'\n'"guarded: $guarded"$'\n'"all:     $calls"
   assert_contains "$guarded" 'BOOTSTRAP_INFO' \
     "bootstrap must report drift as a BOOTSTRAP_INFO fact, not a bare diagnostic line"
 
