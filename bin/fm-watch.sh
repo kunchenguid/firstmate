@@ -265,11 +265,25 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
-# both places a hash can be absorbed this way: the plain non-terminal path,
-# and the stale_is_terminal-overridden path (a captain-relevant status-log
-# line that an active run/busy pane outranked).
+# escalates once STALE_ESCALATE_SECS have elapsed. Costs nothing on an ordinary
+# poll: the crew state is never re-read while the timer is merely running (the
+# costly check already ran once, at classification time). Shared by both places
+# a hash can be absorbed this way: the plain non-terminal path, and the
+# stale_is_terminal-overridden path (a captain-relevant status-log line that an
+# active run/busy pane outranked).
+#
+# At the ONE poll where the timer would otherwise fire, and only there, it asks
+# whether the crew's pipeline advanced since this window opened
+# (crew_progress_advanced_since). A long validation step sits on a visually
+# static pane for its whole duration, so elapsed idle time alone escalates a
+# healthy worker on exactly the same schedule as a frozen one, over and over -
+# and an alarm with a known benign cause trains its reader to ignore the one
+# that matters. Positive proof of advancement resets the timer and absorbs;
+# everything else - including an unreadable, unparseable, or timed-out progress
+# read - escalates exactly as before, so this can only ever quiet an alarm that
+# was demonstrably false. The consecutive-escalation count is deliberately left
+# untouched by an advancement absorb, so a pane that keeps re-wedging still
+# reaches the demand-deep-inspection threshold on the escalations it did emit.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -281,6 +295,11 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        if crew_progress_advanced_since "$(window_to_task "$win" "$STATE")" "$since"; then
+          date +%s > "$since_file"
+          triage_log "absorbed $label (idle ${age}s but the pipeline advanced since this window opened): $win"
+          return 0
+        fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"

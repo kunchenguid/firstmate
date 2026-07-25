@@ -25,6 +25,8 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) --progress: the activity age the wedge timer reads before escalating,
+#       under the same attribution, and `unknown` for every unprovable case.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -141,6 +143,11 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
   PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
+}
+
+# The narrower --progress read: same attribution, one `activity_age:` line.
+run_crew_progress() {  # <case-dir> <id>
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" --progress "$2"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -322,6 +329,28 @@ run:
     review,completed,0,0
     push,completed,0,0
     ci,running,0,0
+EOF
+}
+
+# A run carrying the active_steps table `no-mistakes axi status` renders for a
+# live step, whose last_activity column stamps the most recent thing that step
+# actually did. Column set and stamp shape verified against the installed CLI
+# (v1.37.0): `ci,running,54m43s,"quiet 53m38s ago: log: no CI checks reported -
+# still monitoring until merged or closed","",starting`.
+run_running_with_activity() {  # <branch> <last-activity-stamp>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+  steps[2]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,running,0,0
+  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
+    review,running,41m12s,"$2","81234",2
 EOF
 }
 
@@ -1309,6 +1338,106 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# ---------------------------------------------------------------------------
+# (l) --progress: the activity read the wedge timer consults before escalating.
+# It must report a real age only from THIS crew's attributed run, and `unknown`
+# for every case it cannot prove, because the caller reads `unknown` as "could
+# not determine" and escalates.
+
+test_progress_reports_active_step_activity_age() {
+  reset_fakes
+  local d out; d=$(new_case progress-active)
+  make_repo_on_branch "$d/wt" fm/feat-p1
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-p1.meta" "window=fm:fm-feat-p1" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p1 'active 1m43s ago: log: reviewing internal/watch.go')"
+  out=$(run_crew_progress "$d" feat-p1)
+  assert_contains "$out" "activity_age: 103" "1m43s stamp reads as 103 seconds"
+  pass "--progress reports the active step's activity age"
+}
+
+test_progress_parses_a_quiet_multi_unit_stamp() {
+  reset_fakes
+  local d out; d=$(new_case progress-quiet)
+  make_repo_on_branch "$d/wt" fm/feat-p2
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-p2.meta" "window=fm:fm-feat-p2" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p2 'quiet 1h2m3s ago: log: no CI checks reported - still monitoring until merged or closed')"
+  out=$(run_crew_progress "$d" feat-p2)
+  assert_contains "$out" "activity_age: 3723" "1h2m3s stamp reads as 3723 seconds"
+  # The installed CLI also drops trailing zero components on a long wait
+  # (observed live: active_for 1h23m, last_activity "quiet 1h22m ago: ...").
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p2 'quiet 1h22m ago: log: no CI checks reported - still monitoring until merged or closed')"
+  out=$(run_crew_progress "$d" feat-p2)
+  assert_contains "$out" "activity_age: 4920" "1h22m stamp reads as 4920 seconds"
+  pass "--progress parses a multi-unit quiet stamp"
+}
+
+# active_for is elapsed time, not activity, and carries no ` ago` suffix. Reading
+# it would reintroduce exactly the clock the wedge timer already has, so a run
+# with no last_activity stamp must answer unknown rather than borrow it.
+test_progress_ignores_elapsed_time_without_an_activity_stamp() {
+  reset_fakes
+  local d out; d=$(new_case progress-no-stamp)
+  make_repo_on_branch "$d/wt" fm/feat-p3
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-p3.meta" "window=fm:fm-feat-p3" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p3 'log: no activity stamp here')"
+  out=$(run_crew_progress "$d" feat-p3)
+  assert_contains "$out" "activity_age: unknown" "an active_for column alone is not an activity age"
+  pass "--progress ignores elapsed time when no activity stamp is present"
+}
+
+test_progress_without_active_steps_is_unknown() {
+  reset_fakes
+  local d out; d=$(new_case progress-no-active-steps)
+  make_repo_on_branch "$d/wt" fm/feat-p4
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-p4.meta" "window=fm:fm-feat-p4" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-p4)"
+  out=$(run_crew_progress "$d" feat-p4)
+  assert_contains "$out" "activity_age: unknown" "no active_steps table -> unknown"
+  pass "--progress reports unknown when the run exposes no active step"
+}
+
+# The safety case: another branch's run must never be read as this crew's
+# progress, or a healthy-looking neighbour would suppress a real wedge alarm.
+test_progress_ignores_another_branch_run() {
+  reset_fakes
+  local d out; d=$(new_case progress-other-branch)
+  make_repo_on_branch "$d/wt" fm/feat-p5
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-p5.meta" "window=fm:fm-feat-p5" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/someone-else 'active 5s ago: log: busy elsewhere')"
+  FM_FAKE_RUNS_LIST="running fm/feat-p5 ${FM_FAKE_RUN_HEAD:-abc1234} 2026-07-24"
+  out=$(run_crew_progress "$d" feat-p5)
+  assert_contains "$out" "activity_age: unknown" "another branch's activity must not be attributed here"
+  pass "--progress never attributes another branch's activity"
+}
+
+test_progress_without_a_run_is_unknown() {
+  reset_fakes
+  local d out; d=$(new_case progress-no-run)
+  make_repo_on_branch "$d/wt" fm/feat-p6
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-p6.meta" "window=fm:fm-feat-p6" "worktree=$d/wt" "kind=ship"
+  printf 'working: still compiling\n' > "$d/state/feat-p6.status"
+  FM_FAKE_BUSY=1
+  out=$(run_crew_progress "$d" feat-p6)
+  assert_contains "$out" "activity_age: unknown" "a busy pane is liveness, not pipeline progress"
+  pass "--progress reports unknown when no run is attributed"
+}
+
+test_progress_torn_down_worktree_is_unknown() {
+  reset_fakes
+  local d out; d=$(new_case progress-torn-down)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-p7.meta" "window=fm:fm-feat-p7" "worktree=$d/gone" "kind=ship"
+  out=$(run_crew_progress "$d" feat-p7)
+  assert_contains "$out" "activity_age: unknown" "a torn-down worktree cannot prove progress"
+  pass "--progress reports unknown for a torn-down worktree"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1358,5 +1487,12 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_progress_reports_active_step_activity_age
+test_progress_parses_a_quiet_multi_unit_stamp
+test_progress_ignores_elapsed_time_without_an_activity_stamp
+test_progress_without_active_steps_is_unknown
+test_progress_ignores_another_branch_run
+test_progress_without_a_run_is_unknown
+test_progress_torn_down_worktree_is_unknown
 
 echo "all fm-crew-state tests passed"

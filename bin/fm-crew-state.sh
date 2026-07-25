@@ -47,6 +47,20 @@
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
 #
+# `--progress <id>` is a second, narrower mode over the SAME run attribution:
+# instead of the state line it prints one line,
+#
+#   activity_age: <seconds> | activity_age: unknown
+#
+# the age of the most recent thing the attributed pipeline actually did, read
+# from the active_steps table's last_activity stamp. It answers only "has this
+# crew's work advanced", never "what state is it in", and it reports `unknown`
+# for every case it cannot prove - no attributed run, a coarse-only match, a
+# bounded call that timed out, an absent or unparseable stamp - so a caller can
+# never mistake a failed read for evidence of progress. The coarse runs-list
+# fallback is skipped in this mode: it carries no step detail, so it could only
+# ever answer unknown, and skipping it halves the worst-case call budget.
+#
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
 set -u
@@ -65,8 +79,13 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 
+PROGRESS_MODE=0
+if [ "${1:-}" = --progress ]; then
+  PROGRESS_MODE=1
+  shift
+fi
 ID=${1:-}
-[ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
+[ -n "$ID" ] || { echo "usage: fm-crew-state.sh [--progress] <id>" >&2; exit 2; }
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
@@ -81,7 +100,15 @@ case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;;
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
+# In --progress mode every emit call is on a path that produced no attributed
+# run detail to read (missing meta, torn-down worktree, pane/log fallback), so
+# it answers `unknown` - the progress answer itself is printed earlier, from the
+# run attribution, and never reaches here.
 emit() {  # <state> <source> [detail]
+  if [ "$PROGRESS_MODE" = 1 ]; then
+    printf 'activity_age: unknown\n'
+    exit 0
+  fi
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
@@ -323,6 +350,60 @@ nm_ci_checks_state() {
     *) printf 'unknown' ;;
   esac
 }
+# Seconds encoded by one compact duration token, the form no-mistakes renders
+# inside an active step's last_activity stamp (verified against the installed
+# CLI: `quiet 53m38s ago: log: no CI checks reported ...`). Accepts d/h/m/s
+# components in any combination, and treats a sub-second `ms` component as 0.
+# Prints NOTHING for anything outside that grammar - including a bare number
+# with no unit - because a caller that cannot parse the stamp must report
+# unknown rather than guess an age.
+duration_token_secs() {  # <token>
+  local t=$1 total=0 num
+  [ -n "$t" ] || return 0
+  case "$t" in *[!0-9dhms]*) return 0 ;; esac
+  while [ -n "$t" ]; do
+    num=${t%%[dhms]*}
+    case "$num" in ''|*[!0-9]*) return 0 ;; esac
+    t=${t#"$num"}
+    case "$t" in
+      ms*) t=${t#ms} ;;
+      d*)  total=$(( total + num * 86400 )); t=${t#d} ;;
+      h*)  total=$(( total + num * 3600 ));  t=${t#h} ;;
+      m*)  total=$(( total + num * 60 ));    t=${t#m} ;;
+      s*)  total=$(( total + num ));         t=${t#s} ;;
+      *)   return 0 ;;
+    esac
+  done
+  printf '%s' "$total"
+}
+
+# Age in seconds of the most recent activity across the attributed run's active
+# steps, from the active_steps table's last_activity stamp ("<duration> ago").
+# The table's other duration column, active_for, carries no ` ago` suffix and is
+# elapsed time rather than activity, so it is deliberately not matched: elapsed
+# time is exactly the signal the wedge timer already has. With several active
+# steps the SMALLEST age wins - the freshest thing the pipeline did. Prints
+# nothing when no parseable stamp is present.
+nm_active_activity_age() {
+  local block stamps token secs best=""
+  block=$(printf '%s\n' "$RUN_OUT" \
+    | awk '/^[[:space:]]*active_steps\[/ { inblock = 1; next }
+           inblock && /^[^[:space:]]/ { exit }
+           inblock { print }')
+  [ -n "$block" ] || return 0
+  stamps=$(printf '%s\n' "$block" | grep -oE '[0-9][0-9dhms]*[[:space:]]+ago' || true)
+  [ -n "$stamps" ] || return 0
+  while IFS= read -r token; do
+    token=${token%%[[:space:]]*}
+    secs=$(duration_token_secs "$token")
+    [ -n "$secs" ] || continue
+    if [ -z "$best" ] || [ "$secs" -lt "$best" ]; then
+      best=$secs
+    fi
+  done <<< "$stamps"
+  [ -n "$best" ] && printf '%s' "$best"
+}
+
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one
 # exists, else falls back to some other branch's run purely as informational
@@ -443,14 +524,34 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
-      # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
-        HAVE_RUN=1
-        RUN_SOURCE=coarse
+      # for no better answer. Skipped entirely in --progress mode: a coarse
+      # match carries no step detail, so it could only answer unknown anyway.
+      if [ "$PROGRESS_MODE" != 1 ]; then
+        COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
+        if [ -n "$COARSE_STATUS" ]; then
+          HAVE_RUN=1
+          RUN_SOURCE=coarse
+        fi
       fi
     fi
   fi
+fi
+
+# --- progress answer (--progress) -------------------------------------------
+# Answered from the SAME attribution as the state path above, so a run that
+# belongs to another branch, or to a rewritten head, can never be mistaken for
+# this crew's progress. Every unproven case answers unknown.
+
+if [ "$PROGRESS_MODE" = 1 ]; then
+  ACTIVITY_AGE=""
+  if [ "$HAVE_RUN" = 1 ] && [ "$RUN_SOURCE" = full ]; then
+    ACTIVITY_AGE=$(nm_active_activity_age)
+  fi
+  case "$ACTIVITY_AGE" in
+    ''|*[!0-9]*) printf 'activity_age: unknown\n' ;;
+    *)           printf 'activity_age: %s\n' "$ACTIVITY_AGE" ;;
+  esac
+  exit 0
 fi
 
 # --- run-step authoritative path -------------------------------------------

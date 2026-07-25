@@ -8,9 +8,10 @@
 # provably-working no-verb wakes absorbed (no exit, no queue entry, suppressor
 # advanced, beacon fresh), stopped-crew no-verb wakes surfaced (queue + exit),
 # provably-working stale panes absorbed-then-escalated past the threshold,
-# terminal-looking stale status lines overridden by an active run, the heartbeat
-# backstop fail-safe, and afk coherence (no double-triage while the away-mode
-# daemon owns supervision).
+# the wedge timer absorbing a window whose pipeline provably advanced while
+# still escalating one that did not, terminal-looking stale status lines
+# overridden by an active run, the heartbeat backstop fail-safe, and afk
+# coherence (no double-triage while the away-mode daemon owns supervision).
 #
 # Daemon-side classification/injection lives in fm-daemon.test.sh; watcher/lock
 # liveness in fm-watcher-lock.test.sh; the durable-queue safety matrix in
@@ -306,6 +307,47 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
   unset FM_FAKE_CREW_STATE
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+}
+
+# crew_progress_advanced_since: the wedge timer's only reason to stay quiet past
+# the threshold. It must answer yes ONLY on positive proof that the pipeline did
+# something at or after the anchor, and no for every unprovable case - an unknown
+# or unparseable age, a missing id or anchor, and a crew-state binary too old to
+# understand --progress at all.
+test_crew_progress_advanced_since_classifier() {
+  local dir fakebin now anchor
+  dir=$(make_case progress-advanced); fakebin="$dir/fakebin"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_PROGRESS
+  now=$(date +%s)
+  anchor=$(( now - 300 ))
+  FM_FAKE_CREW_PROGRESS=30
+  crew_progress_advanced_since a "$anchor" || fail "activity inside the window was not read as advancement"
+  FM_FAKE_CREW_PROGRESS=900
+  ! crew_progress_advanced_since a "$anchor" || fail "activity older than the anchor was read as advancement"
+  FM_FAKE_CREW_PROGRESS=unknown
+  ! crew_progress_advanced_since a "$anchor" || fail "an unknown progress read was treated as proof"
+  FM_FAKE_CREW_PROGRESS='a while'
+  ! crew_progress_advanced_since a "$anchor" || fail "an unparseable age was treated as proof"
+  FM_FAKE_CREW_PROGRESS=30
+  ! crew_progress_advanced_since "" "$anchor" || fail "an empty id was treated as proof"
+  ! crew_progress_advanced_since a "" || fail "a missing anchor was treated as proof"
+  ! crew_progress_advanced_since a "not-an-epoch" || fail "an unparseable anchor was treated as proof"
+
+  # A crew-state binary that predates --progress prints its ordinary state line
+  # and ignores the flag. That is a read that could not determine progress, so it
+  # must never suppress an alarm.
+  cat > "$fakebin/fm-crew-state-old.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'state: working · source: run-step · validating (running)\n'
+SH
+  chmod +x "$fakebin/fm-crew-state-old.sh"
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state-old.sh" \
+    crew_progress_advanced_since a "$anchor" && fail "a --progress-unaware helper's state line was read as advancement"
+
+  unset FM_FAKE_CREW_PROGRESS
+  pass "crew_progress_advanced_since: proof only from a fresh activity stamp, never from an unprovable read"
 }
 
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
@@ -1055,6 +1097,124 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold() {
   pass "consecutive wedge escalations on the same pane accumulate and demand deep inspection at the threshold"
 }
 
+# --- wedge timer: proven pipeline advancement absorbs instead of escalating ---
+# The defect this pins: wedge_timer_check escalated on elapsed idle time ALONE.
+# A long validation step leaves the pane visually static for its whole duration,
+# so a healthy crew re-escalated as a "possible wedge" every
+# FM_STALE_ESCALATE_SECS - repeatedly, on the same schedule a genuinely frozen
+# crew would. Observed live on 2026-07-24: one endpoint escalated six times
+# inside a single 40-minute review pass, each one costing a supervision turn to
+# confirm "yes, still working". Here the crew's pipeline logged something 20s
+# ago, well inside the window that just elapsed, which is positive proof it
+# advanced: the timer resets and the wake is absorbed. Without the progress
+# check this test fails - the watcher queues a possible-wedge wake and exits.
+test_wedge_timer_absorbs_when_the_pipeline_advanced() {
+  local dir state fakebin out capture_file window key pane_hash sig pid backdated since
+  dir=$(make_case wedge-progress-absorb); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-advancing"
+  printf 'idle building output' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/advancing.meta"
+  printf 'working: still validating\n' > "$state/advancing.status"
+  sig=$(seen_sig "$state/advancing.status"); printf '%s' "$sig" > "$state/.seen-advancing_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_PROGRESS=20
+
+  # Priming round: first sighting of this stale hash absorbs it and starts the
+  # wedge timer, without reaching wedge_timer_check.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited on the priming round (should absorb): $(cat "$out")"
+  fi
+  reap "$pid"
+  # Two consecutive escalations already stand against this pane (the priming
+  # round clears escalation bookkeeping, so seed it afterwards).
+  printf '2\n' > "$state/.wedge-escalations-$key"
+
+  # The idle window has elapsed - the exact condition that used to escalate.
+  backdated=$(( $(date +%s) - 500 ))
+  echo "$backdated" > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an advancing pipeline was still escalated as a possible wedge: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "an advancing pipeline printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "an advancing pipeline enqueued a wake: $(cat "$state/.wake-queue")"
+  since=$(cat "$state/.stale-since-$key" 2>/dev/null || echo 0)
+  [ "$since" -gt "$backdated" ] || fail "proven advancement did not reset the wedge timer"
+  # Absorbing on advancement must not erase escalations already recorded, or a
+  # pane that alternates advancing and freezing could never reach the
+  # demand-deep-inspection threshold that the guard below pins.
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 2 ] \
+    || fail "an advancement absorb discarded the consecutive-escalation count"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE FM_FAKE_CREW_PROGRESS
+  pass "a provably-working stale whose pipeline advanced resets the wedge timer instead of escalating"
+}
+
+# --- preservation guard: a non-advancing pipeline still escalates -------------
+# This is a GUARD, not evidence for the change above: it passes just as well
+# with the progress check reverted, because it pins behavior the check must not
+# lose rather than behavior the check introduces. A crew whose pipeline last did
+# anything long before this window opened has NOT advanced, so it must escalate
+# exactly as before, carry its consecutive-escalation count forward, and still
+# reach the demand-deep-inspection threshold.
+test_wedge_timer_still_escalates_a_non_advancing_pipeline() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case wedge-progress-preserved); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-frozen"
+  printf 'idle building output' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/frozen.meta"
+  printf 'working: still validating\n' > "$state/frozen.status"
+  sig=$(seen_sig "$state/frozen.status"); printf '%s' "$sig" > "$state/.seen-frozen_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  # The pipeline last did something an hour ago - long before this idle window
+  # opened, so there is nothing to prove advancement.
+  export FM_FAKE_CREW_PROGRESS=3600
+
+  # Priming round establishes the stale hash and the wedge timer. It also clears
+  # escalation bookkeeping, so the counter is seeded afterwards.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited on the priming round (should absorb): $(cat "$out")"
+  fi
+  reap "$pid"
+  # Two consecutive escalations already stand against this pane.
+  printf '2\n' > "$state/.wedge-escalations-$key"
+
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a non-advancing pipeline was not escalated: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null || fail "a non-advancing pipeline did not flag a possible wedge: $(cat "$out")"
+  grep -F "escalation 3" "$out" >/dev/null || fail "the consecutive-escalation count did not continue: $(cat "$out")"
+  grep -F "demand-deep-inspection" "$out" >/dev/null || fail "the demand-deep-inspection path became unreachable: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE FM_FAKE_CREW_PROGRESS
+  pass "preservation guard: a non-advancing pipeline still escalates and still reaches demand-deep-inspection"
+}
+
 test_wedge_escalation_resets_when_pane_becomes_active() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case wedge-escalation-reset); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1559,6 +1719,7 @@ test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
+test_crew_progress_advanced_since_classifier
 test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
@@ -1569,6 +1730,8 @@ test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
+test_wedge_timer_absorbs_when_the_pipeline_advanced
+test_wedge_timer_still_escalates_a_non_advancing_pipeline
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
