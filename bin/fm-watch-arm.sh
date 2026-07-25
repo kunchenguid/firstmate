@@ -61,9 +61,10 @@
 # Only the OWNING arm sees a cycle's wake output, so an arm merely attached to
 # that watcher cannot tell a delivered wake apart from a watcher that vanished.
 # Before an attached arm calls a close unexplained it reads the owner's own
-# ledger record for that exact watcher identity. Proof of a delivered wake ends
-# this arm cleanly because the owner already reported the reason and a second
-# wake would be a duplicate. No proof keeps the unexplained-close failure.
+# ledger record for that exact watcher identity. Proof of a delivered wake
+# changes only the wording because the owner already reported the reason and a
+# second wake would be a duplicate. The close stays nonzero because no live
+# cycle remains. No proof keeps the unexplained-close failure.
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
