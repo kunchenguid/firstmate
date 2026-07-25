@@ -3134,6 +3134,80 @@ test_composer_state_pi_separator_requires_safe_native_identity() {
   pass "fm_backend_herdr_composer_state: Pi separators never authorize working, non-Pi, unreadable, or over-tall targets"
 }
 
+# --- composer_state: agy plain-ASCII "> " composer (herdr-specific shape) -----
+# agy's interactive composer draws a PLAIN ASCII "> " prompt with no side
+# border and no agent-specific glyph, so its empty-composer row is byte-for-byte
+# the bare shell ">" prompt the shared classifier deliberately refuses as
+# `unknown` (the dead-shell safety rule). Like Pi's separator composer, the agy
+# row is admitted as a real, injectable composer ONLY when native `agent get`
+# corroborates the target is agy AND reports it idle/done/blocked. These assert
+# the identity + structure conjunction, and that the dead-shell rule still holds
+# for a bare ">" under a non-agy (or absent) agent.
+
+test_composer_state_agy_prompt_idle_is_empty() {
+  local dir log resp fb out calls
+  dir="$TMP_ROOT/composer-agy-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  some transcript line\n  another line\n\n> \n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"agy","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "an idle native agy '> ' composer should read empty, got '$out'"
+  calls=$(grep -c $'\x1f''agent'$'\x1f''get' "$log")
+  [ "$calls" -eq 1 ] || fail "agy recognition must corroborate identity exactly once, made $calls agent calls"
+  pass "fm_backend_herdr_composer_state: a native idle agy '> ' composer reads empty"
+}
+
+test_composer_state_agy_prompt_real_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-agy-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  transcript\n\n> hello captain this is a draft\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"agy","agent_status":"done"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "real unsubmitted text in an agy '> ' composer should read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: real agy composer text reads pending"
+}
+
+# The core collision this task exists to resolve: a bare "> " row that is NOT a
+# live agy composer (a dead shell, or any non-agy / unregistered agent) must
+# stay `unknown`, never `empty` - the dead-shell safety rule the shared
+# classifier enforces. A working agy also cannot authorize injection.
+test_composer_state_agy_prompt_requires_safe_native_identity() {
+  local dir log resp fb out case_id
+  for case_id in working non-agy unreadable absent; do
+    dir="$TMP_ROOT/composer-agy-$case_id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '  transcript\n\n> \n' > "$resp/1.out"
+    case "$case_id" in
+      working) printf '{"result":{"agent":{"agent":"agy","agent_status":"working"}}}\n' > "$resp/2.out" ;;
+      non-agy) printf '{"result":{"agent":{"agent":"shell","agent_status":"idle"}}}\n' > "$resp/2.out" ;;
+      unreadable) printf '1\n' > "$resp/2.exit" ;;
+      absent) printf '{"error":{"code":"agent_not_found","message":"no agent"}}\n' > "$resp/2.out" ;;
+    esac
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+    [ "$out" = unknown ] || fail "a bare '> ' row under an unsafe/absent agy identity case '$case_id' must remain unknown (dead-shell rule), got '$out'"
+  done
+  pass "fm_backend_herdr_composer_state: a bare '> ' row stays unknown for working, non-agy, unreadable, or unregistered agents"
+}
+
+# A live bottom-most agy "> " prompt below a stale bordered decorative box must
+# win: the box (identity-free) cannot outrank the identity-corroborated live
+# composer, and a stale transcript ">" above it cannot either.
+test_composer_state_agy_prompt_below_stale_bordered_box_wins() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-agy-below-box"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\n\xe2\x94\x82 stale notice \xe2\x94\x82\n\xe2\x95\xb0\xe2\x94\x80\xe2\x94\x80\xe2\x95\xaf\n\n> \n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"agy","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a live idle agy '> ' composer below a stale bordered box must win (empty), got '$out'"
+  pass "fm_backend_herdr_composer_state: a live agy '> ' composer below a stale bordered box wins"
+}
+
 # --- composer_state: unbordered (bare) composer rows -------------------------
 # Regression coverage for the away-mode redelivery-loop incident
 # (docs/herdr-backend.md "Incident (2026-07-07)"): real claude and codex
@@ -4324,6 +4398,10 @@ test_composer_state_pi_separator_idle_is_empty
 test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
+test_composer_state_agy_prompt_idle_is_empty
+test_composer_state_agy_prompt_real_text_is_pending
+test_composer_state_agy_prompt_requires_safe_native_identity
+test_composer_state_agy_prompt_below_stale_bordered_box_wins
 test_composer_state_claude_unbordered_prompt_is_empty
 test_composer_state_claude_unbordered_prompt_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins

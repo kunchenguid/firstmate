@@ -228,8 +228,14 @@ A human-blocked permission dialog has no busy banner and still surfaces.
 ## Composer and injection safety
 
 Herdr has no direct cursor-row primitive.
-The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, or a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked.
+The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked, or an agy `> ` prompt row admitted only when native identity is exactly agy and state is idle, done, or blocked.
 A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains pending or unknown.
+
+agy is a known gap in the shared classifier's dead-shell rule.
+agy's interactive composer draws a plain ASCII `> ` prompt with no side border and no agent-specific glyph, so its empty-composer row is byte-for-byte the bare shell `>` prompt the shared classifier deliberately refuses as `unknown` rather than `empty`.
+The herdr adapter closes this gap the same way it admits Pi's borderless separator composer: it locates the bottom-most `> ` prompt row structurally and admits it as a real, injectable composer only when native `agent get` corroborates the target is agy and reports it idle, done, or blocked.
+A working agy, a non-agy or unregistered agent, or an unreadable identity leaves the bare `> ` row `unknown`, so the dead-shell rule still holds for every non-agy prompt.
+This identity plus structure conjunction stays inside the herdr adapter (`FM_BACKEND_HERDR_AGY_PROMPT_RE`, `fm_backend_herdr_agy_composer_find`, and the agy block in `fm_backend_herdr_composer_state`); the shared classifier's bare-glyph safety rule is not weakened.
 
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.

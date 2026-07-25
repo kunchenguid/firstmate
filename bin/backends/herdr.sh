@@ -2702,6 +2702,15 @@ FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^(❯|›)'}
 # structural candidate so two unrelated transcript rules with an arbitrarily
 # large region between them can never be promoted into a composer.
 FM_BACKEND_HERDR_PI_COMPOSER_MAX_LINES=${FM_BACKEND_HERDR_PI_COMPOSER_MAX_LINES:-8}
+# agy's interactive composer draws a PLAIN ASCII "> " prompt with no side
+# border and no agent-specific glyph, so its empty-composer row is byte-for-byte
+# a bare shell ">" prompt - exactly the dead-shell glyph the shared classifier
+# deliberately refuses as `unknown` (never `empty`). This regex locates that agy
+# prompt row structurally; it is admitted as a real composer ONLY after native
+# `agent get` corroborates the target is agy (see the agy block in
+# fm_backend_herdr_composer_state), the same identity + structure conjunction
+# that makes a blank Pi separator row safe. A bare "> " (or lone ">") only.
+FM_BACKEND_HERDR_AGY_PROMPT_RE=${FM_BACKEND_HERDR_AGY_PROMPT_RE:-'^>( |$)'}
 
 fm_backend_herdr_pi_separator_row() {  # <plain-row>
   local row=$1
@@ -2758,6 +2767,33 @@ $cap
 EOF
 }
 
+# Locate the bottom-most agy prompt row (a bare ASCII "> " / ">" with no side
+# border) and record its screen line and RAW styled bytes. This shape is
+# structurally indistinguishable from a dead-shell prompt, so - exactly like the
+# Pi separator finder - it only records position/content here and defers the
+# empty-vs-unknown verdict to an identity check in the caller. A global carries
+# the raw row so empty composer content is not lost through command substitution.
+fm_backend_herdr_agy_composer_find() {  # <ansi-capture>
+  local cap=$1 line plain row=0
+  FM_BACKEND_HERDR_AGY_ROW_FOUND=0
+  FM_BACKEND_HERDR_AGY_ROW_LINE=0
+  FM_BACKEND_HERDR_AGY_ROW_RAW=""
+  while IFS= read -r line; do
+    row=$((row + 1))
+    plain=$(fm_backend_herdr_strip_ansi "$line")
+    plain="${plain#"${plain%%[![:space:]]*}"}"
+    plain="${plain%"${plain##*[![:space:]]}"}"
+    [ -n "$plain" ] || continue
+    if printf '%s' "$plain" | grep -qE "$FM_BACKEND_HERDR_AGY_PROMPT_RE"; then
+      FM_BACKEND_HERDR_AGY_ROW_FOUND=1
+      FM_BACKEND_HERDR_AGY_ROW_LINE=$row
+      FM_BACKEND_HERDR_AGY_ROW_RAW=$line
+    fi
+  done <<EOF
+$cap
+EOF
+}
+
 fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   local out
   out=$(fm_backend_herdr_cli "$1" agent get "$2" 2>/dev/null) || return 1
@@ -2766,7 +2802,7 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
-  local identity agent agent_status row=0 generic_line=0
+  local identity agent agent_status row=0 generic_line=0 identity_fetched=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
@@ -2807,7 +2843,10 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   if [ "$FM_BACKEND_HERDR_PI_PAIR_FOUND" -eq 1 ] \
      && [ "$FM_BACKEND_HERDR_PI_PAIR_LINE" -gt "$generic_line" ] \
      && [ "$generic_line" -lt "$FM_BACKEND_HERDR_PI_PAIR_OPEN_LINE" ]; then
-    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
+    if [ "$identity_fetched" -eq 0 ]; then
+      identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
+      identity_fetched=1
+    fi
     IFS=$'\t' read -r agent agent_status <<EOF
 $identity
 EOF
@@ -2834,6 +2873,44 @@ EOF
     # not provide the complete Pi composer structure required for injection.
     found=0
   fi
+  # agy has no side border and no agent-specific glyph: its live composer draws
+  # a PLAIN ASCII "> " prompt, byte-for-byte the bare shell prompt the shared
+  # classifier deliberately refuses as `unknown` (the dead-shell safety rule).
+  # So - exactly like the Pi separator shape - an agy prompt row is admitted as
+  # a real, injectable composer ONLY when Herdr's native `agent get` corroborates
+  # the target is agy AND reports it idle, done, or blocked. The agy row must be
+  # the bottom-most composer-like candidate (below any generic bordered/bare
+  # match and below any Pi separator activity) so a stale transcript `>` line can
+  # never outrank the live composer, and identity is consulted only then - which
+  # also keeps the Pi shapes above making exactly one identity call, never two.
+  # A missing/stale/non-agy identity, or a working agy, leaves the row `unknown`,
+  # preserving the dead-shell rule for a bare `>` under a non-agy (or no) agent.
+  fm_backend_herdr_agy_composer_find "$cap"
+  if [ "$FM_BACKEND_HERDR_AGY_ROW_FOUND" -eq 1 ] \
+     && [ "$FM_BACKEND_HERDR_AGY_ROW_LINE" -gt "$generic_line" ] \
+     && [ "$FM_BACKEND_HERDR_AGY_ROW_LINE" -gt "$FM_BACKEND_HERDR_PI_PAIR_LINE" ] \
+     && [ "$FM_BACKEND_HERDR_AGY_ROW_LINE" -gt "$FM_BACKEND_HERDR_PI_LAST_SEPARATOR_LINE" ]; then
+    if [ "$identity_fetched" -eq 0 ]; then
+      identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
+      identity_fetched=1
+    fi
+    IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+    case "$agent:$agent_status" in
+      agy:idle|agy:done|agy:blocked)
+        shape=agy
+        raw_match=$FM_BACKEND_HERDR_AGY_ROW_RAW
+        found=1
+        ;;
+      agy:*|:*)
+        # A working agy or unreadable/absent identity cannot authorize
+        # injection; the bare "> " prompt stays a dead-shell candidate.
+        found=0
+        ;;
+      *) : ;; # A known non-agy agent keeps its established generic verdict.
+    esac
+  fi
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
   # Content: extract the real typed text from the raw row with the shared,
   # fleet-wide ghost stripper (bin/fm-composer-lib.sh), which drops dim/faint AND
@@ -2857,6 +2934,13 @@ EOF
     # The native Pi identity plus the complete separator pair is the genuine
     # composer container, equivalent to a bordered box for shared content
     # classification. ANSI stripping keeps real text and drops only styling.
+    bordered=1
+  elif [ "$shape" = agy ]; then
+    # The native agy identity plus the "> " prompt row is the genuine composer
+    # container, equivalent to a bordered box for shared content classification.
+    # Marking it bordered is exactly what lets fm_composer_classify_content read
+    # a lone "> " as an empty AGENT composer (the harness's own prompt) rather
+    # than the `unknown` a bare, unstructured shell ">" would get.
     bordered=1
   fi
   # Delegate the empty/pending/unknown decision to the shared owner. The bare
