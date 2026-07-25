@@ -156,6 +156,58 @@ if fm_backend_tmux_resolve_bare_selector "no-such-window-xyz" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that does not exist"
 
+# --- empty-target kill must not destroy the active (captain-like) window -----
+# Proven footgun: `tmux kill-window -t ''` kills the CURRENT active window.
+# Teardown of meta with empty/missing window= used to reach that path from the
+# primary face and destroy `captain`. Guard must no-op without killing anything.
+
+CAPTAIN_WINDOW="captain"
+WORKER_WINDOW="fm-worker-safe"
+CAPTAIN_TARGET="$SESSION:$CAPTAIN_WINDOW"
+WORKER_TARGET="$SESSION:$WORKER_WINDOW"
+
+fm_backend_tmux_create_task "$SESSION" "$CAPTAIN_WINDOW" "$HOME" \
+  || fail "failed to create captain-like window for empty-kill safety test"
+fm_backend_tmux_create_task "$SESSION" "$WORKER_WINDOW" "$HOME" \
+  || fail "failed to create worker window for empty-kill safety test"
+tmux select-window -t "$CAPTAIN_TARGET" \
+  || fail "failed to select captain-like window as active"
+active=$(tmux display-message -p -t "$SESSION" '#{window_name}') \
+  || fail "failed to read active window name"
+[ "$active" = "$CAPTAIN_WINDOW" ] \
+  || fail "expected active window '$CAPTAIN_WINDOW', got '$active'"
+
+# Empty / non-concrete targets: must not kill any window (especially not active).
+for bad in '' '.' ':' ':window' 'session:'; do
+  err=$(fm_backend_tmux_kill "$bad" 2>&1) || true
+  printf '%s' "$err" | grep -Fq 'refusing empty or non-concrete target' \
+    || fail "fm_backend_tmux_kill '$bad' should refuse with a clear stderr reason, got: $err"
+  tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$CAPTAIN_WINDOW" \
+    || fail "empty/non-concrete kill '$bad' destroyed the active captain-like window"
+  tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WORKER_WINDOW" \
+    || fail "empty/non-concrete kill '$bad' destroyed an unrelated worker window"
+  tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WINDOW" \
+    || fail "empty/non-concrete kill '$bad' destroyed the original smoke window"
+done
+# Active window must still be captain after the empty-target attempts.
+active=$(tmux display-message -p -t "$SESSION" '#{window_name}')
+[ "$active" = "$CAPTAIN_WINDOW" ] \
+  || fail "empty-target kill changed the active window to '$active'"
+pass "real tmux: empty/non-concrete kill target does not kill any window (active captain survives)"
+
+# Valid session:window still kills only that window; captain stays.
+fm_backend_tmux_kill "$WORKER_TARGET" \
+  || fail "fm_backend_tmux_kill on a valid target must stay best-effort (never fail)"
+if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$WORKER_WINDOW"; then
+  fail "fm_backend_tmux_kill did not remove the concrete worker window"
+fi
+tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$CAPTAIN_WINDOW" \
+  || fail "valid kill of worker also destroyed the captain-like window"
+active=$(tmux display-message -p -t "$SESSION" '#{window_name}')
+[ "$active" = "$CAPTAIN_WINDOW" ] \
+  || fail "valid worker kill left active window as '$active', expected captain"
+pass "real tmux: valid session:window kill removes only that window; active captain survives"
+
 # --- kill and recovery-grade missing-window classification ------------------
 
 fm_backend_tmux_kill "$TARGET"

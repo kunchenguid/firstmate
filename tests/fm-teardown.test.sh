@@ -1377,6 +1377,86 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   pass "herdr projection teardown retains the stale journal and attempts no workspace cleanup when exact-pane close is unconfirmed"
 }
 
+# Empty/missing window= must never invoke tmux kill-window (especially not with
+# an empty -t, which would destroy the active/captain window). Endpoint
+# validation refuses such metadata before any cleanup step, so teardown stops
+# with task state preserved and tmux is never called at all.
+install_logging_tmux() {
+  local case_dir=$1 log=$2
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf 'tmux' >> "$log"
+for a in "\$@"; do
+  printf '\\x1f%s' "\$a" >> "$log"
+done
+printf '\\n' >> "$log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+}
+
+test_empty_window_meta_refuses_before_any_kill() {
+  local case_dir log
+  case_dir=$(make_case empty-window-kill-guard)
+  write_meta "$case_dir" local-only ship
+  # Simulate the real incident shape: window already gone / never recorded.
+  sed -i.bak 's/^window=.*/window=/' "$case_dir/state/task-x1.meta"
+  log="$case_dir/tmux.log"; : > "$log"
+  install_logging_tmux "$case_dir" "$log"
+
+  if run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"; then
+    fail "empty-window-kill-guard: teardown must refuse empty window= even under --force"
+  fi
+  assert_grep "missing, empty, or ambiguous window endpoint" "$case_dir/stderr" \
+    "empty window= teardown did not explain the refusal"
+  if grep -F $'kill-window' "$log" >/dev/null 2>&1; then
+    fail "empty window= teardown still called tmux kill-window"$'\n'"$(cat "$log")"
+  fi
+  # Task state is preserved for a human to inspect rather than silently cleaned.
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "empty window= teardown removed meta despite refusing"
+  pass "teardown with empty window= refuses before any cleanup and never calls kill-window"
+}
+
+test_missing_window_meta_refuses_before_any_kill() {
+  local case_dir log
+  case_dir=$(make_case missing-window-kill-guard)
+  write_meta "$case_dir" local-only ship
+  # Drop the window= line entirely (same as meta that never recorded one).
+  grep -v '^window=' "$case_dir/state/task-x1.meta" > "$case_dir/state/task-x1.meta.new"
+  mv "$case_dir/state/task-x1.meta.new" "$case_dir/state/task-x1.meta"
+  log="$case_dir/tmux.log"; : > "$log"
+  install_logging_tmux "$case_dir" "$log"
+
+  if run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"; then
+    fail "missing-window-kill-guard: teardown must refuse missing window= even under --force"
+  fi
+  assert_grep "missing, empty, or ambiguous window endpoint" "$case_dir/stderr" \
+    "missing window= teardown did not explain the refusal"
+  if grep -F $'kill-window' "$log" >/dev/null 2>&1; then
+    fail "missing window= teardown still called tmux kill-window"$'\n'"$(cat "$log")"
+  fi
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "missing window= teardown removed meta despite refusing"
+  pass "teardown with missing window= refuses before any cleanup and never calls kill-window"
+}
+
+test_recorded_window_meta_still_kills_endpoint() {
+  local case_dir log
+  case_dir=$(make_case recorded-window-kill)
+  write_meta "$case_dir" local-only ship
+  # Prefer the firstmate:fm-<id> form used by live spawns.
+  sed -i.bak 's/^window=.*/window=firstmate:fm-task-x1/' "$case_dir/state/task-x1.meta"
+  log="$case_dir/tmux.log"; : > "$log"
+  install_logging_tmux "$case_dir" "$log"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "recorded-window-kill: forced teardown should succeed"$'\n'"$(cat "$case_dir/stderr")"
+  assert_contains "$(cat "$log")" $'tmux\x1fkill-window\x1f-t\x1f=firstmate:=fm-task-x1' \
+    "recorded window= teardown did not call tmux kill-window on the exact fm-<id> window"$'\n'"$(cat "$log")"
+  pass "teardown with recorded firstmate:fm-<id> window still kills only that endpoint"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -1388,6 +1468,9 @@ test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
+test_empty_window_meta_refuses_before_any_kill
+test_missing_window_meta_refuses_before_any_kill
+test_recorded_window_meta_still_kills_endpoint
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows

@@ -117,9 +117,12 @@ fm_backend_tmux_send_literal() {  # <target> <text>
   tmux send-keys -t "$1" -l "$2"
 }
 
-# fm_backend_tmux_kill: remove one explicitly named task window, best-effort.
-# Empty, omitted, and malformed targets return nonzero before invoking tmux so
-# tmux can never interpret an empty target as the caller's current window.
+# fm_backend_tmux_kill: remove one explicitly named task window, best-effort
+# for a concrete target (already-gone is not an error). Empty, omitted, and
+# malformed targets are refused with a stderr reason before invoking tmux so
+# tmux can never interpret an empty target as the caller's current window:
+# `tmux kill-window -t ''` kills the ACTIVE window, which from the primary face
+# destroys `captain` rather than a missing worker.
 fm_backend_tmux_kill() {  # <target>
   local target=${1:-} session window
   case "$target" in
@@ -127,10 +130,16 @@ fm_backend_tmux_kill() {  # <target>
       session=${target%%:*}
       window=${target#*:}
       ;;
-    *) return 1 ;;
+    *)
+      echo "error: fm_backend_tmux_kill: refusing empty or non-concrete target '$target' (would risk killing the active window)" >&2
+      return 1
+      ;;
   esac
   case "$session:$window" in
-    :*|*:|*:*:*) return 1 ;;
+    :*|*:|*:*:*)
+      echo "error: fm_backend_tmux_kill: refusing empty or non-concrete target '$target' (would risk killing the active window)" >&2
+      return 1
+      ;;
   esac
   tmux kill-window -t "=$session:=$window" 2>/dev/null || true
 }

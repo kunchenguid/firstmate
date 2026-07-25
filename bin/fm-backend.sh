@@ -741,6 +741,9 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
 # fm_backend_kill: remove the task's session endpoint (best-effort; a
 # nonexistent/already-gone target is not an error - callers already swallow
 # failures here exactly as the inline `tmux kill-window ... || true` did).
+# Empty/non-concrete targets are refused fail-closed before any adapter command
+# runs (tmux especially: kill-window -t '' kills the active window - see
+# fm_backend_tmux_kill).
 fm_backend_kill() {  # <backend> <target>
   local backend=$1
   shift

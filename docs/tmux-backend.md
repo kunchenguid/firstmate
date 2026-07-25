@@ -45,6 +45,7 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 ## Current behavior and safety
 
 A target-existence check proves only that the pane exists.
+Endpoint kill refuses empty or non-concrete targets and never calls `tmux kill-window -t ''`, which would destroy the active window (including the primary face when teardown runs there); see `fm_backend_tmux_kill` and `bin/fm-teardown.sh`.
 The deeper tmux agent-liveness probe first verifies exact window membership, then reads `#{pane_current_command}` to distinguish a running harness process from a bare idle shell.
 It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
