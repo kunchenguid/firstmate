@@ -520,7 +520,16 @@ test_off_is_byte_compatible_and_never_calls_agent_fleet() {
   assert_regex '^generation_id=spawn:a[0-9a-f]{15}$' "$HOME_DIR/state/$id.meta" "routing off did not record a stable spawn generation"
   assert_grep 'report_required=1' "$HOME_DIR/state/$id.meta" "post-cutover spawn did not activate the report gate"
   assert_grep '# Completion report' "$HOME_DIR/data/$id/brief.md" "post-cutover spawn did not upgrade a legacy unspawned brief"
-  assert_grep "Summary, What changed, Verification, Visual evidence, Artifacts, and Follow-ups" "$HOME_DIR/data/$id/brief.md" "upgraded brief omitted the completion-report sections"
+  # Assert each required section by the exact heading publication demands, not by
+  # the sentence that happens to list them. The prose was reworded once already
+  # (to spell out the level-two requirement crews kept getting wrong) and this
+  # assertion broke even though the contract still named all six - it was pinned
+  # to phrasing rather than to the guarantee.
+  for section in '## Summary' '## What changed' '## Verification' \
+                 '## Visual evidence' '## Artifacts' '## Follow-ups'; do
+    assert_grep "$section" "$HOME_DIR/data/$id/brief.md" \
+      "upgraded brief omitted the completion-report section $section"
+  done
   assert_contains "$out" "spawned $id" "default-off spawn did not complete"
   pass "routing off makes no Agent Fleet call and preserves launch/meta bytes"
 }
