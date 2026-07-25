@@ -354,7 +354,7 @@ Kimi Code CLI must be launched by the verified absolute binary path because it i
 | Binary | `/Users/kunchen/.kimi-code/bin/kimi` |
 | Launch | Bare interactive TUI with `--auto`, followed by readiness-gated pointer delivery; positional prompts are rejected. |
 | Models | `kimi-code/kimi-for-coding` (default), `kimi-code/kimi-for-coding-highspeed`, `kimi-code/k3`, and `kimi-code/k3-256k`. |
-| Busy-pane signature | A transient spinner line containing a rotating moon-phase glyph; the line is absent when idle. |
+| Busy-pane signature | A transient line containing only a rotating moon-phase glyph followed by `Thinking`; the line is absent when idle. |
 | Exit command | `/exit` |
 | Interrupt | Single Escape, which prints `Interrupted by user`. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; firstmate skills are discovered. |

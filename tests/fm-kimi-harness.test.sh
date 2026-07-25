@@ -260,6 +260,10 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
   if fm_pane_is_busy fake kimi; then
     fail "a moon outside Kimi's spinner-line shape was misread as busy"
   fi
+  printf '🌕 Full moon details\n│ > │\n' > "$capture"
+  if fm_pane_is_busy fake kimi; then
+    fail "moon-led Kimi output was misread as the complete spinner row"
+  fi
   printf '🌕 Thinking\n│ > │\n' > "$capture"
   if fm_pane_is_busy fake codex; then
     fail "Kimi's moon spinner signature leaked into another harness"
@@ -295,6 +299,9 @@ test_watcher_scopes_moon_spinner_to_recorded_kimi_task() (
   printf 'window=fake\nharness=kimi\n' > "$state/kimi-watch.meta"
   if window_is_busy fake 'ordinary response ending with 🌕'; then
     fail "fm-watch treated an ordinary Kimi moon as a spinner line"
+  fi
+  if window_is_busy fake '🌕 Full moon details'; then
+    fail "fm-watch treated moon-led Kimi output as the complete spinner row"
   fi
   pass "fm-watch: moon spinner matching is scoped by metadata and line shape"
 )
