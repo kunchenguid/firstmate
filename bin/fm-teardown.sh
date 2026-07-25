@@ -76,6 +76,12 @@
 # timeout, a status this build does not know) is reported as a warning naming the
 # run id and does NOT refuse: a false refusal would push the operator to --force,
 # which also skips the dirty and unlanded-work checks.
+# The single exception to the refusal is the run that is finished work rather
+# than work in progress: the recorded nm_watch_run= whose own recorded PR/MR the
+# provider reports as merged. Nothing in no-mistakes ends such a watch, so
+# teardown ends it and says so instead of refusing over it; nm_settle_task_runs
+# owns how narrow that is, and bin/fm-poll-lib.sh's fm_poll_end_watch_run owns
+# why a landed PR retires its watch at all.
 # --force reaps instead of refusing (`no-mistakes axi abort --run <id>`), since
 # forced teardown is the one path that both has explicit discard authority and
 # would otherwise be the surest way to create an orphan.
@@ -945,13 +951,36 @@ nm_task_run_ids() {
   [ "$run_id" = "$recorded" ] || printf '%s\n' "$run_id"
 }
 
+# Has the task's own recorded PR/MR landed? Cached, because the answer cannot
+# change during one teardown and each lookup costs a provider round trip. Only
+# the recorded pr= is ever asked about: this is not the landed-work check (that
+# is work_is_landed, which also proves the local commits are IN the merged head),
+# it is the narrower question of whether the thing this task's watch run was
+# watching is over.
+NM_PR_LANDED=
+nm_recorded_pr_is_merged() {
+  local state
+  case "$NM_PR_LANDED" in
+    yes) return 0 ;;
+    no) return 1 ;;
+  esac
+  NM_PR_LANDED=no
+  [ -n "$PR_URL" ] || return 1
+  state=$(fm_scm_pr_state "$WT" "$PR_URL" 2>/dev/null) || return 1
+  case "$state" in
+    MERGED|merged) NM_PR_LANDED=yes; return 0 ;;
+  esac
+  return 1
+}
+
 # Refuse (or, under --force, reap) the runs this task still owns, so its record
 # is never deleted while a run that only this record could attribute is alive.
 nm_settle_task_runs() {
-  local ids id state rc live_status live_branch out refused=0
+  local ids id state rc live_status live_branch out recorded refused=0
   case "$KIND" in
     secondmate) return 0 ;;
   esac
+  recorded=$(meta_value "$META" nm_watch_run)
   ids=$(nm_task_run_ids)
   [ -n "$ids" ] || return 0
 
@@ -988,6 +1017,33 @@ nm_settle_task_runs() {
           ;;
       esac
       continue
+    fi
+
+    # Backstop for the one live run that is finished work rather than work in
+    # progress: the escalate-only watch whose PR/MR has already landed. Nothing
+    # in no-mistakes ends such a run - a parked watch stops polling, so the merge
+    # never reaches it - and bin/fm-poll-lib.sh's fm_poll_end_watch_run, which
+    # owns that reasoning, ends it at the merge the armed poll observes. This
+    # catches the merge that poll never saw: a poll that was never armed or was
+    # already disarmed, an ending that failed, or a merge firstmate learned about
+    # some other way.
+    # Deliberately narrow, so the refusal below keeps its full reach:
+    #   - only the id the meta records as this task's watch run, never the
+    #     branch-matched active run, which can be a gate run doing real work;
+    #   - only when the provider says this task's own recorded PR/MR is merged,
+    #     so a watch that still has something to watch refuses exactly as before;
+    #   - and an ending that does not take falls straight through to the refusal.
+    # A watch run whose PR has landed holds no work and edits no code, so ending
+    # it is finishing it, not discarding it - which is why this needs no --force.
+    if [ "$id" = "$recorded" ] && nm_recorded_pr_is_merged; then
+      out=$(nm_axi abort --run "$id")
+      case "$out" in
+        *'aborted: true'*|*'no active run with that id'*)
+          echo "teardown: ended no-mistakes watch run $id (${live_status:-alive}${live_branch:+ on $live_branch}) owned by task $ID: its PR/MR has merged, so the watch had nothing left to watch"
+          continue
+          ;;
+      esac
+      echo "teardown: WARNING: could not end no-mistakes watch run $id owned by task $ID after its PR/MR merged; reap it with: $NM_BIN axi abort --run $id" >&2
     fi
 
     echo "REFUSED: no-mistakes run $id is still ${live_status:-alive}${live_branch:+ on $live_branch} and belongs to task $ID." >&2

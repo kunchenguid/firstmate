@@ -71,6 +71,14 @@
 #   (n5) recorded run already completed              -> ALLOW, never aborted
 #   (n6) run state undeterminable                    -> WARN with the id, ALLOW
 #   (n7) live own run under --force                  -> aborted, then ALLOW
+# And the one live run that is finished work rather than work in progress: the
+# recorded watch run whose own PR/MR has already merged. Nothing in no-mistakes
+# ends such a run, so teardown ends it instead of refusing over it - narrowly,
+# which is what (n9) to (n11) hold in place.
+#   (n8)  recorded watch run live, its PR merged     -> ENDED, then ALLOW
+#   (n9)  recorded watch run live, PR still open     -> REFUSE (unchanged)
+#   (n10) branch-matched run live, PR merged         -> REFUSE, never ended
+#   (n11) PR merged but the ending fails             -> REFUSE, run not orphaned
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -1752,6 +1760,127 @@ test_force_reaps_the_tasks_live_run() {
   pass "--force reaps the task's own live run instead of orphaning it"
 }
 
+# --- the watch run a landed PR/MR retires -----------------------------------
+# Nothing in no-mistakes ends an escalate-only watch: the daemon parks it on the
+# first thing needing a person and a parked run stops polling, so the merge it
+# was waiting for never reaches it. bin/fm-poll-lib.sh ends it at the merge the
+# armed poll observes; teardown is the backstop for the merge that poll never
+# saw. The backstop is narrow on purpose - these cases are what keeps it narrow.
+add_merged_pr_for_watch_case() {  # <case-dir>
+  local case_dir=$1
+  append_pr_meta_url "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+}
+
+test_landed_pr_ends_the_recorded_watch_run() {
+  local case_dir rc
+  case_dir=$(make_case nm-watch-landed)
+  write_meta "$case_dir" direct-PR ship
+  printf '%s\n' 'nm_watch_run=01KRUNLANDED01' >> "$case_dir/state/task-x1.meta"
+  nm_declare_run "$case_dir" 01KRUNLANDED01 running fm/task-x1
+  add_merged_pr_for_watch_case "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nm-watch-landed: a watch run whose PR has merged must not block cleanup: $(cat "$case_dir/stderr")"
+  assert_contains "$(nm_argv_log "$case_dir")" "axi abort --run 01KRUNLANDED01" \
+    "nm-watch-landed: the retired watch run was left alive for someone to abort by hand"
+  assert_grep "ended no-mistakes watch run 01KRUNLANDED01" "$case_dir/stdout" \
+    "nm-watch-landed: teardown ended the run without saying so"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "nm-watch-landed: teardown did not complete"
+  pass "a live watch run whose PR/MR has merged is ended by teardown instead of blocking it"
+}
+
+test_unlanded_pr_still_refuses_over_the_watch_run() {
+  local case_dir rc
+  case_dir=$(make_case nm-watch-open)
+  write_meta "$case_dir" direct-PR ship
+  printf '%s\n' 'nm_watch_run=01KRUNOPEN0001' >> "$case_dir/state/task-x1.meta"
+  nm_declare_run "$case_dir" 01KRUNOPEN0001 running fm/task-x1
+  # The PR is recorded but still open, so the watch still has something to watch.
+  append_pr_meta_url "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-watch-open: a watch run on a PR that has not landed must still refuse teardown"
+  assert_grep "no-mistakes run 01KRUNOPEN0001 is still running" "$case_dir/stderr" \
+    "nm-watch-open: the refusal did not name the run"
+  assert_not_contains "$(nm_argv_log "$case_dir")" "axi abort" \
+    "nm-watch-open: teardown ended a watch run that still had something to watch"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "nm-watch-open: teardown deleted the record that attributes the run"
+  pass "a watch run whose PR has not landed still refuses teardown, exactly as before"
+}
+
+test_landed_pr_never_ends_a_branch_matched_run() {
+  local case_dir rc
+  case_dir=$(make_case nm-watch-gate-run)
+  write_meta "$case_dir" no-mistakes ship
+  # No nm_watch_run: this is the repository's active run, matched to the task
+  # only by branch. It can be a gate run mid-pipeline with real work in it, so a
+  # merged PR is no reason to end it.
+  nm_declare_run "$case_dir" 01KRUNGATE0001 running fm/task-x1
+  nm_set_active_run "$case_dir" 01KRUNGATE0001
+  add_merged_pr_for_watch_case "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-watch-gate-run: a branch-matched run must still refuse teardown when the PR has merged"
+  assert_not_contains "$(nm_argv_log "$case_dir")" "axi abort" \
+    "nm-watch-gate-run: teardown ended a run that was never recorded as this task's watch"
+  pass "a landed PR never ends a run this task owns only by branch match"
+}
+
+test_failed_ending_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_case nm-watch-end-fails)
+  write_meta "$case_dir" direct-PR ship
+  printf '%s\n' 'nm_watch_run=01KRUNSTUCK001' >> "$case_dir/state/task-x1.meta"
+  nm_declare_run "$case_dir" 01KRUNSTUCK001 running fm/task-x1
+  add_merged_pr_for_watch_case "$case_dir"
+  # `axi status` still answers, so the run reads as alive; only the ending fails.
+  cat > "$case_dir/fakebin/no-mistakes" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/nm/argv.log"
+case "\${1:-} \${2:-}" in
+  "axi status")
+    [ -f "$case_dir/nm/run-\${4:-}.toon" ] || { echo 'error: not found' >&2; exit 1; }
+    cat "$case_dir/nm/run-\${4:-}.toon"
+    exit 0
+    ;;
+  "axi abort")
+    echo "error: cannot reach the no-mistakes daemon" >&2
+    exit 7
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/no-mistakes"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "nm-watch-end-fails: an ending that did not take must fall through to the refusal"
+  assert_grep "could not end no-mistakes watch run 01KRUNSTUCK001" "$case_dir/stderr" \
+    "nm-watch-end-fails: the failed ending was not reported"
+  assert_grep "no-mistakes run 01KRUNSTUCK001 is still running" "$case_dir/stderr" \
+    "nm-watch-end-fails: teardown proceeded over a run it failed to end"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "nm-watch-end-fails: teardown deleted the record that attributes the run"
+  pass "an ending that does not take still refuses rather than orphaning the run"
+}
+
 configure_herdr_projection_teardown_case() {  # <case-dir>
   local case_dir=$1 token=AbCdEfGhIjKlMnOpQrStUv
   sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
@@ -1868,6 +1997,10 @@ test_forced_teardown_never_aborts_another_branchs_run
 test_terminal_recorded_run_allows_teardown
 test_undeterminable_run_warns_without_refusing
 test_force_reaps_the_tasks_live_run
+test_landed_pr_ends_the_recorded_watch_run
+test_unlanded_pr_still_refuses_over_the_watch_run
+test_landed_pr_never_ends_a_branch_matched_run
+test_failed_ending_still_refuses
 test_teardown_moves_github_pr_row_to_done
 test_teardown_records_codebase_mr_via_note
 test_teardown_reports_backlog_write_failure_loudly
