@@ -70,7 +70,11 @@ case "${3:-}" in
   *) exit 67 ;;
 esac
 if [ -n "${FM_FAKE_HERDR_DRIFT_WORKTREE:-}" ]; then
-  git -C "$FM_FAKE_HERDR_DRIFT_WORKTREE" switch --quiet --detach || exit 68
+  # Drift the worktree's identity out from under account preparation. It must be a
+  # real change: a leased worktree is handed over DETACHED, so detaching again
+  # would be a no-op and the recheck would have nothing to catch. -C is used so
+  # repeated preparation calls stay idempotent.
+  git -C "$FM_FAKE_HERDR_DRIFT_WORKTREE" switch --quiet -C drifted-during-prepare || exit 68
 fi
 SH
 chmod +x "$FAKEBIN/herdr"
@@ -252,6 +256,9 @@ SH
 #!/usr/bin/env bash
 set -u
 printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
+# `treehouse get --lease` reports the leased worktree on stdout, and fm-spawn
+# refuses to launch without it. The stub has to answer that the same way.
+[ "${1:-}" != get ] || { printf '%s\n' "${FM_FAKE_TREEHOUSE_WORKTREE:?}"; exit 0; }
 [ "${1:-}" = return ] || exit 0
 [ "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-0}" != 1 ] || exit 71
 target=${@: -1}
@@ -277,7 +284,7 @@ run_direct_spawn() {
     FM_FAKE_LAUNCH_LOG="$launch_log" FM_FAKE_ENDPOINT_FILE="$home/state/.fake-endpoint" \
     FM_FAKE_ENDPOINT_LABEL="fm-${1:-unknown}" FM_FAKE_KILL_RETAIN="${FM_FAKE_KILL_RETAIN:-0}" \
     FM_FAKE_HERDR_DRIFT_WORKTREE="${FM_FAKE_HERDR_DRIFT_WORKTREE:-}" \
-    FM_FAKE_TREEHOUSE_LOG="$TREEHOUSE_LOG" \
+    FM_FAKE_TREEHOUSE_LOG="$TREEHOUSE_LOG" FM_FAKE_TREEHOUSE_WORKTREE="$worktree" \
     FM_FAKE_TREEHOUSE_RETURN_FAIL="${FM_FAKE_TREEHOUSE_RETURN_FAIL:-0}" \
     PATH="$FAKEBIN:$PATH" \
     FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1 \
@@ -301,7 +308,12 @@ make_spawn_case() {
   printf '%s\n' "$harness" > "$home/config/crew-harness"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
+  # A leased Treehouse worktree is handed over at detached HEAD on a clean
+  # default branch, and fm-spawn refuses one that is still attached to a branch
+  # (the crew creates its own). Reproduce that shape, not a generic worktree.
   fm_git_worktree "$project" "$worktree" "wt-$name"
+  git -C "$worktree" checkout --quiet --detach HEAD
+  git -C "$project" branch --quiet -D "wt-$name"
   printf '%s\n' "$home|$project|$worktree|$launch_log"
 }
 
@@ -541,8 +553,17 @@ test_direct_recovery_rejects_worktree_from_another_project() {
     status=$?
   fi
   [ "$status" -ne 0 ] || fail "direct recovery launched in a worktree from another project"
-  assert_contains "$out" "does not belong to recorded project" \
-    "direct recovery project-identity refusal was not actionable"
+  # Two correct guards can catch this worktree: the recorded Git metadata is now
+  # proven before the project-membership comparison runs, so a redirected worktree
+  # is refused as redirected rather than as foreign. Pin the REFUSAL and its
+  # actionability - that it names the offending path - not which of the two fires
+  # first, which is an implementation detail either ordering satisfies.
+  case $out in
+    *"does not belong to recorded project"*|*"redirected or unprovable Git metadata"*) ;;
+    *) fail "direct recovery project-identity refusal was not actionable: $out" ;;
+  esac
+  assert_contains "$out" "$unrelated" \
+    "direct recovery refusal did not name the offending worktree"
   [ ! -e "$SPAWN_HOME/state/.fake-endpoint" ] || fail "project-identity mismatch created a replacement endpoint"
   [ ! -s "$QUOTA_LOG" ] || fail "project-identity mismatch read account quota before refusing recovery"
   [ ! -s "$HERDR_LOG" ] || fail "project-identity mismatch installed a profile hook before refusing recovery"
