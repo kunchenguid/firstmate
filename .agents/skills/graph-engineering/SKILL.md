@@ -24,6 +24,7 @@ Require these inputs before selecting an architecture.
 - Define the primary metric or rubric, its direction, tie or noise treatment, and guardrails for correctness, security, cost, latency, and resource use.
 - Set limits for iterations, retries, tool calls, workers, concurrency, tokens, cost, wall-clock time, and writes as applicable.
 - Define how every candidate is checkpointed, restored, and compared with the retained baseline.
+- Checkpoint at durable boundaries, and make retried or resumed side effects idempotent or protect them with an idempotency key or compensation.
 - Define the trial record, required sources, final evidence, and escalation boundary.
 - Define success, plateau, idea-exhaustion, and budget-exhaustion stopping criteria before the first trial.
 
@@ -63,12 +64,13 @@ Return task-specific evidence rather than worker transcripts as the handoff surf
 
 ## Add architecture only for a measured failure
 
+Distinguish acyclic execution or lineage DAGs, cyclic state graphs, runtime-generated task graphs, and domain knowledge graphs; multi-agent coordination is orthogonal to all four.
 Climb this ladder only when the current rung has exposed the named limitation and the next rung has a measurable exit criterion.
 
 1. Add one tool when a repeated error comes from a missing capability, and give the tool typed inputs, minimum permissions, and result confirmation.
 2. Add a chain when the stages and handoff order are stable.
 3. Add planning only when valid task paths vary, and require explicit dependencies and success conditions before execution.
-4. Add parallel workers only for independent units, after defining isolation, artifact contracts, a reducer, deduplication, concurrency limits, and a final evaluation.
+4. Add parallel workers only after ruling out dependencies through required data, shared mutable resources, exclusive tools, rate limits, or coupled writes and defining isolation, artifact contracts, a reducer, deduplication, concurrency limits, and a final evaluation.
 5. Add a distinct critic or evaluator when its rubric and evidence can catch a demonstrated generator failure rather than merely repeat the generator's opinion.
 6. Add a commit or artifact DAG when alternative lineages, parentage, or discarded experiments must remain traversable.
 7. Add persistent graph memory only when connected facts, provenance, conflicts, or cross-session queries cannot be served adequately by versioned files or relational tables.
@@ -76,6 +78,7 @@ Climb this ladder only when the current rung has exposed the named limitation an
 
 Keep experiment lineage and domain knowledge as separate models even when links connect them.
 Retrieve a bounded, task-relevant subgraph with provenance and conflicts rather than dumping shared memory into every worker's context.
+Keep execution flow separate from context flow: an execution edge does not pass a whole transcript; hand off only the required versioned artifacts and evidence.
 Use reversible, evidence-backed entity resolution because one false merge can contaminate many later queries.
 Drop back to the simpler rung when the promised exit criterion is not met.
 
@@ -107,6 +110,6 @@ Include the stopping reason, trial ledger, consumed budget, discarded but releva
 
 ## Source provenance
 
-This procedure is an original operational synthesis of *Graph Engineering: The Karpathy Loop, Improved 1000x by Itself - The Anthropic Playbook*, an independently compiled July 2026 paper supplied for this task.
+This procedure is an original operational synthesis of an independently compiled July 2026 *Graph Engineering* paper supplied for this task.
 The paper attributes the measured autonomous loop and experiment-DAG direction to Andrej Karpathy's autoresearch and AgentHub work, and it attributes workflow and knowledge-graph patterns to Anthropic materials.
 Consult those primary sources before relying on historical, performance, or product-specific claims because this skill retains only the reusable method.
