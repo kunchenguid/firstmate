@@ -29,6 +29,49 @@ test_script_parses() {
   pass "fm-brief.sh: bash -n succeeds"
 }
 
+# macOS still ships Bash 3.2 as /bin/bash, and that parser catches regressions
+# modern Linux Bash misses in nested heredoc command substitutions. CI runs on
+# Linux, so build an upstream Bash 3.2 parser there when the system shell is too
+# new.
+fm_brief_bash32() {
+  local version src tarball bash32
+  if [ -x /bin/bash ]; then
+    version=$(/bin/bash --version | head -n 1)
+    case "$version" in
+      *'version 3.2.'*) printf '%s\n' /bin/bash; return 0 ;;
+    esac
+  fi
+  if [ "${GITHUB_ACTIONS:-}" != "true" ]; then
+    return 1
+  fi
+  src="$TMP_ROOT/bash-3.2"
+  bash32="$src/bash"
+  [ -x "$bash32" ] && { printf '%s\n' "$bash32"; return 0; }
+  tarball="$TMP_ROOT/bash-3.2.tar.gz"
+  curl -fsSL https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz -o "$tarball"
+  tar -xzf "$tarball" -C "$TMP_ROOT"
+  (cd "$src" && ./configure --without-bash-malloc >/dev/null && make -j2 >/dev/null)
+  [ -x "$bash32" ] || fail "failed to build Bash 3.2 parser for fm-brief regression coverage"
+  printf '%s\n' "$bash32"
+}
+
+test_bash32_parser_when_available() {
+  local bash32 out rc version
+  if ! bash32=$(fm_brief_bash32); then
+    pass "fm-brief.sh: Bash 3.2 parser unavailable outside CI"
+    return 0
+  fi
+  version=$("$bash32" --version | head -n 1)
+  case "$version" in
+    *'version 3.2.'*) ;;
+    *) fail "fm-brief.sh: selected parser is not Bash 3.2 ($version)" ;;
+  esac
+  out=$("$bash32" -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
+  expect_code 0 "$rc" "Bash 3.2 -n bin/fm-brief.sh must parse cleanly (got: $out)"
+  [ -z "$out" ] || fail "Bash 3.2 -n bin/fm-brief.sh emitted unexpected output: $out"
+  pass "fm-brief.sh: Bash 3.2 -n succeeds"
+}
+
 test_help_includes_entire_header() {
   local help
   help=$("$ROOT/bin/fm-brief.sh" --help)
@@ -383,6 +426,7 @@ test_scout_and_secondmate_scaffold() {
 }
 
 test_script_parses
+test_bash32_parser_when_available
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
