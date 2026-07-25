@@ -100,13 +100,25 @@ SH
 # A per-id override FM_FAKE_CREW_STATE_<sanitized-id> wins; otherwise the shared
 # FM_FAKE_CREW_STATE; otherwise an unknown verdict (NOT provably working), the
 # safe default so a test that forgets to set one surfaces rather than absorbs.
+# The fake also serves the narrower `--progress <id>` mode the wedge timer reads
+# before escalating, from FM_FAKE_CREW_PROGRESS_<sanitized-id> / the shared
+# FM_FAKE_CREW_PROGRESS (an activity age in seconds), defaulting to `unknown` -
+# again the safe default, since an unprovable progress read must escalate.
 make_fake_crew_state() {  # <fakebin>
   local fakebin=$1
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
+mode=state
+if [ "${1:-}" = --progress ]; then mode=progress; shift; fi
 id=${1:-}
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
+if [ "$mode" = progress ]; then
+  var="FM_FAKE_CREW_PROGRESS_$key"
+  val=${!var:-${FM_FAKE_CREW_PROGRESS:-}}
+  printf 'activity_age: %s\n' "${val:-unknown}"
+  exit 0
+fi
 var="FM_FAKE_CREW_STATE_$key"
 val=${!var:-${FM_FAKE_CREW_STATE:-}}
 printf '%s\n' "${val:-state: unknown · source: none · fake default}"

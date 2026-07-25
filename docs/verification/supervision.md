@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports current session-start, turn-end, watcher-continuity, and wedge-alarm guarantees.
+This record supports current session-start, turn-end, watcher-continuity, wedge-timer progress, and wedge-alarm guarantees.
 Operator behavior and active limits remain in the linked current guides.
 Task-specific chronology, temporary paths, run identifiers, and delivery transcripts remain in private reports or PR evidence.
 
@@ -127,6 +127,33 @@ tests/fm-watcher-lock.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
+```
+
+## Wedge-timer progress evidence
+
+`bin/fm-crew-state.sh --progress` reads the activity stamp the wedge timer consults before escalating, so the shape of that stamp is the fact this guarantee rests on.
+It was read live on 2026-07-25 against no-mistakes v1.37.0 (78e4dcb) inside a worktree with its own active run.
+
+```sh
+no-mistakes axi status
+```
+
+Observed output, last two lines:
+
+```text
+  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
+    ci,running,1h23m,"quiet 1h22m ago: log: no CI checks reported - still monitoring until merged or closed","",starting
+```
+
+Two properties matter and both hold in that sample.
+`last_activity` carries the age of the most recent thing the step did, suffixed ` ago`, and drops zero components (`1h22m`, not `1h22m0s`).
+`active_for` is elapsed time with no ` ago` suffix, which is why the parser matches only the ` ago` form: elapsed time is the signal the wedge timer already has, and reading it would restore the defect.
+
+Deterministic entry points:
+
+```sh
+tests/fm-crew-state.test.sh
+tests/fm-watch-triage.test.sh
 ```
 
 ## Wedge-alarm channels
