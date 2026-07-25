@@ -38,6 +38,29 @@
 # byte-pattern check missed claude's own dim ghost (its prompt glyph is not
 # bold-wrapped) and no adapter covered grok's truecolor placeholder at all.
 #
+# NON-BREAKING SPACE in an EMPTY composer is the third concern this owner carries
+# (measured 2026-07-25 against claude 2.1.220 on tmux, two idle panes, bytes
+# identical at rest and at the moment of a send):
+#
+#   ESC[38;5;246m  E2 9D AF (❯)  C2 A0 (U+00A0)  ESC[39m
+#
+# claude renders its EMPTY composer as the prompt glyph followed by a NON-BREAKING
+# space, not an ordinary one, and the classifier below missed it in three
+# independent places: the bare-glyph shortcut compares against a LONE glyph, the
+# glyph-strip cases match glyph + ASCII space, and the whitespace trim used
+# [[:space:]], which does not cover U+00A0 in the UTF-8 locales this fleet runs.
+# One character survived all three, so EVERY genuinely empty claude composer
+# classified as `pending`: fm-send reported "Enter swallowed" for steers that had
+# actually landed, and the away-mode daemon, which injects only into an
+# affirmatively `empty` composer, deferred every escalation. Deterministic, not
+# intermittent - the render is the steady state, so it failed on every send.
+# fm_composer_trim_ws below is the fix: the one trim that counts U+00A0 as
+# whitespace. This is NOT a ghost-text problem and must not be "fixed" in
+# fm_composer_strip_ghost: the glyph carries a 256-colour palette foreground
+# (SGR 38;5;246), which that extractor deliberately keeps (see above), and
+# widening it to palette colours would delete the real prompt glyph. The defect
+# is the CHARACTER, not the styling.
+#
 # Each adapter still owns its own CAPTURE and structural row-finding, because
 # those use genuinely different primitives (tmux's visible-pane box scan,
 # herdr's ANSI tail scan, orca/cmux's plain read-screen). Once an adapter has a
@@ -160,6 +183,31 @@ fm_composer_strip_ghost() {
   '
 }
 
+# U+00A0 as a literal. Built with an octal escape so this file stays free of \u
+# escapes and multibyte character classes, matching the border-stripping rule in
+# bin/fm-tmux-lib.sh (bash 3.2 safe, locale-independent).
+FM_COMPOSER_NBSP=$'\302\240'
+
+# fm_composer_trim_ws: trim leading and trailing whitespace from <text>, counting
+# U+00A0 as whitespace (see the NON-BREAKING SPACE note in the file header;
+# [[:space:]] alone does not cover it). NBSP is removed by literal-string
+# substitution, never by a character class: UTF-8 is self-synchronising and C2 is
+# never a continuation byte, so an anchored two-byte match can only ever be the
+# NBSP itself and never the tail of another multibyte glyph, which a byte-wise
+# class under LC_ALL=C could truncate. Loops until the value stops changing so a
+# mixed run (space, NBSP, space) collapses completely.
+fm_composer_trim_ws() {  # <text>
+  local s=$1 prev=
+  while [ "$s" != "$prev" ]; do
+    prev=$s
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    s="${s#"$FM_COMPOSER_NBSP"}"
+    s="${s%"$FM_COMPOSER_NBSP"}"
+  done
+  printf '%s' "$s"
+}
+
 # fm_composer_classify_content: the single shared composer-content verdict.
 #   <bordered> 1 when <content> came from a genuine agent-composer container (a
 #              bordered composer box, or a structurally-identified bare AGENT
@@ -183,6 +231,10 @@ fm_composer_idle_matches() {
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}
+  # Adapters trim with [[:space:]], which leaves an empty claude composer's
+  # trailing U+00A0 behind, so re-trim both here where every adapter converges.
+  content=$(fm_composer_trim_ws "$content")
+  plain_content=$(fm_composer_trim_ws "$plain_content")
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
       '❯'|'›') printf 'empty'; return 0 ;;
@@ -211,8 +263,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
     '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
     '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
   esac
-  content="${content#"${content%%[![:space:]]*}"}"
-  content="${content%"${content##*[![:space:]]}"}"
+  content=$(fm_composer_trim_ws "$content")
   [ -n "$content" ] || { printf 'empty'; return 0; }
   # Known idle placeholder (matched again after the leading glyph was stripped,
   # e.g. "❯ Type a message...").

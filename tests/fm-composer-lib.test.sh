@@ -82,6 +82,60 @@ test_agent_glyphs_are_empty_bordered_and_bare() {
   pass "fm_composer_classify_content: agent prompt glyphs (❯ claude, › codex) read empty bordered or bare"
 }
 
+# --- Empty composer rendered with U+00A0 (claude 2.1.220, 2026-07-25) -------
+#
+# claude renders an EMPTY composer as the prompt glyph followed by a NON-BREAKING
+# space, so every row below is an idle composer, not typed input. Before
+# fm_composer_trim_ws they all read `pending`: fm-send reported a swallowed Enter
+# for steers that had landed, and the away-mode daemon never injected.
+
+NBSP=$(printf '\302\240')
+
+test_agent_glyph_with_nbsp_is_empty() {
+  local out
+  out=$(classify 0 "❯$NBSP"); [ "$out" = empty ] || fail "bare claude '❯'+NBSP is an empty composer, got '$out'"
+  out=$(classify 1 "❯$NBSP"); [ "$out" = empty ] || fail "bordered claude '❯'+NBSP is an empty composer, got '$out'"
+  out=$(classify 0 "›$NBSP"); [ "$out" = empty ] || fail "bare codex '›'+NBSP is an empty composer, got '$out'"
+  out=$(classify 0 "$NBSP"); [ "$out" = empty ] || fail "a lone NBSP is an empty composer, got '$out'"
+  # A mixed whitespace run must collapse completely, not one layer per call.
+  out=$(classify 0 "❯$NBSP $NBSP"); [ "$out" = empty ] || fail "glyph + mixed NBSP/space run is empty, got '$out'"
+  pass "fm_composer_classify_content: an agent glyph followed by U+00A0 reads empty (claude's real empty composer)"
+}
+
+test_nbsp_stripped_unbordered_content_stays_empty() {
+  # The ghost-stripped path: content empties out and plain_content carries the row.
+  local out
+  out=$(classify 0 '' '' sensitive "❯$NBSP")
+  [ "$out" = empty ] || fail "a stripped agent glyph carrying NBSP must remain empty, got '$out'"
+  pass "fm_composer_classify_content: the stripped-content path also tolerates a trailing U+00A0"
+}
+
+test_nbsp_does_not_swallow_real_text() {
+  local out
+  out=$(classify 0 "❯${NBSP}fix findings 1 and 3")
+  [ "$out" = pending ] || fail "real text after a glyph+NBSP must stay pending, got '$out'"
+  out=$(classify 0 "${NBSP}fix findings 1 and 3")
+  [ "$out" = pending ] || fail "real text behind a leading NBSP must stay pending, got '$out'"
+  out=$(classify 1 "deploy staging${NBSP}")
+  [ "$out" = pending ] || fail "real text with a trailing NBSP must stay pending, got '$out'"
+  pass "fm_composer_classify_content: trimming U+00A0 never swallows real unsubmitted text"
+}
+
+test_nbsp_preserves_dead_shell_safety() {
+  local g out
+  for g in '>' '$' '%' '#'; do
+    out=$(classify 0 "$g$NBSP")
+    [ "$out" = unknown ] \
+      || fail "a bare shell glyph '$g' with NBSP is still a dead shell, got '$out'"
+    out=$(classify 1 "$g$NBSP")
+    [ "$out" = empty ] \
+      || fail "a bordered shell glyph '$g' with NBSP is the harness prompt, got '$out'"
+  done
+  out=$(classify 0 '' '' sensitive "\$$NBSP")
+  [ "$out" = unknown ] || fail "a stripped bare shell prompt with NBSP must stay unknown, got '$out'"
+  pass "fm_composer_classify_content: U+00A0 trimming does not weaken the dead-shell safety rule"
+}
+
 # --- Empty content and idle placeholder -------------------------------------
 
 test_empty_content_is_empty() {
@@ -126,6 +180,10 @@ test_real_text_is_pending() {
 }
 
 test_bare_shell_glyphs_are_unknown
+test_agent_glyph_with_nbsp_is_empty
+test_nbsp_stripped_unbordered_content_stays_empty
+test_nbsp_does_not_swallow_real_text
+test_nbsp_preserves_dead_shell_safety
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty

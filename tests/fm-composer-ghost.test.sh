@@ -16,6 +16,10 @@
 #   3. The tmux reader structurally scans every row of a multi-row composer.
 #   4. The human/LLM-facing capture path (fm-peek.sh) stays PLAIN - no escape codes
 #      ever reach firstmate's context.
+#   4. The sibling defect with the SAME symptom and a different cause: claude's empty
+#      composer renders as the prompt glyph plus U+00A0 (measured 2026-07-25), which
+#      reads empty through fm_composer_trim_ws - NOT through the ghost stripper, whose
+#      256-colour exclusion deliberately keeps that row's styling.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -570,6 +574,31 @@ test_non_bordered_interior_edges_are_pending() {
   pass "fm_tmux_composer_state: interior edge glyphs retain non-bordered fallback"
 }
 
+# --- Same symptom, different cause: the empty composer's U+00A0 -------------
+
+test_claude_empty_composer_nbsp_row_is_empty() {
+  local dir fb capture state
+  dir="$TMP_ROOT/nbsp-empty"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  # The EXACT bytes captured from a live idle claude pane (2.1.220) on 2026-07-25:
+  # a 256-colour palette foreground, the prompt glyph, and a NON-BREAKING space.
+  # Not ghost text - that styling is deliberately KEPT by the stripper, and the
+  # row is empty anyway. Handled by fm_composer_trim_ws, not by the ghost path.
+  printf '\033[38;5;246m\xe2\x9d\xaf\xc2\xa0\033[39m\n' > "$capture"
+  if PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+     fm_pane_input_pending "fakepane"; then
+    fail "claude's empty composer (glyph + U+00A0) falsely read as pending"
+  fi
+  # Not-pending is not enough for away mode: the daemon injects only into an
+  # affirmatively empty composer, so an `unknown` verdict would still wedge it.
+  state=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+          fm_tmux_composer_state "fakepane")
+  [ "$state" = empty ] \
+    || fail "claude's empty composer must read affirmatively empty for injection, got '$state'"
+  pass "fm_tmux_composer_state: claude's empty composer (prompt glyph + U+00A0) reads empty"
+}
+
 # --- fm-peek.sh stays escape-free (LLM-facing path) -------------------------
 
 test_peek_output_is_escape_free() {
@@ -625,4 +654,5 @@ test_fallback_capture_race_with_edge_is_unknown
 test_legitimate_empty_routes_remain_empty
 test_non_bordered_composer_uses_compatibility_fallback
 test_non_bordered_interior_edges_are_pending
+test_claude_empty_composer_nbsp_row_is_empty
 test_peek_output_is_escape_free

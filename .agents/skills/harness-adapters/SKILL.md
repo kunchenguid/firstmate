@@ -192,6 +192,15 @@ Its broader dark-TRUECOLOR placeholder handling and dark-theme tradeoff are docu
 That styled capture is internal to the boolean detector only.
 `fm-peek` and every other human or LLM-facing capture path stays plain `tmux capture-pane` with no escape codes.
 
+**Empty-composer render fact (measured 2026-07-25, Claude Code 2.1.220, tmux).**
+Claude renders its EMPTY composer as the prompt glyph followed by U+00A0, a NON-BREAKING space, under a 256-colour palette foreground: `ESC[38;5;246m` `❯` `U+00A0` `ESC[39m`.
+Captured live from two idle panes, byte-identical at rest and at the moment of a send.
+This is not ghost text, and it must never be handled by widening `fm_composer_strip_ghost`: that extractor's 256-colour exclusion is deliberate, and widening it would delete the real prompt glyph.
+Until `fm_composer_trim_ws` (`bin/fm-composer-lib.sh`) counted U+00A0 as whitespace, every genuinely empty claude composer classified as `pending`, so `fm-send` reported a swallowed Enter for steers that had actually landed, and the away-mode daemon, which injects only into an affirmatively `empty` composer, deferred every escalation.
+The defect was deterministic rather than intermittent, because the rendering is the composer's steady state.
+Regression coverage: the four `nbsp` cases in `tests/fm-composer-lib.test.sh`, plus `test_claude_empty_composer_nbsp_row_is_empty` in `tests/fm-composer-ghost.test.sh`, which replays the captured bytes through the tmux reader.
+The composer detector parses the harness TUI, so re-measure this row whenever a claude update changes composer rendering.
+
 **Primary-session guard fact (verified 2026-07-04, Claude Code 2.1.201; preserved 2026-07-08, Claude Code 2.1.204; Stop-owned auto-arm revalidated 2026-07-24, Claude Code 2.1.219).**
 This is separate from the per-task crewmate turn-end hook above (that one just `touch`es a marker file in a task's own `.claude/settings.local.json`).
 The firstmate PRIMARY's own `.claude/settings.json` registers two Stop hooks: `bin/fm-turnend-guard.sh --claude` and the Stop-owned auto-arm `bin/fm-claude-stop-autoarm.sh` (`asyncRewake: true`, `timeout: 28800`), and exiting the guard with status 2 plus stderr reliably forces the model to continue.
