@@ -239,10 +239,10 @@ test_merged_wakes_and_clears_state() {
 # left the no-mistakes watch run it had been reporting on alive. Nothing else
 # ever ends such a run - the daemon parks an external watch on the first thing
 # needing a person and a parked run stops polling, so the merge never reaches it
-# - so it stayed on the books until a person aborted it by hand, and
-# bin/fm-teardown.sh refused to clean the task up for as long as it did. Three
-# direct-PR tasks landed that way on 2026-07-24 and 2026-07-25 here, parked for
-# up to 36 hours each.
+# - so it stayed on the books until a person aborted it by hand, and the task's
+# cleanup was held up for as long as it did. Three direct-PR tasks landed that
+# way on 2026-07-24 and 2026-07-25 here; bin/fm-poll-lib.sh's
+# fm_poll_end_watch_run header records their ids and the evidence.
 
 test_merged_ends_this_tasks_watch_run() {
   local case_dir out

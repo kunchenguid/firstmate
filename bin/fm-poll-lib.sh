@@ -195,10 +195,12 @@ fm_poll_git_dir() {  # <meta>
 # waiting for approval - and a parked run stops polling, so the merge it was
 # waiting for never reaches it. Three direct-PR tasks landed here on 2026-07-24
 # and 2026-07-25 with their watch runs still on the books (01KY80J684V29V81BM43M618ZF,
-# 01KY96ZNA6D9Q7HCCXFG8HECPR, 01KYBZVKTD5PBAEV4GBY1ZX59W); no-mistakes' own
-# records show all three still at pr_state=open, parked for up to 36 hours,
-# each ended by hand in the end. Until then each one blocked bin/fm-teardown.sh,
-# which refuses to delete the meta that names a live run.
+# 01KY96ZNA6D9Q7HCCXFG8HECPR, 01KYBZVKTD5PBAEV4GBY1ZX59W), and each one held up
+# the task's cleanup until a person ended it by hand. Every one of their watch
+# logs stops at the escalation rather than at the merge - "escalating for a human
+# decision" on the first, "PR is green but blocked on review (PENDING) -
+# escalating for a human" on the other two - and all three now read
+# `error: "cancelled: aborted by user"`, which is the hand-abort.
 #
 # `axi abort --run <id>` is the only ending verb no-mistakes has - there is no
 # complete and no finish - so a watch whose PR landed is recorded as
