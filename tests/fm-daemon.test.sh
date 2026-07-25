@@ -298,7 +298,7 @@ test_housekeeping_paused_resurfaces_and_resets() {
   pass "housekeeping re-surfaces a stale declared pause on the long cadence and resets its window"
 }
 
-# A pause whose pane became busy again (the crew resumed) drops its marker without
+# A pause whose pane became busy again (the crewmate resumed) drops its marker without
 # escalating, exactly like a resumed wedge.
 test_housekeeping_paused_resumed_cleared() {
   local dir state fakebin win pane key
@@ -316,7 +316,7 @@ test_housekeeping_paused_resumed_cleared() {
   pass "housekeeping clears a paused marker whose pane became busy again, without escalating"
 }
 
-# A pane still idle but whose status is no longer a pause (the crew changed state
+# A pane still idle but whose status is no longer a pause (the crewmate changed state
 # without becoming busy) drops the marker - the signal path owns the new state, so
 # the pause recheck must not re-surface a stale pause reason.
 test_housekeeping_paused_unpaused_cleared() {

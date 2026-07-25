@@ -12,7 +12,7 @@ Pick tmux unless you have a specific reason to try a new-task-capable experiment
 ## Prerequisites
 
 - tmux itself: `brew install tmux` (or your platform's package manager).
-- The universal firstmate prerequisites: a verified crew harness plus the required toolchain, detected at session start and installed only after you approve; [`docs/configuration.md`](configuration.md) owns both lists ("Harness support", "Toolchain").
+- The universal firstmate prerequisites: a verified crewmate harness plus the required toolchain, detected at session start and installed only after you approve; [`docs/configuration.md`](configuration.md) owns both lists ("Harness support", "Toolchain").
 
 ## Selecting it
 
@@ -29,7 +29,7 @@ The first crewmate spawn creates whatever tmux session and window it needs.
 ## Run inside tmux for the best experience
 
 Launch your harness from inside a tmux session (`tmux new -s firstmate` or similar, then start your agent).
-Every crewmate window then lands in that same session, where you can watch the crew work in real time or type into any window to intervene.
+Every crewmate window then lands in that same session, where you can watch the crewmate work in real time or type into any window to intervene.
 When following the commands below, use that session's actual name.
 Inside tmux, `tmux display-message -p '#S'` prints it.
 
@@ -42,18 +42,18 @@ Attach to it any time with:
 tmux attach -t firstmate
 ```
 
-## Watching and typing into crew windows
+## Watching and typing into crewmate windows
 
 Once attached, each crewmate is its own window named `fm-<id>`:
 
 ```sh
-tmux list-windows -t <session-name>          # see every crew window
+tmux list-windows -t <session-name>          # see every crewmate window
 tmux select-window -t <session-name>:fm-<id> # jump to one, or use ctrl-b <n>
 ```
 
 Use the current tmux session name when firstmate was launched inside tmux; use `firstmate` only for the detached outside-tmux path.
 Typing directly into an attached window is authoritative direct intervention - the first mate treats it the same as any other captain instruction and reconciles at the next heartbeat.
-You do not need to attach at all for routine supervision: from an active firstmate session, the first mate reads crew windows itself with `bin/fm-peek.sh fm-<id>` (a bounded, read-only capture) and steers a crew with `FM_HOME=<this-firstmate-home> bin/fm-send.sh fm-<id> "<text>"` unless `FM_HOME` is already set to the active firstmate home.
+You do not need to attach at all for routine supervision: from an active firstmate session, the first mate reads crewmate windows itself with `bin/fm-peek.sh fm-<id>` (a bounded, read-only capture) and steers a crewmate with `FM_HOME=<this-firstmate-home> bin/fm-send.sh fm-<id> "<text>"` unless `FM_HOME` is already set to the active firstmate home.
 
 ## Verifying it works
 

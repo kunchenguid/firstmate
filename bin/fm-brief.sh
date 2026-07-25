@@ -16,7 +16,7 @@
 #   captain-relevant escalations and marked from-firstmate replies append to this
 #   home's status file.
 #   --no-projects writes a project-less charter for a domain whose subject is the
-#   firstmate repo itself (its home is a firstmate worktree, its crews take pooled
+#   firstmate repo itself (its home is a firstmate worktree, its crewmates take pooled
 #   worktrees of the same repo). It is mutually exclusive with a project list, and
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
@@ -127,8 +127,8 @@ fi
 SECONDMATE_CHARTER=${FM_SECONDMATE_CHARTER:-"{TASK}"}
 SECONDMATE_SCOPE=${FM_SECONDMATE_SCOPE:-${FM_SECONDMATE_CHARTER:-"{TASK}"}}
 if [ "$NO_PROJECTS" -eq 1 ]; then
-  PROJECT_CLONES_BODY="None. This is a project-less domain: its subject is the firstmate repo this home lives in, so it needs no separate clones under \`projects/\`; its crews take pooled worktrees of that firstmate repo."
-  PROJECT_CLONES_NOTE="This domain has no separate project clones: its subject is the firstmate repo this home lives in, and its crews take pooled worktrees of that repo."
+  PROJECT_CLONES_BODY="None. This is a project-less domain: its subject is the firstmate repo this home lives in, so it needs no separate clones under \`projects/\`; its crewmates take pooled worktrees of that firstmate repo."
+  PROJECT_CLONES_NOTE="This domain has no separate project clones: its subject is the firstmate repo this home lives in, and its crewmates take pooled worktrees of that repo."
 else
   PROJECT_CLONES_BODY=$(printf '%s\n' "$SECONDMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
   PROJECT_CLONES_NOTE="The projects above are local clones for work you supervise; they are not an exclusive ownership claim."

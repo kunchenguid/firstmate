@@ -11,7 +11,7 @@
 # refused on ANY symlink entry anywhere in the tree, which made every repo
 # whose own committed layout uses symlinks permanently un-reapable: relvino
 # carries 177 of them in every worktree (its CLAUDE.md -> AGENTS.md convention
-# and its symlinked skills), so no crew there could ever be torn down. A
+# and its symlinked skills), so no crewmate there could ever be torn down. A
 # symlink ENTRY cannot redirect this operation - it is inspected with
 # follow_symlinks=False, it is not a directory so it is never queued for
 # descent, and each descent opens with O_NOFOLLOW and re-proves identity,

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behavior tests for bin/fm-crew-state.sh - the deterministic crew-current-state
+# Behavior tests for bin/fm-crew-state.sh - the deterministic crewmate-current-state
 # helper.
 #
 # The status file (state/<id>.status) is a best-effort append-only EVENT LOG, so
@@ -463,7 +463,7 @@ test_ci_ready_done_log_beats_monitoring_run() {
   pass "ci-ready status log beats monitoring run"
 }
 
-# Regression for the PR #252 incident: the crew's own status log never got a
+# Regression for the PR #252 incident: the crewmate's own status log never got a
 # "done: ... checks green" line (log_reports_ci_ready above does not apply),
 # but the ci step's log tail shows CI is actually green and only waiting on
 # merge/close. fm-crew-state must surface this as done, not "validating
@@ -474,7 +474,7 @@ test_ci_monitoring_checks_green_surfaces_done() {
   make_repo_on_branch "$d/wt" fm/feat-cigreen
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-cigreen.meta" "window=fm:fm-feat-cigreen" "worktree=$d/wt" "kind=ship"
-  # No status-log line at all: the crew never reported its own checks-green line.
+  # No status-log line at all: the crewmate never reported its own checks-green line.
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cigreen)"
   FM_FAKE_CI_LOGS=$(cat <<'EOF'
 CI checks running, waiting for results...
@@ -691,7 +691,7 @@ test_terminal_failed() {
 }
 
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
-# routine case once more than one crew validates the same underlying repo
+# routine case once more than one crewmate validates the same underlying repo
 # concurrently - they share ONE no-mistakes repo registration), so the helper
 # falls back to the real top-level `no-mistakes runs` listing to learn whether
 # THIS branch has an active run of its own. Regression coverage for the
@@ -699,14 +699,14 @@ test_terminal_failed() {
 # (bare) expecting a `runs[N]{...}:` TOON table that the real CLI never emits
 # (verified against the installed v1.32.2 - the `axi` surface has no
 # runs-listing subcommand at all), so attribution silently failed every time
-# the repo-wide answer was not this crew's own branch.
+# the repo-wide answer was not this crewmate's own branch.
 test_cross_branch_attribution_via_runs_list() {
   reset_fakes
   local d; d=$(new_case crossbranch)
   make_repo_on_branch "$d/wt" fm/feat-f
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-f.meta" "window=fm:fm-feat-f" "worktree=$d/wt" "kind=ship"
-  # The repo-wide active/most-recent run belongs to a different crew's branch.
+  # The repo-wide active/most-recent run belongs to a different crewmate's branch.
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
   # Real `no-mistakes runs` shape: plain text, newest-first, no run id, no
   # quoting - "<status> <branch> <short-sha> <date> [<pr-url>]".
@@ -785,7 +785,7 @@ EOF
   pass "another branch's run is ignored, falls back"
 }
 
-# (f) no run for this crew + a busy pane -> working via pane
+# (f) no run for this crewmate + a busy pane -> working via pane
 test_no_run_busy_pane() {
   reset_fakes
   local d; d=$(new_case busy)
@@ -822,7 +822,7 @@ test_no_run_herdr_unknown_uses_backend_capture() {
 
 # Regression: herdr's agent.get reports generation state ("working" only while
 # the model is actively streaming a turn - docs/herdr-backend.md "Busy state"),
-# not "this crew's tool call is still in progress". A crew blocked on its own
+# not "this crewmate's tool call is still in progress". A crewmate blocked on its own
 # long-running foreground `no-mistakes axi run` (no --yes; blocks until a gate
 # or outcome) is not generating for that whole span, so agent.get can read
 # idle while the pane's own rendered text still shows the busy banner
@@ -904,7 +904,7 @@ test_no_run_idle_pane_uses_keyed_log() {
 }
 
 # (g') no run + idle pane on a DECLARED external-wait pause -> state: paused, so a
-# supervisor reading the crew sees a distinct pause (and its reason) rather than a
+# supervisor reading the crewmate sees a distinct pause (and its reason) rather than a
 # wedge-suspect idle. This is the reader half the watcher/daemon build on.
 test_no_run_idle_pane_paused() {
   reset_fakes
@@ -993,7 +993,7 @@ test_dead_window_ignores_stale_status_log() {
 }
 
 # A closed/unreadable pane must NOT mask an authoritative run-step: judge by the
-# run-step, not the shell. The common case is a finished crew whose agent has
+# run-step, not the shell. The common case is a finished crewmate whose agent has
 # exited and closed its window (the normal gap between completion and teardown) -
 # it must still report its terminal run-step state (e.g. done), never unknown.
 test_dead_window_still_reports_terminal_run_step() {
@@ -1004,7 +1004,7 @@ test_dead_window_still_reports_terminal_run_step() {
   fm_write_meta "$d/state/feat-dead-done.meta" "window=fm:fm-feat-dead-done" "worktree=$d/wt" "kind=ship"
   printf 'done: PR https://github.com/o/r/pull/3 checks green\n' > "$d/state/feat-dead-done.status"
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-dead-done)"
-  FM_FAKE_TMUX_MISSING=1   # the crew's window has closed
+  FM_FAKE_TMUX_MISSING=1   # the crewmate's window has closed
   local out; out=$(run_crew_state "$d" feat-dead-done)
   assert_contains "$out" "state: done" "closed pane still reports terminal run-step done"
   assert_contains "$out" "source: run-step" "closed pane does not mask the run-step"
@@ -1102,9 +1102,9 @@ test_missing_meta() {
 # (k) crew_is_provably_working end-to-end over the REAL fm-crew-state.sh (not a
 # canned fake verdict, unlike tests/fm-watch-triage.test.sh's classifier
 # coverage). This is the direct regression pair for the 2026-07-02 herdr
-# incident: a validating crew whose bare `axi status` answer belongs to
+# incident: a validating crewmate whose bare `axi status` answer belongs to
 # another branch must still be absorbed by the watcher via the runs-list
-# fallback (working), while a crew with genuinely no run anywhere and an idle
+# fallback (working), while a crewmate with genuinely no run anywhere and an idle
 # pane must still surface (the safety property the fix must never widen away).
 test_provably_working_via_runs_list_fallback() {
   reset_fakes

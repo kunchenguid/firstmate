@@ -15,7 +15,7 @@
 #     main. Reachability alone false-refused this common GitHub flow; the check now
 #     recognizes a merged PR head containing the local work (or the content already
 #     in main) as landed.
-#   - teardown-lock-race: a killed crew process can leave a transient worktree
+#   - teardown-lock-race: a killed crewmate process can leave a transient worktree
 #     git index.lock that blocks teardown. The return path retries on the lock
 #     error signature (even if the lock self-clears mid-check), then only removes a
 #     provably stale lock before re-running safety checks.
@@ -40,7 +40,7 @@
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
-# killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
+# killed crewmate process (bin/fm-teardown.sh's teardown_treehouse_return).
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
 #   (s) index.lock with a live holder, any age                -> lock kept, REFUSE
 #   (t) lsof error while checking index.lock                  -> lock kept, REFUSE
@@ -424,7 +424,7 @@ SH
 }
 
 # treehouse return fails once with the index.lock signature, then clears the lock
-# (simulating a dying crew git process finishing) so the next retry succeeds.
+# (simulating a dying crewmate git process finishing) so the next retry succeeds.
 # The first failure always reports the lock path even if the file is removed in
 # the same attempt - matching the production race where the lock self-clears
 # between the failed return and the supervisor's existence check.

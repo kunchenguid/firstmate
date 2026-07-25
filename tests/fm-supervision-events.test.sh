@@ -43,7 +43,7 @@ mkrec() {  # <pane_id> <status>
   fm_transition_record "$1" "wG" "" "$2" claude
 }
 
-# --- handle_push_transition: enqueue + wake for a non-paused blocked crew -----
+# --- handle_push_transition: enqueue + wake for a non-paused blocked crewmate ---
 
 reset_state
 fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"

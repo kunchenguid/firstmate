@@ -78,7 +78,7 @@ fm_transition_agent()        { fm_transition_field "$1" 5; }
 #                and otherwise sit until the stale-pane wedge timer.
 #   absorb     - do NOT wake, but CLEAR this pane's per-pane escalation dedupe
 #                marker so a later `->blocked` edge re-escalates. `working`
-#                (a crew resumed/started a turn) is the clearing edge.
+#                (a crewmate resumed/started a turn) is the clearing edge.
 #   defer      - do NOTHING on the fast path; leave it to the existing
 #                status/turn-end completion semantics and the poll backstop.
 #                `idle`/`done` blip transiently between tool calls, so

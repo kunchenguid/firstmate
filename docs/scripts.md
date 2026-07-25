@@ -29,7 +29,7 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-cd-command-policy.mjs` | Semantic owner of the cd-guard's persistent-directory-change decision (docs/cd-guard.md) |
 | `fm-supervision-instructions.sh` | Render the session-start primary-harness supervision block or the one-line repair instruction |
 | `fm-home-seed.sh`        | Transactionally provision a secondmate home and maintain `data/secondmates.md`       |
-| `fm-spawn.sh`            | Spawn, native-resume, or provider-neutrally continue crews on the resolved account and runtime backend |
+| `fm-spawn.sh`            | Spawn, native-resume, or provider-neutrally continue crewmates on the resolved account and runtime backend |
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule through quota or the deferred legacy pool-summary branch |
 | `fm-account-directory.sh` | Select a direct Claude/Codex account directory and install its per-profile Herdr hook |
 | `fm-account-routing-lib.sh` | Own routing mode plus legacy Agent Fleet lease, exec, resume, and release recovery |
@@ -57,7 +57,7 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-afk-launch.sh`       | Own away-mode entry, exit, rollback, and any backend terminal lifecycle                 |
 | `fm-supervisor-target-lib.sh` | Resolve the compatibility injection target and backend for the daemon and launcher |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, complete native tasks or inject compatibility digests |
-| `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
+| `fm-crew-state.sh`       | Print one deterministic current-state line for a crewmate                            |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
@@ -80,7 +80,7 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-report-stack.mjs`    | Publish and browse machine-global, account-independent completion reports            |
 | `fm-report-retention.sh` | Maintain bounded, interruption-safe 30-day report retention independently of tasks   |
 | `fm-teardown.sh`         | Fail-closed teardown of worktrees, endpoints, secondmate homes, and managed account leases |
-| `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
+| `fm-harness.sh`          | Detect the running harness and resolve crewmate or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-lint.sh`             | Single owner of the shell-lint definition that CI and the no-mistakes gate both run  |
 | `fm-install-shellcheck.sh` | Install CI's pinned, checksum-verified ShellCheck build                            |

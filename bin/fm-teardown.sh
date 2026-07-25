@@ -56,7 +56,7 @@
 #   --force permits recursive kind=secondmate retirement. It never bypasses
 #   dirty, untracked, stash, landed-work, endpoint, identity, or report proofs.
 #
-# Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
+# Transient / stale worktree git lock recovery (teardown-lock-race): a crewmate process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
 # non-linked worktree, .git/index.lock) that makes `treehouse return --force` fail
 # with Unable to create '...index.lock': File exists. That lock is usually transient
@@ -1091,7 +1091,7 @@ retry_wait_secs_is_valid() {
 }
 
 STALE_WORKTREE_LOCK_AGE_SECS=${FM_STALE_WORKTREE_LOCK_AGE_SECS:-30}
-# Bounded patience window for transient index.lock after killing a crew process.
+# Bounded patience window for transient index.lock after killing a crewmate process.
 # New knobs are preferred; FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS remains an alias
 # for the per-attempt wait so existing tests and operators keep working.
 TREEHOUSE_RETURN_LOCK_RETRIES=${FM_TREEHOUSE_RETURN_LOCK_RETRIES:-3}
@@ -1165,7 +1165,7 @@ cleanup_stale_lock_for_safety_check() {
 }
 
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
-# stale git index.lock left by a killed crew process. See the script header.
+# stale git index.lock left by a killed crewmate process. See the script header.
 teardown_treehouse_return_locked() {
   local dir=$1 cd_dir=$2 label=$3 expected_holder=$4 post_cleanup_check=${5:-} post_return_cleanup=${6:-}
   local out lock attempt=0 max_retries lock_desc return_status return_branch=
@@ -4100,7 +4100,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
-  # left by a killed crew process; see the script header for retry and stale-lock proof.
+  # left by a killed crewmate process; see the script header for retry and stale-lock proof.
   post_lock_cleanup_check=
   if [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety

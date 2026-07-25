@@ -8,7 +8,7 @@
 #      to launch SECONDMATE agents, independent of config/crew-harness (the
 #      crewmate harness). fm-harness.sh secondmate resolves the fallback chain
 #      config/secondmate-harness -> config/crew-harness -> own; an absent or
-#      "default" secondmate-harness behaves exactly as the crew harness did before
+#      "default" secondmate-harness behaves exactly as the crewmate harness did before
 #      this knob existed (full backward-compat). fm-spawn.sh resolves a secondmate
 #      launch through that mode, durably (every respawn re-resolves), while an
 #      explicit per-spawn harness arg still wins.
@@ -48,7 +48,7 @@ export FM_BACKEND=tmux
 # detect_own is pinned to claude via CLAUDECODE=1 so the "fall through to own"
 # cases are reproducible. Each row sets crew-harness / secondmate-harness in a
 # fresh config dir (a literal '-' means leave the file absent) and asserts BOTH
-# the secondmate resolution AND that crew resolution is unchanged (backward-compat).
+# the secondmate resolution AND that crewmate resolution is unchanged (backward-compat).
 #   <label>^<crew-harness>^<secondmate-harness>^<expect-secondmate>^<expect-crew>
 test_harness_resolution() {
   local label crew sm exp_sm exp_crew case_dir cfg got_sm got_crew n
@@ -232,7 +232,7 @@ test_propagate_lib() {
 
 # ===========================================================================
 # B/A integration: a secondmate spawn resolves the secondmate harness and
-# propagates the crew harness into the home's config.
+# propagates the crewmate harness into the home's config.
 # ===========================================================================
 
 # A tmux stub that accepts every subcommand and prints nothing, so no window
@@ -315,7 +315,7 @@ test_spawn_split_and_inherit() {
 }
 
 # Backward-compat: secondmate-harness absent -> the secondmate launches on the
-# crew harness, exactly as before this knob existed, and that crew value is the
+# crewmate harness, exactly as before this knob existed, and that crewmate value is the
 # one inherited.
 test_spawn_backward_compat_crew_fallback() {
   local w sm meta
@@ -647,7 +647,7 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   [ "$(meta_field "$meta" effort)" = default ] || fail "fallback: meta effort should stay default with no tokens anywhere"
 
   # Crew/scout launch: same crew-harness config, no --secondmate. Must resolve
-  # the crew harness and record no model/effort - this codepath must never read
+  # the crewmate harness and record no model/effort - this codepath must never read
   # config/secondmate-harness's tokens at all.
   id="crew-unaffected-z1"
   home="$w/home"

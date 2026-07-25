@@ -5,7 +5,7 @@
 # The hazard (data/nm-gate-ambient-authority-containment-c3/report.md): a
 # no-mistakes gate agent runs inside a firstmate checkout with a free shell, so
 # it auto-loads firstmate's AGENTS.md, adopts the captain identity, and - seeing
-# crew "in flight" - reaches for fm-spawn.sh/fm-send.sh/fm-teardown.sh to
+# crewmate "in flight" - reaches for fm-spawn.sh/fm-send.sh/fm-teardown.sh to
 # "delegate" and "reconcile" the shared worktree. It has real capability because
 # those entrypoints self-locate their home and never knew a gate context existed.
 #
@@ -29,7 +29,7 @@
 #      NM_HOME is covered by signal 1.
 #
 # A NORMAL firstmate session - a real primary checkout, a real treehouse/Orca
-# crew worktree - has NEITHER signal and is COMPLETELY unaffected: the function
+# crewmate worktree - has NEITHER signal and is COMPLETELY unaffected: the function
 # returns 0 and the lifecycle proceeds exactly as before.
 #
 # This mirrors the unspoofable-marker precedent in bin/fm-marker-lib.sh: a signal

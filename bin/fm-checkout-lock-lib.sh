@@ -382,7 +382,7 @@ while pending:
         # descended. Refusing outright made this boundary reject any repository
         # whose own committed layout uses symlinks - relvino puts 177 in every
         # worktree (its CLAUDE.md -> AGENTS.md convention and symlinked skills),
-        # so no crew there could ever be reaped. What this walk exists to prove
+        # so no crewmate there could ever be reaped. What this walk exists to prove
         # is that the destructive return cannot ESCAPE the tree, and a symlink
         # entry cannot cause that here: it is inspected with
         # follow_symlinks=False, it is not a directory so it is never queued,

@@ -47,7 +47,7 @@ test_seven_ordered_principles() {
 
   assert_grep "every captain ask" "$SKILL" "orchestration principle must cover every captain ask"
   assert_grep "durable backlog item" "$SKILL" "orchestration principle must require durable backlog tracking"
-  assert_grep "tracked crew assignment" "$SKILL" "orchestration principle must require a tracked owner"
+  assert_grep "tracked crewmate assignment" "$SKILL" "orchestration principle must require a tracked owner"
   assert_grep "never perform project investigation, planning, implementation, or deliverable production inline" "$SKILL" "orchestration principle must forbid inline project and deliverable work"
   assert_grep "every healthy lane" "$SKILL" "lane-saturation principle is missing"
   assert_grep "blocker as a routing problem" "$SKILL" "blocker-routing principle is missing"
@@ -119,13 +119,13 @@ test_crew_steering_contract_and_trigger() {
   assert_grep "fixed-goal guardrail" "$CREW_SKILL" "crew steering must retain the fixed-goal authority"
   assert_grep "specific, un-bloated briefs and steers" "$CREW_SKILL" "crew steering must remain direct"
   assert_grep "correct a wrong path before it is built" "$CREW_SKILL" "crew steering must correct wrong paths early"
-  assert_grep "concrete result the crew must produce" "$CREW_SKILL" "a steer must end with the required result"
+  assert_grep "concrete result the crewmate must produce" "$CREW_SKILL" "a steer must end with the required result"
   assert_grep "evidence that will prove it" "$CREW_SKILL" "a steer must end with required proof"
   assert_grep "next action it should take" "$CREW_SKILL" "a steer must end with the next action"
   assert_grep "Do not add motivational padding, duplicate background, or a second copy of an existing procedure" "$CREW_SKILL" "crew steering must avoid padding and duplicate contracts"
 
   section=$(awk '/^## 13\. Agent-only reference skills$/ { capture=1; next } capture && /^## / { exit } capture' "$AGENTS")
-  assert_contains "$section" "\`crew-steering\` - load before writing or materially revising any crew brief and before live-steering a crew" "section 13 must trigger crew-steering for briefs and live steers"
+  assert_contains "$section" "\`crew-steering\` - load before writing or materially revising any crewmate brief and before live-steering a crewmate" "section 13 must trigger crew-steering for briefs and live steers"
   pass "crew-steering retains its behavioral guardrails and conditional trigger"
 }
 

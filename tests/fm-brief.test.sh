@@ -371,7 +371,7 @@ test_secondmate_no_projects_charter() {
   assert_grep "# Project clones" "$brief" "project-less charter dropped the Project clones heading"
   assert_grep "None. This is a project-less domain" "$brief" \
     "project-less charter did not render a sensible no-clones note"
-  assert_grep "its crews take pooled worktrees of that repo" "$brief" \
+  assert_grep "its crewmates take pooled worktrees of that repo" "$brief" \
     "project-less charter operating model lost the pooled-worktree note"
   assert_no_grep "The projects above are local clones" "$brief" \
     "project-less charter kept the with-projects operating-model line"

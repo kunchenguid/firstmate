@@ -1226,7 +1226,7 @@ handle_wake() {  # <reason> <state>
       ;;
     *)
       # Transient (non-terminal) stale: record/refresh the wedge marker so
-      # housekeeping can age it, and drop any pause marker (a crew that left its
+      # housekeeping can age it, and drop any pause marker (a crewmate that left its
       # pause reverts to normal wedge aging). The persistence recheck, not this
       # wake, escalates a wedge.
       if [ "$kind" = "stale" ]; then

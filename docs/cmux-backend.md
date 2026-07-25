@@ -11,14 +11,14 @@ It never enumerates-and-closes, touches no existing workspace, closes only its o
 
 ## Setup
 
-Pick cmux if you already run it as your terminal and want firstmate crew tabs to live there instead of tmux.
+Pick cmux if you already run it as your terminal and want firstmate crewmate tabs to live there instead of tmux.
 cmux is **macOS-only** and **GUI-first** - selecting this backend means a real GUI window exists and is running, exactly like Orca's posture.
 
 Prerequisites:
 
 - The cmux app itself, installed from [cmux.com](https://cmux.com) or `brew install --cask cmux`, version 0.64.17 or newer.
 - `jq`, required to parse cmux's JSON output: `brew install jq` (or your platform's package manager).
-- The universal firstmate prerequisites - a verified crew harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, cmux only provides the session.
+- The universal firstmate prerequisites - a verified crewmate harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, cmux only provides the session.
 - The cmux CLI binary is not guaranteed to be on `PATH` after a plain app install (see "CLI is not on PATH by default" below) - the adapter falls back to the well-known bundle path automatically, so this is not a blocker, just something to be aware of if you want to run `cmux` yourself from a shell.
 
 **One-time socket access setup (required, not optional):** cmux's control socket defaults to `automation.socketControlMode: "cmuxOnly"`, which rejects any CLI process not spawned inside cmux itself - firstmate always drives cmux from an external shell, so this must be changed before `backend=cmux` can work at all.
@@ -48,7 +48,7 @@ If you prefer **Password mode** instead: set the mode and a password in Settings
 A configured password is harmless if you later switch to Automation mode: cmux's CLI sends the `auth` handshake preemptively and tolerates the server's "Unknown command 'auth'" reply in non-password modes (verified from source, `cli/cmux.swift` `authenticateSocketClientIfNeeded`).
 Do not edit `~/.config/cmux/cmux.json` by hand for any of this: the mode change cannot be applied over the socket that is itself still rejecting connections, and the app's config writer drops a hand-added `socketPassword` key entirely (see "Socket control modes" below for that finding).
 
-Ask the firstmate crew to select cmux by putting `cmux` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=cmux` for a one-off session; telling the first mate in chat to use cmux also works.
+Ask the firstmate crewmate to select cmux by putting `cmux` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=cmux` for a one-off session; telling the first mate in chat to use cmux also works.
 cmux is also selected by **runtime auto-detection**: a firstmate process itself running inside a cmux-spawned terminal (`CMUX_WORKSPACE_ID` set - or, when cmux's bundled claude wrapper stripped that marker, the bundle-id/ancestry fallback signals - checked after `$TMUX`/`HERDR_ENV=1` since cmux is the outermost terminal application, not a nestable multiplexer) spawns new tasks into cmux by default, with no config needed, exactly like herdr's own auto-detection - see "Runtime auto-detection" below.
 Auto-detection only ever picks a SESSION provider; it never touches the one-time socket-access setup above, which stays required regardless of how cmux was selected.
 A cmux spawn refuses loudly, with an actionable message pointing back to this document, if the app is unreachable, the socket rejects the connection (`cmuxOnly` mode still active), or a password is required but not configured or was rejected; the refusal names every viable mode with Automation mode as the recommendation, plus the `config/backend`/`--backend tmux` opt-out for a caller who ended up on cmux only because auto-detection picked it.
@@ -244,7 +244,7 @@ The next section ("Closing the last workspace in a window") owns the last-in-win
 
 Verified live 2026-07-10 against the installed cmux 0.64.17 (build 97), macOS aarch64, socket in `automation` mode; the captain's app was not modified, relaunched, or reconfigured, and only `fm-test-` task workspaces and throwaway default workspaces were touched.
 
-The incident this fixes: a cmux-backed task's teardown left its workspace open because it was the currently selected workspace, and the crew closed it by hand.
+The incident this fixes: a cmux-backed task's teardown left its workspace open because it was the currently selected workspace, and the crewmate closed it by hand.
 `close-workspace` cleanly removes a workspace ONLY when that workspace is not the last one in its window.
 cmux keeps every window at one or more workspaces, so `close-workspace` against the ONLY workspace in a window silently no-ops: it still prints `OK`, but the workspace stays.
 The last workspace in a window is always the selected one, so from the outside this reads as "the selected task workspace would not close" - but being selected is not itself the trigger.

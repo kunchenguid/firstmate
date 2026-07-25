@@ -656,7 +656,7 @@ fm_backend_quiesce_worktree_terminals() {  # <backend> <worktree-id> <expected-l
 # primitive (tmux) report unknown. Callers own the fallback policy: fm-watch.sh
 # uses unknown as the cue for its pane-hash + FM_BUSY_REGEX detection, while
 # fm-crew-state.sh also corroborates native idle verdicts before treating a
-# no-run crew as not busy.
+# no-run crewmate as not busy.
 fm_backend_busy_state() {  # <backend> <target> [expected-label]
   local backend=$1
   shift

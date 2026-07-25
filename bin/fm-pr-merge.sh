@@ -3,7 +3,7 @@
 # state/<id>.meta first via bin/fm-pr-check.sh, so bin/fm-teardown.sh's
 # landed-check has a PR reference to verify a squash merge against.
 #
-# Why this exists: the normal trigger for running fm-pr-check.sh is the crew's
+# Why this exists: the normal trigger for running fm-pr-check.sh is the crewmate's
 # `done: PR <url> checks green` line, which no-mistakes only emits once its CI
 # step turns green. Repos that intentionally run no CI on PRs (CI only on
 # pushes to the default branch) never emit that line, so a merge performed by

@@ -676,7 +676,7 @@ fm_backend_herdr_server_legacy_env_certificate_path() {  # <session>
 
 # Herdr-native cutover: production no longer requires a firstmate-issued
 # closed-shell certificate on the herdr server. The certificate existed to prove a
-# crew pane's environment was scrubbed by firstmate's own managed worker shell; a
+# crewmate pane's environment was scrubbed by firstmate's own managed worker shell; a
 # natively started agent gets its environment from `agent start --env` instead, so
 # there is nothing left for a server-level certificate to attest. It also caused a
 # hard deadlock whenever firstmate itself ran inside the herdr session it needed to
@@ -1953,10 +1953,10 @@ fm_backend_herdr_server_ensure() {  # <session>
           # landed source change altered the managed-shell-source digest after the
           # server was launched, or because FirstMate itself runs inside this herdr
           # session (HERDR_ENV=1) and the server was launched by the interactive
-          # launcher rather than the crew adapter's own closed-shell path. It is
-          # OCCUPIED (live crews and/or FirstMate), so it cannot be restarted to
+          # launcher rather than the crewmate adapter's own closed-shell path. It is
+          # OCCUPIED (live crewmates and/or FirstMate), so it cannot be restarted to
           # re-certify. Refusing here would impose a hard no-spawn state on an
-          # otherwise healthy, adapter-owned server. Accept it: every new crew pane
+          # otherwise healthy, adapter-owned server. Accept it: every new crewmate pane
           # is individually env-scrubbed by fm-herdr-worker-shell at pane creation,
           # so a drifted SERVER certificate does not weaken a NEW pane's isolation.
           # The strict certified restart still applies whenever the session is empty
@@ -2649,7 +2649,7 @@ fm_backend_herdr_expected_label_matches() {  # <target> [expected-label]
 
 # fm_backend_herdr_server_reachable_for_readsteer: the lighter precondition for
 # reading from or sending to an ALREADY-RUNNING pane, as distinct from the
-# launch-grade fm_backend_herdr_server_ensure used to spawn new crews.
+# launch-grade fm_backend_herdr_server_ensure used to spawn new crewmates.
 #
 # Reading a pane or sending keys to it does not care how the server was
 # launched - the pane already exists and the server is up. It only needs the
@@ -2657,11 +2657,11 @@ fm_backend_herdr_expected_label_matches() {  # <target> [expected-label]
 # live pid), which fm_backend_herdr_server_adapter_owned proves without the
 # closed-shell launch certification. This is what keeps peek/steer working when
 # FirstMate itself runs INSIDE the herdr session it manages (HERDR_ENV=1): that
-# server was not launched through the crew adapter's own closed-shell path, so
+# server was not launched through the crewmate adapter's own closed-shell path, so
 # closed_shell_environment_ready is false and the full ensure would try to
-# restart+recertify - impossible while the session is occupied by live crews and
+# restart+recertify - impossible while the session is occupied by live crewmates and
 # FirstMate itself. The SPAWN path deliberately keeps the strict ensure so a new
-# crew still launches only in a certified closed-shell server.
+# crewmate still launches only in a certified closed-shell server.
 fm_backend_herdr_server_reachable_for_readsteer() {  # <session>
   local session=$1 running
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null \
@@ -3214,7 +3214,7 @@ fm_backend_herdr_list_live() {  # <session>
 # fm_backend_herdr_wait_transition is the watcher's bounded wait primitive for
 # herdr homes: instead of a blind sleep, it blocks on herdr's native event
 # stream and returns the instant a subscribed pane transitions to `blocked`, so
-# a crew waiting on the human wakes its supervisor sub-second instead of after
+# a crewmate waiting on the human wakes its supervisor sub-second instead of after
 # the ~240s stale-pane wedge timer. Everything not `blocked` is streamed too
 # (the policy, not the subscription, makes `blocked` the sole immediate action)
 # so `working` edges clear the per-pane dedupe marker. Polling stays the

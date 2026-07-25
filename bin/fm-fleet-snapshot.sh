@@ -313,11 +313,11 @@ task_json_lines() {
     # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
     # never mask a still-open captain decision. The set is derived purely from the
     # keyed fold - never from report bodies or decision-like prose - and then
-    # reconciled against the crew LIFECYCLE, which only clears a stale decision the
-    # crew has provably moved past. Two lifecycle signals clear it, neither of which
+    # reconciled against the crewmate LIFECYCLE, which only clears a stale decision the
+    # crewmate has provably moved past. Two lifecycle signals clear it, neither of which
     # reads any report content:
     #   - a live activity read (run-step or busy pane) that is working/done, so a
-    #     crew that resumed past a gate is not still reported as parked; and
+    #     crewmate that resumed past a gate is not still reported as parked; and
     #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
     #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
     #     report POINTER, never as a reopened pending decision.
@@ -431,7 +431,7 @@ task_json_lines() {
 # secondmate homes. A merge a secondmate managed is recorded in ITS OWN backlog,
 # never the main one, so landed-work views miss it without this. Reuses the single
 # backlog parser (backlog_json) against each home's data/backlog.md - a pure Markdown
-# read, no per-task crew-state and no network - and the one secondmate-home enumerator
+# read, no per-task crewmate-state and no network - and the one secondmate-home enumerator
 # (fm-ff-lib.sh's live_secondmate_meta_records: meta home= with data/secondmates.md
 # fallback). Per-home Done is capped here by default so the canonical snapshot stays
 # bounded; a cap of 0 explicitly lifts that bound for an expanding caller. Bearings

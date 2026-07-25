@@ -1,29 +1,29 @@
 ---
 name: crew-steering
 description: >-
-  Agent-only practice for holding crews to the captain's bar.
-  Use before writing or materially revising a crewmate or secondmate brief and before live-steering a crew.
+  Agent-only practice for holding crewmates to the captain's bar.
+  Use before writing or materially revising a crewmate or secondmate brief and before live-steering a crewmate.
   Applies ownership, evidence, premise-checking, quality, goal-fidelity, and directness without duplicating their authoritative contracts.
 user-invocable: false
 metadata:
   internal: true
 ---
 
-# Crew steering
+# Crewmate steering
 
-Steer every crew to the same bar the captain holds firstmate to.
+Steer every crewmate to the same bar the captain holds firstmate to.
 Apply this skill both while writing the initial brief and while live-steering work already in flight.
 Keep each brief or steer proportional: name the outcome, constraint, evidence, and next action, then stop.
 
 ## Apply it in both modes
 
 When writing a brief, make the expected result, authority boundaries, verification, and definition of done unmistakable.
-When live-steering, correct the smallest load-bearing mistake early and require the crew to carry the fix through implementation and proof.
+When live-steering, correct the smallest load-bearing mistake early and require the crewmate to carry the fix through implementation and proof.
 In both modes, preserve the captain's actual goal and use the existing owner for detail instead of copying its contract.
 
 ## 1. Demand ownership
 
-Require the crew to solve and implement the task: it never stops solely because work is hard or failing, it preserves mandated safety `blocked` stops such as unsafe or non-isolated worktree placement, and it exhausts its capability before following the solve-first escalation bar owned by `AGENTS.md` section 9.
+Require the crewmate to solve and implement the task: it never stops solely because work is hard or failing, it preserves mandated safety `blocked` stops such as unsafe or non-isolated worktree placement, and it exhausts its capability before following the solve-first escalation bar owned by `AGENTS.md` section 9.
 
 ## 2. Reject vague or optimistic claims
 
@@ -31,7 +31,7 @@ Treat `almost there` as unfinished, require real evidence because work is not do
 
 ## 3. Fact-check the load-bearing premise
 
-Cheaply test the crew's one load-bearing assumption before it acts, rejecting a shallow-false premise without overcorrecting; `operating-fundamentals` section 7 owns the premise-check rule.
+Cheaply test the crewmate's one load-bearing assumption before it acts, rejecting a shallow-false premise without overcorrecting; `operating-fundamentals` section 7 owns the premise-check rule.
 
 ## 4. Prefer quality and robustness
 
@@ -47,5 +47,5 @@ Write specific, un-bloated briefs and steers, and correct a wrong path before it
 
 ## Finish the steer
 
-End with the concrete result the crew must produce, the evidence that will prove it, and the next action it should take.
+End with the concrete result the crewmate must produce, the evidence that will prove it, and the next action it should take.
 Do not add motivational padding, duplicate background, or a second copy of an existing procedure.

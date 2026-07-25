@@ -9,13 +9,13 @@ All real-zellij verification in this document and in `tests/fm-backend-zellij-sm
 
 ## Setup
 
-Pick zellij if you already use it as your terminal multiplexer and want firstmate crew windows there instead of tmux; it has no per-home container split, so it is simpler than herdr for a single-home fleet.
+Pick zellij if you already use it as your terminal multiplexer and want firstmate crewmate windows there instead of tmux; it has no per-home container split, so it is simpler than herdr for a single-home fleet.
 
 Prerequisites:
 
 - `zellij` itself, version 0.44 or newer (installed 0.44.0 verified) - see [zellij.dev](https://zellij.dev) for install instructions.
 - `jq`, required to parse zellij's JSON output: `brew install jq` (or your platform's package manager).
-- The universal firstmate prerequisites - a verified crew harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, zellij only provides the session.
+- The universal firstmate prerequisites - a verified crewmate harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, zellij only provides the session.
 
 Select zellij by putting `zellij` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=zellij` when you launch your harness for a one-off session; telling the first mate in chat to use zellij also works.
 Unlike tmux and herdr, zellij is **never** auto-detected - it always requires an explicit choice.

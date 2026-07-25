@@ -220,7 +220,7 @@ The legacy secondmate and recovery implementation resolves Agent Fleet through i
 Its remaining crew-dispatch pool-summary branch and isolated new-crewmate fixture path are deferred to follow-up task `remove-fleet-routing-deadcode`; neither is a real new ship/scout launch path.
 The direct account-directory module has a separate unmistakable `FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1` opt-in for deterministic filesystem, quota, and installer fixtures.
 
-## Crew dispatch profiles (config/crew-dispatch.json)
+## Crewmate dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
 The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves that rule directly or through a supported selector, and passes the concrete harness, model, effort, account pool, and account profile axes to `fm-spawn.sh` when present.
@@ -541,7 +541,7 @@ FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE; seconds a live watche
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # status regex that makes watcher and daemon signal/stale/scan output captain-relevant
 FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; excluded from FM_CAPTAIN_RE and distinct from blocked
-FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; stale panes whose crew is not provably working surface immediately unless they declare the pause verb
+FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; stale panes whose crewmate is not provably working surface immediately unless they declare the pause verb
 FM_PERMISSION_STALL_ESCALATE_SECS=900 # busy seconds without meaningful pane/status/turn-end progress before a possible macOS permission/system-dialog block surfaces; timeout heuristic, not direct OS detection
 FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wait re-surfaces for a recheck in the watcher or away-mode daemon
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive unchanged wedge or permission-stall escalations before demand-deep-inspection is added

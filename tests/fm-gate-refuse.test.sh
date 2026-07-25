@@ -10,7 +10,7 @@
 #   2. the current worktree's git-common-dir resolves under a no-mistakes gate
 #      repo (.../.no-mistakes/repos/*.git) - the unspoofable backstop, which
 #      still refuses even if the marker was tampered/unset.
-# A normal firstmate session (real primary, real crew worktree) has NEITHER
+# A normal firstmate session (real primary, real crewmate worktree) has NEITHER
 # signal and is completely unaffected.
 #
 # Each entrypoint is exercised in three scenarios, isolating exactly ONE signal:
@@ -185,7 +185,7 @@ test_helper_normal_is_noop() {
 
 # --- fm-spawn ---------------------------------------------------------------
 
-# A fake tmux/treehouse so fm-spawn resolves the crew worktree from a controlled
+# A fake tmux/treehouse so fm-spawn resolves the crewmate worktree from a controlled
 # pane path and completes without a live terminal (mirrors tests/fm-tangle-guard).
 make_spawn_fakebin() {
   local dir=$1 fakebin

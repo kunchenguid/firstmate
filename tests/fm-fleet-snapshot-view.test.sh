@@ -497,7 +497,7 @@ test_open_decision_clears_on_keyed_resolution() {
 # body and the stale status line contain decision-like prose. This is the Lavish-103
 # defect: a terminal single-owner task's stale, never-keyed-resolved needs-decision
 # must not linger as pending. Decisions come purely from the keyed fold reconciled
-# against the crew lifecycle; report prose never opens or reopens a decision.
+# against the crewmate lifecycle; report prose never opens or reopens a decision.
 test_completed_scout_report_is_pointer_not_pending() {
   local home fakebin out
   home=$(make_home completed-scout)

@@ -2,7 +2,7 @@
 name: operating-fundamentals
 description: >-
   Agent-only operating practice for firstmate.
-  Use when intaking any captain ask, deciding whether to dispatch or work inline, supervising under load, handling a blocked lane or a finished crew, protecting shared validation capacity, acting on an explicit captain order, about to make a consequential config/system change or an escalation, or about to assert a fleet fact.
+  Use when intaking any captain ask, deciding whether to dispatch or work inline, supervising under load, handling a blocked lane or a finished crewmate, protecting shared validation capacity, acting on an explicit captain order, about to make a consequential config/system change or an escalation, or about to assert a fleet fact.
 user-invocable: false
 metadata:
   internal: true
@@ -14,7 +14,7 @@ Apply these principles together to maximize verified fleet-wide progress.
 
 ## 1. Orchestrate; never work inline
 
-Turn every captain ask into both a durable backlog item and a tracked crew assignment before project or deliverable work begins.
+Turn every captain ask into both a durable backlog item and a tracked crewmate assignment before project or deliverable work begins.
 Keep firstmate's own thread for intake, dispatch, supervision, decisions, and outcome reporting; never perform project investigation, planning, implementation, or deliverable production inline.
 Treat the backlog record and tracked owner as an atomic pair, and repair either immediately when missing so work survives context loss.
 A dropped or forgotten ask is an operating failure; restore its record and owner immediately.
@@ -29,7 +29,7 @@ Never idle a working lane merely because another lane, resource, or dependency i
 
 Treat a blocker as a routing problem, not a stopping point.
 Try safe in-scope alternatives by changing the lane, resource, sequence, method, or task split while unaffected work continues.
-Drive the crew to a solved and implemented result, exhausting its capability before treating a hard problem as a stopping point; `AGENTS.md` section 9 owns the escalation bar.
+Drive the crewmate to a solved and implemented result, exhausting its capability before treating a hard problem as a stopping point; `AGENTS.md` section 9 owns the escalation bar.
 
 ## 4. Decouple validation from worker budgets
 

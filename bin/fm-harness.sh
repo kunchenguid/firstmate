@@ -6,8 +6,8 @@
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
 #                                        SECONDMATE agents: config/secondmate-harness ->
 #                                        config/crew-harness -> own. "default" or absent
-#                                        defers to the crew resolution, so an unset
-#                                        secondmate-harness behaves exactly as the crew
+#                                        defers to the crewmate resolution, so an unset
+#                                        secondmate-harness behaves exactly as the crewmate
 #                                        harness did before this knob existed.
 #        fm-harness.sh secondmate-model    print the optional MODEL token from
 #                                        config/secondmate-harness, or empty when absent.
@@ -107,9 +107,9 @@ secondmate_field() {
 
 # Resolve the harness the PRIMARY uses to launch SECONDMATE agents: a fallback
 # chain config/secondmate-harness -> config/crew-harness -> own. An absent or
-# "default" secondmate-harness token defers to the crew resolution, so an unset
+# "default" secondmate-harness token defers to the crewmate resolution, so an unset
 # secondmate-harness behaves exactly as before this knob existed (a secondmate
-# launched on the crew harness). config/secondmate-harness is the PRIMARY's own
+# launched on the crewmate harness). config/secondmate-harness is the PRIMARY's own
 # setting and is never inherited downstream - secondmates do not spawn secondmates.
 resolve_secondmate() {
   local sm

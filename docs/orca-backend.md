@@ -19,7 +19,7 @@ Prerequisites:
 - The Orca app installed at `/Applications/Orca.app`, and **running**.
 - The `orca` CLI: `brew install orca`.
 - `node`, used by firstmate's adapter to parse Orca's JSON output and to gate spawns on runtime readiness.
-- The universal firstmate prerequisites - a verified crew harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain") - with `orca` as the only backend-specific tool, since Orca replaces both the session multiplexer CLI and the `treehouse` worktree provider that the other backends require.
+- The universal firstmate prerequisites - a verified crewmate harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain") - with `orca` as the only backend-specific tool, since Orca replaces both the session multiplexer CLI and the `treehouse` worktree provider that the other backends require.
 
 Existing legacy Orca metadata is inspection- and supervision-only until lifecycle authority is empirically verified.
 Do not pass `--backend orca` or export `FM_BACKEND=orca` to respawn it; use tmux, Herdr, zellij, or cmux for any replacement generation.

@@ -56,7 +56,7 @@ test_signal_catchup_without_running_watcher() {
   drain_out="$dir/drain.out"
   status_file="$state/task.status"
   # The durable-queue catch-up contract applies to ACTIONABLE wakes (the always-on
-  # watcher can absorb no-verb working: notes when the crew is provably working).
+  # watcher can absorb no-verb working: notes when the crewmate is provably working).
   # Use a captain-relevant verb so the wake is surfaced and the catch-up path is
   # tested.
   printf 'blocked: first\n' > "$status_file"
@@ -85,7 +85,7 @@ test_stale_enqueue_before_suppressor() {
   window="test:fm-stale"
   printf 'idle prompt' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/stale.meta"
-  # A stale pane sitting on a captain-relevant status is actionable when the crew
+  # A stale pane sitting on a captain-relevant status is actionable when the crewmate
   # is not provably working, so give the window one and prime the .seen-* marker
   # to its current signature so the per-poll signal scan does not pre-empt the
   # stale wake with a signal wake.
@@ -106,7 +106,7 @@ test_stale_enqueue_before_suppressor() {
 }
 
 # Absorb-only-when-provably-working adds a new actionable wake: a non-terminal stale
-# whose crew is NOT provably working is surfaced immediately. That new path must keep
+# whose crewmate is NOT provably working is surfaced immediately. That new path must keep
 # the queue-safety invariant - enqueue the stale wake BEFORE advancing the .stale-*
 # suppressor - so a watcher killed between the two never swallows the surfaced finish.
 test_not_working_stale_enqueue_before_suppressor() {

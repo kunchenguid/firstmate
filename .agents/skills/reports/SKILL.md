@@ -1,6 +1,6 @@
 ---
 name: reports
-description: Browse, search, open, or summarize Firstmate's durable completion report stack. Use when the captain asks what Firstmate or its crews finished, wants a completion report or visual evidence, asks to review recent work, or invokes /reports.
+description: Browse, search, open, or summarize Firstmate's durable completion report stack. Use when the captain asks what Firstmate or its crewmates finished, wants a completion report or visual evidence, asks to review recent work, or invokes /reports.
 user-invocable: true
 metadata:
   internal: true

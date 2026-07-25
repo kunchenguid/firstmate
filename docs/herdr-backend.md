@@ -21,7 +21,7 @@ Prerequisites:
 - `herdr` itself, protocol 14 or newer (0.7.1 and 0.7.3 verified) - see [herdr.dev](https://herdr.dev) for install instructions.
 - `jq`, required to parse herdr's JSON output: `brew install jq` (or your platform's package manager).
 - `nohup` and the universal `perl` runtime, required by the detached server launcher; [`docs/configuration.md`](configuration.md#portable-process-control-prerequisites) owns the platform-specific recovery guidance.
-- The universal firstmate prerequisites - a verified crew harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, herdr only provides the session.
+- The universal firstmate prerequisites - a verified crewmate harness plus the required toolchain, owned by [`docs/configuration.md`](configuration.md) ("Harness support", "Toolchain"); treehouse still provides the worktree, herdr only provides the session.
 
 Select herdr by putting `herdr` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=herdr` when you launch your harness for a one-off session; telling the first mate in chat to use herdr also works.
 It can also be auto-detected: when firstmate itself is running natively inside herdr (`HERDR_ENV=1`) and no explicit backend is set, firstmate auto-selects herdr and prints a one-time opt-out notice; running inside tmux nested in herdr always resolves to tmux instead.
@@ -332,12 +332,12 @@ Verified this eliminates the flake across repeated full smoke-test runs.
 ## Verified gap: `agent.get` reads idle during a long foreground tool call
 
 `herdr agent get <pane>` -> `.result.agent.agent_status` was verified against a short interactive `claude` exchange (see "Busy state" above): `working` while the model streams a turn, `done` once it stops.
-That verification did not cover a crew blocked on its OWN long-running foreground tool call - e.g. `no-mistakes axi run` without `--yes`, which blocks synchronously for the whole pipeline (minutes to tens of minutes) until a gate or outcome, per `AGENTS.md` section 11.
+That verification did not cover a crewmate blocked on its OWN long-running foreground tool call - e.g. `no-mistakes axi run` without `--yes`, which blocks synchronously for the whole pipeline (minutes to tens of minutes) until a gate or outcome, per `AGENTS.md` section 11.
 For that entire span the model is not generating - it already finished the turn that invoked the tool and is waiting on the tool's result - so `agent_status` reads `idle` (or `blocked`, which the adapter also maps to `idle`), even though the pane's own rendered text keeps showing the harness's busy banner (`BUSY_REGEX`, e.g. `esc to interrupt`) the whole time, exactly as it would in a plain tmux pane.
 
 This surfaced as a real fleet incident (2026-07-02): `bin/fm-watch.sh`'s absorb-only-when-provably-working stale path (`AGENTS.md` section 8) treated a herdr `idle` verdict from `crew_pane_is_busy` as final, so it skipped the shared tail-regex corroboration that `unknown` already got.
-At the same time, an independent no-mistakes run-step attribution fallback could miss this crew's branch when `axi status` reported another branch; current `bin/fm-crew-state.sh` falls back to top-level `no-mistakes runs --limit ${FM_CREW_STATE_RUNS_LIMIT:-200}` for that coarse cross-branch verdict.
-Together, those gaps let a genuinely still-working herdr crew read as not provably working, triggering an immediate stale wake instead of the intended absorb-then-escalate behavior.
+At the same time, an independent no-mistakes run-step attribution fallback could miss this crewmate's branch when `axi status` reported another branch; current `bin/fm-crew-state.sh` falls back to top-level `no-mistakes runs --limit ${FM_CREW_STATE_RUNS_LIMIT:-200}` for that coarse cross-branch verdict.
+Together, those gaps let a genuinely still-working herdr crewmate read as not provably working, triggering an immediate stale wake instead of the intended absorb-then-escalate behavior.
 
 **Fix:** `bin/fm-crew-state.sh`'s `crew_pane_is_busy` now corroborates BOTH `idle` and unknown/unparseable native verdicts with the shared tail-regex before concluding "not busy" - only a bare `busy` verdict is trusted outright.
 The cross-branch attribution fallback now uses the real `no-mistakes runs` command, and the watcher checks provably-working evidence before a stale status-log verb can make a stale pane terminal.
@@ -726,7 +726,7 @@ The herdr incident regressions (`tests/fm-backend-herdr.test.sh`'s composer-stat
 The captain woke to find away-mode had never injected: 20 escalations buffered, the max-defer wedge marker at 30623s undelivered, the wake queue at 65.
 Daemon triage and buffering worked perfectly; the injection leg deferred EVERY attempt with `inject deferred: supervisor pane has pending input (non-empty composer)` - 6524 lifetime occurrences in the daemon log, 2144 of them from the single overnight daemon (`pid 94088`, `backend=herdr`, `target=default:w1:p3`), dominating every other defer reason.
 
-**Root cause.** The primary firstmate runs claude, and claude-code renders a rotating prompt SUGGESTION as ghost text in an otherwise-empty composer (the primary does not set `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`; crews do, via `fm-spawn`, so crew panes never show it).
+**Root cause.** The primary firstmate runs claude, and claude-code renders a rotating prompt SUGGESTION as ghost text in an otherwise-empty composer (the primary does not set `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`; crewmates do, via `fm-spawn`, so crewmate panes never show it).
 Captured read-only from the live primary pane (no Herdr lifecycle touched):
 
 ```
@@ -769,7 +769,7 @@ It now also attempts a configurable active alert independent of the supervisor b
 
 ## Native `pane.agent_status_changed` push escalation (immediate blocked wake)
 
-Herdr exposes a native, push-based agent-state event stream, and firstmate folds it into the watcher so a crew entering `blocked` (waiting on the human at a permission/trust dialog, an interactive menu, or a wedged prompt) wakes its supervisor sub-second instead of after the ~240s stale-pane wedge timer.
+Herdr exposes a native, push-based agent-state event stream, and firstmate folds it into the watcher so a crewmate entering `blocked` (waiting on the human at a permission/trust dialog, an interactive menu, or a wedged prompt) wakes its supervisor sub-second instead of after the ~240s stale-pane wedge timer.
 This is the follow-up the former "No `events.subscribe` native push" gap note deferred; it is now implemented.
 
 **Mechanism (one owner per contract).**
@@ -847,7 +847,7 @@ The away daemon's `state/.subsuper-escalations` (+ `.since`) is a transient deli
 Two ordering/scoping bugs leaked them into the next away session: on a clean terminal-backed exit the `/afk` skill cleared `state/.afk` BEFORE stopping the daemon, so the daemon's shutdown flush hit its own presence gate (`inject_msg`: `afk_active || return 1`) and was a no-op; and nothing cleared them on entry.
 The fix: `bin/fm-afk-launch.sh stop` SIGTERMs the daemon while `state/.afk` is still present, permits a terminal-backed compatibility flush, preserves a native delivery buffer for catch-up, closes any recorded terminal by exact id, and then clears `state/.afk` last.
 On entry the launcher drops the prior session's artifacts when the daemon is not already running, never on a refresh; the sourceable `bin/fm-afk-start.sh` exposes the shared clearing helper and also applies it for a direct, non-prepared fresh start.
-This never drops the durable wake record: `state/.wake-queue` is the lossless backlog, each crew's `state/<id>.status` retains its current status, and any still-true condition is also re-escalated by the daemon's heartbeat catch-all scan.
+This never drops the durable wake record: `state/.wake-queue` is the lossless backlog, each crewmate's `state/<id>.status` retains its current status, and any still-true condition is also re-escalated by the daemon's heartbeat catch-all scan.
 Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry vs refresh, and stop ordering with `state/.afk` still present at SIGTERM).
 
 ## Known gaps and follow-up notes
@@ -866,9 +866,9 @@ Covered by the unit cases in `tests/fm-afk-launch.test.sh` (clear-on-fresh-entry
 - **Ghost/placeholder suggestion handling depends on ANSI style.** See "Incident (2026-07-08)" and "Incident (2026-07-10)" above.
   Herdr 0.7.3 preserves the harness's own de-emphasis style (dim/faint and truecolor foreground) in `pane read --format ansi`, and `fm_backend_herdr_composer_state` extracts real typed content with the shared `fm_composer_strip_ghost` (`bin/fm-composer-lib.sh`), which drops dim/faint AND dark-truecolor runs to distinguish ghost suggestions/placeholders from real typed text.
   If a future herdr build strips ANSI style from `--format ansi`, the classifier loses its ghost signal and falls back to reading the suggestion text as `pending` - the fail-safe direction for terminal-backed compatibility injection (it defers rather than risks overwriting a human draft), which the max-defer alarm then surfaces.
-- **RESOLVED: a "paused / awaiting-external" crew state for the stale-wedge escalation.** Raised alongside the 2026-07-07 incident: an in-flight crew intentionally idling on a known external wait (a vendor rate limit, say) still tripped `bin/fm-supervise-daemon.sh`'s "stale persisted ... (possible wedge)" escalation exactly like a genuinely wedged crew, with no way to mark the wait as expected.
-  Fixed by the `paused:` external-wait verb: a crew declares a deliberate wait, and both `bin/fm-watch.sh` and `bin/fm-supervise-daemon.sh` absorb its idle pane through the shared `bin/fm-classify-lib.sh` vocabulary (`status_is_paused`, `crew_absorb_class`, `FM_PAUSE_RESURFACE_SECS`), re-surfacing it for a recheck on a long cadence instead of a wedge escalation.
-  See `AGENTS.md` section 8 and the crew-facing brief contract in `bin/fm-brief.sh`.
+- **RESOLVED: a "paused / awaiting-external" crewmate state for the stale-wedge escalation.** Raised alongside the 2026-07-07 incident: an in-flight crewmate intentionally idling on a known external wait (a vendor rate limit, say) still tripped `bin/fm-supervise-daemon.sh`'s "stale persisted ... (possible wedge)" escalation exactly like a genuinely wedged crewmate, with no way to mark the wait as expected.
+  Fixed by the `paused:` external-wait verb: a crewmate declares a deliberate wait, and both `bin/fm-watch.sh` and `bin/fm-supervise-daemon.sh` absorb its idle pane through the shared `bin/fm-classify-lib.sh` vocabulary (`status_is_paused`, `crew_absorb_class`, `FM_PAUSE_RESURFACE_SECS`), re-surfacing it for a recheck on a long cadence instead of a wedge escalation.
+  See `AGENTS.md` section 8 and the crewmate-facing brief contract in `bin/fm-brief.sh`.
 - **Not implemented: mid-session secondmate liveness.** The `fm_backend_agent_alive`-driven respawn sweep (`bin/fm-bootstrap.sh`, see "Agent liveness probe reuses the husk classifier" above) only runs at session start.
   A secondmate dying mid-session is a harder follow-on: the watcher deliberately exempts secondmates from stale-pane detection (an idle secondmate pane is healthy by design), so catching a mid-session death would need a periodic liveness beacon distinct from that exemption, not implemented here.
   Deferred as a separate item - it changes the stale-classification/status vocabulary shared with `bin/fm-watch.sh` and `bin/fm-classify-lib.sh`, which is a bigger surface than this redelivery-loop fix should carry.

@@ -20,7 +20,7 @@ The captain may override that file at session start or later; a per-task instruc
 
 Secondmates have their own harness knob, so a secondmate can run on a different adapter than crewmates.
 `config/secondmate-harness` is the harness the primary uses to launch SECONDMATE agents, resolved through the fallback chain `config/secondmate-harness` -> `config/crew-harness` -> firstmate's own.
-An absent or `default` `config/secondmate-harness` therefore behaves exactly as the crew harness did before this knob existed (secondmates launched on the crew harness); setting it splits the two.
+An absent or `default` `config/secondmate-harness` therefore behaves exactly as the crewmate harness did before this knob existed (secondmates launched on the crewmate harness); setting it splits the two.
 `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend` are inherited by secondmate homes.
 This skill owns only the harness-relevant consequence: a secondmate's own crewmates use the primary's dispatch profiles and static harness value, while `config/secondmate-harness` is the primary's own setting and is never inherited - secondmates do not spawn secondmates.
 Inheritance copies the literal `config/crew-harness` file, so for a secondmate's own crewmates to run on the primary's crewmate harness the captain must set `config/crew-harness` to a concrete adapter name, such as `codex`.
@@ -41,7 +41,7 @@ If the captain asks for a new harness, propose verifying it first: spawn a trivi
 
 `bin/fm-harness.sh` prints firstmate's own harness, using verified env markers first and then process ancestry.
 `bin/fm-harness.sh crew` resolves the effective crewmate harness from `config/crew-harness` (absent or `default` -> own).
-`bin/fm-harness.sh secondmate` resolves the secondmate-launch harness through the chain `config/secondmate-harness` -> `config/crew-harness` -> own, so an unset `config/secondmate-harness` matches the crew harness.
+`bin/fm-harness.sh secondmate` resolves the secondmate-launch harness through the chain `config/secondmate-harness` -> `config/crew-harness` -> own, so an unset `config/secondmate-harness` matches the crewmate harness.
 `bin/fm-spawn.sh` uses `crew` mode for a crewmate/scout launch and `secondmate` mode for a `--secondmate` launch, re-resolving on every spawn so the split is durable across respawns; an explicit per-spawn harness arg overrides either.
 On `unknown`, ask the captain instead of guessing.
 A captain override always beats detection.
@@ -159,7 +159,7 @@ A `$<skill>` invocation opens a `$`-autocomplete (skill) popup, the same hazard 
 `fm-send` handles it the same way it handles `/` - it gives the popup a longer settle (1.2s) between typing and the first Enter, with the target backend's submit retry as the safety net - but the `$` settle is scoped to `harness=codex`, read from the target metadata for exact task ids or legacy `fm-<id>` labels.
 That scope matters because, unlike `/`, a leading `$` commonly starts ordinary text (`$5/month`, `$HOME`), so a universal `$` rule would needlessly slow plain steers to claude/opencode/pi; only a codex target receiving a `$...` message gets the popup-settle.
 An explicit `session:window` target has no meta, so its harness is unknown and treated as non-codex (the safe fast-path default).
-This is why the validation trigger (`$no-mistakes`) to a codex crew now lands on the first Enter instead of biting the popup.
+This is why the validation trigger (`$no-mistakes`) to a codex crewmate now lands on the first Enter instead of biting the popup.
 
 Directory trust dialog on first run per repo root: "Do you trust the contents of this directory?"
 Accept with Enter only during the spawn-time peek before the brief starts processing.

@@ -32,7 +32,7 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
-#   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
+#   With no harness arg, a crewmate/scout spawn resolves the crewmate harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
@@ -66,7 +66,7 @@
 #   their existing default-identity behavior.
 #   config/secondmate-account-pool remains the primary's durable, non-inherited
 #   Agent Fleet selection input for secondmate agents when routing is enabled. A
-#   secondmate's own crewmates use inherited crew dispatch/routing policy, not
+#   secondmate's own crewmates use inherited crewmate dispatch/routing policy, not
 #   this setting.
 #   --resume-account and --continue-account are legacy recovery paths only for
 #   existing account_profile metadata. They retain the sealed Agent Fleet
@@ -2192,7 +2192,7 @@ case "$ARG3" in
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
     # secondmate harness (config/secondmate-harness -> config/crew-harness -> own);
-    # every other kind uses the crew harness only when no dispatch profile file is
+    # every other kind uses the crewmate harness only when no dispatch profile file is
     # active. Resolving here on every spawn is what makes the split DURABLE - a
     # respawn (recovery, /updatefirstmate, restart) re-resolves, so
     # config/secondmate-harness keeps governing secondmate launches across restarts.

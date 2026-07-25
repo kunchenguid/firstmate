@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# fm-crew-state.sh - deterministic read of a crew's CURRENT state.
+# fm-crew-state.sh - deterministic read of a crewmate's CURRENT state.
 #
 # Why this exists: state/<id>.status is an append-only, best-effort EVENT LOG.
-# Crews append only wake-worthy transitions (done/needs-decision/blocked/paused/failed)
+# Crewmates append only wake-worthy transitions (done/needs-decision/blocked/paused/failed)
 # and nothing when they silently resume, so `tail -1` of that log reports the
 # last EVENT, not the current STATE. After firstmate resolves a needs-decision
-# or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
+# or blocked and the crewmate resumes (responds to the gate, the pipeline fixes, it
 # re-validates), the log's last line stays stale. This helper never infers the
 # current state from a tail of the log: it reads the authoritative source (a
-# no-mistakes run-step attributed to this crew's branch, else the pane
+# no-mistakes run-step attributed to this crewmate's branch, else the pane
 # busy-signature) and reconciles the possibly-stale log against it.
 #
 # The determinism lives entirely here - only run-step / pane / log reads plus
@@ -19,7 +19,7 @@
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
-#   2. Matching no-mistakes run for this crew's branch, active or terminal
+#   2. Matching no-mistakes run for this crewmate's branch, active or terminal
 #      (from `axi status`, or the coarse `no-mistakes runs` fallback)?
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
@@ -32,12 +32,12 @@
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
-#   4. No run for this crew (pre-validation, or kind=scout): fall back to the
+#   4. No run for this crewmate (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
-#      attributed to this crew, a dead endpoint also reports unknown · none rather
+#      attributed to this crewmate, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
@@ -65,7 +65,7 @@ NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # How many of the most recent `no-mistakes runs` rows the cross-branch fallback
 # (nm_runs_status_for_branch, below) scans. Generous enough to still find a
-# branch's own run on a busy multi-crew fleet without listing the entire
+# branch's own run on a busy multi-crewmate fleet without listing the entire
 # history every call.
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
@@ -105,7 +105,7 @@ log_last_line() {
 }
 # Map a status-log verb onto a canonical state for the fallback path. `paused` is
 # the deliberate-external-wait verb (fm-classify-lib.sh's FM_CLASSIFY_PAUSED_VERB):
-# a crew with no active run and an idle pane that declared a known external wait
+# a crewmate with no active run and an idle pane that declared a known external wait
 # reports `paused` distinctly, so a supervisor reading this sees a declared pause
 # and its reason rather than a wedge-suspect idle.
 map_log_state() {  # <line>
@@ -128,7 +128,7 @@ LOG_VERB=$(status_line_verb "$LOG_LINE")
 
 # pane_readable is consulted ONLY in the no-run fallback below. The run-step path
 # stays authoritative regardless of pane liveness - judge by the run-step, not the
-# shell - so a finished crew whose endpoint has closed still reports its run-step
+# shell - so a finished crewmate whose endpoint has closed still reports its run-step
 # state (e.g. done) instead of being masked as unknown. Backend-aware
 # (fm_backend_of_meta defaults absent backend= to tmux, the P1 contract): a
 # herdr task is read through fm_backend_capture instead of a bare tmux probe.
@@ -148,15 +148,15 @@ pane_readable() {  # <target>
 # through to the shared tail-regex corroboration, NOT just unknown: herdr's
 # agent.get reports generation state ("working" while the model is streaming
 # a turn, "done"/"idle" once it is not - docs/herdr-backend.md "Busy state"),
-# which is a narrower signal than "this crew's turn/tool call is still in
-# progress". A crew blocked on its own long-running foreground tool call (e.g.
+# which is a narrower signal than "this crewmate's turn/tool call is still in
+# progress". A crewmate blocked on its own long-running foreground tool call (e.g.
 # `no-mistakes axi run` without --yes, which blocks synchronously until a gate
 # or outcome - AGENTS.md section 11) is not generating for that whole span, so
 # agent.get can read idle/blocked (bin/backends/herdr.sh maps both to `idle`)
 # while the pane's own rendered text still shows the harness's busy banner
 # (BUSY_REGEX, e.g. "esc to interrupt") for the entire tool call, exactly like
 # tmux's regex-only reader would correctly report. Trusting herdr's `idle`
-# outright (skipping that corroboration) is what let a still-working crew read
+# outright (skipping that corroboration) is what let a still-working crewmate read
 # as not-busy here, and - combined with a no-mistakes run-step lookup that also
 # missed attribution (see nm_runs_status_for_branch) - as not provably working in
 # fm-classify-lib.sh, triggering an immediate (non-wedge) stale wake instead of
@@ -338,7 +338,7 @@ nm_ci_checks_state() {
 # exists, else falls back to some other branch's run purely as informational
 # display (verified empirically: querying a worktree with its own active run
 # reliably returns that run, even under concurrent load from several other
-# validating crews on the same underlying repo). A crew whose branch genuinely
+# validating crewmates on the same underlying repo). A crewmate whose branch genuinely
 # has no run yet therefore sees another branch's answer here.
 #
 # This fallback used to shell out to `no-mistakes axi` (bare, no subcommand)
@@ -347,7 +347,7 @@ nm_ci_checks_state() {
 # CLI (v1.32.2): the `axi` surface exposes only abort/logs/respond/run/status -
 # there is no runs-listing subcommand under `axi` at all, so that table never
 # appears and the lookup was silently dead code; whenever the bare `axi
-# status` answer was not this crew's own branch, attribution always failed and
+# status` answer was not this crewmate's own branch, attribution always failed and
 # the caller fell straight through to the pane/log fallback below. (The
 # PRIMARY cause of the 2026-07 herdr false-surface incidents turned out to be
 # a separate bug in bin/fm-watch.sh's stale_is_terminal precedence - see that
@@ -382,15 +382,15 @@ nm_runs_status_for_branch() {  # <branch>
   return 0
 }
 
-# CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
-# scratch worktree); with no branch there is no run to attribute to this crew.
+# CREW_BRANCH is empty at detached HEAD (a just-spawned crewmate, or a scout's
+# scratch worktree); with no branch there is no run to attribute to this crewmate.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
 # $RUN_OUT is real `axi status` TOON with step/gate detail; "coarse" means only
 # a bare status word came back from the runs-list fallback above, so the
-# run-step block below skips the TOON field parsing entirely for this crew.
+# run-step block below skips the TOON field parsing entirely for this crewmate.
 RUN_SOURCE=full
 COARSE_STATUS=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
@@ -427,7 +427,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATUS=""
   if [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
-    # true/working, done, or failed. A crew genuinely parked at a gate still
+    # true/working, done, or failed. A crewmate genuinely parked at a gate still
     # gets full detail once `axi status` reports its own branch again (e.g.
     # once its own step is the most-recently-touched one), and its own
     # needs-decision/blocked status-log append (a captain-relevant VERB) is
@@ -535,10 +535,10 @@ if [ "$HAVE_RUN" = 1 ]; then
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 
-# --- fallback: no run attributed to this crew ------------------------------
-# The run-step path above already handled any crew with a run, regardless of pane
-# liveness, so a finished-but-pane-closed crew never reaches here. Down here there
-# is no run to consult, so a dead/unreadable target means the crew is gone: report
+# --- fallback: no run attributed to this crewmate ------------------------------
+# The run-step path above already handled any crewmate with a run, regardless of pane
+# liveness, so a finished-but-pane-closed crewmate never reaches here. Down here there
+# is no run to consult, so a dead/unreadable target means the crewmate is gone: report
 # unknown rather than trusting a possibly-stale status log as the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
@@ -554,7 +554,7 @@ fi
 # FM_CLASSIFY_RESOLVE_VERB), and any future decision-only sibling - is NOT a state:
 # it exists solely to CLOSE a keyed decision in the durable fold, so a trailing
 # resolved: must never become the current state or leak its resolution prose as the
-# detail. Skipping it lets a just-resolved idle crew (typically a secondmate, which
+# detail. Skipping it lets a just-resolved idle crewmate (typically a secondmate, which
 # has no busy check above) fall through to the idle default instead of rendering
 # `unknown` with the resolution note as `doing`. map_log_state is the single owner of
 # the verb->state mapping (including the configurable paused verb), so reusing its
