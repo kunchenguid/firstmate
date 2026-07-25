@@ -59,7 +59,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|cursor)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -386,7 +386,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|cursor)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -447,6 +447,17 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # cursor (Cursor Agent CLI: `agent` / cursor-agent): headless one-shot via
+    # --print. --force/--yolo auto-approves tools; --trust skips the workspace
+    # trust prompt. Optional firstmate/.env may supply CURSOR_API_KEY (agent may
+    # already be logged in without it). Turn-end rides the launch line like
+    # codex notify=: touch __TURNEND__ after agent exits. Status still via brief
+    # `echo "done: …" >> state/<id>.status`.
+    cursor)
+      # printf %q here — shell_quote() is defined later in this script and is not
+      # available when launch_template runs during arg parsing.
+      printf '%s' "set -a; [ -f $(printf %q "$FM_HOME/.env") ] && . $(printf %q "$FM_HOME/.env"); set +a; export PATH=\"\$HOME/.local/bin:\$PATH\"; agent --print --force --trust __MODELFLAG__\"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"; touch __TURNEND__"
+      ;;
     *) return 1 ;;
   esac
 }
@@ -534,7 +545,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    claude|codex|opencode|pi|grok|cursor)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -576,6 +587,8 @@ effort_flag_for_harness() {
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
+    # cursor (agent --print): no separate --effort flag; effort can be folded into
+    # model bracket overrides (e.g. 'claude-opus-4-8[effort=high]') when needed.
   esac
 }
 
@@ -1231,8 +1244,10 @@ export default function (pi: any) {
 }
 EOF
       ;;
-    codex*)
+    codex*|cursor*)
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
+      # cursor: turn-end rides the launch command via `; touch __TURNEND__` after
+      # the headless `agent --print` process exits.
       ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the

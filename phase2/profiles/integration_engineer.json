@@ -1,0 +1,38 @@
+{
+  "name": "integration_engineer",
+  "purpose": "integration engineer",
+  "denied_global": [
+    "production_secrets",
+    "live_stripe_keys",
+    "live_gelato_keys",
+    "ssh_private_keys",
+    "production_dotenv",
+    "docker_socket",
+    "unrelated_repos",
+    "force_push",
+    "auto_deploy"
+  ],
+  "allowed_tools": [
+    "Shell",
+    "Read",
+    "Write"
+  ],
+  "denied_tools": [
+    "live_stripe",
+    "live_gelato"
+  ],
+  "allowed_directories": [
+    "**/integrations/**",
+    "**/payments/**",
+    "**/print/**"
+  ],
+  "required_skills": [
+    "gelato-integration",
+    "stripe-marketplace"
+  ],
+  "max_task_scope": "sandbox_integrations_only",
+  "required_tests": [
+    "contract_tests"
+  ],
+  "required_final_report": "packet/RESULT.md"
+}

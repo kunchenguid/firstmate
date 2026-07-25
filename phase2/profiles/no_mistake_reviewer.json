@@ -1,0 +1,33 @@
+{
+  "name": "no_mistake_reviewer",
+  "purpose": "no mistake reviewer",
+  "denied_global": [
+    "production_secrets",
+    "live_stripe_keys",
+    "live_gelato_keys",
+    "ssh_private_keys",
+    "production_dotenv",
+    "docker_socket",
+    "unrelated_repos",
+    "force_push",
+    "auto_deploy"
+  ],
+  "allowed_tools": [
+    "Shell(no-mistakes axi)",
+    "Read"
+  ],
+  "denied_tools": [
+    "axi respond as firstmate for another worker"
+  ],
+  "allowed_directories": [
+    "assigned worktree"
+  ],
+  "required_skills": [
+    "no-mistake-validation"
+  ],
+  "max_task_scope": "gate_driver",
+  "required_tests": [
+    "no_mistakes_pipeline"
+  ],
+  "required_final_report": "packet/NO-MISTAKE.md"
+}

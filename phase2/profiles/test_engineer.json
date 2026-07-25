@@ -1,0 +1,37 @@
+{
+  "name": "test_engineer",
+  "purpose": "test engineer",
+  "denied_global": [
+    "production_secrets",
+    "live_stripe_keys",
+    "live_gelato_keys",
+    "ssh_private_keys",
+    "production_dotenv",
+    "docker_socket",
+    "unrelated_repos",
+    "force_push",
+    "auto_deploy"
+  ],
+  "allowed_tools": [
+    "Shell",
+    "Read",
+    "Write",
+    "Browser"
+  ],
+  "denied_tools": [
+    "production mutate"
+  ],
+  "allowed_directories": [
+    "**/tests/**",
+    "**/e2e/**",
+    "phase2/playwright/**"
+  ],
+  "required_skills": [
+    "browser-testing"
+  ],
+  "max_task_scope": "tests_and_evidence",
+  "required_tests": [
+    "own_suite_green"
+  ],
+  "required_final_report": "packet/RESULT.md"
+}

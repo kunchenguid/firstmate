@@ -1,0 +1,36 @@
+{
+  "name": "architect",
+  "purpose": "architect",
+  "denied_global": [
+    "production_secrets",
+    "live_stripe_keys",
+    "live_gelato_keys",
+    "ssh_private_keys",
+    "production_dotenv",
+    "docker_socket",
+    "unrelated_repos",
+    "force_push",
+    "auto_deploy"
+  ],
+  "allowed_tools": [
+    "Read",
+    "Grep",
+    "Glob",
+    "Write(packet only)"
+  ],
+  "denied_tools": [
+    "Shell(deploy)",
+    "Browser"
+  ],
+  "allowed_directories": [
+    "docs/",
+    "data/*/packet/",
+    "phase2/"
+  ],
+  "required_skills": [
+    "programme-control"
+  ],
+  "max_task_scope": "design_and_packets_only",
+  "required_tests": [],
+  "required_final_report": "packet/RESULT.md"
+}

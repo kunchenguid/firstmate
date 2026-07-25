@@ -1,0 +1,11 @@
+{
+  "max_implementation_workers": 3,
+  "max_reviewer_workers": 1,
+  "max_migration_workers": 1,
+  "deployment_workers_enabled": false,
+  "heartbeat_grace_secs": 300,
+  "max_auto_restarts": 1,
+  "max_failures_before_block": 3,
+  "independent_review_required": true,
+  "worktree_root": "/home/unifiedops/agentic/worktrees"
+}

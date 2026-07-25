@@ -1,0 +1,17 @@
+[Unit]
+Description=FirstMate Phase 2 event daemon
+After=default.target
+
+[Service]
+Type=simple
+Environment=FM_HOME=%h/agentic/firstmate
+WorkingDirectory=%h/agentic/firstmate
+ExecStart=%h/agentic/firstmate/bin/fm-phase2-eventd.sh
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+# no public ports
+
+[Install]
+WantedBy=default.target

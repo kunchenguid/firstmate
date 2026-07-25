@@ -1,0 +1,12 @@
+[Unit]
+Description=FirstMate Phase 2 heartbeat watchdog (scan)
+After=default.target
+
+[Service]
+Type=oneshot
+Environment=FM_HOME=%h/agentic/firstmate
+WorkingDirectory=%h/agentic/firstmate
+ExecStart=%h/agentic/firstmate/bin/fm-phase2-heartbeat.sh scan --recover
+
+[Install]
+WantedBy=default.target

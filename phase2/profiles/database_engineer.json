@@ -1,0 +1,38 @@
+{
+  "name": "database_engineer",
+  "purpose": "database engineer",
+  "denied_global": [
+    "production_secrets",
+    "live_stripe_keys",
+    "live_gelato_keys",
+    "ssh_private_keys",
+    "production_dotenv",
+    "docker_socket",
+    "unrelated_repos",
+    "force_push",
+    "auto_deploy"
+  ],
+  "allowed_tools": [
+    "Shell(git,psql,drizzle)",
+    "Read",
+    "Write"
+  ],
+  "denied_tools": [
+    "Browser",
+    "Stripe live"
+  ],
+  "allowed_directories": [
+    "**/db/**",
+    "**/migrations/**",
+    "**/schema/**"
+  ],
+  "required_skills": [
+    "database-migrations",
+    "git-worktrees"
+  ],
+  "max_task_scope": "schema_and_migrations",
+  "required_tests": [
+    "migration_validate"
+  ],
+  "required_final_report": "packet/RESULT.md"
+}

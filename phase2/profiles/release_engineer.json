@@ -1,0 +1,36 @@
+{
+  "name": "release_engineer",
+  "purpose": "release engineer",
+  "denied_global": [
+    "production_secrets",
+    "live_stripe_keys",
+    "live_gelato_keys",
+    "ssh_private_keys",
+    "production_dotenv",
+    "docker_socket",
+    "unrelated_repos",
+    "force_push",
+    "auto_deploy"
+  ],
+  "allowed_tools": [
+    "Read",
+    "Shell(gh,git)"
+  ],
+  "denied_tools": [
+    "production deploy",
+    "force_push"
+  ],
+  "allowed_directories": [
+    "docs/",
+    ".github/workflows/"
+  ],
+  "required_skills": [
+    "release-readiness",
+    "ci-repair"
+  ],
+  "max_task_scope": "release_checklist_only",
+  "required_tests": [
+    "ci_green"
+  ],
+  "required_final_report": "packet/RESULT.md"
+}

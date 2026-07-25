@@ -114,13 +114,14 @@ profiles_json=$(printf '%s\n' "$SPEC_JSON" | jq -ec '
 ' 2>/dev/null) || { echo "error: dispatch input must be a rule, profile, or profile array" >&2; exit 2; }
 
 validation_error=$(printf '%s\n' "$profiles_json" | jq -r '
-  def verified($h): ["claude", "codex", "opencode", "pi", "grok"] | index($h);
+  def verified($h): ["claude", "codex", "opencode", "pi", "grok", "cursor"] | index($h);
   def effort_ok($h; $e):
     if $h == "claude" then ["low", "medium", "high", "xhigh", "max"] | index($e)
     elif $h == "codex" then ["low", "medium", "high", "xhigh"] | index($e)
     elif $h == "grok" then ["low", "medium", "high"] | index($e)
     elif $h == "pi" then ["low", "medium", "high", "xhigh", "max"] | index($e)
     elif $h == "opencode" then false
+    elif $h == "cursor" then false
     else false
     end;
   if length == 0 then "dispatch profile array must not be empty"

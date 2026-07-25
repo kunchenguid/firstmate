@@ -1,0 +1,35 @@
+{
+  "name": "reviewer",
+  "purpose": "reviewer",
+  "denied_global": [
+    "production_secrets",
+    "live_stripe_keys",
+    "live_gelato_keys",
+    "ssh_private_keys",
+    "production_dotenv",
+    "docker_socket",
+    "unrelated_repos",
+    "force_push",
+    "auto_deploy"
+  ],
+  "allowed_tools": [
+    "Read",
+    "Grep",
+    "Shell(git diff)"
+  ],
+  "denied_tools": [
+    "Write(implementation)"
+  ],
+  "allowed_directories": [
+    "data/*/packet/",
+    "worktree read-only"
+  ],
+  "required_skills": [
+    "code-review"
+  ],
+  "max_task_scope": "review_only_not_own_implementation",
+  "required_tests": [
+    "ac_matrix"
+  ],
+  "required_final_report": "packet/REVIEW.md"
+}

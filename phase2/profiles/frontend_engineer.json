@@ -1,0 +1,38 @@
+{
+  "name": "frontend_engineer",
+  "purpose": "frontend engineer",
+  "denied_global": [
+    "production_secrets",
+    "live_stripe_keys",
+    "live_gelato_keys",
+    "ssh_private_keys",
+    "production_dotenv",
+    "docker_socket",
+    "unrelated_repos",
+    "force_push",
+    "auto_deploy"
+  ],
+  "allowed_tools": [
+    "Shell",
+    "Read",
+    "Write",
+    "Browser"
+  ],
+  "denied_tools": [
+    "db migrate production"
+  ],
+  "allowed_directories": [
+    "**/src/**",
+    "**/components/**",
+    "**/routes/**"
+  ],
+  "required_skills": [
+    "frontend-ui",
+    "browser-testing"
+  ],
+  "max_task_scope": "bounded_ui_feature",
+  "required_tests": [
+    "component_or_playwright"
+  ],
+  "required_final_report": "packet/RESULT.md"
+}

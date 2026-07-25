@@ -1,0 +1,38 @@
+{
+  "name": "backend_engineer",
+  "purpose": "backend engineer",
+  "denied_global": [
+    "production_secrets",
+    "live_stripe_keys",
+    "live_gelato_keys",
+    "ssh_private_keys",
+    "production_dotenv",
+    "docker_socket",
+    "unrelated_repos",
+    "force_push",
+    "auto_deploy"
+  ],
+  "allowed_tools": [
+    "Shell",
+    "Read",
+    "Write",
+    "Grep"
+  ],
+  "denied_tools": [
+    "live financial APIs"
+  ],
+  "allowed_directories": [
+    "**/server/**",
+    "**/api/**",
+    "**/lib/**"
+  ],
+  "required_skills": [
+    "git-worktrees",
+    "authentication-security"
+  ],
+  "max_task_scope": "bounded_api_feature",
+  "required_tests": [
+    "unit_or_integration"
+  ],
+  "required_final_report": "packet/RESULT.md"
+}

@@ -1,6 +1,8 @@
 projects/
 state/
 data/
+backups/
+inbox/
 .no-mistakes/
 .lavish/
 .fm-secondmate-home
