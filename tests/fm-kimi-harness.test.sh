@@ -336,6 +336,7 @@ test_watcher_scopes_moon_spinner_to_recorded_kimi_task() (
   export FM_HOME FM_STATE_OVERRIDE
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-watch.sh"
+  # shellcheck disable=SC2329 # Runtime override called by the sourced watcher.
   fm_backend_busy_state() { printf 'unknown'; }
   window_is_busy fake '🌕 Thinking' \
     || fail "fm-watch did not recognize a recorded Kimi spinner line"
