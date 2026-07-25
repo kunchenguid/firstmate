@@ -210,19 +210,24 @@ strip_quotes() {
   trim "$s"
 }
 
-# Bounded no-mistakes call in the worktree; stdout only, never fails the script.
+# Bounded no-mistakes call in the worktree that preserves the command result.
 HAVE_TIMEOUT=none
 if command -v timeout >/dev/null 2>&1; then HAVE_TIMEOUT=timeout
 elif command -v gtimeout >/dev/null 2>&1; then HAVE_TIMEOUT=gtimeout
 elif command -v perl >/dev/null 2>&1; then HAVE_TIMEOUT=perl
 fi
-nm_run() {  # <args...>
+nm_run_bounded() {  # <args...>
   case "$HAVE_TIMEOUT" in
-    timeout)  ( cd "$WT" && timeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    gtimeout) ( cd "$WT" && gtimeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    *)        true ;;
+    timeout)  ( cd "$WT" && timeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
+    gtimeout) ( cd "$WT" && gtimeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
+    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
+    *)        return 125 ;;
   esac
+}
+
+# Stdout-only tolerant wrapper for state reads.
+nm_run() {  # <args...>
+  nm_run_bounded "$@" || true
 }
 
 # Scalar value of a TOON key in the captured run output ($RUN_OUT).
@@ -360,7 +365,9 @@ nm_ci_checks_state() {
 duration_token_secs() {  # <token>
   local t=$1 total=0 num
   [ -n "$t" ] || return 0
-  case "$t" in *[!0-9dhms]*) return 0 ;; esac
+  printf '%s\n' "$t" \
+    | grep -Eq '^([0-9]+d([0-9]+h)?([0-9]+m)?([0-9]+s)?|[0-9]+h([0-9]+m)?([0-9]+s)?|[0-9]+m([0-9]+s)?|[0-9]+s|[0-9]+ms)$' \
+    || return 0
   while [ -n "$t" ]; do
     num=${t%%[dhms]*}
     case "$num" in ''|*[!0-9]*) return 0 ;; esac
@@ -378,30 +385,65 @@ duration_token_secs() {  # <token>
 }
 
 # Age in seconds of the most recent activity across the attributed run's active
-# steps, from the active_steps table's last_activity stamp ("<duration> ago").
-# The table's other duration column, active_for, carries no ` ago` suffix and is
-# elapsed time rather than activity, so it is deliberately not matched: elapsed
-# time is exactly the signal the wedge timer already has. With several active
-# steps the SMALLEST age wins - the freshest thing the pipeline did. Prints
-# nothing when no parseable stamp is present.
+# steps, from each active_steps row's fourth, double-quoted last_activity field.
+# The table's other duration column, active_for, is never read. Every declared
+# row must carry exactly one leading "active|quiet <duration> ago" stamp; any
+# malformed table, row, or stamp makes the whole answer unknown. With several
+# valid rows the smallest age wins.
 nm_active_activity_age() {
-  local block stamps token secs best=""
-  block=$(printf '%s\n' "$RUN_OUT" \
-    | awk '/^[[:space:]]*active_steps\[/ { inblock = 1; next }
-           inblock && /^[^[:space:]]/ { exit }
-           inblock { print }')
-  [ -n "$block" ] || return 0
-  stamps=$(printf '%s\n' "$block" | grep -oE '[0-9][0-9dhms]*[[:space:]]+ago' || true)
-  [ -n "$stamps" ] || return 0
-  while IFS= read -r token; do
-    token=${token%%[[:space:]]*}
+  local rows expected="" row_count=0 row activity rest suffix token secs best=""
+  rows=$(printf '%s\n' "$RUN_OUT" | awk '
+    /^[[:space:]]*active_steps\[/ {
+      if (seen) exit 1
+      if ($0 !~ /^[[:space:]]*active_steps\[[0-9][0-9]*\]\{step,status,active_for,last_activity,agent_pid,round\}:[[:space:]]*$/) exit 1
+      count = $0
+      sub(/^[[:space:]]*active_steps\[/, "", count)
+      sub(/\].*$/, "", count)
+      if (count < 1) exit 1
+      print count
+      remaining = count
+      seen = 1
+      next
+    }
+    seen && remaining > 0 {
+      print
+      remaining--
+      next
+    }
+    END {
+      if (!seen || remaining != 0) exit 1
+    }
+  ') || return 0
+  while IFS= read -r row; do
+    if [ -z "$expected" ]; then
+      expected=$row
+      continue
+    fi
+    activity=$(printf '%s\n' "$row" \
+      | sed -n 's/^[[:space:]]*[^,]*,[^,]*,[^,]*,"\([^"]*\)",[^,]*,[^,]*[[:space:]]*$/\1/p')
+    [ -n "$activity" ] || return 0
+    case "$activity" in
+      active\ *) rest=${activity#active } ;;
+      quiet\ *)  rest=${activity#quiet } ;;
+      *)         return 0 ;;
+    esac
+    token=${rest%% *}
+    [ -n "$token" ] || return 0
+    suffix=${rest#"$token"}
+    case "$suffix" in
+      " ago") ;;
+      " ago: log: "?*) ;;
+      *) return 0 ;;
+    esac
     secs=$(duration_token_secs "$token")
-    [ -n "$secs" ] || continue
+    [ -n "$secs" ] || return 0
     if [ -z "$best" ] || [ "$secs" -lt "$best" ]; then
       best=$secs
     fi
-  done <<< "$stamps"
-  [ -n "$best" ] && printf '%s' "$best"
+    row_count=$((row_count + 1))
+  done <<< "$rows"
+  [ -n "$expected" ] && [ "$row_count" -eq "$expected" ] && [ -n "$best" ] \
+    && printf '%s' "$best"
 }
 
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
@@ -509,11 +551,17 @@ HAVE_RUN=0
 # run-step block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
+RUN_RESULT=0
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
-  RUN_OUT=$(nm_run axi status)
-  if [ -n "$RUN_OUT" ]; then
+  if [ "$PROGRESS_MODE" = 1 ]; then
+    RUN_OUT=$(nm_run_bounded axi status)
+    RUN_RESULT=$?
+  else
+    RUN_OUT=$(nm_run axi status)
+  fi
+  if [ "$RUN_RESULT" = 0 ] && [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1

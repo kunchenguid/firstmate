@@ -79,7 +79,7 @@ case "${1:-}" in
   runs)
     printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
 esac
-exit 0
+exit "${FM_FAKE_NM_EXIT:-0}"
 SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -177,8 +177,10 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_NM_EXIT=0
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_NM_EXIT
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -351,6 +353,24 @@ run:
     review,running,0,0
   active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
     review,running,41m12s,"$2","81234",2
+EOF
+}
+
+run_running_with_two_activities() {  # <branch> <first-stamp> <second-stamp>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+  steps[2]{step,status,findings,duration_ms}:
+    intent,running,0,0
+    review,running,0,0
+  active_steps[2]{step,status,active_for,last_activity,agent_pid,round}:
+    intent,running,2h,"$2","81233",1
+    review,running,41m12s,"$3","81234",2
 EOF
 }
 
@@ -1373,6 +1393,53 @@ test_progress_parses_a_quiet_multi_unit_stamp() {
   pass "--progress parses a multi-unit quiet stamp"
 }
 
+test_progress_reads_only_each_row_leading_activity_stamp() {
+  reset_fakes
+  local d out; d=$(new_case progress-leading-stamp)
+  make_repo_on_branch "$d/wt" fm/feat-p-leading
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-p-leading.meta" "window=fm:fm-feat-p-leading" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p-leading 'quiet 1h ago: log: retried 5m ago')"
+  out=$(run_crew_progress "$d" feat-p-leading)
+  assert_contains "$out" "activity_age: 3600" "only the last_activity field's leading stamp is read"
+  assert_not_contains "$out" "activity_age: 300" "trailing log prose cannot become progress evidence"
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p-leading 'quiet 1h 5m ago: log: malformed stamp')"
+  out=$(run_crew_progress "$d" feat-p-leading)
+  assert_contains "$out" "activity_age: unknown" "a non-canonical leading stamp is unprovable"
+  pass "--progress isolates and validates the last_activity leading stamp"
+}
+
+test_progress_uses_the_freshest_valid_active_step_row() {
+  reset_fakes
+  local d out; d=$(new_case progress-multiple-rows)
+  make_repo_on_branch "$d/wt" fm/feat-p-rows
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-p-rows.meta" "window=fm:fm-feat-p-rows" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running_with_two_activities fm/feat-p-rows \
+    'quiet 1h ago: log: intent work' 'active 2m ago: log: review work')"
+  out=$(run_crew_progress "$d" feat-p-rows)
+  assert_contains "$out" "activity_age: 120" "freshest last_activity stamp wins across rows"
+  FM_FAKE_AXI_STATUS="$(run_running_with_two_activities fm/feat-p-rows \
+    'quiet 1h ago: log: intent work' 'active 2m 5s ago: log: malformed review stamp')"
+  out=$(run_crew_progress "$d" feat-p-rows)
+  assert_contains "$out" "activity_age: unknown" "one malformed row invalidates the whole activity answer"
+  pass "--progress chooses the freshest validated active-step row"
+}
+
+test_progress_rejects_parseable_output_from_a_failed_call() {
+  reset_fakes
+  local d out; d=$(new_case progress-failed-call)
+  make_repo_on_branch "$d/wt" fm/feat-p-failed-call
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-p-failed-call.meta" "window=fm:fm-feat-p-failed-call" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-p-failed-call 'active 5s ago: log: partial output')"
+  FM_FAKE_NM_EXIT=7
+  out=$(run_crew_progress "$d" feat-p-failed-call)
+  assert_contains "$out" "activity_age: unknown" "nonzero command result invalidates parseable stdout"
+  assert_not_contains "$out" "activity_age: 5" "failed output cannot suppress a wedge alarm"
+  pass "--progress rejects parseable output from a failed bounded call"
+}
+
 # active_for is elapsed time, not activity, and carries no ` ago` suffix. Reading
 # it would reintroduce exactly the clock the wedge timer already has, so a run
 # with no last_activity stamp must answer unknown rather than borrow it.
@@ -1489,6 +1556,9 @@ test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
 test_progress_reports_active_step_activity_age
 test_progress_parses_a_quiet_multi_unit_stamp
+test_progress_reads_only_each_row_leading_activity_stamp
+test_progress_uses_the_freshest_valid_active_step_row
+test_progress_rejects_parseable_output_from_a_failed_call
 test_progress_ignores_elapsed_time_without_an_activity_stamp
 test_progress_without_active_steps_is_unknown
 test_progress_ignores_another_branch_run
