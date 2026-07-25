@@ -75,11 +75,14 @@
 # When compatible tasks-axi is selected and available, the shared tasks-axi
 # backend probe remains the compatibility owner and this script asks
 # `tasks-axi list` for the compact identity fields plus blocked_by, hold_kind,
-# and hold_reason, never body.
+# hold_reason, and created where captain-decision age is needed, never body.
 # When manual mode is selected, or tasks-axi is unavailable or incompatible,
 # this script prints only backlog section headings and item title lines, so
 # title-line hold and blocked-by metadata remain visible while indented bodies
 # stay out of the startup digest.
+# A separate held-captain-decision subsection is still derived from the same
+# backlog data, ordered oldest first, with age annotations only for visibility.
+# It is not a second obligation store.
 # Full bodies are targeted follow-up only: `tasks-axi show <id> --full` when
 # compatible tasks-axi is available, or `data/backlog.md` when the file body is
 # truly needed.
@@ -213,6 +216,197 @@ print_backlog_compact() {
   fi
 }
 
+date_to_epoch() {  # <yyyy-mm-dd>
+  local day=$1
+  case "$day" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
+    *) return 1 ;;
+  esac
+  if date -u -d "$day" +%s >/dev/null 2>&1; then
+    date -u -d "$day" +%s
+  elif date -u -j -f %F "$day" +%s >/dev/null 2>&1; then
+    date -u -j -f %F "$day" +%s
+  else
+    return 1
+  fi
+}
+
+captain_decision_age_days() {  # <yyyy-mm-dd>
+  local since=$1 today today_epoch since_epoch days
+  today=${FM_SESSION_START_TODAY:-$(date -u +%F)}
+  today_epoch=$(date_to_epoch "$today") || return 1
+  since_epoch=$(date_to_epoch "$since") || return 1
+  days=$(( (today_epoch - since_epoch) / 86400 ))
+  [ "$days" -ge 0 ] || days=0
+  printf '%s\n' "$days"
+}
+
+strip_csv_quotes() {  # <value>
+  local value=$1
+  case "$value" in
+    \"*\")
+      value=${value#\"}
+      value=${value%\"}
+      value=${value//\"\"/\"}
+      ;;
+  esac
+  printf '%s\n' "$value"
+}
+
+tasks_axi_captain_decision_records() {  # <backlog-path>
+  local path=$1 out rc
+  out=$(tasks-axi list --file "$path" --state held --kind captain --limit "$BACKLOG_LIMIT" --fields created,blocked_by,hold_kind,hold_reason 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'tasks-axi held-decision listing failed; falling back to title-line rendering.\n%s\n' "$out" >&2
+    return "$rc"
+  fi
+  printf '%s\n' "$out" | awk '
+    function csv_split(line, out,    i, c, nextc, field, n, in_quote) {
+      n = 1
+      field = ""
+      in_quote = 0
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (in_quote) {
+          if (c == "\"") {
+            nextc = substr(line, i + 1, 1)
+            if (nextc == "\"") {
+              field = field c
+              i++
+            } else {
+              in_quote = 0
+            }
+          } else {
+            field = field c
+          }
+        } else if (c == ",") {
+          out[n++] = field
+          field = ""
+        } else if (c == "\"") {
+          in_quote = 1
+        } else {
+          field = field c
+        }
+      }
+      out[n] = field
+      return n
+    }
+    /^tasks\[[0-9]+\]\{/ { in_table = 1; next }
+    /^help\[/ { in_table = 0 }
+    in_table && /^  / {
+      line = $0
+      sub(/^  /, "", line)
+      delete f
+      n = csv_split(line, f)
+      if (n < 9 || f[8] != "captain") next
+      printf "%s\t%s\t%s\t%s\t%s\n", f[6], f[1], f[5], f[9], f[7]
+    }
+  '
+}
+
+backlog_title_metadata() {  # <title-rest> <metadata-key>
+  local rest=$1 key=$2 pattern
+  pattern="\\($key:[[:space:]]*([^)]*)\\)"
+  if [[ $rest =~ $pattern ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  fi
+}
+
+backlog_title_since() {  # <title-rest>
+  local rest=$1
+  if [[ $rest =~ \(since[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\) ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  fi
+}
+
+clean_backlog_title() {  # <title-rest>
+  printf '%s\n' "$1" \
+    | sed -E 's/[[:space:]]+blocked-by:[^[:space:])]+.*$//; s/[[:space:]]*\([^)]*\)//g; s/[[:space:]]+$//'
+}
+
+manual_captain_decision_records() {  # <backlog-path>
+  local path=$1 section='' line id rest kind hold_kind hold_reason since title blocked_by
+  while IFS= read -r line; do
+    case "$line" in
+      '## In flight') section=in_flight; continue ;;
+      '## Queued') section=queued; continue ;;
+      '## Done') section='done'; continue ;;
+      '## '*) section=''; continue ;;
+    esac
+    [ "$section" != 'done' ] || continue
+    [[ $line =~ ^[-*][[:space:]]+\[[[:space:]xX]\][[:space:]]+([^[:space:]]+)[[:space:]]+-[[:space:]]+(.*)$ ]] || continue
+    id=${BASH_REMATCH[1]}
+    rest=${BASH_REMATCH[2]}
+    kind=$(backlog_title_metadata "$rest" kind)
+    hold_kind=$(backlog_title_metadata "$rest" hold-kind)
+    hold_reason=$(backlog_title_metadata "$rest" hold)
+    [ "$kind" = captain ] && [ "$hold_kind" = captain ] && [ -n "$hold_reason" ] || continue
+    since=$(backlog_title_since "$rest")
+    title=$(clean_backlog_title "$rest")
+    blocked_by=$(printf '%s\n' "$rest" | sed -nE 's/.*blocked-by:[[:space:]]*([^[:space:])]+).*/\1/p' | head -1)
+    [ -n "$blocked_by" ] || blocked_by=none
+    printf '%s\t%s\t%s\t%s\t%s\n' "$since" "$id" "$title" "$hold_reason" "$blocked_by"
+  done < "$path"
+}
+
+render_captain_decision_records() {
+  local records=$1 rows='' day id title reason blocked days sort_key age_label date_label line tab
+  tab=$(printf '\t')
+  while IFS=$'\t' read -r day id title reason blocked; do
+    [ -n "$id" ] || continue
+    reason=$(strip_csv_quotes "${reason:--}")
+    blocked=$(strip_csv_quotes "${blocked:-none}")
+    if days=$(captain_decision_age_days "$day"); then
+      sort_key=$days
+      age_label="age: ${days}d"
+      date_label="since $day"
+    else
+      sort_key=-1
+      age_label="age: unknown"
+      date_label="since unknown"
+    fi
+    rows="${rows}${sort_key}${tab}${id}${tab}${age_label}${tab}${date_label}${tab}${title}${tab}${reason}${tab}${blocked}"$'\n'
+  done <<< "$records"
+
+  if [ -z "$rows" ]; then
+    printf '(no held captain decisions found)\n'
+    return 0
+  fi
+
+  printf '%s' "$rows" | LC_ALL=C sort -t "$tab" -k1,1nr -k2,2 | while IFS=$'\t' read -r _sort id age_label date_label title reason blocked; do
+    line="- $id ($age_label, $date_label) - $title"
+    [ -n "$reason" ] && [ "$reason" != "-" ] && line="$line; reason: $reason"
+    case "$blocked" in
+      ''|none|\"-\"|-) : ;;
+      *) line="$line; blocked by: $blocked" ;;
+    esac
+    printf '%s\n' "$line"
+  done
+}
+
+print_captain_decision_ages() {  # <backlog-path>
+  local path=$1 records
+  subsection "Held captain decisions (age-ordered)"
+  if [ ! -f "$path" ]; then
+    printf '(no backlog file; no held captain decisions found)\n'
+    return 0
+  fi
+  if [ ! -s "$path" ]; then
+    printf '(present, empty)\n'
+    return 0
+  fi
+  printf 'single source: data/backlog.md; oldest held captain decision first\n'
+  if fm_tasks_axi_backend_available "$CONFIG"; then
+    if records=$(tasks_axi_captain_decision_records "$path" 2>/dev/null); then
+      render_captain_decision_records "$records"
+      return 0
+    fi
+  fi
+  records=$(manual_captain_decision_records "$path")
+  render_captain_decision_records "$records"
+}
+
 print_status_tail() {
   local status=$1
   printf 'status tail (last %s line(s), wake-EVENT history, not current state; full log: %s):\n' "$STATUS_TAIL" "$status"
@@ -341,6 +535,7 @@ print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 # --- 5. fleet-state digest ---------------------------------------------
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
+print_captain_decision_ages "$DATA/backlog.md"
 
 subsection "Work under way (state/*.meta)"
 META_FOUND=0

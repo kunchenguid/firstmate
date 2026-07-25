@@ -119,6 +119,28 @@ case "${1:-}" in
     esac
     case "$*" in *'--limit 80'*) : ;; *) printf '%s\n' 'missing compact limit' >&2; exit 9 ;; esac
     case "$*" in *'--file '*) : ;; *) printf '%s\n' 'missing explicit backlog file' >&2; exit 9 ;; esac
+    case "$*" in
+      *'--state held --kind captain'*)
+        if [ "${FM_FAKE_TASKS_AXI_HELD:-0}" = 1 ]; then
+          cat <<'OUT'
+count: 2
+tasks[2]{id,state,kind,repo,title,created,blocked_by,hold_kind,hold_reason}:
+  newer-choice,queued,captain,firstmate,Choose the newer route,2026-07-24,none,captain,captain newer choice pending
+  older-choice,queued,captain,firstmate,Choose the older route,2026-07-20,none,captain,captain older choice pending
+help[1]:
+  - Run `tasks-axi show <id> --full` for full notes on a task
+OUT
+        else
+          cat <<'OUT'
+count: 0
+tasks[0]{id,state,kind,repo,title,created,blocked_by,hold_kind,hold_reason}:
+help[1]:
+  - Run `tasks-axi ready` to see unblocked queued work
+OUT
+        fi
+        exit 0
+        ;;
+    esac
     cat <<'OUT'
 count: 2
 tasks[2]{id,state,kind,repo,title,blocked_by,hold_kind,hold_reason}:
@@ -755,7 +777,7 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
-  rm -f "$fakebin/node"
+  rm -f "$fakebin/gh-axi"
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
 
@@ -778,7 +800,7 @@ EOF
   [ "$context_line" -lt "$fleet_line" ] || fail "CONTEXT did not precede FLEET STATE"
   [ "$fleet_line" -lt "$next_line" ] || fail "FLEET STATE did not precede NEXT STEP"
 
-  missing_line=$(printf '%s\n' "$out" | grep -n 'MISSING: node' | head -1 | cut -d: -f1)
+  missing_line=$(printf '%s\n' "$out" | grep -n 'MISSING: gh-axi' | head -1 | cut -d: -f1)
   [ -n "$missing_line" ] || fail "MISSING diagnostic did not appear at all"
   [ "$missing_line" -lt "$fleet_line" ] || fail "actionable MISSING diagnostic was buried after the bulk fleet-state digest"
 
@@ -1037,7 +1059,7 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  rm -f "$fakebin/node"
+  rm -f "$fakebin/gh-axi"
 
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
@@ -1047,7 +1069,7 @@ EOF
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
   # fm-bootstrap.sh's own exact MISSING-tool line format.
-  assert_contains "$out" "MISSING: node (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
+  assert_contains "$out" "MISSING: gh-axi (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
   # fm-wake-drain.sh's real drained record (raw tab-separated queue line).
   assert_contains "$out" "$(printf 'signal\ttask-z.status\tneeds-decision: pick a library')" "fm-wake-drain.sh's real drained record did not appear"
   assert_contains "$out" "wake annotation: latest wake-EVENT observed at drain, not current state: task-z.status: needs-decision: pick a library" "fm-session-start.sh did not preserve the drain's separate annotation line"
@@ -1162,6 +1184,97 @@ EOF
   assert_not_contains "$out" "OVERSIZED-BODY-LINE" "unavailable tasks-axi fallback leaked an in-flight task body"
 
   pass "unavailable or incompatible tasks-axi falls back to compact manual backlog rendering"
+}
+
+test_held_captain_decisions_are_age_ordered_with_tasks_axi() {
+  local rec root home fakebin out older_line newer_line log
+  rec=$(new_world held-decisions-tasks-axi)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_tasks_axi_compact "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  write_long_body_backlog "$home/data/backlog.md"
+  log="$home/tasks-axi.log"
+
+  out=$(FM_FAKE_TASKS_AXI_LOG="$log" FM_FAKE_TASKS_AXI_HELD=1 FM_SESSION_START_TODAY=2026-07-25 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "Held captain decisions (age-ordered)" \
+    "session start did not print the held captain decision age block"
+  assert_contains "$out" "single source: data/backlog.md; oldest held captain decision first" \
+    "age block did not state that the backlog is its only source"
+  assert_contains "$out" "- older-choice (age: 5d, since 2026-07-20) - Choose the older route; reason: captain older choice pending" \
+    "older held captain decision was not age annotated"
+  assert_contains "$out" "- newer-choice (age: 1d, since 2026-07-24) - Choose the newer route; reason: captain newer choice pending" \
+    "newer held captain decision was not age annotated"
+  older_line=$(printf '%s\n' "$out" | grep -n -- '- older-choice ' | head -1 | cut -d: -f1)
+  newer_line=$(printf '%s\n' "$out" | grep -n -- '- newer-choice ' | head -1 | cut -d: -f1)
+  [ "$older_line" -lt "$newer_line" ] \
+    || fail "held captain decisions were not ordered oldest first: $out"
+  assert_grep "list --file $home/data/backlog.md --state held --kind captain --limit 80 --fields created,blocked_by,hold_kind,hold_reason" "$log" \
+    "session start did not ask tasks-axi for held captain decisions with created dates"
+
+  pass "held captain decisions render with age annotations and oldest-first ordering from tasks-axi"
+}
+
+write_manual_decision_backlog() {
+  local path=$1
+  cat > "$path" <<'EOF'
+# Backlog
+
+## In flight
+
+## Queued
+- [ ] held-choice - Choose whether to continue the held lane (repo: firstmate) (kind: captain) (since 2026-07-20) (hold: captain lane choice pending) (hold-kind: captain)
+
+## Done
+- [x] delivery-model-choice - Delivery model auto-resolved by convention (repo: firstmate) (kind: captain) (done 2026-07-24)
+EOF
+}
+
+test_held_captain_decision_age_annotation_survives_consecutive_digests() {
+  local rec root home fakebin out1 out2 expected
+  rec=$(new_world held-decisions-consecutive)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  write_manual_decision_backlog "$home/data/backlog.md"
+  expected="- held-choice (age: 5d, since 2026-07-20) - Choose whether to continue the held lane; reason: captain lane choice pending"
+
+  out1=$(FM_SESSION_START_TODAY=2026-07-25 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  rm -f "$home/state/.lock"
+  out2=$(FM_SESSION_START_TODAY=2026-07-25 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out1" "$expected" "first digest did not age-annotate the held captain decision"
+  assert_contains "$out2" "$expected" "second consecutive digest did not age-annotate the held captain decision"
+
+  pass "a held captain decision stays age-annotated across consecutive session-start digests"
+}
+
+test_delivery_model_decision_remains_backlog_done_not_held() {
+  local rec root home fakebin out
+  rec=$(new_world delivery-model-auto-resolved)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  write_manual_decision_backlog "$home/data/backlog.md"
+
+  out=$(FM_SESSION_START_TODAY=2026-07-25 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "- [x] delivery-model-choice - Delivery model auto-resolved by convention" \
+    "auto-resolved delivery-model decision did not remain visible as a Done backlog item"
+  assert_not_contains "$out" "- delivery-model-choice (age:" \
+    "auto-resolved delivery-model decision was incorrectly surfaced as a held captain decision"
+
+  pass "a delivery-model decision can land as a Done backlog item auto-resolved by convention"
 }
 
 # --- fleet-state digest: no in-flight tasks ----------------------------------
@@ -1374,6 +1487,9 @@ test_composition_invokes_real_scripts
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
+test_held_captain_decisions_are_age_ordered_with_tasks_axi
+test_held_captain_decision_age_annotation_survives_consecutive_digests
+test_delivery_model_decision_remains_backlog_done_not_held
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon

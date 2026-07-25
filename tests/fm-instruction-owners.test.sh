@@ -258,6 +258,20 @@ test_intake_reuses_evidence_and_parallelizes_safe_work() {
   pass "intake reuses evidence, reserves scouts for uncertainty, and parallelizes safe work"
 }
 
+test_decide_dont_ask_uses_backlog_single_obligation_store() {
+  for phrase in \
+    'Decide, do not ask: firstmate makes routine implementation, routing, validation, and delivery-model choices inside the accepted task contract' \
+    'records useful precedent on the backlog item' \
+    'does not open a captain decision for choices it can own' \
+    'Escalate only choices that are external, money-related, irreversible, reserved, security-sensitive, destructive, credential-related, merge/discard authority' \
+    'hold for the captain in the backlog rather than creating another reminder or decision system' \
+    "It is firstmate's single obligation store" \
+    'do not add parallel obligation registers, reminder ledgers, or decision databases for firstmate behavior'; do
+    assert_grep "$phrase" "$AGENTS" "decide-dont-ask or single-obligation-store contract lost '$phrase'"
+  done
+  pass "AGENTS.md owns decide-dont-ask and the backlog-only obligation contract"
+}
+
 test_compressed_agents_retains_authority_and_supervision_safety() {
   for phrase in \
     'A lock-refused session must not spawn, steer, merge, drain the wake queue' \
@@ -297,4 +311,5 @@ test_secondmate_registry_contract_stays_concise
 test_state_startup_and_ordinary_recovery_placement
 test_compressed_agents_owner_map
 test_intake_reuses_evidence_and_parallelizes_safe_work
+test_decide_dont_ask_uses_backlog_single_obligation_store
 test_compressed_agents_retains_authority_and_supervision_safety
