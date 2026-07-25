@@ -8,7 +8,7 @@ When this session owns supervision and away mode is not active:
 3. On a `Stop hook feedback` wake (`signal:`, `stale:`, `check:`, or `heartbeat`), run `bin/fm-wake-drain.sh` first and handle the wake.
    Do not run `bin/fm-watch-arm.sh` after an ordinary wake; the next turn end re-arms automatically when supervision is still needed.
    Do not invent a wake from an attach-status line alone; drain and act only on real wake records or a real watcher reason line.
-4. On a `Stop hook feedback` watcher-failure wake (`watcher: FAILED ...`) or loud delivered-close wake (`watcher: cycle closed with a delivered wake ...; no live cycle remains`), treat it as an alarm: drain, then repair supervision before ending the turn.
+4. On a `Stop hook feedback` watcher-failure wake (`watcher: FAILED ...`), treat it as an alarm: drain, then repair supervision before ending the turn.
 5. Manual arm is recovery only.
    When a repair is genuinely needed - the Stop hook did not claim this home, or a forced restart is required - run `bin/fm-watch-arm.sh` (or `bin/fm-watch-arm.sh --restart`) as its own Claude Code background task, never bundled with other commands, never with shell `&`.
    Source `__FM_X_MODE_ENV__` first when X mode is active.
@@ -16,9 +16,9 @@ When this session owns supervision and away mode is not active:
 6. Treat `watcher: started ...` and `watcher: attached ...` inside arm output as proof that one live cycle exists.
    On attach, the arm follows verified identity-matched successors instead of exiting when the first cycle ends.
    `watcher: cycle closed with a delivered wake ...; no live cycle remains` means an attached arm's cycle closed for a wake its owning arm already reported, so do not act on it as a second wake.
-   The line stays loud and exits nonzero because supervision is down; repair or re-arm before ending the turn.
-7. The continuity PreToolUse gate allows wake drain, watcher arm recovery, and fail-closed teardown, and refuses other `bin/fm-*.sh` fleet commands whenever tasks are in flight and no identity-matched live watcher holds the home lock.
-   This refusal also applies during the expected post-wake gap, so establish a recovery arm before reading crew state, merging, or dispatching.
+   That attached arm exits cleanly so the Stop hook stays silent instead of duplicating the owner's wake.
+7. The continuity PreToolUse gate allows wake drain, watcher arm recovery, fail-closed teardown, and the expected post-wake handling gap.
+   A recent delivered-wake owner record allows crew-state reads and other fleet commands for `FM_CONTINUITY_GAP_GRACE` seconds, default 1800; an absent, stale, or superseded record keeps the normal refusal.
 8. The turn-end guard (`bin/fm-turnend-guard.sh --claude`) remains the final backstop.
    It allows the stop when a watcher is healthy, when the auto-arm already owns recovery for this event epoch, or when a fresh rewake is recorded; it re-blocks only when none of those materialize, within a bounded budget.
 9. Waiting on the hook-owned cycle is silent: do not send idle progress while the watcher is parked.

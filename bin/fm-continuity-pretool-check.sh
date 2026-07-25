@@ -4,12 +4,19 @@
 # This hook is deliberately narrow. It denies only an executed bin/fm-*.sh fleet
 # command other than bin/fm-wake-drain.sh, bin/fm-watch-arm.sh, or the
 # independently fail-closed bin/fm-teardown.sh, and only when the active primary
-# home has task metadata in flight but no identity-matched live watcher holds the
-# home lock. Ordinary shell commands, recovery commands, healthy supervision,
-# fleet-idle homes, and child worktrees are always allowed.
+# home has task metadata in flight, no identity-matched live watcher holds the
+# home lock, and the missing watcher is unexplained. Ordinary shell commands,
+# recovery commands, healthy supervision, the recorded post-wake gap, fleet-idle
+# homes, and child worktrees are always allowed.
+#
+# The watcher is one-shot and its arm exit is the wake notification, so the home
+# is deliberately unwatched while Claude handles that wake. A recent actionable
+# owner row in the cycle ledger explains this gap. FM_CONTINUITY_GAP_GRACE bounds
+# it so a session that never re-arms is refused again.
 #
 # The turn-end guard remains the final backstop, cooperating with the
-# Stop-owned auto-arm in its --claude mode. This gate closes the long-turn gap
+# Stop-owned auto-arm in its --claude mode, and prevents a turn from ending in
+# the explained gap. This gate still closes an unexplained supervision gap
 # before another fleet mutation, but does not replace or weaken the Stop hooks.
 #
 # Input is Claude PreToolUse JSON on stdin. Tests may pass --command directly.
@@ -28,6 +35,9 @@ Usage: fm-continuity-pretool-check.sh [--command <shell-command>]
 Reads Claude PreToolUse JSON from stdin unless --command is supplied.
 Exits 0 to allow. Exits 2 with a Claude deny object on stderr only when an
 unhealthy primary tries to execute a non-recovery firstmate fleet script.
+
+A missing watcher whose latest owner cycle delivered a wake within
+FM_CONTINUITY_GAP_GRACE seconds (default 1800) is allowed.
 EOF
 }
 
@@ -70,6 +80,8 @@ FM_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 POLICY="$SCRIPT_DIR/fm-continuity-command-policy.mjs"
+GAP_GRACE=${FM_CONTINUITY_GAP_GRACE:-1800}
+case "$GAP_GRACE" in ''|*[!0-9]*) GAP_GRACE=1800 ;; esac
 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
@@ -77,6 +89,8 @@ POLICY="$SCRIPT_DIR/fm-continuity-command-policy.mjs"
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-watch-cycle-lib.sh
+. "$SCRIPT_DIR/fm-watch-cycle-lib.sh"
 
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 fm_supervision_status "$STATE" "${FM_GUARD_GRACE:-300}"
@@ -85,6 +99,8 @@ LOCK_PID=$(cat "$STATE/.watch.lock/pid" 2>/dev/null || true)
 if fm_pid_alive "$LOCK_PID" && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$LOCK_PID" "$FM_HOME"; then
   exit 0
 fi
+
+fm_cycle_close_explained "$STATE" "$GAP_GRACE" && exit 0
 
 command -v node >/dev/null 2>&1 || exit 0
 [ -f "$POLICY" ] || exit 0

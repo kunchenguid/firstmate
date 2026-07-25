@@ -17,13 +17,14 @@
 # means the observer could not account for the close.
 #
 # That asymmetry is the reason this library exists. Only the owning arm can see a
-# cycle's wake output, so an arm merely ATTACHED to that same watcher otherwise
-# has no way to tell a delivered wake apart from a watcher that vanished. Reading
-# the owner's own record keeps its close wording honest without deciding whether
-# supervision is healthy.
+# cycle's wake output, so an arm merely ATTACHED to that same watcher, and the
+# PreToolUse continuity gate looking at the home afterwards, otherwise have no
+# way to tell a delivered wake apart from a watcher that vanished. Reading the
+# owner's own record keeps both verdicts honest.
 #
 # Readers:
 #   bin/fm-watch-arm.sh                  attached-close classification
+#   bin/fm-continuity-pretool-check.sh   explained post-wake gap
 #
 # Every query is evidence-based and fails toward "not explained": a missing,
 # unreadable, noncanonical, ambiguous, or truncated ledger returns false, so an
@@ -44,19 +45,16 @@ fm_cycle_clean_field() {
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-512
 }
 
-# fm_cycle_pid_closed_actionably <state-dir> <watcher-pid> <not-before-epoch>
-# True when a complete owner record says <watcher-pid> closed for a delivered
-# wake at or after <not-before-epoch>.
-fm_cycle_pid_closed_actionably() {
+# One canonical parser backs both readers so the ledger schema has one owner.
+fm_cycle_query() {
   local log='' final_newline='' now=''
-  case "$2" in ''|*[!0-9]*) return 1 ;; esac
-  case "$3" in ''|*[!0-9]*) return 1 ;; esac
   log=$(fm_cycle_log_path "$1")
   [ -s "$log" ] || return 1
   final_newline=$(tail -c 1 "$log" 2>/dev/null | wc -l | tr -d '[:space:]')
   [ "$final_newline" = 1 ] || return 1
   now=$(date +%s)
-  awk -v want="$2" -v floor="$3" -v now="$now" '
+  awk -v mode="$2" -v want_pid="${3:-}" -v floor="${4:-}" \
+    -v want_lock="${5:-}" -v maxage="${6:-}" -v now="$now" '
     BEGIN { FS = "\t" }
     {
       if (NF != 12 ||
@@ -80,13 +78,57 @@ fm_cycle_pid_closed_actionably() {
       started = substr($4, 12) + 0
       ended = substr($5, 10) + 0
       reason = substr($8, 8)
+      lock_before = substr($10, 13)
       if (ended < started || started > now + 0 || ended > now + 0) {
         invalid = 1
         next
       }
-      if (pid == want && origin == "started" && ended >= floor + 0 &&
-          reason ~ /^actionable-/) found = 1
+      if (mode == "instance" && pid == want_pid && origin == "started" &&
+          ended >= floor + 0 && lock_before == want_lock) {
+        matches += 1
+        matched_reason = reason
+      }
+      if (mode == "latest" && origin == "started") {
+        latest_found = 1
+        latest_ended = ended
+        latest_reason = reason
+      }
     }
-    END { if (!invalid && found) exit 0; exit 1 }
+    END {
+      if (invalid) exit 1
+      if (mode == "instance") {
+        if (want_pid !~ /^[0-9][0-9]*$/ ||
+            floor !~ /^[0-9][0-9]*$/ ||
+            want_lock == "" ||
+            matches != 1) exit 1
+        exit matched_reason ~ /^actionable-/ ? 0 : 1
+      }
+      if (mode == "latest") {
+        if (maxage !~ /^[0-9][0-9]*$/ || !latest_found) exit 1
+        age = now - latest_ended
+        if (age < 0 || age > maxage + 0) exit 1
+        exit latest_reason ~ /^actionable-/ ? 0 : 1
+      }
+      exit 1
+    }
   ' "$log" 2>/dev/null
+}
+
+# fm_cycle_pid_closed_actionably <state-dir> <watcher-pid> <not-before-epoch> <lock-identity>
+# True when exactly one complete owner record says the exact watcher instance
+# closed for a delivered wake at or after <not-before-epoch>.
+fm_cycle_pid_closed_actionably() {
+  case "$2" in ''|*[!0-9]*) return 1 ;; esac
+  case "$3" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$4" ] || return 1
+  fm_cycle_query "$1" instance "$2" "$3" "$4"
+}
+
+# fm_cycle_close_explained <state-dir> <max-age-seconds>
+# True when the latest owner record in append order is a delivered wake no older
+# than <max-age-seconds>. Append order, not wall-clock ordering, decides which
+# cycle supersedes which; timestamps only bound the resulting handling gap.
+fm_cycle_close_explained() {
+  case "$2" in ''|*[!0-9]*) return 1 ;; esac
+  fm_cycle_query "$1" latest '' '' '' "$2"
 }

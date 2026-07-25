@@ -639,13 +639,13 @@ test_attached_arm_reports_the_owners_delivered_wake_not_a_failure() {
   grep -qF "watcher: cycle closed with a delivered wake pid=$TWO_ARM_WATCHER_PID" "$TWO_ARM_DIR/attached.out" \
     || fail "attached arm did not account for the owner-delivered close: $(cat "$TWO_ARM_DIR/attached.out")"
   grep -qF 'no live cycle remains' "$TWO_ARM_DIR/attached.out" \
-    || fail "attached arm did not say that supervision must recover: $(cat "$TWO_ARM_DIR/attached.out")"
-  [ "$attached_status" -ne 0 ] && [ "$attached_status" -ne 124 ] \
-    || fail "attached arm did not stay loud after an owner-delivered close (status $attached_status)"
+    || fail "attached arm did not identify the closed cycle: $(cat "$TWO_ARM_DIR/attached.out")"
+  [ "$attached_status" -eq 0 ] \
+    || fail "attached arm exited $attached_status after an owner-delivered close"
   # The observer must not manufacture a second wake for an already-delivered one.
   ! grep -qE '^(signal:|stale:|check:|heartbeat)' "$TWO_ARM_DIR/attached.out" \
     || fail "attached arm duplicated the owner's wake reason: $(cat "$TWO_ARM_DIR/attached.out")"
-  pass "an attached arm reports the owner's delivered wake accurately and exits non-zero"
+  pass "an attached arm reports the owner's delivered wake and exits cleanly"
 }
 
 # Preservation guard: the ledger consult must not regress upstream's unexplained-close alarm, and this cannot fail against the diff because that path is deliberately unchanged.
@@ -679,22 +679,29 @@ test_attached_cycle_reader_requires_canonical_current_owner_row() {
   now=$(date +%s)
   printf 'arm_pid=1\twatcher_pid=4242\torigin=started\tstarted_at=%s\tended_at=%s\texit_code=0\tsignal=none\treason=actionable-signal\tbeacon_age=1\tlock_before=pid:none|identity:none\tlock_after=pid:none|identity:none\tsuccessor=none\n' \
     "$((now - 2))" "$now" > "$state/.watch-cycle-exits.log"
-  bash -c '. "$1"; fm_cycle_pid_closed_actionably "$2" "$3" "$4"' \
-    _ "$CYCLE_LIB" "$state" 4242 "$((now - 5))" \
+  bash -c '. "$1"; fm_cycle_pid_closed_actionably "$2" "$3" "$4" "$5"' \
+    _ "$CYCLE_LIB" "$state" 4242 "$((now - 5))" 'pid:none|identity:none' \
     || fail "canonical current owner row did not prove the delivered wake"
 
   printf 'arm_pid=1\twatcher_pid=4242\torigin=started\tstarted_at=%s\tended_at=%s\texit_code=0\tsignal=none\treason=actionable-signal' \
     "$((now - 2))" "$now" > "$state/.watch-cycle-exits.log"
-  if bash -c '. "$1"; fm_cycle_pid_closed_actionably "$2" "$3" "$4"' \
-    _ "$CYCLE_LIB" "$state" 4242 "$((now - 5))"; then
+  if bash -c '. "$1"; fm_cycle_pid_closed_actionably "$2" "$3" "$4" "$5"' \
+    _ "$CYCLE_LIB" "$state" 4242 "$((now - 5))" 'pid:none|identity:none'; then
     fail "truncated owner row was accepted as delivered-wake proof"
   fi
 
   printf 'arm_pid=1\twatcher_pid=4242\torigin=started\tstarted_at=%s\tended_at=%s\texit_code=0\tsignal=none\treason=actionable-signal\tbeacon_age=1\tlock_before=pid:none|identity:none\tlock_after=pid:none|identity:none\tsuccessor=none\n' \
     "$((now + 1))" "$((now + 2))" > "$state/.watch-cycle-exits.log"
-  if bash -c '. "$1"; fm_cycle_pid_closed_actionably "$2" "$3" "$4"' \
-    _ "$CYCLE_LIB" "$state" 4242 "$((now - 5))"; then
+  if bash -c '. "$1"; fm_cycle_pid_closed_actionably "$2" "$3" "$4" "$5"' \
+    _ "$CYCLE_LIB" "$state" 4242 "$((now - 5))" 'pid:none|identity:none'; then
     fail "future-dated owner row was accepted as delivered-wake proof"
+  fi
+
+  printf 'arm_pid=1\twatcher_pid=4242\torigin=started\tstarted_at=%s\tended_at=%s\texit_code=0\tsignal=none\treason=actionable-signal\tbeacon_age=1\tlock_before=pid:4242|identity:old-instance\tlock_after=pid:none|identity:none\tsuccessor=none\n' \
+    "$((now - 2))" "$now" > "$state/.watch-cycle-exits.log"
+  if bash -c '. "$1"; fm_cycle_pid_closed_actionably "$2" "$3" "$4" "$5"' \
+    _ "$CYCLE_LIB" "$state" 4242 "$now" 'pid:4242|identity:new-instance'; then
+    fail "same-second row from a different watcher identity answered for a reused pid"
   fi
   pass "attached-cycle reader accepts only canonical current owner evidence"
 }

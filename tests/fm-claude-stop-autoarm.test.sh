@@ -74,6 +74,29 @@ run_autoarm() {
   return "$rc"
 }
 
+is_live_non_zombie() {
+  local pid=$1 stat
+  kill -0 "$pid" 2>/dev/null || return 1
+  stat=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+  case "$stat" in Z*) return 1 ;; esac
+  return 0
+}
+
+wait_for_exit() {
+  local pid=$1 limit=${2:-50} i=0
+  while [ "$i" -lt "$limit" ]; do
+    if ! is_live_non_zombie "$pid"; then
+      wait "$pid"
+      return "$?"
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  return 124
+}
+
 # Arm fixture variants, installed per test as <dir>/bin/fm-watch-arm.sh.
 write_arm_fixture() {
   local dir=$1 kind=$2
@@ -351,6 +374,76 @@ test_active_in_marked_secondmate_home() {
   pass "auto-arm: active in a marked secondmate home"
 }
 
+test_real_arm_overlap_delivered_close_stays_clean() {
+  local dir owner_pid harness_pid watcher_pid owner_rc=0 harness_rc=0 autoarm_rc i
+  dir=$(make_primary_dir "$TMP_ROOT/real-overlap")
+  cp -R "$ROOT/bin/." "$dir/bin/"
+  fm_fake_exit0 "$FAKEBIN" tmux
+  printf 'project=fixture\nwindow=w\n' > "$dir/state/t1.meta"
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$dir/state/.pr-check-migration-scan-v1"
+  printf '%s\n' fm-pr-check-migration-v1 > "$dir/state/.pr-check-migration-v1"
+  chmod 0600 "$dir/state/.pr-check-migration-scan-v1" "$dir/state/.pr-check-migration-v1"
+
+  PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=2 \
+    "$dir/bin/fm-watch-arm.sh" > "$dir/state/owner.out" 2>&1 &
+  owner_pid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -q 'watcher: started pid=' "$dir/state/owner.out" 2>/dev/null && break
+    is_live_non_zombie "$owner_pid" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  watcher_pid=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).*/\1/p' "$dir/state/owner.out" | head -1)
+  if [ -z "$watcher_pid" ]; then
+    kill "$owner_pid" 2>/dev/null || true
+    wait "$owner_pid" 2>/dev/null || true
+    fail "real owner arm never confirmed its watcher: $(cat "$dir/state/owner.out")"
+  fi
+
+  PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=2 \
+    "$FAKE_CLAUDE" -c '
+      printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+      printf "%s\n" "{\"session_id\":\"real-overlap\"}" \
+        | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/state/stop.out" 2>&1
+      printf "%s\n" "$?" > "$FM_HOME/state/autoarm.rc"
+    ' &
+  harness_pid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -q "watcher: attached pid=$watcher_pid" "$dir"/state/.claude-autoarm-output.* 2>/dev/null && break
+    is_live_non_zombie "$harness_pid" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if ! grep -q "watcher: attached pid=$watcher_pid" "$dir"/state/.claude-autoarm-output.* 2>/dev/null; then
+    kill "$harness_pid" "$owner_pid" 2>/dev/null || true
+    wait "$harness_pid" 2>/dev/null || true
+    wait "$owner_pid" 2>/dev/null || true
+    fail "real Stop-owned arm did not attach to watcher $watcher_pid"
+  fi
+
+  printf 'done: PR opened\n' >> "$dir/state/t1.status"
+  wait_for_exit "$owner_pid" 150 || owner_rc=$?
+  wait_for_exit "$harness_pid" 150 || harness_rc=$?
+  autoarm_rc=$(cat "$dir/state/autoarm.rc" 2>/dev/null || true)
+
+  [ "$owner_rc" -eq 0 ] || fail "real owner arm failed after its delivered wake: $(cat "$dir/state/owner.out")"
+  grep -q '^signal:' "$dir/state/owner.out" || fail "real owner arm omitted its delivered wake"
+  [ "$harness_rc" -eq 0 ] || fail "fake Claude harness timed out waiting for the real Stop hook"
+  [ "$autoarm_rc" = 0 ] || fail "real Stop auto-arm returned $autoarm_rc for an already-delivered wake: $(cat "$dir/state/stop.out")"
+  [ ! -s "$dir/state/stop.out" ] || fail "real Stop auto-arm duplicated the delivered wake: $(cat "$dir/state/stop.out")"
+  grep -q "watcher_pid=$watcher_pid.*origin=started.*reason=actionable-" "$dir/state/.watch-cycle-exits.log" \
+    || fail "real owner arm did not record the delivered wake"
+  grep -q "watcher_pid=$watcher_pid.*origin=attached.*reason=attached-cycle-ended" "$dir/state/.watch-cycle-exits.log" \
+    || fail "real Stop-owned attached arm did not record its observation"
+  pass "auto-arm: real Stop overlap closes cleanly after the owner delivers one wake"
+}
+
 test_fm_lock_status_still_works_with_shared_lib() {
   local out
   out=$(FM_HOME="$TMP_ROOT/lock-status-home" bash "$ROOT/bin/fm-lock.sh" status 2>&1)
@@ -372,4 +465,5 @@ test_single_flight_admits_exactly_one_owner
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
+test_real_arm_overlap_delivered_close_stays_clean
 test_fm_lock_status_still_works_with_shared_lib
