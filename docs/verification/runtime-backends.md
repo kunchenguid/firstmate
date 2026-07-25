@@ -54,7 +54,7 @@ fatal: xreallocarray: zero size
 
 Agents set their pane title from their own launch prompt, so a launch prompt carrying U+2063 killed every window on the server within seconds of each spawn.
 This defect is upstream and is not worked around in Firstmate.
-The Firstmate-side guarantee it requires - the `launch-brief` envelope contains no U+2063 in any position, while every injected kind keeps its mark - is owned by `bin/fm-operational-input.sh` and pinned by:
+The Firstmate-side guarantee it requires - an encoded `launch-brief` envelope contains no U+2063 in any position, because its header is the marked header minus the mark and the encoder strips the mark from the captain-supplied body, while every injected kind keeps its mark - is owned by `bin/fm-operational-input.sh` and pinned by:
 
 ```sh
 tests/fm-operational-input.test.sh

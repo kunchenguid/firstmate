@@ -94,6 +94,38 @@ test_launch_brief_carries_no_zero_width_mark() {
   pass "operational input: launch-brief encodes with zero U+2063 bytes in any position"
 }
 
+test_launch_brief_body_cannot_reintroduce_the_mark() {
+  local marked_body encoded cli_encoded injected
+
+  # A launch-brief body is verbatim captain-supplied brief text: a charter or
+  # task description that pastes an operational message would otherwise put
+  # U+2063 back into the agent's pane title and abort the whole tmux server.
+  marked_body="LAUNCH ${FM_OPERATIONAL_MARK}BODY${FM_OPERATIONAL_MARK}"
+  fm_operational_input_encode launch-brief "$marked_body" encoded \
+    || fail "could not encode a launch-brief body carrying U+2063"
+  [ "$encoded" = "FIRSTMATE_OP: v1 launch-brief: LAUNCH BODY" ] \
+    || fail "launch-brief body stripping changed more than U+2063: $encoded"
+  case "$(printf '%s' "$encoded" | od -An -tx1 | tr -d ' \n')" in
+    *e281a3*) fail "a launch-brief body reintroduced U+2063 into the envelope" ;;
+  esac
+
+  cli_encoded=$(printf '%s' "$marked_body" | "$OWNER" encode launch-brief) \
+    || fail "CLI could not encode a launch-brief body carrying U+2063"
+  [ "$cli_encoded" = "$encoded" ] \
+    || fail "CLI launch-brief body stripping diverged from the library"
+
+  # A body that is nothing but marks encodes to no body at all: invalid use.
+  fm_operational_input_encode launch-brief "$FM_OPERATIONAL_MARK" encoded \
+    && fail "an all-U+2063 launch-brief body was accepted as an empty envelope"
+
+  # Injected kinds are untouched: their bodies stay byte-verbatim.
+  fm_operational_input_encode watcher "$marked_body" injected \
+    || fail "could not encode an injected body carrying U+2063"
+  [ "$injected" = "${FM_OPERATIONAL_HEADER_PREFIX}watcher: ${marked_body}" ] \
+    || fail "an injected kind's body was altered by launch-brief mark stripping"
+  pass "operational input: a launch-brief body cannot carry U+2063 while injected bodies stay verbatim"
+}
+
 test_unmarked_header_is_rejected_for_injected_kinds() {
   local kind forged parsed body
   for kind in session-start watcher turn-end-guard away-supervisor; do
@@ -155,6 +187,67 @@ test_generic_split_does_not_shadow_caller_result_variables() {
       || fail "split shadowed a caller body variable named $name (got '$body_probe')"
   done
   pass "operational input: envelope splitting never shadows a caller's result variable"
+}
+
+test_public_entry_points_do_not_shadow_caller_result_variables() {
+  local encoded name probe
+  fm_operational_input_encode watcher 'SHADOW BODY' encoded \
+    || fail "could not encode the public shadowing fixture"
+
+  # The splitter is not the only function with the hazard: every public
+  # <result-var> entry point writes with printf -v into a caller-supplied name.
+  for name in kind body message remainder parsed_kind parsed_body current_kind \
+              header result_var value transformed classified_kind; do
+    unset -v "$name"
+    eval "fm_operational_input_kind \"\$encoded\" $name" \
+      || fail "fm_operational_input_kind failed writing into a caller variable named $name"
+    eval "probe=\${$name-}"
+    [ "$probe" = watcher ] \
+      || fail "fm_operational_input_kind shadowed a caller variable named $name (got '$probe')"
+
+    unset -v "$name"
+    eval "fm_operational_generic_kind \"\$encoded\" $name" \
+      || fail "fm_operational_generic_kind failed writing into a caller variable named $name"
+    eval "probe=\${$name-}"
+    [ "$probe" = watcher ] \
+      || fail "fm_operational_generic_kind shadowed a caller variable named $name (got '$probe')"
+
+    unset -v "$name"
+    eval "fm_operational_input_classify \"\$encoded\" $name" \
+      || fail "fm_operational_input_classify failed writing into a caller variable named $name"
+    eval "probe=\${$name-}"
+    [ "$probe" = watcher ] \
+      || fail "fm_operational_input_classify shadowed a caller variable named $name (got '$probe')"
+
+    unset -v "$name"
+    eval "fm_operational_input_body \"\$encoded\" $name" \
+      || fail "fm_operational_input_body failed writing into a caller variable named $name"
+    eval "probe=\${$name-}"
+    [ "$probe" = 'SHADOW BODY' ] \
+      || fail "fm_operational_input_body shadowed a caller variable named $name (got '$probe')"
+
+    unset -v "$name"
+    eval "fm_operational_input_encode watcher 'SHADOW BODY' $name" \
+      || fail "fm_operational_input_encode failed writing into a caller variable named $name"
+    eval "probe=\${$name-}"
+    [ "$probe" = "$encoded" ] \
+      || fail "fm_operational_input_encode shadowed a caller variable named $name (got '$probe')"
+
+    unset -v "$name"
+    eval "fm_operational_input_construct from-firstmate 'SHADOW BODY' $name" \
+      || fail "fm_operational_input_construct failed writing into a caller variable named $name"
+    eval "probe=\${$name-}"
+    [ "$probe" = "${FM_FROMFIRST_MARK}SHADOW BODY" ] \
+      || fail "fm_operational_input_construct shadowed a caller variable named $name (got '$probe')"
+
+    unset -v "$name"
+    eval "fm_operational_read_stdin $name <<<'SHADOW STDIN'" \
+      || fail "fm_operational_read_stdin failed writing into a caller variable named $name"
+    eval "probe=\${$name-}"
+    [ "$probe" = $'SHADOW STDIN\n' ] \
+      || fail "fm_operational_read_stdin shadowed a caller variable named $name (got '$probe')"
+  done
+  pass "operational input: no public entry point shadows a caller's result variable"
 }
 
 test_current_from_firstmate_carrier() {
@@ -263,8 +356,10 @@ test_invalid_current_encodings_are_rejected() {
 test_current_generic_matrix
 test_injected_kinds_keep_the_leading_mark
 test_launch_brief_carries_no_zero_width_mark
+test_launch_brief_body_cannot_reintroduce_the_mark
 test_unmarked_header_is_rejected_for_injected_kinds
 test_generic_split_does_not_shadow_caller_result_variables
+test_public_entry_points_do_not_shadow_caller_result_variables
 test_current_from_firstmate_carrier
 test_landed_untyped_prefix_is_explicitly_legacy
 test_isolated_legacy_matrix

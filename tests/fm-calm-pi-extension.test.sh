@@ -1792,9 +1792,13 @@ if (current.length !== expected.size) {
 for (const [needle, kind] of expected) {
   const entry = current.find((candidate) => JSON.stringify(candidate.message.content).includes(needle));
   const text = entry?.message.content?.find((item) => item.type === "text")?.text;
+  // launch-brief is never injected, so its versioned envelope carries no
+  // U+2063: bin/fm-operational-input.sh owns both wire forms.
   const exactEnvelope = kind === "from-firstmate"
     ? text?.startsWith("[fm-from-firstmate]\u2063corr=0123456789abcdef ")
-    : text?.startsWith(`\u2063FIRSTMATE_OP: v1 ${kind}: `);
+    : kind === "launch-brief"
+      ? text?.startsWith(`FIRSTMATE_OP: v1 ${kind}: `) && !text.includes("\u2063")
+      : text?.startsWith(`\u2063FIRSTMATE_OP: v1 ${kind}: `);
   if (!entry || !exactEnvelope) {
     throw new Error(`expected exact user-role ${needle} as ${kind}, found ${JSON.stringify(entry)}`);
   }
@@ -1818,11 +1822,13 @@ JS
     CURRENT_WATCHER_E2E \
     CURRENT_TURN_END_E2E \
     CURRENT_AWAY_E2E \
-    CURRENT_FROM_FIRSTMATE_E2E \
-    CURRENT_LAUNCH_BRIEF_E2E
+    CURRENT_FROM_FIRSTMATE_E2E
   do
     assert_not_contains "$(cat "$active_hidden_snapshot")" "$hidden" "Calm rendered operational input $hidden"
   done
+  # launch-brief is never injected and carries the unmarked envelope, so Calm's
+  # U+2063 gate never classifies it as operational: it stays visible.
+  assert_contains "$(cat "$active_hidden_snapshot")" "CURRENT_LAUNCH_BRIEF_E2E" "Calm hid the unmarked launch-brief envelope"
   assert_contains "$(cat "$active_hidden_snapshot")" "Warning: CALM_TRANSIENT_DIAGNOSTIC" "operational arrival lost its preceding transient diagnostic"
   assert_contains "$(cat "$active_hidden_snapshot")" " Error:" "operational delivery did not produce a transient provider diagnostic"
   hash_before=$(shasum -a 256 "$session_file" | awk '{print $1}')
@@ -1955,11 +1961,11 @@ JS
     CURRENT_WATCHER_E2E \
     CURRENT_TURN_END_E2E \
     CURRENT_AWAY_E2E \
-    CURRENT_FROM_FIRSTMATE_E2E \
-    CURRENT_LAUNCH_BRIEF_E2E
+    CURRENT_FROM_FIRSTMATE_E2E
   do
     assert_not_contains "$(cat "$restarted_snapshot")" "$hidden" "restart/resume rendered operational input $hidden"
   done
+  assert_contains "$(cat "$restarted_snapshot")" "CURRENT_LAUNCH_BRIEF_E2E" "restart/resume hid the unmarked launch-brief envelope"
   assert_not_contains "$(cat "$restarted_snapshot")" "calm transcript" "restart/resume added a persistent Calm status row"
   assert_contains "$(cat "$restarted_snapshot")" "CALM_WORKING_E2E_PROMPT" "restart/resume removed a genuine user prompt"
   assert_contains "$(cat "$restarted_snapshot")" "CALM_WORKING_E2E_RESPONSE" "restart/resume removed a genuine assistant response"
