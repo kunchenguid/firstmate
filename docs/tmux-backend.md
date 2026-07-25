@@ -81,6 +81,7 @@ Ambiguous pending text never receives the busy-queue conversion.
 - tmux is the reference path and supports secondmate homes.
 - Existing Pi agent-process liveness is inconclusive, while an authoritatively missing Pi window can trigger recovery.
 - The OpenCode busy-queue exception is tmux-specific; Herdr retains its separately documented gap.
+- tmux 3.7b aborts the whole server on a pane title containing U+2063, and an agent titles its pane from its own launch prompt, so the launch prompt must stay free of that mark; `bin/fm-operational-input.sh` owns the mark-free `launch-brief` envelope.
 
 ```sh
 tests/fm-backend-tmux-smoke.test.sh

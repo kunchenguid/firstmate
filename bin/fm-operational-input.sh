@@ -5,8 +5,16 @@
 # by JavaScript and TypeScript integrations. It is the single owner of current
 # construction, current parsing, and narrow pre-protocol transcript parsing.
 #
-# Current generic wire form:
+# Current generic wire form, for every kind INJECTED into a running agent:
 #   U+2063 FIRSTMATE_OP: v1 <kind>: <body>
+#
+# Current generic wire form, for a kind listed in FM_OPERATIONAL_UNMARKED_KINDS:
+#   FIRSTMATE_OP: v1 <kind>: <body>
+#
+# The unmarked form is the marked form minus its leading U+2063, and is accepted
+# on parse ONLY for a declared unmarked kind, so no injected kind can be forged
+# without the mark. See FM_OPERATIONAL_UNMARKED_KINDS below for why launch-brief
+# is the one kind that carries it.
 #
 # The landed U+2063 + "FIRSTMATE_OP: " prefix is permanent compatibility.
 # The version and kind header make current inputs structurally typed without
@@ -30,6 +38,37 @@ FM_OPERATIONAL_VERSION=v1
 FM_OPERATIONAL_HEADER_PREFIX="${FM_OPERATIONAL_PREFIX}${FM_OPERATIONAL_VERSION} "
 FM_OPERATIONAL_KINDS='session-start watcher turn-end-guard away-supervisor launch-brief'
 
+# launch-brief is the one kind that is never INJECTED into a running agent: it is
+# passed as the agent's argv launch prompt by bin/fm-spawn.sh. The leading U+2063
+# mark exists to make injected input unforgeable by a human typing at a composer,
+# a property an argv launch prompt cannot need, so launch-brief carries the same
+# versioned envelope without the zero-width mark. Every injected kind keeps the
+# marked envelope and its anti-forgery guarantee unchanged.
+#
+# This is load-bearing, not cosmetic: agents set their terminal pane title from
+# their own launch prompt, and tmux 3.7b aborts the ENTIRE server on a title
+# containing U+2063 ("utf8proc_wcwidth(02063) returned 0" ->
+# "fatal: xreallocarray: zero size"), killing every window at once.
+FM_OPERATIONAL_UNMARKED_KINDS='launch-brief'
+# Derived, never re-typed: the unmarked header is exactly the marked header with
+# its leading U+2063 removed, so the two forms cannot drift apart.
+FM_OPERATIONAL_UNMARKED_HEADER_PREFIX="${FM_OPERATIONAL_HEADER_PREFIX#"$FM_OPERATIONAL_MARK"}"
+
+fm_operational_kind_is_unmarked() {  # <kind>
+  case " $FM_OPERATIONAL_UNMARKED_KINDS " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+fm_operational_header_for_kind() {  # <kind>
+  if fm_operational_kind_is_unmarked "$1"; then
+    printf '%s' "$FM_OPERATIONAL_UNMARKED_HEADER_PREFIX"
+  else
+    printf '%s' "$FM_OPERATIONAL_HEADER_PREFIX"
+  fi
+}
+
 # Compatibility name retained for the away-mode owner and its tests.
 # shellcheck disable=SC2034 # Public source-library variable used by callers.
 FM_INJECT_MARK=$FM_OPERATIONAL_MARK
@@ -52,7 +91,7 @@ fm_operational_input_encode() {  # <generic-kind> <body> <result-var>
   [ -n "$result_var" ] || return 2
   fm_operational_kind_is_current "$kind" || return 2
   [ -n "$body" ] || return 2
-  printf -v "$result_var" '%s%s: %s' "$FM_OPERATIONAL_HEADER_PREFIX" "$kind" "$body"
+  printf -v "$result_var" '%s%s: %s' "$(fm_operational_header_for_kind "$kind")" "$kind" "$body"
 }
 
 fm_operational_input_construct() {  # <kind> <body> <result-var>
@@ -65,18 +104,40 @@ fm_operational_input_construct() {  # <kind> <body> <result-var>
   fm_operational_input_encode "$kind" "$body" "$result_var"
 }
 
-fm_operational_generic_kind() {  # <message> <result-var>
-  local message=${1-} result_var=${2-} remainder parsed_kind body
-  [ -n "$result_var" ] || return 2
-  case "$message" in
-    "$FM_OPERATIONAL_HEADER_PREFIX"*': '?*) ;;
+# Single owner of current-envelope splitting for both the marked and the
+# unmarked header. An unmarked header is accepted only for a kind declared in
+# FM_OPERATIONAL_UNMARKED_KINDS, so no injected kind can be forged without the
+# zero-width mark.
+fm_operational_generic_split() {  # <message> <kind-result-var> <body-result-var>
+  # EVERY local here is split_-prefixed, with no exception for the parameters:
+  # under bash dynamic scoping an unprefixed local silently shadows a caller's
+  # own result-variable name, so the write lands on the local and the caller
+  # reads an empty value instead of an error. tests/fm-operational-input.test.sh
+  # locks this by round-tripping through every plausible caller-side name.
+  local split_message=${1-} split_kind_var=${2-} split_body_var=${3-}
+  local split_header split_remainder split_kind split_body
+  [ -n "$split_kind_var" ] && [ -n "$split_body_var" ] || return 2
+  case "$split_message" in
+    "$FM_OPERATIONAL_HEADER_PREFIX"*': '?*) split_header=$FM_OPERATIONAL_HEADER_PREFIX ;;
+    "$FM_OPERATIONAL_UNMARKED_HEADER_PREFIX"*': '?*) split_header=$FM_OPERATIONAL_UNMARKED_HEADER_PREFIX ;;
     *) return 1 ;;
   esac
-  remainder=${message#"$FM_OPERATIONAL_HEADER_PREFIX"}
-  parsed_kind=${remainder%%': '*}
-  fm_operational_kind_is_current "$parsed_kind" || return 1
-  body=${remainder#"${parsed_kind}: "}
-  [ "$body" != "$remainder" ] && [ -n "$body" ] || return 1
+  split_remainder=${split_message#"$split_header"}
+  split_kind=${split_remainder%%': '*}
+  fm_operational_kind_is_current "$split_kind" || return 1
+  if [ "$split_header" = "$FM_OPERATIONAL_UNMARKED_HEADER_PREFIX" ]; then
+    fm_operational_kind_is_unmarked "$split_kind" || return 1
+  fi
+  split_body=${split_remainder#"${split_kind}: "}
+  [ "$split_body" != "$split_remainder" ] && [ -n "$split_body" ] || return 1
+  printf -v "$split_kind_var" '%s' "$split_kind"
+  printf -v "$split_body_var" '%s' "$split_body"
+}
+
+fm_operational_generic_kind() {  # <message> <result-var>
+  local message=${1-} result_var=${2-} parsed_kind parsed_body
+  [ -n "$result_var" ] || return 2
+  fm_operational_generic_split "$message" parsed_kind parsed_body || return 1
   printf -v "$result_var" '%s' "$parsed_kind"
 }
 
@@ -99,8 +160,7 @@ fm_operational_input_kind() {  # <message> <result-var>
 fm_operational_input_body() {  # <current-message> <result-var>
   local message=${1-} result_var=${2-} current_kind parsed_body
   [ -n "$result_var" ] || return 2
-  if fm_operational_generic_kind "$message" current_kind; then
-    parsed_body=${message#"${FM_OPERATIONAL_HEADER_PREFIX}${current_kind}: "}
+  if fm_operational_generic_split "$message" current_kind parsed_body; then
     printf -v "$result_var" '%s' "$parsed_body"
     return 0
   fi

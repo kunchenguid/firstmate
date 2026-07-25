@@ -43,6 +43,25 @@ tests/fm-tmux-submit-busy.test.sh
 Expected structural matrix: real text on any content row is pending; all-empty complete boxes are empty; unreadable, incomplete, or unsafe boxes are unknown; and non-bordered panes retain cursor-row compatibility.
 Expected submit matrix: proven pending plus busy is accepted as queued; proven pending plus idle remains pending; ambiguous pending is never converted by the busy exception; and only a proven empty composer succeeds directly.
 
+### Pane titles and U+2063
+
+tmux 3.7b on macOS was observed on 2026-07-25 aborting the entire server, not the offending pane, while handling a pane title containing U+2063:
+
+```text
+utf8proc_wcwidth(02063) returned 0
+fatal: xreallocarray: zero size
+```
+
+Agents set their pane title from their own launch prompt, so a launch prompt carrying U+2063 killed every window on the server within seconds of each spawn.
+This defect is upstream and is not worked around in Firstmate.
+The Firstmate-side guarantee it requires - the `launch-brief` envelope contains no U+2063 in any position, while every injected kind keeps its mark - is owned by `bin/fm-operational-input.sh` and pinned by:
+
+```sh
+tests/fm-operational-input.test.sh
+```
+
+The crash itself is deliberately not scripted as a regression: reproducing it aborts the tmux server running the fleet.
+
 ## Herdr
 
 The compatibility floor is protocol 14.
