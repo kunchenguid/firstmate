@@ -37,11 +37,26 @@ case "$CMD" in
     deadline=$((SECONDS + TIMEOUT))
     RUN_ID=""
     CONCLUSION=""
+    EMPTY_POLLS=0
     while [ "$SECONDS" -lt "$deadline" ]; do
       JSON=$(gh run list --commit "$SHA" "${REPO_ARGS[@]}" --limit 5 --json databaseId,conclusion,status,name,url 2>/dev/null || echo '[]')
       RUN_ID=$(printf '%s' "$JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['databaseId'] if d else '')")
       STATUS=$(printf '%s' "$JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('status','') if d else '')")
       CONCLUSION=$(printf '%s' "$JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('conclusion','') if d else '')")
+      if [ -z "$RUN_ID" ]; then
+        EMPTY_POLLS=$((EMPTY_POLLS + 1))
+        # Fail fast when the repo has no Actions for this commit (avoids no-mistakes-style indefinite wait).
+        if [ "$EMPTY_POLLS" -ge 4 ]; then
+          "$REG" set "$TID" --field "ci_run=none_configured" --field "next_action=add_github_actions_workflows"
+          "$FM_HOME/bin/fm-phase2-event.sh" ci_completed --task "$TID" --dedupe "ci-none-$SHA" \
+            --payload "{\"conclusion\":\"none_configured\",\"sha\":\"$SHA\"}"
+          echo "{\"run_id\":\"\",\"conclusion\":\"none_configured\",\"sha\":\"$SHA\",\"error\":\"no GitHub Actions runs for commit\"}" >&2
+          exit 4
+        fi
+        sleep 15
+        continue
+      fi
+      EMPTY_POLLS=0
       if [ "$STATUS" = "completed" ]; then
         break
       fi
