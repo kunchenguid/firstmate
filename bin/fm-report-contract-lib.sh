@@ -5,7 +5,6 @@
 
 fm_completion_report_contract() {  # <data-dir> <task-id>
   local data=$1 task=$2
-  # shellcheck disable=SC2016 # Markdown backticks in literal prose must not expand.
   printf '%s\n' \
     '# Completion report' \
     "Before the final \`done:\` status, write \`$data/$task/completion.md\` with these six sections, each as a LEVEL-TWO markdown heading spelled exactly: \`## Summary\`, \`## What changed\`, \`## Verification\`, \`## Visual evidence\`, \`## Artifacts\`, \`## Follow-ups\`." \

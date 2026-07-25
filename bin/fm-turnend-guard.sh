@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Turn-end guard for any firstmate PRIMARY session: the main home OR a
 # secondmate's own home. A secondmate runs its own primary firstmate session and
-# is guarded exactly like the main primary; only child crewmate/scout worktrees are
+# is guarded exactly like the main primary; only child crew/scout worktrees are
 # exempt (see the scoping block below and docs/turnend-guard.md).
 #
 # fm-guard.sh (bin/fm-guard.sh) is pull-based: it only warns when some other
@@ -21,7 +21,7 @@
 # secondmate home (treehouse-leased or git-cloned), and any crewmate/scout task
 # worktree spawned to work on firstmate itself (the recursive "firstmate
 # improving itself" case). A secondmate home runs its OWN primary firstmate
-# session, so it must be guarded like the main primary; only child crewmate/scout
+# session, so it must be guarded like the main primary; only child crew/scout
 # worktrees are exempt. It must therefore scope itself at runtime to a real
 # primary checkout - the main home or a genuinely marked secondmate home - and
 # stay a silent, fast no-op inside child task worktrees.
