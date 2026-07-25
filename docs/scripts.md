@@ -87,7 +87,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
 | `fm-pr-check.sh`         | Record validated provider `pr=` and `pr_head=` values, atomically arm a static merge poll, and arm a direct-PR no-mistakes watch |
 | `fm-nm-watch.sh`         | Arm a no-mistakes escalate-only watch run on a direct-PR task's PR/MR                |
-| `fm-poll-lib.sh`         | Provide the PR/MR poll judgement used by the poll extension and compatibility shims  |
+| `fm-poll-lib.sh`         | Provide the PR/MR poll judgement used by the poll extension and compatibility shims, and end a task's watch run once its PR/MR lands |
 | `fm-poll-extra.sh`       | Answer an armed poll's extra questions about this task's no-mistakes watch run       |
 | `fm-nm-orphan-scan.sh`   | Report a no-mistakes run this home armed that is parked with no live task left to answer it |
 | `fm-pr-merge.sh`         | Record PR/MR metadata, then merge through the detected provider seam                 |

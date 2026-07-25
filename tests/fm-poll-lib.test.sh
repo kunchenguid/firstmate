@@ -14,6 +14,12 @@
 # Matrix:
 #   (a) an open PR with no watch run stays silent
 #   (b) a merged PR wakes with "merged" and clears the poll's own state
+#   (b1) a merged PR also ENDS this task's watch run, which nothing else does
+#   (b2) it ends only the run recorded as this task's, never another's
+#   (b3) a task with no recorded run ends nothing at all
+#   (b4) an ending that fails stays silent and leaves the merge answer alone
+#   (b5) ending an already-ended run is a harmless no-op on every later poll
+#   (b6) a pre-library poll ends its watch run too, its own file untouched
 #   (c) this task's parked watch run wakes once, then stays quiet while parked
 #   (d) a park that clears re-arms the one-shot, so a later park wakes again
 #   (e) ANOTHER run's park is never reported - the captain's own no-mistakes
@@ -92,9 +98,31 @@ SH
 
   # Mirrors the real CLI: \`parked --json\` prints the machine-wide record and
   # exits 1 when nothing is parked; \`axi status --run\` resolves a run by id
-  # alone and exits 1 with a "not found" error when there is no such run.
+  # alone and exits 1 with a "not found" error when there is no such run; and
+  # \`axi abort --run\` ends a live run, but on a run that already ended it is an
+  # explicit no-op that still exits 0 - verified 2026-07-25 against the real
+  # no-mistakes 60d5741, which is where the ending's idempotency comes from.
+  # Every abort is logged before anything else, so a case can prove which runs
+  # were touched and which were not even reached.
   cat > "$fakebin/no-mistakes" <<SH
 #!/usr/bin/env bash
+if [ "\$1 \$2" = "axi abort" ]; then
+  run=\$4
+  printf '%s\n' "\$run" >> '$case_dir/abort.log'
+  if [ -e '$case_dir/abort-broken' ]; then
+    echo "no-mistakes: cannot reach the daemon" >&2
+    exit 7
+  fi
+  toon="$case_dir/run-\$run.toon"
+  if [ -f "\$toon" ] && ! grep -qE '  status: (cancelled|completed|failed|interrupted)' "\$toon"; then
+    sed -i.bak 's/^  status: .*/  status: cancelled/' "\$toon"
+    rm -f "\$toon.bak"
+    printf 'aborted: true\nrun: "%s"\n' "\$run"
+    exit 0
+  fi
+  printf 'aborted: false\nrun: "%s"\ndetail: no active run with that id (no-op)\n' "\$run"
+  exit 0
+fi
 if [ -e '$case_dir/nm-broken' ]; then
   echo "no-mistakes: cannot reach state" >&2
   exit 3
@@ -157,6 +185,15 @@ run_record() {  # <case-dir> <run-id> <status>
     "$2" "$3" > "$1/run-$2.toon"
 }
 
+run_status() {  # <case-dir> <run-id>
+  sed -n 's/^  status: //p' "$1/run-$2.toon" 2>/dev/null | head -1
+}
+
+# Every run id `axi abort --run` was called with, one per line.
+abort_log() {  # <case-dir>
+  cat "$1/abort.log" 2>/dev/null || true
+}
+
 # A parked.json entry for <run-id>. The captain's own run is always in the
 # record too, so every read has something to wrongly report if the filter leaks.
 parked_record() {  # <case-dir> [run-id ...]
@@ -195,6 +232,136 @@ test_merged_wakes_and_clears_state() {
   assert_absent "$case_dir/state/task-p1.check.fails" \
     "merged: landing must clear the consecutive-failure count"
   pass "a merged PR wakes firstmate with 'merged' and clears the poll's own state"
+}
+
+# --- the watch run a landing retires ----------------------------------------
+# The bug these cover: the merged branch cleared the poll's own bookkeeping and
+# left the no-mistakes watch run it had been reporting on alive. Nothing else
+# ever ends such a run - the daemon parks an external watch on the first thing
+# needing a person and a parked run stops polling, so the merge never reaches it
+# - so it stayed on the books until a person aborted it by hand, and
+# bin/fm-teardown.sh refused to clean the task up for as long as it did. Three
+# direct-PR tasks landed that way on 2026-07-24 and 2026-07-25 here, parked for
+# up to 36 hours each.
+
+test_merged_ends_this_tasks_watch_run() {
+  local case_dir out
+  case_dir=$(make_case merged-ends-watch)
+  arm_poll "$case_dir"
+  watch_run "$case_dir" "$MY_RUN"
+  run_record "$case_dir" "$MY_RUN" running
+  parked_record "$case_dir" "$MY_RUN"
+  run_poll "$case_dir" >/dev/null
+
+  printf 'MERGED\n' > "$case_dir/pr-state"
+  out=$(run_poll "$case_dir")
+
+  [ "$out" = merged ] \
+    || fail "merged-ends-watch: the merge answer must still be exactly 'merged' (got '$out')"
+  assert_contains "$(abort_log "$case_dir")" "$MY_RUN" \
+    "merged-ends-watch: landing left this task's watch run on the books, which is the run teardown then refuses over"
+  [ "$(run_status "$case_dir" "$MY_RUN")" = cancelled ] \
+    || fail "merged-ends-watch: the watch run is still $(run_status "$case_dir" "$MY_RUN") after its PR merged"
+  pass "a merged PR ends the watch run it retires instead of leaving it on the books"
+}
+
+test_merged_never_ends_another_runs_work() {
+  local case_dir out
+  case_dir=$(make_case merged-end-not-mine)
+  arm_poll "$case_dir"
+  watch_run "$case_dir" "$MY_RUN"
+  run_record "$case_dir" "$MY_RUN" running
+  # The captain's own run is live in the same machine-wide record this poll
+  # reads, and it belongs to no task. Landing this task's PR says nothing at all
+  # about it.
+  run_record "$case_dir" "$THEIR_RUN" running
+  parked_record "$case_dir" "$MY_RUN"
+
+  printf 'MERGED\n' > "$case_dir/pr-state"
+  out=$(run_poll "$case_dir")
+
+  [ "$out" = merged ] \
+    || fail "merged-end-not-mine: the merge answer must still be exactly 'merged' (got '$out')"
+  assert_contains "$(abort_log "$case_dir")" "$MY_RUN" \
+    "merged-end-not-mine: this task's own watch run was not ended"
+  assert_not_contains "$(abort_log "$case_dir")" "$THEIR_RUN" \
+    "merged-end-not-mine: the poll ended a no-mistakes run that was never this task's"
+  [ "$(run_status "$case_dir" "$THEIR_RUN")" = running ] \
+    || fail "merged-end-not-mine: another run was cancelled by this task's landing"
+  pass "landing ends only the run recorded as this task's, never another's"
+}
+
+test_merged_with_no_recorded_run_ends_nothing() {
+  local case_dir out
+  case_dir=$(make_case merged-end-no-run)
+  arm_poll "$case_dir"
+  # No nm_watch_run in the meta, but the captain's own run IS live and parked.
+  run_record "$case_dir" "$THEIR_RUN" running
+  parked_record "$case_dir"
+
+  printf 'MERGED\n' > "$case_dir/pr-state"
+  out=$(run_poll "$case_dir")
+
+  [ "$out" = merged ] \
+    || fail "merged-end-no-run: the merge answer must still be exactly 'merged' (got '$out')"
+  [ -z "$(abort_log "$case_dir")" ] \
+    || fail "merged-end-no-run: a task with no recorded watch run ended something anyway: $(abort_log "$case_dir")"
+  pass "a task with no recorded watch run ends nothing when its PR lands"
+}
+
+test_merged_ending_failure_stays_silent() {
+  local case_dir first second third fourth
+  case_dir=$(make_case merged-end-fails)
+  arm_poll "$case_dir"
+  watch_run "$case_dir" "$MY_RUN"
+  run_record "$case_dir" "$MY_RUN" running
+  # What a dead daemon or a revoked auth looks like from here: the PR still
+  # reads as merged, and only the ending fails.
+  : > "$case_dir/abort-broken"
+  printf 'MERGED\n' > "$case_dir/pr-state"
+
+  first=$(run_poll "$case_dir")
+  second=$(run_poll "$case_dir")
+  third=$(run_poll "$case_dir")
+  fourth=$(run_poll "$case_dir")
+
+  [ "$first" = merged ] && [ "$second" = merged ] \
+    && [ "$third" = merged ] && [ "$fourth" = merged ] \
+    || fail "merged-end-fails: a failed ending must not change the merge answer (got '$first' '$second' '$third' '$fourth')"
+  assert_not_contains "$first$second$third$fourth" "poll broken" \
+    "merged-end-fails: a failed ending must never become the broken-poll diagnostic"
+  assert_absent "$case_dir/state/task-p1.check.error" \
+    "merged-end-fails: a failed ending left a broken-poll marker behind"
+  assert_contains "$(abort_log "$case_dir")" "$MY_RUN" \
+    "merged-end-fails: the poll gave up on ending the run instead of retrying next cycle"
+  [ "$(run_status "$case_dir" "$MY_RUN")" = running ] \
+    || fail "merged-end-fails: the fixture did not actually fail the ending"
+  pass "an ending that cannot complete stays silent and leaves the merge answer alone"
+}
+
+test_merged_ending_is_idempotent() {
+  local case_dir first second
+  case_dir=$(make_case merged-end-again)
+  arm_poll "$case_dir"
+  watch_run "$case_dir" "$MY_RUN"
+  run_record "$case_dir" "$MY_RUN" running
+  printf 'MERGED\n' > "$case_dir/pr-state"
+
+  first=$(run_poll "$case_dir")
+  [ "$(run_status "$case_dir" "$MY_RUN")" = cancelled ] \
+    || fail "merged-end-again: the first cycle did not end the run"
+  # The poll stays armed until teardown, so a merged PR keeps being polled. The
+  # real CLI answers a repeat abort with an explicit no-op and exit 0, and the
+  # run record is left exactly as the first ending left it.
+  second=$(run_poll "$case_dir")
+
+  [ "$first" = merged ] && [ "$second" = merged ] \
+    || fail "merged-end-again: every merged cycle must answer 'merged' (got '$first' '$second')"
+  [ "$(run_status "$case_dir" "$MY_RUN")" = cancelled ] \
+    || fail "merged-end-again: a repeat ending disturbed an already-ended run"
+  [ "$(abort_log "$case_dir" | wc -l | tr -d ' ')" = 2 ] \
+    || fail "merged-end-again: expected one ending attempt per merged cycle, got: $(abort_log "$case_dir")"
+  pass "ending an already-ended watch run is a harmless no-op on every later poll"
 }
 
 test_park_wakes_once() {
@@ -432,8 +599,38 @@ test_legacy_poll_gains_todays_signals_untouched() {
   pass "a poll generated before the library picks up today's signals with its own file untouched"
 }
 
+test_legacy_poll_ends_the_watch_run_on_merge() {
+  local case_dir before after merged
+  case_dir=$(make_case legacy-ends-watch)
+  write_legacy_poll "$case_dir"
+  before=$(cksum < "$case_dir/state/task-p1.check.sh")
+
+  watch_run "$case_dir" "$MY_RUN"
+  run_record "$case_dir" "$MY_RUN" running
+  printf 'MERGED\n' > "$case_dir/pr-state"
+  merged=$(run_legacy_poll "$case_dir")
+
+  [ "$merged" = merged ] \
+    || fail "legacy-ends-watch: the merge answer must still be exactly 'merged' (got '$merged')"
+  assert_contains "$(abort_log "$case_dir")" "$MY_RUN" \
+    "legacy-ends-watch: a poll armed before the library still leaves its watch run on the books"
+  [ "$(run_status "$case_dir" "$MY_RUN")" = cancelled ] \
+    || fail "legacy-ends-watch: the watch run is still $(run_status "$case_dir" "$MY_RUN") after its PR merged"
+
+  after=$(cksum < "$case_dir/state/task-p1.check.sh")
+  [ "$before" = "$after" ] \
+    || fail "legacy-ends-watch: the frozen poll file was rewritten; the upgrade must need no regeneration"
+  pass "a poll armed before the library ends its watch run on merge with its own file untouched"
+}
+
 test_open_pr_is_silent
 test_merged_wakes_and_clears_state
+test_merged_ends_this_tasks_watch_run
+test_merged_never_ends_another_runs_work
+test_merged_with_no_recorded_run_ends_nothing
+test_merged_ending_failure_stays_silent
+test_merged_ending_is_idempotent
+test_legacy_poll_ends_the_watch_run_on_merge
 test_park_wakes_once
 test_park_clearing_rearms_the_one_shot
 test_another_runs_park_is_never_reported

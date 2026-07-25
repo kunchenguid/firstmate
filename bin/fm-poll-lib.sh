@@ -28,6 +28,10 @@
 # keep sleeping. At most one line per poll, because a wake reason is one line; a
 # signal not printed this cycle stays pending and prints on the next one.
 #
+# The one thing it does besides answer: a merge also ENDS this task's watch run,
+# because nothing else ever does. fm_poll_end_watch_run owns that reasoning and
+# the cost of the only ending verb no-mistakes has.
+#
 # Run-id scoping is a hard boundary. Both watch questions are answered only for
 # the run id state/<id>.meta records as this task's (nm_watch_run=, written by
 # bin/fm-nm-watch.sh). The captain runs no-mistakes on their own work outside the
@@ -183,6 +187,78 @@ fm_poll_git_dir() {  # <meta>
   return 1
 }
 
+# End this task's watch run once its PR/MR has landed, so a merge never leaves
+# behind a run that nothing will ever finish. Silent and best effort, always.
+#
+# Nothing ends an external watch on its own. The daemon parks it on the first
+# thing that needs a person - an unresolved review thread, or checks green and
+# waiting for approval - and a parked run stops polling, so the merge it was
+# waiting for never reaches it. Three direct-PR tasks landed here on 2026-07-24
+# and 2026-07-25 with their watch runs still on the books (01KY80J684V29V81BM43M618ZF,
+# 01KY96ZNA6D9Q7HCCXFG8HECPR, 01KYBZVKTD5PBAEV4GBY1ZX59W); no-mistakes' own
+# records show all three still at pr_state=open, parked for up to 36 hours,
+# each ended by hand in the end. Until then each one blocked bin/fm-teardown.sh,
+# which refuses to delete the meta that names a live run.
+#
+# `axi abort --run <id>` is the only ending verb no-mistakes has - there is no
+# complete and no finish - so a watch whose PR landed is recorded as
+# "cancelled: aborted by user" with its watch step failed. That mislabels a
+# watch that did its job, in no-mistakes' own history, and it is the price of
+# ending it at all: a watch run holds no work, edits no code, and no firstmate
+# decision reads that history. `axi respond --action approve` would end a parked
+# run as completed instead, but it blocks until the next gate or outcome (which
+# one check's timeout cannot afford), it has nothing to answer when the run
+# never parked, and approving a finding nobody read would claim a review that
+# did not happen.
+#
+# Scoped to the run id state/<id>.meta records as this task's, exactly like every
+# other watch question here: `no-mistakes` records are machine-wide, and the
+# captain's own runs are never firstmate's to touch.
+#
+# Idempotent by the CLI's own contract: aborting a run that already ended prints
+# "aborted: false ... no active run with that id (no-op)" and exits 0, leaving
+# the record alone. Verified 2026-07-25 against no-mistakes 60d5741.
+#
+# Bounded where a timeout binary exists, because the whole check shares one
+# FM_CHECK_TIMEOUT with the provider lookup that just ran. Where none exists -
+# stock macOS has neither timeout nor gtimeout - the bound is the watcher's own
+# per-check watchdog, and being killed by it costs the poll nothing: the merge
+# answer is already on disk by then, because bash flushes stdout before forking
+# a child. Verified 2026-07-25 on this machine by running a poll-shaped script
+# under bin/fm-watch.sh's own perl watchdog: killed at 2s of a 30s child, exit
+# 124, and the captured output was still exactly "merged".
+#
+# Returns non-zero when the run could not be ended. Only bin/fm-teardown.sh's
+# backstop acts on that; the poll prints nothing either way, because a failure
+# here must never become a wake and the merge answer is already given.
+fm_poll_end_watch_run() {  # <meta>
+  local meta=$1 run nm dir secs runner out rc
+  nm=${FM_NM_BIN:-no-mistakes}
+  run=$(fm_poll_field "$meta" nm_watch_run)
+  [ -n "$run" ] || return 0
+  command -v "$nm" >/dev/null 2>&1 || return 1
+  dir=$(fm_poll_git_dir "$meta") || return 1
+  secs=${FM_POLL_NM_TIMEOUT_SECS:-10}
+  case "$secs" in ''|0|*[!0-9]*) secs=10 ;; esac
+  runner=
+  if command -v timeout >/dev/null 2>&1; then
+    runner=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then
+    runner=gtimeout
+  fi
+  rc=0
+  if [ -n "$runner" ]; then
+    out=$(cd "$dir" && "$runner" "$secs" "$nm" axi abort --run "$run" 2>&1) || rc=$?
+  else
+    out=$(cd "$dir" && "$nm" axi abort --run "$run" 2>&1) || rc=$?
+  fi
+  [ "$rc" -eq 0 ] || return 1
+  case "$out" in
+    *'aborted: true'*|*'no active run with that id'*) return 0 ;;
+  esac
+  return 1
+}
+
 # Echo at most one watch-run signal line, and return non-zero when a lookup could
 # not answer. Each signal is one-shot: it fires when the condition first appears
 # and stays quiet until the condition clears or the task's run id changes, so a
@@ -263,9 +339,13 @@ fm_poll_run() {  # <state-dir> <task-id> [pr-url]
     case "$prstate" in
       MERGED|merged)
         # Landing ends the task's whole monitoring story: no watch question
-        # outlives it, so the one-shot state goes with the failure count.
+        # outlives it, so the one-shot state goes with the failure count - and
+        # the watch run itself goes with them, because nothing else ever ends
+        # it (fm_poll_end_watch_run owns why). The merge answer is printed
+        # first, so an ending that fails or times out cannot delay or colour it.
         rm -f "$failfile" "$nmfile"
         echo "merged"
+        fm_poll_end_watch_run "$meta" || true
         return 0
         ;;
     esac

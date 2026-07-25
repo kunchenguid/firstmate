@@ -34,6 +34,12 @@
 # Re-running is the supported idempotent path: the new run replaces the branch's
 # previous watcher.
 #
+# The other thing that ends the run is the PR landing, and that one is
+# firstmate's own doing: no-mistakes never ends a watch on merge, so
+# bin/fm-poll-lib.sh's fm_poll_end_watch_run ends it at the merge the armed poll
+# observes and bin/fm-teardown.sh backstops the merge that poll never saw. Only
+# re-arm while the PR is genuinely still open.
+#
 # Refuses any mode other than direct-PR. A no-mistakes-mode task gets its watch
 # run from its own gate/watch handoff, and re-arming over it would replace that
 # pipeline-owned watcher (with its QA node and fix rounds) with an escalate-only

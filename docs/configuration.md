@@ -523,6 +523,7 @@ FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi sta
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
 FM_NM_BIN=no-mistakes   # no-mistakes binary fm-nm-watch.sh arms the PR watch with and fm-teardown.sh settles the task's own runs through; mainly a test override
 FM_NM_QUERY_TIMEOUT_SECS=20   # seconds allowed per no-mistakes query inside fm-teardown.sh; a timeout reads as an undeterminable run state, which warns instead of refusing
+FM_POLL_NM_TIMEOUT_SECS=10    # seconds allowed for the poll to end a task's watch run once its PR/MR merged; it shares FM_CHECK_TIMEOUT with the provider lookup, and a timeout leaves the run to fm-teardown.sh's backstop
 FM_NM_ORPHAN_LEDGER_DAYS=90   # data/nm-armed-runs entries older than this whose run is no longer parked are pruned (bin/fm-nm-orphan-scan.sh)
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development

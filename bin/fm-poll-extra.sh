@@ -28,6 +28,9 @@
 # those runs belong to no task, and firstmate must never read, report, or answer
 # them. A task with no recorded run id has no watch question to ask.
 #
+# The merged phase asks nothing and instead ENDS that same run, because nothing
+# else ever does; bin/fm-poll-lib.sh's fm_poll_end_watch_run owns why.
+#
 # The watcher's check contract is unchanged: output = wake firstmate, silence =
 # keep sleeping, at most one line per poll. A signal not printed this cycle stays
 # pending and prints on the next one.
@@ -95,8 +98,16 @@ case "$PHASE" in
     ;;
   merged)
     # Landing ends the task's whole monitoring story: no watch question outlives
-    # it, so the one-shot state goes with the failure count.
+    # it, so the one-shot state goes with the failure count - and the watch run
+    # itself goes with them, because nothing else ever ends it. The local
+    # bookkeeping is cleared first so it is dropped even where the library
+    # cannot be loaded, and bin/fm-pr-poll.sh has already printed the merge
+    # answer by the time this phase runs, so nothing below can colour it.
+    # fm_poll_end_watch_run owns why the run has to end here.
     rm -f "$FAILFILE" "$NMFILE"
+    # shellcheck source=bin/fm-poll-lib.sh
+    . "$SCRIPT_DIR/fm-poll-lib.sh" 2>/dev/null || exit 0
+    fm_poll_end_watch_run "$META" || true
     exit 0
     ;;
   open|unknown) ;;
