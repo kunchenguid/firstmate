@@ -23,6 +23,11 @@ set -u
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
 export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
+# Every fixture gh below is a trivial fake, not a real provisioned binary, so
+# point GH_PATH_SHADOW detection at an empty directory - otherwise it would
+# leak a real $HOME/doordash-ai-helpers install on a dev machine into cases
+# that expect silence.
+export FM_GH_PROVISIONED_ROOT_OVERRIDE="$TMP_ROOT/no-provisioned-gh"
 
 # Hermetic runtime-backend detection. These cases pin the backend per-home via
 # config/backend; the dev shell's ambient runtime markers ($TMUX inside tmux,
@@ -72,6 +77,26 @@ SH
   add_tasks_axi "$fakebin" "0.1.1"
   add_quota_axi "$fakebin"
   printf '%s\n' "$fakebin"
+}
+
+# Mirrors fm-bootstrap.sh's gh_provisioned_path os/arch mapping so GH_PATH_SHADOW
+# fixtures land in the exact subdirectory name the script under test computes
+# for the real host running the suite, whatever that host is.
+gh_shadow_test_platform() {
+  local os arch
+  os=$(uname -s)
+  arch=$(uname -m)
+  case "$os" in
+    Darwin) os=darwin ;;
+    Linux) os=linux ;;
+    *) os=unsupported ;;
+  esac
+  case "$arch" in
+    arm64|aarch64) arch=arm64 ;;
+    x86_64|amd64) arch=x64 ;;
+    *) arch=unsupported ;;
+  esac
+  printf '%s\n' "${os}-${arch}"
 }
 
 add_quota_axi() {
@@ -346,6 +371,53 @@ SH
   expected="MISSING: git (install: brew install git  # or the platform's package manager)"
   [ "$out" = "$expected" ] || fail "missing git should report the supported install instruction, got: $out"
   pass "bootstrap requires git with an install instruction"
+}
+
+test_gh_path_shadow_flags_shadowed_provisioned_gh() {
+  local case_dir fakebin provisioned_root platform out expected
+  case_dir="$TMP_ROOT/gh-path-shadow"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  provisioned_root="$case_dir/provisioned"
+  platform=$(gh_shadow_test_platform)
+  mkdir -p "$provisioned_root/$platform"
+  cat > "$provisioned_root/$platform/gh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$provisioned_root/$platform/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_GH_PROVISIONED_ROOT_OVERRIDE="$provisioned_root" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  expected="GH_PATH_SHADOW: $fakebin/gh shadows the provisioned gh at $provisioned_root/$platform/gh; gh-axi state-changing commands will fail until PATH is fixed"
+  assert_contains "$out" "$expected" "a PATH-earlier gh shadowing a provisioned install must report GH_PATH_SHADOW"
+  pass "bootstrap flags a PATH-shadowed provisioned gh"
+}
+
+test_gh_path_shadow_silent_when_resolved_gh_is_the_provisioned_one() {
+  local case_dir fakebin provisioned_root platform out
+  case_dir="$TMP_ROOT/gh-path-shadow-match"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh"
+  provisioned_root="$case_dir/provisioned"
+  platform=$(gh_shadow_test_platform)
+  mkdir -p "$provisioned_root/$platform"
+  cat > "$provisioned_root/$platform/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$provisioned_root/$platform/gh"
+  out=$(PATH="$provisioned_root/$platform:$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_GH_PROVISIONED_ROOT_OVERRIDE="$provisioned_root" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "GH_PATH_SHADOW" "a resolved gh that is itself the provisioned binary must not report a shadow"
+  pass "bootstrap stays silent when the resolved gh is the provisioned one"
 }
 
 test_orca_backend_gates_orca_tool_only_when_selected() {
@@ -797,6 +869,8 @@ ROWS
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_git_is_required_with_supported_install_instruction
+test_gh_path_shadow_flags_shadowed_provisioned_gh
+test_gh_path_shadow_silent_when_resolved_gh_is_the_provisioned_one
 test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux
 test_session_provider_backends_gate_own_cli_not_tmux

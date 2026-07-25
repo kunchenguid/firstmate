@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, GH_PATH_SHADOW, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -24,6 +24,9 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `MISSING_MANUAL: <tool> (instructions: <url>)` - tell the captain why the tool is required and give them the printed instructions URL, but do not pass the tool to `bin/fm-bootstrap.sh install`; wait for the captain to complete the manual installation, then rerun session start to confirm the dependency is present.
 - `BACKEND_INVALID: <name> (known: <names>)` - the resolved runtime backend has no verified dependency or lifecycle contract, so do not dispatch work until the invalid `FM_BACKEND` or `config/backend` value is corrected to one of the listed backends.
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
+- `GH_PATH_SHADOW: <resolved gh> shadows the provisioned gh at <provisioned path>; gh-axi state-changing commands will fail until PATH is fixed` - a Homebrew or other non-provisioned `gh` sits earlier on `PATH` than DoorDash's version-pinned install, so `gh-axi` state-changing commands (e.g. `pr merge`) will refuse with a version-mismatch error even though read-only commands work fine.
+  This is advisory: bootstrap never reorders `PATH` itself.
+  Tell the captain their `gh` PATH order needs fixing (reorder `PATH` or remove the shadowing install) and, until they do, route any state-changing GitHub operation through the printed provisioned path prefixed onto `PATH` for that one command only.
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.

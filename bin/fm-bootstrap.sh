@@ -7,6 +7,9 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "GH_PATH_SHADOW: <resolved gh> shadows the provisioned gh at
+#                 <provisioned path>; gh-axi state-changing commands will fail
+#                 until PATH is fixed",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
@@ -54,6 +57,17 @@
 #          incompatible build reports MISSING like no-mistakes. A compatible
 #          tasks-axi default backend is silent. quota-axi is required for the
 #          agent-owned dispatch-profile array procedure in AGENTS.md section 4.
+#          A GH_PATH_SHADOW line means DoorDash's ai-helpers toolchain provisions
+#          a version-pinned gh at $HOME/doordash-ai-helpers/<os>-<arch>/gh (or
+#          FM_GH_PROVISIONED_ROOT_OVERRIDE/<os>-<arch>/gh when that override is
+#          set) but a different gh resolves earlier on PATH - typically a
+#          Homebrew install at /usr/local/bin/gh. gh-axi resolves gh via the
+#          ambient PATH and refuses every state-changing command (pr merge,
+#          etc.) once the resolved binary's version differs from the pin;
+#          read-only gh-axi commands are unaffected. Detection is presence-only
+#          (a provisioned gh exists elsewhere but is shadowed), not a version
+#          diff, so it can still fire even when the shadowing gh currently
+#          happens to match; bootstrap never reorders PATH itself.
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
@@ -508,6 +522,45 @@ missing_tool_diagnostic() {
   echo "MISSING: $tool (install: $(install_cmd "$tool"))"
 }
 
+# Path of the DoorDash-provisioned gh for this host's os-arch, if present.
+# FM_GH_PROVISIONED_ROOT_OVERRIDE lets tests point this at an empty directory
+# instead of the real $HOME/doordash-ai-helpers, so fixture gh binaries on a
+# fake PATH never trip GH_PATH_SHADOW against a developer machine's real
+# provisioned install.
+gh_provisioned_path() {
+  local root os arch candidate
+  root="${FM_GH_PROVISIONED_ROOT_OVERRIDE:-${HOME:-}/doordash-ai-helpers}"
+  [ -n "$root" ] || return 1
+  os=$(uname -s 2>/dev/null) || return 1
+  arch=$(uname -m 2>/dev/null) || return 1
+  case "$os" in
+    Darwin) os=darwin ;;
+    Linux) os=linux ;;
+    *) return 1 ;;
+  esac
+  case "$arch" in
+    arm64|aarch64) arch=arm64 ;;
+    x86_64|amd64) arch=x64 ;;
+    *) return 1 ;;
+  esac
+  candidate="$root/${os}-${arch}/gh"
+  [ -x "$candidate" ] || return 1
+  printf '%s\n' "$candidate"
+}
+
+# Detects the PATH-shadow shape that trips gh-axi's version-pin refusal on
+# state-changing commands (see the GH_PATH_SHADOW header note above).
+# Presence-only: a provisioned gh existing elsewhere but shadowed is reported
+# even if the shadowing gh's version currently happens to match, since drift
+# can silently reintroduce the failure later.
+gh_path_shadow_diagnostic() {
+  local resolved provisioned
+  resolved=$(command -v gh 2>/dev/null) || return 0
+  provisioned=$(gh_provisioned_path) || return 0
+  [ "$resolved" = "$provisioned" ] && return 0
+  echo "GH_PATH_SHADOW: $resolved shadows the provisioned gh at $provisioned; gh-axi state-changing commands will fail until PATH is fixed"
+}
+
 # Required-tool detection follows the RESOLVED backend, not a one-size default:
 # a universal toolchain every home needs plus the backend-specific delta owned by
 # fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
@@ -845,6 +898,7 @@ if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
 fi
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+gh_path_shadow_diagnostic
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.
