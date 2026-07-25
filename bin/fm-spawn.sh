@@ -992,6 +992,10 @@ ACCOUNT_NATIVE_LAUNCH_GO=
 ACCOUNT_NATIVE_LAUNCH_DIR=
 DIRECT_ACCOUNT_ROUTING=0
 DIRECT_ACCOUNT_HOME=
+# Environment delivered natively by `herdr agent start --env KEY=VALUE` (one
+# repeated flag per entry). Empty for every other backend, which has no native
+# env channel and keeps using command-scoped shell prefixes instead.
+HERDR_AGENT_ENV=()
 DIRECT_ACCOUNT_RESPAWN=0
 DIRECT_ACCOUNT_PREPARE_DEFERRED=0
 WORKTREE_GIT_DIR=
@@ -2922,219 +2926,16 @@ finally:
   BRIEF=$CONTINUATION_PACKET
 fi
 
-W="fm-$ID"
-SPAWN_CWD=${WT:-$PROJ_ABS}
-if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then
-  validate_direct_recovery_worktree_identity || exit 1
-fi
-case "$BACKEND" in
-  tmux)
-    SES=$(fm_backend_tmux_container_ensure)
-    T="$SES:$W"
-    # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
-    # id and pins the window name (automatic-rename/allow-rename off) so a captain's
-    # non-default tmux config cannot rename the window away from fm-<id>.
-    # WT_TARGET carries that stable id for spawn-time commands below; the
-    # persisted window= handle stays $T (the name form), which is safe now that
-    # rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_CWD") || exit 1
-    ENDPOINT_CREATED=1
-    WT_TARGET="$WID"
-    ;;
-  herdr)
-    # fm_backend_herdr_workspace_label resolves the target workspace from
-    # FM_HOME. For every KIND except secondmate, this process's own FM_HOME is
-    # already the right home (the primary spawning its own crewmate/scout, or
-    # a secondmate spawning ITS OWN crewmate/scout from its own process's
-    # FM_HOME - the latter needs no glue at all). A --secondmate spawn is the
-    # one case that does: it is the PRIMARY's own fm-spawn.sh process
-    # launching a DIFFERENT home (PROJ_ABS, already validated above as the
-    # secondmate's home), so FM_HOME here still names the primary. Shadow it
-    # to PROJ_ABS for just these two calls (bash restores it automatically
-    # after each prefixed simple-command call) so the secondmate's tab lands
-    # in the secondmate's own workspace, not the primary's "firstmate" one.
-    HERDR_LABEL_HOME=$FM_HOME
-    if [ "$KIND" = secondmate ]; then
-      HERDR_LABEL_HOME=$PROJ_ABS
-    fi
-    HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$SPAWN_CWD") || exit 1
-    # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
-    # (the second field empty when this call ADOPTED a pre-existing workspace
-    # rather than creating a fresh one). Split on the guaranteed single tab
-    # character; the seeded tab id is threaded through to create_task
-    # untouched, which is the only function permitted to prune it (never
-    # re-derived from labels - see docs/herdr-backend.md "Default-tab prune").
-    CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
-    HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
-    HERDR_SES=${CONTAINER%%:*}
-    HERDR_WORKSPACE_ID=${CONTAINER#*:}
-    if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ] && ! fm_account_test_lab_enabled \
-      && ! fm_backend_herdr_server_closed_shell_environment_ready "$HERDR_SES"; then
-      echo "error: refusing enforced Agent Fleet routing because Herdr session '$HERDR_SES' was not launched by this adapter's closed environment; stop that idle server and let Firstmate restart it" >&2
-      exit 1
-    fi
-    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$SPAWN_CWD" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
-    read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
-$HERDR_TASK_IDS
-EOF
-    if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
-      echo "error: herdr did not return a tab/pane id for $W" >&2
-      exit 1
-    fi
-    T="$HERDR_SES:$HERDR_PANE_ID"
-    ENDPOINT_CREATED=1
-    ;;
-  zellij)
-    ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
-    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$SPAWN_CWD") || exit 1
-    read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
-$ZELLIJ_TASK_IDS
-EOF
-    if [ -z "$ZELLIJ_TAB_ID" ] || [ -z "$ZELLIJ_PANE_ID" ]; then
-      echo "error: zellij did not return a tab/pane id for $W" >&2
-      exit 1
-    fi
-    T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
-    ENDPOINT_CREATED=1
-    ;;
-  cmux)
-    fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$SPAWN_CWD") || exit 1
-    read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
-$CMUX_TASK_IDS
-EOF
-    if [ -z "$CMUX_WORKSPACE_ID" ] || [ -z "$CMUX_SURFACE_ID" ]; then
-      echo "error: cmux did not return a workspace/surface id for $W" >&2
-      exit 1
-    fi
-    T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
-    ENDPOINT_CREATED=1
-    ;;
-  orca)
-    if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then
-      ORCA_WORKTREE_ID=$(fm_meta_get "$RESUME_META" orca_worktree_id)
-      [ -n "$ORCA_WORKTREE_ID" ] || {
-        echo "error: direct account recovery metadata has no Orca worktree id for $ID" >&2
-        exit 1
-      }
-      ORCA_RECORDED_WORKTREE=$(fm_backend_orca_worktree_path "$ORCA_WORKTREE_ID") || exit 1
-      [ "$(real_path_or_raw "$ORCA_RECORDED_WORKTREE")" = "$(real_path_or_raw "$WT")" ] || {
-        echo "error: recorded Orca worktree identity no longer matches $WT for $ID" >&2
-        exit 1
-      }
-      ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
-      ORCA_TERMINAL_PROOF=recorded
-    else
-      ORCA_EXPECTED_TASK="fm-$ID"
-      ORCA_TERMINAL_PROOF=unproven
-      persist_orca_cleanup_quarantine spawn-preparing || {
-        echo "error: cannot durably arm Orca cleanup quarantine for $ID" >&2
-        exit 1
-      }
-      ORCA_ABORT_CLEANUP=1
-      set +e
-      ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
-      ORCA_WT_STATUS=$?
-      set -e
-      if [ "$ORCA_WT_STATUS" -ne 0 ]; then
-        if [ "$ORCA_WT_STATUS" -eq 2 ] && [ -n "$ORCA_WT_RAW" ]; then
-          parse_orca_worktree_result "$ORCA_WT_RAW" || true
-          persist_orca_cleanup_quarantine spawn-abort || {
-            echo "error: cannot durably record partial Orca create authority for $ID" >&2
-          }
-        fi
-        exit 1
-      fi
-      parse_orca_worktree_result "$ORCA_WT_RAW" || true
-      persist_orca_cleanup_quarantine spawn-abort || {
-        echo "error: cannot durably record Orca create authority for $ID" >&2
-        exit 1
-      }
-      if [ -z "$ORCA_WORKTREE_ID" ] || [ -z "$WT" ] || [ "$ORCA_PROVIDER_TASK" != "$ORCA_EXPECTED_TASK" ]; then
-        echo "error: orca did not return matching worktree id, path, and task authority for $W" >&2
-        exit 1
-      fi
-      validate_spawn_worktree "orca worktree create" "$W"
-      if [ -z "$ORCA_TERMINAL" ]; then
-        ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
-        ORCA_TERMINAL_PROOF=recorded
-        persist_orca_cleanup_quarantine spawn-abort || {
-          echo "error: cannot durably record the Orca terminal authority for $ID" >&2
-          exit 1
-        }
-      fi
-      WORKTREE_CREATED=1
-    fi
-    [ "$(fm_backend_orca_terminal_state "$ORCA_TERMINAL" "$ORCA_WORKTREE_ID" "$W")" = present ] \
-      && fm_backend_orca_worktree_terminal_contains "$ORCA_WORKTREE_ID" "$W" "$ORCA_TERMINAL" || {
-        echo "error: Orca terminal is not authoritatively bound to worktree $ORCA_WORKTREE_ID and task $W" >&2
-        exit 1
-      }
-    T="$ORCA_TERMINAL"
-    ENDPOINT_CREATED=1
-    ;;
-esac
-if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ]; then
-  persist_failed_account_rollback_short || exit 1
-fi
-# #134 robustness: only tmux needs a command target distinct from $T - its
-# rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
-# Every other backend addresses its pane/surface by the id already in $T, so default
-# WT_TARGET to $T for them (and for any future backend).
-: "${WT_TARGET:=$T}"
-spawn_send_text_line() {  # <target> <text>
-  case "$BACKEND" in
-    tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
-    herdr) fm_backend_herdr_send_text_line "$1" "$2" ;;
-    zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
-    orca) fm_backend_orca_send_text_line "$1" "$2" ;;
-    cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
-  esac
-}
-spawn_current_path() {  # <target>
-  case "$BACKEND" in
-    tmux) fm_backend_tmux_current_path "$1" ;;
-    herdr) fm_backend_herdr_current_path "$1" ;;
-    zellij) fm_backend_zellij_current_path "$1" "$W" ;;
-    cmux) fm_backend_cmux_current_path "$1" "$W" ;;
-  esac
-}
-spawn_send_literal() {  # <target> <text>
-  case "$BACKEND" in
-    tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
-    herdr) fm_backend_herdr_send_literal "$1" "$2" ;;
-    zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
-    orca) fm_backend_orca_send_literal "$1" "$2" ;;
-    cmux) fm_backend_cmux_send_literal "$1" "$2" "$W" ;;
-  esac
-}
-spawn_send_key() {  # <target> <key>
-  case "$BACKEND" in
-    tmux) fm_backend_tmux_send_key "$1" "$2" ;;
-    herdr) fm_backend_herdr_send_key "$1" "$2" ;;
-    zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
-    orca) fm_backend_orca_send_key "$1" "$2" ;;
-    cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
-  esac
-}
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$RECOVERY_ACCOUNT" != 1 ]; then
-  WT_REAL=$(real_path_or_raw "$WT")
-  for _ in $(seq 1 60); do
-    p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" = "$WT_REAL" ]; then
-      break
-    fi
-    sleep 1
-  done
-  if [ -z "${p:-}" ] || [ "$(real_path_or_raw "$p")" != "$WT_REAL" ]; then
-    echo "error: task endpoint did not start in leased worktree $WT within 60s; inspect window $T" >&2
-    exit 1
-  fi
-fi
-if [ -z "$WT" ] && [ "$BACKEND" = orca ]; then
-  WT="$PROJ_ABS"
-fi
-
+# prepare_launch_environment: every step the launch-command construction below
+# depends on - worktree canonicalization, the per-task temp root, the per-harness
+# turn-end hook, delivery mode/yolo, and account selection. The body is unchanged
+# and deliberately NOT re-indented (it contains heredocs whose bodies are written
+# verbatim into hook files); it is wrapped in a function only so the herdr backend
+# can run it BEFORE endpoint creation, because herdr `agent start` needs the final
+# agent argv up front, while every other backend keeps calling it exactly where it
+# ran before. orca is why this is not simply hoisted for all backends: orca only
+# learns its worktree path during endpoint creation.
+prepare_launch_environment() {
 if [ "$DIRECT_ACCOUNT_ROUTING" = 1 ] && [ "$DIRECT_ACCOUNT_RECOVERY" = 0 ] && [ "$KIND" != secondmate ]; then
   WT=$(cd "$WT" 2>/dev/null && pwd -P) || {
     echo "error: cannot canonicalize direct account worktree for $ID" >&2
@@ -3153,6 +2954,9 @@ fi
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
+# herdr sets GOTMPDIR natively at agent start. Every other backend exports it into
+# the pane shell just before the launch line, further down.
+[ "$BACKEND" != herdr ] || HERDR_AGENT_ENV+=("GOTMPDIR=$TASK_TMP/gotmp")
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
@@ -3321,6 +3125,348 @@ if [ "$DIRECT_ACCOUNT_ROUTING" = 1 ]; then
     }
   fi
 fi
+}
+
+# build_launch_command: resolve LAUNCH (the full harness launch command) and its
+# placeholders. Body unchanged and not re-indented, for the same reasons as
+# prepare_launch_environment above.
+build_launch_command() {
+sq_brief=$(shell_quote "$BRIEF")
+if [ "$CONTINUE_ACCOUNT" = 1 ]; then
+  continuation_prompt_command="\$(cat __BRIEF__)"
+  continuation_prompt_marker="\"$continuation_prompt_command\""
+  case "$HARNESS" in
+    claude) continuation_prompt_reference= ;;
+    codex) continuation_prompt_reference= ;;
+    *) echo "error: continuation native prompt launch supports only claude and codex" >&2; exit 1 ;;
+  esac
+  LAUNCH=${LAUNCH//$continuation_prompt_marker/$continuation_prompt_reference}
+  case "$LAUNCH" in *"$continuation_prompt_command"*) echo "error: continuation prompt was not bound to its verified generation" >&2; exit 1 ;; esac
+fi
+sq_turnend=$(shell_quote "$TURNEND")
+sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
+sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
+MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+if [ "$RESUME_ACCOUNT" = 1 ]; then
+  case "$HARNESS:$KIND" in
+    claude:*) LAUNCH='CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false __AGENT__ --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__' ;;
+    codex:secondmate) LAUNCH='__AGENT__ __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox' ;;
+    codex:*) LAUNCH='__AGENT__ __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]"' ;;
+    *) echo "error: managed recovery supports only claude and codex" >&2; exit 1 ;;
+  esac
+fi
+AGENT_COMMAND=$HARNESS
+if [ "$DIRECT_ACCOUNT_ROUTING" = 1 ]; then
+  # herdr delivers the account directory NATIVELY, as `agent start --env KEY=VALUE`
+  # (HERDR_AGENT_ENV below), instead of as a command-scoped shell prefix. Verified
+  # before making the switch: no login profile on this machine sets CODEX_HOME or
+  # CLAUDE_CONFIG_DIR, so the natively-injected value cannot be overwritten by the
+  # login shell that evaluates the launch command. Every other backend keeps the
+  # shell prefix, which is the only delivery mechanism a typed launch line has.
+  case "$HARNESS:$BACKEND" in
+    claude:herdr) HERDR_AGENT_ENV+=("CLAUDE_CONFIG_DIR=$DIRECT_ACCOUNT_HOME") ;;
+    codex:herdr) HERDR_AGENT_ENV+=("CODEX_HOME=$DIRECT_ACCOUNT_HOME") ;;
+    claude:*) AGENT_COMMAND="CLAUDE_CONFIG_DIR=$(shell_quote "$DIRECT_ACCOUNT_HOME") $HARNESS" ;;
+    codex:*) AGENT_COMMAND="CODEX_HOME=$(shell_quote "$DIRECT_ACCOUNT_HOME") $HARNESS" ;;
+  esac
+fi
+if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ]; then
+  if [ "$RESUME_ACCOUNT" = 1 ]; then
+    rm -rf "$STATE/.$ID.account-native-launch" "$STATE/.$ID.account-native-ready" "$STATE/.$ID.account-native-go" || exit 1
+    ACCOUNT_NATIVE_LAUNCH_DIR=$(mktemp -d "$STATE/.$ID.account-native-launch.XXXXXX") || exit 1
+    chmod 700 "$ACCOUNT_NATIVE_LAUNCH_DIR" || exit 1
+    ACCOUNT_NATIVE_LAUNCH_SCRIPT="$ACCOUNT_NATIVE_LAUNCH_DIR/account-native-launch"
+    ACCOUNT_NATIVE_LAUNCH_READY="$ACCOUNT_NATIVE_LAUNCH_DIR/ready"
+    ACCOUNT_NATIVE_LAUNCH_GO="$ACCOUNT_NATIVE_LAUNCH_DIR/go"
+    resume_command=$(fm_account_resume_command "$ACCOUNT_TASK" "$WT" "$TURNEND") || exit 1
+    if [ "$BACKEND" = herdr ]; then
+      native_shell=$(fm_backend_herdr_managed_shell_bin) || {
+        echo "error: managed Herdr worker shell is unavailable for native resume" >&2
+        exit 1
+      }
+    else
+      # Non-Herdr enforced recovery is reachable only in the explicit test lab.
+      native_shell="$FM_ROOT/bin/fm-herdr-worker-shell"
+      [ -f "$native_shell" ] && [ ! -L "$native_shell" ] && [ -x "$native_shell" ] || {
+        echo "error: closed worker shell is unavailable for native resume" >&2
+        exit 1
+      }
+    fi
+    native_ready_q=$(fm_account_shell_quote "$ACCOUNT_NATIVE_LAUNCH_READY")
+    native_go_q=$(fm_account_shell_quote "$ACCOUNT_NATIVE_LAUNCH_GO")
+    if ! ( set -C; cat > "$ACCOUNT_NATIVE_LAUNCH_SCRIPT" <<EOF
+#!$native_shell
+set -euC
+: > $native_ready_q
+while [ ! -f $native_go_q ]; do /bin/sleep 0.05; done
+/bin/rm -f $native_ready_q $native_go_q
+exec $resume_command "\$@"
+EOF
+    ); then
+      echo "error: could not create private native provider launch wrapper for $ID" >&2
+      exit 1
+    fi
+    chmod +x "$ACCOUNT_NATIVE_LAUNCH_SCRIPT"
+    AGENT_COMMAND=$(fm_account_shell_quote "$ACCOUNT_NATIVE_LAUNCH_SCRIPT")
+  else
+    AGENT_COMMAND=$(fm_account_exec_command "$ACCOUNT_PROFILE" "$ACCOUNT_POOL" "$ACCOUNT_TASK" "$WT" "$TURNEND") || exit 1
+  fi
+fi
+LAUNCH=${LAUNCH//__AGENT__/$AGENT_COMMAND}
+LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
+LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
+LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
+LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
+LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+if [ "$KIND" = secondmate ]; then
+  sq_home=$(shell_quote "$PROJ_ABS")
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+fi
+if [ "$CONTINUE_ACCOUNT" = 1 ]; then
+  continuation_launch_command=$LAUNCH
+  LAUNCH="$(shell_quote python3) $(shell_quote "$SCRIPT_DIR/fm-prompt-exec.py") $(shell_quote "$CONTINUATION_PROMPT_FILE") $(shell_quote "$CONTINUATION_PROMPT_DIR_ID") $(shell_quote "$CONTINUATION_PROMPT_FILE_ID") $(shell_quote "$CONTINUATION_PROMPT_CONTENT_ID") $(shell_quote "$continuation_launch_command")"
+fi
+}
+
+W="fm-$ID"
+# herdr launches natively: `herdr agent start ... -- <argv>` creates the pane AND
+# starts the agent in one call, so the whole launch command must exist BEFORE
+# endpoint creation rather than being typed into a pane shell afterwards. Run the
+# two launch-preparation blocks up front for herdr only; every other backend calls
+# them at their original positions further down (see their definitions above).
+if [ "$BACKEND" = herdr ]; then
+  prepare_launch_environment
+  build_launch_command
+fi
+SPAWN_CWD=${WT:-$PROJ_ABS}
+if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then
+  validate_direct_recovery_worktree_identity || exit 1
+fi
+case "$BACKEND" in
+  tmux)
+    SES=$(fm_backend_tmux_container_ensure)
+    T="$SES:$W"
+    # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
+    # id and pins the window name (automatic-rename/allow-rename off) so a captain's
+    # non-default tmux config cannot rename the window away from fm-<id>.
+    # WT_TARGET carries that stable id for spawn-time commands below; the
+    # persisted window= handle stays $T (the name form), which is safe now that
+    # rename is disabled.
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_CWD") || exit 1
+    ENDPOINT_CREATED=1
+    WT_TARGET="$WID"
+    ;;
+  herdr)
+    # fm_backend_herdr_workspace_label resolves the target workspace from
+    # FM_HOME. For every KIND except secondmate, this process's own FM_HOME is
+    # already the right home (the primary spawning its own crewmate/scout, or
+    # a secondmate spawning ITS OWN crewmate/scout from its own process's
+    # FM_HOME - the latter needs no glue at all). A --secondmate spawn is the
+    # one case that does: it is the PRIMARY's own fm-spawn.sh process
+    # launching a DIFFERENT home (PROJ_ABS, already validated above as the
+    # secondmate's home), so FM_HOME here still names the primary. Shadow it
+    # to PROJ_ABS for just these two calls (bash restores it automatically
+    # after each prefixed simple-command call) so the secondmate's tab lands
+    # in the secondmate's own workspace, not the primary's "firstmate" one.
+    HERDR_LABEL_HOME=$FM_HOME
+    if [ "$KIND" = secondmate ]; then
+      HERDR_LABEL_HOME=$PROJ_ABS
+    fi
+    HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$SPAWN_CWD") || exit 1
+    # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
+    # (the second field empty when this call ADOPTED a pre-existing workspace
+    # rather than creating a fresh one). Split on the guaranteed single tab
+    # character; the seeded tab id is threaded through to create_task
+    # untouched, which is the only function permitted to prune it (never
+    # re-derived from labels - see docs/herdr-backend.md "Default-tab prune").
+    CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
+    HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
+    HERDR_SES=${CONTAINER%%:*}
+    HERDR_WORKSPACE_ID=${CONTAINER#*:}
+    if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ] && ! fm_account_test_lab_enabled \
+      && ! fm_backend_herdr_server_closed_shell_environment_ready "$HERDR_SES"; then
+      echo "error: refusing enforced Agent Fleet routing because Herdr session '$HERDR_SES' was not launched by this adapter's closed environment; stop that idle server and let Firstmate restart it" >&2
+      exit 1
+    fi
+    # Native launch: the pane and the agent are created by one `herdr agent start`
+    # call, with the account/GOTMPDIR environment injected natively. The agent argv
+    # is a login shell evaluating the very same LAUNCH string every other backend
+    # types into its pane, so per-harness launch semantics (env prefixes, model and
+    # effort flags, "$(cat <brief>)") stay byte-identical across backends and the
+    # Agent Fleet enforced-mode command is preserved verbatim. What goes away is
+    # typing that command into a composer and hoping it submits.
+    FM_BACKEND_HERDR_AGENT_ENV=(${HERDR_AGENT_ENV[@]+"${HERDR_AGENT_ENV[@]}"})
+    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$SPAWN_CWD" "$HERDR_SEEDED_DEFAULT_TAB_ID" \
+      /bin/bash -lc "$LAUNCH") || exit 1
+    read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+$HERDR_TASK_IDS
+EOF
+    if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
+      echo "error: herdr did not return a tab/pane id for $W" >&2
+      exit 1
+    fi
+    T="$HERDR_SES:$HERDR_PANE_ID"
+    ENDPOINT_CREATED=1
+    ;;
+  zellij)
+    ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
+    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$SPAWN_CWD") || exit 1
+    read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
+$ZELLIJ_TASK_IDS
+EOF
+    if [ -z "$ZELLIJ_TAB_ID" ] || [ -z "$ZELLIJ_PANE_ID" ]; then
+      echo "error: zellij did not return a tab/pane id for $W" >&2
+      exit 1
+    fi
+    T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
+    ENDPOINT_CREATED=1
+    ;;
+  cmux)
+    fm_backend_cmux_container_ensure || exit 1
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$SPAWN_CWD") || exit 1
+    read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
+$CMUX_TASK_IDS
+EOF
+    if [ -z "$CMUX_WORKSPACE_ID" ] || [ -z "$CMUX_SURFACE_ID" ]; then
+      echo "error: cmux did not return a workspace/surface id for $W" >&2
+      exit 1
+    fi
+    T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
+    ENDPOINT_CREATED=1
+    ;;
+  orca)
+    if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then
+      ORCA_WORKTREE_ID=$(fm_meta_get "$RESUME_META" orca_worktree_id)
+      [ -n "$ORCA_WORKTREE_ID" ] || {
+        echo "error: direct account recovery metadata has no Orca worktree id for $ID" >&2
+        exit 1
+      }
+      ORCA_RECORDED_WORKTREE=$(fm_backend_orca_worktree_path "$ORCA_WORKTREE_ID") || exit 1
+      [ "$(real_path_or_raw "$ORCA_RECORDED_WORKTREE")" = "$(real_path_or_raw "$WT")" ] || {
+        echo "error: recorded Orca worktree identity no longer matches $WT for $ID" >&2
+        exit 1
+      }
+      ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
+      ORCA_TERMINAL_PROOF=recorded
+    else
+      ORCA_EXPECTED_TASK="fm-$ID"
+      ORCA_TERMINAL_PROOF=unproven
+      persist_orca_cleanup_quarantine spawn-preparing || {
+        echo "error: cannot durably arm Orca cleanup quarantine for $ID" >&2
+        exit 1
+      }
+      ORCA_ABORT_CLEANUP=1
+      set +e
+      ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
+      ORCA_WT_STATUS=$?
+      set -e
+      if [ "$ORCA_WT_STATUS" -ne 0 ]; then
+        if [ "$ORCA_WT_STATUS" -eq 2 ] && [ -n "$ORCA_WT_RAW" ]; then
+          parse_orca_worktree_result "$ORCA_WT_RAW" || true
+          persist_orca_cleanup_quarantine spawn-abort || {
+            echo "error: cannot durably record partial Orca create authority for $ID" >&2
+          }
+        fi
+        exit 1
+      fi
+      parse_orca_worktree_result "$ORCA_WT_RAW" || true
+      persist_orca_cleanup_quarantine spawn-abort || {
+        echo "error: cannot durably record Orca create authority for $ID" >&2
+        exit 1
+      }
+      if [ -z "$ORCA_WORKTREE_ID" ] || [ -z "$WT" ] || [ "$ORCA_PROVIDER_TASK" != "$ORCA_EXPECTED_TASK" ]; then
+        echo "error: orca did not return matching worktree id, path, and task authority for $W" >&2
+        exit 1
+      fi
+      validate_spawn_worktree "orca worktree create" "$W"
+      if [ -z "$ORCA_TERMINAL" ]; then
+        ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
+        ORCA_TERMINAL_PROOF=recorded
+        persist_orca_cleanup_quarantine spawn-abort || {
+          echo "error: cannot durably record the Orca terminal authority for $ID" >&2
+          exit 1
+        }
+      fi
+      WORKTREE_CREATED=1
+    fi
+    [ "$(fm_backend_orca_terminal_state "$ORCA_TERMINAL" "$ORCA_WORKTREE_ID" "$W")" = present ] \
+      && fm_backend_orca_worktree_terminal_contains "$ORCA_WORKTREE_ID" "$W" "$ORCA_TERMINAL" || {
+        echo "error: Orca terminal is not authoritatively bound to worktree $ORCA_WORKTREE_ID and task $W" >&2
+        exit 1
+      }
+    T="$ORCA_TERMINAL"
+    ENDPOINT_CREATED=1
+    ;;
+esac
+if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ]; then
+  persist_failed_account_rollback_short || exit 1
+fi
+# #134 robustness: only tmux needs a command target distinct from $T - its
+# rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
+# Every other backend addresses its pane/surface by the id already in $T, so default
+# WT_TARGET to $T for them (and for any future backend).
+: "${WT_TARGET:=$T}"
+spawn_send_text_line() {  # <target> <text>
+  case "$BACKEND" in
+    tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
+    herdr) fm_backend_herdr_send_text_line "$1" "$2" ;;
+    zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
+    orca) fm_backend_orca_send_text_line "$1" "$2" ;;
+    cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
+  esac
+}
+spawn_current_path() {  # <target>
+  case "$BACKEND" in
+    tmux) fm_backend_tmux_current_path "$1" ;;
+    herdr) fm_backend_herdr_current_path "$1" ;;
+    zellij) fm_backend_zellij_current_path "$1" "$W" ;;
+    cmux) fm_backend_cmux_current_path "$1" "$W" ;;
+  esac
+}
+spawn_send_literal() {  # <target> <text>
+  case "$BACKEND" in
+    tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
+    herdr) fm_backend_herdr_send_literal "$1" "$2" ;;
+    zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
+    orca) fm_backend_orca_send_literal "$1" "$2" ;;
+    cmux) fm_backend_cmux_send_literal "$1" "$2" "$W" ;;
+  esac
+}
+spawn_send_key() {  # <target> <key>
+  case "$BACKEND" in
+    tmux) fm_backend_tmux_send_key "$1" "$2" ;;
+    herdr) fm_backend_herdr_send_key "$1" "$2" ;;
+    zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
+    orca) fm_backend_orca_send_key "$1" "$2" ;;
+    cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
+  esac
+}
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$RECOVERY_ACCOUNT" != 1 ]; then
+  WT_REAL=$(real_path_or_raw "$WT")
+  for _ in $(seq 1 60); do
+    p=$(spawn_current_path "$WT_TARGET" || true)
+    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" = "$WT_REAL" ]; then
+      break
+    fi
+    sleep 1
+  done
+  if [ -z "${p:-}" ] || [ "$(real_path_or_raw "$p")" != "$WT_REAL" ]; then
+    echo "error: task endpoint did not start in leased worktree $WT within 60s; inspect window $T" >&2
+    exit 1
+  fi
+fi
+if [ -z "$WT" ] && [ "$BACKEND" = orca ]; then
+  WT="$PROJ_ABS"
+fi
+
+
+if [ "$BACKEND" != herdr ]; then
+  prepare_launch_environment
+fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
@@ -3465,96 +3611,8 @@ META_INSTALLED=1
 META_WRITE_LOCK=
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
-sq_brief=$(shell_quote "$BRIEF")
-if [ "$CONTINUE_ACCOUNT" = 1 ]; then
-  continuation_prompt_command="\$(cat __BRIEF__)"
-  continuation_prompt_marker="\"$continuation_prompt_command\""
-  case "$HARNESS" in
-    claude) continuation_prompt_reference= ;;
-    codex) continuation_prompt_reference= ;;
-    *) echo "error: continuation native prompt launch supports only claude and codex" >&2; exit 1 ;;
-  esac
-  LAUNCH=${LAUNCH//$continuation_prompt_marker/$continuation_prompt_reference}
-  case "$LAUNCH" in *"$continuation_prompt_command"*) echo "error: continuation prompt was not bound to its verified generation" >&2; exit 1 ;; esac
-fi
-sq_turnend=$(shell_quote "$TURNEND")
-sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
-sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
-sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
-if [ "$RESUME_ACCOUNT" = 1 ]; then
-  case "$HARNESS:$KIND" in
-    claude:*) LAUNCH='CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false __AGENT__ --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__' ;;
-    codex:secondmate) LAUNCH='__AGENT__ __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox' ;;
-    codex:*) LAUNCH='__AGENT__ __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]"' ;;
-    *) echo "error: managed recovery supports only claude and codex" >&2; exit 1 ;;
-  esac
-fi
-AGENT_COMMAND=$HARNESS
-if [ "$DIRECT_ACCOUNT_ROUTING" = 1 ]; then
-  case "$HARNESS" in
-    claude) AGENT_COMMAND="CLAUDE_CONFIG_DIR=$(shell_quote "$DIRECT_ACCOUNT_HOME") $HARNESS" ;;
-    codex) AGENT_COMMAND="CODEX_HOME=$(shell_quote "$DIRECT_ACCOUNT_HOME") $HARNESS" ;;
-  esac
-fi
-if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ]; then
-  if [ "$RESUME_ACCOUNT" = 1 ]; then
-    rm -rf "$STATE/.$ID.account-native-launch" "$STATE/.$ID.account-native-ready" "$STATE/.$ID.account-native-go" || exit 1
-    ACCOUNT_NATIVE_LAUNCH_DIR=$(mktemp -d "$STATE/.$ID.account-native-launch.XXXXXX") || exit 1
-    chmod 700 "$ACCOUNT_NATIVE_LAUNCH_DIR" || exit 1
-    ACCOUNT_NATIVE_LAUNCH_SCRIPT="$ACCOUNT_NATIVE_LAUNCH_DIR/account-native-launch"
-    ACCOUNT_NATIVE_LAUNCH_READY="$ACCOUNT_NATIVE_LAUNCH_DIR/ready"
-    ACCOUNT_NATIVE_LAUNCH_GO="$ACCOUNT_NATIVE_LAUNCH_DIR/go"
-    resume_command=$(fm_account_resume_command "$ACCOUNT_TASK" "$WT" "$TURNEND") || exit 1
-    if [ "$BACKEND" = herdr ]; then
-      native_shell=$(fm_backend_herdr_managed_shell_bin) || {
-        echo "error: managed Herdr worker shell is unavailable for native resume" >&2
-        exit 1
-      }
-    else
-      # Non-Herdr enforced recovery is reachable only in the explicit test lab.
-      native_shell="$FM_ROOT/bin/fm-herdr-worker-shell"
-      [ -f "$native_shell" ] && [ ! -L "$native_shell" ] && [ -x "$native_shell" ] || {
-        echo "error: closed worker shell is unavailable for native resume" >&2
-        exit 1
-      }
-    fi
-    native_ready_q=$(fm_account_shell_quote "$ACCOUNT_NATIVE_LAUNCH_READY")
-    native_go_q=$(fm_account_shell_quote "$ACCOUNT_NATIVE_LAUNCH_GO")
-    if ! ( set -C; cat > "$ACCOUNT_NATIVE_LAUNCH_SCRIPT" <<EOF
-#!$native_shell
-set -euC
-: > $native_ready_q
-while [ ! -f $native_go_q ]; do /bin/sleep 0.05; done
-/bin/rm -f $native_ready_q $native_go_q
-exec $resume_command "\$@"
-EOF
-    ); then
-      echo "error: could not create private native provider launch wrapper for $ID" >&2
-      exit 1
-    fi
-    chmod +x "$ACCOUNT_NATIVE_LAUNCH_SCRIPT"
-    AGENT_COMMAND=$(fm_account_shell_quote "$ACCOUNT_NATIVE_LAUNCH_SCRIPT")
-  else
-    AGENT_COMMAND=$(fm_account_exec_command "$ACCOUNT_PROFILE" "$ACCOUNT_POOL" "$ACCOUNT_TASK" "$WT" "$TURNEND") || exit 1
-  fi
-fi
-LAUNCH=${LAUNCH//__AGENT__/$AGENT_COMMAND}
-LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
-LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
-LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
-LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
-LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
-LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
-LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
-if [ "$KIND" = secondmate ]; then
-  sq_home=$(shell_quote "$PROJ_ABS")
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
-fi
-if [ "$CONTINUE_ACCOUNT" = 1 ]; then
-  continuation_launch_command=$LAUNCH
-  LAUNCH="$(shell_quote python3) $(shell_quote "$SCRIPT_DIR/fm-prompt-exec.py") $(shell_quote "$CONTINUATION_PROMPT_FILE") $(shell_quote "$CONTINUATION_PROMPT_DIR_ID") $(shell_quote "$CONTINUATION_PROMPT_FILE_ID") $(shell_quote "$CONTINUATION_PROMPT_CONTENT_ID") $(shell_quote "$continuation_launch_command")"
+if [ "$BACKEND" != herdr ]; then
+  build_launch_command
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
@@ -3570,11 +3628,16 @@ if [ "$BACKEND" = orca ]; then
     exit 1
   }
 fi
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
-sleep 0.3
-spawn_send_key "$T" Enter
+# herdr already launched the agent natively during endpoint creation, with the
+# same LAUNCH string as its argv and GOTMPDIR injected via --env, so there is
+# nothing to type into a pane here.
+if [ "$BACKEND" != herdr ]; then
+  spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+  sleep 0.3
+  spawn_send_literal "$T" "$LAUNCH"
+  sleep 0.3
+  spawn_send_key "$T" Enter
+fi
 
 if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ]; then
   session_sync_args=("$ID" --wait "${FM_ACCOUNT_SESSION_WAIT_SECONDS:-10}" --require)

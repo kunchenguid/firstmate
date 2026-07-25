@@ -106,6 +106,14 @@ FM_BACKEND_HERDR_ESCALATED_PREFIX=".herdr-escalated-"
 # The primary firstmate home never carries this marker.
 FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
 
+# Environment fm_backend_herdr_create_task hands to `agent start` as repeated
+# --env KEY=VALUE flags when it is asked to launch an agent natively. Set by the
+# caller (bin/fm-spawn.sh) before the call; declared here so `set -u` callers can
+# read it unconditionally. Never initialized over a value a caller already set.
+if ! declare -p FM_BACKEND_HERDR_AGENT_ENV >/dev/null 2>&1; then
+  FM_BACKEND_HERDR_AGENT_ENV=()
+fi
+
 fm_backend_herdr_test_lab_enabled() {
   [ "${FM_BACKEND_HERDR_TEST_LAB:-}" = firstmate-herdr-test-lab-v1 ]
 }
@@ -254,6 +262,32 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   herdr_bin=$(fm_backend_herdr_bin) || return 1
   HERDR_SESSION="$session" fm_backend_herdr_scrubbed_exec \
     "$herdr_bin" "$@" --session "$session"
+}
+
+# fm_backend_herdr_cli_argv: fm_backend_herdr_cli for the one subcommand that
+# takes a trailing `-- <argv...>` (agent start). The plain helper appends
+# `--session <name>` LAST, which for those calls would land INSIDE the launched
+# program's argv rather than being read by herdr - verified: it fails with
+# agent_placement_not_found because herdr then never sees the session at all, and
+# the two stray words would have been passed to the agent. This variant splits at
+# the first literal `--` and pins the session before it. Both flag placements were
+# verified equivalent against the real herdr 0.7.3 binary.
+fm_backend_herdr_cli_argv() {  # <session> <subcommand-and-flags...> -- <argv...>
+  local session=$1 herdr_bin arg
+  local -a pre=() post=()
+  local seen_sep=0
+  shift
+  herdr_bin=$(fm_backend_herdr_bin) || return 1
+  for arg in "$@"; do
+    if [ "$seen_sep" = 0 ] && [ "$arg" = '--' ]; then
+      seen_sep=1
+      continue
+    fi
+    if [ "$seen_sep" = 1 ]; then post+=("$arg"); else pre+=("$arg"); fi
+  done
+  [ "$seen_sep" = 1 ] || return 1
+  HERDR_SESSION="$session" fm_backend_herdr_scrubbed_exec \
+    "$herdr_bin" ${pre[@]+"${pre[@]}"} --session "$session" -- ${post[@]+"${post[@]}"}
 }
 
 # fm_backend_herdr_tool_check: refuse loudly if herdr, jq, or the portable
@@ -640,9 +674,19 @@ fm_backend_herdr_server_legacy_env_certificate_path() {  # <session>
   printf '%s/%s.closed-shell-v1\n' "$root" "$key"
 }
 
+# Herdr-native cutover: production no longer requires a firstmate-issued
+# closed-shell certificate on the herdr server. The certificate existed to prove a
+# crew pane's environment was scrubbed by firstmate's own managed worker shell; a
+# natively started agent gets its environment from `agent start --env` instead, so
+# there is nothing left for a server-level certificate to attest. It also caused a
+# hard deadlock whenever firstmate itself ran inside the herdr session it needed to
+# spawn into: the server had been launched by the interactive launcher, could never
+# be certified, and could not be restarted because it was occupied (the three
+# bypass commits 50b1356/40b2f8e/9858e76 patched around exactly that).
+# Only the explicit test lab can still exercise the legacy certified lifecycle.
 fm_backend_herdr_server_certificate_required() {
-  ! fm_backend_herdr_test_lab_enabled && return 0
-  [ "${FM_TEST_HERDR_REQUIRE_CERT_LIFECYCLE:-}" = firstmate-herdr-tests-v1 ]
+  fm_backend_herdr_test_lab_enabled \
+    && [ "${FM_TEST_HERDR_REQUIRE_CERT_LIFECYCLE:-}" = firstmate-herdr-tests-v1 ]
 }
 
 fm_backend_herdr_file_read_verified() {  # <identity|snapshot> <path> <mode|executable> <owner|root-or-owner>
@@ -2276,8 +2320,11 @@ fm_backend_herdr_agent_alive() {  # <target> [expected-label]
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
 # shellcheck disable=SC2016
-fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
+fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id> [<agent-argv>...]
   local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
+  local native_agent=0 root_pane_id agent_tab kv
+  local -a agent_env_args=()
+  [ "$#" -le 4 ] || native_agent=1
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -2305,6 +2352,35 @@ EOF
   if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
     return 1
+  fi
+  if [ "$native_agent" = 1 ]; then
+    shift 4
+    for kv in ${FM_BACKEND_HERDR_AGENT_ENV[@]+"${FM_BACKEND_HERDR_AGENT_ENV[@]}"}; do
+      agent_env_args+=(--env "$kv")
+    done
+    root_pane_id=$pane_id
+    out=$(fm_backend_herdr_cli_argv "$session" agent start "$label" --tab "$tab_id" --cwd "$cwd" --no-focus \
+      ${agent_env_args[@]+"${agent_env_args[@]}"} -- "$@" 2>/dev/null) || {
+      echo "error: herdr agent start failed for '$label' in workspace $wsid (session $session)" >&2
+      fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || true
+      return 1
+    }
+    pane_id=$(printf '%s' "$out" | fm_backend_herdr_control_jq -r '.result.agent.pane_id // empty' 2>/dev/null)
+    agent_tab=$(printf '%s' "$out" | fm_backend_herdr_control_jq -r '.result.agent.tab_id // empty' 2>/dev/null)
+    if [ -z "$pane_id" ] || [ "$agent_tab" != "$tab_id" ] || [ "$pane_id" = "$root_pane_id" ]; then
+      echo "error: herdr agent start did not report a new agent pane inside tab $tab_id (session $session)" >&2
+      fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || true
+      return 1
+    fi
+    # Verified against the real herdr 0.7.3 binary: `agent start --tab <id>` always
+    # SPLITS the target tab, so the tab's own freshly created shell pane is still
+    # sitting there beside the agent. Close it now, AFTER the agent pane exists and
+    # never before - closing a tab's last pane deletes the tab (the same
+    # create-before-close rule the husk replacement and default-tab prune obey) -
+    # so the task tab ends up holding exactly one pane, the agent itself. That is
+    # the same one-pane-per-task shape the old typed-launch path produced, which
+    # every identity, capture, and husk-classification path here already assumes.
+    fm_backend_herdr_cli "$session" pane close "$root_pane_id" >/dev/null 2>&1 || true
   fi
   [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
   if [ -n "$dup_tab_ids" ]; then
@@ -2627,9 +2703,29 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
 # caller sends Enter separately. Mirrors tmux's `send-keys -t T -l text`.
 # Verified: `pane send-text` does NOT auto-submit (contrary to the addendum's
 # original guess); it behaves exactly like tmux's `-l` literal send.
+#
+# Native-first: `agent send` addresses the registered AGENT, so it cannot deliver
+# steering text into a pane whose agent has died and left a bare shell - where the
+# very next Enter would run that text as a shell command. `pane send-text` is the
+# fallback, kept because firstmate must still be able to drive a husk or an
+# agent-less pane during recovery and stuck-crewmate handling.
 fm_backend_herdr_send_literal() {  # <target> <text> [expected-label]
   fm_backend_herdr_target_ready "$1" "${3:-}" || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent send "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1 \
+    && return 0
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
+}
+
+# fm_backend_herdr_agent_session_id: the harness's OWN session id for the agent
+# running under <session>:<pane_id>, read natively from `agent get`
+# (.result.agent.agent_session.value - e.g. a codex session uuid), or empty when
+# the target has no agent or reports no session. This is the resume handle: it is
+# herdr's own observation of the live agent, so it stays correct across a firstmate
+# restart without firstmate having to record anything itself.
+fm_backend_herdr_agent_session_id() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 out
+  out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null) || { printf ''; return 0; }
+  printf '%s' "$out" | fm_backend_herdr_control_jq -r '.result.agent.agent_session.value // empty' 2>/dev/null
 }
 
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,
