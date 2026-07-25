@@ -4,8 +4,9 @@ Calm is a Pi-only conversation presentation toggle.
 It is off by default, and the last `/calm` choice persists for the effective Firstmate home across Pi session starts and resumes.
 
 While Calm is active, Pi's built-in `Working...` activity remains visible and no separate Calm status row is added.
-Calm hides collapsed thinking labels, the shells for Pi's seven built-in tools, the `fm_watch_arm_pi` tool shell, and canonically classified Firstmate operational user rows.
+Calm hides collapsed thinking labels, the shells for Pi's seven built-in tools, the `fm_watch_arm_pi` tool shell, and the canonically classified Firstmate operational user rows that carry the U+2063 mark.
 The operational inputs remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
+An agent's own `launch-brief` prompt carries the unmarked envelope owned by `bin/fm-operational-input.sh`, so Calm leaves it visible like ordinary captain text.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
 Calm changes presentation only.
