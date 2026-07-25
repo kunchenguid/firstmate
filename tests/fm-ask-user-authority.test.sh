@@ -52,7 +52,7 @@ test_owner_and_always_loaded_boundary() {
   assert_grep 'With `yolo` off, every ask-user finding belongs to the captain' "$OWNER" \
     "detailed procedure permits autonomous ask-user decisions with yolo off"
   trigger_count=$(grep -Fc -- '- `ask-user-authority` -' "$AGENTS")
-  [ "$trigger_count" -eq 1 ] || fail "ask-user-authority must have exactly one section 13 trigger, found $trigger_count"
+  [ "$trigger_count" -eq 1 ] || fail "ask-user-authority must have exactly one section 12 trigger, found $trigger_count"
   assert_no_grep 'Hi Bit' "$AGENTS" "AGENTS.md encoded an incident-specific authority rule"
   assert_no_grep 'Hi Bit' "$OWNER" "authority owner encoded an incident-specific rule"
   pass "ask-user authority has one conditional owner and a concise always-loaded boundary"

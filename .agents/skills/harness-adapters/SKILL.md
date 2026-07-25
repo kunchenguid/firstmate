@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, selecting a dispatch profile, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, and grok.
 user-invocable: false
 metadata:
   internal: true
@@ -47,6 +47,27 @@ When verifying a new adapter, record its env marker and command name in `bin/fm-
 
 For stuck recovery, the target window's harness is recorded as `harness=` in `state/<id>.meta`.
 Use that value for interrupt, exit, resume, and skill-invocation facts.
+
+## Dispatch profile selection
+
+`docs/configuration.md` owns the dispatch-profile schema, while this section is the single owner of the judgment procedure for selecting one concrete profile.
+At every crewmate or scout intake, apply an explicit per-task captain override first, then the best-fitting configured rule, then the configured default, then the static crewmate harness.
+When a selected rule or default is one profile object, use that concrete profile directly.
+
+Firstmate alone resolves a matched profile array.
+Run `quota-axi --json` at that intake, evaluate every configured candidate against that current output, and choose the candidate with the most real headroom.
+Account for every candidate.
+If any harness, model, or provider relationship, applicable quota data, or interpretation cannot be established, stop and report that candidate instead of omitting it, guessing, falling back, or calling the result quota-informed.
+Preserve malformed profile configuration as an actionable error rather than selecting around it.
+When every candidate is tight, preserve the captain's strongest-reasoning class rather than silently downgrading it solely to conserve quota.
+Stop and report the tight choice if that class cannot proceed.
+Break genuine headroom ties without array-order or harness bias.
+`quota-axi` owns how model or product windows relate to bounding account windows.
+As an explicitly interim rule until successor `quota-axi-interpretation-hints-h3` lands, use the weakest applicable remaining headroom, then remove this sentence when that successor replaces it.
+`bin/fm-dispatch-select.sh` is vestigial during this transition and must not be called.
+
+After selection, pass the concrete `harness`, `model`, and `effort` axes that are set to `bin/fm-spawn.sh`.
+A missing dependency, authentication failure, unresolved relationship, unavailable quota reading, unsupported backend, or version refusal blocks this dispatch rather than authorizing a guess or silent retry on another runtime.
 
 ## Primary turn-end guard
 

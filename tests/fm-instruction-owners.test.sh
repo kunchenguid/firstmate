@@ -17,6 +17,8 @@ CONFIG="$ROOT/docs/configuration.md"
 AGENTS="$ROOT/AGENTS.md"
 BRIEF="$ROOT/bin/fm-brief.sh"
 BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
+TASK="$ROOT/.agents/skills/task-lifecycle/SKILL.md"
+SUPERVISION="$ROOT/.agents/skills/fleet-supervision/SKILL.md"
 
 test_new_skill_metadata_and_triggers() {
   local skill name count
@@ -107,10 +109,10 @@ test_agent_owned_quota_array_dispatch_contract() {
   local phrase
   for phrase in \
     'Firstmate alone resolves a matched profile array' \
-    'run `quota-axi --json` at that intake' \
+    'Run `quota-axi --json` at that intake' \
     'evaluate every configured candidate against that current output' \
     'choose the candidate with the most real headroom' \
-    'if any harness/model/provider relationship, applicable quota data, or interpretation cannot be established, stop and report that candidate' \
+    'If any harness, model, or provider relationship, applicable quota data, or interpretation cannot be established, stop and report that candidate' \
     'instead of omitting it, guessing, falling back, or calling the result quota-informed' \
     'Preserve malformed profile configuration as an actionable error' \
     "preserve the captain's strongest-reasoning class rather than silently downgrading it" \
@@ -118,7 +120,7 @@ test_agent_owned_quota_array_dispatch_contract() {
     '`quota-axi` owns how model or product windows relate to bounding account windows' \
     'explicitly interim rule until successor `quota-axi-interpretation-hints-h3` lands' \
     '`bin/fm-dispatch-select.sh` is vestigial during this transition and must not be called'; do
-    assert_grep "$phrase" "$AGENTS" "array-dispatch contract lost '$phrase'"
+    assert_grep "$phrase" "$HARNESS" "array-dispatch owner lost '$phrase'"
   done
 
   for phrase in \
@@ -133,13 +135,13 @@ test_agent_owned_quota_array_dispatch_contract() {
   done
   assert_grep 'not as a permanent namespace or provider mapping' "$HARNESS" \
     "model discovery guidance permits a fixed provider table"
-  assert_grep '`AGENTS.md` section 4 owns the dispatch and array-selection procedure.' "$CONFIG" \
+  assert_grep '[`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md) owns the dispatch and array-selection procedure.' "$CONFIG" \
     "configuration docs do not point to the agent-owned array procedure"
   assert_grep '`bin/fm-dispatch-select.sh` is vestigial during the instruction transition and must not be called' "$CONFIG" \
     "configuration docs still permit the vestigial selector"
   assert_grep 'quota-axi is required for the' "$BOOTSTRAP" \
     "bootstrap docs lost the quota-axi dependency pointer"
-  assert_grep 'agent-owned dispatch-profile array procedure in AGENTS.md section 4.' "$BOOTSTRAP" \
+  assert_grep 'agent-owned dispatch-profile array procedure in the harness-adapters skill.' "$BOOTSTRAP" \
     "bootstrap docs do not point to the agent-owned array procedure"
   assert_no_grep 'every crew-dispatch profile array calls it automatically' "$BOOTSTRAP" \
     "bootstrap docs still claim automatic selector invocation"
@@ -211,77 +213,66 @@ test_state_startup_and_ordinary_recovery_placement() {
     "ordinary recovery lost treehouse inventory inspection"
   assert_grep "recorded \`orca_worktree_id=\` and \`terminal=\`" "$RECOVERY" \
     "ordinary recovery lost Orca inventory inspection"
-  assert_grep "session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window" "$AGENTS" \
+  assert_grep '`stuck-crewmate-recovery` - load when startup reports an ordinary direct report dead or without a window' "$AGENTS" \
     "AGENTS.md does not trigger ordinary dead-report recovery"
   pass "state, startup, and ordinary recovery have focused owners and triggers"
 }
 
 test_compressed_agents_owner_map() {
-  assert_grep '`docs/configuration.md` is the single owner of the top-level operational-home layout' "$AGENTS" \
+  assert_grep '`docs/configuration.md` owns the operational-home layout' "$AGENTS" \
     "AGENTS.md lost the state-layout owner pointer"
-  assert_grep 'header is the single owner of composed commands, ordering, and digest contents' "$AGENTS" \
-    "AGENTS.md lost the session-start owner pointer"
-  assert_grep '`docs/configuration.md` owns dispatch-profile and runtime-backend schemas' "$AGENTS" \
-    "AGENTS.md lost the dispatch-schema owner pointer"
-  assert_grep 'That skill owns registry syntax, delivery-mode selection' "$AGENTS" \
-    "AGENTS.md lost the project-management owner pointer"
-  assert_grep 'The delivery lifecycle is an always-loaded operational contract' "$AGENTS" \
-    "AGENTS.md no longer owns the delivery lifecycle"
-  assert_grep 'Fleet supervision is an always-loaded operational contract' "$AGENTS" \
-    "AGENTS.md no longer owns fleet supervision"
-  assert_grep '`.tasks.toml`, `docs/configuration.md`, and current `tasks-axi --help` own the backlog schema' "$AGENTS" \
+  assert_grep 'Run `bin/fm-session-start.sh` exactly once' "$AGENTS" \
+    "AGENTS.md lost the session-start behavioral owner"
+  assert_grep '`harness-adapters` owns runtime operations, profile choice' "$AGENTS" \
+    "AGENTS.md lost the dispatch-procedure owner"
+  assert_grep '`project-management` - load before adding, creating, removing, or initializing a project.' "$AGENTS" \
+    "AGENTS.md lost the project-management trigger"
+  assert_grep 'which owns briefing through cleanup, scout promotion, custom checks, and backlog procedure' "$AGENTS" \
+    "AGENTS.md lost the task-lifecycle owner pointer"
+  assert_grep 'Load `fleet-supervision`' "$AGENTS" \
+    "AGENTS.md lost the notification-procedure owner pointer"
+  assert_grep '`.tasks.toml`, `docs/configuration.md`, and `tasks-axi --help` own schema' "$AGENTS" \
     "AGENTS.md lost the backlog-mechanics owner pointer"
-  assert_grep '`bin/fm-brief.sh` and its help own scaffold syntax' "$AGENTS" \
+  assert_grep '`bin/fm-brief.sh` help owns scaffold variants' "$AGENTS" \
     "AGENTS.md lost the brief-mechanics owner pointer"
   assert_grep '`docs/configuration.md` owns activation, generated state, cadence, wire protocol' "$AGENTS" \
-    "AGENTS.md lost the X-mode mechanics owner pointer"
+    "AGENTS.md lost the X-mode owner pointer"
   pass "compressed AGENTS.md records the approved one-owner map"
 }
 
 test_intake_reuses_evidence_and_parallelizes_safe_work() {
-  for phrase in \
-    'consult existing reports and established evidence' \
-    'remaining bounded research inside it' \
-    'unresolved uncertainty could materially change whether or what to build' \
-    'relay it without a design-only scout' \
-    'ask one concise implementation question when useful' \
-    'Never both present a likely-enough solution' \
-    'overlap as a risk signal rather than an automatic reason to wait' \
-    'independently implemented and validated' \
-    'selected delivery path can reconcile ordinary rebases or conflicts' \
-    'Serialize only for a true semantic dependency' \
-    'shared mutable external state' \
-    'incompatible concurrent migration' \
-    'same-file editing alone is insufficient' \
-    'genuine blockers remain durable'; do
-    assert_grep "$phrase" "$AGENTS" "intake contract lost '$phrase'"
-  done
-  assert_grep 'dispatch isolated work immediately with no concurrency cap' "$AGENTS" \
-    "intake contract lost unbounded safe parallel dispatch"
-  assert_grep 'captain explicitly requests a separate knowledge or design deliverable' "$AGENTS" \
-    "intake contract lost captain-requested separate scouts"
-  assert_grep 'When implementation is separately authorized, promote the existing scout' "$AGENTS" \
-    "intake contract lost genuine scout promotion"
+  assert_grep 'Consult existing reports and established evidence before commissioning research.' "$AGENTS" \
+    "intake no longer reuses established evidence"
+  assert_grep 'A **ship** is the default after implementation authorization' "$AGENTS" \
+    "intake lost the ship default"
+  assert_grep 'A **scout** produces a self-contained report and no PR' "$AGENTS" \
+    "intake lost the scout deliverable boundary"
+  assert_grep 'unresolved uncertainty could materially change whether or what to build' "$AGENTS" \
+    "intake lost the scout uncertainty criterion"
+  assert_grep 'Dispatch independently implementable and verifiable work immediately with no concurrency cap' "$AGENTS" \
+    "intake lost safe parallel dispatch"
+  assert_grep 'Serialize only for a real semantic dependency, shared mutable external state, incompatible concurrent migration' "$AGENTS" \
+    "intake lost concrete serialization criteria"
+  assert_grep 'Promote the existing scout through `bin/fm-promote.sh <id>` rather than creating a duplicate task.' "$TASK" \
+    "task owner lost genuine scout promotion"
   pass "intake reuses evidence, reserves scouts for uncertainty, and parallelizes safe work"
 }
 
 test_compressed_agents_retains_authority_and_supervision_safety() {
-  for phrase in \
-    'A lock-refused session must not spawn, steer, merge, drain the wake queue' \
-    'A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.' \
-    'The selected delivery path owns its own rigor.' \
-    'When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.' \
-    'Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.' \
-    'A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.' \
-    'If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.' \
-    '**local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority' \
-    'A status line is a wake event, not current state' \
-    'keep exactly one live supervision cycle' \
-    'Never broadly kill watchers' \
-    'While `state/.afk` exists, the daemon owns supervision' \
-    'post the final completion follow-up before teardown'; do
-    assert_grep "$phrase" "$AGENTS" "compressed AGENTS.md lost safety phrase '$phrase'"
-  done
+  assert_grep 'remain read-only without spawning, steering, merging, draining notifications' "$AGENTS" \
+    "lock-refusal safety is missing"
+  assert_grep 'Do not add a reviewer to a faster path' "$AGENTS" \
+    "selected delivery rigor is missing"
+  assert_grep "A separate review or audit requires the captain's request" "$AGENTS" \
+    "separate-review authority is missing"
+  assert_grep 'Never merge red work.' "$AGENTS" \
+    "red-merge prohibition is missing"
+  assert_grep 'No turn ends blind while supervision is required' "$AGENTS" \
+    "no-blind-turn safety is missing"
+  assert_grep 'While `state/.afk` exists, the away daemon owns supervision' "$AGENTS" \
+    "away-mode ownership is missing"
+  assert_grep 'Before terminal cleanup, always post the final follow-up' "$SUPERVISION" \
+    "X terminal follow-up procedure is missing"
   assert_no_grep 'Firstmate does not personally review code or deliverables' "$AGENTS" \
     "AGENTS.md retained the weaker duplicate review prohibition"
   assert_no_grep 'firstmate reviews your branch' "$AGENTS" \
