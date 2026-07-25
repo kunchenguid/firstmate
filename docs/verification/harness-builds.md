@@ -4,7 +4,7 @@ Audience: maintainer verification.
 
 This record supports the current guarantee that a documented harness fact cannot silently expire.
 Every fact in the `harness-adapters` skill was established by one manual observation against one build, and nothing used to compare those stamps to the installed runtimes.
-`bin/fm-harness-drift.sh` is that comparison; its header owns the exact flags and line formats, and `.agents/skills/bootstrap-diagnostics/SKILL.md` owns the response to a reported line.
+`bin/fm-harness-drift.sh` is that comparison; its header owns the exact flags and line formats, and the `harness-adapters` skill's "Recorded build stamps" section owns both the stamps and the response to a reported line.
 Task chronology and delivery transcripts stay in private reports or PR evidence.
 
 ## Mechanism
@@ -16,7 +16,8 @@ The check parses that block, probes each harness with a bounded `<harness> --ver
 It distinguishes three per-harness outcomes: the stamp equals the installed build (silent), the stamp differs in either direction (drift), and the harness is absent (drift).
 A stamp ahead of the installed build is drift, not a match, because it describes a build nobody is running.
 The check is detect-only: it never edits the skill, never installs anything, and always exits 0, so drift never blocks a session.
-`bin/fm-bootstrap.sh` runs it among the read-only detect checks, so it also runs in a lock-refused detect-only session.
+It is run deliberately rather than on every session start, because each recorded harness costs a `--version` launch and a drift line needs no action.
+`bin/fm-bootstrap.sh` runs it only under `FM_BOOTSTRAP_VERBOSE_FACTS=1`, prefixing each line as a `BOOTSTRAP_INFO:` fact; being read-only, that opt-in also holds in a lock-refused detect-only session.
 
 ## Verified on 2026-07-25
 

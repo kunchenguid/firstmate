@@ -39,7 +39,9 @@ If the captain asks for a new harness, propose verifying it first: spawn a trivi
 
 Every fact in the per-harness sections below was established by one manual observation against one build, so a fact stops describing reality the moment that harness updates.
 The block below is the single machine-readable owner of the newest build each harness section's facts were checked against.
-`bin/fm-harness-drift.sh` parses it, compares it to the installed binaries, and prints one `HARNESS_DRIFT:` line per mismatch at session start; the dated stamps inside the prose stay as historical observation records.
+`bin/fm-harness-drift.sh` parses it, compares it to the installed binaries, and prints one `HARNESS_DRIFT:` line per mismatch; the dated stamps inside the prose stay as historical observation records.
+Run it deliberately, before relying on a harness fact you have not re-verified yourself.
+`bin/fm-bootstrap.sh` runs it only under `FM_BOOTSTRAP_VERBOSE_FACTS=1` and reports each line as a `BOOTSTRAP_INFO:` fact, because the comparison launches a `--version` probe per recorded harness and drift needs no action.
 When you re-verify a harness against a newer build, update its line here in the same change.
 
 ```fm-harness-builds
@@ -52,9 +54,11 @@ pi 0.80.6
 
 `docs/verification/harness-builds.md` owns the mechanism record and its active dated evidence.
 
-Drift is expected and blocks nothing.
+Drift is expected, blocks nothing, and needs no captain report on its own.
 A drift line means the facts for that harness need re-verification before you rely on them, in either direction: a stamp ahead of the installed build is as stale as one behind it, because neither describes the build that is actually running.
-An absent harness means none of its recorded facts are verified against anything present on this machine.
+A `not installed here` line says the same thing about a harness absent from the home the check ran on.
+A drifted busy signature is the failure mode that already bit: it makes healthy workers look stopped.
+Re-verify the facts a task actually depends on - busy signature, exit command, interrupt, dialogs, resume, skill invocation, and quirks - and update that harness's line in the block above in the same change, which is what clears the line.
 
 ## Detection
 
@@ -272,11 +276,6 @@ The companion `.opencode/plugins/fm-primary-watch-arm.js` owns normal TUI watche
 The follow-up was verified in the interactive TUI; `opencode run` can exit before displaying a queued follow-up, so the adapter is fail-open in headless mode.
 
 ## pi (VERIFIED 2026-06-11)
-
-**Pi is not installed on this machine (observed 2026-07-25): `command -v pi` resolves nothing.**
-Every fact in this section, including the launch-profile row and the primary-session guard fact, is therefore unverified against any currently present Pi build; treat it as knowledge awaiting re-verification, not as a current description.
-Re-verify against the installed build before dispatching a crewmate or secondmate on pi, and re-stamp the recorded build above in the same change.
-`bin/fm-harness-drift.sh` reports this absence at session start, so it self-corrects on a home where pi is present.
 
 | Fact | Value |
 |---|---|

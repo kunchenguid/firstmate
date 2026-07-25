@@ -52,7 +52,7 @@ usage() {
 
 # Bounded probe with the same portable ladder fm-fleet-snapshot.sh uses. When no
 # bounding tool exists at all, run the probe directly rather than reporting every
-# harness unreadable: a false drift storm at every session start is worse than an
+# harness unreadable: a false drift storm on every run is worse than an
 # unbounded `--version` call on a host with no timeout, gtimeout, or perl.
 run_timed() {  # <seconds> <command...>
   local seconds=$1
@@ -110,7 +110,7 @@ malformed=0
 while IFS= read -r line; do
   case "$line" in ''|'#'*) continue ;; esac
   # A blank or whitespace-only line inside the block is spacing, not a malformed
-  # stamp; treating it as one would raise a false alarm at every session start.
+  # stamp; treating it as one would raise a false alarm on every run.
   [ -n "${line//[[:space:]]/}" ] || continue
   harness=${line%% *}
   recorded=${line#* }

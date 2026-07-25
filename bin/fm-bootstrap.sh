@@ -16,7 +16,7 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
-#                 "HARNESS_DRIFT: <harness> recorded <stamp>, installed <version>|not installed here|installed build unreadable",
+#                 "BOOTSTRAP_INFO: HARNESS_DRIFT: <harness> recorded <stamp>, installed <version>|not installed here|installed build unreadable",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
@@ -42,11 +42,14 @@
 #          failed names whether the endpoint was missing or agent-less.
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
-#          HARNESS_DRIFT lines compare the build stamps recorded in
+#          HARNESS_DRIFT facts compare the build stamps recorded in
 #          .agents/skills/harness-adapters/SKILL.md against the harness binaries
 #          installed here, so a documented harness fact cannot silently expire.
 #          bin/fm-harness-drift.sh owns that comparison and its exact wording; it
-#          is read-only, runs in detect-only sessions too, and never blocks work.
+#          is read-only and never blocks work. Because it probes every recorded
+#          harness with its own --version and drift needs no action, bootstrap
+#          runs it only under FM_BOOTSTRAP_VERBOSE_FACTS=1 and reports it as a
+#          BOOTSTRAP_INFO fact; run the script directly for an on-demand check.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -869,9 +872,13 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != 
   echo "BOOTSTRAP_INFO: crew harness override active: $crew"
 fi
 crew_dispatch_validate
-# Read-only, so it runs in detect-only sessions too. Silent when every recorded
-# harness build stamp still matches the installed binary.
-"$SCRIPT_DIR/fm-harness-drift.sh" || true
+# Opt-in only. The comparison launches a `--version` probe per recorded harness,
+# and drift needs no action, so it is a verbose BOOTSTRAP_INFO fact rather than a
+# cost every session start pays. Read-only, so the opt-in holds in a detect-only
+# session too. Silent when every recorded stamp matches the installed binary.
+if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+  "$SCRIPT_DIR/fm-harness-drift.sh" | sed 's/^/BOOTSTRAP_INFO: /' || true
+fi
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "BOOTSTRAP_INFO: tasks-axi available"

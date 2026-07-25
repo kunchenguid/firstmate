@@ -199,16 +199,44 @@ EOF
   pass "the tracked skill records one parseable build stamp per verified harness"
 }
 
-test_bootstrap_wires_the_check_and_owns_the_label() {
-  assert_grep 'fm-harness-drift.sh' "$ROOT/bin/fm-bootstrap.sh" \
-    "bootstrap does not run the harness build-drift check"
-  assert_grep 'HARNESS_DRIFT:' "$ROOT/bin/fm-bootstrap.sh" \
-    "bootstrap's header does not own the HARNESS_DRIFT line format"
-  assert_grep 'HARNESS_DRIFT' "$ROOT/.agents/skills/bootstrap-diagnostics/SKILL.md" \
-    "bootstrap-diagnostics has no response entry for HARNESS_DRIFT"
-  assert_grep 'HARNESS_DRIFT:' "$ROOT/AGENTS.md" \
-    "AGENTS.md section 13 does not list HARNESS_DRIFT as a bootstrap-diagnostics trigger"
-  pass "the drift check is wired into bootstrap with a documented response"
+test_bootstrap_runs_the_check_only_as_an_opt_in_fact() {
+  local guarded
+  assert_grep 'BOOTSTRAP_INFO: HARNESS_DRIFT:' "$ROOT/bin/fm-bootstrap.sh" \
+    "bootstrap's header does not own the emitted HARNESS_DRIFT fact format"
+  assert_grep 'HARNESS_DRIFT' "$ROOT/.agents/skills/harness-adapters/SKILL.md" \
+    "harness-adapters does not own the response to a drift line"
+
+  # The comparison costs one `--version` launch per recorded harness and a drift
+  # line needs no action, so bootstrap may only run it inside the existing
+  # verbose-facts opt-in, and only ever as a BOOTSTRAP_INFO fact.
+  # Comment lines are skipped deliberately: the header names both the env var and
+  # the script, so a comment-blind scan would pass on prose alone.
+  guarded=$(awk '
+    /^[[:space:]]*#/ { next }
+    /^if \[ "\$\{FM_BOOTSTRAP_VERBOSE_FACTS:-0\}" = 1 \]/ { guard = 1; next }
+    /^fi$/ { guard = 0 }
+    guard && /fm-harness-drift\.sh/ { print }
+  ' "$ROOT/bin/fm-bootstrap.sh")
+  [ -n "$guarded" ] \
+    || fail "bootstrap must run fm-harness-drift.sh only under FM_BOOTSTRAP_VERBOSE_FACTS"
+  assert_contains "$guarded" 'BOOTSTRAP_INFO' \
+    "bootstrap must report drift as a BOOTSTRAP_INFO fact, not a bare diagnostic line"
+
+  # A fact that needs no action must not be an actionable line that mandates
+  # loading bootstrap-diagnostics at every session start of every home.
+  assert_no_grep 'HARNESS_DRIFT' "$ROOT/.agents/skills/bootstrap-diagnostics/SKILL.md" \
+    "bootstrap-diagnostics still treats HARNESS_DRIFT as an actionable line"
+  assert_no_grep 'HARNESS_DRIFT' "$ROOT/AGENTS.md" \
+    "AGENTS.md still lists HARNESS_DRIFT as a bootstrap-diagnostics trigger"
+  pass "bootstrap runs the drift check only as an opt-in BOOTSTRAP_INFO fact"
+}
+
+test_no_surface_asserts_a_local_installation_state() {
+  # A stamp source is shared by every home, so a claim about which harnesses are
+  # installed on one machine is false on the next one that loads it.
+  assert_no_grep 'not installed on this machine' "$SKILL" \
+    "the shared skill asserts a machine-local installation state"
+  pass "the shared skill states recorded stamps, not one machine's install state"
 }
 
 test_skill_keeps_one_owner_for_each_stamp() {
@@ -228,5 +256,6 @@ test_version_shapes_of_every_verified_harness
 test_malformed_and_missing_block_are_reported
 test_check_never_writes_to_its_source
 test_tracked_skill_stamps_cover_the_verified_harnesses
-test_bootstrap_wires_the_check_and_owns_the_label
+test_bootstrap_runs_the_check_only_as_an_opt_in_fact
+test_no_surface_asserts_a_local_installation_state
 test_skill_keeps_one_owner_for_each_stamp

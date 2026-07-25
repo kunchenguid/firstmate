@@ -104,12 +104,13 @@ SH
 # recorded in harness-adapters/SKILL.md, each reporting exactly its recorded
 # build.
 #
-# bin/fm-bootstrap.sh runs the read-only harness build-drift check, which
-# compares those stamps against the harnesses on PATH. A hermetic fakebin PATH
-# has none of them, so without this every bootstrap silence assertion would fail
-# on a drift line per harness. Declaring them present at their recorded build
-# keeps the real check running while silence still means silence. The drift
-# outcomes themselves belong to tests/fm-harness-drift.test.sh.
+# Under FM_BOOTSTRAP_VERBOSE_FACTS=1, bin/fm-bootstrap.sh runs the read-only
+# harness build-drift check, which compares those stamps against the harnesses on
+# PATH. A hermetic fakebin PATH has none of them, so without this every verbose
+# BOOTSTRAP_INFO assertion would also carry a drift fact per harness. Declaring
+# them present at their recorded build keeps the real check running while silence
+# still means silence. The drift outcomes themselves belong to
+# tests/fm-harness-drift.test.sh.
 fm_fake_stamped_harnesses() {
   local fakebin=$1 harness version
   while read -r harness version; do
