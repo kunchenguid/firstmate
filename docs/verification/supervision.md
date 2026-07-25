@@ -132,7 +132,7 @@ tests/fm-turnend-guard.test.sh
 ## Wedge-timer progress evidence
 
 `bin/fm-crew-state.sh --progress` reads the activity stamp the wedge timer consults before escalating, so the shape of that stamp is the fact this guarantee rests on.
-It was read live on 2026-07-25 against no-mistakes v1.37.0 (78e4dcb) inside a worktree with its own active run.
+It was read live on 2026-07-24 against no-mistakes v1.37.0 (78e4dcb) inside a worktree with its own active run.
 
 ```sh
 no-mistakes axi status
@@ -145,9 +145,9 @@ Observed output, last two lines:
     ci,running,1h23m,"quiet 1h22m ago: log: no CI checks reported - still monitoring until merged or closed","",starting
 ```
 
-Two properties matter and both hold in that sample.
-`last_activity` carries the age of the most recent thing the step did, suffixed ` ago`, and drops zero components (`1h22m`, not `1h22m0s`).
-`active_for` is elapsed time with no ` ago` suffix, which is why the parser matches only the ` ago` form: elapsed time is the signal the wedge timer already has, and reading it would restore the defect.
+In that sample, `last_activity` was exactly `quiet 1h22m ago: log: no CI checks reported - still monitoring until merged or closed`.
+In that sample, `active_for` was `1h23m` with no ` ago` suffix.
+The parser matches only the leading age before ` ago`, because elapsed time is the signal the wedge timer already has.
 
 Deterministic entry points:
 

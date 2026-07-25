@@ -356,31 +356,26 @@ crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
 }
 
-# 0 (advanced) ONLY on positive proof that crew <id>'s attributed pipeline did
-# something at or after <epoch>. Read from fm-crew-state.sh --progress, which
-# answers with the age of the most recent active-step activity under the same
-# run attribution the state path uses.
+# 0 (advanced) ONLY when fm-crew-state.sh --progress returns its one exact
+# positive verdict for crew <id> and <epoch>.
 #
 # This predicate exists to make a wedge alarm honest in BOTH directions: a long
 # pipeline step leaves the pane visually idle, so elapsed time alone cannot tell
 # a healthy worker from a frozen one, while "did the work advance since the last
 # escalation" can. It may only ever SUPPRESS an alarm, never raise one, so every
 # uncertain outcome - no attributed run, a bounded call that timed out, an absent
-# or unparseable stamp, an activity age older than the anchor - returns 1, and
+# or unparseable stamp, or an activity interval not wholly after the anchor -
+# returns 1, and
 # the caller escalates exactly as it would have without this check. Absence of
 # evidence is never evidence of progress.
 #
-# FM_CREW_STATE_BIN lets tests stub the answer; a stub that does not understand
-# --progress simply prints no activity_age line, which reads as could-not-prove.
+# FM_CREW_STATE_BIN lets tests stub the answer.
 crew_progress_advanced_since() {  # <id> <epoch>
-  local id=$1 anchor=${2:-} line age
+  local id=$1 anchor=${2:-} verdict
   [ -n "$id" ] || return 1
   case "$anchor" in ''|*[!0-9]*) return 1 ;; esac
-  line=$("$FM_CREW_STATE_BIN" --progress "$id" 2>/dev/null | grep '^activity_age: ' | tail -1) || true
-  [ -n "$line" ] || return 1
-  age=${line#activity_age: }
-  case "$age" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$(( $(date +%s) - age ))" -ge "$anchor" ]
+  verdict=$("$FM_CREW_STATE_BIN" --progress "$id" "$anchor" 2>/dev/null) || return 1
+  [ "$verdict" = "progress: advanced" ]
 }
 
 # 0 if crew <id>'s authoritative current state is a declared external-wait pause.
