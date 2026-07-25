@@ -12,12 +12,14 @@
 #
 # Uncommitted work in the project blocks the merge only on a GENUINE COLLISION:
 # a path that is both uncommitted in the project checkout and rewritten by this
-# exact fast-forward. Untracked files, ignored files, and changes at paths the
-# fast-forward never touches cannot be clobbered by it, so they do not block it,
-# and a refusal names every colliding path and what the incoming commits do to
-# it. A state this guard cannot classify confidently - an unresolved conflict, an
-# unrecognized status code, a git command that fails - refuses instead of
-# proceeding.
+# exact fast-forward, including an untracked entry and an incoming path that
+# cannot both exist because one is a directory where the other is a file. Ignored
+# files, and untracked or modified paths the fast-forward never touches, cannot
+# be clobbered by it, so they do not block it, and a refusal names every
+# colliding path and what the incoming commits do to it. A state this guard
+# cannot classify confidently - an unresolved conflict, a merge, cherry-pick,
+# revert, rebase, or bisect left in progress, an unrecognized status code, a git
+# command that fails - refuses instead of proceeding.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
@@ -101,15 +103,32 @@ GUARD_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-merge-local.XXXXXX") || {
 refuse_unreadable() {  # <detail>
   echo "REFUSED: cannot classify the state of $PROJ, so refusing to merge into it." >&2
   echo "  $1" >&2
-  echo "Resolve that state in $PROJ (finish or abort an unresolved merge, or report an unexpected git status), then retry." >&2
+  echo "Resolve that state in $PROJ (finish or abort the operation in progress, or report an unexpected git status), then retry." >&2
   exit 1
+}
+
+# A merge, cherry-pick, revert, rebase, or bisect left half-finished is another
+# such state, and one the status listing cannot show on its own: once its
+# conflicts are staged, git reports plain modifications indistinguishable from
+# ordinary dirt. Resolve the sentinel through rev-parse --git-path rather than
+# assuming "$PROJ/.git": in a linked worktree the git dir is elsewhere, and a
+# hardcoded path would silently never fire.
+refuse_if_in_progress() {  # <git-dir-entry> <detail>
+  local rel path
+  rel=$(git -C "$PROJ" rev-parse --git-path "$1") \
+    || refuse_unreadable "git rev-parse --git-path $1 failed in $PROJ"
+  case "$rel" in
+    /*) path=$rel ;;
+    *) path="$PROJ/$rel" ;;
+  esac
+  [ -e "$path" ] || return 0
+  refuse_unreadable "$2"
 }
 
 DIRTY_PATHS=()      # tracked paths carrying staged or unstaged changes
 UNTRACKED_PATHS=()  # untracked, non-ignored files
 INC_PATHS=()        # paths the fast-forward rewrites
 INC_ACTIONS=()      # what it does to INC_PATHS[i]: changes, removes, or adds
-INC_ADDS=()         # paths the fast-forward creates
 
 git -C "$PROJ" status --porcelain=v1 -z --untracked-files=all > "$GUARD_TMP/status" \
   || refuse_unreadable "git status failed in $PROJ"
@@ -146,6 +165,22 @@ while IFS= read -r -d '' entry; do
   esac
 done < "$GUARD_TMP/status"
 
+# Checked after the listing above, so an operation still carrying live conflicts
+# is named by the conflicted path it left behind; these sentinels then catch the
+# same operation once its resolutions are staged and it has nothing left to show.
+refuse_if_in_progress MERGE_HEAD \
+  "a merge is in progress here; conclude it with 'git commit' or abandon it with 'git merge --abort'"
+refuse_if_in_progress CHERRY_PICK_HEAD \
+  "a cherry-pick is in progress here; conclude it with 'git cherry-pick --continue' or abandon it with 'git cherry-pick --abort'"
+refuse_if_in_progress REVERT_HEAD \
+  "a revert is in progress here; conclude it with 'git revert --continue' or abandon it with 'git revert --abort'"
+refuse_if_in_progress rebase-merge \
+  "a rebase is in progress here; conclude it with 'git rebase --continue' or abandon it with 'git rebase --abort'"
+refuse_if_in_progress rebase-apply \
+  "a rebase is in progress here; conclude it with 'git rebase --continue' or abandon it with 'git rebase --abort'"
+refuse_if_in_progress BISECT_LOG \
+  "a bisect is in progress here; end it with 'git bisect reset'"
+
 git -C "$PROJ" diff -z --name-status "$DEFAULT" "$BRANCH" > "$GUARD_TMP/incoming" \
   || refuse_unreadable "git diff failed between $DEFAULT and $BRANCH in $PROJ"
 
@@ -155,7 +190,7 @@ while IFS= read -r -d '' change; do
   IFS= read -r -d '' path || refuse_unreadable "truncated '$change' entry in the incoming diff"
   case "$change" in
     A)
-      INC_PATHS+=("$path"); INC_ACTIONS+=(adds); INC_ADDS+=("$path")
+      INC_PATHS+=("$path"); INC_ACTIONS+=(adds)
       ;;
     M|M[0-9]*|T|T[0-9]*)
       INC_PATHS+=("$path"); INC_ACTIONS+=(changes)
@@ -166,11 +201,11 @@ while IFS= read -r -d '' change; do
     R|R[0-9]*)
       IFS= read -r -d '' other || refuse_unreadable "truncated '$change' entry at '$path' in the incoming diff"
       INC_PATHS+=("$path"); INC_ACTIONS+=(removes)
-      INC_PATHS+=("$other"); INC_ACTIONS+=(adds); INC_ADDS+=("$other")
+      INC_PATHS+=("$other"); INC_ACTIONS+=(adds)
       ;;
     C|C[0-9]*)
       IFS= read -r -d '' other || refuse_unreadable "truncated '$change' entry at '$path' in the incoming diff"
-      INC_PATHS+=("$other"); INC_ACTIONS+=(adds); INC_ADDS+=("$other")
+      INC_PATHS+=("$other"); INC_ACTIONS+=(adds)
       ;;
     *)
       refuse_unreadable "unrecognized git diff status '$change' at '$path'"
@@ -178,12 +213,16 @@ while IFS= read -r -d '' change; do
   esac
 done < "$GUARD_TMP/incoming"
 
-# Echo what the fast-forward does to <path>, or fail when it leaves it alone.
+# Set INC_ACTION to what the fast-forward does to <path>, or fail when it leaves
+# it alone. Both lookups below assign a global rather than echoing: a command
+# substitution would fork a subshell per dirty path in a large checkout, and
+# would also swallow the `exit` a refusal depends on.
+INC_ACTION=
 incoming_action() {  # <path>
   local want=$1 i=0
   while [ "$i" -lt "${#INC_PATHS[@]}" ]; do
     if [ "${INC_PATHS[$i]}" = "$want" ]; then
-      printf '%s\n' "${INC_ACTIONS[$i]}"
+      INC_ACTION=${INC_ACTIONS[$i]}
       return 0
     fi
     i=$((i + 1))
@@ -191,13 +230,35 @@ incoming_action() {  # <path>
   return 1
 }
 
-# True when the fast-forward creates a file at <path>, where an untracked file of
-# the operator's own would be in the way.
-incoming_creates() {  # <path> <created-path>...
-  local want=$1 candidate
-  shift
-  for candidate in "$@"; do
-    [ "$candidate" = "$want" ] && return 0
+# Set UNTRACKED_COLLISION to how the fast-forward would have to disturb the
+# untracked entry at <path> to land, or fail when it can leave that entry alone.
+# git refuses all three shapes, so name them here rather than letting git emit
+# its own abort: the merge's file at that exact path, a file where the merge
+# needs a directory, and a directory where the merge needs a file.
+UNTRACKED_COLLISION=
+untracked_collision() {  # <path>
+  local want=$1 i=0 add
+  while [ "$i" -lt "${#INC_PATHS[@]}" ]; do
+    if [ "${INC_ACTIONS[$i]}" = adds ]; then
+      add=${INC_PATHS[$i]}
+      if [ "$add" = "$want" ]; then
+        UNTRACKED_COLLISION="untracked file here, and this merge creates a file at that path"
+        return 0
+      fi
+      case "$add" in
+        "$want"/*)
+          UNTRACKED_COLLISION="untracked file here, and this merge needs that path to be a directory to create '$add'"
+          return 0
+          ;;
+      esac
+      case "$want" in
+        "$add"/*)
+          UNTRACKED_COLLISION="untracked file here, and this merge creates a file at '$add', replacing the directory holding it"
+          return 0
+          ;;
+      esac
+    fi
+    i=$((i + 1))
   done
   return 1
 }
@@ -205,15 +266,15 @@ incoming_creates() {  # <path> <created-path>...
 COLLISIONS=()
 if [ "${#DIRTY_PATHS[@]}" -gt 0 ]; then
   for path in "${DIRTY_PATHS[@]}"; do
-    if action=$(incoming_action "$path"); then
-      COLLISIONS+=("$path - uncommitted changes here, and this merge $action it")
+    if incoming_action "$path"; then
+      COLLISIONS+=("$path - uncommitted changes here, and this merge $INC_ACTION it")
     fi
   done
 fi
-if [ "${#UNTRACKED_PATHS[@]}" -gt 0 ] && [ "${#INC_ADDS[@]}" -gt 0 ]; then
+if [ "${#UNTRACKED_PATHS[@]}" -gt 0 ]; then
   for path in "${UNTRACKED_PATHS[@]}"; do
-    if incoming_creates "$path" "${INC_ADDS[@]}"; then
-      COLLISIONS+=("$path - untracked file here, and this merge creates a file at that path")
+    if untracked_collision "$path"; then
+      COLLISIONS+=("$path - $UNTRACKED_COLLISION")
     fi
   done
 fi

@@ -13,17 +13,26 @@
 #   refuses  (c) untracked file at a path the fast-forward adds (name with spaces)
 #   refuses  (d) untracked file nested inside an otherwise untracked directory,
 #                which a collapsed status listing would hide
-#   refuses  (e) either endpoint of a staged rename that the fast-forward removes
-#   refuses  (f) an unresolved merge conflict (state it cannot classify)
-#   refuses  (g) an unrecognized git status code
-#   proceeds (h) untracked file at a path the fast-forward never touches
-#   proceeds (i) modified path the fast-forward never touches
-#   proceeds (j) ignored file, even at a path the fast-forward adds
-#   proceeds (k) clean tree
-#   proceeds (l) a staged rename at paths the fast-forward never touches, proving
+#   refuses  (e) untracked file sitting where the fast-forward needs a directory
+#   refuses  (f) untracked files under a path the fast-forward replaces with a file
+#   refuses  (g) either endpoint of a staged rename that the fast-forward removes
+#   refuses  (h) both endpoints of an INCOMING rename, whose diff record orders
+#                old-then-new, the reverse of git status
+#   refuses  (i) the destination of an INCOMING copy, when the project has asked
+#                git for copy detection
+#   refuses  (j) an unresolved merge conflict (state it cannot classify)
+#   refuses  (k) a merge left in progress with its resolution staged, in a linked
+#                worktree, where the git dir is not <project>/.git
+#   refuses  (l) a cherry-pick left in progress with its resolution staged
+#   refuses  (m) an unrecognized git status code
+#   proceeds (n) untracked file at a path the fast-forward never touches
+#   proceeds (o) modified path the fast-forward never touches
+#   proceeds (p) ignored file, even at a path the fast-forward adds
+#   proceeds (q) clean tree
+#   proceeds (r) a staged rename at paths the fast-forward never touches, proving
 #                the rename's second NUL field is consumed and not misread as the
 #                next record's status code
-#   regression (m) the observed deadlock: two untracked operator files plus one
+#   regression (s) the observed deadlock: two untracked operator files plus one
 #                modified tracked pointer that the incoming commit removes from
 #                the index. It must refuse, naming only the pointer, and must
 #                merge once that single path is settled - the cure can no longer
@@ -43,22 +52,36 @@ REAL_GIT=$(command -v git)
 # A local-only task whose project is a one-commit repo on main, with the task
 # branch checked out for the caller to build the incoming commits on. Echoes the
 # case dir; "$case_dir/project" is the project checkout fm-merge-local writes to.
+#
+# layout=worktree instead makes that project checkout a LINKED worktree of a repo
+# beside it, so its .git is a pointer file and its git dir is not
+# "$proj/.git" - the layout where a hardcoded git-dir path silently never fires.
 make_case() {
-  local name=$1 case_dir proj
+  local name=$1 layout=${2:-plain} case_dir proj repo
   case_dir="$TMP_ROOT/$name"
   proj="$case_dir/project"
-  mkdir -p "$case_dir/state" "$proj/docs"
-  git -C "$proj" init -q
+  repo="$proj"
+  if [ "$layout" = worktree ]; then
+    repo="$case_dir/repo"
+  fi
+  mkdir -p "$case_dir/state" "$repo/docs"
+  git -C "$repo" init -q
   # Set the default branch without relying on `git init -b` (git 2.28+).
-  git -C "$proj" symbolic-ref HEAD refs/heads/main
-  git -C "$proj" config user.name 'Firstmate Tests'
-  git -C "$proj" config user.email 'tests@example.invalid'
-  printf 'tracked\n' > "$proj/tracked.txt"
-  printf 'pointer\n' > "$proj/runtime-pointer.json"
-  printf 'long enough contents to pair as a rename\n' > "$proj/docs/notes.md"
-  printf 'ignored-*\n' > "$proj/.gitignore"
-  git -C "$proj" add -A
-  git -C "$proj" commit -qm base
+  git -C "$repo" symbolic-ref HEAD refs/heads/main
+  git -C "$repo" config user.name 'Firstmate Tests'
+  git -C "$repo" config user.email 'tests@example.invalid'
+  printf 'tracked\n' > "$repo/tracked.txt"
+  printf 'pointer\n' > "$repo/runtime-pointer.json"
+  printf 'long enough contents to pair as a rename\n' > "$repo/docs/notes.md"
+  printf 'ignored-*\n' > "$repo/.gitignore"
+  git -C "$repo" add -A
+  git -C "$repo" commit -qm base
+  if [ "$layout" = worktree ]; then
+    # Park the repo's own worktree on a branch nobody else wants, so main is free
+    # to be checked out in the linked worktree the merge actually targets.
+    git -C "$repo" checkout -q -b scratch
+    git -C "$repo" worktree add -q "$proj" main
+  fi
   fm_write_meta "$case_dir/state/$TASK_ID.meta" \
     "window=fm-$TASK_ID" \
     "worktree=$case_dir/wt" \
@@ -203,6 +226,52 @@ test_refuses_untracked_file_inside_an_untracked_directory() {
   pass "fm-merge-local sees an untracked file nested inside an otherwise untracked directory"
 }
 
+test_refuses_untracked_file_where_the_merge_needs_a_directory() {
+  local case_dir proj
+  case_dir=$(make_case refuse-untracked-file-vs-dir)
+  proj="$case_dir/project"
+  mkdir -p "$proj/reports"
+  printf 'theirs\n' > "$proj/reports/Quarterly Review.pdf"
+  commit_in "$proj" 'add a report in a new directory'
+  git -C "$proj" checkout -q main
+  # An untracked FILE sitting at a leading component of the incoming path. No
+  # exact path matches, but the two cannot both exist, and git refuses.
+  printf 'the operators own notes\n' > "$proj/reports"
+
+  attempt_merge "$case_dir"
+
+  expect_code 1 "$RC" "refuse-untracked-file-vs-dir: expected a refusal"
+  assert_grep "reports - untracked file here, and this merge needs that path to be a directory to create 'reports/Quarterly Review.pdf'" \
+    "$case_dir/stderr" "refuse-untracked-file-vs-dir: the file-where-a-directory-is-needed collision was not named"
+  assert_not_merged "$proj" refuse-untracked-file-vs-dir
+  assert_grep 'the operators own notes' "$proj/reports" \
+    "refuse-untracked-file-vs-dir: the operator's untracked file was disturbed"
+  pass "fm-merge-local names an untracked file sitting where the fast-forward needs a directory"
+}
+
+test_refuses_untracked_files_under_a_path_the_merge_turns_into_a_file() {
+  local case_dir proj
+  case_dir=$(make_case refuse-untracked-dir-vs-file)
+  proj="$case_dir/project"
+  printf 'theirs\n' > "$proj/notes"
+  commit_in "$proj" 'add a notes file'
+  git -C "$proj" checkout -q main
+  # The mirror shape: the operator's untracked files live UNDER a path the
+  # fast-forward replaces with a blob.
+  mkdir -p "$proj/notes"
+  printf 'operator draft\n' > "$proj/notes/draft.md"
+
+  attempt_merge "$case_dir"
+
+  expect_code 1 "$RC" "refuse-untracked-dir-vs-file: expected a refusal"
+  assert_grep "notes/draft.md - untracked file here, and this merge creates a file at 'notes', replacing the directory holding it" \
+    "$case_dir/stderr" "refuse-untracked-dir-vs-file: the directory-where-a-file-is-created collision was not named"
+  assert_not_merged "$proj" refuse-untracked-dir-vs-file
+  assert_grep 'operator draft' "$proj/notes/draft.md" \
+    "refuse-untracked-dir-vs-file: the operator's untracked file was disturbed"
+  pass "fm-merge-local names untracked files under a path the fast-forward replaces with a file"
+}
+
 test_refuses_rename_endpoint_the_merge_removes() {
   local case_dir proj
   case_dir=$(make_case refuse-rename-endpoint)
@@ -221,6 +290,59 @@ test_refuses_rename_endpoint_the_merge_removes() {
     "$case_dir/stderr" "refuse-rename-endpoint: the rename's source endpoint was not treated as uncommitted"
   assert_not_merged "$proj" refuse-rename-endpoint
   pass "fm-merge-local refuses when a staged rename's endpoint is removed by the fast-forward"
+}
+
+test_refuses_both_endpoints_of_an_incoming_rename() {
+  local case_dir proj
+  case_dir=$(make_case refuse-incoming-rename)
+  proj="$case_dir/project"
+  # Rename detection is on by default, so an incoming rename arrives as a single
+  # R record whose two path fields are old-then-new - the REVERSE of the
+  # new-then-old order git status uses. Both endpoints are dirty here, so the
+  # refusal must name the source as removed and the destination as created; if
+  # the reader's old/new assumption were inverted, both assertions flip.
+  git -C "$proj" mv docs/notes.md 'docs/crewmate notes.md'
+  commit_in "$proj" 'rename docs/notes.md'
+  git -C "$proj" checkout -q main
+  printf 'operator edit\n' >> "$proj/docs/notes.md"
+  printf 'the operators own copy\n' > "$proj/docs/crewmate notes.md"
+
+  attempt_merge "$case_dir"
+
+  expect_code 1 "$RC" "refuse-incoming-rename: expected a refusal"
+  assert_grep 'docs/notes.md - uncommitted changes here, and this merge removes it' \
+    "$case_dir/stderr" "refuse-incoming-rename: the incoming rename's source was not reported as removed"
+  assert_grep 'docs/crewmate notes.md - untracked file here, and this merge creates a file at that path' \
+    "$case_dir/stderr" "refuse-incoming-rename: the incoming rename's destination was not reported as created"
+  assert_not_merged "$proj" refuse-incoming-rename
+  assert_grep 'the operators own copy' "$proj/docs/crewmate notes.md" \
+    "refuse-incoming-rename: the operator's untracked file was overwritten"
+  pass "fm-merge-local reads an incoming rename's endpoints in the incoming diff's own field order"
+}
+
+test_refuses_untracked_file_at_an_incoming_copy_destination() {
+  local case_dir proj
+  case_dir=$(make_case refuse-incoming-copy)
+  proj="$case_dir/project"
+  # Copy detection is off unless the project asks for it, and then a C record
+  # arrives source-first like R. Only the destination is created, so only it can
+  # collide - an inverted reader would name the untouched source instead.
+  git -C "$proj" config diff.renames copies
+  cp "$proj/docs/notes.md" "$proj/docs/notes copy.md"
+  printf 'crewmate line\n' >> "$proj/docs/notes.md"
+  commit_in "$proj" 'copy docs/notes.md'
+  git -C "$proj" checkout -q main
+  printf 'the operators own copy\n' > "$proj/docs/notes copy.md"
+
+  attempt_merge "$case_dir"
+
+  expect_code 1 "$RC" "refuse-incoming-copy: expected a refusal"
+  assert_grep 'docs/notes copy.md - untracked file here, and this merge creates a file at that path' \
+    "$case_dir/stderr" "refuse-incoming-copy: the incoming copy's destination was not reported as created"
+  assert_not_merged "$proj" refuse-incoming-copy
+  assert_grep 'the operators own copy' "$proj/docs/notes copy.md" \
+    "refuse-incoming-copy: the operator's untracked file was overwritten"
+  pass "fm-merge-local reads an incoming copy's destination from the incoming diff"
 }
 
 test_refuses_unresolved_conflict() {
@@ -256,6 +378,73 @@ test_refuses_unresolved_conflict() {
     "refuse-unresolved-conflict: refusal did not name the conflicted path"
   assert_not_merged "$proj" refuse-unresolved-conflict
   pass "fm-merge-local refuses an unresolved merge conflict rather than classifying it as ordinary dirt"
+}
+
+# Build a conflicting `sideline` branch and rebuild the task branch on top of the
+# advanced main, so the fast-forward itself stays valid and the half-finished
+# operation is the only thing the guard can object to. The incoming commit only
+# touches tracked.txt, which no resolution below goes near - so nothing but the
+# in-progress sentinel can produce a refusal.
+prepare_conflicting_sideline() {
+  local proj=$1
+  git -C "$proj" checkout -q main
+  git -C "$proj" branch sideline
+  printf 'main side\n' >> "$proj/docs/notes.md"
+  commit_in "$proj" 'main side'
+  git -C "$proj" checkout -q sideline
+  printf 'other side\n' >> "$proj/docs/notes.md"
+  commit_in "$proj" 'other side'
+  git -C "$proj" checkout -q main
+  git -C "$proj" branch -f "$BRANCH" main
+  git -C "$proj" checkout -q "$BRANCH"
+  printf 'incoming\n' > "$proj/tracked.txt"
+  commit_in "$proj" 'change tracked.txt'
+  git -C "$proj" checkout -q main
+}
+
+test_refuses_in_progress_merge_in_a_linked_worktree() {
+  local case_dir proj
+  case_dir=$(make_case refuse-in-progress-merge worktree)
+  proj="$case_dir/project"
+  prepare_conflicting_sideline "$proj"
+  git -C "$proj" merge sideline >/dev/null 2>&1 \
+    && fail "refuse-in-progress-merge: fixture merge was expected to conflict"
+  # Staging the resolution without committing hides the merge from git status:
+  # the entry becomes a plain 'M ', so only MERGE_HEAD still says an operation is
+  # open - and in this linked worktree it does not live at "$proj/.git".
+  git -C "$proj" add docs/notes.md
+  assert_absent "$proj/.git/MERGE_HEAD" \
+    "refuse-in-progress-merge: fixture is not a linked worktree, so it cannot pin git-dir resolution"
+
+  attempt_merge "$case_dir"
+
+  expect_code 1 "$RC" "refuse-in-progress-merge: expected a refusal"
+  assert_grep 'cannot classify the state of' "$case_dir/stderr" \
+    "refuse-in-progress-merge: refusal was not the unclassifiable-state refusal"
+  assert_grep 'a merge is in progress here' "$case_dir/stderr" \
+    "refuse-in-progress-merge: refusal did not name the half-finished merge"
+  assert_grep 'git merge --abort' "$case_dir/stderr" \
+    "refuse-in-progress-merge: refusal was not actionable"
+  assert_not_merged "$proj" refuse-in-progress-merge
+  pass "fm-merge-local refuses a merge left in progress, including in a linked worktree"
+}
+
+test_refuses_in_progress_cherry_pick() {
+  local case_dir proj
+  case_dir=$(make_case refuse-in-progress-cherry-pick)
+  proj="$case_dir/project"
+  prepare_conflicting_sideline "$proj"
+  git -C "$proj" cherry-pick sideline >/dev/null 2>&1 \
+    && fail "refuse-in-progress-cherry-pick: fixture cherry-pick was expected to conflict"
+  git -C "$proj" add docs/notes.md
+
+  attempt_merge "$case_dir"
+
+  expect_code 1 "$RC" "refuse-in-progress-cherry-pick: expected a refusal"
+  assert_grep 'a cherry-pick is in progress here' "$case_dir/stderr" \
+    "refuse-in-progress-cherry-pick: refusal did not name the half-finished cherry-pick"
+  assert_not_merged "$proj" refuse-in-progress-cherry-pick
+  pass "fm-merge-local refuses a cherry-pick left in progress, not just a merge"
 }
 
 test_refuses_unrecognized_status_code() {
@@ -435,8 +624,14 @@ test_refuses_modified_path_the_merge_changes
 test_refuses_modified_path_the_merge_removes
 test_refuses_untracked_file_at_an_added_path
 test_refuses_untracked_file_inside_an_untracked_directory
+test_refuses_untracked_file_where_the_merge_needs_a_directory
+test_refuses_untracked_files_under_a_path_the_merge_turns_into_a_file
 test_refuses_rename_endpoint_the_merge_removes
+test_refuses_both_endpoints_of_an_incoming_rename
+test_refuses_untracked_file_at_an_incoming_copy_destination
 test_refuses_unresolved_conflict
+test_refuses_in_progress_merge_in_a_linked_worktree
+test_refuses_in_progress_cherry_pick
 test_refuses_unrecognized_status_code
 test_proceeds_on_untracked_file_the_merge_never_touches
 test_proceeds_on_modified_path_the_merge_never_touches
