@@ -2942,7 +2942,7 @@ fi
 # reach. The standard locations are appended for the case where firstmate itself was
 # launched with a thin PATH; missing directories and duplicates are dropped.
 crew_tool_path() {
-  local seed dir out= brew=/opt/homebrew
+  local seed dir out='' brew=/opt/homebrew
   [ -d "$brew" ] || brew=/usr/local
   seed="$PATH:$HOME/.local/bin:$brew/bin:$brew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   local IFS=:
