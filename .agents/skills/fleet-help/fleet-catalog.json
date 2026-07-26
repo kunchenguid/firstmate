@@ -1,0 +1,293 @@
+{
+  "schema": "fleet-help-catalog.v1",
+  "description": "Read-mostly capability catalog for the internal /fleet-help navigator.",
+  "generated_skills": [
+    {
+      "id": "afk",
+      "command": "/afk",
+      "display": "Away-mode supervision",
+      "source": ".agents/skills/afk/SKILL.md",
+      "summary": "Step away while the fleet keeps supervising routine notifications and escalates only captain-relevant events.",
+      "sample_prompts": [
+        "/afk",
+        "I am going afk for an hour."
+      ]
+    },
+    {
+      "id": "ahoy",
+      "command": "/ahoy",
+      "display": "Visible-session recap",
+      "source": ".agents/skills/ahoy/SKILL.md",
+      "summary": "Recap visible session events since the prior real captain message and surface visibly unanswered captain decisions.",
+      "sample_prompts": [
+        "/ahoy",
+        "What happened since my last message?"
+      ]
+    },
+    {
+      "id": "bearings",
+      "command": "/bearings",
+      "display": "Current fleet status report",
+      "source": ".agents/skills/bearings/SKILL.md",
+      "summary": "Generate a standalone current-status report from bounded local fleet and registered-secondmate state.",
+      "sample_prompts": [
+        "/bearings",
+        "Give me a morning status report."
+      ]
+    },
+    {
+      "id": "fleet-help",
+      "command": "/fleet-help",
+      "display": "Fleet capability and next-step navigator",
+      "source": ".agents/skills/fleet-help/SKILL.md",
+      "summary": "Explain what the fleet can do and recommend the next captain action from live read-only sources.",
+      "sample_prompts": [
+        "/fleet-help what can the fleet do?",
+        "/fleet-help what should happen next?"
+      ]
+    },
+    {
+      "id": "stow",
+      "command": "/stow",
+      "display": "Session knowledge sweep",
+      "source": ".agents/skills/stow/SKILL.md",
+      "summary": "Sweep the session for uncaptured durable knowledge, route each finding to its disk home, and report reset safety.",
+      "sample_prompts": [
+        "/stow",
+        "Stow what you learned before reset."
+      ]
+    },
+    {
+      "id": "updatefirstmate",
+      "command": "/updatefirstmate",
+      "display": "Firstmate self-update",
+      "source": ".agents/skills/updatefirstmate/SKILL.md",
+      "summary": "Fast-forward firstmate and registered secondmates to the latest origin state, then refresh loaded instructions.",
+      "sample_prompts": [
+        "/updatefirstmate",
+        "Update firstmate to the latest version."
+      ]
+    }
+  ],
+  "lifecycle_operations": [
+    {
+      "id": "ship-task",
+      "display": "Ship a project change",
+      "category": "delivery",
+      "summary": "Firstmate can turn an approved coding request into an isolated worker task that implements, validates, opens a PR, and waits for captain merge approval unless routine authority already applies.",
+      "reads": [
+        "data/projects.md",
+        "data/backlog.md",
+        "state/*.meta",
+        "project delivery posture"
+      ],
+      "owners": [
+        "AGENTS.md section 7",
+        "bin/fm-brief.sh",
+        "bin/fm-spawn.sh",
+        "no-mistakes"
+      ],
+      "mutates_when_requested_outside_help": [
+        "data/backlog.md",
+        "state/",
+        "project worktree",
+        "PR branch"
+      ],
+      "sample_prompts": [
+        "Fix the login redirect bug in pm-tools and ship a PR.",
+        "Build ONM-1234 with no-mistakes and stop at a PR for me to merge."
+      ]
+    },
+    {
+      "id": "scout-investigation",
+      "display": "Scout or investigate before changing code",
+      "category": "investigation",
+      "summary": "Firstmate can commission a read-only or scratch investigation that produces a report before any implementation is authorized.",
+      "reads": [
+        "existing reports",
+        "project code",
+        "data/backlog.md"
+      ],
+      "owners": [
+        "AGENTS.md section 7",
+        "bin/fm-brief.sh",
+        ".agents/skills/decision-hold-lifecycle/SKILL.md"
+      ],
+      "mutates_when_requested_outside_help": [
+        "data/<id>/report.md",
+        "data/backlog.md"
+      ],
+      "sample_prompts": [
+        "Scout why the document list feels slow and report options.",
+        "Investigate this regression first; do not change code yet."
+      ]
+    },
+    {
+      "id": "bug-diagnosis",
+      "display": "Diagnose a reported bug",
+      "category": "investigation",
+      "summary": "Firstmate can reproduce an end-user symptom, separate cause from masking conditions, and then either report findings or promote the scout into a fix when the captain authorizes implementation.",
+      "reads": [
+        "bug report",
+        "project history",
+        "tests",
+        "diagnostic report"
+      ],
+      "owners": [
+        ".agents/skills/diagnostic-reasoning/SKILL.md",
+        "bin/fm-promote.sh"
+      ],
+      "mutates_when_requested_outside_help": [
+        "data/<id>/report.md",
+        "project worktree after promotion"
+      ],
+      "sample_prompts": [
+        "Diagnose why fresh issues disappear from the project view.",
+        "Reproduce this browser error, find the cause, then ask before fixing."
+      ]
+    },
+    {
+      "id": "review-or-validate",
+      "display": "Review or validate work",
+      "category": "quality",
+      "summary": "Firstmate can run no-mistakes on a committed branch, coordinate review findings, tests, docs, lint, PR creation, and CI without adding a separate manual approval gate.",
+      "reads": [
+        "branch diff",
+        "no-mistakes state",
+        "CI status"
+      ],
+      "owners": [
+        "no-mistakes",
+        ".agents/skills/ask-user-authority/SKILL.md"
+      ],
+      "mutates_when_requested_outside_help": [
+        "validation branch",
+        "PR",
+        "Linear comments when configured"
+      ],
+      "sample_prompts": [
+        "Run no-mistakes on this branch and open the PR.",
+        "Review this plan for verification gaps only."
+      ]
+    },
+    {
+      "id": "project-management",
+      "display": "Add, create, initialize, or remove projects",
+      "category": "fleet-management",
+      "summary": "Firstmate can manage registered projects, delivery mode, project initialization, and outward-facing repository consent through the project-management contract.",
+      "reads": [
+        "data/projects.md",
+        "project clone state",
+        "GitHub auth"
+      ],
+      "owners": [
+        ".agents/skills/project-management/SKILL.md",
+        "bin/fm-project-mode.sh"
+      ],
+      "mutates_when_requested_outside_help": [
+        "data/projects.md",
+        "projects/ clones",
+        "remote repository only after consent"
+      ],
+      "sample_prompts": [
+        "Add this repo to the fleet as direct-PR.",
+        "Create a private GitHub repo for this new project."
+      ]
+    },
+    {
+      "id": "secondmate-routing",
+      "display": "Route a domain to a persistent second mate",
+      "category": "fleet-management",
+      "summary": "Firstmate can create, sync, hand work to, recover, or retire a persistent second mate for a defined scope while the main home remains the captain's point of contact.",
+      "reads": [
+        "data/secondmates.md",
+        "registered secondmate homes",
+        "pending replies"
+      ],
+      "owners": [
+        ".agents/skills/secondmate-provisioning/SKILL.md",
+        "bin/fm-backlog-handoff.sh"
+      ],
+      "mutates_when_requested_outside_help": [
+        "data/secondmates.md",
+        "secondmate home",
+        "pending reply records"
+      ],
+      "sample_prompts": [
+        "Set up a second mate for pm-tools QA work.",
+        "Route this frontend maintenance stream to the existing second mate if it fits."
+      ]
+    },
+    {
+      "id": "linear-backed-work",
+      "display": "Keep Linear aligned with work",
+      "category": "tracking",
+      "summary": "For projects that use Linear, firstmate can find or create the issue, post progress, link commits and PRs, and move the ticket at delivery milestones.",
+      "reads": [
+        "project tracker anchors",
+        "Linear issue state",
+        "PR URL"
+      ],
+      "owners": [
+        "linear-workflow",
+        "project-tracker.md when present"
+      ],
+      "mutates_when_requested_outside_help": [
+        "Linear issue comments",
+        "Linear issue status"
+      ],
+      "sample_prompts": [
+        "Build ONM-1034 and keep the ticket updated.",
+        "Create Linear issues from this approved breakdown."
+      ]
+    },
+    {
+      "id": "documentation-updates",
+      "display": "Keep project docs current",
+      "category": "documentation",
+      "summary": "When a change ships, firstmate can include relevant README, architecture, runbook, or external-document updates through the project's doc discipline.",
+      "reads": [
+        "project-docs.md",
+        "README.md",
+        "architecture docs",
+        "Linear Documents when configured"
+      ],
+      "owners": [
+        "project-docs",
+        "project documentation map"
+      ],
+      "mutates_when_requested_outside_help": [
+        "project docs",
+        "external docs when configured"
+      ],
+      "sample_prompts": [
+        "Ship the fix and update the affected docs.",
+        "Sync the runbook after this deployment change."
+      ]
+    },
+    {
+      "id": "x-mode",
+      "display": "Answer eligible public mentions through X mode",
+      "category": "integration",
+      "summary": "When X mode is explicitly opted in, firstmate can classify eligible mentions, reply or dismiss, link spawned work, and post milestone follow-ups within the X-mode safety boundary.",
+      "reads": [
+        ".env pairing token presence",
+        "state/x-inbox",
+        "state/x-context"
+      ],
+      "owners": [
+        ".agents/skills/fmx-respond/SKILL.md",
+        "docs/configuration.md"
+      ],
+      "mutates_when_requested_outside_help": [
+        "public replies",
+        "X-mode state artifacts",
+        "fleet work only after eligible classification"
+      ],
+      "sample_prompts": [
+        "What can X mode safely handle?",
+        "Opt me out of X mode."
+      ]
+    }
+  ]
+}
