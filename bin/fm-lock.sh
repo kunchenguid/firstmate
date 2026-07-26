@@ -379,10 +379,18 @@ acquire_generation_claim() {
   while [ "$attempt" -lt 2 ]; do
     attempt=$((attempt + 1))
     if mkdir "$claim" 2>/dev/null; then
+      claim_generation=$(reclaim_path_generation "$claim" 2>/dev/null || true)
+      [ -n "$claim_generation" ] || return 2
+      marker="$claim/.recovery-$claim_generation"
+      [ ! -e "$marker" ] && [ ! -L "$marker" ] || return 1
       now=$(date +%s 2>/dev/null) || return 2
       printf '%s\n' "${BASHPID:-$$}" > "$claim/pid" || return 2
       printf '%s\n' "$now" > "$claim/started" || return 2
       reclaim_generation_dir_is_safe "$claim" || return 2
+      current=$(reclaim_path_generation "$claim" 2>/dev/null || true)
+      [ "$current" = "$claim_generation" ] \
+        && [ ! -e "$marker" ] && [ ! -L "$marker" ] \
+        || return 1
       [ "$(cat "$claim/pid" 2>/dev/null || true)" = "${BASHPID:-$$}" ] \
         && [ "$(cat "$claim/started" 2>/dev/null || true)" = "$now" ] \
         || return 2
@@ -409,12 +417,20 @@ acquire_generation_claim() {
         ;;
     esac
     marker="$claim/.recovery-$claim_generation"
-    mkdir "$marker" 2>/dev/null || [ -d "$marker" ] || return 2
+    mkdir "$marker" 2>/dev/null \
+      || { [ ! -L "$marker" ] && [ -d "$marker" ]; } \
+      || return 2
     current=$(reclaim_path_generation "$claim" 2>/dev/null || true)
     if [ "$current" != "$claim_generation" ]; then
       rmdir "$marker" 2>/dev/null || true
       return 1
     fi
+    reclaim_generation_dir_is_safe "$claim" || return 2
+    pid=$(cat "$claim/pid" 2>/dev/null || true)
+    case "$pid" in
+      ''|*[!0-9]*) ;;
+      *) kill -0 "$pid" 2>/dev/null && return 1 ;;
+    esac
     quarantine="$STATE/.lock-reclaim-claim-retired-$generation.$claim_generation"
     [ ! -e "$quarantine" ] && [ ! -L "$quarantine" ] || return 2
     perl -e 'exit(rename($ARGV[0], $ARGV[1]) ? 0 : 1)' \
