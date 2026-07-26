@@ -327,8 +327,8 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
     esac
   }
   # These fixtures reproduce the observed spinner shape rather than byte-exact
-  # transcriptions. Leading whitespace is deliberately varied because the
-  # matcher is whitespace-insensitive by design and must not be pinned to prose.
+  # transcriptions. Leading whitespace is deliberately varied, while separator
+  # whitespace stays fixed because every observed capture had it.
   printf ' 🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"\n│ > │\n' > "$capture"
   fm_pane_is_busy fake kimi || fail "the first real Kimi spinner shape was not recognized as busy"
   printf '   🌗 · Tip: /plugins: manage plugins ...\n│ > │\n' > "$capture"
