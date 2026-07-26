@@ -29,6 +29,7 @@ HARNESS="$ROOT/bin/fm-harness.sh"
 . "$LIB"
 
 TMP_ROOT=$(fm_test_tmproot fm-cursor-harness)
+BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
 ARROW=$(printf '\xe2\x86\x92')   # U+2192, cursor-agent's composer glyph
 
@@ -67,6 +68,11 @@ make_fake_tmux() {  # <dir>
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  send-keys)
+    if [ -n "${FM_FAKE_SEND_LOG:-}" ]; then
+      printf '%s\n' "$*" >> "$FM_FAKE_SEND_LOG"
+    fi
+    exit 0 ;;
   display-message)
     for a in "$@"; do
       case "$a" in
@@ -103,6 +109,29 @@ esac
 exit 1
 SH
   chmod +x "$fb/tmux"
+  cat > "$fb/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field=
+pid=
+prev=
+for arg in "$@"; do
+  [ "$prev" = -o ] && field=$arg
+  [ "$prev" = -p ] && pid=$arg
+  prev=$arg
+done
+case "${FM_FAKE_ANCESTRY:-unknown}:$field:$pid" in
+  cursor:comm=:4242) printf '/opt/cursor/bin/cursor-agent\n' ;;
+  claude:comm=:4242) printf '/opt/claude/bin/claude\n' ;;
+  unknown:comm=:*) printf '/bin/bash\n' ;;
+  *:comm=:*) printf '/bin/bash\n' ;;
+  unknown:ppid=:*) printf '1\n' ;;
+  *:ppid=:4242) printf '1\n' ;;
+  *:ppid=:*) printf '4242\n' ;;
+  *:args=:*) printf '/bin/bash\n' ;;
+esac
+SH
+  chmod +x "$fb/ps"
   printf '%s\n' "$fb"
 }
 
@@ -241,12 +270,20 @@ test_bare_arrow_glyph_is_an_agent_composer_not_a_dead_shell() {
 }
 
 test_placeholder_rule_does_not_swallow_real_text() {
-  local state
-  # The placeholder rule is anchored to the glyph and the exact placeholder, so
-  # text that merely mentions it is still pending.
-  state=$(fm_composer_classify_content 0 "$ARROW please add a follow-up test")
-  [ "$state" = pending ] || fail "real text mentioning the placeholder read '$state'"
-  pass "the cursor placeholder rule does not swallow real typed text"
+  local content state
+  for content in \
+    "$ARROW Add a follow-up test" \
+    "$ARROW Add a follow-up" \
+    "$ARROW Plan, search, build anything now" \
+    "$ARROW Plan, search, build anything"; do
+    state=$(fm_composer_classify_content 0 "$content")
+    [ "$state" = pending ] \
+      || fail "real text matching or extending a placeholder read '$state': $content"
+  done
+  state=$(fm_composer_classify_content 0 B '' sensitive "$ARROW Add a follow-up")
+  [ "$state" = pending ] \
+    || fail "placeholder shape with the wrong ghost-stripped remnant read '$state'"
+  pass "cursor placeholders require exact shape, styling, and block-cursor remnant"
 }
 
 # --- harness detection ------------------------------------------------------
@@ -256,6 +293,30 @@ test_env_marker_detects_cursor() {
   out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT CURSOR_AGENT=1 "$HARNESS")
   [ "$out" = cursor ] || fail "CURSOR_AGENT=1 detected as '$out', expected cursor"
   pass "fm-harness detects cursor from its CURSOR_AGENT marker"
+}
+
+test_conflicting_markers_use_nearest_ancestry() {
+  local dir fb out
+  dir="$TMP_ROOT/marker-conflict"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+
+  out=$(env -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fb:$BASE_PATH" FM_FAKE_ANCESTRY=cursor CLAUDECODE=1 CURSOR_AGENT=1 "$HARNESS")
+  [ "$out" = cursor ] || fail "nearest cursor ancestry resolved as '$out'"
+  out=$(env -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fb:$BASE_PATH" FM_FAKE_ANCESTRY=claude CLAUDECODE=1 CURSOR_AGENT=1 "$HARNESS")
+  [ "$out" = claude ] || fail "nearest claude ancestry resolved as '$out'"
+  out=$(env -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fb:$BASE_PATH" FM_FAKE_ANCESTRY=unknown CLAUDECODE=1 CURSOR_AGENT=1 "$HARNESS")
+  [ "$out" = unknown ] || fail "inconclusive conflicting markers resolved as '$out'"
+
+  out=$(env -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT \
+    PATH="$fb:$BASE_PATH" FM_FAKE_ANCESTRY=cursor CLAUDECODE=1 "$HARNESS")
+  [ "$out" = claude ] || fail "unambiguous claude marker resolved as '$out'"
+  out=$(env -u PI_CODING_AGENT -u GROK_AGENT -u CLAUDECODE \
+    PATH="$fb:$BASE_PATH" FM_FAKE_ANCESTRY=claude CURSOR_AGENT=1 "$HARNESS")
+  [ "$out" = cursor ] || fail "unambiguous cursor marker resolved as '$out'"
+  pass "conflicting markers use nearest ancestry and fail closed when inconclusive"
 }
 
 test_cursor_is_an_accepted_configured_crew_harness() {
@@ -295,6 +356,49 @@ test_agent_liveness_states() {
   pass "cursor pane liveness: alive when named, ambiguous as node, dead on the shell"
 }
 
+test_backend_input_boundary_rejects_dead_and_missing_agents() {
+  local dir fb pane log state verdict
+  dir="$TMP_ROOT/input-boundary"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  pane="$dir/pane.txt"
+  log="$dir/send.log"
+  make_pane_file "$pane" "$(idle_composer_row A 'dd a follow-up')"
+  : > "$log"
+
+  state=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$pane" FM_FAKE_CY=10 \
+    FM_FAKE_WINDOWS=win FM_FAKE_COMM=node \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state tmux sess:win' "$ROOT")
+  [ "$state" = empty ] || fail "live ambiguous cursor composer read '$state'"
+  verdict=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$pane" FM_FAKE_CY=10 \
+    FM_FAKE_WINDOWS=win FM_FAKE_COMM=node FM_FAKE_SEND_LOG="$log" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit tmux sess:win steer 1 0 0' "$ROOT")
+  [ "$verdict" = empty ] || fail "live ambiguous cursor steer returned '$verdict'"
+  [ -s "$log" ] || fail "live ambiguous cursor steer never reached tmux"
+
+  : > "$log"
+  make_pane_file "$pane" '❯'
+  state=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$pane" FM_FAKE_CY=10 \
+    FM_FAKE_WINDOWS=win FM_FAKE_COMM=zsh \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state tmux sess:win' "$ROOT")
+  [ "$state" = unknown ] || fail "dead cursor shell composer read '$state'"
+  verdict=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$pane" FM_FAKE_CY=10 \
+    FM_FAKE_WINDOWS=win FM_FAKE_COMM=zsh FM_FAKE_SEND_LOG="$log" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit tmux sess:win steer 1 0 0' "$ROOT")
+  [ "$verdict" = send-failed ] || fail "dead cursor shell steer returned '$verdict'"
+  [ ! -s "$log" ] || fail "dead cursor shell received tmux input"
+
+  state=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$pane" FM_FAKE_CY=10 \
+    FM_FAKE_WINDOWS=other FM_FAKE_COMM=node \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state tmux sess:win' "$ROOT")
+  [ "$state" = unknown ] || fail "missing cursor target composer read '$state'"
+  verdict=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$pane" FM_FAKE_CY=10 \
+    FM_FAKE_WINDOWS=other FM_FAKE_COMM=node FM_FAKE_SEND_LOG="$log" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit tmux sess:win steer 1 0 0' "$ROOT")
+  [ "$verdict" = send-failed ] || fail "missing cursor target steer returned '$verdict'"
+  [ ! -s "$log" ] || fail "missing cursor target received tmux input"
+  pass "tmux input boundary rejects dead and missing agents but preserves live cursor steering"
+}
+
 test_busy_signature_matches_only_the_composer_anchored_hint
 test_busy_signature_is_not_shared_across_harnesses
 test_busy_signature_survives_tool_execution_rendering
@@ -306,7 +410,9 @@ test_blank_cursor_row_without_a_cursor_composer_is_unchanged
 test_bare_arrow_glyph_is_an_agent_composer_not_a_dead_shell
 test_placeholder_rule_does_not_swallow_real_text
 test_env_marker_detects_cursor
+test_conflicting_markers_use_nearest_ancestry
 test_cursor_is_an_accepted_configured_crew_harness
 test_agent_liveness_states
+test_backend_input_boundary_rejects_dead_and_missing_agents
 
 echo "# all fm-cursor-harness tests passed"

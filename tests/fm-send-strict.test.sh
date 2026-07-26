@@ -36,10 +36,12 @@ case "${1:-}" in
   display-message)
     target=
     cursor=0
+    current=0
     while [ $# -gt 0 ]; do
       case "$1" in
         -t) target=$2; shift 2 ;;
         *cursor_y*) cursor=1; shift ;;
+        *pane_current_command*) current=1; shift ;;
         *) shift ;;
       esac
     done
@@ -47,13 +49,14 @@ case "${1:-}" in
       exit 1
     fi
     [ "$cursor" = 1 ] && { printf '1\n'; exit 0; }
+    [ "$current" = 1 ] && { printf '%s\n' "${FM_FAKE_TMUX_COMM:-node}"; exit 0; }
     printf '%%1\n'
     exit 0 ;;
   capture-pane)
     printf '╭────╮\n│    │\n╰────╯\n'
     exit 0 ;;
   list-windows)
-    printf 'foreign:%s\n' "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
+    printf '%s\n' fm-mpf-lane-m8 fm-lane-ok fm-dead-agent "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
     exit 0 ;;
 esac
 exit 0
@@ -163,9 +166,25 @@ test_healthy_fm_id_send_still_works() {
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
+test_recorded_dead_agent_refuses_before_steering() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/dead-agent"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home deadagent); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/dead-agent.meta" "window=sess:fm-dead-agent" "kind=ship" "harness=cursor"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_COMM=zsh FM_SEND_SETTLE=0 \
+    "$SEND" fm-dead-agent "do not run in the shell" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "recorded dead agent should refuse steering"
+  assert_contains "$(cat "$err")" "text not sent" "dead-agent refusal should be explicit"
+  [ ! -s "$log" ] || fail "recorded dead agent still received tmux input"$'\n'"$(cat "$log")"
+  pass "fm-send strict: recorded dead agents refuse before steering"
+}
+
 test_exact_lane_id_send_still_works
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_healthy_fm_id_send_still_works
+test_recorded_dead_agent_refuses_before_steering

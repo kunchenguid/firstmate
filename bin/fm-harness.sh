@@ -18,7 +18,8 @@
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
 # Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
-# Detection layers: verified environment markers first, then process ancestry.
+# Detection layers: one verified environment marker wins directly; conflicting
+# verified markers are resolved by nearest process ancestry or fail closed.
 # Record each newly verified env marker here.
 set -u
 
@@ -27,31 +28,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
-detect_own() {
-  # Layer 1: environment markers for verified harnesses.
-  # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Only claude, pi, grok, and cursor set verified markers of their own; codex,
-  # opencode, and kimi are markerless, so a foreign marker retained in a terminal
-  # multiplexer's stored environment can silently misidentify one of them before
-  # ancestry is consulted. That precedence hazard is now DEMONSTRATED rather than
-  # theoretical: a cursor-agent tool child launched from a claude terminal was
-  # observed carrying an inherited CLAUDECODE=1 alongside cursor's own
-  # CURSOR_AGENT=1 (2026-07-26). It remains ordering-only - it says nothing about
-  # a natively launched harness - but it is why every marker below is checked
-  # against its OWN harness's variable rather than trusted as exclusive.
-  [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
-  if [ "${PI_CODING_AGENT:-}" = "true" ]; then
-    if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
-    return
-  fi
-  # cursor-agent sets CURSOR_AGENT=1 for its tool child processes (verified,
-  # cursor-agent 2026.07.23-e383d2b).
-  [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
-  # grok sets GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
-  # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
-  # is unambiguous when firstmate runs natively on grok.
-  [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
-  # Layer 2: walk the parent chain and match the command name.
+detect_ancestry() {
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
@@ -84,6 +61,43 @@ detect_own() {
     fi
   done
   echo unknown
+}
+
+detect_own() {
+  local marker_count=0 marker_harness= ancestry
+  if [ "${CLAUDECODE:-}" = "1" ]; then
+    marker_count=$((marker_count + 1))
+    marker_harness=claude
+  fi
+  if [ "${PI_CODING_AGENT:-}" = "true" ]; then
+    marker_count=$((marker_count + 1))
+    if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then
+      marker_harness=pi-signed
+    else
+      marker_harness=pi
+    fi
+  fi
+  # cursor-agent sets CURSOR_AGENT=1 for its tool child processes (verified,
+  # cursor-agent 2026.07.23-e383d2b).
+  if [ "${CURSOR_AGENT:-}" = "1" ]; then
+    marker_count=$((marker_count + 1))
+    marker_harness=cursor
+  fi
+  # grok sets GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
+  if [ "${GROK_AGENT:-}" = "1" ]; then
+    marker_count=$((marker_count + 1))
+    marker_harness=grok
+  fi
+  if [ "$marker_count" -eq 1 ]; then
+    echo "$marker_harness"
+    return
+  fi
+  ancestry=$(detect_ancestry)
+  if [ "$marker_count" -gt 1 ] && [ "$ancestry" = unknown ]; then
+    echo unknown
+    return
+  fi
+  echo "$ancestry"
 }
 
 # Resolve the effective crewmate harness: config/crew-harness (a bare adapter

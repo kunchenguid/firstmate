@@ -15,9 +15,8 @@
 #
 # The verified composer/busy-detection and verify-and-retry-submit primitives
 # already live in bin/fm-tmux-lib.sh, shared with the away-mode daemon
-# (bin/fm-supervise-daemon.sh); this adapter sources that file and re-exports
-# its submit core under the backend's naming convention rather than
-# duplicating it, so the two consumers cannot drift apart.
+# (bin/fm-supervise-daemon.sh); this adapter sources that file and wraps its
+# submit core under the backend's naming convention.
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-tmux-lib.sh"
 
@@ -38,6 +37,13 @@ fm_backend_tmux_capture() {  # <target> <lines>
   tmux capture-pane -p -t "$1" -S -"$2"
 }
 
+fm_backend_tmux_agent_accepts_input() {  # <target>
+  case "$(fm_backend_tmux_agent_state "$1")" in
+    dead|missing) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 # fm_backend_tmux_send_key: one named key. Mirrors fm-send.sh's --key path:
 # `tmux display-message -p -t "$T" '#{pane_id}' >/dev/null`, then
 # `tmux send-keys -t "$T" "$2"`.
@@ -47,11 +53,16 @@ fm_backend_tmux_send_key() {  # <target> <key>
 }
 
 # fm_backend_tmux_send_text_submit: type <text> into <target> once, then
-# submit with Enter, retried (Enter only, never retyped) until the composer
-# clears. Re-exports fm_tmux_submit_core (bin/fm-tmux-lib.sh) verbatim; see
-# that file for the composer-verification contract and echoed verdicts.
+# submit with Enter, retried (Enter only, never retyped) until the composer clears.
 fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
+  fm_backend_tmux_agent_accepts_input "$1" || { printf 'send-failed'; return 0; }
   fm_tmux_submit_core "$@"
+}
+
+fm_backend_tmux_composer_state() {  # <target>
+  fm_backend_tmux_agent_accepts_input "$1" \
+    || { printf 'unknown'; return 0; }
+  fm_tmux_composer_state "$1"
 }
 
 # fm_backend_tmux_container_ensure: reuse the current tmux session when

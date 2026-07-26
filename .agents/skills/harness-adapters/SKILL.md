@@ -40,7 +40,8 @@ A harness may draw its own block cursor and park the terminal cursor elsewhere, 
 
 ## Detection
 
-`bin/fm-harness.sh` prints firstmate's own harness, using verified env markers first and then process ancestry.
+`bin/fm-harness.sh` prints firstmate's own harness, using one unambiguous verified env marker directly and resolving conflicting verified markers through nearest process ancestry.
+If conflicting markers have no conclusive verified ancestor, detection returns `unknown`.
 Within the Pi family, only the exact launch-boundary marker `FM_PI_HARNESS=pi-signed` alongside `PI_CODING_AGENT=true` selects the signed identity; unmarked shared launcher ancestry remains `pi`.
 `bin/fm-harness.sh crew` resolves the effective crewmate harness from `config/crew-harness` (absent or `default` -> own).
 `bin/fm-harness.sh secondmate` resolves the secondmate-launch harness through the chain `config/secondmate-harness` -> `config/crew-harness` -> own, so an unset `config/secondmate-harness` matches the crew harness.
@@ -131,6 +132,8 @@ The supported launch-profile flags below are verified locally; each row records 
 | cursor | `--model <model>` | none; effort rides in the model name | Verified 2026-07-26 on cursor-agent 2026.07.23-e383d2b. `cursor-agent --help` advertises parameterized bracket overrides (`'claude-opus-4-8[context=1m,effort=high,fast=false]'`), but that syntax - including the help's own literal example - is rejected with exit 1 and the accepted-model list in the error. Effort is a MODEL-NAME suffix instead (`claude-opus-5-thinking-low` .. `-max`, `gpt-5.3-codex-xhigh`), so firstmate picks the tiered model at intake and `fm-spawn` records the requested `effort=` in metadata without emitting any flag. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
+Cursor dispatch profiles accept the recorded effort vocabulary `low`, `medium`, `high`, `xhigh`, and `max`.
+An effort-bearing Cursor dispatch profile must select a model whose name ends in that effort tier because no separate effort flag is emitted.
 
 ### Model support discovery
 
@@ -438,8 +441,9 @@ Requiring a blank cursor row keeps every already-verified adapter on its existin
 
 **Cursor de-emphasises its whole EMPTY composer, glyph and placeholder alike.**
 The single character under its self-drawn block cursor renders at normal intensity in reverse video, so ghost stripping correctly removes everything else and leaves exactly that one character behind, which would read as real typed input on every idle pane.
-The shared classifier therefore also matches the plain, un-stripped row against `FM_COMPOSER_AGENT_PLACEHOLDER_RE` (`bin/fm-composer-lib.sh`), whose alternatives are anchored to cursor's own `→` glyph so they can neither collide with another harness's composer nor match a shell prompt.
-Trailing context is left open so the busy variant of the same row still matches.
+The shared classifier therefore matches the plain, un-stripped row against `FM_COMPOSER_AGENT_PLACEHOLDER_RE` (`bin/fm-composer-lib.sh`) only when it has the complete idle placeholder or the complete busy placeholder plus `ctrl+c to stop`.
+It also requires the ghost-stripped row to contain the matching `P` or `A` block-cursor remnant, with the busy hint preserved only on the busy shape.
+Real input that equals or extends the placeholder text therefore remains pending instead of becoming a false empty.
 Once real text is typed, cursor renders the glyph and the text at normal intensity and drops the placeholder, so pending input is unambiguous.
 
 **A zero-settle submit duplicates the steer, so the settle is a safety requirement.**
@@ -459,15 +463,12 @@ Like claude's and kimi's, this signature stays out of the shared unrecorded-harn
 `ps -o comm=` reports `cursor-agent` for the foreground process-group leader, but tmux's `#{pane_current_command}` resolves the pane to the bundled `node`, so `fm_backend_tmux_agent_state` returns `ambiguous` for a live cursor pane.
 That is the preserved-not-relaunched arm, and death detection is unaffected because an exited cursor pane falls back to the login shell and reads `dead`.
 `node` is deliberately not added to the alive patterns: it is far too generic to prove any agent is alive.
+The tmux backend accepts `alive`, `ambiguous`, and `unreadable` liveness for structural composer proof, but rejects authoritative `dead` and `missing` states before reporting an empty composer or sending any input.
+This preserves live Cursor steering while preventing an exited pane's shell prompt from becoming an injection target even when its glyph resembles an agent composer.
 
 Cursor has no turn-end hook, so like opencode its wake signal is the crewmate's own status appends plus pane staleness and the busy signature.
 
-**Env-marker precedence hazard, now demonstrated.**
+**Conflicting env markers require ancestry.**
 A cursor tool child launched from a claude terminal was observed carrying an inherited `CLAUDECODE=1` alongside cursor's own `CURSOR_AGENT=1`.
-Detection checks `CLAUDECODE` first, so that ordering would misidentify a cursor session launched from a claude terminal.
-This says nothing about a natively launched harness, and it is the same ordering hazard already recorded in `bin/fm-harness.sh`, but it is now evidence rather than theory.
-
-**Open pre-existing hazard found while verifying this adapter (not introduced by it).**
-After `/exit`, the pane returns to a zsh prompt whose glyph in this fleet's theme is `❯` - the same glyph the shared classifier treats as a genuine empty AGENT composer on a bare row.
-A dead cursor pane therefore classifies as `empty`, which is exactly the dead-shell injection target the classifier exists to prevent.
-This affects claude equally today and is independent of cursor; changing it would alter claude's classification, so it is recorded here for a separate decision rather than fixed in passing.
+When two or more verified markers coexist, `bin/fm-harness.sh` uses the nearest verified process ancestor instead of static marker order.
+It preserves direct marker-only detection when exactly one verified marker is present and returns `unknown` when a conflict has no conclusive verified ancestor.

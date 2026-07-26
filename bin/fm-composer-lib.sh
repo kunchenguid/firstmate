@@ -181,17 +181,31 @@ fm_composer_strip_ghost() {
 # the glyph and the placeholder, so the only content left is the single
 # character sitting under that block cursor, and every idle pane would read as
 # real typed input. The plain, un-stripped row is therefore matched against this
-# pattern too. Each alternative is anchored to its own harness's agent glyph, so
-# it can neither collide with another harness's composer nor match a shell
-# prompt, and the trailing context is left open so the busy variant of the same
-# row (cursor-agent appends a right-aligned `ctrl+c to stop`) still matches.
+# pattern too, but only when it has the exact idle or busy shape and the
+# ghost-stripped content is the expected cursor remnant. Each alternative is
+# anchored to its own harness's agent glyph, so it can neither collide with
+# another harness's composer nor match a shell prompt.
 # This is a UNION with the caller's own idle_re, not a replacement, because the
 # per-adapter idle regexes are backend-specific while this rule is harness-specific.
-FM_COMPOSER_AGENT_PLACEHOLDER_RE=${FM_COMPOSER_AGENT_PLACEHOLDER_RE-'^→[[:space:]]+(Plan, search, build anything|Add a follow-up)([[:space:]]|$)'}
+FM_COMPOSER_AGENT_PLACEHOLDER_RE=${FM_COMPOSER_AGENT_PLACEHOLDER_RE-'^→[[:space:]]+(Plan, search, build anything|Add a follow-up)([[:space:]]+ctrl\+c to stop)?$'}
 
-fm_composer_placeholder_matches() {  # <plain-content>
+fm_composer_placeholder_matches() {  # <plain-content> <ghost-stripped-content>
+  local plain=$1 stripped=$2 remnant
   [ -n "${FM_COMPOSER_AGENT_PLACEHOLDER_RE:-}" ] || return 1
-  printf '%s' "$1" | grep -qE "$FM_COMPOSER_AGENT_PLACEHOLDER_RE"
+  printf '%s' "$plain" | grep -qE "$FM_COMPOSER_AGENT_PLACEHOLDER_RE" || return 1
+  case "$plain" in
+    '→ '*Plan,\ search,\ build\ anything*) remnant=P ;;
+    '→ '*Add\ a\ follow-up*) remnant=A ;;
+    *) return 1 ;;
+  esac
+  case "$plain" in
+    *ctrl+c\ to\ stop)
+      printf '%s' "$stripped" | grep -qE "^${remnant}[[:space:]]+ctrl\\+c to stop$"
+      ;;
+    *)
+      [ "$stripped" = "$remnant" ]
+      ;;
+  esac
 }
 
 fm_composer_idle_matches() {
@@ -208,7 +222,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   plain_content=${5:-$content}
   # A harness that de-emphasises its whole empty composer leaves only its block
   # cursor behind after ghost stripping, so judge the plain row first.
-  if fm_composer_placeholder_matches "$plain_content"; then
+  if fm_composer_placeholder_matches "$plain_content" "$content"; then
     printf 'empty'; return 0
   fi
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
