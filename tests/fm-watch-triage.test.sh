@@ -756,6 +756,71 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
 }
 
+# --- a live-agent declared pause surfaces once per pause WINDOW ---------------
+#
+# A declared pause on a crew whose agent is not confidently dead fails open and
+# surfaces, deliberately: it might be sitting on a decision gate its own status
+# line silenced. The defect was that the classification re-runs on every distinct
+# pane hash, so "looked at once" meant "looked at once per pane redraw" - one
+# wake per redraw, unthrottled, and unbounded in principle, because a pane
+# rendering a ticking clock produces a new hash every poll forever.
+#
+# Each round below rewrites the pane, which is exactly the trigger. The first
+# round must still surface - that is the documented safety behaviour and it is
+# not what is being removed - and every later round must take the bounded
+# cadence instead.
+test_live_declared_pause_surfaces_once_per_pause_window() {
+  local dir state fakebin out capture_file statusf window key sig pid round wakes
+  dir=$(make_case live-pause-throttle); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/livepause.status"
+  window="test:fm-livepause"
+  printf 'round 0 output\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\nbackend=tmux\n' "$window" > "$state/livepause.meta"
+  printf 'paused: waiting on the upstream release\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-livepause_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # No FM_FAKE_TMUX_CURRENT_COMMAND: the liveness probe reads inconclusive, which
+  # is the fail-open population this throttle governs. A long resurface window
+  # keeps the bounded hourly recheck out of the count.
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting on the upstream release'
+
+  round=1
+  while [ "$round" -le 4 ]; do
+    printf 'round %s output, the pane redrew\n' "$round" > "$capture_file"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_PAUSE_RESURFACE_SECS=999999 FM_STALE_ESCALATE_SECS=999999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+    pid=$!
+    if wait_live "$pid" 60; then reap "$pid"; else wait "$pid" || fail "live-pause round $round failed"; fi
+    if [ "$round" -eq 1 ]; then
+      wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+      [ "$wakes" -eq 1 ] || fail "a live-agent declared pause lost its one documented surface, got $wakes"
+      [ -e "$state/.paused-liveprobe-$key" ] || fail "the surface did not record that this pause window had its look"
+    fi
+    round=$((round + 1))
+  done
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 1 ] || fail "a live-agent declared pause surfaced $wakes times across four pane redraws"
+  grep -F "absorbed stale (paused, awaiting external" "$state/.watch-triage.log" >/dev/null \
+    || fail "later redraws of the same pause window did not take the bounded cadence"
+
+  # The budget belongs to the pause window, not to the task: when the crew stops
+  # declaring a pause, the next pause gets its own look.
+  printf 'working: resumed\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-livepause_status"
+  printf 'resumed output\n' > "$capture_file"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999999 FM_STALE_ESCALATE_SECS=999999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  if wait_live "$pid" 40; then reap "$pid"; else wait "$pid" || true; fi
+  [ ! -e "$state/.paused-liveprobe-$key" ] || fail "leaving a declared pause did not release its live-agent look"
+  unset FM_FAKE_CREW_STATE
+  pass "a live-agent declared pause surfaces once per pause window, not once per pane redraw"
+}
+
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1476,6 +1541,7 @@ test_wedge_escalation_unreadable_progress_still_escalates
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_live_declared_pause_surfaces_once_per_pause_window
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking

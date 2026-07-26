@@ -398,6 +398,32 @@ clear_pause_tracking() {  # <window>
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # Only a confidently dead ordinary crew may recover paused classification after
 # fm-crew-state has fallen back to stopped or unknown.
+#
+# A declared pause on a crew whose agent is NOT confidently dead deliberately
+# fails open to `none`, which surfaces: the documented intent is that a live
+# agent under a declared pause gets looked at, because it might be sitting on a
+# decision gate its own status line has silenced. The defect was that this
+# classification re-runs on every distinct pane hash, so "looked at once" was
+# implemented as "looked at once per pane redraw" - unthrottled, and unbounded in
+# principle, since a pane rendering a ticking clock or a token counter produces a
+# new hash every poll forever. That is the shape of the incident this fixes; the
+# measured production rate on an ordinary pane was low, but the ceiling is what
+# matters.
+#
+# .paused-liveprobe-<key> records that this pause window has already HAD its one
+# live-agent surface. It is a pure predicate here and is written by
+# surface_nonterminal_stale, at the moment a surface actually happens - not here,
+# because this classification also returns `none` on paths that do not surface,
+# and spending the budget on one of those would consume the documented look
+# without ever taking it. It is released when the crew is observed to no longer
+# be in a declared pause, so the next pause gets its own look. Once spent, a live
+# agent takes the same bounded PAUSE_RESURFACE_SECS cadence a dead one takes,
+# which keeps a forgotten pause from rotting invisibly. The first surface, and
+# the dead-agent behaviour, are both unchanged.
+pause_live_probe_spent() {  # <key>
+  [ -e "$STATE/.paused-liveprobe-$1" ]
+}
+
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
   key=${win//:/_}
@@ -414,6 +440,10 @@ pause_state_class() {  # <window> <task>
     if [ "$(window_kind "$win")" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
+        if pause_live_probe_spent "$key"; then
+          printf 'paused'
+          return
+        fi
         rm -f "$recheck_file"
         printf 'none'
         return
@@ -431,6 +461,10 @@ pause_state_class() {  # <window> <task>
   if [ "$(window_kind "$win")" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then
+      if pause_live_probe_spent "$key"; then
+        printf 'paused'
+        return
+      fi
       rm -f "$recheck_file"
       printf 'none'
       return
@@ -457,8 +491,13 @@ surface_nonterminal_stale() {  # <window> <hash>
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
     date +%s > "$STATE/.paused-resurfaced-$key"
+    # This IS the one live-agent look a declared pause is owed. Record it here,
+    # where the surface is real, so every later redraw of the same pause window
+    # takes the bounded cadence instead of surfacing again.
+    : > "$STATE/.paused-liveprobe-$key"
   else
-    rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+    rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key" \
+      "$STATE/.paused-liveprobe-$key"
   fi
   wake "$reason"
 }
@@ -905,8 +944,9 @@ EOF
     key=${key//\//_}
     key=${key//./_}
     last=$(last_status_line "$STATE/$task.status")
-    if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
-      clear_pause_tracking "$w"
+    if ! status_is_paused_or_captain_held "$last"; then
+      rm -f "$STATE/.paused-liveprobe-$key"
+      [ -e "$STATE/.paused-$key" ] && clear_pause_tracking "$w"
     fi
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
