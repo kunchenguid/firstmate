@@ -25,6 +25,10 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
+# Teardown resolves that default from origin/HEAD, then local main, then local
+# master, with build as the final fallback only when refs/heads/build or
+# refs/remotes/origin/build exists. A dangling origin/HEAD that names build does
+# not make build a valid candidate.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
