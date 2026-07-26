@@ -228,19 +228,18 @@ if (mode === "markdown") {
 } else if (mode === "bearings") {
   const snapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
   if (snapshot?.schema !== "fm-bearings.v1") throw new Error("unsupported Bearings schema");
+  if (snapshot.unhealthy_endpoints === undefined) snapshot.unhealthy_endpoints = [];
   for (const key of ["in_flight", "secondmates", "decisions_open", "landed", "gates", "unhealthy_endpoints", "omitted"]) {
     if (!Array.isArray(snapshot[key])) throw new Error(`Bearings snapshot is missing ${key}`);
   }
   if (typeof snapshot.generated !== "string" || !snapshot.generated) throw new Error("Bearings snapshot is missing generated");
-  const seen = new Set();
+  const secondmateMirrors = new Set();
   const decisions = [];
   const underway = [];
   const charted = [];
   const landed = [];
   const add = (target, kind, row, primary, detail) => {
     const id = String(row.id ?? "unknown");
-    if (seen.has(id)) return;
-    seen.add(id);
     target.push({ id, kind, primary, detail });
   };
   for (const row of snapshot.decisions_open) add(decisions, "decision", row, row.summary ?? row.id, `${row.owner ?? "-"} · ${row.verb ?? "decision"}`);
@@ -250,8 +249,12 @@ if (mode === "markdown") {
     const freshness = `${row.freshness ?? "freshness unknown"}${Number.isFinite(row.age_seconds) ? ` · observed ${row.age_seconds}s before snapshot` : ""}`;
     const contradiction = row.contradiction ? ` · contradiction: ${row.reason ?? "reported"}` : "";
     add(target, "secondmate", row, row.id, `${row.state ?? "unknown"} · ${row.doing ?? row.reason ?? "Current detail unavailable"} · ${freshness}${contradiction}`);
+    secondmateMirrors.add(String(row.id ?? "unknown"));
   }
-  for (const row of snapshot.in_flight) add(underway, "worker", row, row.id, `${row.state ?? "unknown"} · ${row.doing ?? "Current detail unavailable"}`);
+  for (const row of snapshot.in_flight) {
+    if (row.kind === "secondmate" && secondmateMirrors.has(String(row.id ?? "unknown"))) continue;
+    add(underway, "worker", row, row.id, `${row.state ?? "unknown"} · ${row.doing ?? "Current detail unavailable"}`);
+  }
   for (const row of snapshot.gates) add(charted, "gate", row, row.title ?? row.id, `Blocked by ${row.blocked_by ?? "-"} · ${row.reason ?? "queued"}`);
   for (const row of snapshot.landed) add(landed, "landed", row, row.what ?? row.id, `${row.owner ?? "-"} · ${row.artifact ?? "-"}`);
 

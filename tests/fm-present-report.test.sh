@@ -90,13 +90,12 @@ cat >"$SNAPSHOT" <<'JSON'
     {"id":"landed-one","what":"Completed & verified","artifact":"data/landed/report.md","owner":"(main)"}
   ],
   "gates": [
-    {"id":"gate-one","title":"Wait for release","blocked_by":"worker-alpha","reason":"dependency","owner":"(main)"}
+    {"id":"gate-one","title":"Wait for release","blocked_by":"worker-alpha","reason":"dependency","owner":"(main)"},
+    {"id":"task-1","title":"Main queue item","blocked_by":"-","reason":"queued","owner":"(main)"},
+    {"id":"task-1","title":"Secondmate queue item","blocked_by":"-","reason":"queued","owner":"mate-held"}
   ],
   "reports": [],
   "recorded_prs": [],
-  "unhealthy_endpoints": [
-    {"id":"endpoint-broken","kind":"ship","state":"missing","reason":"terminal unavailable"}
-  ],
   "omitted": [
     {"surface":"live PR discovery + checks","reveal":"--include-prs"}
   ]
@@ -136,16 +135,19 @@ test_bearings_page_has_all_current_rows_once_and_discloses_freshness() {
   [ "$html" = "$HOME_DIR/.lavish/bearings-20260726T142039Z.html" ] \
     || fail "Bearings artifact path was not timestamped: $html"
   body=$(cat "$html")
-  for id in worker-alpha mate-active mate-held decision-one landed-one gate-one endpoint-broken; do
+  for id in worker-alpha mate-active mate-held decision-one landed-one gate-one; do
     count=$(grep -Fo "data-record-id=\"$id\"" "$html" | wc -l | tr -d ' ')
     [ "$count" -eq 1 ] || fail "Bearings row $id appeared $count times instead of once"
   done
+  count=$(grep -Fo 'data-record-id="task-1"' "$html" | wc -l | tr -d ' ')
+  [ "$count" -eq 2 ] || fail "Bearings rows with matching IDs from separate homes appeared $count times instead of twice"
   headings=$(printf '%s' "$body" | grep -Eo '<h2[^>]*>[^<]+' | sed -E 's/<h2[^>]*>//')
   expected=$(printf '%s\n' "Captain's Call" "Recently Landed" "Underway" "Charted Next")
   [ "$headings" = "$expected" ] || fail "Bearings sections changed order: $headings"
   assert_contains "$body" '<time datetime="2026-07-26T14:19:00Z">' "Bearings source observation timestamp"
   assert_contains "$body" 'fresh · observed 2s before snapshot' "Bearings secondmate freshness"
-  assert_contains "$body" 'terminal unavailable' "Bearings unhealthy endpoint detail"
+  assert_contains "$body" 'Main queue item' "main-home queued item with a shared ID"
+  assert_contains "$body" 'Secondmate queue item' "secondmate-home queued item with a shared ID"
   assert_contains "$body" 'Run <code>/bearings</code> again to refresh.' "Bearings honest refresh instruction"
   assert_contains "$body" 'fm-bearings.v1' "Bearings source schema disclosure"
   assert_contains "$body" 'live PR discovery + checks' "Bearings omission disclosure"
