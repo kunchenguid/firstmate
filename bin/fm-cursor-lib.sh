@@ -175,7 +175,7 @@ fm_cursor_remove_stop_entry() {
   hooks_file="$cursor_home/hooks.json"
   [ ! -L "$hooks_file" ] || return 1
   [ -f "$hooks_file" ] || return 0
-  fm_cursor_hooks_json_mergeable "$hooks_file" || return 0
+  fm_cursor_hooks_json_mergeable "$hooks_file" || return 1
   tmp=$(mktemp "$cursor_home/hooks.json.tmp.XXXXXXXXXXXX") || return 1
   if ! jq --arg command "$hook_command" '
     if (.hooks?.stop? // null) == null then .

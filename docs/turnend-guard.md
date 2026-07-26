@@ -102,6 +102,7 @@ Firstmate therefore keeps passing the correctly structured task plugin for forwa
 That fallback reads `workspace_roots`, requires a gitignored `.fm-cursor-turnend` token in the task worktree, validates the token against a private Firstmate registry, and no-ops for unrelated Cursor sessions.
 It merges into the existing `stop` array and refuses malformed existing configuration instead of overwriting it.
 `bin/fm-cursor-lib.sh` owns the shared-artifact mechanics: the hook script is written atomically (mktemp plus rename in the same directory), install and teardown serialize on a bounded mkdir lock, and the teardown that removes the last registry token also removes the shared hook script, Firstmate's own `hooks.json` stop entry, and the empty registry directory, so no Firstmate global state persists after the final Cursor task.
+If install cannot acquire that lock, spawn continues without mutating the shared fallback artifacts or registering a task token.
 Every uncertain cleanup path (lock timeout, malformed `hooks.json`) skips cleanup and leaves the strict-no-op hook installed for the next teardown to retry.
 
 Cursor Agent `2026.07.16-899851b` was revalidated on 2026-07-18 in a git-initialized scratch project on an individual Pro account, and hook execution proved to be gated server-side.

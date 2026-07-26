@@ -441,10 +441,10 @@ secondmate_liveness_sweep() {
         # Only tmux's argv0-based classifier is verified to read a live
         # node-wrapped cursor-agent correctly (docs/tmux-backend.md); herdr's
         # native agent registry is unverified for cursor-agent, so a non-tmux
-        # cursor dead/missing verdict is downgraded rather than trusted for respawn.
+        # cursor dead verdict is downgraded rather than trusted for respawn.
         if [ "$backend" != tmux ]; then
           case "$agent_state" in
-            dead|missing) agent_state=inconclusive ;;
+            dead) agent_state=inconclusive ;;
           esac
         fi
         ;;

@@ -190,14 +190,14 @@ test_cursor_lib_cleanup_skips_on_held_lock_and_malformed_hooks_json() {
     [ -x "$hooks_dir/fm-turn-end.sh" ] || exit 64
     rmdir "$hooks_dir/.fm-turn-end.lock"
 
-    # A malformed hooks.json is never rewritten; the rest of cleanup still runs.
+    # A malformed hooks.json is never rewritten or detached from its artifacts.
     printf '%s\n' 'not json at all' > "$home/.cursor/hooks.json"
     printf '%s\n' "$state/d.turn-ended" > "$auth_dir/fm.dddddddddddd"
     printf '%s\n' 'fm.dddddddddddd' > "$state/task-d.cursor-turnend-token"
     fm_cursor_remove_turnend_auth "$state" task-d
     [ "$(cat "$home/.cursor/hooks.json")" = 'not json at all' ] || exit 65
-    [ ! -e "$hooks_dir/fm-turn-end.sh" ] || exit 66
-    [ ! -d "$auth_dir" ] || exit 67
+    [ -x "$hooks_dir/fm-turn-end.sh" ] || exit 66
+    [ -d "$auth_dir" ] || exit 67
   ) || fail "cursor lib cleanup safety contract failed (subshell exit $?)"
   pass "cursor lib cleanup skips shared removal under a held lock and never rewrites malformed hooks.json"
 }

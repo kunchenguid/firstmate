@@ -1388,42 +1388,41 @@ EOF
       # bin/fm-cursor-lib.sh owns the shared-artifact contract: the hook script
       # write is atomic, the hooks.json merge is additive and idempotent, and
       # the lock serializes this install against a concurrent teardown's
-      # last-token cleanup. On lock timeout the install proceeds anyway - it
-      # converges to the same installed state and must never block a spawn.
+      # last-token cleanup. On lock timeout the shared fallback install is
+      # skipped so spawn can continue without an unlocked transaction.
       CURSOR_HOME="$HOME/.cursor"
       CURSOR_HOOKS_DIR="$CURSOR_HOME/hooks"
       CURSOR_AUTH_DIR="$CURSOR_HOOKS_DIR/fm-turn-end.d"
       CURSOR_PLUGIN_DIR="$STATE/$ID.cursor-plugin"
-      mkdir -p "$CURSOR_AUTH_DIR" "$CURSOR_PLUGIN_DIR/.cursor-plugin" "$CURSOR_PLUGIN_DIR/hooks"
+      mkdir -p "$CURSOR_PLUGIN_DIR/.cursor-plugin" "$CURSOR_PLUGIN_DIR/hooks"
       CURSOR_ABORT_CLEANUP=1
-      cursor_locked=0
-      if fm_cursor_hooks_lock "$CURSOR_HOOKS_DIR"; then
-        cursor_locked=1
-        CURSOR_ABORT_LOCK_HELD=1
-      fi
-      old_umask=$(umask)
-      umask 077
-      auth_file=$(mktemp "$CURSOR_AUTH_DIR/fm.XXXXXXXXXXXX")
-      CURSOR_ABORT_AUTH_FILE=$auth_file
-      umask "$old_umask"
-      printf '%s\n' "$TURNEND" > "$auth_file"
-      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.cursor-turnend-token"
-      if ! fm_cursor_write_turnend_hook "$CURSOR_HOOKS_DIR" "$CURSOR_AUTH_DIR"; then
-        [ "$cursor_locked" -eq 0 ] || fm_cursor_hooks_unlock "$CURSOR_HOOKS_DIR"
-        CURSOR_ABORT_LOCK_HELD=0
-        echo "error: failed to install Firstmate's Cursor turn-end hook in $CURSOR_HOOKS_DIR" >&2
-        exit 1
-      fi
       cursor_hook_command=$(shell_quote "$CURSOR_HOOKS_DIR/fm-turn-end.sh")
-      if ! fm_cursor_merge_stop_entry "$CURSOR_HOME" "$cursor_hook_command"; then
-        [ "$cursor_locked" -eq 0 ] || fm_cursor_hooks_unlock "$CURSOR_HOOKS_DIR"
+      if fm_cursor_hooks_lock "$CURSOR_HOOKS_DIR"; then
+        CURSOR_ABORT_LOCK_HELD=1
+        mkdir -p "$CURSOR_AUTH_DIR"
+        old_umask=$(umask)
+        umask 077
+        auth_file=$(mktemp "$CURSOR_AUTH_DIR/fm.XXXXXXXXXXXX")
+        CURSOR_ABORT_AUTH_FILE=$auth_file
+        umask "$old_umask"
+        printf '%s\n' "$TURNEND" > "$auth_file"
+        printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.cursor-turnend-token"
+        if ! fm_cursor_write_turnend_hook "$CURSOR_HOOKS_DIR" "$CURSOR_AUTH_DIR"; then
+          fm_cursor_hooks_unlock "$CURSOR_HOOKS_DIR"
+          CURSOR_ABORT_LOCK_HELD=0
+          echo "error: failed to install Firstmate's Cursor turn-end hook in $CURSOR_HOOKS_DIR" >&2
+          exit 1
+        fi
+        if ! fm_cursor_merge_stop_entry "$CURSOR_HOME" "$cursor_hook_command"; then
+          fm_cursor_hooks_unlock "$CURSOR_HOOKS_DIR"
+          CURSOR_ABORT_LOCK_HELD=0
+          exit 1
+        fi
+        fm_cursor_hooks_unlock "$CURSOR_HOOKS_DIR"
         CURSOR_ABORT_LOCK_HELD=0
-        exit 1
+        printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-cursor-turnend"
+        exclude_path '.fm-cursor-turnend'
       fi
-      [ "$cursor_locked" -eq 0 ] || fm_cursor_hooks_unlock "$CURSOR_HOOKS_DIR"
-      CURSOR_ABORT_LOCK_HELD=0
-      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-cursor-turnend"
-      exclude_path '.fm-cursor-turnend'
       cursor_plugin_hook=$(json_escape "$cursor_hook_command")
       printf '{"name":"firstmate-task-%s","version":"1.0.0","hooks":"hooks/hooks.json"}\n' "$ID" > "$CURSOR_PLUGIN_DIR/.cursor-plugin/plugin.json"
       printf '{"hooks":{"stop":[{"command":"%s","timeout":5,"failClosed":false}]}}\n' "$cursor_plugin_hook" > "$CURSOR_PLUGIN_DIR/hooks/hooks.json"

@@ -487,7 +487,25 @@ SH
   assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm2: skipped: liveness probe inconclusive (backend=herdr)" \
     "a cursor dead reading on a non-tmux backend must downgrade to inconclusive"
   [ ! -s "$log" ] || fail "a non-tmux cursor dead reading must never kill or respawn: $(cat "$log")"
-  pass "sweep: cursor dead verdicts are trusted on tmux and downgraded on unverified backends"
+  rm -f "$w/home/state/sm2.meta"
+
+  cat > "$herdrfb/herdr" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  'pane get') printf '{"error":{"code":"pane_not_found"}}\n' >&2; exit 1 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$herdrfb/herdr"
+  add_sm_home "$w" sm3 hsess:p2 cursor
+  printf 'backend=herdr\n' >> "$w/home/state/sm3.meta"
+  : > "$log"
+  out=$(run_bootstrap "$herdrfb:$tmuxfb:$fb" "$w/home" zsh "$log")
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" \
+    "a successful respawn of an authoritatively missing cursor endpoint should stay silent"
+  assert_contains "$(cat "$log")" "new-window" \
+    "an authoritatively missing cursor endpoint on herdr should be relaunched"
+  pass "sweep: cursor dead trust is backend-specific while missing stays authoritative"
 }
 
 test_sweep_converges_no_retouch_once_alive() {

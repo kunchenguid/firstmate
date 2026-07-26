@@ -365,6 +365,31 @@ test_cursor_threads_model_and_omits_effort_axis() {
   pass "cursor receives --model, records but omits effort, and wires plugin plus additive fallback hook"
 }
 
+test_cursor_lock_timeout_skips_shared_fallback_install() {
+  local rec id out status
+  id=profile-cursor-lock-z19
+  rec=$(make_spawn_case profile-cursor-lock cursor "$id")
+  read_case_record "$rec"
+  mkdir -p "$HOME_DIR/.cursor/hooks/.fm-turn-end.lock"
+
+  out=$(FM_CURSOR_HOOK_LOCK_TRIES=1 run_spawn \
+    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "cursor spawn should continue when the shared hook lock is unavailable"
+  assert_contains "$out" "spawned $id harness=cursor" "cursor lock timeout did not continue spawn"
+  assert_absent "$HOME_DIR/.cursor/hooks/fm-turn-end.d" \
+    "cursor lock timeout must not mutate the shared token registry"
+  assert_absent "$HOME_DIR/.cursor/hooks/fm-turn-end.sh" \
+    "cursor lock timeout must not write the shared hook script"
+  assert_absent "$HOME_DIR/.cursor/hooks.json" \
+    "cursor lock timeout must not merge the shared hooks config"
+  assert_absent "$HOME_DIR/state/$id.cursor-turnend-token" \
+    "cursor lock timeout must not record an unregistered token"
+  assert_absent "$WT_DIR/.fm-cursor-turnend" \
+    "cursor lock timeout must not expose an unregistered worktree token"
+  pass "cursor lock timeout skips the shared fallback transaction"
+}
+
 test_pi_threads_model_and_max_effort() {
   local rec id out status launch
   id=profile-pi-z8
@@ -437,6 +462,7 @@ test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_cursor_threads_model_and_omits_effort_axis
+test_cursor_lock_timeout_skips_shared_fallback_install
 test_pi_threads_model_and_max_effort
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
