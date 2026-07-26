@@ -9,7 +9,9 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 KIMI_HOOK="$ROOT/bin/fm-kimi-turnend-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-kimi-harness)
-PYTHON_BIN_DIR=$(dirname "$(command -v python3)")
+PYTHON_BIN=$(command -v python3) || fail "test needs python3"
+PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
+JQ_BIN=$(command -v jq) || fail "test needs jq"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
 assert_source_line() {
@@ -119,6 +121,7 @@ SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   fm_fake_exit0 "$fakebin" kimi
+  ln -s "$JQ_BIN" "$fakebin/jq"
   printf '%s\n' "$fakebin"
 }
 
