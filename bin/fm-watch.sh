@@ -100,16 +100,11 @@ CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
-# Busy signatures are selected by recorded harness unless FM_BUSY_REGEX globally
-# overrides them.
-# claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
-# grok: "Esc:cancel" (0.2.112 mid-turn) and still "Ctrl+c:cancel" (older
-# installs). Claude's current spinner signature is matched only for a recorded
-# Claude task because an ellipsis followed by elapsed time is not a safe shared
-# signature for arbitrary harness output; Grok's Esc:cancel is GROK-scoped for
-# the same reason. The per-harness patterns live in bin/fm-tmux-lib.sh - this
-# variable only carries an explicit FM_BUSY_REGEX override, so it has no
-# fallback pattern of its own to drift.
+# Busy signatures are selected by recorded harness (fm_busy_lines_match) unless
+# FM_BUSY_REGEX globally overrides them. The per-harness patterns and the
+# rationale for keeping harness-specific tokens out of the shared default are
+# owned by bin/fm-tmux-lib.sh; this variable only carries an explicit
+# FM_BUSY_REGEX override, so it has no fallback pattern of its own to drift.
 BUSY_REGEX=${FM_BUSY_REGEX:-}
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather

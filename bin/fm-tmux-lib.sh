@@ -60,7 +60,8 @@
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
-# Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
+# Busy footers per harness; this block is their one owner (fm-watch.sh and the
+# away-mode daemon match through fm_busy_lines_match). claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Esc:cancel"
 # (0.2.112 mid-turn) and still "Ctrl+c:cancel" (older installs). Claude's
 # current spinner has a rotating glyph and word, but every active-turn line has
