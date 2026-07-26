@@ -550,6 +550,100 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+# tasks-axi's Done-retention prune archives resolved captain holds out of the
+# live backlog (`done <origin>` auto-prunes). The completion gate previously
+# deadlocked teardown here: resolve every hold, close the origin, and the gate
+# failed with "absent from data/backlog.md" with no non-bypass exit. The gate
+# must keep verifying the durable resolution record from the archive.
+test_pruned_resolved_hold_stays_durable_and_unblocks_teardown() {
+  local home origin hold
+  home=$(make_home pruned-resolved-hold)
+  origin=sample-prune-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Prune regression review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create prune-regression origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report and visual review complete\n' > "$home/state/$origin.status"
+  printf '# Prune regression review\n\nOne captain choice remains.\n' > "$home/data/$origin/report.md"
+  hold=$(run_decisions "$home" hold "$origin" pick \
+    --title "Choose the sample option" --reason "captain option choice pending" --repo sample) \
+    || fail "could not register prune-regression hold"
+  run_decisions "$home" complete "$origin" pick >/dev/null \
+    || fail "pre-resolution completion failed"
+  tasks_in "$home" add sample-pick-impl "Apply the picked option" --kind ship --repo sample >/dev/null \
+    || fail "could not create routed dependent"
+  tasks_in "$home" block sample-pick-impl --by "$hold" >/dev/null \
+    || fail "could not block the routed dependent"
+  printf 'Pick option one.\n' > "$home/pick-decision.txt"
+  run_decisions "$home" resolve "$origin" pick --decision-file "$home/pick-decision.txt" \
+    --routed-to sample-pick-impl >/dev/null || fail "could not resolve prune-regression hold"
+
+  tasks_in "$home" "done" "$origin" --report "data/$origin/report.md" --keep 0 >/dev/null \
+    || fail "could not close the origin"
+  ! grep -E "^- \[[ x]\] $hold -" "$home/data/backlog.md" >/dev/null \
+    || fail "fixture did not prune the resolved hold from the live backlog"
+  grep -E "^- \[x\] $hold -" "$home/data/done-archive.md" >/dev/null \
+    || fail "prune did not archive the resolved hold"
+
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "pruned resolved hold failed the completion gate"
+  run_decisions "$home" complete "$origin" pick >/dev/null \
+    || fail "pruned resolved hold failed idempotent completion"
+  run_decisions "$home" resolve "$origin" pick --decision-file "$home/pick-decision.txt" \
+    --routed-to sample-pick-impl >/dev/null \
+    || fail "identical resolution retry failed after prune"
+  printf 'Pick option two.\n' > "$home/changed-pick.txt"
+  if run_decisions "$home" resolve "$origin" pick --decision-file "$home/changed-pick.txt" \
+    --routed-to sample-pick-impl > "$home/pruned-drift.out" 2> "$home/pruned-drift.err"; then
+    fail "archived resolution accepted a different captain decision"
+  fi
+  if run_decisions "$home" hold "$origin" pick \
+    --title "Choose the sample option" --reason "captain option choice pending" --repo sample \
+    > "$home/reopen.out" 2> "$home/reopen.err"; then
+    fail "archived resolved hold could be reopened"
+  fi
+  assert_grep "already durably resolved" "$home/reopen.err" \
+    "reopen refusal must name the durable resolution"
+  ! grep -E "^- \[[ x]\] $hold -" "$home/data/backlog.md" >/dev/null \
+    || fail "refused reopen still created a live backlog row"
+
+  run_teardown "$home" "$origin" >/dev/null 2> "$home/pruned-teardown.err" \
+    || fail "teardown stayed deadlocked after the hold was pruned: $(cat "$home/pruned-teardown.err")"
+  pass "a pruned resolved hold stays durably verifiable and teardown proceeds"
+}
+
+# The archive fallback must accept only a durable resolution record. A hold
+# closed outside fm-decision-hold and then pruned has no such record, and the
+# gate must keep failing closed rather than treating any archived row as done.
+test_pruned_unresolved_hold_still_fails_closed() {
+  local home origin hold
+  home=$(make_home pruned-unresolved-hold)
+  origin=sample-prune-loss
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Prune loss review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create prune-loss origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Prune loss review\n\nOne captain choice remains.\n' > "$home/data/$origin/report.md"
+  hold=$(run_decisions "$home" hold "$origin" loss \
+    --title "Choose the loss option" --reason "captain loss choice pending" --repo sample) \
+    || fail "could not register loss hold"
+  run_decisions "$home" complete "$origin" loss >/dev/null || fail "loss completion failed"
+  tasks_in "$home" "done" "$hold" --no-prune >/dev/null || fail "could not hand-close the hold"
+  tasks_in "$home" prune --keep 0 >/dev/null || fail "could not prune the hand-closed hold"
+  grep -E "^- \[x\] $hold -" "$home/data/done-archive.md" >/dev/null \
+    || fail "fixture did not archive the hand-closed hold"
+  if run_decisions "$home" verify "$origin" > "$home/loss-verify.out" 2> "$home/loss-verify.err"; then
+    fail "an archived hold without a resolution record passed the completion gate"
+  fi
+  assert_grep "neither actively held nor durably resolved" "$home/loss-verify.err" \
+    "gate must fail closed on an archived unresolved hold"
+  if run_teardown "$home" "$origin" > "$home/loss-teardown.out" 2> "$home/loss-teardown.err"; then
+    fail "teardown accepted an archived hold without a resolution record"
+  fi
+  pass "an archived hold without a durable resolution still fails the gate"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -560,3 +654,5 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
+test_pruned_resolved_hold_stays_durable_and_unblocks_teardown
+test_pruned_unresolved_hold_still_fails_closed

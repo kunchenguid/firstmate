@@ -28,6 +28,10 @@ It records the decision digest and routed task identities as a retry identity in
 An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
 A failed intermediate step leaves the hold open.
 
+tasks-axi's Done-retention prune archives Done rows out of the live backlog rather than deleting them, and closing the originating task auto-prunes.
+Every read that accepts a resolved hold therefore falls back to the markdown backend's archive file, so `complete`, `verify`, identical `resolve` retries, and reopen refusal remain correct in any order relative to pruning.
+An archived row without the durable resolution record still fails the gate, and an active hold is never read from the archive.
+
 ## Structured read surfaces
 
 `bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)` and `(hold-kind: captain)` metadata alongside existing backlog fields.
@@ -43,11 +47,14 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Pruned-hold archive-fallback regression verification date: 2026-07-27.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
+The 2026-07-27 regression reproduces the live teardown deadlock: after every hold was resolved and the origin was closed, the auto-prune archived a resolved hold and the gate failed with "absent from data/backlog.md" with no non-bypass exit.
+Its two tests prove the archived resolution record keeps `verify`, `complete`, identical `resolve` retries, reopen refusal, and teardown working, while an archived hold with no resolution record still fails the gate.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -62,6 +69,8 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+ok - a pruned resolved hold stays durably verifiable and teardown proceeds
+ok - an archived hold without a durable resolution still fails the gate
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly
@@ -89,3 +98,7 @@ $ git diff --check
 $ for test_script in tests/*.test.sh; do bash "$test_script"; done
 ALL 71 TEST SCRIPTS PASSED
 ```
+
+The 2026-07-27 re-verification ran the decision-hold, teardown, fleet-snapshot, Bearings, and brief suites plus `bin/fm-lint.sh` with the pinned ShellCheck.
+Every decision-hold, snapshot, Bearings, and brief case above passed, including the two new pruned-hold cases.
+The teardown suite's single failure was its content-landed case, which fails only because the verifying checkout was itself on a task branch and trips the worktree-tangle guard; it fails identically on the unmodified base commit and is unrelated to this change.

@@ -37,6 +37,13 @@
 # It writes the captain decision and routed identities into the hold body, clears
 # those dependency edges, and only then marks the hold Done. A failure before the
 # final step leaves the captain hold open.
+#
+# tasks-axi's Done-retention prune archives Done rows out of the live backlog
+# (it never deletes), so a resolved hold's durable resolution record survives in
+# the markdown backend's archive file. Every read that accepts a Done hold falls
+# back to that archive, which keeps `complete`, `verify`, identical `resolve`
+# retries, and reopen refusal correct in any order relative to pruning. An
+# active hold is never read from the archive.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -110,6 +117,73 @@ task_show() {  # <id>
   tasks_axi show "$1" --full 2>/dev/null
 }
 
+archive_path() {
+  # Minimal read of the markdown backend's archive key from .tasks.toml; the
+  # tracked schema has a single [markdown] section, and the fallback matches
+  # the tracked default.
+  local rel
+  rel=$(sed -n 's/^archive[[:space:]]*=[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' \
+    "$FM_HOME/.tasks.toml" 2>/dev/null | head -1)
+  [ -n "$rel" ] || rel=data/done-archive.md
+  case "$rel" in
+    /*) printf '%s\n' "$rel" ;;
+    *) printf '%s/%s\n' "$FM_HOME" "$rel" ;;
+  esac
+}
+
+archived_task_show() {  # <id>
+  # Emulates the `tasks-axi show --full` fields this script reads, for a Done
+  # row the retention prune moved into the archive. Prune archives entries
+  # byte-identically (bullet line plus two-space-indented body), and show has
+  # no archive reader of its own. The last matching entry wins.
+  local id=$1 file
+  file=$(archive_path)
+  [ -f "$file" ] || return 1
+  awk -v id="$id" '
+    {
+      if (substr($0, 1, 2) == "- ") {
+        inentry = 0
+        if (index($0, "- [x] " id " - ") == 1 || index($0, "- [X] " id " - ") == 1) {
+          inentry = 1
+          found = 1
+          bullet = $0
+          nbody = 0
+        }
+      } else if ($0 != "" && substr($0, 1, 1) != " ") {
+        inentry = 0
+      } else if (inentry) {
+        body[++nbody] = $0
+      }
+    }
+    END {
+      if (!found) exit 1
+      while (nbody > 0 && body[nbody] == "") nbody--
+      out = ""
+      for (i = 1; i <= nbody; i++) {
+        line = body[i]
+        sub(/^  /, "", line)
+        gsub(/\\/, "\\\\", line)
+        gsub(/"/, "\\\"", line)
+        out = out (i > 1 ? "\\n" : "") line
+      }
+      kind = "task"
+      if (match(bullet, / \(kind: [^)]*\)/)) {
+        kind = substr(bullet, RSTART + 8, RLENGTH - 9)
+      }
+      print "task:"
+      print "  id: " id
+      print "  state: done"
+      print "  held: no"
+      print "  kind: " kind
+      print "  body: \"" out "\""
+    }
+  ' "$file"
+}
+
+task_show_durable() {  # <id> - the live backlog first, then the prune archive
+  task_show "$1" || archived_task_show "$1"
+}
+
 show_field() {  # <show-output> <field>
   local output=$1 field=$2
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
@@ -172,7 +246,7 @@ verify_hold_active() {  # <hold-id>
 
 verify_hold_resolved() {  # <hold-id>
   local id=$1 show state kind body
-  show=$(task_show "$id") || return 1
+  show=$(task_show_durable "$id") || return 1
   state=$(show_field "$show" state)
   kind=$(show_field "$show" kind)
   body=$(show_field "$show" body)
@@ -186,7 +260,8 @@ verify_hold_resolved() {  # <hold-id>
 
 verify_hold_durable() {  # <hold-id>
   local id=$1 show state held kind hold_kind body
-  show=$(task_show "$id") || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
+  show=$(task_show_durable "$id") \
+    || fail "captain decision $id is absent from $FM_HOME/data/backlog.md and its done archive"
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
@@ -249,7 +324,7 @@ command_hold() {
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
   id=$(hold_id "$origin" "$key")
-  if show=$(task_show "$id"); then
+  if show=$(task_show_durable "$id"); then
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
     existing_title=$(show_field "$show" title)
@@ -394,7 +469,7 @@ command_resolve() {
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
   if verify_hold_resolved "$id"; then
-    hold_show=$(task_show "$id")
+    hold_show=$(task_show_durable "$id")
     hold_body=$(show_field "$hold_show" body)
     verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
     printf 'resolved: %s\n' "$id"
@@ -411,7 +486,7 @@ command_resolve() {
   esac
 
   for dep in $routed; do
-    show=$(task_show "$dep") || fail "routed task $dep does not exist in the active home"
+    show=$(task_show_durable "$dep") || fail "routed task $dep does not exist in the active home"
     state=$(show_field "$show" state)
     [ "$state" != "done" ] || [ "$resolution_recorded" = 1 ] \
       || fail "routed task $dep is already done"
@@ -437,7 +512,7 @@ command_resolve() {
   tasks_axi update "$id" --body "$body" >/dev/null \
     || fail "could not record the captain decision on $id"
   for dep in $routed; do
-    show=$(task_show "$dep") || fail "routed task $dep disappeared before routing"
+    show=$(task_show_durable "$dep") || fail "routed task $dep disappeared before routing"
     blocked=$(show_field "$show" blocked_by | tr -d '[:space:]')
     blocked=${blocked#\"}
     blocked=${blocked%\"}
