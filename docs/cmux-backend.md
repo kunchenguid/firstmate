@@ -129,13 +129,13 @@ Empirical verification (2026-07-05, real cmux 0.64.17, macOS aarch64), touching 
 $ cmux new-workspace --name fm-test-adopt-probe --focus false --id-format uuids
 OK workspace:14
 $ cmux workspace list --json --id-format uuids | jq -r '.workspaces[]|select(.title=="fm-test-adopt-probe")|"\(.id)\t\(.current_directory)"'
-1BC9DFBA-067B-4596-A2C7-DD46197D1597	/Users/thescoho/Developer/reddit-hackathon
+1BC9DFBA-067B-4596-A2C7-DD46197D1597	/home/dev/example-project
 
 # Adopt it by UUID (surface auto-resolved), into a scratch FM_HOME/state:
 $ bin/fm-adopt.sh probe-live --workspace 1BC9DFBA-067B-4596-A2C7-DD46197D1597
-adopted probe-live backend=cmux window=1BC9DFBA-067B-4596-A2C7-DD46197D1597:57F297C6-94CA-46A1-A7A2-3292F6B03CC5 worktree=/Users/thescoho/Developer/reddit-hackathon
+adopted probe-live backend=cmux window=1BC9DFBA-067B-4596-A2C7-DD46197D1597:57F297C6-94CA-46A1-A7A2-3292F6B03CC5 worktree=/home/dev/example-project
 # state/probe-live.meta recorded kind=adopted, mode=adopted, backend=cmux,
-# worktree=/Users/thescoho/Developer/reddit-hackathon, and both cmux ids.
+# worktree=/home/dev/example-project, and both cmux ids.
 
 # Steer and read it by pure UUID (empty expected-label, human title preserved):
 $ bin/fm-send.sh fm-probe-live "echo adopted-probe-ok"     # rc 0; text landed at the composer
@@ -143,7 +143,7 @@ $ bin/fm-peek.sh fm-probe-live 12                          # rc 0; showed the li
 
 # Teardown un-registers WITHOUT closing the workspace:
 $ bin/fm-teardown.sh probe-live
-teardown probe-live complete (window 1BC9DFBA-...:57F297C6-..., worktree /Users/thescoho/Developer/reddit-hackathon)
+teardown probe-live complete (window 1BC9DFBA-...:57F297C6-..., worktree /home/dev/example-project)
 Backlog: adopted task probe-live released - its cmux workspace was left running (never closed) ...
 # state/probe-live.meta removed; the workspace was still listed afterward:
 $ cmux workspace list --json --id-format uuids | jq -r '.workspaces[]|select(.id=="1BC9DFBA-067B-4596-A2C7-DD46197D1597")|.title'
