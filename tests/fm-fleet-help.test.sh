@@ -15,6 +15,7 @@ test_fleet_help_metadata_and_readme() {
   assert_grep 'user-invocable: true' "$SKILL" "fleet-help skill is not user-invocable"
   assert_grep '  internal: true' "$SKILL" "fleet-help skill is not internal"
   assert_absent "$ROOT/skills/fleet-help" "fleet-help must not exist in the public installer-facing skills directory"
+  # shellcheck disable=SC2016  # single quotes are deliberate: a literal needle string, not an expansion
   assert_grep '| `/fleet-help`' "$README" "README built-in skills table does not list /fleet-help"
   pass "fleet-help is internal, user-invocable, and documented with built-in skills"
 }
@@ -24,6 +25,7 @@ test_fleet_help_is_read_only_navigator() {
     "fleet-help does not declare the navigator boundary"
   assert_grep 'This skill is read-only over fleet state.' "$SKILL" \
     "fleet-help does not declare read-only state access"
+  # shellcheck disable=SC2016  # single quotes are deliberate: a literal needle string, not an expansion
   assert_grep 'Do not spawn workers, steer workers, dispatch queued work, merge PRs, update Linear, update the backlog, write reports, arm supervision, or mutate `state/` or `data/` as a side effect of help.' "$SKILL" \
     "fleet-help lost the no-mutation and no-dispatch boundary"
   assert_grep 'If the best next step is actionable, say what the captain can ask for and stop.' "$SKILL" \
@@ -34,12 +36,14 @@ test_fleet_help_is_read_only_navigator() {
 }
 
 test_fleet_help_reads_live_sources_not_status_logs() {
+  # shellcheck disable=SC2016  # single quotes are deliberate: a literal needle string, not an expansion
   assert_grep '[`fleet-catalog.json`](fleet-catalog.json)' "$SKILL" \
     "fleet-help does not point to its machine-readable catalog"
   assert_grep 'bin/fm-bearings-snapshot.sh --json' "$SKILL" \
     "fleet-help does not use the bounded bearings snapshot"
   assert_grep 'bin/fm-fleet-snapshot.sh --json' "$SKILL" \
     "fleet-help does not define the canonical snapshot fallback"
+  # shellcheck disable=SC2016  # single quotes are deliberate: a literal needle string, not an expansion
   assert_grep 'Do not parse `state/*.status` directly because those files are append-only event history, not current state.' "$SKILL" \
     "fleet-help must not infer current state from raw status logs"
   pass "fleet-help uses live structured sources instead of raw status history"
