@@ -19,8 +19,8 @@
 # container - a bordered composer box, where the harness draws its own prompt
 # glyph (e.g. claude's older `| > ... |`). On a bare, unstructured row it is a
 # dead-shell prompt and is NEVER "empty"; it classifies as `unknown` (not a safe
-# injection target). The AGENT prompt glyphs `❯` (claude) and `›` (codex) are a
-# genuine empty agent composer either way, bordered or bare.
+# injection target). The AGENT prompt glyphs `❯` (claude), `›` (codex) and `→`
+# (cursor-agent) are a genuine empty agent composer either way, bordered or bare.
 #
 # GHOST/PLACEHOLDER TEXT is the other half of this owner (task
 # afk-herdr-false-pending): a harness fills an otherwise-empty composer with
@@ -171,6 +171,29 @@ fm_composer_strip_ghost() {
 #              "Type a message...") that reads as empty; matched both before and
 #              after a leading prompt glyph is stripped, so a pattern written
 #              with or without the glyph both land.
+#   [plain_content] the same row BEFORE ghost stripping, used for the shared
+#              agent-placeholder rule below and for the bare-row glyph decision.
+#
+# FM_COMPOSER_AGENT_PLACEHOLDER_RE is the fleet-wide pattern for a harness that
+# de-emphasises its ENTIRE empty composer - agent glyph and placeholder alike -
+# and then draws its own block cursor in reverse video on top of it, which is
+# how cursor-agent renders an idle composer. Ghost stripping correctly removes
+# the glyph and the placeholder, so the only content left is the single
+# character sitting under that block cursor, and every idle pane would read as
+# real typed input. The plain, un-stripped row is therefore matched against this
+# pattern too. Each alternative is anchored to its own harness's agent glyph, so
+# it can neither collide with another harness's composer nor match a shell
+# prompt, and the trailing context is left open so the busy variant of the same
+# row (cursor-agent appends a right-aligned `ctrl+c to stop`) still matches.
+# This is a UNION with the caller's own idle_re, not a replacement, because the
+# per-adapter idle regexes are backend-specific while this rule is harness-specific.
+FM_COMPOSER_AGENT_PLACEHOLDER_RE=${FM_COMPOSER_AGENT_PLACEHOLDER_RE-'^→[[:space:]]+(Plan, search, build anything|Add a follow-up)([[:space:]]|$)'}
+
+fm_composer_placeholder_matches() {  # <plain-content>
+  [ -n "${FM_COMPOSER_AGENT_PLACEHOLDER_RE:-}" ] || return 1
+  printf '%s' "$1" | grep -qE "$FM_COMPOSER_AGENT_PLACEHOLDER_RE"
+}
+
 fm_composer_idle_matches() {
   local content=$1 idle_re=$2 idle_case=$3
   [ -n "$idle_re" ] || return 1
@@ -183,15 +206,20 @@ fm_composer_idle_matches() {
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}
+  # A harness that de-emphasises its whole empty composer leaves only its block
+  # cursor behind after ghost stripping, so judge the plain row first.
+  if fm_composer_placeholder_matches "$plain_content"; then
+    printf 'empty'; return 0
+  fi
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
-      '❯'|'›') printf 'empty'; return 0 ;;
+      '❯'|'›'|'→') printf 'empty'; return 0 ;;
       *) printf 'unknown'; return 0 ;;
     esac
   fi
   # A bare prompt glyph on its own row.
   case "$content" in
-    '❯'|'›')
+    '❯'|'›'|'→')
       # Agent prompt glyph: a genuine empty agent composer, bordered or bare.
       printf 'empty'; return 0 ;;
     '>'|'$'|'%'|'#')
@@ -208,8 +236,8 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   fi
   # Strip a leading prompt glyph, then re-judge the remainder.
   case "$content" in
-    '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
-    '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
+    '❯ '*|'› '*|'→ '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
+    '❯'*|'›'*|'→'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
   esac
   content="${content#"${content%%[![:space:]]*}"}"
   content="${content%"${content##*[![:space:]]}"}"

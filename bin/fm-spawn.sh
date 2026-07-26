@@ -59,7 +59,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
@@ -409,7 +409,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -474,6 +474,16 @@ launch_template() {
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
+    # cursor (Cursor CLI, `cursor-agent`): a positional prompt starts and
+    # auto-submits the supervised interactive session, the same shape as claude
+    # and grok. --force (alias --yolo, footer "Run Everything") auto-approves
+    # every tool call; verified to run a shell command unattended. --trust is
+    # SEPARATELY required: unlike --print mode, where -f alone suppresses the
+    # workspace-trust gate, the interactive TUI still blocks on a "Workspace
+    # Trust Required" dialog under --force alone, and every pooled worktree is a
+    # fresh path, so an unattended crewmate would wedge on that dialog forever
+    # without it. cursor has no reasoning-effort flag, so no __EFFORTFLAG__ here.
+    cursor) printf '%s' 'cursor-agent --force --trust __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
     *) return 1 ;;
   esac
@@ -598,7 +608,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -642,6 +652,18 @@ effort_flag_for_harness() {
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
     # kimi likewise has no reasoning-effort flag; the requested axis stays in
     # task metadata but never reaches the launch command.
+    # cursor has no effort flag either, and its case is worth stating exactly
+    # because its --help ADVERTISES one: parameterized bracket overrides such as
+    # 'claude-opus-4-8[context=1m,effort=high,fast=false]'. That documented
+    # syntax - including the help's own literal example - is rejected with exit 1
+    # by cursor-agent 2026.07.23-e383d2b, so it must not be synthesized here.
+    # cursor carries reasoning effort in the MODEL NAME instead
+    # (claude-opus-5-thinking-low .. -max, gpt-5.3-codex-xhigh, ...), and firstmate
+    # picks that concrete model at intake. fm-spawn deliberately does not derive a
+    # suffix from --effort, because the tier vocabulary is per-family and
+    # incomplete: composer-2.5 has no tiers, gpt-5.2 has no -medium, gpt-5.5 spells
+    # it -extra-high, and gemini-3.6-flash spells it -minimal, so a synthesized
+    # suffix would be exactly the known-bad launch value this function avoids.
   esac
 }
 

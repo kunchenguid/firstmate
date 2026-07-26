@@ -9,7 +9,9 @@
 # This file is sourced by scripts and has no side effects on source.
 
 # Known harness command names; extend when a new adapter is verified.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
+# `cursor-agent` is spelled in full rather than as a bare `cursor`, so an
+# unrelated process merely mentioning a cursor cannot be read as a harness.
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|cursor-agent|^pi$|^pi-signed$'
 
 # Walk the current process ancestry (up to 16 hops) and print a harness pid.
 # For every harness except Claude, the first match wins (innermost pid), which

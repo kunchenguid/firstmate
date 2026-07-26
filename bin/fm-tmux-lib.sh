@@ -76,6 +76,19 @@
 # busy signals on their own.
 # The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
 # exposes no stable ASCII busy token.
+# cursor-agent's own spinner WORD rotates with the phase of the turn (`Working`,
+# `Thinking`, `Running`), so it is not a signature. The stable signal is the
+# right-aligned `ctrl+c to stop` hint cursor-agent renders in its composer row
+# for the whole turn, including while a shell tool runs, and never renders when
+# idle. That hint is matched ONLY as the tail of cursor-agent's own composer
+# row, because `ctrl+c to stop` as a bare substring is a phrase ordinary dev
+# servers print ("Press Ctrl+C to stop"), and a crewmate that leaves such a
+# server in its last visible lines would then look busy forever and mask a real
+# wedge. Anchoring to the `→` composer glyph plus the end of the line removes
+# that. The glyph is a plain arrow rather than a braille or emoji frame, so it
+# carries none of Kimi's emoji-font sensitivity, and the hint itself is ASCII.
+# Like claude's and kimi's, this signature stays OUT of the shared default
+# because it is not safe to apply to arbitrary unrecorded harness output.
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
@@ -83,6 +96,7 @@ FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
+FM_TMUX_CURSOR_BUSY_REGEX_DEFAULT='^[[:space:]]*→.*ctrl\+c to stop[[:space:]]*$'
 
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex
@@ -97,6 +111,7 @@ fm_busy_lines_match() {  # [harness]
       pi|pi-signed) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_TMUX_GROK_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_TMUX_KIMI_BUSY_REGEX_DEFAULT ;;
+      cursor) regex=$FM_TMUX_CURSOR_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_TMUX_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.
@@ -309,7 +324,7 @@ EOF
 # busy-queued Enter conversion.
 fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   local target=$1 cy raw pane plain box box_status top bottom geometry_ambiguous
-  local row row_raw state unknown_seen=0
+  local row row_raw state unknown_seen=0 composer_row
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   pane=$(tmux capture-pane -e -p -t "$target" -S 0 -E - 2>/dev/null) || { printf 'unknown'; return 0; }
@@ -354,6 +369,25 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   if fm_tmux_row_has_composer_edge "$(printf '%s\n' "$raw" | fm_composer_strip_ansi)"; then
     printf 'unknown'
     return 0
+  fi
+  # A harness need not keep the terminal cursor in its composer. cursor-agent
+  # draws its own block cursor, leaves #{cursor_flag} at 0, and parks
+  # #{cursor_y} on a blank row well below its bare composer, so the cursor row
+  # carries no composer at all and reads "empty" while real text sits
+  # unsubmitted - the exact false-empty that lets the away-mode injector type
+  # over live input and lets the submit core report a swallowed Enter as
+  # delivered. When the cursor row is genuinely BLANK there is no cursor-anchored
+  # answer to trust, so fall back to the bottom-most bare agent-composer row in
+  # the visible pane. Only `→` is scanned for: `❯` and `›` are also shell prompt
+  # glyphs in this fleet, so scanning for those would let dead-shell scrollback
+  # masquerade as a live composer. Requiring a blank cursor row also keeps every
+  # already-verified harness on its existing path, because claude, codex,
+  # opencode, pi, grok and kimi all keep the cursor inside their own composer.
+  if [ -z "$(printf '%s\n' "$raw" | fm_composer_strip_ansi | tr -d '[:space:]')" ]; then
+    composer_row=$(printf '%s\n' "$plain" | grep -nE '^[[:space:]]*→' | tail -1 | cut -d: -f1)
+    if [ -n "$composer_row" ]; then
+      raw=$(printf '%s\n' "$pane" | sed -n "${composer_row}p")
+    fi
   fi
   fm_tmux_composer_row_state "$raw" 0
 }

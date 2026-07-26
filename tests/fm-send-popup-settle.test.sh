@@ -136,3 +136,13 @@ first_settle 1.2 'codex /command -> long settle (slash unchanged)' codex '/help'
 
 # Plain text to codex takes the fast path - the codex scope is `$`-prefixed only.
 first_settle 0.3 'codex plain text -> fast path' codex 'just a normal steer'
+
+# Cursor makes the settle load-bearing rather than an optimisation. Verified live
+# on cursor-agent 2026.07.23-e383d2b: with a ZERO settle the Enter arrives in the
+# same input burst as the typed text, cursor submits the message but leaves it
+# sitting in the composer, so the verdict reads `pending` and each retried Enter
+# RE-SUBMITS it - one steer landed four times. Any settle at or above 0.1 gives a
+# clean single submission and an `empty` verdict. Both fm-send paths clear that
+# floor with margin, which is what these two cases pin.
+first_settle 0.3 'cursor plain text -> fast path is still a nonzero settle' cursor 'just a normal steer'
+first_settle 1.2 'cursor /command -> long settle' cursor '/no-mistakes'

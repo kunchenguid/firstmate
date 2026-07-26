@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, and kimi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, and cursor.
 user-invocable: false
 metadata:
   internal: true
@@ -34,7 +34,9 @@ The supervision knowledge lives here: busy signature, exit command, interrupt, d
 Never dispatch a crewmate or secondmate on an unverified adapter.
 If `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, tell the captain under `AGENTS.md` section 9 that the requested worker runtime is not verified yet, use firstmate's own verified runtime for current work, and ask only whether to verify the requested runtime before future use.
 Do not pause current work for that future-verification choice, and never launch an unverified adapter.
-If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
+If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override or `FM_COMPOSER_AGENT_PLACEHOLDER_RE` entry plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
+Establish WHERE the harness keeps its composer before trusting any emptiness verdict about it.
+A harness may draw its own block cursor and park the terminal cursor elsewhere, in which case a cursor-anchored read answers about the wrong row and reports a false `empty` (see the cursor section below).
 
 ## Detection
 
@@ -126,6 +128,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
+| cursor | `--model <model>` | none; effort rides in the model name | Verified 2026-07-26 on cursor-agent 2026.07.23-e383d2b. `cursor-agent --help` advertises parameterized bracket overrides (`'claude-opus-4-8[context=1m,effort=high,fast=false]'`), but that syntax - including the help's own literal example - is rejected with exit 1 and the accepted-model list in the error. Effort is a MODEL-NAME suffix instead (`claude-opus-5-thinking-low` .. `-max`, `gpt-5.3-codex-xhigh`), so firstmate picks the tiered model at intake and `fm-spawn` records the requested `effort=` in metadata without emitting any flag. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 
@@ -142,6 +145,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
+| cursor | Run `cursor-agent models`, which lists every model identifier this account may pass to `--model`, effort tier included. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 If those sources do not establish the relationship needed for dispatch, fail loudly and report the unresolved candidate.
@@ -160,12 +164,17 @@ Natural language is acceptable if uncertain.
 - pi and pi-signed: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the structural composer reader; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
+- cursor: `/<skill>`, for example `/no-mistakes`. Verified end to end: cursor discovers firstmate's user-level skills, the slash-autocomplete popup lists `/no-mistakes` with its description, and a SINGLE Enter submits it. Unlike grok's and codex's popups there is no swallow or settle hazard.
 
 ## Submission acknowledgement hazards
 
 A send or key action reporting success is not proof that the intended action happened.
 OpenCode can accept and queue an Enter while leaving text visible, Grok can consume Enter in its slash popup without submitting, and Kimi can silently drop a message sent before readiness even though the send returns success.
 The shared symptom is a healthy-looking pane with no work in progress, so each adapter must verify the observable postcondition that is specific to its TUI.
+Cursor adds two further shapes.
+Its composer is not where the terminal cursor is, so a postcondition read anchored to the cursor answers about the wrong row entirely.
+And a zero-settle submit makes cursor accept the message while LEAVING it in the composer, so the verdict reads `pending` and every retried Enter re-sends it - a duplicating failure rather than a swallowed one.
+When verifying a new adapter, establish where its composer actually is before trusting any emptiness verdict about it, and confirm that a failed verdict cannot cause a re-send.
 
 ## claude (VERIFIED; busy signature re-verified 2026-07-25 on Claude Code 2.1.220)
 
@@ -394,3 +403,71 @@ The spinner match covers the full moon-phase glyph set rather than one frame, bu
 Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, and the global hook touches that task's `state/<id>.turn-ended` only when the Stop payload's `cwd`, pointer, and registry entry all agree.
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal supplements the pane busy signature, whose locale- and emoji-font-sensitive limits still apply while a turn is running.
+
+## cursor (VERIFIED 2026-07-26, cursor-agent 2026.07.23-e383d2b)
+
+Cursor CLI (`cursor-agent`, also installed as `agent`), launched with a positional prompt that auto-submits: `cursor-agent --force --trust "$(...)"`.
+For its model and effort axes, see the [launch-profile-axes table](#launch-profile-axes); effort is not a flag, it is part of the model name.
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | The right-aligned `ctrl+c to stop` hint in cursor's own composer row, matched anchored as `^[[:space:]]*→.*ctrl\+c to stop[[:space:]]*$`. Present for the whole turn, including while a shell tool runs; absent when idle. |
+| Exit command | `/exit` (or `/quit`); on exit it prints `To resume this session: agent --resume=<chatId>`. |
+| Interrupt | Single `Ctrl+C`, which ends the turn and leaves the session usable. |
+| Skill invocation | `/<skill>`; one Enter submits, with no popup swallow. |
+| Submission settle | Load-bearing, not an optimisation. Any settle at or above 0.1s submits cleanly once; a ZERO settle duplicates the message (see below). |
+| Autonomy | `--force` (alias `--yolo`, footer shows `Run Everything`); verified to run a shell tool unattended with no approval prompt. |
+| Trust dialog | `⚠ Workspace Trust Required`, offering `[a] Trust this workspace` and `[q] Quit`. Suppressed by `--trust`, which the launch command always passes. |
+| Resume | `cursor-agent --resume=<chatId>`; it restores the conversation but NOT the `--model` pin, so a resumed session falls back to the account default. |
+| Environment marker | `CURSOR_AGENT=1`, set for tool child processes. Process ancestry also resolves, because `ps -o comm=` reports `cursor-agent` for the session process. |
+| Composer | BARE (no box), a `→` prompt glyph, and a placeholder that is `Plan, search, build anything` on a fresh session and `Add a follow-up` after any turn. |
+
+**`--force` does not imply `--trust`, and the difference is mode-dependent.**
+In `--print` mode, `-f` alone suppresses the workspace-trust gate.
+In the interactive TUI it does not: `cursor-agent --force` in an untrusted directory still blocks on the trust dialog.
+Every pooled worktree is a fresh path, so an unattended crewmate launched without `--trust` would wedge on that dialog forever.
+This is why `--trust` is in the launch template rather than left to a post-spawn keystroke.
+
+**Cursor does not keep the terminal cursor in its composer.**
+It draws its own block cursor, leaves `#{cursor_flag}` at 0, and parks `#{cursor_y}` on a blank row well below the composer.
+Every previously verified adapter keeps the cursor inside its own composer, so the shared tmux reader's cursor-anchored fallback inspected a blank row and returned `empty` while real unsubmitted text sat in the composer.
+That false-empty is the dangerous direction: it lets the away-mode injector type over live input and lets the submit core report a swallowed Enter as delivered.
+`fm_tmux_composer_state` now falls back to the bottom-most bare `→` row in the visible pane, but only when the cursor row is genuinely blank.
+Both conditions matter.
+Requiring a blank cursor row keeps every already-verified adapter on its existing path, and scanning only for `→` is what preserves the dead-shell rule, because `❯` and `›` are also shell prompt glyphs in this fleet and scanning for those would let dead-shell scrollback masquerade as a live composer.
+
+**Cursor de-emphasises its whole EMPTY composer, glyph and placeholder alike.**
+The single character under its self-drawn block cursor renders at normal intensity in reverse video, so ghost stripping correctly removes everything else and leaves exactly that one character behind, which would read as real typed input on every idle pane.
+The shared classifier therefore also matches the plain, un-stripped row against `FM_COMPOSER_AGENT_PLACEHOLDER_RE` (`bin/fm-composer-lib.sh`), whose alternatives are anchored to cursor's own `→` glyph so they can neither collide with another harness's composer nor match a shell prompt.
+Trailing context is left open so the busy variant of the same row still matches.
+Once real text is typed, cursor renders the glyph and the text at normal intensity and drops the placeholder, so pending input is unambiguous.
+
+**A zero-settle submit duplicates the steer, so the settle is a safety requirement.**
+When the Enter arrives in the same input burst as the typed text, cursor submits the message but does NOT clear it from the composer.
+The submit core then reads a proven `pending`, spends its whole Enter-retry budget, and every one of those retries re-submits the still-present text.
+Measured live: settle 0 gave verdict `pending` and landed one steer four times, while settle 0.1, 0.3 and 0.5 each gave verdict `empty` and exactly one submission.
+Both `fm-send` paths clear that floor with margin - 0.3s for plain text and 1.2s for a slash command - so ordinary steering is correct today, and `tests/fm-send-popup-settle.test.sh` pins both.
+Any future caller reaching `fm_tmux_submit_core` directly must pass a nonzero settle for a cursor target; `fm-spawn`'s zero-settle path is scoped to kimi and never runs for cursor.
+Note this is the OPPOSITE hazard from grok's and opencode's: those under-submit, cursor over-submits.
+
+**Its spinner word is not a signature, and the bare stop phrase is not safe.**
+The spinner word rotates with the phase of the turn (`Working`, `Thinking`, `Running`), so only the composer hint is stable.
+The hint is matched anchored to the composer row rather than as a bare substring, because `ctrl+c to stop` is a phrase ordinary dev servers print, and a crewmate that left such a server in its last visible lines would otherwise look busy forever and mask a real wedge.
+Like claude's and kimi's, this signature stays out of the shared unrecorded-harness default.
+
+**Agent liveness is imprecise but safe.**
+`ps -o comm=` reports `cursor-agent` for the foreground process-group leader, but tmux's `#{pane_current_command}` resolves the pane to the bundled `node`, so `fm_backend_tmux_agent_state` returns `ambiguous` for a live cursor pane.
+That is the preserved-not-relaunched arm, and death detection is unaffected because an exited cursor pane falls back to the login shell and reads `dead`.
+`node` is deliberately not added to the alive patterns: it is far too generic to prove any agent is alive.
+
+Cursor has no turn-end hook, so like opencode its wake signal is the crewmate's own status appends plus pane staleness and the busy signature.
+
+**Env-marker precedence hazard, now demonstrated.**
+A cursor tool child launched from a claude terminal was observed carrying an inherited `CLAUDECODE=1` alongside cursor's own `CURSOR_AGENT=1`.
+Detection checks `CLAUDECODE` first, so that ordering would misidentify a cursor session launched from a claude terminal.
+This says nothing about a natively launched harness, and it is the same ordering hazard already recorded in `bin/fm-harness.sh`, but it is now evidence rather than theory.
+
+**Open pre-existing hazard found while verifying this adapter (not introduced by it).**
+After `/exit`, the pane returns to a zsh prompt whose glyph in this fleet's theme is `❯` - the same glyph the shared classifier treats as a genuine empty AGENT composer on a bare row.
+A dead cursor pane therefore classifies as `empty`, which is exactly the dead-shell injection target the classifier exists to prevent.
+This affects claude equally today and is independent of cursor; changing it would alter claude's classification, so it is recorded here for a separate decision rather than fixed in passing.

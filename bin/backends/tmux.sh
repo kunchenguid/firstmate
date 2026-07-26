@@ -193,7 +193,17 @@ fm_backend_tmux_agent_state() {  # <target>
   }
   comm=${comm#-}
   case "$comm" in
-    *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'alive' ;;
+    # cursor-agent is listed for completeness, but on the verified local setup
+    # tmux does NOT report it: the foreground process GROUP leader is
+    # `cursor-agent`, while `#{pane_current_command}` resolves to the bundled
+    # `node` it spawns, so a live cursor pane lands on the `ambiguous` arm below
+    # (2026-07-26, cursor-agent 2026.07.23-e383d2b, tmux 3.7b). That is the safe
+    # direction - `ambiguous` is preserved rather than relaunched - and a cursor
+    # pane whose agent has EXITED still falls back to the login shell and reads
+    # `dead`, so recovery-grade death detection is unaffected. `node` is
+    # deliberately NOT added to this list: it is far too generic to treat as
+    # proof that any agent is alive.
+    *claude*|*codex*|*opencode*|*grok*|*kimi*|*cursor-agent*|pi|pi-signed|pi-launcher|Pi) printf 'alive' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
     '') printf 'unreadable' ;;
     *) printf 'ambiguous' ;;

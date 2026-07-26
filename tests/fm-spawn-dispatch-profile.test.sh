@@ -482,6 +482,49 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   pass "opencode receives --model and omits the unsupported effort axis"
 }
 
+test_cursor_threads_model_and_omits_every_effort_form() {
+  local rec id out status launch
+  id=profile-cursor-z16
+  rec=$(make_spawn_case profile-cursor cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model claude-opus-5-thinking-xhigh --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "cursor spawn with model and recorded-only effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor claude-opus-5-thinking-xhigh xhigh
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "cursor-agent --force --trust --model 'claude-opus-5-thinking-xhigh'" \
+    "cursor launch did not thread the model through the verified autonomy and trust flags"
+  # cursor's --help advertises parameterized bracket overrides, but
+  # cursor-agent 2026.07.23-e383d2b rejects them (exit 1) - effort travels in the
+  # model NAME. Nothing effort-shaped may be synthesized onto the launch.
+  assert_not_contains "$launch" "[effort=" "cursor launch must not synthesize a rejected bracket override"
+  assert_not_contains "$launch" "--effort" "cursor launch must not pass claude's effort flag"
+  assert_not_contains "$launch" "--reasoning-effort" "cursor launch must not pass grok's effort flag"
+  assert_not_contains "$launch" "--thinking" "cursor launch must not pass pi's thinking flag"
+  assert_not_contains "$launch" "model_reasoning_effort" "cursor launch must not pass codex's effort config"
+  pass "cursor receives --model and omits every effort form, including the rejected bracket syntax"
+}
+
+test_cursor_always_passes_trust_because_force_alone_blocks() {
+  local rec id out status launch
+  id=profile-cursor-trust-z17
+  rec=$(make_spawn_case profile-cursor-trust cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "cursor spawn without a model should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  # Every pooled worktree is a fresh path, and the interactive TUI blocks on its
+  # "Workspace Trust Required" dialog under --force alone (unlike --print mode),
+  # so an unattended crewmate wedges forever without --trust.
+  assert_contains "$launch" "--force" "cursor launch lost its autonomy flag"
+  assert_contains "$launch" "--trust" "cursor launch lost the trust flag that unblocks a fresh worktree"
+  assert_not_contains "$launch" "--model" "cursor launch must omit --model when none was chosen"
+  pass "cursor launch always carries both --force and --trust"
+}
+
 test_pi_threads_model_and_max_effort() {
   local rec id out status launch
   id=profile-pi-z8
@@ -672,6 +715,8 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
+test_cursor_threads_model_and_omits_every_effort_form
+test_cursor_always_passes_trust_because_force_alone_blocks
 test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata

@@ -106,7 +106,9 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # grok: "Ctrl+c:cancel". Claude's current spinner signature is matched only for
 # a recorded Claude task because an ellipsis followed by elapsed time is not a
 # safe shared signature for arbitrary harness output. Kimi's moon-plus-middot
-# spinner signature is likewise matched only for a recorded Kimi task.
+# spinner signature is likewise matched only for a recorded Kimi task, as is
+# cursor's composer-anchored "ctrl+c to stop" hint, whose bare substring is a
+# phrase ordinary dev servers print.
 BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
