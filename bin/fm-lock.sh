@@ -294,11 +294,15 @@ emit_classified_lock() {
 }
 
 reclaim_mutex_generation() {
-  local value
+  reclaim_path_generation "$RECLAIM_LOCK"
+}
+
+reclaim_path_generation() {
+  local path=$1 value
   if [ "$(uname)" = Darwin ]; then
-    value=$(stat -f '%d.%i' "$RECLAIM_LOCK" 2>/dev/null) || return 1
+    value=$(stat -f '%d.%i' "$path" 2>/dev/null) || return 1
   else
-    value=$(stat -c '%d.%i' "$RECLAIM_LOCK" 2>/dev/null) || return 1
+    value=$(stat -c '%d.%i' "$path" 2>/dev/null) || return 1
   fi
   case "$value" in ''|*[!0-9.]*) return 1 ;; esac
   printf '%s\n' "$value"
@@ -370,7 +374,7 @@ reclaim_generation_dir_is_safe() {
 }
 
 acquire_generation_claim() {
-  local generation=$1 claim pid age attempt=0 now
+  local generation=$1 claim pid age attempt=0 now min_age claim_generation marker quarantine current
   claim="$RECLAIM_LOCK/.generation-claim-$generation"
   while [ "$attempt" -lt 2 ]; do
     attempt=$((attempt + 1))
@@ -385,19 +389,36 @@ acquire_generation_claim() {
       return 0
     fi
     reclaim_generation_dir_is_safe "$claim" || return 2
+    claim_generation=$(reclaim_path_generation "$claim" 2>/dev/null || true)
+    [ -n "$claim_generation" ] || return 2
     pid=$(cat "$claim/pid" 2>/dev/null || true)
     case "$pid" in
       ''|*[!0-9]*)
         age=$(reclaim_mutex_age "$claim" 2>/dev/null || true)
         case "$age" in ''|*[!0-9]*) return 2 ;; esac
-        [ "$age" -ge 2 ] || return 1
+        min_age=$RECLAIM_MUTEX_STALE_AFTER
+        case "$min_age" in ''|*[!0-9]*) min_age=2 ;; esac
+        [ "$min_age" -lt 2 ] && min_age=2
+        if [ "${FM_RECLAIM_MUTEX_STALE_AFTER:-}" = 0 ]; then
+          min_age=0
+        fi
+        [ "$age" -ge "$min_age" ] || return 1
         ;;
       *)
         kill -0 "$pid" 2>/dev/null && return 1
         ;;
     esac
-    rm -f "$claim/pid" "$claim/started" 2>/dev/null || return 2
-    rmdir "$claim" 2>/dev/null || return 1
+    marker="$claim/.recovery-$claim_generation"
+    mkdir "$marker" 2>/dev/null || [ -d "$marker" ] || return 2
+    current=$(reclaim_path_generation "$claim" 2>/dev/null || true)
+    if [ "$current" != "$claim_generation" ]; then
+      rmdir "$marker" 2>/dev/null || true
+      return 1
+    fi
+    quarantine="$STATE/.lock-reclaim-claim-retired-$generation.$claim_generation"
+    [ ! -e "$quarantine" ] && [ ! -L "$quarantine" ] || return 2
+    perl -e 'exit(rename($ARGV[0], $ARGV[1]) ? 0 : 1)' \
+      "$claim" "$quarantine" 2>/dev/null || return 1
   done
   return 1
 }
@@ -445,7 +466,7 @@ write_reclaim_owner() {
 }
 
 release_reclaim_lock() {
-  local recorded generation gate claimed mypid=${BASHPID:-$$}
+  local recorded generation gate claimed retired mypid=${BASHPID:-$$}
   if [ "$RECLAIM_HELD" -ne 1 ]; then
     return 0
   fi
@@ -467,13 +488,18 @@ release_reclaim_lock() {
       }
       rm -rf "$claimed" 2>/dev/null || true
     fi
+    for retired in "$STATE/.lock-reclaim-claim-retired-$generation".*; do
+      if [ -e "$retired" ] || [ -L "$retired" ]; then
+        rm -rf "$retired" 2>/dev/null || true
+      fi
+    done
     remove_reclaim_mutex
   fi
   RECLAIM_HELD=0
 }
 
 detach_abandoned_reclaim_mutex() {
-  local generation=$1 gate claimed quarantine current pid now claim_pid gate_pid age min_age claim_rc=0
+  local generation=$1 gate claimed quarantine current pid now claim_pid gate_pid age min_age claim_rc=0 retired
   gate="$RECLAIM_LOCK/.generation-$generation"
   claimed="$RECLAIM_LOCK/.generation-claimed-$generation"
   quarantine="$STATE/.lock-reclaim-retired.${BASHPID:-$$}.$RANDOM.$generation"
@@ -545,6 +571,11 @@ detach_abandoned_reclaim_mutex() {
   fi
   rm -rf "$quarantine" 2>/dev/null || return 2
   [ ! -e "$quarantine" ] && [ ! -L "$quarantine" ] || return 2
+  for retired in "$STATE/.lock-reclaim-claim-retired-$generation".*; do
+    if [ -e "$retired" ] || [ -L "$retired" ]; then
+      rm -rf "$retired" 2>/dev/null || return 2
+    fi
+  done
   return 0
 }
 

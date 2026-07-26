@@ -567,6 +567,44 @@ EOF
   pass "signal-interrupted reclaim emits a typed main-lock result"
 }
 
+test_generation_claim_uses_configured_threshold() {
+  local rec home fakebin generation out rc=0
+  rec=$(new_home generation-claim-threshold)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  make_ps_denied "$fakebin"
+  printf '999999\n' > "$home/state/.lock"
+  mkdir "$home/state/.lock-reclaim"
+  printf '888888\n' > "$home/state/.lock-reclaim/pid"
+  printf '1\n' > "$home/state/.lock-reclaim/started"
+  if [ "$(uname)" = Darwin ]; then
+    generation=$(stat -f '%d.%i' "$home/state/.lock-reclaim")
+  else
+    generation=$(stat -c '%d.%i' "$home/state/.lock-reclaim")
+  fi
+  mkdir "$home/state/.lock-reclaim/.generation-claim-$generation"
+  touch -t 200001010000 "$home/state/.lock-reclaim/.generation-claim-$generation"
+
+  out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_RECLAIM_MUTEX_STALE_AFTER=999999999 FM_RECLAIM_BUSY_RETRIES=0 \
+    "$LOCK" 2>&1) || rc=$?
+
+  expect_code 13 "$rc" "configured generation-claim threshold"
+  assert_contains "$out" "LOCK_RESULT=RECLAIM_BUSY" "claim ignored the configured grace threshold"
+
+  rc=0
+  out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_RECLAIM_MUTEX_STALE_AFTER=0 FM_RECLAIM_BUSY_RETRIES=0 \
+    "$LOCK" 2>&1) || rc=$?
+
+  expect_code 0 "$rc" "abandoned generation claim recovery"
+  assert_contains "$out" "LOCK_RESULT=OWNED" "abandoned generation claim did not recover"
+  [ -z "$(find "$home/state" -name '.lock-reclaim-claim-retired*' -print)" ] \
+    || fail "generation-claim quarantine was not removed"
+  pass "generation claims honor the configured abandonment threshold"
+}
+
 test_state_path_failure_is_not_reclaim_busy() {
   local rec home fakebin out rc=0
   rec=$(new_home invalid-state-path)
@@ -699,6 +737,7 @@ run_one() {
     generation-symlink) test_generation_symlinks_are_not_followed ;;
     nonregular-metadata) test_nonregular_mutex_metadata_is_rejected ;;
     interrupted-reclaim) test_interrupted_reclaim_emits_typed_result ;;
+    claim-threshold) test_generation_claim_uses_configured_threshold ;;
     invalid-state) test_state_path_failure_is_not_reclaim_busy ;;
     publication-failure) test_reclaim_owner_publication_failure_is_not_busy ;;
     stale-write-failure) test_stale_reclaim_write_failure_stays_stale ;;
@@ -731,6 +770,7 @@ else
   test_generation_symlinks_are_not_followed
   test_nonregular_mutex_metadata_is_rejected
   test_interrupted_reclaim_emits_typed_result
+  test_generation_claim_uses_configured_threshold
   test_state_path_failure_is_not_reclaim_busy
   test_reclaim_owner_publication_failure_is_not_busy
   test_stale_reclaim_write_failure_stays_stale
