@@ -7,8 +7,7 @@ The lane is opt-in tooling only: nothing in firstmate dispatches to it automatic
 ## What this lane is
 
 FreeLLMAPI (https://github.com/tashfeenahmed/freellmapi, MIT) is a third-party local proxy that pools free-tier LLM provider keys behind one OpenAI-compatible endpoint on localhost, with automatic fallback across providers.
-The fleet's verified evaluation of the upstream project - repo authenticity, key handling, prompt egress, realistic capacity - is `data/freellmapi-koeajo/report.md` (scout, 2026-07-24); this document does not restate it.
-The install is pinned to the exact audited commit `526c8634` (2026-07-20); the pin changes only after re-verifying a new commit the way that report did.
+The install is pinned to the exact audited commit `526c8634` (2026-07-20); the pin changes only after re-verifying upstream authenticity, CI, and key handling and updating the safety-contract regression coverage.
 
 ## Allowed and forbidden use
 
@@ -51,7 +50,7 @@ Secrets are never printed and never placed on argv.
 At runtime they live only in process environment, mode-0600 files, and stdin pipes; the same OS user can still inspect those (for example process environment on many platforms).
 Never run `bin/fm-freellmapi.sh` under shell xtrace (`bash -x`, `set -o xtrace`, or an equivalent debug wrapper): tracing dumps assignments and piped bodies and will leak keys into the terminal and shell logs.
 
-Catalog sync to `api.freellmapi.co` is disabled by default so the lane has zero background egress; `start --catalog-sync` opts in to the signed metadata-only sync described in the scout report.
+Catalog sync to `api.freellmapi.co` is disabled by default so the lane has zero background egress; `start --catalog-sync` opts in to that metadata refresh.
 
 ## Disabling and removing the lane
 

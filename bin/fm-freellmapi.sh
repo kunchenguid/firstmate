@@ -47,8 +47,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
-# Exact pin - change only after re-verifying the upstream commit the way
-# data/freellmapi-koeajo/report.md did (repo authenticity, CI, key handling).
+# Exact pin - change only after re-verifying upstream authenticity, CI, and key
+# handling and updating the safety-contract regression coverage.
 FM_FREELLMAPI_REPO_URL=https://github.com/tashfeenahmed/freellmapi.git
 FM_FREELLMAPI_PIN=526c86349891bd336b470481ee2d732cd8e13c14
 FM_FREELLMAPI_PIN_DATE=2026-07-20
@@ -88,7 +88,7 @@ KNOWN RISKS - FreeLLMAPI lane (pin $FM_FREELLMAPI_PIN, $FM_FREELLMAPI_PIN_DATE):
     some keyless providers may use prompts for training.
   - This service is for ISOLATED LOCAL USE ONLY: localhost binding, no tunnel,
     no port forwarding, no sensitive content, never a primary-model substitute.
-  Full policy: docs/freellmapi-lane.md and data/freellmapi-koeajo/report.md.
+  Full policy: docs/freellmapi-lane.md.
 EOF
 }
 
