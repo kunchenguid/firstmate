@@ -27,7 +27,7 @@ COMPOSER="${FM_FAKE_COMPOSER:?}"
 case "${1:-}" in
   display-message)
     for a in "$@"; do
-      case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac
+      case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac
     done
     exit 0 ;;
   capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
@@ -40,7 +40,7 @@ case "${1:-}" in
       if [ -n "${FM_FAKE_SWALLOW:-}" ] && [ -f "$FM_FAKE_SWALLOW" ]; then
         [ "${FM_FAKE_PERSIST_SWALLOW:-0}" = 1 ] || rm -f "$FM_FAKE_SWALLOW"
       else
-        printf '│ > │\n' > "$COMPOSER"
+        printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$COMPOSER"
       fi
     fi
     exit 0 ;;
@@ -59,7 +59,7 @@ test_busy_pane_pending_returns_empty() {
   composer="$dir/composer"
   sent="$dir/sent.log"
   vfile="$dir/verdict"
-  printf '│ > fix findings 1 and 3 │\n' > "$composer"
+  printf '╭────────────────────────────╮\n│ > fix findings 1 and 3    │\n╰────────────────────────────╯\n' > "$composer"
   : > "$sent"
   touch "$dir/.swallow"
   # Pre-check: composer state should be pending (via function, not $()).
@@ -82,7 +82,7 @@ test_idle_pane_pending_returns_pending() {
   composer="$dir/composer"
   sent="$dir/sent.log"
   vfile="$dir/verdict"
-  printf '│ > fix findings 1 and 3 │\n' > "$composer"
+  printf '╭────────────────────────────╮\n│ > fix findings 1 and 3    │\n╰────────────────────────────╯\n' > "$composer"
   : > "$sent"
   touch "$dir/.swallow"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
@@ -99,7 +99,7 @@ test_busy_pane_composer_clears_first_try() {
   composer="$dir/composer"
   sent="$dir/sent.log"
   vfile="$dir/verdict"
-  printf '│ > fix findings 1 and 3 │\n' > "$composer"
+  printf '╭────────────────────────────╮\n│ > fix findings 1 and 3    │\n╰────────────────────────────╯\n' > "$composer"
   : > "$sent"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" FM_FAKE_PANE_BUSY=1 \
     fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
@@ -114,7 +114,7 @@ test_idle_pane_composer_clears_first_try() {
   composer="$dir/composer"
   sent="$dir/sent.log"
   vfile="$dir/verdict"
-  printf '│ > fix findings 1 and 3 │\n' > "$composer"
+  printf '╭────────────────────────────╮\n│ > fix findings 1 and 3    │\n╰────────────────────────────╯\n' > "$composer"
   : > "$sent"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" FM_FAKE_PANE_BUSY=0 \
     fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null

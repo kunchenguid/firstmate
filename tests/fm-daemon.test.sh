@@ -848,8 +848,8 @@ test_tmux_composer_state_bordered_and_agent_rows_are_empty() {
   local dir fakebin capture out
   dir=$(make_supercase composer-empty-agent)
   fakebin="$dir/fakebin"; capture="$dir/pane.txt"
-  printf '%s\n' "│ >                     │" > "$capture"
-  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+  printf '╭────────────────────────╮\n│ >                      │\n╰────────────────────────╯\n' > "$capture"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=1 \
     fm_tmux_composer_state "fakepane")
   [ "$out" = empty ] || fail "a bordered '│ > │' composer should read empty, got '$out'"
   printf '%s\n' "❯ " > "$capture"
@@ -883,8 +883,8 @@ test_pane_input_pending_honors_idle_override_after_border_strip() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   capture="$dir/pane.txt"
-  printf '│ custom idle> │\n' > "$capture"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+  printf '╭────────────────╮\n│ custom idle>  │\n╰────────────────╯\n' > "$capture"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=1 \
     FM_COMPOSER_IDLE_RE='^custom idle>$' pane_input_pending "fakepane" \
     && fail "FM_COMPOSER_IDLE_RE was not applied after border stripping"
   pass "pane_input_pending honors FM_COMPOSER_IDLE_RE after border stripping"
@@ -996,8 +996,8 @@ test_pane_input_pending_bordered_idle_not_pending() {
     "│ ❯                                            │" \
     "│ >  │" \
     "│                                              │"; do
-    printf '%s\n' "$line" > "$capture"
-    if PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+    printf '╭────────────────────────────────────────────────╮\n%s\n╰────────────────────────────────────────────────╯\n' "$line" > "$capture"
+    if PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=1 \
       pane_input_pending "fakepane"; then
       fail "bordered idle composer falsely detected as pending: <$line>"
     fi
@@ -1012,8 +1012,8 @@ test_pane_input_pending_bordered_with_text_is_pending() {
   local dir state fakebin capture
   dir=$(make_supercase pending-bordered-text)
   state="$dir/state"; fakebin="$dir/fakebin"; capture="$dir/pane.txt"
-  printf '%s\n' "│ > fix findings 1 and 3, skip 2               │" > "$capture"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+  printf '╭────────────────────────────────────────────────╮\n│ > fix findings 1 and 3, skip 2               │\n╰────────────────────────────────────────────────╯\n' > "$capture"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=1 \
     pane_input_pending "fakepane" \
     || fail "real text inside a bordered composer was not detected as pending"
   pass "pane_input_pending: text inside a bordered composer is still pending"
@@ -1055,7 +1055,7 @@ test_max_defer_empty_swallow_types_once_and_alarms() {
   dir=$(make_bordered_case maxdefer-stuck)
   state="$dir/state"; fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
-  printf '│ > │\n' > "$dir/composer"
+  printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
   touch "$dir/.swallow"
   escalate_add "$state" "needs-decision: pick A"
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
@@ -1077,7 +1077,7 @@ test_max_defer_flushes_empty_idle_pane() {
   dir=$(make_bordered_case maxdefer-recover)
   state="$dir/state"; fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
-  printf '│ > │\n' > "$dir/composer"
+  printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
   escalate_add "$state" "done: PR https://x/y/pull/1"
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
@@ -1094,7 +1094,7 @@ test_max_defer_pending_composer_alarms_without_typing() {
   dir=$(make_bordered_case maxdefer-pending-digest)
   state="$dir/state"; fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
-  printf '│ > human draft │\n' > "$dir/composer"
+  printf '╭─────────────────╮\n│ > human draft   │\n╰─────────────────╯\n' > "$dir/composer"
   escalate_add "$state" "needs-decision: pick B"
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
@@ -1504,7 +1504,7 @@ test_fm_send_exits_nonzero_on_confirmed_swallow() {
     FM_SEND_SLEEP=0.05 "$ROOT/bin/fm-send.sh" sess:win 'route this work' >/dev/null 2>"$err" \
     || fail "fm-send exited non-zero on a clean submit: $(cat "$err")"
   # Persistent swallow -> exit non-zero with a clear message.
-  printf '│ > │\n' > "$dir/composer"
+  printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
   touch "$dir/.swallow"
   if PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_SEND_SLEEP=0.05 \

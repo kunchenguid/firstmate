@@ -200,7 +200,7 @@ make_bordered_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"; fakebin="$dir/fakebin"
   mkdir -p "$dir/state" "$fakebin"
-  printf '│ > │\n' > "$dir/composer"
+  printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -208,7 +208,7 @@ COMPOSER="${FM_FAKE_COMPOSER:?FM_FAKE_COMPOSER unset}"
 case "${1:-}" in
   display-message)
     print=0
-    for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
+    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     for a in "$@"; do [ "$a" = "-p" ] && print=1; done
     [ "$print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;
@@ -231,12 +231,12 @@ case "${1:-}" in
         [ "${FM_FAKE_PERSIST_SWALLOW:-0}" = 1 ] || rm -f "$FM_FAKE_SWALLOW"
       else
         [ -n "${FM_FAKE_SENT:-}" ] && printf '[ENTER]\n' >> "$FM_FAKE_SENT"
-        printf '│ > │\n' > "$COMPOSER"
+        printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$COMPOSER"
       fi
     elif [ "$lit" = 1 ]; then
       [ "${FM_FAKE_SEND_FAIL:-0}" = 1 ] && exit 1
       [ -n "${FM_FAKE_SENT:-}" ] && printf '%s\n' "$text" >> "$FM_FAKE_SENT"
-      printf '│ > %s │\n' "$text" > "$COMPOSER"
+      printf '╭────────────────╮\n│ > %s │\n╰────────────────╯\n' "$text" > "$COMPOSER"
     fi
     exit 0 ;;
 esac

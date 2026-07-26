@@ -163,8 +163,8 @@ test_dim_ghost_inside_bordered_composer_is_not_pending() {
   fb=$(make_fake_tmux "$dir")
   capture="$dir/styled.txt"
   # Bordered composer (claude box) holding only dim ghost text.
-  printf '\xe2\x94\x82 \033[2mtry the other approach instead\033[0m \xe2\x94\x82\n' > "$capture"
-  if PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+  printf '╭─────────────────────────────────────╮\n│ \033[2mtry the other approach instead\033[0m │\n╰─────────────────────────────────────╯\n' > "$capture"
+  if PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
      fm_pane_input_pending "fakepane"; then
     fail "dim ghost in a bordered composer falsely read as pending"
   fi
