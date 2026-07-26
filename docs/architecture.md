@@ -32,9 +32,12 @@ Crew status files are append-only wake-event logs, not current-state fields.
 The script header owns the exact run-head ancestry rules.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
+A second exception covers a run that already reached a terminal outcome: when that outcome is done or cancelled and the status log's last verb is a declared external wait, the crew reports `paused` from the status log with the terminal run outcome leading the detail, because a finished run record must not permanently overrule a self-declared wait.
+That exception is keyed on the run's own terminal outcome rather than the mapped state, so an actively monitored checks-green run still reports done, and a terminal failed run always surfaces as failed: neither the status log nor `axi status` timestamps its events, so a pause appended before or during the run cannot be distinguished from one declared after it, and masking a real work failure behind a benign wait is the worse error.
+Cancelled is a supervisor abort rather than failed work, so it stays overridable.
 Only when no matching run exists does it fall back to the pane busy-signature and then a status-log event whose verb maps to a recognized run-state; a dead pane without a run reports unknown instead of trusting a stale log.
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
-In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
+In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason, as does the terminal done/cancelled exception above.
 For herdr, that pane fallback trusts a native `busy` verdict outright, but corroborates native `idle` or unknown verdicts against the recorded harness's rendered busy signature before deciding the crew is not working.
 For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, current crew state, endpoint probes, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
