@@ -38,17 +38,19 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (r) default resolution: origin/HEAD, main, master, build     -> ordered, explicit refs
+#   (s) default resolution: no candidate                         -> REFUSE (fail-safe)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
-#   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
-#   (s) index.lock with a live holder, any age                -> lock kept, REFUSE
-#   (t) lsof error while checking index.lock                  -> lock kept, REFUSE
-#   (u) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
-#   (v) non-linked repo index.lock                            -> lock removed, ALLOW
-#   (w) index.lock mtime read failure                         -> lock kept, REFUSE
-#   (x) transient lock cleared after first failed return      -> retry ALLOW
-#   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#   (t) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
+#   (u) index.lock with a live holder, any age                -> lock kept, REFUSE
+#   (v) lsof error while checking index.lock                  -> lock kept, REFUSE
+#   (w) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
+#   (x) non-linked repo index.lock                            -> lock removed, ALLOW
+#   (y) index.lock mtime read failure                         -> lock kept, REFUSE
+#   (z) transient lock cleared after first failed return      -> retry ALLOW
+#   (aa) persistent lock (never clears, not provably stale)   -> REFUSE loudly
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -205,6 +207,25 @@ land_on_origin_main() {
   git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash $file"
   git -C "$tmp" push -q origin HEAD:main
   rm -rf "$tmp"
+}
+
+# Remove origin/HEAD and the local branch refs that precede <keep> in
+# fm-teardown.sh's default-branch order. The project checkout is detached first so
+# its initially checked-out main branch can be deleted safely. Args: case_dir keep
+keep_default_candidate() {
+  local case_dir=$1 keep=$2 branch
+  git -C "$case_dir/project" symbolic-ref -d refs/remotes/origin/HEAD 2>/dev/null || true
+  git -C "$case_dir/project" checkout -q --detach
+  for branch in main master build; do
+    [ "$branch" = "$keep" ] && continue
+    git -C "$case_dir/project" update-ref -d "refs/heads/$branch"
+  done
+}
+
+set_local_branch_to_worktree_head() {
+  local case_dir=$1 branch=$2 head
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref "refs/heads/$branch" "$head"
 }
 
 # Override GitHub lookups to report PR 7 as merged with the supplied head.
@@ -487,6 +508,29 @@ SH
   chmod +x "$case_dir/fakebin/git"
 }
 
+# Git 2.34 predates merge-tree --write-tree. Emulate only the clean equal-tree
+# result needed by default-branch content tests so this suite remains runnable on
+# the repo's oldest supported test hosts. Args: case_dir
+add_equal_tree_merge_tree_compat_git() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+if [ "${1:-}" = -C ] && [ "${3:-}" = merge-tree ] && [ "${4:-}" = --write-tree ]; then
+  dir=$2
+  ref=${5:-}
+  head=${6:-}
+  ref_tree=$("$real" -C "$dir" rev-parse --quiet --verify "$ref^{tree}") || exit 1
+  head_tree=$("$real" -C "$dir" rev-parse --quiet --verify "$head^{tree}") || exit 1
+  [ "$ref_tree" = "$head_tree" ] || exit 1
+  printf '%s\n' "$ref_tree"
+  exit 0
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
@@ -586,6 +630,123 @@ test_local_only_merged_to_local_main_allows() {
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
+}
+
+test_origin_head_precedes_local_main_master_and_build() {
+  local case_dir rc wt_head
+  case_dir=$(make_case default-origin-head)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" branch master HEAD
+  git -C "$case_dir/project" branch build HEAD
+  git -C "$case_dir/project" update-ref refs/heads/release "$wt_head"
+  git -C "$case_dir/project" update-ref refs/remotes/origin/release "$wt_head"
+  git -C "$case_dir/project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/release
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "default-origin-head: teardown should prefer origin/HEAD"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "default-origin-head: teardown printed a REFUSED line"
+  pass "default branch resolution preserves origin/HEAD as the first candidate"
+}
+
+test_local_main_precedes_master_and_build_without_origin_head() {
+  local case_dir rc
+  case_dir=$(make_case default-main)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  git -C "$case_dir/project" symbolic-ref -d refs/remotes/origin/HEAD
+  git -C "$case_dir/project" branch master HEAD
+  git -C "$case_dir/project" branch build HEAD
+  set_local_branch_to_worktree_head "$case_dir" main
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "default-main: teardown should prefer local main"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "default-main: teardown printed a REFUSED line"
+  pass "default branch resolution preserves local main ahead of master and build"
+}
+
+test_local_master_precedes_build_without_origin_head_or_main() {
+  local case_dir rc
+  case_dir=$(make_case default-master)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  keep_default_candidate "$case_dir" master
+  set_local_branch_to_worktree_head "$case_dir" master
+  git -C "$case_dir/project" branch build HEAD
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "default-master: teardown should prefer local master"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "default-master: teardown printed a REFUSED line"
+  pass "default branch resolution preserves local master ahead of build"
+}
+
+test_local_build_allows_without_higher_priority_candidate() {
+  local case_dir rc
+  case_dir=$(make_case default-local-build)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  keep_default_candidate "$case_dir" build
+  set_local_branch_to_worktree_head "$case_dir" build
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "default-local-build: teardown should accept an existing local build ref"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "default-local-build: teardown printed a REFUSED line"
+  pass "default branch resolution accepts an existing local build ref"
+}
+
+test_remote_build_content_landed_allows_without_local_default() {
+  local case_dir rc
+  case_dir=$(make_case default-remote-build)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_equivalent_patch_on_origin_branch "$case_dir" build feature.txt hello "squash feature" >/dev/null
+  keep_default_candidate "$case_dir" none
+  add_equal_tree_merge_tree_compat_git "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "default-remote-build: teardown should accept an existing origin/build ref"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "default-remote-build: teardown printed a REFUSED line"
+  pass "build-only project tears down safely when landed content exists on origin/build"
+}
+
+test_no_default_candidate_refuses_without_guessing() {
+  local case_dir rc
+  case_dir=$(make_case default-none)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work"
+  keep_default_candidate "$case_dir" none
+  git -C "$case_dir/project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/build
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "default-none: teardown should refuse without an explicit candidate"
+  grep -Fq "expected origin/HEAD, main, master, or an existing local/remote build ref" "$case_dir/stderr" \
+    || fail "default-none: refusal did not explain the explicit default candidates"
+  pass "default branch resolution refuses safely when no candidate ref exists"
 }
 
 test_no_mistakes_origin_remote_allows() {
@@ -1376,6 +1537,12 @@ test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_origin_head_precedes_local_main_master_and_build
+test_local_main_precedes_master_and_build_without_origin_head
+test_local_master_precedes_build_without_origin_head_or_main
+test_local_build_allows_without_higher_priority_candidate
+test_remote_build_content_landed_allows_without_local_default
+test_no_default_candidate_refuses_without_guessing
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
