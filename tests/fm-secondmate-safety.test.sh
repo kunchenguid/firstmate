@@ -1322,7 +1322,7 @@ EOF
 # lease: continuing would clear the routing entry and metadata while leaving the
 # home - and the secondmate's own state and backlog inside it - on disk unowned.
 test_secondmate_teardown_refuses_home_referenced_by_another_task() {
-  local home subhome subhome_abs fakebin log lease fmroot rc err
+  local home subhome subhome_abs fakebin log lease fmroot rc err stamp
   home="$TMP_ROOT/teardown-contested-home"
   subhome="$TMP_ROOT/teardown-contested-subhome"
   fmroot="$TMP_ROOT/teardown-contested-fmroot"
@@ -1354,6 +1354,10 @@ mode=no-mistakes
 yolo=off
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  # shellcheck source=/dev/null
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$subhome" domain "$home" ) \
+    || fail "the contested secondmate home fixture could not be stamped"
   fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-contested-fake")
   log="$TMP_ROOT/teardown-contested-fake/tmux.log"
   lease="$TMP_ROOT/teardown-contested-fake/lease"
@@ -1375,6 +1379,13 @@ EOF
   [ -e "$home/state/domain.meta" ] || fail "a refused secondmate teardown cleared its own metadata"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null \
     || fail "a refused secondmate teardown removed the routing entry"
+  # A refused operation mutates nothing: the ownership stamp is the rule-2
+  # evidence that stops a stale sibling disposing of this still-owned home.
+  # shellcheck source=/dev/null
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$subhome" task || printf 'none' )
+  [ "$stamp" = domain ] \
+    || fail "a refused secondmate teardown erased its own ownership stamp: $stamp"
   pass "secondmate teardown refuses a home still recorded by another task"
 }
 

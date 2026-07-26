@@ -108,8 +108,11 @@ Retaining means the lease is retired rather than returned.
 A conflicting secondmate home or Orca worktree refuses outright instead, because silently skipping their removal would strand a registry entry or an Orca-owned worktree.
 
 Retention is not a one-way door.
-A task that retains because another task's metadata still names the slot gives up its own ownership stamp on the way out, so the holder left behind can release the slot normally once nothing else references it.
-That clear is deliberately narrow: a stamp naming a *different* task is always preserved, because it is the evidence that stops a stale task from disposing of a slot whose real occupant is merely paused or between processes, and destroying preserved work would be strictly worse than leaking a slot.
+A task that retains because another task's metadata still names the slot *and then completes its own teardown* gives up its own ownership stamp on the way out, so the holder left behind can release the slot normally once nothing else references it.
+That clear is deliberately narrow in two directions.
+A stamp naming a *different* task is always preserved, because it is the evidence that stops a stale task from disposing of a slot whose real occupant is merely paused or between processes, and destroying preserved work would be strictly worse than leaking a slot.
+A caller that refuses outright preserves the stamp too, because a refused operation mutates nothing: its records all stay, ownership did not change, and stripping the evidence there would set up exactly that same destructive sequence once those records are reconciled away.
+Each call site therefore states which of the two it is, so a new caller cannot silently inherit the wrong behaviour.
 The live-occupant check stays a blocking condition and is never weakened to compensate.
 
 #### Reclaiming an already-leaked slot

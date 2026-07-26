@@ -813,7 +813,7 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
 # lease the way the pooled-worktree path does, because silently skipping the
 # removal would strand an Orca-owned worktree behind a cleared record.
 test_scout_teardown_refuses_orca_worktree_referenced_by_another_task() {
-  local proj wt data state config id out rc neutral
+  local proj wt data state config id out rc neutral stamp
   id="orcacontestedz9"
   proj="$TMP_ROOT/contested-project"
   wt="$TMP_ROOT/contested-wt"
@@ -837,6 +837,10 @@ test_scout_teardown_refuses_orca_worktree_referenced_by_another_task() {
   orca_case contested
   printf '{"ok":true,"result":{"worktree":{"id":"wt-contested","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  # shellcheck source=/dev/null
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$wt" "$id" "$neutral" ) \
+    || fail "the contested Orca slot fixture could not be stamped"
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
@@ -851,6 +855,13 @@ test_scout_teardown_refuses_orca_worktree_referenced_by_another_task() {
   assert_present "$wt" "a contested Orca worktree was deleted"
   assert_present "$state/$id.meta" "a refused Orca teardown should preserve its own metadata"
   assert_present "$state/paused-$id.meta" "a refused Orca teardown cleared the other holder's record"
+  # A refused operation mutates nothing: the ownership stamp is the rule-2
+  # evidence that stops a stale sibling disposing of this still-owned slot.
+  # shellcheck source=/dev/null
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$wt" task || printf 'none' )
+  [ "$stamp" = "$id" ] \
+    || fail "a refused Orca teardown erased its own ownership stamp: $stamp"
   pass "fm-teardown.sh backend=orca: refuses a worktree still recorded by another task"
 }
 

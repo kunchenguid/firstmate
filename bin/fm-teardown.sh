@@ -58,14 +58,16 @@
 # slot is released, bin/fm-slot-owner-lib.sh must find no conflicting reference.
 # A conflict RETIRES the lease instead of returning it: the directory is left
 # untouched on disk, the rest of the teardown (endpoint and records) still runs,
-# and the completion line says the slot was retained. A retiring task also gives
-# up its OWN ownership stamp so the holder left behind can still release the
-# slot once nothing references it; docs/worker-isolation.md owns the operator
-# reclaim path for a slot that no record names at all. This gate is not waived by
+# and the completion line says the slot was retained. A task that retires a lease
+# and still completes gives up its OWN ownership stamp so the holder left behind
+# can still release the slot once nothing references it;
+# docs/worker-isolation.md owns the operator reclaim path for a slot that no
+# record names at all. This gate is not waived by
 # --force, which grants authority over this task's work only, never over another
 # task's slot. A conflicting SECONDMATE home or Orca worktree refuses outright
 # instead, because skipping their removal would strand a registry entry or an
-# Orca-owned worktree.
+# Orca-owned worktree; a refusal keeps every record for the task and therefore
+# keeps its ownership stamp too.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -795,19 +797,39 @@ firstmate_home_has_treehouse_slot() {
 # directory whose current occupant is another task.
 # NOT waived by --force: --force is the captain's authority to discard THIS
 # task's work, never authority to release another task's slot.
+#
+# The last argument states what THIS caller does when the gate says retain, and
+# every caller must state it rather than inherit a default:
+#   retire  teardown continues past the gate and still deletes this task's own
+#           records, so the task must also hand over its own ownership stamp -
+#           otherwise the stamp outlives every reference to it and the slot can
+#           never be released again.
+#   refuse  teardown aborts and deliberately preserves every record for this
+#           task. A refused operation mutates NOTHING: the stamp stays, because
+#           ownership did not change and it is the rule-2 evidence that stops a
+#           stale sibling from later disposing of a slot that still holds this
+#           task's paused work.
 TEARDOWN_SLOT_RETAINED=0
-slot_release_allowed() {  # <state-dir> <task-id> <worktree> <home> <label>
-  local state=$1 id=$2 wt=$3 home=$4 label=$5 verdict
+slot_release_allowed() {  # <state-dir> <task-id> <worktree> <home> <label> <retire|refuse>
+  local state=$1 id=$2 wt=$3 home=$4 label=$5 disposition=$6 verdict
+  case "$disposition" in
+    retire|refuse) ;;
+    *)
+      echo "error: slot gate for $label $wt was asked for an unknown disposition '$disposition'" >&2
+      return 1
+      ;;
+  esac
   verdict=$(fm_slot_disposal_verdict "$state" "$id" "$wt" "$home")
   [ "$verdict" = dispose ] && return 0
   TEARDOWN_SLOT_RETAINED=1
-  # Hand this task's own claim over as it goes, so the holder left behind can
-  # still release the slot. bin/fm-slot-owner-lib.sh owns exactly when that is
-  # safe - never when the stamp names someone else.
-  fm_slot_stamp_relinquish "$wt" "$id" "$verdict"
   echo "teardown: $label $wt lease RETAINED, not returned to the pool: ${verdict#retain: }" >&2
   echo "teardown: the directory is left untouched on disk so the slot cannot be reissued while another task still references it; --force does not waive this gate." >&2
-  echo "teardown: once nothing references the slot, tearing down its remaining holder releases it; docs/worker-isolation.md owns the operator reclaim path for a slot no record names at all." >&2
+  if [ "$disposition" = retire ]; then
+    fm_slot_stamp_relinquish "$wt" "$id" "$verdict"
+    echo "teardown: once nothing references the slot, tearing down its remaining holder releases it; docs/worker-isolation.md owns the operator reclaim path for a slot no record names at all." >&2
+  else
+    echo "teardown: refusing to continue for $label $wt and leaving every record for $id in place; reconcile the other holder, then retry." >&2
+  fi
   return 1
 }
 
@@ -982,7 +1004,7 @@ remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scop
       echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
       return 1
     }
-    slot_release_allowed "$state_scope" "${expected_id:-$ID}" "$abs_home_path" "$home_scope" "$label" || return 1
+    slot_release_allowed "$state_scope" "${expected_id:-$ID}" "$abs_home_path" "$home_scope" "$label" refuse || return 1
     fm_slot_stamp_clear "$abs_home_path"
     teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
@@ -1076,7 +1098,7 @@ cleanup_firstmate_home_children() {
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
-      if slot_release_allowed "$sub_state" "$child_id" "$child_wt" "$home" "child worktree"; then
+      if slot_release_allowed "$sub_state" "$child_id" "$child_wt" "$home" "child worktree" retire; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
@@ -1185,7 +1207,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     ORCA_PATH_MATCH_VERIFIED=1
   fi
   if [ -d "$WT" ]; then
-    slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" "orca worktree" || exit 1
+    slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" "orca worktree" refuse || exit 1
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
       if git -C "$WT" checkout --detach -q 2>/dev/null; then
@@ -1204,7 +1226,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # live or paused occupant. The rest of teardown still runs - the lease is
   # retired rather than returned, which is exactly the records-and-panes-only
   # policy that kept the 2026-07-25 slot collision harmless.
-  if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" "worktree"; then
+  if slot_release_allowed "$STATE" "$ID" "$WT" "$FM_HOME" "worktree" retire; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
       if git -C "$WT" checkout --detach -q 2>/dev/null; then

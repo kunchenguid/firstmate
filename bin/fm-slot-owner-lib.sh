@@ -30,11 +30,14 @@
 # Absence of evidence is not evidence: a slot with no stamp (every task spawned
 # before stamping existed) and no conflicting reference still disposes normally.
 #
-# Retention must not be a one-way door either. A task that retains on rule 1
-# gives up its own stamp as it goes (fm_slot_stamp_relinquish), so the holder
-# left behind can still release the slot once nothing references it. A stamp
-# naming someone ELSE is never cleared, because that stamp is what stops a stale
-# task from disposing of a slot whose real occupant is merely paused.
+# Retention must not be a one-way door either. A task that retains on rule 1 AND
+# still completes its own teardown gives up its own stamp as it goes
+# (fm_slot_stamp_relinquish), so the holder left behind can still release the
+# slot once nothing references it. A caller that refuses outright keeps every
+# record and therefore keeps the stamp too, because a refused operation changes
+# nothing. A stamp naming someone ELSE is never cleared either, because that
+# stamp is what stops a stale task from disposing of a slot whose real occupant
+# is merely paused.
 # docs/worker-isolation.md owns the operator reclaim path for a slot that was
 # already leaked before this rule existed.
 #
@@ -205,6 +208,12 @@ fm_slot_disposal_verdict() {
 # fm_slot_stamp_relinquish <worktree> <task-id> <verdict>
 # Give up THIS task's claim on a slot it is retaining, so a retained lease can
 # still be released later by whoever is left holding it.
+#
+# Only a caller that PROCEEDS past the gate and goes on to delete this task's
+# own records may ask for this. A caller that refuses outright and preserves
+# every record must not: nothing was torn down, ownership did not change, and
+# erasing the stamp there would strip the rule-2 evidence that stops a stale
+# sibling from later disposing of a slot still holding this task's paused work.
 #
 # Without this the gate is a one-way door. Task B stamps a slot, paused task A's
 # stale metadata also names it, B tears down and retains on rule 1, and B's

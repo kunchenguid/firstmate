@@ -671,7 +671,7 @@ test_a_stamp_naming_another_task_survives_a_retain_and_still_blocks() {
 }
 
 test_teardown_retires_a_contested_lease_even_with_force() {
-  local rec fakebin out status
+  local rec fakebin out status stamp
   rec=$(make_slot_world slot-teardown)
   read_slot_world "$rec"
   fakebin=$(fm_fakebin "$WORLD/fake")
@@ -689,6 +689,9 @@ SH
   fm_write_meta "$WORLD/home/state/quarantined-e6.meta" \
     "window=firstmate:fm-quarantined-e6" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" task-e6 "$WORLD/home" ) \
+    || fail "the contested-slot fixture could not be stamped"
 
   out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$WORLD/home" \
     FM_STATE_OVERRIDE="$WORLD/home/state" FM_DATA_OVERRIDE="$WORLD/home/data" \
@@ -708,6 +711,12 @@ SH
     || fail "teardown moved a contested worktree off its branch"
   assert_absent "$WORLD/home/state/task-e6.meta" "teardown did not clear its own records"
   assert_present "$WORLD/home/state/quarantined-e6.meta" "teardown cleared the other holder's record"
+  # This path DID complete and delete its own records, so its stamp must not
+  # outlive it, or the slot could never be released again.
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
+  [ "$stamp" = none ] \
+    || fail "a completed teardown left its own ownership stamp behind: $stamp"
   pass "teardown retires a contested lease, leaves the slot untouched, and --force does not waive it"
 }
 
