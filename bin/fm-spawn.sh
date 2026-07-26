@@ -93,15 +93,8 @@
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() in bin/fm-launch-lib.sh, the single owner
-#   of every firstmate launch command; placeholders replaced before launch:
-#     __BRIEF__    absolute path to data/<task-id>/brief.md
-#     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
-#                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
-#     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
-#                  written by this script; outside the worktree to avoid pi's trust gate)
-#     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
-#     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
-#     __OPINPUT__   absolute path to the canonical operational-input encoder
+#   of every firstmate launch command; that library's header owns the placeholder
+#   contract this script substitutes before launch.
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
