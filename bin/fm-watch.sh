@@ -835,6 +835,8 @@ while :; do
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+    WAKE_QUEUE_LOCK_HELD=1
     active_pending=""
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
@@ -853,7 +855,11 @@ while :; do
 $pending
 EOF
     pending=$active_pending
-    [ -n "$pending" ] || continue
+    if [ -z "$pending" ]; then
+      WAKE_QUEUE_LOCK_HELD=0
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      continue
+    fi
     reason="signal:$files"
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
@@ -870,56 +876,34 @@ EOF
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
-      appended=0
-      fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-      WAKE_QUEUE_LOCK_HELD=1
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
-        base=${f##*/}
-        task=${base%.status}
-        task=${task%.turn-ended}
-        [ -f "$STATE/$task.meta" ] || continue
-        [ "$(stat_sig "$f" 2>/dev/null || true)" = "$sig" ] || continue
         fm_wake_append_locked signal "$(basename "$f")" "$reason" || exit 1
-        appended=$((appended + 1))
       done <<EOF
 $pending
 EOF
-      if [ "$appended" -eq 0 ]; then
-        WAKE_QUEUE_LOCK_HELD=0
-        fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-        continue
-      fi
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         base=${f##*/}
         task=${base%.status}
         task=${task%.turn-ended}
-        [ -f "$STATE/$task.meta" ] || continue
-        [ "$(stat_sig "$f" 2>/dev/null || true)" = "$sig" ] || continue
         printf '%s' "$sig" > "$sf"
-        if [ ! -f "$STATE/$task.meta" ]; then
-          rm -f "$sf" "$(_hb_surfaced_path "$task")"
-          continue
-        fi
         mark_surfaced "$f"
       done <<EOF
 $pending
 EOF
+      WAKE_QUEUE_LOCK_HELD=0
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
       wake "$reason"
     else
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
-        base=${f##*/}
-        task=${base%.status}
-        task=${task%.turn-ended}
-        [ -f "$STATE/$task.meta" ] || continue
-        [ "$(stat_sig "$f" 2>/dev/null || true)" = "$sig" ] || continue
         printf '%s' "$sig" > "$sf"
-        [ -f "$STATE/$task.meta" ] || rm -f "$sf"
       done <<EOF
 $pending
 EOF
+      WAKE_QUEUE_LOCK_HELD=0
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
       triage_log "absorbed benign $reason"
     fi
   fi
@@ -969,6 +953,7 @@ EOF
         if [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
+            waiting) handle_paused_stale "$w" "$task" "$h" waiting ;;
             *)      clear_pause_tracking "$w" ;;
           esac
         elif afk_present; then
@@ -1035,6 +1020,8 @@ EOF
           #   - paused: the crew declared an external wait, or a declared pause or
           #     captain hold is paired with a confidently dead agent, so absorb on
           #     the long PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
+          #   - waiting: a verified validation decision, so absorb and recheck
+          #     positive worker liveness on the bounded verified-wait cadence;
           #   - none: no running pipeline, idle pane, no busy signature, no declared
           #     pause - the crew has STOPPED. Surface immediately so firstmate peeks
           #     (it may be done via an interactive menu that wrote no done: status,
@@ -1052,6 +1039,9 @@ EOF
               paused)
                 handle_paused_stale "$w" "$task" "$h"
                 ;;
+              waiting)
+                handle_paused_stale "$w" "$task" "$h" waiting
+                ;;
               *)
                 surface_nonterminal_stale "$w" "$h"
                 ;;
@@ -1061,6 +1051,7 @@ EOF
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
+                waiting) handle_paused_stale "$w" "$task" "$h" waiting ;;
                 working) clear_pause_state "$w"
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
@@ -1087,6 +1078,7 @@ EOF
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && ! window_is_busy "$w" "$tail40"; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
+          waiting) handle_paused_stale "$w" "$task" "$h" waiting ;;
           *)      clear_pause_tracking "$w" ;;
         esac
       else
