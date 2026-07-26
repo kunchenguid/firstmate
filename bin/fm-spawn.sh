@@ -235,6 +235,7 @@ ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 CURSOR_ABORT_CLEANUP=0
 CURSOR_ABORT_LOCK_HELD=0
+CURSOR_ABORT_AUTH_FILE=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -311,11 +312,15 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
+  if [ "$CURSOR_ABORT_LOCK_HELD" = 1 ]; then
+    CURSOR_ABORT_LOCK_HELD=0
+    fm_cursor_hooks_unlock "${HOME}/.cursor/hooks" 2>/dev/null || true
+  fi
   if [ "$CURSOR_ABORT_CLEANUP" = 1 ]; then
     CURSOR_ABORT_CLEANUP=0
-    if [ "$CURSOR_ABORT_LOCK_HELD" = 1 ]; then
-      CURSOR_ABORT_LOCK_HELD=0
-      fm_cursor_hooks_unlock "${HOME}/.cursor/hooks" 2>/dev/null || true
+    if [ -n "$CURSOR_ABORT_AUTH_FILE" ]; then
+      rm -f "$CURSOR_ABORT_AUTH_FILE" 2>/dev/null || true
+      CURSOR_ABORT_AUTH_FILE=
     fi
     if [ -n "${ID:-}" ] && [ -n "${STATE:-}" ]; then
       fm_cursor_remove_turnend_auth "$STATE" "$ID" 2>/dev/null || true
@@ -1390,6 +1395,7 @@ EOF
       CURSOR_AUTH_DIR="$CURSOR_HOOKS_DIR/fm-turn-end.d"
       CURSOR_PLUGIN_DIR="$STATE/$ID.cursor-plugin"
       mkdir -p "$CURSOR_AUTH_DIR" "$CURSOR_PLUGIN_DIR/.cursor-plugin" "$CURSOR_PLUGIN_DIR/hooks"
+      CURSOR_ABORT_CLEANUP=1
       cursor_locked=0
       if fm_cursor_hooks_lock "$CURSOR_HOOKS_DIR"; then
         cursor_locked=1
@@ -1398,11 +1404,10 @@ EOF
       old_umask=$(umask)
       umask 077
       auth_file=$(mktemp "$CURSOR_AUTH_DIR/fm.XXXXXXXXXXXX")
+      CURSOR_ABORT_AUTH_FILE=$auth_file
       umask "$old_umask"
       printf '%s\n' "$TURNEND" > "$auth_file"
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.cursor-turnend-token"
-      # Token is durable now; abort cleanup must reclaim it if later steps fail.
-      CURSOR_ABORT_CLEANUP=1
       if ! fm_cursor_write_turnend_hook "$CURSOR_HOOKS_DIR" "$CURSOR_AUTH_DIR"; then
         [ "$cursor_locked" -eq 0 ] || fm_cursor_hooks_unlock "$CURSOR_HOOKS_DIR"
         CURSOR_ABORT_LOCK_HELD=0
@@ -1550,6 +1555,7 @@ META_WINDOW=$T
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 CURSOR_ABORT_CLEANUP=0
 CURSOR_ABORT_LOCK_HELD=0
+CURSOR_ABORT_AUTH_FILE=
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

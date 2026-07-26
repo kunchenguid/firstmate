@@ -202,6 +202,73 @@ test_cursor_lib_cleanup_skips_on_held_lock_and_malformed_hooks_json() {
   pass "cursor lib cleanup skips shared removal under a held lock and never rewrites malformed hooks.json"
 }
 
+test_cursor_lib_refuses_symlinked_hooks_json() {
+  local home hooks_dir auth_dir state target hook_cmd
+  home="$TMP_ROOT/lib-home-symlink"
+  state="$TMP_ROOT/lib-state-symlink"
+  hooks_dir="$home/.cursor/hooks"
+  auth_dir="$hooks_dir/fm-turn-end.d"
+  target="$home/dotfiles/hooks.json"
+  mkdir -p "$auth_dir" "$state" "$(dirname "$target")"
+  printf '%s\n' '{"version":1,"hooks":{"stop":[{"command":"user-own-hook.sh","failClosed":true}]}}' > "$target"
+  ln -s "$target" "$home/.cursor/hooks.json"
+  (
+    # shellcheck source=bin/fm-cursor-lib.sh
+    . "$ROOT/bin/fm-cursor-lib.sh"
+    # shellcheck disable=SC2030
+    HOME="$home"
+    hook_cmd=$(fm_cursor_shell_quote "$hooks_dir/fm-turn-end.sh")
+    if fm_cursor_merge_stop_entry "$home/.cursor" "$hook_cmd" 2>/dev/null; then
+      exit 61
+    fi
+    [ -L "$home/.cursor/hooks.json" ] || exit 62
+    [ "$(jq -r '.hooks.stop[0].command' "$target")" = user-own-hook.sh ] || exit 63
+    [ "$(jq -r '.hooks.stop[0].failClosed' "$target")" = true ] || exit 64
+
+    fm_cursor_write_turnend_hook "$hooks_dir" "$auth_dir" || exit 65
+    printf '%s\n' "$state/e.turn-ended" > "$auth_dir/fm.eeeeeeeeeeee"
+    printf '%s\n' 'fm.eeeeeeeeeeee' > "$state/task-e.cursor-turnend-token"
+    fm_cursor_remove_turnend_auth "$state" task-e
+    [ -L "$home/.cursor/hooks.json" ] || exit 66
+    [ -x "$hooks_dir/fm-turn-end.sh" ] || exit 67
+    [ -d "$auth_dir" ] || exit 68
+    [ "$(jq -r '.hooks.stop[0].failClosed' "$target")" = true ] || exit 69
+  ) || fail "cursor symlinked hooks.json refusal contract failed (subshell exit $?)"
+  pass "cursor hook lifecycle refuses symlinked hooks.json without replacing its target"
+}
+
+test_cursor_abort_cleanup_owns_lock_and_auth_immediately() {
+  local home state auth_file function_source
+  home="$TMP_ROOT/abort-home"
+  state="$TMP_ROOT/abort-state"
+  mkdir -p "$home/.cursor/hooks/fm-turn-end.d" "$state"
+  auth_file="$home/.cursor/hooks/fm-turn-end.d/fm.ffffffffffff"
+  : > "$auth_file"
+  mkdir "$home/.cursor/hooks/.fm-turn-end.lock"
+  function_source=$(sed -n '/^spawn_abort_cleanup()/,/^trap spawn_abort_cleanup EXIT/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
+  (
+    # shellcheck source=bin/fm-cursor-lib.sh
+    . "$ROOT/bin/fm-cursor-lib.sh"
+    eval "$function_source"
+    HOME="$home"
+    STATE="$state"
+    ID=task-f
+    WT="$TMP_ROOT/no-worktree"
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+    HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+    ORCA_ABORT_CLEANUP=0
+    CURSOR_ABORT_CLEANUP=1
+    CURSOR_ABORT_LOCK_HELD=1
+    CURSOR_ABORT_AUTH_FILE="$auth_file"
+    SPAWN_TASK_LOCK_HELD=0
+    CONFIG_INHERIT_LOCK_HELD=0
+    spawn_abort_cleanup
+    [ ! -d "$home/.cursor/hooks/.fm-turn-end.lock" ] || exit 61
+    [ ! -e "$auth_file" ] || exit 62
+  ) || fail "cursor early abort cleanup contract failed (subshell exit $?)"
+  pass "cursor abort cleanup releases its lock and removes an untracked auth file"
+}
+
 test_cursor_primary_hooks_are_wired() {
   local hooks pretool stop
   hooks="$ROOT/.cursor/hooks.json"
@@ -254,6 +321,8 @@ test_cursor_busy_signature_is_specific
 test_cursor_primary_sessionstart_nudge_is_wired
 test_cursor_lib_install_is_idempotent_and_cleanup_is_last_token_scoped
 test_cursor_lib_cleanup_skips_on_held_lock_and_malformed_hooks_json
+test_cursor_lib_refuses_symlinked_hooks_json
+test_cursor_abort_cleanup_owns_lock_and_auth_immediately
 test_cursor_primary_hooks_are_wired
 test_cursor_turnend_adapter_maps_followup_and_loop_guard
 

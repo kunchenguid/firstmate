@@ -124,6 +124,10 @@ fm_cursor_hooks_json_mergeable() {
 fm_cursor_merge_stop_entry() {
   local cursor_home=$1 hook_command=$2 hooks_file tmp source
   hooks_file="$cursor_home/hooks.json"
+  if [ -L "$hooks_file" ]; then
+    echo "error: refusing to rewrite symlinked Cursor hooks file: $hooks_file" >&2
+    return 1
+  fi
   tmp=$(mktemp "$cursor_home/hooks.json.tmp.XXXXXXXXXXXX") || return 1
   if [ -f "$hooks_file" ]; then
     if ! fm_cursor_hooks_json_mergeable "$hooks_file"; then
@@ -169,6 +173,7 @@ fm_cursor_registry_empty() {
 fm_cursor_remove_stop_entry() {
   local cursor_home=$1 hook_command=$2 hooks_file tmp
   hooks_file="$cursor_home/hooks.json"
+  [ ! -L "$hooks_file" ] || return 1
   [ -f "$hooks_file" ] || return 0
   fm_cursor_hooks_json_mergeable "$hooks_file" || return 0
   tmp=$(mktemp "$cursor_home/hooks.json.tmp.XXXXXXXXXXXX") || return 1
@@ -207,9 +212,10 @@ fm_cursor_remove_turnend_auth() {
     # The registered hooks.json command is the shell-quoted script path
     # (exactly what fm-spawn merged), so match that same form here.
     hook_command=$(fm_cursor_shell_quote "$hooks_dir/fm-turn-end.sh")
-    fm_cursor_remove_stop_entry "$cursor_home" "$hook_command" || true
-    rm -f "$hooks_dir/fm-turn-end.sh"
-    rmdir "$auth_dir" 2>/dev/null || true
+    if fm_cursor_remove_stop_entry "$cursor_home" "$hook_command"; then
+      rm -f "$hooks_dir/fm-turn-end.sh"
+      rmdir "$auth_dir" 2>/dev/null || true
+    fi
   fi
   fm_cursor_hooks_unlock "$hooks_dir"
 }
