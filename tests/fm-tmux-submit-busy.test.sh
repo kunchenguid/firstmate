@@ -37,6 +37,7 @@ case "${1:-}" in
       case "$1" in -t) shift ;; -l) ;; Enter) is_enter=1 ;; esac; shift
     done
     if [ "$is_enter" = 1 ]; then
+      [ -z "${FM_FAKE_SENT:-}" ] || printf 'Enter\n' >> "$FM_FAKE_SENT"
       if [ -n "${FM_FAKE_SWALLOW:-}" ] && [ -f "$FM_FAKE_SWALLOW" ]; then
         [ "${FM_FAKE_PERSIST_SWALLOW:-0}" = 1 ] || rm -f "$FM_FAKE_SWALLOW"
       else
@@ -70,8 +71,8 @@ test_busy_pane_pending_returns_empty() {
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 \
     fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = empty ] || fail "busy-pane pending should return empty, got '$(cat "$vfile")'"
-  [ "$(grep -c 'fix findings' "$sent" 2>/dev/null || true)" -eq 0 ] \
-    || fail "busy-pane should not retype text"
+  [ "$(grep -c '^Enter$' "$sent" 2>/dev/null || true)" -eq 3 ] \
+    || fail "proven pending should consume the configured Enter retry budget"
   pass "fm_tmux_submit_enter_core: busy pane + pending composer returns empty (message queued)"
 }
 
@@ -138,23 +139,50 @@ test_busy_pane_unknown_stays_unknown() {
   pass "fm_tmux_submit_enter_core: busy conversion is limited to proven pending input"
 }
 
-test_busy_pane_ambiguous_pending_stays_pending() {
-  local dir fakebin composer vfile
+test_busy_pane_ambiguous_pending_retries_without_conversion() {
+  local dir fakebin composer sent vfile
   dir="$TMP_ROOT/busy-ambiguous-pending"
   fakebin=$(make_submit_mock "$dir")
   composer="$dir/composer"
+  sent="$dir/sent.log"
   vfile="$dir/verdict"
+  : > "$sent"
   printf '╭────────────╮\n│ > fix  │\n╰────────────╯\n' > "$composer"
   touch "$dir/.swallow"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" fm_tmux_composer_state "win" > "$vfile" 2>/dev/null
-  [ "$(cat "$vfile")" = pending ] \
-    || fail "ambiguous composer text should remain publicly pending, got '$(cat "$vfile")'"
-  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_PANE_BUSY=1 \
+  [ "$(cat "$vfile")" = pending-unproven ] \
+    || fail "ambiguous composer text should be pending-unproven, got '$(cat "$vfile")'"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" FM_FAKE_PANE_BUSY=1 \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
     fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
-  [ "$(cat "$vfile")" = pending ] \
-    || fail "a busy pane must not convert ambiguous pending to empty, got '$(cat "$vfile")'"
-  pass "fm_tmux_submit_enter_core: ambiguous pending never uses busy conversion"
+  [ "$(cat "$vfile")" = pending-unproven ] \
+    || fail "a busy pane must not convert pending-unproven to empty, got '$(cat "$vfile")'"
+  [ "$(grep -c '^Enter$' "$sent" 2>/dev/null || true)" -eq 3 ] \
+    || fail "pending-unproven should consume the configured Enter retry budget"
+  pass "fm_tmux_submit_enter_core: pending-unproven retries without busy conversion"
+}
+
+test_unrecognized_state_skips_busy_conversion() {
+  local dir fakebin composer busy_called vfile
+  dir="$TMP_ROOT/unrecognized-state"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  busy_called="$dir/busy-called"
+  vfile="$dir/verdict"
+  printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$composer"
+  (
+    # shellcheck disable=SC2329
+    fm_tmux_composer_state() { printf 'future-state'; }
+    # shellcheck disable=SC2329
+    fm_pane_is_busy() { touch "$busy_called"; return 0; }
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
+      fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
+  ) || fail "unrecognized-state submit check failed"
+  [ "$(cat "$vfile")" = future-state ] \
+    || fail "unrecognized state should be preserved, got '$(cat "$vfile")'"
+  [ ! -e "$busy_called" ] \
+    || fail "unrecognized state must not trigger busy conversion"
+  pass "fm_tmux_submit_enter_core: unrecognized states skip busy conversion"
 }
 
 test_claude_busy_signature_uses_real_capture_shapes() {
@@ -233,5 +261,6 @@ test_idle_pane_pending_returns_pending
 test_busy_pane_composer_clears_first_try
 test_idle_pane_composer_clears_first_try
 test_busy_pane_unknown_stays_unknown
-test_busy_pane_ambiguous_pending_stays_pending
+test_busy_pane_ambiguous_pending_retries_without_conversion
+test_unrecognized_state_skips_busy_conversion
 test_claude_busy_signature_uses_real_capture_shapes

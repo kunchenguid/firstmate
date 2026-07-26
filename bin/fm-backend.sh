@@ -551,8 +551,8 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 }
 
 # fm_backend_send_text_submit: type text once, then submit and verify,
-# retrying only the submission (never retyping). Echoes the verdict
-# (empty|pending|unknown|send-failed for submit-verifying adapters).
+# retrying only the submission (never retyping). Echoes the backend's
+# proof-carrying verdict; callers require exact empty for confirmed delivery.
 fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local backend=$1
   shift
@@ -622,8 +622,8 @@ fm_backend_busy_state() {  # <backend> <target>
 }
 
 # fm_backend_composer_state: classify the composer/input row of <target> as
-# empty|pending|unknown for callers that need a pre-submit pending-input guard
-# or an adapter's conservative submit fallback. It is exposed generically so a
+# empty|pending|pending-unproven|unknown for callers that need a pre-submit
+# input guard or an adapter's conservative submit fallback. It is exposed so a
 # caller other than the send path (the away-mode daemon's supervisor-pane
 # pending-input guard, bin/fm-supervise-daemon.sh) can ask the same question
 # without duplicating per-backend composer-reading logic. tmux and herdr both
@@ -633,7 +633,7 @@ fm_backend_busy_state() {  # <backend> <target>
 # submit path uses an internal content-diff approach with no separately named
 # classifier, so it reports unknown here - callers fall back to their own
 # policy, exactly as an unknown fm_backend_busy_state already does.
-fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
+fm_backend_composer_state() {  # <backend> <target> -> empty|pending|pending-unproven|unknown
   local backend=$1
   shift
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }

@@ -548,12 +548,11 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 # (one source of truth with fm-send.sh). These thin wrappers keep the daemon's
 # call sites and the unit tests stable.
 #
-# pane_input_pending returns 0 (pending) when the cursor line holds real
-# unsubmitted text - a human's half-typed line (the return race) or a previous
-# injection whose Enter was swallowed. The detector drops dim/faint ghost text and
-# strips the harness's composer box borders, so a ghost-only or idle bordered
-# claude composer ("│ > … │") is correctly read as empty, not pending (incidents
-# afk-invx-i5 and composer-robust).
+# pane_input_pending returns 0 unless the composer is positively proven empty.
+# This includes real unsubmitted text, ambiguous structure, unreadable state,
+# and future verdicts. The detector drops dim/faint ghost text and strips the
+# harness's composer box borders, so an aligned ghost-only or idle bordered
+# claude composer ("│ > … │") is correctly proven empty.
 # pane_is_busy / pane_input_pending: BACKEND-AWARE now (previously tmux-only
 # direct calls). <backend> defaults to tmux when omitted, so every existing
 # caller/test that passes only <target> is unaffected. Dispatch goes through
@@ -575,18 +574,12 @@ pane_is_busy() {  # <target> [backend]
     | fm_busy_lines_match
 }
 
-# pane_input_pending: the standalone "is there real unsubmitted text" predicate,
-# dispatching through fm_backend_composer_state (byte-identical to a direct
-# fm_tmux_composer_state call for the default/omitted-backend case). inject_msg
-# no longer routes its composer-guard through this boolean: a safe injection
-# target must be affirmatively 'empty', and a boolean pending/not-pending check
-# cannot distinguish an empty agent composer from a bare dead-shell prompt or an
-# unreadable pane (both 'unknown'), so inject_msg reads the full tri-state
-# verdict directly. This predicate is retained as the shared pending check and
-# as the vehicle for the composer-classifier dispatch regression tests.
+# pane_input_pending dispatches through fm_backend_composer_state and treats
+# every verdict except exact empty as unsafe. inject_msg reads the full verdict
+# directly and applies the same positive-proof boundary.
 pane_input_pending() {  # <target> [backend]
   local target=$1 backend=${2:-tmux}
-  [ "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)" = pending ]
+  [ "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)" != empty ]
 }
 
 task_window_backend() {  # <window> <state>

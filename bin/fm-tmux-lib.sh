@@ -299,13 +299,15 @@ EOF
 # fm_tmux_composer_state classification contract:
 # A row is structural only when its first or last non-whitespace character is a
 # composer edge. A complete box has matching border families and bounded top and
-# bottom rows. Real content on any row is publicly pending; internal submit
-# confirmation retains whether that pending row has proven geometry. Empty
-# requires positive proof: a genuinely empty composer, an
-# all-empty unambiguous box, an empty non-bordered fallback row, or the submit
-# core's busy-queued Enter conversion. Other structural ambiguity is unknown,
-# never empty.
-fm_tmux_composer_state_detail() {  # <target> -> empty|pending|ambiguous-pending|unknown
+# bottom rows. The proof-carrying verdict is empty for proven emptiness, pending
+# for proven text in established structure, pending-unproven for text in
+# ambiguous structure, and unknown for unreadable state. Consumers that can
+# overwrite input or confirm delivery must accept only the exact positive proof
+# they require, so unrecognized future verdicts fail safe by default. Empty
+# requires positive proof: a genuinely empty composer, an all-empty unambiguous
+# box, an empty non-bordered fallback row, or the submit core's proven
+# busy-queued Enter conversion.
+fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   local target=$1 cy raw pane plain box box_status top bottom geometry_ambiguous
   local row row_raw state unknown_seen=0
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
@@ -324,7 +326,7 @@ fm_tmux_composer_state_detail() {  # <target> -> empty|pending|ambiguous-pending
       case "$state" in
         pending)
           if [ "$geometry_ambiguous" = 1 ]; then
-            printf 'ambiguous-pending'
+            printf 'pending-unproven'
           else
             printf 'pending'
           fi
@@ -356,20 +358,10 @@ fm_tmux_composer_state_detail() {  # <target> -> empty|pending|ambiguous-pending
   fm_tmux_composer_row_state "$raw" 0
 }
 
-fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
-  local state
-  state=$(fm_tmux_composer_state_detail "$1")
-  case "$state" in
-    ambiguous-pending) printf 'pending' ;;
-    *) printf '%s' "$state" ;;
-  esac
-}
-
-# fm_pane_input_pending: 0 (pending) if the composer holds real unsubmitted
-# text, 1 otherwise. An unreadable pane is treated as NOT pending (fail-safe:
-# the same bias the old daemon used — an unknown pane defers nothing here).
+# fm_pane_input_pending: 0 when the composer is not proven empty, so pending
+# text, ambiguous structure, unreadable state, and future verdicts all defer.
 fm_pane_input_pending() {  # <target>
-  [ "$(fm_tmux_composer_state "$1")" = pending ]
+  [ "$(fm_tmux_composer_state "$1")" != empty ]
 }
 
 # fm_pane_is_busy: 0 if the pane's last few non-blank lines show a busy footer
@@ -384,36 +376,34 @@ fm_pane_is_busy() {  # <target> [harness]
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
 # verifying the composer cleared. Retries Enter ONLY — never retypes, because a
 # swallowed Enter leaves our text in the composer and retyping would duplicate
-# it. Echoes the final verdict on stdout (empty|pending|unknown|send-failed) so callers can
-# pick their own success policy:
-#   - the daemon clears its buffer only on "empty" (strict: an unknown pane must
-#     not be mistaken for a delivered escalation).
-#   - fm-send fails only on "pending" (lenient: a positively-confirmed swallow),
-#     so an unreadable pane never turns a normal steer into a false error.
+# it. Echoes the final proof-carrying verdict on stdout so callers can require
+# exact `empty` before treating submission as confirmed.
 # Busy-queued Enter (opencode 1.18.4): the harness accepts Enter while mid-turn
 # and queues it for after the current turn, but keeps the typed text visible in
 # the composer. Once the Enter-retry budget is spent and a structurally proven
 # composer still reads "pending", the submit core falls back to
 # `fm_pane_is_busy`: a busy pane means the Enter was accepted and queued (report
-# `empty` so the caller does not re-send), while an idle pane or ambiguous
-# pending geometry keeps `pending` as a genuine swallow. This is the only place
-# that exception lives, so the daemon's strict and fm-send's lenient success
-# policies both treat a proven busy-queued Enter as delivered.
+# `empty` so the caller does not re-send), while an idle pane keeps `pending` as
+# a genuine swallow. Pending-unproven receives the same Enter retry budget but
+# never reaches this exception.
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
   local target=$1 retries=$2 sleep_s=$3 i=0 state
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
-    state=$(fm_tmux_composer_state_detail "$target")
+    state=$(fm_tmux_composer_state "$target")
     case "$state" in
-      pending) ;;
-      ambiguous-pending) printf 'pending'; return 0 ;;
+      pending|pending-unproven) ;;
       *) printf '%s' "$state"; return 0 ;;
     esac
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || break
   done
-  # Retries exhausted, composer still shows pending.
+  if [ "$state" != pending ]; then
+    printf '%s' "$state"
+    return 0
+  fi
+  # Retries exhausted, composer still shows proven pending.
   # If the pane is busy (agent mid-turn), the harness accepted the Enter
   # and queued the message for processing when the current turn ends.
   # Treat it as submitted so the caller does not re-send.

@@ -443,8 +443,8 @@ test_differing_widths_use_asymmetric_verdicts() {
   printf '╭──────────╮\n│ > text │\n╰──────────╯\n' > "$capture"
   out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
     fm_tmux_composer_state "fakepane")
-  [ "$out" = pending ] \
-    || fail "text in a differing-width box should be pending, got '$out'"
+  [ "$out" = pending-unproven ] \
+    || fail "text in a differing-width box should be pending-unproven, got '$out'"
   printf '╭──────────╮\n│        │\n╰──────────╯\n' > "$capture"
   out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
     fm_tmux_composer_state "fakepane")
@@ -462,8 +462,8 @@ test_wide_composer_text_is_pending() {
     printf '╭────────────────────╮\n│ > %s │\n╰────────────────────╯\n' "$text" > "$capture"
     out=$(PATH="$fb:$PATH" LC_ALL=C FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
       fm_tmux_composer_state "fakepane")
-    [ "$out" = pending ] \
-      || fail "wide composer text '$text' should be pending, got '$out'"
+    [ "$out" = pending-unproven ] \
+      || fail "wide composer text '$text' should be pending-unproven, got '$out'"
   done
   pass "fm_tmux_composer_state: emoji and CJK text remain pending under the C locale"
 }
@@ -496,6 +496,15 @@ test_all_tmux_harness_composers_share_classification() {
       || fail "$harness composer with text should be pending, got '$out'"
   done
   pass "fm_tmux_composer_state: all tmux harnesses share empty and pending classification"
+}
+
+test_unrecognized_state_defers_input_guard() {
+  (
+    # shellcheck disable=SC2329
+    fm_tmux_composer_state() { printf 'future-state'; }
+    fm_pane_input_pending "fakepane"
+  ) || fail "an unrecognized composer state should defer the input guard"
+  pass "fm_pane_input_pending: unrecognized states defer by default"
 }
 
 test_fallback_capture_race_with_edge_is_unknown() {
@@ -611,6 +620,7 @@ test_unproved_empty_geometry_is_unknown
 test_differing_widths_use_asymmetric_verdicts
 test_wide_composer_text_is_pending
 test_all_tmux_harness_composers_share_classification
+test_unrecognized_state_defers_input_guard
 test_fallback_capture_race_with_edge_is_unknown
 test_legitimate_empty_routes_remain_empty
 test_non_bordered_composer_uses_compatibility_fallback
