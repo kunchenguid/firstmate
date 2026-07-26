@@ -119,9 +119,9 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 
 # fm_tmux_composer_row_state: classify one raw styled candidate row.
 # A structural caller forces bordered=1; the compatibility fallback detects the
-# old single-row border shape from the plain row.
-fm_tmux_composer_row_state() {  # <raw-row> [bordered] -> empty|pending|unknown
-  local raw=$1 bordered=${2:-auto} plain stripped
+# old single-row border shape from the plain row and may recognize a busy footer.
+fm_tmux_composer_row_state() {  # <raw-row> [bordered] [allow-busy] -> empty|pending|unknown
+  local raw=$1 bordered=${2:-auto} allow_busy=${3:-1} plain stripped
   plain=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
   plain="${plain#"${plain%%[![:space:]]*}"}"
   plain="${plain%"${plain##*[![:space:]]}"}"
@@ -141,8 +141,7 @@ fm_tmux_composer_row_state() {  # <raw-row> [bordered] -> empty|pending|unknown
   esac
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  # A busy footer landing where the composer is read is not pending input.
-  if [ -n "$stripped" ] \
+  if [ "$allow_busy" = 1 ] && [ -n "$stripped" ] \
      && printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
     printf 'empty'; return 0
   fi
@@ -154,7 +153,7 @@ fm_tmux_composer_row_state() {  # <raw-row> [bordered] -> empty|pending|unknown
 # on any content row or on the bottom border; no fixed cursor offset is used.
 fm_tmux_find_composer_box() {  # <cursor-y> <plain-visible-pane> -> "<top> <bottom>"
   local cy=$1 pane=$2 line trimmed kind family current_family=
-  local row=0 top=-1 valid=0 content_rows=0
+  local row=0 top=-1 valid=0 content_rows=0 unsafe=0 cursor_structural=0
   while IFS= read -r line; do
     trimmed="${line#"${line%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
@@ -171,7 +170,17 @@ fm_tmux_find_composer_box() {  # <cursor-y> <plain-visible-pane> -> "<top> <bott
       '┗'*'┛') kind=bottom; family=heavy ;;
       '+'*'+') kind=ascii; family=ascii ;;
     esac
+    if [ "$row" -eq "$cy" ]; then
+      case "$trimmed" in
+        '╭'*|'┌'*|'╔'*|'┏'*|'╰'*|'└'*|'╚'*|'┗'*|'│'*'│'|'┃'*'┃'|'|'*'|'|'+'*'+')
+          cursor_structural=1
+          ;;
+      esac
+    fi
     if [ "$kind" = top ] || { [ "$kind" = ascii ] && [ "$top" -lt 0 ]; }; then
+      if [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; then
+        unsafe=1
+      fi
       top=$row
       current_family=$family
       valid=1
@@ -182,6 +191,10 @@ fm_tmux_find_composer_box() {  # <cursor-y> <plain-visible-pane> -> "<top> <bott
          && [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; then
         printf '%s %s' "$top" "$row"
         return 0
+      fi
+      if { [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; } \
+         || [ "$row" -eq "$cy" ]; then
+        unsafe=1
       fi
       top=-1
       current_family=
@@ -197,6 +210,12 @@ fm_tmux_find_composer_box() {  # <cursor-y> <plain-visible-pane> -> "<top> <bott
   done <<EOF
 $pane
 EOF
+  if [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ]; then
+    unsafe=1
+  fi
+  if [ "$unsafe" = 1 ] || [ "$cursor_structural" = 1 ]; then
+    return 2
+  fi
   return 1
 }
 
@@ -209,7 +228,7 @@ EOF
 # for non-bordered composers. A read failure or unsafe bare shell prompt is
 # unknown.
 fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cy raw pane plain box top bottom row row_raw state unknown_seen=0
+  local target=$1 cy raw pane plain box box_status top bottom row row_raw state unknown_seen=0
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   pane=$(tmux capture-pane -e -p -t "$target" -S 0 -E - 2>/dev/null) || { printf 'unknown'; return 0; }
@@ -220,7 +239,7 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
     row=$((top + 1))
     while [ "$row" -lt "$bottom" ]; do
       row_raw=$(printf '%s\n' "$pane" | sed -n "$((row + 1))p")
-      state=$(fm_tmux_composer_row_state "$row_raw" 1)
+      state=$(fm_tmux_composer_row_state "$row_raw" 1 0)
       case "$state" in
         pending) printf 'pending'; return 0 ;;
         unknown) unknown_seen=1 ;;
@@ -229,6 +248,12 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
     done
     if [ "$unknown_seen" = 1 ]; then printf 'unknown'; else printf 'empty'; fi
     return 0
+  else
+    box_status=$?
+    if [ "$box_status" -eq 2 ]; then
+      printf 'unknown'
+      return 0
+    fi
   fi
   raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) \
     || { printf 'unknown'; return 0; }

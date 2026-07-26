@@ -306,6 +306,60 @@ test_bottom_border_cursor_reads_ghost_only_box_as_empty() {
   pass "fm_tmux_composer_state: Grok's bottom-border cursor quirk reads an empty box structurally"
 }
 
+test_bordered_busy_signatures_are_pending() {
+  local dir fb capture out signature
+  dir="$TMP_ROOT/bordered-busy-signatures"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  for signature in 'Working...' 'Ctrl+c:cancel'; do
+    printf '╭────────────────────╮\n│ %s │\n╰────────────────────╯\n' "$signature" > "$capture"
+    out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+      fm_tmux_composer_state "fakepane")
+    [ "$out" = pending ] \
+      || fail "typed bordered busy signature '$signature' should be pending, got '$out'"
+  done
+  pass "fm_tmux_composer_state: typed Pi and Grok busy signatures inside a box are pending"
+}
+
+test_non_bordered_busy_footer_remains_empty() {
+  local dir fb capture out
+  dir="$TMP_ROOT/non-bordered-busy"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  printf 'Working...\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] \
+    || fail "a non-bordered busy footer should remain empty, got '$out'"
+  pass "fm_tmux_composer_state: non-bordered busy footers retain compatibility behavior"
+}
+
+test_clipped_bordered_box_is_unknown() {
+  local dir fb capture out
+  dir="$TMP_ROOT/clipped-box"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  printf '╭────────────────────╮\n│ >                  │\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = unknown ] \
+    || fail "a bordered box with no readable bottom border should be unknown, got '$out'"
+  pass "fm_tmux_composer_state: an unbounded bordered box fails closed as unknown"
+}
+
+test_non_bordered_composer_uses_compatibility_fallback() {
+  local dir fb capture out
+  dir="$TMP_ROOT/non-bordered-fallback"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  printf '› deploy staging\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = pending ] \
+    || fail "a non-bordered composer should retain cursor-row classification, got '$out'"
+  pass "fm_tmux_composer_state: panes without bordered structure retain compatibility fallback"
+}
+
 # --- fm-peek.sh stays escape-free (LLM-facing path) -------------------------
 
 test_peek_output_is_escape_free() {
@@ -346,4 +400,8 @@ test_real_text_with_trailing_ghost_is_pending
 test_two_row_composer_reads_text_above_empty_cursor_row
 test_wrapped_composer_reads_all_content_rows
 test_bottom_border_cursor_reads_ghost_only_box_as_empty
+test_bordered_busy_signatures_are_pending
+test_non_bordered_busy_footer_remains_empty
+test_clipped_bordered_box_is_unknown
+test_non_bordered_composer_uses_compatibility_fallback
 test_peek_output_is_escape_free
