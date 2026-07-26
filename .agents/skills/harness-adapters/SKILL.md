@@ -25,8 +25,8 @@ If `config/crew-harness` is unset or `default`, there is no concrete value to in
 Inheritance also copies the literal `config/crew-dispatch.json` file, so secondmates apply the same best-fit profile rules for their own crewmates.
 
 Each adapter splits into mechanics and knowledge.
-The per-task mechanics, including the autonomy flag and any enabled crewmate turn-end hook, live in `bin/fm-spawn.sh`.
-`bin/fm-launch-lib.sh` is the single owner of every verified launch command, for crewmate, scout, secondmate, and primary sessions alike; never hand-write one.
+The per-task mechanics, including any enabled crewmate turn-end hook, live in `bin/fm-spawn.sh`.
+`bin/fm-launch-lib.sh` is the single owner of every verified launch command and the autonomy, model, and effort flags it carries, for crewmate, scout, secondmate, and primary sessions alike; never hand-write one.
 The primary-session "no turn ends blind" guard contract and harness hook installation paths live in `docs/turnend-guard.md`.
 The primary-session watcher wake protocols are rendered from `docs/supervision-protocols/` by `bin/fm-supervision-instructions.sh`.
 The supervision knowledge lives here: busy signature, exit command, interrupt, dialogs, resume behavior, skill invocation, and quirks.
@@ -122,7 +122,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. |
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-13 on Pi 0.80.6. `pi --help` advertises `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; `pi --print --model openai-codex/gpt-5.6-sol --thinking max 'Reply with exactly OK.'` completed successfully. |
-| opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
+| opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches opencode's interactive TUI, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 
 ### Model support discovery
@@ -271,7 +271,7 @@ The follow-up was verified in the interactive TUI; `opencode run` can exit befor
 
 Pi has no permission system, so crewmates are always autonomous.
 Keep the brief as one positional argument.
-Multiple positional args become separate queued messages; `fm-spawn`'s template already does this correctly.
+Multiple positional args become separate queued messages; the verified pi template in `bin/fm-launch-lib.sh` already does this correctly.
 
 Project trust dialog can appear on the first pi run in any not-yet-trusted directory, observed even on clean worktrees.
 Accept with Enter.
