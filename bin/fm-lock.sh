@@ -75,7 +75,6 @@ HOLDER_DETAIL=
 PID_IDENTITY=
 PID_IDENTITY_DETAIL=
 RECLAIM_HELD=0
-RECLAIM_ACQUIRE_ERROR=
 RECLAIM_COMMAND_ACTIVE=0
 
 usage() {
@@ -630,7 +629,6 @@ detach_abandoned_reclaim_mutex() {
 # Returns 0 held, 1 busy (live or mid-acquire), 2 storage or malformed-state failure.
 acquire_reclaim_lock() {
   local attempt=0 generation gate abandoned_rc detach_rc
-  RECLAIM_ACQUIRE_ERROR=
   while [ "$attempt" -lt 2 ]; do
     attempt=$((attempt + 1))
     if mkdir "$RECLAIM_LOCK" 2>/dev/null; then
@@ -642,17 +640,14 @@ acquire_reclaim_lock() {
         return 0
       fi
       remove_reclaim_mutex
-      RECLAIM_ACQUIRE_ERROR=io
       return 2
     fi
     if [ -L "$RECLAIM_LOCK" ] || { [ -e "$RECLAIM_LOCK" ] && [ ! -d "$RECLAIM_LOCK" ]; }; then
-      RECLAIM_ACQUIRE_ERROR=io
       return 2
     fi
     generation=$(reclaim_mutex_generation 2>/dev/null || true)
     if [ -z "$generation" ]; then
       if [ -d "$RECLAIM_LOCK" ]; then
-        RECLAIM_ACQUIRE_ERROR=io
         return 2
       fi
       continue
@@ -666,30 +661,24 @@ acquire_reclaim_lock() {
         if [ "$detach_rc" -eq 0 ]; then
           continue
         elif [ "$detach_rc" -eq 2 ]; then
-          RECLAIM_ACQUIRE_ERROR=io
           return 2
         fi
         ;;
       2)
-        RECLAIM_ACQUIRE_ERROR=io
         return 2
         ;;
       *)
-        RECLAIM_ACQUIRE_ERROR=busy
         return 1
         ;;
     esac
     if [ ! -e "$RECLAIM_LOCK" ]; then
       continue
     fi
-    RECLAIM_ACQUIRE_ERROR=busy
     return 1
   done
   if [ ! -e "$RECLAIM_LOCK" ]; then
-    RECLAIM_ACQUIRE_ERROR=io
     return 2
   fi
-  RECLAIM_ACQUIRE_ERROR=busy
   return 1
 }
 

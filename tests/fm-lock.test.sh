@@ -402,6 +402,7 @@ EOF
     "reclaim --expected 999999 --confirmed-closed"
   do
     rc=0
+    # shellcheck disable=SC2086 # Each case intentionally supplies multiple CLI arguments.
     out=$(FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$LOCK" $args 2>&1) || rc=$?
     [ "$rc" -ne 0 ] || fail "invalid reclaim invocation succeeded: $args"
     assert_contains "$out" "LOCK_RESULT=" "invalid reclaim invocation omitted LOCK_RESULT: $args"
