@@ -16,7 +16,8 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#                 "FMX: X mode on ..." or "FMX: X mode off ...",
+#                 "KEEPALIVE: <session-revival arming problem>".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
 #          an origin fetch) AND its loaded instruction surface (AGENTS.md, bin/,
@@ -66,9 +67,12 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
+#          A KEEPALIVE line means the opt-in external session-revival loop
+#          (bin/fm-keepalive.sh, docs/session-keepalive.md) could not be armed or
+#          its config value is unrecognized. A home that has not opted in is silent.
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          x_mode_setup, fleet_sync) while still printing every read-only detect line
+#          x_mode_setup, keepalive_arm, fleet_sync) while still printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
@@ -700,6 +704,36 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
+# Arm the opt-in external session keepalive for this home. Off by default: with no
+# config/keepalive value of "on" this is a complete no-op that prints nothing.
+# bin/fm-keepalive.sh owns opt-in resolution, endpoint discovery, its singleton
+# lock, and its non-visible terminal, so this sweep only invokes `start` and
+# reports an actionable failure. Idempotent, because `start` leaves an
+# already-running loop alone; it must run from the primary's own pane so the
+# captured endpoint is the primary session's.
+keepalive_arm() {
+  local keepalive="$SCRIPT_DIR/fm-keepalive.sh" out status
+  [ -x "$keepalive" ] || return 0
+  "$keepalive" config-check
+  status=$?
+  case "$status" in
+    0) ;;
+    2)
+      echo "KEEPALIVE: config/keepalive value is unrecognized (expected on or off); session revival stays off"
+      return 0 ;;
+    *) return 0 ;;
+  esac
+  out=$("$keepalive" start 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "KEEPALIVE: could not arm session revival - $(printf '%s' "$out" | tr '\n' ' ')"
+    return 0
+  fi
+  if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+    echo "BOOTSTRAP_INFO: session revival armed - $(printf '%s' "$out" | tr '\n' ' ')"
+  fi
+}
+
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -871,6 +905,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_liveness_sweep
   secondmate_sync
   x_mode_setup
+  keepalive_arm
   fleet_sync
 fi
 exit 0

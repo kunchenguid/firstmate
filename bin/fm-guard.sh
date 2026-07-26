@@ -13,10 +13,11 @@
 # distinct staleness episode in this FM_HOME (keyed to beacon mtime or absence);
 # later guarded commands in the same episode print a one-line reminder instead.
 # Episode state lives only under state/.guard-watcher-stale-banner (volatile,
-# bounded). Independent alarms (queued wakes, worktree tangle) are never
-# suppressed by that dedup. Normal wake handling (watcher briefly down between a
-# wake and the next supervision resume) stays inside the grace window and stays
-# silent. Always exits 0: the guard warns, it never blocks.
+# bounded). Independent alarms (queued wakes, worktree tangle, an exhausted
+# session revival) are never suppressed by that dedup. Normal wake handling
+# (watcher briefly down between a wake and the next supervision resume) stays
+# inside the grace window and stays silent. Always exits 0: the guard warns, it
+# never blocks.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -113,6 +114,16 @@ fm_guard_clear_stale_banner() {
   rm -f "$STALE_BANNER_MARKER" 2>/dev/null || true
 }
 
+# Session-revival exhaustion is an independent hazard, reported whether or not
+# work is still in flight: an earlier turn of this session died and the opt-in
+# keepalive loop gave up after its attempt cap (bin/fm-keepalive.sh,
+# docs/session-keepalive.md). The report file is the only durable record of that
+# gap, so every guarded command surfaces it until it is read and removed.
+fm_guard_report_keepalive_exhausted() {
+  [ -f "$STATE/.keepalive-exhausted" ] || return 0
+  echo "WARNING: automatic session revival was exhausted - read $STATE/.keepalive-exhausted, reconcile in-flight work, then remove that file." >&2
+}
+
 # Worktree-tangle alarm, checked FIRST and independent of in-flight tasks: the
 # firstmate PRIMARY checkout (FM_ROOT) must stay on its default branch. If a
 # crewmate's branch/commits landed here instead of in its own isolated worktree,
@@ -153,6 +164,7 @@ if [ "$in_flight" -eq 0 ]; then
   # in-flight + stale combination is a fresh episode even if the beacon is still
   # absent with the same key string.
   [ "$READ_ONLY" -eq 1 ] || fm_guard_clear_stale_banner
+  fm_guard_report_keepalive_exhausted
   exit 0
 fi
 
@@ -217,4 +229,5 @@ if "$queue_pending"; then
     echo "WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else." >&2
   fi
 fi
+fm_guard_report_keepalive_exhausted
 exit 0

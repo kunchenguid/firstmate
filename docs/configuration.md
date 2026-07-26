@@ -113,6 +113,16 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Session keepalive (config/keepalive)
+
+The external session keepalive revives a PRIMARY firstmate session whose own turn died while fleet work was still in flight; [`session-keepalive.md`](session-keepalive.md) owns its detection evidence, injected input, backoff, cap, away-mode division of duty, and authority boundary.
+It ships inert and changes nothing until the home opts in by putting `on` in the local, gitignored `config/keepalive` file under the effective firstmate home.
+An absent file, an empty file, or `off` keeps it off, while any other value is reported as a `KEEPALIVE:` session-start diagnostic and never treated as `on`.
+When the value is `on`, the locked session-start bootstrap sweep runs `bin/fm-keepalive.sh start` from the primary's own pane so the captured endpoint is the primary session's; arming is idempotent and a home that has not opted in stays silent.
+The loop stands down on its next tick when the value stops being `on`, so opting out needs no process hunting.
+It supports the same `tmux` and `herdr` supervisor panes as away-mode injection and refuses any other supervisor backend at startup.
+This file is not inherited by secondmate homes: a secondmate is idle by default and its parent, not an injected turn, owns routing work to it.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
@@ -465,6 +475,18 @@ FM_CRASH_BACKOFF=60                # seconds to wait after crossing the crash th
 FM_CRASH_NORMAL_SLEEP=5            # seconds to wait after an isolated watcher crash
 FM_LOG_MAX_BYTES=1048576           # daemon log size that triggers trimming
 FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
+# external session keepalive (bin/fm-keepalive.sh); opt-in via config/keepalive
+FM_KEEPALIVE=                      # on|off override for config/keepalive, mainly for tests
+FM_KEEPALIVE_POLL=30               # seconds between keepalive evaluation passes
+FM_KEEPALIVE_GRACE=                # stale-beacon threshold for the lapse signal; defaults to FM_GUARD_GRACE
+FM_KEEPALIVE_CONFIRM_SECS=45       # continuous lapse required before the first revival attempt
+FM_KEEPALIVE_BACKOFF_BASE=60       # first backoff step; attempt N+1 waits base * 2^(N-1)
+FM_KEEPALIVE_BACKOFF_MAX=900       # documented backoff ceiling
+FM_KEEPALIVE_MAX_ATTEMPTS=5        # revival attempts before writing state/.keepalive-exhausted
+FM_KEEPALIVE_GONE_EXIT_SECS=600    # continuous primary-endpoint absence before the loop stands down
+FM_KEEPALIVE_SUBMIT_RETRIES=3      # Enter-retry attempts after typing the revival input once
+FM_KEEPALIVE_SUBMIT_SLEEP=0.5      # seconds between keepalive submit checks
+FM_KEEPALIVE_ENTRY=                # test seam: command run in the created non-visible terminal
 ```
 
 `fm-teardown.sh` retries only Git's `Unable to create '...index.lock': File exists` return failure up to `FM_TREEHOUSE_RETURN_LOCK_RETRIES` times.

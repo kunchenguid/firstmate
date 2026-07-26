@@ -83,6 +83,11 @@ The daemon injects only into an affirmatively `empty` composer, so both `pending
 Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
+
+Those mechanisms all run inside the primary's own turns, so none of them can start a turn after the primary's turn itself dies with work in flight.
+The opt-in external keepalive (`bin/fm-keepalive.sh`) closes that one gap from outside the session: it proves the session process is alive but its supervision beacon has lapsed with an idle, affirmatively empty composer, then injects one `session-revive` operational input through the same typed protocol and submit primitives the sub-supervisor uses.
+Its revival duty is exclusive with away mode - while `state/.afk` exists the daemon owns injection - and it stops at a documented backoff ceiling and attempt cap, after which `bin/fm-guard.sh` surfaces the durable exhaustion report.
+[session-keepalive.md](session-keepalive.md) owns that contract, its detection evidence, and its authority boundary.
 `fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
 
 ## Runtime session backends
@@ -130,7 +135,7 @@ Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-
 
 Firstmate's own no-mistakes gate runs agents inside a checkout that also contains the fleet-captain identity in `AGENTS.md`, so gate execution needs an authority boundary separate from ordinary crewmate worktree isolation.
 The tracked `.no-mistakes.yaml` sets `disable_project_settings: true`; no-mistakes honors that setting only from the trusted default-branch copy, so a pushed branch cannot enable its own project instructions during validation.
-Independently, `fm-spawn.sh`, `fm-send.sh`, and `fm-teardown.sh` source `bin/fm-gate-refuse-lib.sh` and exit with status 3 before fleet mutation when the gate environment marker is present or the current checkout matches the default no-mistakes gate-repository topology.
+Independently, `fm-spawn.sh`, `fm-send.sh`, `fm-teardown.sh`, and `fm-keepalive.sh`'s arming, driving, and retiring verbs source `bin/fm-gate-refuse-lib.sh` and exit with status 3 before fleet mutation when the gate environment marker is present or the current checkout matches the default no-mistakes gate-repository topology.
 A normal primary checkout or crewmate worktree has neither signal and remains unaffected.
 The helper's header owns the exact signal detection, relocated-home limitation, test-harness bypass, and relationship to no-mistakes' HEAD-continuity guard.
 

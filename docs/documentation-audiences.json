@@ -260,6 +260,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/session-keepalive.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/sessionstart-nudge.md",
       "audience": "operator-current"
     },

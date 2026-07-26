@@ -161,3 +161,51 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+
+## Session keepalive revival
+
+The external revival path ran against a real primary session on 2026-07-26 with Claude Code 2.1.220 on tmux, in a throwaway `FM_HOME` that contained only one in-flight task record, a session lock naming the live harness pid, and `config/keepalive` set to `on`.
+Operator behavior and the detection contract stay in [session-keepalive.md](../session-keepalive.md).
+
+Arming, with the primary pane passed explicitly:
+
+```sh
+FM_HOME="$H" FM_SUPERVISOR_TARGET=%30 FM_SUPERVISOR_BACKEND=tmux bin/fm-keepalive.sh start
+```
+
+Observed output, plus the recorded terminal id and the loop's own log with default knobs (45s confirm window, 30s poll):
+
+```
+fm-keepalive: watching %30 from detached tmux session fm-keepalive-3625860978-508-109-1785080690
+loop: running pid 632
+config: on
+verdict: confirming|lapse held 0s of the 45s confirm window (beacon never)
+
+[2026-07-26T08:44:50-0700] loop starting (pid 632); backend=tmux target=%30 poll=30s
+[2026-07-26T08:45:51-0700] revived: attempt 1 of 5 - supervision lapsed never with 1 task(s) in flight; attempt 1 of 5
+```
+
+The pane received exactly one typed input and started a real turn:
+
+```
+❯ FIRSTMATE_OP: v1 session-revive: Automatic session revival 1 of 5: the previous turn ended without handing supervision back (...).
+  Resume supervision now - drain queued wakes with bin/fm-wake-drain.sh, reconcile in-flight work from the durable records, and re-arm the supervision cycle for this harness. ...
+✻ Cogitated for 8s
+```
+
+That evidence session was a bare Claude Code session in the throwaway home, so it had no `AGENTS.md` and treated the input as untrusted conversation content rather than internal operational input.
+Transport, detection, and submit confirmation are therefore what this record covers; recognition of the `session-revive` kind is an instruction contract in `AGENTS.md` section 8, asserted statically by `tests/fm-keepalive.test.sh`.
+
+Two safety refusals were observed against the same real session:
+
+```sh
+# a mid-turn primary, with claude's "esc to interrupt" footer present
+FM_HOME="$H" FM_SUPERVISOR_TARGET=%30 FM_SUPERVISOR_BACKEND=tmux bin/fm-keepalive.sh tick
+busy|the primary is mid-turn
+
+# the same command while claude's first-run trust dialog held the composer
+unsafe|composer is not confirmed-empty (state=pending)
+```
+
+Neither typed anything, and the busy pass also cleared the continuous-lapse window.
+Backoff spacing, the attempt cap with its durable give-up report, away mode's exclusive ownership of revival duty, and an unconfirmed submit are covered deterministically by `tests/fm-keepalive.test.sh`.
