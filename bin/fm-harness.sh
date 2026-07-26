@@ -64,7 +64,7 @@ detect_ancestry() {
 }
 
 detect_own() {
-  local marker_count=0 marker_harness= ancestry
+  local marker_count=0 marker_harness='' ancestry
   if [ "${CLAUDECODE:-}" = "1" ]; then
     marker_count=$((marker_count + 1))
     marker_harness=claude
