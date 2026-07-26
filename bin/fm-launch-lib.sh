@@ -43,12 +43,29 @@ shell_quote() {
 # and no status file, so it launches bare and is greeted by the session-start
 # adapters already installed in the home (for pi and opencode those are the
 # project-local extensions the harness auto-discovers once trusted, which is why
-# a primary needs no explicit extension flag). A primary template therefore ends
-# at its flag placeholders, and an unset flag leaves one trailing space; that is
-# cosmetic in a shell command, and consumers may trim it.
+# a primary needs no explicit extension flag). A primary template therefore
+# carries only its flag placeholders plus whatever briefless-launch flag that
+# adapter was verified to need, and an unset flag leaves one trailing space; that
+# is cosmetic in a shell command, and consumers may trim it.
 #
-# Placeholders the caller substitutes before launch are documented in
-# bin/fm-spawn.sh's header.
+# Placeholders every caller substitutes before launch:
+#   __MODELFLAG__  model_flag_for_harness output, or empty (see below)
+#   __EFFORTFLAG__ effort_flag_for_harness output, or empty (see below)
+#   __KIMIBIN__    shell-quoted absolute path to the resolved kimi binary
+# Placeholders only a task-scoped (ship|scout|secondmate) launch substitutes:
+#   __BRIEF__     absolute path to data/<task-id>/brief.md
+#   __TURNEND__   absolute path to state/<task-id>.turn-ended (for harnesses whose
+#                 turn-end signal rides the launch command, e.g. codex -c notify=[...])
+#   __PIEXT__     absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
+#                 written by fm-spawn.sh; outside the worktree to avoid pi's trust gate)
+#   __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
+#   __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+#   __OPINPUT__   absolute path to the canonical operational-input encoder
+#
+# __KIMIBIN__ is resolved by bin/fm-spawn.sh alone, deliberately: the fleet
+# launcher reaches Kimi through the pi harness rather than a native kimi binary,
+# so there is no second caller to drift from.
+# Revisit that only if a native kimi launch ever becomes a launcher entry.
 launch_template() {
   local harness=$1 kind=${2:-ship}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
@@ -57,7 +74,11 @@ launch_template() {
       case "$harness" in
         claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__' ;;
         codex) printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox' ;;
-        opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__' ;;
+        # --prompt carries the crewmate's brief, so it has no place in a briefless
+        # primary; --auto is the empirically verified briefless form (a primary
+        # opencode TUI is launched that way in
+        # tests/fm-opencode-primary-live-e2e.test.sh:256 and :310).
+        opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--auto' ;;
         pi|pi-signed) printf '%s%s' "FM_PI_HARNESS=$harness $harness" ' __MODELFLAG____EFFORTFLAG__' ;;
         grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__' ;;
         # Kimi Code rejects a positional prompt, so its crewmate template
