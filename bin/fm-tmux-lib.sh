@@ -158,14 +158,29 @@ fm_tmux_row_has_composer_edge() {  # <plain-row>
   return 1
 }
 
+fm_tmux_composer_geometry_spaces() {  # <content-inner> -> spaces
+  local content=$1 probe
+  probe="${content#"${content%%[![:space:]]*}"}"
+  case "$probe" in
+    '>'*) content=${content/>/ } ;;
+    '❯'*) content=${content/❯/ } ;;
+    '›'*) content=${content/›/ } ;;
+  esac
+  content=$(printf '%s' "$content" | LC_ALL=C sed 's/[!-~]/ /g')
+  case "$content" in
+    *[![:space:]]*) return 1 ;;
+  esac
+  printf '%s' "$content"
+}
+
 # fm_tmux_find_composer_box: print the zero-based top and bottom rows of the
 # complete bordered box that structurally contains the cursor, plus whether its
 # geometry is ambiguous. The cursor may be on any content row or on the bottom
 # border; no fixed cursor offset is used.
 fm_tmux_find_composer_box() {  # <cursor-y> <plain-visible-pane> -> "<top> <bottom> <ambiguous>"
   local cy=$1 pane=$2 line indent left_stripped trimmed kind family current_family=
-  local side_family top_inner top_spaces= geometry_check=0 geometry_ambiguous=0
-  local content_inner content_probe content_spaces bottom_inner bottom_spaces
+  local side_family top_inner top_spaces='' geometry_check=0 geometry_ambiguous=0
+  local content_inner content_spaces bottom_inner bottom_spaces
   local current_indent=
   local row=0 top=-1 valid=0 content_rows=0 unsafe=0 cursor_structural=0
   while IFS= read -r line; do
@@ -207,7 +222,9 @@ fm_tmux_find_composer_box() {  # <cursor-y> <plain-visible-pane> -> "<top> <bott
         heavy) top_inner=${top_inner#┏}; top_inner=${top_inner%┓}; top_spaces=${top_inner//━/ } ;;
         ascii) top_inner=${top_inner#+}; top_inner=${top_inner%+}; top_spaces=${top_inner//-/ } ;;
       esac
-      case "$top_spaces" in *[![:space:]]*) geometry_check=0 ;; esac
+      case "$top_spaces" in
+        *[![:space:]]*) geometry_check=0; geometry_ambiguous=1 ;;
+      esac
     elif [ "$kind" = bottom ] || { [ "$kind" = ascii ] && [ "$top" -ge 0 ]; }; then
       if [ "$top" -ge 0 ] && [ "$family" = "$current_family" ] \
          && [ "$valid" = 1 ] && [ "$content_rows" -gt 0 ] \
@@ -256,14 +273,11 @@ fm_tmux_find_composer_box() {  # <cursor-y> <plain-visible-pane> -> "<top> <bott
               double) content_inner=${content_inner#║}; content_inner=${content_inner%║} ;;
               ascii) content_inner=${content_inner#|}; content_inner=${content_inner%|} ;;
             esac
-            content_probe="${content_inner#"${content_inner%%[![:space:]]*}"}"
-            content_probe="${content_probe%"${content_probe##*[![:space:]]}"}"
-            case "$content_probe" in
-              '') content_spaces=$content_inner; [ "$content_spaces" = "$top_spaces" ] || geometry_ambiguous=1 ;;
-              '>') content_spaces=${content_inner/>/ }; [ "$content_spaces" = "$top_spaces" ] || geometry_ambiguous=1 ;;
-              '❯') content_spaces=${content_inner/❯/ }; [ "$content_spaces" = "$top_spaces" ] || geometry_ambiguous=1 ;;
-              '›') content_spaces=${content_inner/›/ }; [ "$content_spaces" = "$top_spaces" ] || geometry_ambiguous=1 ;;
-            esac
+            if content_spaces=$(fm_tmux_composer_geometry_spaces "$content_inner"); then
+              [ "$content_spaces" = "$top_spaces" ] || geometry_ambiguous=1
+            else
+              geometry_ambiguous=1
+            fi
           fi
           ;;
         *) valid=0 ;;
@@ -285,12 +299,13 @@ EOF
 # fm_tmux_composer_state classification contract:
 # A row is structural only when its first or last non-whitespace character is a
 # composer edge. A complete box has matching border families and bounded top and
-# bottom rows. Real content on any proven row is pending, even when geometry is
-# ambiguous. Empty requires positive proof: a genuinely empty composer, an
+# bottom rows. Real content on any row is publicly pending; internal submit
+# confirmation retains whether that pending row has proven geometry. Empty
+# requires positive proof: a genuinely empty composer, an
 # all-empty unambiguous box, an empty non-bordered fallback row, or the submit
 # core's busy-queued Enter conversion. Other structural ambiguity is unknown,
 # never empty.
-fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
+fm_tmux_composer_state_detail() {  # <target> -> empty|pending|ambiguous-pending|unknown
   local target=$1 cy raw pane plain box box_status top bottom geometry_ambiguous
   local row row_raw state unknown_seen=0
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
@@ -307,7 +322,14 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
       row_raw=$(printf '%s\n' "$pane" | sed -n "$((row + 1))p")
       state=$(fm_tmux_composer_row_state "$row_raw" 1 0)
       case "$state" in
-        pending) printf 'pending'; return 0 ;;
+        pending)
+          if [ "$geometry_ambiguous" = 1 ]; then
+            printf 'ambiguous-pending'
+          else
+            printf 'pending'
+          fi
+          return 0
+          ;;
         unknown) unknown_seen=1 ;;
       esac
       row=$((row + 1))
@@ -332,6 +354,15 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
     return 0
   fi
   fm_tmux_composer_row_state "$raw" 0
+}
+
+fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
+  local state
+  state=$(fm_tmux_composer_state_detail "$1")
+  case "$state" in
+    ambiguous-pending) printf 'pending' ;;
+    *) printf '%s' "$state" ;;
+  esac
 }
 
 # fm_pane_input_pending: 0 (pending) if the composer holds real unsubmitted
@@ -361,20 +392,24 @@ fm_pane_is_busy() {  # <target> [harness]
 #     so an unreadable pane never turns a normal steer into a false error.
 # Busy-queued Enter (opencode 1.18.4): the harness accepts Enter while mid-turn
 # and queues it for after the current turn, but keeps the typed text visible in
-# the composer. Once the Enter-retry budget is spent and the composer still
-# reads "pending", the submit core falls back to `fm_pane_is_busy`: a busy pane
-# means the Enter was accepted and queued (report `empty` so the caller does
-# not re-send), while an idle pane keeps `pending` as a genuine swallow. This
-# is the only place that exception lives, so the daemon's strict and
-# fm-send's lenient success policies both treat a busy-queued Enter as
-# delivered.
+# the composer. Once the Enter-retry budget is spent and a structurally proven
+# composer still reads "pending", the submit core falls back to
+# `fm_pane_is_busy`: a busy pane means the Enter was accepted and queued (report
+# `empty` so the caller does not re-send), while an idle pane or ambiguous
+# pending geometry keeps `pending` as a genuine swallow. This is the only place
+# that exception lives, so the daemon's strict and fm-send's lenient success
+# policies both treat a proven busy-queued Enter as delivered.
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
   local target=$1 retries=$2 sleep_s=$3 i=0 state
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
-    state=$(fm_tmux_composer_state "$target")
-    [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
+    state=$(fm_tmux_composer_state_detail "$target")
+    case "$state" in
+      pending) ;;
+      ambiguous-pending) printf 'pending'; return 0 ;;
+      *) printf '%s' "$state"; return 0 ;;
+    esac
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || break
   done

@@ -59,7 +59,7 @@ test_busy_pane_pending_returns_empty() {
   composer="$dir/composer"
   sent="$dir/sent.log"
   vfile="$dir/verdict"
-  printf '╭────────────────────────────╮\n│ > fix findings 1 and 3     │\n╰────────────────────────────╯\n' > "$composer"
+  printf '╭────────────╮\n│ > fix      │\n╰────────────╯\n' > "$composer"
   : > "$sent"
   touch "$dir/.swallow"
   # Pre-check: composer state should be pending (via function, not $()).
@@ -82,7 +82,7 @@ test_idle_pane_pending_returns_pending() {
   composer="$dir/composer"
   sent="$dir/sent.log"
   vfile="$dir/verdict"
-  printf '╭────────────────────────────╮\n│ > fix findings 1 and 3     │\n╰────────────────────────────╯\n' > "$composer"
+  printf '╭────────────╮\n│ > fix      │\n╰────────────╯\n' > "$composer"
   : > "$sent"
   touch "$dir/.swallow"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
@@ -99,7 +99,7 @@ test_busy_pane_composer_clears_first_try() {
   composer="$dir/composer"
   sent="$dir/sent.log"
   vfile="$dir/verdict"
-  printf '╭────────────────────────────╮\n│ > fix findings 1 and 3     │\n╰────────────────────────────╯\n' > "$composer"
+  printf '╭────────────╮\n│ > fix      │\n╰────────────╯\n' > "$composer"
   : > "$sent"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" FM_FAKE_PANE_BUSY=1 \
     fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
@@ -114,7 +114,7 @@ test_idle_pane_composer_clears_first_try() {
   composer="$dir/composer"
   sent="$dir/sent.log"
   vfile="$dir/verdict"
-  printf '╭────────────────────────────╮\n│ > fix findings 1 and 3     │\n╰────────────────────────────╯\n' > "$composer"
+  printf '╭────────────╮\n│ > fix      │\n╰────────────╯\n' > "$composer"
   : > "$sent"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" FM_FAKE_PANE_BUSY=0 \
     fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
@@ -136,6 +136,25 @@ test_busy_pane_unknown_stays_unknown() {
   [ "$(cat "$vfile")" = unknown ] \
     || fail "a busy pane must not convert an unsafe composer to empty, got '$(cat "$vfile")'"
   pass "fm_tmux_submit_enter_core: busy conversion is limited to proven pending input"
+}
+
+test_busy_pane_ambiguous_pending_stays_pending() {
+  local dir fakebin composer vfile
+  dir="$TMP_ROOT/busy-ambiguous-pending"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  vfile="$dir/verdict"
+  printf '╭────────────╮\n│ > fix  │\n╰────────────╯\n' > "$composer"
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" fm_tmux_composer_state "win" > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = pending ] \
+    || fail "ambiguous composer text should remain publicly pending, got '$(cat "$vfile")'"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_PANE_BUSY=1 \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
+    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = pending ] \
+    || fail "a busy pane must not convert ambiguous pending to empty, got '$(cat "$vfile")'"
+  pass "fm_tmux_submit_enter_core: ambiguous pending never uses busy conversion"
 }
 
 test_claude_busy_signature_uses_real_capture_shapes() {
@@ -214,4 +233,5 @@ test_idle_pane_pending_returns_pending
 test_busy_pane_composer_clears_first_try
 test_idle_pane_composer_clears_first_try
 test_busy_pane_unknown_stays_unknown
+test_busy_pane_ambiguous_pending_stays_pending
 test_claude_busy_signature_uses_real_capture_shapes

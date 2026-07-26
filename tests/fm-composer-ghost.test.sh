@@ -406,6 +406,35 @@ test_misaligned_box_is_unknown() {
   pass "fm_tmux_composer_state: misaligned box bounds fail closed"
 }
 
+test_unproved_empty_geometry_is_unknown() {
+  local dir fb capture out fixture
+  dir="$TMP_ROOT/unproved-empty-geometry"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  for fixture in ghost idle malformed-top; do
+    case "$fixture" in
+      ghost)
+        printf '╭────────────╮\n│ \033[2mghost\033[0m │\n╰────────────╯\n' > "$capture"
+        out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+          fm_tmux_composer_state "fakepane")
+        ;;
+      idle)
+        printf '╭────────────╮\n│ idle hint │\n╰────────────╯\n' > "$capture"
+        out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+          FM_COMPOSER_IDLE_RE='^idle hint$' fm_tmux_composer_state "fakepane")
+        ;;
+      malformed-top)
+        printf '╭────x───────╮\n│            │\n╰────────────╯\n' > "$capture"
+        out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+          fm_tmux_composer_state "fakepane")
+        ;;
+    esac
+    [ "$out" = unknown ] \
+      || fail "unproved empty geometry '$fixture' should be unknown, got '$out'"
+  done
+  pass "fm_tmux_composer_state: unproved ghost, idle, and border geometry stays unknown"
+}
+
 test_differing_widths_use_asymmetric_verdicts() {
   local dir fb capture out
   dir="$TMP_ROOT/differing-widths"; mkdir -p "$dir"
@@ -437,6 +466,36 @@ test_wide_composer_text_is_pending() {
       || fail "wide composer text '$text' should be pending, got '$out'"
   done
   pass "fm_tmux_composer_state: emoji and CJK text remain pending under the C locale"
+}
+
+test_all_tmux_harness_composers_share_classification() {
+  local dir fb capture out harness
+  dir="$TMP_ROOT/all-harness-composers"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  for harness in claude codex opencode pi grok; do
+    case "$harness" in
+      claude) printf '╭────────────╮\n│ ❯ \033[2mtry\033[0m      │\n╰────────────╯\n' > "$capture" ;;
+      codex) printf '╭────────────╮\n│ › \033[2mtip\033[0m      │\n╰────────────╯\n' > "$capture" ;;
+      opencode) printf '╭────────────╮\n│ >          │\n╰────────────╯\n' > "$capture" ;;
+      pi) printf '╭────────────╮\n│            │\n╰────────────╯\n' > "$capture" ;;
+      grok) printf '╭────────────╮\n│ ❯ \033[38;2;50;47;70mType\033[0m     │\n╰────────────╯\n' > "$capture" ;;
+    esac
+    out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+      fm_tmux_composer_state "fakepane")
+    [ "$out" = empty ] \
+      || fail "$harness aligned idle composer should be empty, got '$out'"
+    case "$harness" in
+      claude|grok) printf '╭────────────╮\n│ ❯ fix      │\n╰────────────╯\n' > "$capture" ;;
+      codex) printf '╭────────────╮\n│ › fix      │\n╰────────────╯\n' > "$capture" ;;
+      opencode|pi) printf '╭────────────╮\n│ > fix      │\n╰────────────╯\n' > "$capture" ;;
+    esac
+    out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+      fm_tmux_composer_state "fakepane")
+    [ "$out" = pending ] \
+      || fail "$harness composer with text should be pending, got '$out'"
+  done
+  pass "fm_tmux_composer_state: all tmux harnesses share empty and pending classification"
 }
 
 test_fallback_capture_race_with_edge_is_unknown() {
@@ -548,8 +607,10 @@ test_clipped_bordered_box_is_unknown
 test_asymmetric_composer_edges_are_unknown
 test_mismatched_box_families_are_unknown
 test_misaligned_box_is_unknown
+test_unproved_empty_geometry_is_unknown
 test_differing_widths_use_asymmetric_verdicts
 test_wide_composer_text_is_pending
+test_all_tmux_harness_composers_share_classification
 test_fallback_capture_race_with_edge_is_unknown
 test_legitimate_empty_routes_remain_empty
 test_non_bordered_composer_uses_compatibility_fallback
