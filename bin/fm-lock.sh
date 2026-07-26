@@ -20,8 +20,13 @@
 #   Only a provably abandoned mutex may be removed and retaken: the recorded
 #   owner PID is dead, or (legacy/no-pid) the directory age meets the mid-
 #   acquire threshold. A live owner is never overridden.
+#   Generation claims store a random nonce field. Recovered claims are renamed
+#   to state/.lock-reclaim-claim-retired-<generation>.<nonce> and retained as
+#   irrevocable ABA fences so delayed recovery cannot replace a later owner.
 #   For emergency recovery, re-run fm-lock.sh; it applies the required PID,
 #   age, symlink, and mutex-generation checks before removing anything.
+#   Do not manually delete retained claim tombstones; escalate suspected
+#   tombstone corruption for a generation-aware recovery instead.
 #
 # Usage: fm-lock.sh
 #          Acquire a free lock or atomically reclaim a proven-stale lock.
