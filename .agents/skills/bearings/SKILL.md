@@ -14,6 +14,19 @@ This skill is read-mostly.
 It reads fleet state, writes one canonical Markdown report, and may create one derived snapshot plus one static HTML page under `.lavish/` only for an explicit `/bearings` or explicit show/open request.
 It never tears down a task, merges a PR, dispatches new work, or mutates any task state as a side effect of producing the brief - those belong to the captain's explicit word and the normal task lifecycle.
 
+## Captain's Call-only argument mode
+
+When the appended skill argument is exactly `captains-call-only`, use this mode instead of the full Bearings workflow below.
+Gather the current snapshot once with `bin/fm-bearings-snapshot.sh --json --all-in-flight --all-decisions --all-secondmates --all-queued --all-unhealthy`, using the same bounded fallback described in step 1 when needed.
+Apply only the Captain's Call classification and actionability rules from the chat-response contract below; do not create a second classification rule here.
+Render exactly one section headed `## Captain's Call`, with one scannable line per actionable item and every PR as its full `https://...` URL.
+When no item qualifies, render the existing empty state: `Nothing needs your action right now.`
+If no trustworthy snapshot can be gathered, keep the same single heading and report the availability failure instead of emitting the empty state.
+This mode must not create or replace the dated report.
+It must not load `report-presentation`, write under `.lavish/`, open a browser, render a report link, or render Recently Landed, Underway, or Charted Next.
+After rendering that one section, return immediately.
+Every other invocation follows the complete full Bearings workflow unchanged.
+
 ## What it does
 
 1. **Gather live fleet state once with the complete current-view flags.**

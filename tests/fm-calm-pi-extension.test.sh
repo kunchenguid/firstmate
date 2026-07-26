@@ -7,6 +7,7 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-calm-pi-extension)
 EXT="$ROOT/.pi/extensions/fm-calm.ts"
+SHORTCUT_EXT="$ROOT/.pi/extensions/fm-captains-call-shortcut.ts"
 ASSISTANT_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
 OPERATIONAL_USER_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
 COMPATIBILITY="$ROOT/.pi/extensions/lib/fm-calm-compatibility.ts"
@@ -65,6 +66,299 @@ find_chrome() {
     fi
   done
   return 1
+}
+
+test_captains_call_shortcut_input_contract() {
+  local fixture out status version
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi Captain's Call shortcut test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+  version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
+  require_pi_compat_version "$version" "Pi Captain's Call shortcut input contract"
+
+  fixture="$TMP_ROOT/captains-call-shortcut"
+  mkdir -p \
+    "$fixture/project/.pi/extensions" \
+    "$fixture/project/.agents/skills/bearings" \
+    "$fixture/project/node_modules/@earendil-works"
+  cp "$SHORTCUT_EXT" "$fixture/project/.pi/extensions/fm-captains-call-shortcut.ts"
+  printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+  printf '%s\n' '---' 'name: bearings' 'description: fixture' '---' '# Bearings fixture' \
+    >"$fixture/project/.agents/skills/bearings/SKILL.md"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+
+  out=$(cd "$fixture/project" && \
+    EXT="$fixture/project/.pi/extensions/fm-captains-call-shortcut.ts" \
+    SKILL="$fixture/project/.agents/skills/bearings/SKILL.md" \
+    node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?test=${Date.now()}`);
+let inputHandler;
+let commands;
+let inventoryReads = 0;
+const notifications = [];
+const validCommand = {
+  name: "skill:bearings",
+  source: "skill",
+  sourceInfo: {
+    path: process.env.SKILL,
+    source: "local",
+    scope: "project",
+    origin: "top-level",
+    baseDir: process.env.SKILL.replace(/\/SKILL\.md$/, ""),
+  },
+};
+const pi = {
+  getCommands() {
+    inventoryReads += 1;
+    return commands;
+  },
+  on(name, handler) {
+    if (name === "input") inputHandler = handler;
+  },
+};
+extension.default(pi);
+if (!inputHandler) throw new Error("shortcut extension did not register an input handler");
+const ctx = {
+  ui: {
+    notify(message, level) {
+      notifications.push({ message, level });
+    },
+  },
+};
+const invoke = (text, source = "interactive", images, streamingBehavior) =>
+  inputHandler({ type: "input", text, source, images, streamingBehavior }, ctx);
+
+commands = [validCommand];
+for (const [text, streamingBehavior] of [
+  ["s", undefined],
+  ["S", undefined],
+  [" \t s \n", "steer"],
+  ["\nS\t", "followUp"],
+]) {
+  const result = await invoke(text, "interactive", undefined, streamingBehavior);
+  if (result?.action !== "transform" || result.text !== "/skill:bearings captains-call-only") {
+    throw new Error(`exact interactive shortcut did not transform: ${JSON.stringify({ text, result })}`);
+  }
+}
+const readsAfterExact = inventoryReads;
+for (const event of [
+  ["", "interactive", undefined],
+  ["ss", "interactive", undefined],
+  ["status", "interactive", undefined],
+  ["s now", "interactive", undefined],
+  ["/s", "interactive", undefined],
+  ["ordinary s text", "interactive", undefined],
+  ["s", "rpc", undefined],
+  ["S", "extension", undefined],
+  ["s", "interactive", [{ type: "image", data: "fixture", mimeType: "image/png" }]],
+]) {
+  const result = await invoke(...event);
+  if (result?.action !== "continue") {
+    throw new Error(`non-exact or non-interactive input changed: ${JSON.stringify({ event, result })}`);
+  }
+}
+if (inventoryReads !== readsAfterExact) {
+  throw new Error("non-qualifying input consulted the command inventory");
+}
+
+for (const invalidCommands of [
+  [],
+  [{ ...validCommand, name: "bearings" }],
+  [{ ...validCommand, source: "prompt" }],
+  [{ ...validCommand, sourceInfo: { ...validCommand.sourceInfo, scope: "user" } }],
+  [{ ...validCommand, sourceInfo: { ...validCommand.sourceInfo, path: `${process.env.SKILL}.wrong` } }],
+]) {
+  commands = invalidCommands;
+  const before = notifications.length;
+  const result = await invoke("s");
+  if (result?.action !== "handled" || notifications.length !== before + 1) {
+    throw new Error(`missing or invalid Bearings provenance was not rejected once: ${JSON.stringify({ invalidCommands, result, notifications })}`);
+  }
+  const notice = notifications.at(-1);
+  if (notice.level !== "error" || !notice.message.includes("Bearings")) {
+    throw new Error(`missing or invalid Bearings provenance lacked one actionable error: ${JSON.stringify(notice)}`);
+  }
+}
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi Captain's Call shortcut input contract failed: $out"
+  [ -z "$out" ] || fail "Pi Captain's Call shortcut input contract printed output: $out"
+  pass "Pi Captain's Call shortcut transforms only exact image-free interactive s/S input and verifies project skill provenance"
+}
+
+test_captains_call_shortcut_real_pi_expansion() {
+  local project config home prompt commands_file out status version mode heading_count pane i
+  if ! command -v pi >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+    echo "skip: pi or node not found for real Pi Captain's Call shortcut expansion test"
+    return 0
+  fi
+  version=$(pi --version 2>/dev/null || true)
+  require_pi_compat_version "$version" "real Pi Captain's Call shortcut expansion"
+
+  project="$TMP_ROOT/captains-call-real-pi/project"
+  config="$TMP_ROOT/captains-call-real-pi/config"
+  home="$TMP_ROOT/captains-call-real-pi/home"
+  prompt="$TMP_ROOT/captains-call-real-pi/expanded-prompt.txt"
+  commands_file="$TMP_ROOT/captains-call-real-pi/commands.json"
+  mkdir -p \
+    "$project/.pi/extensions" \
+    "$project/.agents/skills/bearings" \
+    "$project/node_modules/@earendil-works" \
+    "$config" "$home/data" "$home/state" "$home/config" "$home/projects"
+  fm_git_init_commit "$project"
+  cp "$SHORTCUT_EXT" "$project/.pi/extensions/fm-captains-call-shortcut.ts"
+  cp "$ROOT/.agents/skills/bearings/SKILL.md" "$project/.agents/skills/bearings/SKILL.md"
+  ln -s "$PI_PACKAGE_DIR" "$project/node_modules/@earendil-works/pi-coding-agent"
+  printf '%s\n' '## In flight' '' '## Queued' '' '## Done' >"$home/data/backlog.md"
+  cat >"$project/probe-provider.ts" <<'TS'
+import { writeFileSync } from "node:fs";
+import {
+  type AssistantMessage,
+  createAssistantMessageEventStream,
+} from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+export default function (pi: ExtensionAPI): void {
+  pi.on("input", () => {
+    writeFileSync(process.env.PROBE_COMMANDS!, JSON.stringify(pi.getCommands(), null, 2), "utf8");
+    return { action: "continue" };
+  });
+  pi.on("before_agent_start", (event) => {
+    writeFileSync(process.env.PROBE_PROMPT!, event.prompt, "utf8");
+  });
+  pi.registerProvider("captains-call-probe", {
+    baseUrl: "http://127.0.0.1/unused",
+    apiKey: "test-only",
+    api: "captains-call-probe-api",
+    models: [{
+      id: "deterministic",
+      name: "Captain's Call shortcut probe",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 128,
+    }],
+    streamSimple(model) {
+      const stream = createAssistantMessageEventStream();
+      const text = process.env.PROBE_MODE === "actionable"
+        ? "## Captain's Call\n\n- Choose the release route."
+        : "## Captain's Call\n\nNothing needs your action right now.";
+      const output: AssistantMessage = {
+        role: "assistant",
+        content: [],
+        api: model.api,
+        provider: model.provider,
+        model: model.id,
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "stop",
+        timestamp: Date.now(),
+      };
+      queueMicrotask(() => {
+        stream.push({ type: "start", partial: output });
+        const block = { type: "text" as const, text: "" };
+        output.content.push(block);
+        stream.push({ type: "text_start", contentIndex: 0, partial: output });
+        block.text = text;
+        stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
+        stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
+        stream.push({ type: "done", reason: "stop", message: output });
+        stream.end();
+      });
+      return stream;
+    },
+  });
+}
+TS
+
+  for mode in empty actionable; do
+    out=$(cd "$project" && \
+      env FM_HOME="$home" PI_CODING_AGENT_DIR="$config" PI_OFFLINE=1 \
+        PROBE_PROMPT="$prompt" PROBE_COMMANDS="$commands_file" PROBE_MODE="$mode" \
+        pi --approve --no-session --no-context-files --no-prompt-templates --no-tools \
+          -e ./probe-provider.ts --provider captains-call-probe --model deterministic \
+          --thinking off -p '  S  ' 2>&1)
+    status=$?
+    [ "$status" -eq 0 ] || fail "real Pi Captain's Call $mode expansion failed: $out"
+    [ -f "$prompt" ] \
+      || fail "real Pi did not start the transformed turn; commands: $(cat "$commands_file" 2>/dev/null || printf unavailable)"
+    assert_contains "$(cat "$prompt")" '<skill name="bearings"' "real Pi expanded the Bearings skill"
+    tail -c 64 "$prompt" | grep -Fq $'</skill>\n\ncaptains-call-only' \
+      || fail "real Pi did not append the exact captains-call-only argument: $(tail -c 160 "$prompt")"
+    heading_count=$(printf '%s\n' "$out" | grep -c '^## ' || true)
+    [ "$heading_count" -eq 1 ] || fail "Captain's Call-only $mode output rendered $heading_count sections: $out"
+    assert_contains "$out" "## Captain's Call" "Captain's Call-only $mode heading"
+    assert_not_contains "$out" "## Recently Landed" "Captain's Call-only $mode output included Recently Landed"
+    assert_not_contains "$out" "## Underway" "Captain's Call-only $mode output included Underway"
+    assert_not_contains "$out" "## Charted Next" "Captain's Call-only $mode output included Charted Next"
+    if [ "$mode" = empty ]; then
+      assert_contains "$out" "Nothing needs your action right now." "Captain's Call-only empty state"
+    else
+      assert_contains "$out" "Choose the release route." "Captain's Call-only actionable row"
+    fi
+  done
+
+  if command -v tmux >/dev/null 2>&1; then
+    rm -f "$prompt" "$commands_file"
+    tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 100 -y 32 \
+      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 PROBE_PROMPT='$prompt' PROBE_COMMANDS='$commands_file' PROBE_MODE=empty pi --approve --no-session --no-context-files --no-prompt-templates --no-tools -e ./probe-provider.ts --provider captains-call-probe --model deterministic --thinking off; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
+    i=0
+    pane=""
+    while [ "$i" -lt 120 ]; do
+      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+      printf '%s\n' "$pane" | grep -Fq 'probe-provider.ts' && break
+      sleep 0.05
+      i=$((i + 1))
+    done
+    printf '%s\n' "$pane" | grep -Fq 'probe-provider.ts' \
+      || fail "real Pi Captain's Call TUI did not reach the ready composer: $pane"
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '  S  '
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+    i=0
+    while [ "$i" -lt 240 ]; do
+      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+      printf '%s\n' "$pane" | grep -Fq 'Nothing needs your action right now.' && break
+      sleep 0.05
+      i=$((i + 1))
+    done
+    printf '%s\n' "$pane" | grep -Fq 'Nothing needs your action right now.' \
+      || fail "real Pi Captain's Call TUI did not render the empty state: $pane"
+    printf '%s\n' "$pane" | grep -Fq "Captain's Call" \
+      || fail "real Pi Captain's Call TUI did not render its heading: $pane"
+    assert_not_contains "$pane" "Recently Landed" "real Pi Captain's Call TUI included Recently Landed"
+    assert_not_contains "$pane" "Underway" "real Pi Captain's Call TUI included Underway"
+    assert_not_contains "$pane" "Charted Next" "real Pi Captain's Call TUI included Charted Next"
+    [ -f "$prompt" ] || fail "real Pi Captain's Call TUI did not start the transformed turn"
+    tail -c 64 "$prompt" | grep -Fq $'</skill>\n\ncaptains-call-only' \
+      || fail "real Pi Captain's Call TUI lost the exact mode argument: $(tail -c 160 "$prompt")"
+    tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+  else
+    echo "skip: tmux not found for real Pi Captain's Call TUI submission"
+  fi
+
+  if find "$home/data" -maxdepth 1 -name 'status-report-*.md' -print | grep -q .; then
+    fail "Captain's Call-only expansion created a dated report"
+  fi
+  if [ -d "$home/.lavish" ] && find "$home/.lavish" -type f -print | grep -q .; then
+    fail "Captain's Call-only expansion created a browser artifact"
+  fi
+  pass "real Pi 0.82.1 print and TUI paths expand the shortcut argument and render only Captain's Call without report or browser writes"
 }
 
 test_static_contract() {
@@ -2230,6 +2524,8 @@ JS
   pass "Pi Calm native E2E keeps Working and captain turns visible, honors explicit off, hides exact operational rows when enabled, survives restart, and preserves export evidence"
 }
 
+test_captains_call_shortcut_input_contract
+test_captains_call_shortcut_real_pi_expansion
 test_static_contract
 test_home_resolution
 test_compatibility_fallback

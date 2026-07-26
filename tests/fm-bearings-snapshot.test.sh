@@ -1861,6 +1861,24 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
+test_captains_call_only_skill_mode_contract() {
+  local skill mode
+  skill="$ROOT/.agents/skills/bearings/SKILL.md"
+  [ -f "$skill" ] || fail "bearings SKILL.md missing at $skill"
+  mode=$(awk '/^## Captain.s Call-only argument mode$/{capture=1; next} capture && /^## /{exit} capture' "$skill")
+  [ -n "$mode" ] || fail "Bearings lacks the captains-call-only argument mode"
+  assert_contains "$mode" "argument is exactly \`captains-call-only\`" "exact Bearings argument-mode selector"
+  assert_contains "$mode" 'bin/fm-bearings-snapshot.sh --json --all-in-flight --all-decisions --all-secondmates --all-queued --all-unhealthy' \
+    "Captain's Call-only mode must reuse the complete current Bearings snapshot"
+  assert_contains "$mode" 'chat-response contract' "Captain's Call-only mode must reuse the existing classification owner"
+  assert_contains "$mode" "## Captain's Call" "Captain's Call-only output heading"
+  assert_contains "$mode" 'Nothing needs your action right now.' "Captain's Call-only empty state"
+  assert_contains "$mode" 'return immediately' "Captain's Call-only mode must not fall through to full Bearings"
+  assert_contains "$mode" 'must not create or replace the dated report' "Captain's Call-only report prohibition"
+  assert_contains "$mode" "must not load \`report-presentation\`" "Captain's Call-only browser prohibition"
+  pass "the Bearings argument mode reuses the current snapshot and Captain's Call owner without entering full report flow"
+}
+
 # The /bearings skill is the one owner of the four-section chat-response contract.
 # Assert it states exactly the four fixed sections in order, each with its explicit
 # empty-state sentence, documents the At Anchor exclusion, and mandates a chat that is
@@ -1920,6 +1938,7 @@ test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection
+test_captains_call_only_skill_mode_contract
 test_chat_contract_four_sections
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
