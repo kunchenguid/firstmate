@@ -71,6 +71,16 @@ wait_numeric_file() {
   return 1
 }
 
+wait_for_path() {
+  local file=$1 limit=${2:-30} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ -e "$file" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # Portable mtime in epoch seconds. Platform-detected, never the `stat -f || stat -c`
 # fallback (which writes a partial filesystem dump on Linux; see fm-watch.sh).
 file_mtime() {
@@ -705,6 +715,23 @@ test_verified_validation_decision_is_not_stale() {
     && { reap "$pid"; fail "verified validation decision emitted a stale or wedge wake"; }
   reap "$pid"
 
+  printf 'working: validation parked without a captain decision status\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
+  rm -f "$state/.paused-$key" "$state/.verified-wait-$key" "$state/.stale-$key"
+  printf 'idle no-mistakes approval gate without terminal status\n' > "$capture_file"
+  pane_hash=$(hash_text "idle no-mistakes approval gate without terminal status")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=codex FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 1 finding(s)' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_VERIFIED_WAIT_RECHECK_SECS=1 \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  wait_live "$pid" 20 || { reap "$pid"; fail "verified validation decision without a terminal status was surfaced as stale: $(cat "$out")"; }
+  [ -e "$state/.verified-wait-$key" ] || { reap "$pid"; fail "non-terminal verified validation wait marker was not recorded"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "non-terminal verified validation decision emitted a stale wake"; }
+  reap "$pid"
+
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 1 finding(s)' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_VERIFIED_WAIT_RECHECK_SECS=1 \
@@ -744,6 +771,49 @@ test_verified_wait_uses_supported_endpoint_liveness() {
   ' _ "$WATCH")
   [ "$verdict" = dead ] || fail "definitively dead worker was overridden by endpoint presence"
   pass "verified waits use positive endpoint liveness on backends without recovery-grade agent state"
+}
+
+test_signal_batch_rebuilds_after_locked_retirement() {
+  local dir state fakebin out lock_ready lock_wait retire retire_pid pid real_sleep
+  dir=$(make_case signal-retirement-batch); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; lock_ready="$dir/lock-ready"; lock_wait="$dir/lock-wait"; retire="$dir/retire"
+  printf 'window=test:fm-live\nkind=ship\nharness=codex\nbackend=tmux\n' > "$state/live.meta"
+  printf 'window=test:fm-retired\nkind=ship\nharness=codex\nbackend=tmux\n' > "$state/retired.meta"
+  printf 'working: routine progress\n' > "$state/live.status"
+  printf 'needs-decision: retired choice\n' > "$state/retired.status"
+  real_sleep=$(command -v sleep)
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = 0.1 ] && : > "${FM_SIGNAL_LOCK_WAIT:?}"
+exec "${FM_REAL_SLEEP_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$fakebin/sleep"
+
+  (
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+      : > "$2"
+      while [ ! -e "$3" ]; do sleep 0.05; done
+      rm -f "$STATE/retired.meta" "$STATE/retired.status"
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock_ready" "$retire"
+  ) &
+  retire_pid=$!
+  wait_for_path "$lock_ready" 30 || { reap "$retire_pid"; fail "signal retirement fixture did not acquire the queue lock"; }
+
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' FM_REAL_SLEEP_FOR_TEST="$real_sleep" \
+    FM_SIGNAL_LOCK_WAIT="$lock_wait" watch_bg "$state" "$fakebin" "$out" env FM_SIGNAL_GRACE=0
+  pid=$!
+  wait_for_path "$lock_wait" 30 || { reap "$pid"; reap "$retire_pid"; fail "watcher did not reach the held signal queue lock"; }
+  : > "$retire"
+  wait "$retire_pid" || { reap "$pid"; fail "signal retirement fixture failed"; }
+  wait_live "$pid" 20 || { reap "$pid"; fail "retired actionable sibling caused the live benign signal to wake: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "retired actionable sibling caused a live benign signal to queue"; }
+  grep -F "retired.status" "$state/.watch-triage.log" >/dev/null 2>&1 \
+    && { reap "$pid"; fail "retired signal identity remained in the rebuilt reason"; }
+  reap "$pid"
+  pass "signal batches rebuild reason and actionability after locked identity retirement"
 }
 
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
@@ -1396,6 +1466,7 @@ test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_verified_validation_decision_is_not_stale
 test_verified_wait_uses_supported_endpoint_liveness
+test_signal_batch_rebuilds_after_locked_retirement
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
