@@ -317,31 +317,27 @@ handles_json_array() {
 }
 
 build_x_search_tool_json() {
-  local tool handles
-  tool=$(jq -cn '{type:"x_search"}') || return 1
+  local allowed='[]' excluded='[]'
   if [ "${#ALLOWED_HANDLES[@]}" -gt 0 ]; then
-    handles=$(handles_json_array "${ALLOWED_HANDLES[@]}") || return 1
-    tool=$(jq -cn --argjson t "$tool" --argjson h "$handles" \
-      '$t + {allowed_x_handles:$h}') || return 1
+    allowed=$(handles_json_array "${ALLOWED_HANDLES[@]}") || return 1
   fi
   if [ "${#EXCLUDED_HANDLES[@]}" -gt 0 ]; then
-    handles=$(handles_json_array "${EXCLUDED_HANDLES[@]}") || return 1
-    tool=$(jq -cn --argjson t "$tool" --argjson h "$handles" \
-      '$t + {excluded_x_handles:$h}') || return 1
+    excluded=$(handles_json_array "${EXCLUDED_HANDLES[@]}") || return 1
   fi
-  if [ -n "$FROM_DATE" ]; then
-    tool=$(jq -cn --argjson t "$tool" --arg d "$FROM_DATE" '$t + {from_date:$d}') || return 1
-  fi
-  if [ -n "$TO_DATE" ]; then
-    tool=$(jq -cn --argjson t "$tool" --arg d "$TO_DATE" '$t + {to_date:$d}') || return 1
-  fi
-  if [ "$ENABLE_IMAGE" -eq 1 ]; then
-    tool=$(jq -cn --argjson t "$tool" '$t + {enable_image_understanding:true}') || return 1
-  fi
-  if [ "$ENABLE_VIDEO" -eq 1 ]; then
-    tool=$(jq -cn --argjson t "$tool" '$t + {enable_video_understanding:true}') || return 1
-  fi
-  printf '%s\n' "$tool"
+  jq -cn \
+    --argjson allowed "$allowed" \
+    --argjson excluded "$excluded" \
+    --arg from "$FROM_DATE" \
+    --arg to "$TO_DATE" \
+    --arg image "$ENABLE_IMAGE" \
+    --arg video "$ENABLE_VIDEO" \
+    '{type:"x_search"}
+     + (if ($allowed|length) > 0 then {allowed_x_handles:$allowed} else {} end)
+     + (if ($excluded|length) > 0 then {excluded_x_handles:$excluded} else {} end)
+     + (if $from != "" then {from_date:$from} else {} end)
+     + (if $to != "" then {to_date:$to} else {} end)
+     + (if $image == "1" then {enable_image_understanding:true} else {} end)
+     + (if $video == "1" then {enable_video_understanding:true} else {} end)'
 }
 
 build_tools_json() {
@@ -402,6 +398,7 @@ make_tmp() {
 }
 
 AUTH_BEARER=
+REFRESHED_ACCESS=
 
 read_store_xai() {
   local file=$1
@@ -427,51 +424,62 @@ load_oauth_from_store() {
   fi
   if is_uint "$expires" && [ "$expires" -gt 0 ] && [ "$((now + skew))" -ge "$expires" ]; then
     [ -n "$refresh" ] || die "OAuth access expired and no refresh token in $file" 3
-    access=$(refresh_oauth_token "$file" "$refresh") || return 1
-    [ -n "$access" ] || return 1
+    # Called in this shell, not a command substitution: its temp files join
+    # TMP_FILES for the EXIT trap and its die() terminates the script.
+    refresh_oauth_token "$file" "$refresh" || die "OAuth refresh failed for $file" 3
+    access=$REFRESHED_ACCESS
+    REFRESHED_ACCESS=
+    [ -n "$access" ] || die "OAuth refresh returned no access token" 3
   fi
   AUTH_BEARER=$access
   return 0
 }
 
-# Refresh OAuth; print the new access token on stdout. Best-effort write-back to
-# the auth store (mode 600). A write failure still returns the fresh access so
-# the current call can proceed.
+# Refresh OAuth; set REFRESHED_ACCESS to the new access token. Must run in the
+# caller's shell (see load_oauth_from_store) so credential temp files are cleaned
+# by the EXIT trap and refresh failures exit 3 instead of falling through to the
+# next store. Best-effort write-back to the auth store (mode 600); a write
+# failure still yields the fresh access so the current call can proceed.
 refresh_oauth_token() {
-  local file=$1 refresh=$2 form_file resp_file out_file code new_json expires_in access new_refresh expires_ms
+  local file=$1 refresh=$2 form_file resp_file out_file store_dir code new_json expires_in access new_refresh expires_ms
+  REFRESHED_ACCESS=
   command -v curl >/dev/null 2>&1 || die "curl not found"
   make_tmp form_file || die "mktemp failed"
   make_tmp resp_file || die "mktemp failed"
-  # Never log refresh token. Write form body to a 0600 temp file.
-  {
-    printf 'grant_type=refresh_token&client_id='
-    jq -rn --arg v "$CLIENT_ID" '$v|@uri'
-    printf '&refresh_token='
-    jq -rn --arg v "$refresh" '$v|@uri'
-  } > "$form_file" || die "failed to build refresh body"
+  # Never log the refresh token. Write the exact wire body to a 0600 temp file;
+  # -j keeps jq from appending newlines that would corrupt the form fields.
+  jq -jn --arg cid "$CLIENT_ID" --arg refresh "$refresh" \
+    '"grant_type=refresh_token&client_id=" + ($cid|@uri)
+     + "&refresh_token=" + ($refresh|@uri)' \
+    > "$form_file" || die "failed to build refresh body"
 
   code=$(curl -m "$CURL_TIMEOUT" -sS -o "$resp_file" -w '%{http_code}' \
     -X POST \
     -H 'Accept: application/json' \
     -H 'Content-Type: application/x-www-form-urlencoded' \
     --data-binary @"$form_file" \
-    "$TOKEN_URL" 2>/dev/null) || die "OAuth refresh transport failed" 3
+    "$TOKEN_URL" 2>/dev/null) || { rm -f "$form_file"; die "OAuth refresh transport failed" 3; }
+  rm -f "$form_file"
 
   case "$code" in
     2[0-9][0-9]) ;;
-    *) die "OAuth refresh failed (HTTP $code)" 3 ;;
+    *) rm -f "$resp_file"; die "OAuth refresh failed (HTTP $code)" 3 ;;
   esac
 
   access=$(jq -r '.access_token // empty' "$resp_file") || true
-  [ -n "$access" ] || die "OAuth refresh response missing access_token" 3
+  [ -n "$access" ] || { rm -f "$resp_file"; die "OAuth refresh response missing access_token" 3; }
   new_refresh=$(jq -r '.refresh_token // empty' "$resp_file") || true
   [ -n "$new_refresh" ] || new_refresh=$refresh
   expires_in=$(jq -r '.expires_in // empty' "$resp_file") || true
+  rm -f "$resp_file"
   if ! is_uint "${expires_in:-}"; then
     expires_in=$DEFAULT_TOKEN_LIFETIME_S
   fi
-  expires_ms=$(( $(now_ms) + expires_in * 1000 - REFRESH_SKEW_MS ))
-  [ "$expires_ms" -gt 0 ] || expires_ms=$(( $(now_ms) + expires_in * 1000 ))
+  # Absolute expiry, as OpenCode/Pi define the field. The refresh skew belongs
+  # only to the read-side comparison in load_oauth_from_store.
+  expires_ms=$(( $(now_ms) + expires_in * 1000 ))
+
+  REFRESHED_ACCESS=$access
 
   new_json=$(jq -c \
     --arg access "$access" \
@@ -480,29 +488,23 @@ refresh_oauth_token() {
     '.xai.type = "oauth"
      | .xai.access = $access
      | .xai.refresh = $refresh
-     | .xai.expires = $expires' "$file") || {
-    printf '%s\n' "$access"
-    return 0
-  }
+     | .xai.expires = $expires' "$file") || return 0
 
-  make_tmp out_file || {
-    printf '%s\n' "$access"
+  # Stage inside the store's own directory so the replace is a same-filesystem
+  # rename; a cross-device copy could truncate the shared credential file.
+  store_dir=$(dirname -- "$file")
+  out_file=$(mktemp "$store_dir/.fm-xsearch-auth.XXXXXX" 2>/dev/null) || {
+    echo "fm-xsearch: warning: could not write refreshed token to $file" >&2
     return 0
   }
-  printf '%s\n' "$new_json" > "$out_file" || {
-    printf '%s\n' "$access"
+  TMP_FILES+=("$out_file")
+  chmod 600 "$out_file" 2>/dev/null || true
+  if printf '%s\n' "$new_json" > "$out_file" 2>/dev/null &&
+     mv -f "$out_file" "$file" 2>/dev/null; then
     return 0
-  }
-  chmod 600 "$out_file" || true
-  if ! mv -f "$out_file" "$file" 2>/dev/null; then
-    if ! cat "$out_file" > "$file" 2>/dev/null; then
-      echo "fm-xsearch: warning: could not write refreshed token to $file" >&2
-    else
-      chmod 600 "$file" 2>/dev/null || true
-    fi
-    rm -f "$out_file"
   fi
-  printf '%s\n' "$access"
+  rm -f "$out_file"
+  echo "fm-xsearch: warning: could not write refreshed token to $file" >&2
   return 0
 }
 

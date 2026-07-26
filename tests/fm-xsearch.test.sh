@@ -28,11 +28,14 @@ while [ $# -gt 0 ]; do
     -o) ofile=$2; shift 2 ;;
     -X) method=$2; shift 2 ;;
     --data|--data-binary)
+      # Sentinel-guarded capture: command substitution strips trailing newlines,
+      # which would hide a malformed wire body from every assertion below.
       case "$2" in
-        @-) data=$(cat) ;;
-        @*) data=$(cat -- "${2#@}") ;;
-        *) data=$2 ;;
+        @-) data=$(cat; printf X) ;;
+        @*) data=$(cat -- "${2#@}"; printf X) ;;
+        *) data=$2X ;;
       esac
+      data=${data%X}
       shift 2
       ;;
     -H)
@@ -63,12 +66,14 @@ if [ -n "${FAKE_CURL_LOG:-}" ]; then
     Authorization:\ Bearer\ *) auth_kind=bearer ;;
     Authorization:*) auth_kind=other ;;
   esac
+  # Escape newlines so the log stays line-oriented AND a stray newline inside a
+  # request body is visible to an exact-match assertion instead of vanishing.
   {
     echo "method=$method"
     echo "url=$url"
     echo "auth_kind=$auth_kind"
     echo "content_type=$content_type"
-    echo "data=$data"
+    echo "data=${data//$'\n'/\\n}"
   } >> "$FAKE_CURL_LOG"
 fi
 case "$url" in
@@ -251,14 +256,18 @@ test_oauth_store_via_fm_xai_auth_file() {
 }
 
 test_oauth_refresh_when_expired() {
-  local home fakebin log store out rc new_access
+  local home fakebin log store tmpdir out rc new_access now_s leaked
   home="$TMP_ROOT/oauth-refresh"; mkdir -p "$home"
   fakebin=$(make_fake_curl "$home")
   log="$home/curl.log"
   store="$home/auth.json"
-  write_oauth_store "$store" 'old-access' 'refresh-token-ccc' 1
-  out=$(HOME="$home" PATH="$fakebin:$BASE_PATH" \
+  tmpdir="$home/tmp"; mkdir -p "$tmpdir"
+  # A refresh token with reserved characters proves the body is form-encoded.
+  write_oauth_store "$store" 'old-access' 'refresh+token/ccc=' 1
+  now_s=$(date +%s)
+  out=$(HOME="$home" PATH="$fakebin:$BASE_PATH" TMPDIR="$tmpdir" \
     FM_XAI_AUTH_FILE="$store" \
+    FM_XAI_CLIENT_ID='test-client-9' \
     FAKE_CURL_LOG="$log" \
     FAKE_TOKEN_CODE=200 \
     FAKE_TOKEN_BODY='{"access_token":"new-access-ddd","refresh_token":"refresh-token-eee","expires_in":3600}' \
@@ -269,11 +278,44 @@ test_oauth_refresh_when_expired() {
   printf '%s' "$out" | grep -q 'hello from x search' || fail "text after refresh: $out"
   grep -q 'oauth2/token' "$log" || fail "expected token refresh call"
   grep -q 'responses' "$log" || fail "expected responses call after refresh"
+  # Exact wire body: no stray newlines, correct percent-encoding, no bare token.
+  grep -Fqx \
+    'data=grant_type=refresh_token&client_id=test-client-9&refresh_token=refresh%2Btoken%2Fccc%3D' \
+    "$log" || fail "refresh form body malformed: $(grep '^data=' "$log")"
+  grep -Fq 'content_type=Content-Type: application/x-www-form-urlencoded' "$log" \
+    || fail "refresh missing form content type"
   new_access=$(jq -r '.xai.access' "$store")
   [ "$new_access" = 'new-access-ddd' ] || fail "store not updated: $(cat "$store")"
   jq -e '.other.key == "keep-me"' "$store" >/dev/null || fail "sibling providers clobbered"
   jq -e '.xai.refresh == "refresh-token-eee"' "$store" >/dev/null || fail "refresh token not rotated"
+  # Absolute expiry: expires_in with no refresh-skew subtracted.
+  jq -e --argjson floor "$(( (now_s + 3500) * 1000 ))" '.xai.expires > $floor' "$store" \
+    >/dev/null || fail "expiry written with skew subtracted: $(jq -r '.xai.expires' "$store")"
+  # Credential-bearing temp files must not survive the run.
+  leaked=$(find "$tmpdir" "$home" -maxdepth 1 \
+    \( -name 'fm-xsearch.*' -o -name '.fm-xsearch-auth.*' \) 2>/dev/null)
+  [ -z "$leaked" ] || fail "temp credentials leaked: $leaked"
   pass "fm-xsearch refreshes expired OAuth and writes store back"
+}
+
+test_refresh_failure_exits_3_without_fallthrough() {
+  local home fakebin log store rc err
+  home="$TMP_ROOT/refresh-fail"; mkdir -p "$home/xdg/opencode" "$home/.pi/agent"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  store="$home/xdg/opencode/auth.json"
+  write_oauth_store "$store" 'stale-access' 'stale-refresh' 1
+  write_oauth_store "$home/.pi/agent/auth.json" 'pi-access' 'pi-refresh' 9999999999999
+  err=$(HOME="$home" XDG_DATA_HOME="$home/xdg" PATH="$fakebin:$BASE_PATH" \
+    FAKE_CURL_LOG="$log" \
+    FAKE_TOKEN_CODE=401 \
+    FAKE_TOKEN_BODY='{"error":"invalid_grant"}' \
+    FAKE_RESP_BODY="$(sample_response)" \
+    run_xsearch 'refresh should fail' 2>&1 >/dev/null); rc=$?
+  expect_code 3 "$rc" "refresh failure exit"
+  printf '%s' "$err" | grep -q 'HTTP 401' || fail "expected refresh HTTP code: $err"
+  grep -q 'url=.*responses' "$log" && fail "refresh failure fell through to /responses"
+  pass "fm-xsearch surfaces refresh failure as exit 3"
 }
 
 test_opencode_default_store_path() {
@@ -363,6 +405,7 @@ test_no_auth_exits_3
 test_api_key_env_posts_responses
 test_oauth_store_via_fm_xai_auth_file
 test_oauth_refresh_when_expired
+test_refresh_failure_exits_3_without_fallthrough
 test_opencode_default_store_path
 test_pi_default_store_path
 test_api_error_exit_4
