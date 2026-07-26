@@ -98,8 +98,13 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
 # firstmate's own pane has a standing front door instead of tmux's positional
 # default name. Called only through bin/fm-label-self.sh, which owns the
 # refusals that make this safe (never in a secondmate home, never an fm-<id>
-# label). The window is resolved from tmux's own $TMUX_PANE, falling back to
-# the client's current window, so this never targets a task window by name.
+# label). The window is resolved from tmux's own $TMUX_PANE, so this never
+# targets a task window by name.
+#
+# <window-id> is an optional pre-resolved fm_backend_tmux_self_window_id
+# result. bin/fm-label-self.sh passes the SAME id it read the current name from,
+# so the refusal and the rename can never land on two different windows.
+# Omitting it resolves inline, which is what the standalone/test call shape does.
 #
 # The name is pinned exactly like fm_backend_tmux_create_task pins a task
 # window: verified with real tmux 3.6a on a private socket that `rename-window`
@@ -108,10 +113,15 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
 # under a hostile `allow-rename on` + global `automatic-rename on` config; the
 # two explicit set-window-option calls are the same defense in depth the task
 # path uses.
-fm_backend_tmux_label_self() {  # <label>
+fm_backend_tmux_label_self() {  # <label> [window-id]
   local label=$1 wid
   [ -n "$label" ] || { echo "error: fm_backend_tmux_label_self needs a label" >&2; return 1; }
-  wid=$(fm_backend_tmux_self_window_id) || return 1
+  if [ "$#" -ge 2 ]; then
+    wid=$2
+    [ -n "$wid" ] || { echo "error: fm_backend_tmux_label_self was given an empty window id" >&2; return 1; }
+  else
+    wid=$(fm_backend_tmux_self_window_id) || return 1
+  fi
   tmux rename-window -t "$wid" "$label" 2>/dev/null || { echo "error: tmux rename-window failed for $wid" >&2; return 1; }
   tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
   tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
@@ -119,17 +129,22 @@ fm_backend_tmux_label_self() {  # <label>
 }
 
 # fm_backend_tmux_self_window_id: the window id of the window the CALLER ITSELF
-# runs in, resolved from tmux's own $TMUX_PANE and falling back to the client's
-# current window. Shared by the two self-endpoint operations so both address
-# exactly the same window, and so neither ever resolves one by label.
+# runs in, resolved from tmux's own $TMUX_PANE. The single resolution both
+# self-endpoint operations address their window through, so neither ever
+# resolves one by label.
+#
+# There is deliberately NO fallback to the client-relative
+# `tmux display-message -p '#{window_id}'`: that answers with the ATTACHED
+# CLIENT's CURRENT window, which is not the caller's own window and can be any
+# window in the session - including a live fm-<task-id> worker's. Renaming that
+# is precisely the mislabel the self-label refusals exist to prevent, so without
+# $TMUX_PANE the caller's own window is treated as unidentifiable and this FAILS
+# CLOSED, exactly like an unreadable current name.
 fm_backend_tmux_self_window_id() {
   local wid
   [ -n "${TMUX:-}" ] || { echo "error: not running inside tmux (\$TMUX is unset)" >&2; return 1; }
-  if [ -n "${TMUX_PANE:-}" ]; then
-    wid=$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}' 2>/dev/null)
-  else
-    wid=$(tmux display-message -p '#{window_id}' 2>/dev/null)
-  fi
+  [ -n "${TMUX_PANE:-}" ] || { echo "error: \$TMUX_PANE is unset, so this process's own tmux window cannot be identified" >&2; return 1; }
+  wid=$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}' 2>/dev/null)
   [ -n "$wid" ] || { echo "error: could not resolve this tmux pane's own window id" >&2; return 1; }
   printf '%s' "$wid"
 }
@@ -138,9 +153,17 @@ fm_backend_tmux_self_window_id() {
 # right now, or a failure with an explanation. bin/fm-label-self.sh reads this
 # before renaming anything and fails closed on an error, so an unreadable name
 # must never be reported as an empty-but-successful one.
-fm_backend_tmux_current_self_label() {
+#
+# <window-id> is the same optional pre-resolved
+# fm_backend_tmux_self_window_id result fm_backend_tmux_label_self takes.
+fm_backend_tmux_current_self_label() {  # [window-id]
   local wid name
-  wid=$(fm_backend_tmux_self_window_id) || return 1
+  if [ "$#" -ge 1 ]; then
+    wid=$1
+    [ -n "$wid" ] || { echo "error: fm_backend_tmux_current_self_label was given an empty window id" >&2; return 1; }
+  else
+    wid=$(fm_backend_tmux_self_window_id) || return 1
+  fi
   name=$(tmux display-message -p -t "$wid" '#{window_name}' 2>/dev/null) \
     || { echo "error: tmux display-message failed for $wid" >&2; return 1; }
   [ -n "$name" ] || { echo "error: could not read the current name of tmux window $wid" >&2; return 1; }

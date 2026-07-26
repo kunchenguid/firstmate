@@ -35,6 +35,8 @@ Firstmate names its own window `firstmate` at session start through `bin/fm-labe
 The name is pinned with `automatic-rename` and `allow-rename` off, exactly like a task window, so an agent's terminal-title rewrite cannot replace it.
 A secondmate home is refused: its own window is named `fm-<secondmate-id>` and the main Firstmate reaches it by that name.
 A window that is already named `fm-<id>` is refused too, because that window is a worker endpoint; the current name is read with `display-message -p '#{window_name}'` and an unreadable name is refused rather than renamed.
+The window is resolved from `$TMUX_PANE` exactly once, and that one window id is used for both the name read and the rename, so the refusal and the rename can never address different windows.
+Without `$TMUX_PANE` the caller's own window is not identifiable at all: a client-relative `display-message -p '#{window_id}'` answers with the attached client's current window, which may be any window in the session, so self-labeling refuses instead of naming a bystander.
 
 ```sh
 tmux list-windows -t <session-name>

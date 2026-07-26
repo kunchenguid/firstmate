@@ -44,6 +44,7 @@ Firstmate labels its own tab `firstmate` at session start through `bin/fm-label-
 An explicitly set tab label is independent of the pane's `terminal_title`, which the harness rewrites continuously, so the label persists.
 A secondmate home is refused: its own tab is labeled `fm-<secondmate-id>` and the main Firstmate reaches it by that label.
 A tab that already carries an `fm-` label is refused too, because that tab is a worker endpoint and renaming it would drop the task out of the label-matched recovery scan; the current label is read with `tab list` and an unreadable label is refused rather than renamed.
+The tab is resolved once from `HERDR_TAB_ID`, or from a `pane get` on `HERDR_PANE_ID`, and that one tab id is used for both the label read and the rename, so the refusal and the rename can never address different tabs.
 
 Attach to the selected named Herdr session and switch to the relevant home workspace to watch its task tabs.
 Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` without attaching.

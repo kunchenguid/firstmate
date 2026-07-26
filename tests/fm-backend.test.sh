@@ -481,6 +481,21 @@ test_current_self_label_dispatch_reports_unsupported_backends() {
   pass "fm_backend_current_self_label: backends with no verified way to read their own label refuse instead of reporting an empty one"
 }
 
+# The one resolution both halves address their endpoint through, so a refusal on
+# the current label and the rename that follows it can never land on two
+# different endpoints. A backend that cannot name the caller's own endpoint from
+# its own ambient markers must refuse rather than guess at one.
+test_self_endpoint_id_dispatch_reports_unsupported_backends() {
+  local backend out
+  for backend in zellij orca cmux; do
+    out=$(fm_backend_self_endpoint_id "$backend" 2>&1) \
+      && fail "fm_backend_self_endpoint_id must refuse the $backend backend"
+    assert_contains "$out" "no verified way to identify firstmate's own endpoint" \
+      "fm_backend_self_endpoint_id did not explain the $backend limitation"
+  done
+  pass "fm_backend_self_endpoint_id: backends that cannot identify the caller's own endpoint refuse instead of guessing at one"
+}
+
 test_backend_validate_refuses_unknown() {
   fm_backend_validate tmux 2>/dev/null || fail "fm_backend_validate should accept tmux"
   fm_backend_validate orca 2>/dev/null || fail "fm_backend_validate should accept orca"
@@ -1132,6 +1147,7 @@ test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_label_self_dispatch_reports_unsupported_backends
 test_current_self_label_dispatch_reports_unsupported_backends
+test_self_endpoint_id_dispatch_reports_unsupported_backends
 test_backend_source_shell_portable
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta

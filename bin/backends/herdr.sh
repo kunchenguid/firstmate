@@ -255,6 +255,11 @@ fm_backend_herdr_session() {
 # a `pane get` on HERDR_PANE_ID for a herdr build that injects only the pane.
 # Neither is a lookup by label, so this never touches another tab.
 #
+# <tab-id> is an optional pre-resolved fm_backend_herdr_self_tab_id result.
+# bin/fm-label-self.sh passes the SAME id it read the current label from, so the
+# refusal and the rename can never land on two different tabs. Omitting it
+# resolves inline, which is what the standalone/test call shape does.
+#
 # Verified (herdr 0.7.5, real default session, read-only `pane get` on a live
 # Claude crewmate pane): herdr tracks a pane's `terminal_title` - the OSC title
 # the harness rewrites continuously - as a field SEPARATE from its tab `label`.
@@ -263,11 +268,16 @@ fm_backend_herdr_session() {
 # an explicitly set tab label is not overwritten by the harness. That is the
 # same property firstmate's whole label-based recovery
 # (fm_backend_herdr_list_live) already depends on.
-fm_backend_herdr_label_self() {  # <label>
+fm_backend_herdr_label_self() {  # <label> [tab-id]
   local label=$1 session tab
   [ -n "$label" ] || { echo "error: fm_backend_herdr_label_self needs a label" >&2; return 1; }
   fm_backend_herdr_tool_check || return 1
-  tab=$(fm_backend_herdr_self_tab_id) || return 1
+  if [ "$#" -ge 2 ]; then
+    tab=$2
+    [ -n "$tab" ] || { echo "error: fm_backend_herdr_label_self was given an empty tab id" >&2; return 1; }
+  else
+    tab=$(fm_backend_herdr_self_tab_id) || return 1
+  fi
   session=$(fm_backend_herdr_session)
   fm_backend_herdr_cli "$session" tab rename "$tab" "$label" >/dev/null 2>&1 \
     || { echo "error: herdr tab rename failed for $tab" >&2; return 1; }
@@ -276,8 +286,10 @@ fm_backend_herdr_label_self() {  # <label>
 
 # fm_backend_herdr_self_tab_id: the tab id the CALLER ITSELF is running in,
 # resolved from herdr's own injected HERDR_TAB_ID and falling back to a `pane
-# get` on HERDR_PANE_ID. Shared by the two self-endpoint operations so both
-# address exactly the same tab, and so neither ever resolves one by label.
+# get` on HERDR_PANE_ID. The single resolution both self-endpoint operations
+# address their tab through, so neither ever resolves one by label. Both inputs
+# are process-stable, so this never answers with some other tab the way a
+# client-relative "current tab" lookup could.
 fm_backend_herdr_self_tab_id() {
   local session tab
   session=$(fm_backend_herdr_session)
@@ -300,10 +312,18 @@ fm_backend_herdr_self_tab_id() {
 # fm_backend_herdr_resolve_bare_selector already uses: the caller's own tab is
 # in whatever workspace the captain happened to launch it in, which is exactly
 # the workspace this home's own container lookup does NOT resolve.
-fm_backend_herdr_current_self_label() {
+#
+# <tab-id> is the same optional pre-resolved fm_backend_herdr_self_tab_id
+# result fm_backend_herdr_label_self takes.
+fm_backend_herdr_current_self_label() {  # [tab-id]
   local session tab tabs label
   fm_backend_herdr_tool_check || return 1
-  tab=$(fm_backend_herdr_self_tab_id) || return 1
+  if [ "$#" -ge 1 ]; then
+    tab=$1
+    [ -n "$tab" ] || { echo "error: fm_backend_herdr_current_self_label was given an empty tab id" >&2; return 1; }
+  else
+    tab=$(fm_backend_herdr_self_tab_id) || return 1
+  fi
   session=$(fm_backend_herdr_session)
   tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) \
     || { echo "error: herdr tab list failed for session $session" >&2; return 1; }

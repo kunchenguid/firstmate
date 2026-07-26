@@ -637,16 +637,18 @@ test_container_ensure_reuses_existing_workspace() {
   dir="$TMP_ROOT/container-reuse"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
   printf '{"server":{"running":true}}\n' > "$resp/2.out"
-  # 3: the migration's list already shows the canonical label, so it is a no-op.
+  # 3: the ONE shared container resolution's list already shows the canonical
+  # label, so the migration is a no-op and the ensure adopts w9 from that same
+  # answer - there is deliberately no second `workspace list` to stage.
   printf '{"result":{"workspaces":[{"workspace_id":"w9","label":"firstmate-crew"}]}}\n' > "$resp/3.out"
-  # 4: workspace_find's own list.
-  printf '{"result":{"workspaces":[{"workspace_id":"w9","label":"firstmate-crew"}]}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
   [ "$out" = $'fmtest:w9\t' ] || fail "container_ensure should reuse the existing crew workspace id with an EMPTY seeded-tab field (an ADOPTED workspace is never a prune candidate), got '$out'"
   assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' "container_ensure should not create a workspace that already exists"
   assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''rename' "container_ensure must not rename a workspace that already carries the canonical label"
+  [ "$(grep -c $'\x1f''workspace'$'\x1f''list' "$log")" -eq 1 ] \
+    || fail "the migration and the ensure must share ONE workspace list, got $(grep -c $'\x1f''workspace'$'\x1f''list' "$log")"
   pass "fm_backend_herdr_container_ensure: reuses an existing crew workspace without recreating it, and reports no seeded default tab (adopted, not created)"
 }
 
