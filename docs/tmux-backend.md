@@ -54,7 +54,10 @@ An existing Pi pane is therefore reported as ambiguous rather than auto-healed, 
 This is the active tmux liveness limitation.
 
 Agent liveness and composer safety are separate checks.
-The shared classifier in `bin/fm-composer-lib.sh` accepts a shell glyph as an empty agent composer only inside a verified bordered composer.
+For a bordered composer, the tmux reader locates the complete box structurally and classifies every content row through the shared ANSI and ghost handling in `bin/fm-composer-lib.sh`.
+Real text on any content row is pending, while only an unambiguous box with every row empty is proven empty.
+Unreadable, incomplete, or structurally ambiguous boxes fail closed, and panes without a bordered composer retain the compatible cursor-row classification.
+The shared classifier accepts a shell glyph as an empty agent composer only inside a verified bordered composer.
 A bare shell prompt is `unknown`, so away-mode escalation is never injected into a dead shell.
 
 Rendered busy detection is also harness-scoped.
@@ -63,12 +66,15 @@ The exact selection contract and safety rationale live in [architecture](archite
 
 `bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics.
 It types a message once and retries Enter only until the composer clears.
-A cleared composer is the positive delivery acknowledgement; text left in the composer remains `pending`, and `fm-send.sh` reports the failure instead of retyping.
+Only a proven empty composer is a positive delivery acknowledgement.
+Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
+`fm-send.sh` reports every unconfirmed verdict as a failure instead of retyping or assuming delivery.
 
 OpenCode 1.18.4 has one busy-queue exception.
 While OpenCode is mid-turn, Enter queues the message but leaves its text visible until the turn completes.
-After the normal retry budget, a provably busy pane is accepted as queued, while an idle pane remains `pending` as a genuine swallowed Enter.
-`tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with both pending and cleared composers.
+After the normal retry budget, only structurally proven pending text in a provably busy pane is accepted as queued, while an idle pane remains `pending` as a genuine swallowed Enter.
+Ambiguous pending text never receives the busy-queue conversion.
+`tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
 
 ## Limits and regression entry points
 
@@ -78,6 +84,8 @@ After the normal retry budget, a provably busy pane is accepted as queued, while
 
 ```sh
 tests/fm-backend-tmux-smoke.test.sh
+tests/fm-composer-ghost.test.sh
+tests/fm-kimi-harness.test.sh
 tests/fm-tmux-submit-busy.test.sh
 tests/fm-bootstrap.test.sh
 ```

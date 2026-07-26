@@ -2057,10 +2057,10 @@ EOF
 #     re-invokes this function from scratch with the same text after seeing
 #     an error, which is a human/escalation decision, not an automatic
 #     retry).
-# Echoes empty|pending|unknown|send-failed, the SAME vocabulary fm-send.sh
-# already branches on for tmux ("empty" means "confirmed submitted" for every
-# backend; how each backend confirms it is an internal decision - herdr's is
-# no longer literally "the composer read empty").
+# Echoes empty|pending|unknown|send-failed, a subset of the proof-carrying
+# submit vocabulary. Empty means confirmed submitted for every backend; how
+# each backend confirms it is an internal decision, and herdr's is no longer
+# literally "the composer read empty".
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }

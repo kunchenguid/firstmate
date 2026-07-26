@@ -13,6 +13,8 @@ type CalmAssistantLayoutPatch = {
   hidesThinking: () => boolean;
 };
 
+// Keep the introduction-version symbol stable so a compatible upgrade cannot
+// double-patch a live process.
 const CALM_ASSISTANT_LAYOUT_PATCH = Symbol.for(
   "firstmate:calm-assistant-layout:pi-0.81.1",
 );

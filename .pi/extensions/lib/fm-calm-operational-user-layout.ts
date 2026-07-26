@@ -1,5 +1,5 @@
-// Pi 0.81.1's transcript owner adds the ordinary-user spacer and row together.
-// This exact-version adapter changes only that presentation and never message delivery.
+// Pi 0.81.1 and 0.82.0 add the ordinary-user spacer and row together.
+// This version-bounded adapter changes only that presentation and never message delivery.
 import {
   InteractiveMode,
   UserMessageComponent,
@@ -39,6 +39,8 @@ type CalmOperationalUserLayoutPatch = {
   isOperationalInput: (text: string) => boolean;
 };
 
+// Keep the introduction-version symbol stable so a compatible upgrade cannot
+// double-patch a live process.
 const CALM_OPERATIONAL_USER_LAYOUT_PATCH = Symbol.for(
   "firstmate:calm-operational-user-layout:pi-0.81.1",
 );

@@ -39,11 +39,12 @@
 # bold-wrapped) and no adapter covered grok's truecolor placeholder at all.
 #
 # Each adapter still owns its own CAPTURE and structural row-finding, because
-# those use genuinely different primitives (tmux's cursor-row read, herdr's ANSI
-# tail scan, orca/cmux's plain read-screen). Once an adapter has a candidate
-# composer row it hands the RAW styled row to fm_composer_strip_ghost for the
-# real-typed-content extraction, strips the box borders, trims, and hands the
-# result plus a <bordered> flag to fm_composer_classify_content for the shared
+# those use genuinely different primitives (tmux's visible-pane box scan,
+# herdr's ANSI tail scan, orca/cmux's plain read-screen). Once an adapter has a
+# candidate composer row it hands the RAW styled row to
+# fm_composer_strip_ghost for the real-typed-content extraction, strips the box
+# borders, trims, and hands the result plus a <bordered> flag to
+# fm_composer_classify_content for the shared
 # empty|pending|unknown verdict. orca/cmux read a plain (unstyled) screen so
 # they have no ghost styling to strip and rely on the idle-placeholder match
 # below. Re-sourcing is a cheap idempotent redefinition, so this file needs no
