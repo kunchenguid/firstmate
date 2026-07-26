@@ -20,10 +20,8 @@
 #   Only a provably abandoned mutex may be removed and retaken: the recorded
 #   owner PID is dead, or (legacy/no-pid) the directory age meets the mid-
 #   acquire threshold. A live owner is never overridden.
-#   Emergency removal (only when the owner is proven dead or missing after age):
-#     pid=$(cat state/.lock-reclaim/pid 2>/dev/null)
-#     if ! kill -0 "$pid" 2>/dev/null; then rm -rf state/.lock-reclaim; fi
-#   Prefer re-running fm-lock.sh so the same proof runs automatically.
+#   For emergency recovery, re-run fm-lock.sh; it applies the required PID,
+#   age, symlink, and mutex-generation checks before removing anything.
 #
 # Usage: fm-lock.sh
 #          Acquire a free lock or atomically reclaim a proven-stale lock.
@@ -48,7 +46,8 @@ RECLAIM_MUTEX_STALE_AFTER="${FM_RECLAIM_MUTEX_STALE_AFTER:-2}"
 # Short busy-mutex retries for free-claim and stale reclaim (not live takeover).
 RECLAIM_BUSY_RETRIES="${FM_RECLAIM_BUSY_RETRIES:-4}"
 RECLAIM_BUSY_SLEEP_SECS="${FM_RECLAIM_BUSY_SLEEP_SECS:-0.05}"
-if ! mkdir -p "$STATE" 2>/dev/null || [ ! -d "$STATE" ]; then
+if ! mkdir -p "$STATE" 2>/dev/null || [ ! -d "$STATE" ] \
+  || [ ! -w "$STATE" ] || [ ! -x "$STATE" ]; then
   printf '%s\n' "LOCK_RESULT=IDENTITY_UNAVAILABLE"
   printf '%s\n' "LOCK_DETAIL=cannot access lock state directory: $STATE"
   exit 12
@@ -69,6 +68,7 @@ HOLDER_DETAIL=
 PID_IDENTITY=
 PID_IDENTITY_DETAIL=
 RECLAIM_HELD=0
+RECLAIM_ACQUIRE_ERROR=
 
 usage() {
   sed -n '28,36p' "$0" | sed 's/^# \{0,1\}//'
@@ -292,6 +292,17 @@ emit_classified_lock() {
   return $?
 }
 
+reclaim_mutex_generation() {
+  local value
+  if [ "$(uname)" = Darwin ]; then
+    value=$(stat -f '%d.%i' "$RECLAIM_LOCK" 2>/dev/null) || return 1
+  else
+    value=$(stat -c '%d.%i' "$RECLAIM_LOCK" 2>/dev/null) || return 1
+  fi
+  case "$value" in ''|*[!0-9.]*) return 1 ;; esac
+  printf '%s\n' "$value"
+}
+
 reclaim_mutex_age() {
   local m now
   if [ "$(uname)" = Darwin ]; then
@@ -308,8 +319,11 @@ reclaim_mutex_age() {
 # Provably abandoned: live owner PID is never overridden. Missing/invalid PID is
 # treated like wake-lib mid-acquire: only after RECLAIM_MUTEX_STALE_AFTER seconds.
 reclaim_mutex_is_provably_abandoned() {
-  local pid age min_age
-  [ -d "$RECLAIM_LOCK" ] || [ -L "$RECLAIM_LOCK" ] || return 1
+  local generation=$1 pid age min_age
+  [ -d "$RECLAIM_LOCK" ] && [ ! -L "$RECLAIM_LOCK" ] || return 2
+  if [ -d "$RECLAIM_LOCK/.reclaim-abandoned-$generation" ]; then
+    return 0
+  fi
   pid=$(cat "$RECLAIM_LOCK/pid" 2>/dev/null || true)
   case "$pid" in
     ''|*[!0-9]*)
@@ -321,7 +335,7 @@ reclaim_mutex_is_provably_abandoned() {
         min_age=0
       fi
       if ! age=$(reclaim_mutex_age); then
-        return 1
+        return 2
       fi
       [ "$age" -ge "$min_age" ]
       return $?
@@ -336,11 +350,7 @@ reclaim_mutex_is_provably_abandoned() {
 remove_reclaim_mutex() {
   [ ! -L "$RECLAIM_LOCK" ] || return 1
   rm -f "$RECLAIM_LOCK/pid" "$RECLAIM_LOCK/started" 2>/dev/null || true
-  rmdir "$RECLAIM_LOCK" 2>/dev/null || true
-  # Legacy/malformed leftover: directory with unexpected files.
-  if [ -d "$RECLAIM_LOCK" ] || [ -L "$RECLAIM_LOCK" ]; then
-    rm -rf "$RECLAIM_LOCK" 2>/dev/null || true
-  fi
+  rmdir "$RECLAIM_LOCK" 2>/dev/null
 }
 
 write_reclaim_owner() {
@@ -369,22 +379,30 @@ release_reclaim_lock() {
   RECLAIM_HELD=0
 }
 
-claim_abandoned_reclaim_mutex() {
-  local claim="$RECLAIM_LOCK/.reclaim-claim"
-  [ ! -L "$RECLAIM_LOCK" ] || return 1
-  mkdir "$claim" 2>/dev/null || return 1
-  if ! reclaim_mutex_is_provably_abandoned; then
-    rmdir "$claim" 2>/dev/null || true
+detach_abandoned_reclaim_mutex() {
+  local generation=$1 marker quarantine current
+  marker="$RECLAIM_LOCK/.reclaim-abandoned-$generation"
+  quarantine="$STATE/.lock-reclaim-retired-$generation"
+  mkdir "$marker" 2>/dev/null || [ -d "$marker" ] || return 2
+  current=$(reclaim_mutex_generation 2>/dev/null || true)
+  if [ "$current" != "$generation" ]; then
+    rmdir "$marker" 2>/dev/null || true
     return 1
   fi
-  rm -f "$RECLAIM_LOCK/pid" "$RECLAIM_LOCK/started" 2>/dev/null || true
-  rmdir "$claim" 2>/dev/null || return 1
-  remove_reclaim_mutex
+  command -v perl >/dev/null 2>&1 || return 2
+  if ! perl -e 'exit(rename($ARGV[0], $ARGV[1]) ? 0 : 1)' \
+    "$RECLAIM_LOCK" "$quarantine" 2>/dev/null; then
+    [ -e "$quarantine" ] || return 2
+    return 1
+  fi
+  rm -f "$quarantine/pid" "$quarantine/started" 2>/dev/null || true
+  return 0
 }
 
-# Returns 0 held, 1 busy (live or mid-acquire), after one abandon-and-retry.
+# Returns 0 held, 1 busy (live or mid-acquire), 2 storage or malformed-state failure.
 acquire_reclaim_lock() {
-  local attempt=0
+  local attempt=0 generation abandoned_rc
+  RECLAIM_ACQUIRE_ERROR=
   while [ "$attempt" -lt 2 ]; do
     attempt=$((attempt + 1))
     if mkdir "$RECLAIM_LOCK" 2>/dev/null; then
@@ -393,15 +411,49 @@ acquire_reclaim_lock() {
         return 0
       fi
       remove_reclaim_mutex
-      return 1
+      RECLAIM_ACQUIRE_ERROR=io
+      return 2
     fi
-    if reclaim_mutex_is_provably_abandoned; then
-      if claim_abandoned_reclaim_mutex; then
-        continue
+    if [ -L "$RECLAIM_LOCK" ] || { [ -e "$RECLAIM_LOCK" ] && [ ! -d "$RECLAIM_LOCK" ]; }; then
+      RECLAIM_ACQUIRE_ERROR=io
+      return 2
+    fi
+    generation=$(reclaim_mutex_generation 2>/dev/null || true)
+    if [ -z "$generation" ]; then
+      if [ -d "$RECLAIM_LOCK" ]; then
+        RECLAIM_ACQUIRE_ERROR=io
+        return 2
       fi
+      continue
     fi
+    abandoned_rc=0
+    reclaim_mutex_is_provably_abandoned "$generation" || abandoned_rc=$?
+    case "$abandoned_rc" in
+      0)
+        if detach_abandoned_reclaim_mutex "$generation"; then
+          continue
+        fi
+        ;;
+      2)
+        RECLAIM_ACQUIRE_ERROR=io
+        return 2
+        ;;
+      *)
+        RECLAIM_ACQUIRE_ERROR=busy
+        return 1
+        ;;
+    esac
+    if [ ! -e "$RECLAIM_LOCK" ]; then
+      continue
+    fi
+    RECLAIM_ACQUIRE_ERROR=busy
     return 1
   done
+  if [ ! -e "$RECLAIM_LOCK" ]; then
+    RECLAIM_ACQUIRE_ERROR=io
+    return 2
+  fi
+  RECLAIM_ACQUIRE_ERROR=busy
   return 1
 }
 
@@ -409,9 +461,15 @@ acquire_reclaim_lock_with_busy_retry() {
   local attempt=0 max=$RECLAIM_BUSY_RETRIES
   case "$max" in ''|*[!0-9]*) max=4 ;; esac
   while [ "$attempt" -le "$max" ]; do
-    if acquire_reclaim_lock; then
+    acquire_reclaim_lock
+    case "$?" in
+      0)
       return 0
-    fi
+      ;;
+      2)
+        return 2
+        ;;
+    esac
     attempt=$((attempt + 1))
     [ "$attempt" -le "$max" ] || break
     sleep "$RECLAIM_BUSY_SLEEP_SECS" 2>/dev/null || sleep 1
@@ -433,9 +491,12 @@ write_owner() {
 
 # claim_free: 0 success, 2 lock appeared, 3 reclaim mutex busy, 1 other failure.
 claim_free() {
-  if ! acquire_reclaim_lock_with_busy_retry; then
-    return 3
-  fi
+  local mutex_rc=0
+  acquire_reclaim_lock_with_busy_retry || mutex_rc=$?
+  [ "$mutex_rc" -eq 0 ] || {
+    [ "$mutex_rc" -eq 1 ] && return 3
+    return 1
+  }
   if [ -f "$LOCK" ]; then
     release_reclaim_lock
     return 2
@@ -489,9 +550,14 @@ reclaim_expected() {
   fi
   current=$CURRENT_OWNER
 
-  if ! acquire_reclaim_lock_with_busy_retry; then
+  local mutex_rc=0
+  acquire_reclaim_lock_with_busy_retry || mutex_rc=$?
+  if [ "$mutex_rc" -eq 1 ]; then
     emit_result RECLAIM_BUSY "another reclaim operation holds state/.lock-reclaim"
     return "$EXIT_RECLAIM_BUSY"
+  elif [ "$mutex_rc" -ne 0 ]; then
+    emit_result IDENTITY_UNAVAILABLE "cannot access or publish the reclaim mutex"
+    return "$EXIT_IDENTITY_UNAVAILABLE"
   fi
   if ! read_lock || [ "$LOCK_OWNER" != "$expected" ]; then
     release_reclaim_lock

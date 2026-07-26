@@ -270,6 +270,44 @@ EOF
   pass "orphan reclaim mutex plus free lock recovers without permanent jam"
 }
 
+test_aged_legacy_reclaim_mutex_recovers() {
+  local rec home fakebin out rc=0
+  rec=$(new_home aged-legacy-mutex)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  make_ps_denied "$fakebin"
+  mkdir "$home/state/.lock-reclaim"
+  touch -t 200001010000 "$home/state/.lock-reclaim"
+
+  out=$(CODEX_THREAD_ID=legacy-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
+
+  expect_code 0 "$rc" "aged legacy reclaim mutex"
+  assert_contains "$out" "LOCK_RESULT=OWNED" "aged no-pid mutex did not recover"
+  [ ! -e "$home/state/.lock-reclaim" ] || fail "aged legacy mutex remained canonical"
+  pass "aged legacy no-pid reclaim mutex recovers"
+}
+
+test_orphaned_nested_claim_does_not_jam_recovery() {
+  local rec home fakebin out rc=0
+  rec=$(new_home orphaned-nested-claim)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  make_ps_denied "$fakebin"
+  mkdir -p "$home/state/.lock-reclaim/.reclaim-claim"
+  touch -t 200001010000 "$home/state/.lock-reclaim"
+
+  out=$(CODEX_THREAD_ID=claim-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
+
+  expect_code 0 "$rc" "orphaned nested reclaim claim"
+  assert_contains "$out" "LOCK_RESULT=OWNED" "orphaned nested claim jammed recovery"
+  [ ! -e "$home/state/.lock-reclaim" ] || fail "orphaned nested claim remained canonical"
+  pass "orphaned nested reclaim claims cannot jam the canonical mutex"
+}
+
 test_live_reclaim_mutex_owner_is_not_taken() {
   local rec home fakebin out rc=0
   rec=$(new_home live-mutex-owner)
@@ -360,8 +398,9 @@ EOF
   out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
     FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
 
-  expect_code 13 "$rc" "symlink reclaim mutex"
-  assert_contains "$out" "LOCK_RESULT=RECLAIM_BUSY" "symlink mutex was not safely refused"
+  expect_code 12 "$rc" "symlink reclaim mutex"
+  assert_contains "$out" "LOCK_RESULT=IDENTITY_UNAVAILABLE" "symlink mutex was not classified as malformed state"
+  assert_not_contains "$out" "LOCK_RESULT=RECLAIM_BUSY" "symlink mutex was mislabeled contention"
   assert_grep "$$" "$outside/pid" "symlink mutex traversal removed the foreign pid"
   assert_grep "sentinel" "$outside/started" "symlink mutex traversal removed the foreign timestamp"
   [ -L "$home/state/.lock-reclaim" ] || fail "symlink mutex was unexpectedly replaced"
@@ -384,6 +423,25 @@ EOF
   assert_contains "$out" "LOCK_RESULT=IDENTITY_UNAVAILABLE" "state I/O failure lacked a typed result"
   assert_not_contains "$out" "LOCK_RESULT=RECLAIM_BUSY" "state I/O failure was mislabeled mutex contention"
   pass "state directory failures are distinct from reclaim contention"
+}
+
+test_reclaim_owner_publication_failure_is_not_busy() {
+  local rec home fakebin out rc=0
+  rec=$(new_home publication-failure)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  make_ps_denied "$fakebin"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/date"
+  chmod +x "$fakebin/date"
+
+  out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
+
+  expect_code 12 "$rc" "reclaim owner publication failure"
+  assert_contains "$out" "LOCK_RESULT=IDENTITY_UNAVAILABLE" "metadata publication failure lacked I/O classification"
+  assert_not_contains "$out" "LOCK_RESULT=RECLAIM_BUSY" "metadata publication failure was mislabeled contention"
+  pass "reclaim owner publication failures are distinct from contention"
 }
 
 test_confirmed_closed_codex_owner_is_reclaimed_exactly() {
@@ -435,10 +493,13 @@ run_one() {
     clear-refused) test_unconditional_clear_is_refused ;;
     orphan-mutex-stale) test_orphan_reclaim_mutex_with_stale_lock_recovers ;;
     orphan-mutex-free) test_orphan_reclaim_mutex_with_free_lock_recovers ;;
+    aged-legacy-mutex) test_aged_legacy_reclaim_mutex_recovers ;;
+    orphaned-nested-claim) test_orphaned_nested_claim_does_not_jam_recovery ;;
     live-mutex) test_live_reclaim_mutex_owner_is_not_taken ;;
     typed-failures) test_reclaim_failure_paths_always_emit_lock_result ;;
     mutex-symlink) test_reclaim_mutex_symlink_is_not_followed ;;
     invalid-state) test_state_path_failure_is_not_reclaim_busy ;;
+    publication-failure) test_reclaim_owner_publication_failure_is_not_busy ;;
     *) fail "unknown test selector: $1" ;;
   esac
 }
@@ -458,8 +519,11 @@ else
   test_unconditional_clear_is_refused
   test_orphan_reclaim_mutex_with_stale_lock_recovers
   test_orphan_reclaim_mutex_with_free_lock_recovers
+  test_aged_legacy_reclaim_mutex_recovers
+  test_orphaned_nested_claim_does_not_jam_recovery
   test_live_reclaim_mutex_owner_is_not_taken
   test_reclaim_failure_paths_always_emit_lock_result
   test_reclaim_mutex_symlink_is_not_followed
   test_state_path_failure_is_not_reclaim_busy
+  test_reclaim_owner_publication_failure_is_not_busy
 fi
