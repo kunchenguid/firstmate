@@ -2,7 +2,7 @@
 # fm-tmux-lib.sh — shared tmux pane primitives for firstmate.
 #
 # ONE source of truth for: busy detection, composer-empty (pending-input)
-# detection, and a verify-and-retry-Enter submit. Sourced by both the away-mode
+# detection, and a verify-and-confirm-Enter submit. Sourced by both the away-mode
 # daemon (bin/fm-supervise-daemon.sh) and bin/fm-send.sh so the composer/submit
 # logic cannot drift between the two.
 #
@@ -408,10 +408,15 @@ fm_pane_is_busy() {  # <target> [harness]
 }
 
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
-# verifying the composer cleared. Retries Enter ONLY — never retypes, because a
+# verifying the composer cleared. Retries Enter ONLY - never retypes, because a
 # swallowed Enter leaves our text in the composer and retyping would duplicate
 # it. Echoes the final proof-carrying verdict on stdout so callers can require
 # exact `empty` before treating submission as confirmed.
+# Cursor is the deliberate exception to Enter retrying. After a correctly
+# settled Enter, its visible composer can retain the submitted text for more
+# than three seconds while the TUI has already accepted it. A second Enter then
+# queues the same text as a follow-up. `cursor-single-enter` therefore sends one
+# Enter and spends the retry budget on observation-only polls.
 # Busy-queued Enter (opencode 1.18.4): the harness accepts Enter while mid-turn
 # and queues it for after the current turn, but keeps the typed text visible in
 # the composer. Once the Enter-retry budget is spent and a structurally proven
@@ -431,39 +436,64 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [input-check] 
   while :; do
     fm_tmux_submit_input_allowed "$target" "$input_check" \
       || { printf 'send-failed'; return 0; }
-    if tmux send-keys -t "$target" Enter 2>/dev/null; then
-      submitted=1
+    if [ "$i" -eq 0 ] \
+      || { [ "$submit_mode" != cursor-single-enter ] && [ "$submit_mode" != cursor-lifecycle-exit ]; }; then
+      if tmux send-keys -t "$target" Enter 2>/dev/null; then
+        submitted=1
+      fi
     fi
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target")
     if ! fm_tmux_submit_input_allowed "$target" "$input_check"; then
-      if [ "$submit_mode" = lifecycle-exit ] && [ "$submitted" = 1 ]; then
-        printf 'empty'
-      else
-        printf 'send-failed'
-      fi
+      case "$submit_mode:$submitted" in
+        lifecycle-exit:1|cursor-lifecycle-exit:1) printf 'empty' ;;
+        *) printf 'send-failed' ;;
+      esac
       return 0
     fi
     case "$state" in
       pending|pending-unproven) ;;
       empty)
-        if [ "$submit_mode" = lifecycle-exit ] && [ "$submitted" != 1 ]; then
-          printf 'send-failed'
-        else
-          printf 'empty'
-        fi
-        return 0
+        case "$submit_mode:$submitted" in
+          cursor-lifecycle-exit:1)
+            # Cursor lifecycle success is process death, not merely a cleared
+            # composer. Keep polling without another Enter.
+            ;;
+          lifecycle-exit:0|cursor-lifecycle-exit:0|cursor-single-enter:0)
+            printf 'send-failed'
+            return 0
+            ;;
+          *)
+            printf 'empty'
+            return 0
+            ;;
+        esac
         ;;
       *) printf '%s' "$state"; return 0 ;;
     esac
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || break
   done
+  if [ "$submit_mode" = cursor-lifecycle-exit ]; then
+    printf 'send-failed'
+    return 0
+  fi
   if [ "$state" != pending ]; then
     printf '%s' "$state"
     return 0
   fi
   # Retries exhausted, composer still shows proven pending.
+  # Cursor's scoped busy hint is a safe positive acknowledgement after its one
+  # Enter. It is intentionally not part of the generic fallback below.
+  if [ "$submit_mode" = cursor-single-enter ]; then
+    if [ "$submitted" = 1 ] && fm_pane_is_busy "$target" cursor \
+      && fm_tmux_submit_input_allowed "$target" "$input_check"; then
+      printf 'empty'
+    else
+      printf 'pending'
+    fi
+    return 0
+  fi
   # If the pane is busy (agent mid-turn), the harness accepted the Enter
   # and queued the message for processing when the current turn ends.
   # Treat it as submitted so the caller does not re-send.

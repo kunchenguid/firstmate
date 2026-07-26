@@ -167,17 +167,15 @@ Natural language is acceptable if uncertain.
 - pi and pi-signed: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the structural composer reader; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
-- cursor: `/<skill>`, for example `/no-mistakes`. Verified end to end: cursor discovers firstmate's user-level skills, the slash-autocomplete popup lists `/no-mistakes` with its description, and a SINGLE Enter submits it. Unlike grok's and codex's popups there is no swallow or settle hazard.
+- cursor: `/<skill>`, for example `/no-mistakes`. Verified end to end: cursor discovers firstmate's user-level skills, the slash-autocomplete popup lists `/no-mistakes` with its description, and a SINGLE Enter submits it. Unlike grok's popup, it does not require a second Enter, but that one Enter still needs Cursor's adapter-wide settle and confirmation handling described in the [cursor section](#cursor-verified-2026-07-26-cursor-agent-20260723-e383d2b).
 
 ## Submission acknowledgement hazards
 
 A send or key action reporting success is not proof that the intended action happened.
 OpenCode can accept and queue an Enter while leaving text visible, Grok can consume Enter in its slash popup without submitting, and Kimi can silently drop a message sent before readiness even though the send returns success.
 The shared symptom is a healthy-looking pane with no work in progress, so each adapter must verify the observable postcondition that is specific to its TUI.
-Cursor adds two further shapes.
-Its composer is not where the terminal cursor is, so a postcondition read anchored to the cursor answers about the wrong row entirely.
-And a zero-settle submit makes cursor accept the message while LEAVING it in the composer, so the verdict reads `pending` and every retried Enter re-sends it - a duplicating failure rather than a swallowed one.
-When verifying a new adapter, establish where its composer actually is before trusting any emptiness verdict about it, and confirm that a failed verdict cannot cause a re-send.
+Cursor adds parked-terminal-cursor and duplicate-Enter hazards; the [cursor section](#cursor-verified-2026-07-26-cursor-agent-20260723-e383d2b) owns their full contract.
+When verifying a new adapter, establish where its composer actually is before trusting any emptiness verdict about it, and confirm that a failed verdict cannot cause a duplicate submission.
 
 ## claude (VERIFIED; busy signature re-verified 2026-07-25 on Claude Code 2.1.220)
 
@@ -418,7 +416,7 @@ For its model and effort axes, see the [launch-profile-axes table](#launch-profi
 | Exit command | `/exit` (or `/quit`); on exit it prints `To resume this session: agent --resume=<chatId>`. |
 | Interrupt | Single `Ctrl+C`, which ends the turn and leaves the session usable. |
 | Skill invocation | `/<skill>`; one Enter submits, with no popup swallow. |
-| Submission settle | Load-bearing, not an optimisation. Any settle at or above 0.1s submits cleanly once; a ZERO settle duplicates the message (see below). |
+| Submission settle | Load-bearing, not an optimisation. Use 1.2s before the single Enter for plain text and slash commands; ZERO duplicated a message and 0.3s later swallowed a plain-text Enter under load. The visible composer can remain stale for more than three seconds after an accepted Enter, so `fm-send` gives recorded Cursor targets 15 observation-only confirmation polls by default (see below). |
 | Autonomy | `--force` (alias `--yolo`, footer shows `Run Everything`); verified to run a shell tool unattended with no approval prompt. |
 | Trust dialog | `⚠ Workspace Trust Required`, offering `[a] Trust this workspace` and `[q] Quit`. Suppressed by `--trust`, which the launch command always passes. |
 | Resume | `cursor-agent --resume=<chatId>`; it restores the conversation but NOT the `--model` pin, so a resumed session falls back to the account default. |
@@ -446,12 +444,17 @@ It also requires the ghost-stripped row to contain the matching `P` or `A` block
 Real input that equals or extends the placeholder text therefore remains pending instead of becoming a false empty.
 Once real text is typed, cursor renders the glyph and the text at normal intensity and drops the placeholder, so pending input is unambiguous.
 
-**A zero-settle submit duplicates the steer, so the settle is a safety requirement.**
+**Cursor submission needs one settled Enter and a longer confirmation window.**
 When the Enter arrives in the same input burst as the typed text, cursor submits the message but does NOT clear it from the composer.
-The submit core then reads a proven `pending`, spends its whole Enter-retry budget, and every one of those retries re-submits the still-present text.
-Measured live: settle 0 gave verdict `pending` and landed one steer four times, while settle 0.1, 0.3 and 0.5 each gave verdict `empty` and exactly one submission.
-Both `fm-send` paths clear that floor with margin - 0.3s for plain text and 1.2s for a slash command - so ordinary steering is correct today, and `tests/fm-send-popup-settle.test.sh` pins both.
-Any future caller reaching `fm_tmux_submit_core` directly must pass a nonzero settle for a cursor target; `fm-spawn`'s zero-settle path is scoped to kimi and never runs for cursor.
+The former generic submit path then read a proven `pending`, spent its whole Enter-retry budget, and re-submitted the still-present text on every retry.
+Measured live: settle 0 gave verdict `pending` and landed one steer four times.
+A later loaded run on the same Cursor version showed the other timing edge: with a 0.3s pre-Enter settle, Cursor left the plain message unsubmitted for the full confirmation window.
+The 1.2s counterfactual submitted once.
+Even after an accepted Enter, Cursor can leave the submitted text painted for more than three seconds before the turn starts, so the generic three-check window can return a false `pending` even though the message was delivered.
+Retrying Enter during that stale interval queues the same text as a follow-up; one live expanded-retry run produced 14 duplicates.
+Both `fm-send` paths now use a 1.2s pre-Enter settle, then send exactly one Enter and give recorded Cursor targets 15 observation-only confirmation polls by default, a six-second window at the default 0.4s interval.
+`tests/fm-send-popup-settle.test.sh` pins the pre-Enter floor and `tests/fm-cursor-harness.test.sh` pins the expanded Cursor confirmation window with one Enter and one typed steer.
+Any future caller reaching `fm_tmux_submit_core` directly for a Cursor target must pass the 1.2s settle and `cursor-single-enter` submit mode; `fm-spawn`'s zero-settle path is scoped to kimi and never runs for cursor.
 Note this is the OPPOSITE hazard from grok's and opencode's: those under-submit, cursor over-submits.
 
 **Its spinner word is not a signature, and the bare stop phrase is not safe.**

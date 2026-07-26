@@ -13,7 +13,7 @@
 # provider, not the worktree provider, so fm-spawn.sh still drives that part
 # inline with these same send/current-path primitives.
 #
-# The verified composer/busy-detection and verify-and-retry-submit primitives
+# The verified composer/busy-detection and verify-and-confirm-submit primitives
 # already live in bin/fm-tmux-lib.sh, shared with the away-mode daemon
 # (bin/fm-supervise-daemon.sh); this adapter sources that file and wraps its
 # submit core under the backend's naming convention.
@@ -52,8 +52,8 @@ fm_backend_tmux_send_key() {  # <target> <key>
   tmux send-keys -t "$1" "$2"
 }
 
-# fm_backend_tmux_send_text_submit: type <text> into <target> once, then
-# submit with Enter, retried (Enter only, never retyped) until the composer clears.
+# fm_backend_tmux_send_text_submit: type <text> into <target> once, then use the
+# selected submit mode's Enter and confirmation strategy without retyping.
 fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [submit-mode]
   fm_tmux_submit_core "$1" "$2" "$3" "$4" "$5" fm_backend_tmux_agent_accepts_input "${7:-ordinary}"
 }

@@ -12,13 +12,16 @@
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
 # Text submission is verified: the line is typed ONCE, then Enter is sent and
-# retried (Enter only, never retyped) until the target backend confirms a
-# submit or reports an inconclusive send. If a swallowed Enter is positively
-# confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
-# instead of silently leaving an unsubmitted instruction.
+# normally retried (Enter only, never retyped) until the target backend confirms
+# a submit or reports an inconclusive send. Cursor sends exactly one Enter and
+# uses observation-only confirmation polls because another Enter can duplicate
+# an already-accepted steer. If a swallowed Enter is positively confirmed,
+# fm-send exits NON-ZERO so the caller knows the steer did not land instead of
+# silently leaving an unsubmitted instruction.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
-# Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
+# Tune with FM_SEND_RETRIES (default 3; Cursor uses 15 confirmation polls
+# after its single Enter) / FM_SEND_SLEEP (0.4).
 # Slash commands, and codex `$...` skill invocations resolved through harness
 # meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
 #
@@ -281,10 +284,34 @@ else
       ;;
     *) settle=0.3 ;;
   esac
-  retries=${FM_SEND_RETRIES:-3}
+  # Cursor needs the same 1.2-second input settle for plain text as for slash
+  # commands. A live 0.3-second run left the first Enter unaccepted for the full
+  # confirmation window; the 1.2-second counterfactual submitted once.
+  [ "$TARGET_HARNESS" != cursor ] || settle=1.2
+  # Cursor can accept the first Enter while leaving the submitted text painted
+  # in its composer for more than three seconds before the turn starts. The
+  # normal three checks then return a false `pending` even though the steer was
+  # delivered. Keep the caller override authoritative, but give recorded Cursor
+  # targets a six-second default confirmation window (15 * 0.4s). Cursor's
+  # submit mode sends exactly one Enter and only polls after it: another Enter
+  # while the stale text remains visible queues a duplicate follow-up.
+  if [ -n "${FM_SEND_RETRIES+x}" ]; then
+    retries=$FM_SEND_RETRIES
+  elif [ "$TARGET_HARNESS" = cursor ]; then
+    retries=15
+  else
+    retries=3
+  fi
   sleep_s=${FM_SEND_SLEEP:-0.4}
   submit_mode=ordinary
   [ "$LIFECYCLE_EXIT" = 0 ] || submit_mode=lifecycle-exit
+  if [ "$TARGET_HARNESS" = cursor ] && [ "$TARGET_BACKEND" = tmux ]; then
+    if [ "$LIFECYCLE_EXIT" = 0 ]; then
+      submit_mode=cursor-single-enter
+    else
+      submit_mode=cursor-lifecycle-exit
+    fi
+  fi
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary.
   if ! verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$submit_mode"); then

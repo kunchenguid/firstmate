@@ -730,8 +730,8 @@ fm_backend_send_operator_key() {  # <backend> <target> <key> [expected-label]
   fm_backend_send_key "$@"
 }
 
-# fm_backend_send_text_submit: type text once, then submit and verify,
-# retrying only the submission (never retyping). Echoes the backend's
+# fm_backend_send_text_submit: type text once, then submit and verify with the
+# backend's selected confirmation strategy, never retyping. Echoes the
 # proof-carrying verdict; callers require exact empty for confirmed delivery.
 fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label] [submit-mode]
   local backend=$1

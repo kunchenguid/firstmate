@@ -498,6 +498,23 @@ SH
   [ "$(grep -Fc -- 'send-keys -t sess:win Enter' "$log")" -eq 1 ] \
     || fail "authorized Cursor lifecycle exit did not submit exactly once"
 
+  # Clearing the composer is not enough to prove `/exit` worked. Cursor can
+  # accept the bytes as ordinary message text (for example after pending input)
+  # and leave the agent alive. Cursor lifecycle mode must wait for the
+  # authoritative dead/missing postcondition and fail if it never arrives.
+  printf 'node\n' > "$comm"
+  : > "$log"
+  : > "$sleep_count"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_STYLED="$pane" FM_FAKE_CY=10 FM_FAKE_WINDOWS=win \
+    FM_FAKE_COMM_FILE="$comm" FM_FAKE_SEND_LOG="$log" \
+    FM_FAKE_SLEEP_COUNT="$sleep_count" FM_FAKE_EXIT_ON_SLEEP=99 \
+    FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 FM_GATE_REFUSE_BYPASS=1 \
+    "$ROOT/bin/fm-send.sh" exit --lifecycle-exit /exit >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "Cursor lifecycle exit accepted an empty composer while the agent stayed alive"
+  [ "$(grep -Fc -- 'send-keys -t sess:win Enter' "$log")" -eq 1 ] \
+    || fail "Cursor lifecycle exit retried Enter while waiting for process death"
+
   printf 'node\n' > "$comm"
   : > "$log"
   : > "$sleep_count"
@@ -523,6 +540,54 @@ SH
   pass "tmux submit rechecks Cursor liveness during settle and confirmation"
 }
 
+test_fm_send_waits_for_cursor_delayed_submit_ack() {
+  local dir fb pane idle_pane log sleep_count home err rc
+  dir="$TMP_ROOT/delayed-submit-ack"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  pane="$dir/pane.txt"
+  idle_pane="$dir/idle-pane.txt"
+  log="$dir/send.log"
+  sleep_count="$dir/sleep-count"
+  home="$dir/home"
+  err="$dir/send.err"
+  mkdir -p "$home/state"
+  fm_write_meta "$home/state/delayed.meta" "window=sess:win" "kind=ship" "harness=cursor"
+
+  # Live cursor-agent 2026.07.23-e383d2b accepted one correctly settled Enter
+  # while leaving the submitted text painted for more than three seconds. The
+  # old three-check default returned `pending` before the turn started. Model
+  # that delayed redraw by keeping the real text visible through six post-Enter
+  # checks, then exposing the verified idle placeholder.
+  make_pane_file "$pane" "$ARROW steer"
+  make_pane_file "$idle_pane" "$(idle_composer_row A 'dd a follow-up')"
+  cat > "$fb/sleep" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$FM_FAKE_SLEEP_COUNT" ] || count=$(cat "$FM_FAKE_SLEEP_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_FAKE_SLEEP_COUNT"
+if [ "$count" -eq "$FM_FAKE_ACK_ON_SLEEP" ]; then
+  cp "$FM_FAKE_IDLE_PANE" "$FM_FAKE_STYLED"
+fi
+SH
+  chmod +x "$fb/sleep"
+
+  : > "$log"
+  : > "$sleep_count"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_STYLED="$pane" FM_FAKE_IDLE_PANE="$idle_pane" FM_FAKE_CY=10 \
+    FM_FAKE_WINDOWS=win FM_FAKE_COMM=node FM_FAKE_SEND_LOG="$log" \
+    FM_FAKE_SLEEP_COUNT="$sleep_count" FM_FAKE_ACK_ON_SLEEP=8 \
+    FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-send.sh" delayed steer >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -eq 0 ] || fail "Cursor delayed submit acknowledgement failed: $(tail -1 "$err")"
+  [ "$(grep -Fc -- 'send-keys -t sess:win -l steer' "$log")" -eq 1 ] \
+    || fail "Cursor delayed acknowledgement retyped the steer"
+  [ "$(grep -Fc -- 'send-keys -t sess:win Enter' "$log")" -eq 1 ] \
+    || fail "Cursor delayed acknowledgement retried Enter instead of polling"
+  pass "fm-send waits through Cursor's delayed submit acknowledgement with one Enter and one typed steer"
+}
+
 test_busy_signature_matches_only_the_composer_anchored_hint
 test_busy_signature_is_not_shared_across_harnesses
 test_busy_signature_survives_tool_execution_rendering
@@ -539,5 +604,6 @@ test_cursor_is_an_accepted_configured_crew_harness
 test_agent_liveness_states
 test_backend_input_boundary_rejects_dead_and_missing_agents
 test_submit_rechecks_liveness_during_settle
+test_fm_send_waits_for_cursor_delayed_submit_ack
 
 echo "# all fm-cursor-harness tests passed"
