@@ -99,6 +99,13 @@ SH
   cat > "$fakebin/lsof" <<SH
 #!/usr/bin/env bash
 [ "\${FAKE_LSOF_EXIT:-0}" = 0 ] || exit "\$FAKE_LSOF_EXIT"
+for a in "\$@"; do
+  if [ "\$a" = cwd ]; then
+    printf 'p%s\n' "\$4"
+    printf 'n%s\n' '$(dirname "$cap")/home/data/freellmapi/app/server'
+    exit 0
+  fi
+done
 printf 'COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n'
 printf 'node 999 u 23u IPv4 0x0 0t0 TCP %s:3001 (LISTEN)\n' "\${FAKE_LSOF_ADDR:-127.0.0.1}"
 SH
@@ -349,10 +356,33 @@ EOF
   assert_contains "$OUT" ".env not found" "refusal must name the missing .env"
 
   printf 'OTHER_VAR=x\n' > "$home/.env"
+  built_install "$home"
+  run_tool "$home" "$fakebin" start
+  expect_code 0 "$CODE" "start before checking a missing seed variable"
   run_tool "$home" "$fakebin" seed-keys google=GEMINI_API_KEY
   [ "$CODE" -ne 0 ] || fail "seed-keys with a missing var must fail"
   assert_contains "$OUT" "GEMINI_API_KEY is missing or empty" "refusal must name the variable, not a value"
+  stop_lane "$home" "$fakebin"
   pass "seed-keys refuses missing .env and missing variable"
+}
+
+test_seed_keys_refuses_unrecorded_service_before_secrets() {
+  local root home fakebin cap fake_key
+  root=$(fm_test_tmproot fm-freellmapi)
+  read -r home fakebin <<EOF
+$(fresh_home "$root")
+EOF
+  cap="$root/cap"
+  server_fakes "$fakebin" "$cap"
+  fake_key="fake-test-key-unrecorded-service"
+  printf 'GEMINI_API_KEY=%s\n' "$fake_key" > "$home/.env"
+  run_tool "$home" "$fakebin" seed-keys google=GEMINI_API_KEY
+  [ "$CODE" -ne 0 ] || fail "seed-keys must refuse a service without a live recorded lane pid"
+  assert_contains "$OUT" "live recorded lane" "refusal must require the recorded lane process"
+  assert_absent "$home/data/freellmapi/dashboard.credentials" "refusal must happen before dashboard credentials are generated"
+  assert_absent "$cap/curl-stdin.log" "refusal must happen before any secret-bearing request"
+  assert_not_contains "$OUT" "$fake_key" "refusal must not print the provider key"
+  pass "seed-keys refuses an unrecorded service before secrets"
 }
 
 test_seed_keys_sends_value_via_stdin_only() {
@@ -365,6 +395,9 @@ EOF
   server_fakes "$fakebin" "$cap"
   fake_key="fake-test-key-AIzaNotARealKey123456"
   printf 'GEMINI_API_KEY=%s\n' "$fake_key" > "$home/.env"
+  built_install "$home"
+  run_tool "$home" "$fakebin" start
+  expect_code 0 "$CODE" "start before seed-keys"
   run_tool "$home" "$fakebin" seed-keys google=GEMINI_API_KEY
   expect_code 0 "$CODE" "seed-keys"
   assert_contains "$OUT" "seeded google key from GEMINI_API_KEY" "seed-keys must confirm by variable name"
@@ -373,6 +406,7 @@ EOF
   assert_no_grep "$fake_key" "$cap/curl-argv.log" "key value must never appear in curl argv"
   assert_no_grep 'fake-session-token-1234' "$cap/curl-argv.log" "session token must never appear in curl argv"
   assert_grep '"label":"GEMINI_API_KEY"' "$cap/curl-stdin.log" "label must be the env var name"
+  stop_lane "$home" "$fakebin"
   pass "seed-keys sends the value via stdin only"
 }
 
@@ -385,11 +419,15 @@ EOF
   cap="$root/cap"
   server_fakes "$fakebin" "$cap"
   printf 'BAD_KEY=va"lue\n' > "$home/.env"
+  built_install "$home"
+  run_tool "$home" "$fakebin" start
+  expect_code 0 "$CODE" "start before refusing an injection-prone seed value"
   run_tool "$home" "$fakebin" seed-keys google=BAD_KEY
   [ "$CODE" -ne 0 ] || fail "seed-keys must refuse a quote-bearing value"
   assert_contains "$OUT" "refuses to forward" "refusal must explain without echoing the value"
   assert_not_contains "$OUT" 'va"lue' "refused value must not be echoed"
   assert_absent "$cap/curl-stdin.log" "no request body may be sent for a refused value"
+  stop_lane "$home" "$fakebin"
   pass "seed-keys refuses an injection-prone value"
 }
 
@@ -480,6 +518,30 @@ EOF
   pass "stop refuses a foreign pid"
 }
 
+test_stop_refuses_reused_pid_identity() {
+  local root home fakebin cap pid alive
+  root=$(fm_test_tmproot fm-freellmapi)
+  read -r home fakebin <<EOF
+$(fresh_home "$root")
+EOF
+  cap="$root/cap"
+  server_fakes "$fakebin" "$cap"
+  built_install "$home"
+  run_tool "$home" "$fakebin" start
+  expect_code 0 "$CODE" "start before simulating pid reuse"
+  pid=$(cat "$home/data/freellmapi/run/server.pid")
+  printf 'different-process-start-identity\n' > "$home/data/freellmapi/run/server.identity"
+  run_tool "$home" "$fakebin" stop
+  [ "$CODE" -ne 0 ] || fail "stop must reject a pid whose recorded start identity changed"
+  alive=0
+  kill -0 "$pid" 2>/dev/null && alive=1
+  [ "$alive" -eq 1 ] || fail "stop must not signal a process after pid identity mismatch"
+  assert_contains "$OUT" "refusing to signal" "identity mismatch refusal must be explicit"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "stop refuses a reused pid identity"
+}
+
 test_stop_without_pid_record() {
   local root home fakebin cap
   root=$(fm_test_tmproot fm-freellmapi)
@@ -505,12 +567,14 @@ test_start_stops_service_on_non_loopback_listener
 test_start_fails_closed_when_binding_unverifiable
 test_start_refuses_malformed_encryption_key
 test_seed_keys_refuses_missing_env_and_var
+test_seed_keys_refuses_unrecorded_service_before_secrets
 test_seed_keys_sends_value_via_stdin_only
 test_seed_keys_refuses_injection_prone_value
 test_status_reports_not_running
 test_status_warns_on_non_loopback_without_stopping
 test_stop_gracefully_terminates
 test_stop_refuses_foreign_pid
+test_stop_refuses_reused_pid_identity
 test_stop_without_pid_record
 
 echo "fm-freellmapi tests passed"

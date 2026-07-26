@@ -64,6 +64,7 @@ KEY_FILE="$LANE_HOME/encryption.key"
 CRED_FILE="$LANE_HOME/dashboard.credentials"
 RUN_DIR="$LANE_HOME/run"
 PID_FILE="$RUN_DIR/server.pid"
+IDENTITY_FILE="$RUN_DIR/server.identity"
 LOG_FILE="$RUN_DIR/server.log"
 ENV_FILE="$FM_HOME/.env"
 
@@ -99,15 +100,24 @@ pid_alive() {
   kill -0 "$1" 2>/dev/null
 }
 
-# The recorded pid must still be this lane's server before any signal is sent.
-# A recycled pid after a crash must never cause a kill of an unrelated process.
+process_start_identity() {
+  ps -p "$1" -o lstart= 2>/dev/null
+}
+
 pid_is_our_server() {
-  local pid=$1 cmd
+  local pid=$1 cmd cwd recorded current
+  [ -f "$IDENTITY_FILE" ] || return 1
+  recorded=$(cat "$IDENTITY_FILE" 2>/dev/null || true)
+  [ -n "$recorded" ] || return 1
+  current=$(process_start_identity "$pid") || return 1
+  [ "$current" = "$recorded" ] || return 1
   cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
-  case "$cmd" in
-    *"dist/index.js"*) return 0 ;;
+  case " $cmd " in
+    *" $APP_DIR/server/dist/index.js "*) ;;
     *) return 1 ;;
   esac
+  cwd=$(lsof -nP -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p') || return 1
+  [ "$cwd" = "$APP_DIR/server" ]
 }
 
 running_pid() {
@@ -275,21 +285,27 @@ cmd_start() {
     ENCRYPTION_KEY="$(cat "$KEY_FILE")" \
     FREEAPI_DB_PATH="$DB_PATH" \
     CATALOG_SYNC_DISABLED="$sync_disabled" \
-    nohup node dist/index.js >> "$LOG_FILE" 2>&1 &
+    nohup node "$APP_DIR/server/dist/index.js" >> "$LOG_FILE" 2>&1 &
     printf '%s\n' "$!" > "$PID_FILE"
   ) || die "could not launch the server from $APP_DIR/server"
-  chmod 600 "$PID_FILE" "$LOG_FILE" 2>/dev/null || true
 
   local pid waited=0
   pid=$(cat "$PID_FILE")
+  if ! process_start_identity "$pid" > "$IDENTITY_FILE.tmp" || [ ! -s "$IDENTITY_FILE.tmp" ]; then
+    stop_pid "$pid"
+    rm -f "$PID_FILE" "$IDENTITY_FILE.tmp"
+    die "could not record the server process start identity; server stopped"
+  fi
+  mv "$IDENTITY_FILE.tmp" "$IDENTITY_FILE"
+  chmod 600 "$PID_FILE" "$IDENTITY_FILE" "$LOG_FILE" 2>/dev/null || true
   until ping_ok "$port"; do
     if ! pid_alive "$pid"; then
-      rm -f "$PID_FILE"
+      rm -f "$PID_FILE" "$IDENTITY_FILE"
       die "server exited during startup; see log at $LOG_FILE (not printed here by policy)"
     fi
     if [ "$waited" -ge "$FM_FREELLMAPI_START_TIMEOUT" ]; then
       stop_pid "$pid"
-      rm -f "$PID_FILE"
+      rm -f "$PID_FILE" "$IDENTITY_FILE"
       die "server did not answer /api/ping on 127.0.0.1:$port within ${FM_FREELLMAPI_START_TIMEOUT}s; stopped it; see log at $LOG_FILE"
     fi
     sleep 1
@@ -298,7 +314,7 @@ cmd_start() {
 
   if ! verify_loopback_only "$pid"; then
     stop_pid "$pid"
-    rm -f "$PID_FILE"
+    rm -f "$PID_FILE" "$IDENTITY_FILE"
     die "REFUSED: could not prove every listener is bound to 127.0.0.1; server stopped (a non-loopback or unverifiable binding is never tolerated)"
   fi
 
@@ -378,9 +394,12 @@ dashboard_token() {
 
 cmd_seed_keys() {
   [ "$#" -ge 1 ] || die "usage: fm-freellmapi.sh seed-keys <platform>=<ENV_VAR> [...]"
-  local port=${FM_FREELLMAPI_PORT:-$FM_FREELLMAPI_DEFAULT_PORT}
+  local port=${FM_FREELLMAPI_PORT:-$FM_FREELLMAPI_DEFAULT_PORT} pid
   require_tool curl
   [ -f "$ENV_FILE" ] || die "fleet .env not found at $ENV_FILE; nothing to seed from"
+  pid=$(running_pid) || die "no live recorded lane process; start it before seeding keys"
+  verify_loopback_only "$pid" \
+    || die "recorded lane process has a non-loopback or unverifiable listener; refusing to send secrets"
   ping_ok "$port" || die "service is not answering on 127.0.0.1:$port; start it first"
 
   # Validate the whole request before the first write so a typo cannot leave a
@@ -452,16 +471,16 @@ cmd_stop() {
   local pid
   [ -f "$PID_FILE" ] || die "not running (no pid record at $PID_FILE)"
   pid=$(cat "$PID_FILE" 2>/dev/null || true)
-  case "$pid" in ''|*[!0-9]*) rm -f "$PID_FILE"; die "pid record at $PID_FILE was malformed; removed it" ;; esac
+  case "$pid" in ''|*[!0-9]*) rm -f "$PID_FILE" "$IDENTITY_FILE"; die "pid record at $PID_FILE was malformed; removed it" ;; esac
   if ! pid_alive "$pid"; then
-    rm -f "$PID_FILE"
+    rm -f "$PID_FILE" "$IDENTITY_FILE"
     printf 'fm-freellmapi.sh: was not running (stale pid record removed)\n'
     return 0
   fi
   pid_is_our_server "$pid" \
     || die "pid $pid is not this lane's server process; refusing to signal it (remove $PID_FILE by hand after checking)"
   stop_pid "$pid"
-  rm -f "$PID_FILE"
+  rm -f "$PID_FILE" "$IDENTITY_FILE"
   printf 'fm-freellmapi.sh: stopped (pid %s)\n' "$pid"
 }
 
