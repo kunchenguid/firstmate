@@ -14,6 +14,8 @@
 # a path that is both uncommitted in the project checkout and rewritten by this
 # exact fast-forward, including an untracked entry and an incoming path that
 # cannot both exist because one is a directory where the other is a file. An
+# untracked directory git will not descend into, a nested repository above all,
+# stands for everything beneath it, because nothing here can see what it holds. An
 # untracked or modified path the fast-forward never touches cannot be clobbered
 # by it, and an ignored path is declared disposable - git itself overwrites one
 # without complaint, and this guard matches git rather than second-guessing it -
@@ -22,7 +24,8 @@
 # unresolved conflict, a merge, cherry-pick, revert, rebase, bisect, or patch
 # application left in progress, an unrecognized status code, a git command that
 # fails - refuses instead of proceeding, naming the operation it found and how to
-# conclude or abandon it.
+# conclude or abandon it, ahead of the divergence that operation's own commits
+# caused, since rebasing is not what settles it.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
@@ -123,28 +126,29 @@ refuse_if_operation_in_progress() {
     "a bisect is in progress here; end it with 'git bisect reset'"
 }
 
-# The project's main checkout must be on its default branch, so the fast-forward
-# lands predictably (firstmate never writes here otherwise).
+# --- state checks, ordered specific before generic ---------------------------
+#
+# The ordering principle every check below obeys, and every check added later
+# must obey: a refusal that can NAME the state it found runs before any generic
+# check that would describe the same checkout in vaguer terms. A half-finished
+# operation is the reason this matters - it parks the checkout on no branch at
+# all, and it commits onto the default branch as it works through its remaining
+# picks. Either symptom reaches a generic check first if the order is reversed,
+# and the operator is told they are on the wrong branch or that the task branch
+# has diverged and should be rebased, when what they actually have to do is
+# conclude or abandon the operation, which restores the default branch and makes
+# the fast-forward valid again.
+
 cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
 if [ -z "$cur" ]; then
-  # A rebase and a bisect both park the checkout on a detached HEAD, so the
-  # sentinels have to answer here or they never run at all: the generic refusal
-  # below reports an empty branch name and says nothing about the operation that
-  # caused it.
+  # A rebase and a bisect both park the checkout on a detached HEAD, where the
+  # operation's own name is all there is to report: the listing below classifies
+  # what such a rebase left behind as ordinary dirt or as a bare conflict, and the
+  # branch check has nothing but an empty branch name to print.
   refuse_if_operation_in_progress
 fi
-[ "$cur" = "$DEFAULT" ] || { echo "error: $PROJ is on '$cur', expected default branch '$DEFAULT'; cannot merge safely" >&2; exit 1; }
 
-# Clean fast-forward only: DEFAULT must be an ancestor of BRANCH. Settled before
-# the collision guard below, so that guard's incoming change set is exactly the
-# set of paths this fast-forward rewrites rather than a diverged two-way diff.
-if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
-  echo "REFUSED: $BRANCH is not a fast-forward of $DEFAULT (it has diverged)." >&2
-  echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
-  exit 1
-fi
-
-# --- working-tree collision guard -------------------------------------------
+# --- working-tree listing ----------------------------------------------------
 #
 # A blanket "any uncommitted change refuses" check is stricter than git itself
 # and self-deadlocking: it blocks the very commit that would settle the
@@ -156,8 +160,12 @@ fi
 # only status and diff format that emits paths verbatim instead of quoting names
 # with spaces or non-ASCII bytes. --untracked-files=all is required so untracked
 # entries are individual files rather than a collapsed parent directory, which
-# would hide a collision at a nested path. Ignored files are absent from this
-# listing (no --ignored), which is why they never collide.
+# would hide a collision at a nested path. It cannot collapse every such parent:
+# a directory git will not descend into - a nested repository is the shape that
+# does it - still arrives as a lone "<dir>/" entry, so the collision lookup below
+# normalizes that trailing slash away and treats the entry as covering everything
+# beneath it. Ignored files are absent from this listing (no --ignored), which is
+# why they never collide.
 
 GUARD_TMP=
 guard_tmp_cleanup() {
@@ -221,6 +229,23 @@ done < "$GUARD_TMP/status"
 # these catch it once its resolutions are staged and it has nothing left to show.
 refuse_if_operation_in_progress
 
+# --- generic checks, reached only once no specific state was named -----------
+
+# The project's main checkout must be on its default branch, so the fast-forward
+# lands predictably (firstmate never writes here otherwise).
+[ "$cur" = "$DEFAULT" ] || { echo "error: $PROJ is on '$cur', expected default branch '$DEFAULT'; cannot merge safely" >&2; exit 1; }
+
+# Clean fast-forward only: DEFAULT must be an ancestor of BRANCH. Settled before
+# the incoming change set below, so that set is exactly the paths this
+# fast-forward rewrites rather than a diverged two-way diff.
+if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
+  echo "REFUSED: $BRANCH is not a fast-forward of $DEFAULT (it has diverged)." >&2
+  echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
+  exit 1
+fi
+
+# --- incoming change set and collision guard ---------------------------------
+
 # The trailing `--` is load-bearing: without it git applies its revision/filename
 # ambiguity check to both arguments and dies outright in any project holding a
 # root entry named like its default branch, which would refuse a landing the
@@ -282,23 +307,39 @@ incoming_action() {  # <path>
 # needs a directory, and a directory where the merge needs a file.
 UNTRACKED_COLLISION=
 untracked_collision() {  # <path>
-  local want=$1 i=0 add
+  local want=$1 i=0 add lead nested
+  lead="untracked file here"
+  nested="needs that path to be a directory to create"
+  # A lone "<dir>/" entry is the one shape --untracked-files=all still collapses:
+  # git reports a directory it will not descend into, a nested repository above
+  # all, without listing what is inside. Comparing that entry verbatim would build
+  # the prefix pattern '<dir>//*', which matches nothing, so every incoming add
+  # beneath it would pass this guard and hit git's own abort instead. Strip the
+  # slash and let the entry stand for its whole subtree: nothing here can see what
+  # that directory holds, and an unreadable state refuses.
+  case "$want" in
+    */)
+      want=${want%/}
+      lead="untracked directory here that git will not descend into"
+      nested="creates a file beneath it at"
+      ;;
+  esac
   while [ "$i" -lt "${#INC_PATHS[@]}" ]; do
     if [ "${INC_ACTIONS[$i]}" = adds ]; then
       add=${INC_PATHS[$i]}
       if [ "$add" = "$want" ]; then
-        UNTRACKED_COLLISION="untracked file here, and this merge creates a file at that path"
+        UNTRACKED_COLLISION="$lead, and this merge creates a file at that path"
         return 0
       fi
       case "$add" in
         "$want"/*)
-          UNTRACKED_COLLISION="untracked file here, and this merge needs that path to be a directory to create '$add'"
+          UNTRACKED_COLLISION="$lead, and this merge $nested '$add'"
           return 0
           ;;
       esac
       case "$want" in
         "$add"/*)
-          UNTRACKED_COLLISION="untracked file here, and this merge creates a file at '$add', replacing the directory holding it"
+          UNTRACKED_COLLISION="$lead, and this merge creates a file at '$add', replacing the directory holding it"
           return 0
           ;;
       esac

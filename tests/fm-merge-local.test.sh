@@ -7,44 +7,54 @@
 # what keeps the guard usable, and refusing every genuine collision is what keeps
 # it safe.
 #
+# Several cases also pin an ordering the guard depends on: a refusal that can name
+# the state it found runs before any generic wrong-branch or divergence complaint,
+# because a half-finished git operation produces both of those symptoms and
+# neither switching branches nor rebasing is what settles it.
+#
 # Matrix:
 #   refuses  (a) modified path the fast-forward changes
 #   refuses  (b) modified path the fast-forward removes
 #   refuses  (c) untracked file at a path the fast-forward adds (name with spaces)
 #   refuses  (d) untracked file nested inside an otherwise untracked directory,
 #                which a collapsed status listing would hide
-#   refuses  (e) untracked file sitting where the fast-forward needs a directory
-#   refuses  (f) untracked files under a path the fast-forward replaces with a file
-#   refuses  (g) either endpoint of a staged rename that the fast-forward removes
-#   refuses  (h) both endpoints of an INCOMING rename, whose diff record orders
+#   refuses  (e) untracked directory git will not descend into, which arrives as a
+#                lone collapsed entry even with untracked files listed in full
+#   refuses  (f) untracked file sitting where the fast-forward needs a directory
+#   refuses  (g) untracked files under a path the fast-forward replaces with a file
+#   refuses  (h) either endpoint of a staged rename that the fast-forward removes
+#   refuses  (i) both endpoints of an INCOMING rename, whose diff record orders
 #                old-then-new, the reverse of git status
-#   refuses  (i) the destination of an INCOMING copy, when the project has asked
+#   refuses  (j) the destination of an INCOMING copy, when the project has asked
 #                git for copy detection
-#   refuses  (j) an intent-to-add path the fast-forward also adds
-#   refuses  (k) an unresolved merge conflict (state it cannot classify)
-#   refuses  (l) a merge left in progress with its resolution staged, in a linked
+#   refuses  (k) an intent-to-add path the fast-forward also adds
+#   refuses  (l) an unresolved merge conflict (state it cannot classify)
+#   refuses  (m) a merge left in progress with its resolution staged, in a linked
 #                worktree, where the git dir is not <project>/.git
-#   refuses  (m) a cherry-pick left in progress with its resolution staged
-#   refuses  (n) a multi-commit cherry-pick whose conflicted pick has already been
-#                resolved and committed, so only the sequencer still says it is open
-#   refuses  (o) a conflicted rebase, which detaches HEAD, so the named refusal
+#   refuses  (n) a cherry-pick left in progress with its resolution staged
+#   refuses  (o) a multi-commit cherry-pick whose conflicted pick has already been
+#                resolved and committed, so only the sequencer still says it is
+#                open - and whose commit advanced the default branch past the task
+#                branch, so the named refusal has to come before the fast-forward
+#                check to be reachable
+#   refuses  (p) a conflicted rebase, which detaches HEAD, so the named refusal
 #                has to come before the default-branch check to be reachable
-#   refuses  (p) a conflicted apply-backend rebase, which leaves the same state
+#   refuses  (q) a conflicted apply-backend rebase, which leaves the same state
 #                directory git am uses but without its marker
-#   refuses  (q) a failed git am, which keeps HEAD attached and needs the git am
+#   refuses  (r) a failed git am, which keeps HEAD attached and needs the git am
 #                commands rather than the rebase ones
-#   refuses  (r) an unrecognized git status code
-#   proceeds (s) untracked file at a path the fast-forward never touches
-#   proceeds (t) modified path the fast-forward never touches
-#   proceeds (u) an intent-to-add path the fast-forward never touches
-#   proceeds (v) ignored file, even at a path the fast-forward adds
-#   proceeds (w) clean tree
-#   proceeds (x) a staged rename at paths the fast-forward never touches, proving
+#   refuses  (s) an unrecognized git status code
+#   proceeds (t) untracked file at a path the fast-forward never touches
+#   proceeds (u) modified path the fast-forward never touches
+#   proceeds (v) an intent-to-add path the fast-forward never touches
+#   proceeds (w) ignored file, even at a path the fast-forward adds
+#   proceeds (x) clean tree
+#   proceeds (y) a staged rename at paths the fast-forward never touches, proving
 #                the rename's second NUL field is consumed and not misread as the
 #                next record's status code
-#   proceeds (y) a project whose root holds an entry named like its default
+#   proceeds (z) a project whose root holds an entry named like its default
 #                branch, which git reads as a filename without a '--' separator
-#   regression (z) the observed deadlock: two untracked operator files plus one
+#   regression (aa) the observed deadlock: two untracked operator files plus one
 #                modified tracked pointer that the incoming commit removes from
 #                the index. It must refuse, naming only the pointer, and must
 #                merge once that single path is settled - the cure can no longer
@@ -236,6 +246,37 @@ test_refuses_untracked_file_inside_an_untracked_directory() {
   assert_grep 'the operators own copy' "$proj/reports/Quarterly Review.pdf" \
     "refuse-untracked-in-new-dir: the operator's untracked file was overwritten"
   pass "fm-merge-local sees an untracked file nested inside an otherwise untracked directory"
+}
+
+test_refuses_collapsed_untracked_directory() {
+  local case_dir proj stderr
+  case_dir=$(make_case refuse-untracked-nested-repo)
+  proj="$case_dir/project"
+  mkdir -p "$proj/vendor"
+  printf 'theirs\n' > "$proj/vendor/lib.txt"
+  commit_in "$proj" 'add a vendored file'
+  git -C "$proj" checkout -q main
+  # A nested repository is the one untracked shape listing untracked files in full
+  # still cannot expand: git reports it as a lone 'vendor/' entry and never says
+  # what is inside. Compared verbatim, that entry matches no incoming path at all,
+  # so the guard would find nothing and leave git to abort the merge itself.
+  git -C "$proj" init -q vendor
+  printf 'the operators own checkout\n' > "$proj/vendor/lib.txt"
+  [ "$(git -C "$proj" status --porcelain=v1 --untracked-files=all)" = '?? vendor/' ] \
+    || fail "refuse-untracked-nested-repo: fixture did not produce a collapsed untracked directory entry"
+
+  attempt_merge "$case_dir"
+
+  expect_code 1 "$RC" "refuse-untracked-nested-repo: expected a refusal"
+  assert_grep "vendor/ - untracked directory here that git will not descend into, and this merge creates a file beneath it at 'vendor/lib.txt'" \
+    "$case_dir/stderr" "refuse-untracked-nested-repo: the collapsed entry hid the incoming add beneath it"
+  stderr=$(cat "$case_dir/stderr")
+  assert_not_contains "$stderr" 'would be overwritten by merge' \
+    "refuse-untracked-nested-repo: the guard fell through to git's own abort instead of naming the collision"
+  assert_not_merged "$proj" refuse-untracked-nested-repo
+  assert_grep 'the operators own checkout' "$proj/vendor/lib.txt" \
+    "refuse-untracked-nested-repo: the operator's nested checkout was overwritten"
+  pass "fm-merge-local names a collapsed untracked directory entry git will not descend into"
 }
 
 test_refuses_untracked_file_where_the_merge_needs_a_directory() {
@@ -488,6 +529,10 @@ test_refuses_pending_cherry_pick_sequence() {
   local case_dir proj
   case_dir=$(make_case refuse-pending-sequence)
   proj="$case_dir/project"
+  # The task branch's own commit, landed before main moves at all, so main truly
+  # diverges from it below rather than being rebuilt on top of it afterwards.
+  printf 'incoming\n' > "$proj/tracked.txt"
+  commit_in "$proj" 'change tracked.txt'
   # A real two-commit cherry-pick whose FIRST pick conflicts. Resolving and
   # committing that pick drops CHERRY_PICK_HEAD while the second pick is still
   # queued, which is the state git's own status reports as a cherry-pick in
@@ -509,13 +554,14 @@ test_refuses_pending_cherry_pick_sequence() {
   git -C "$proj" commit -qm 'resolve the conflicted pick'
   assert_absent "$proj/.git/CHERRY_PICK_HEAD" \
     "refuse-pending-sequence: fixture still has a live cherry-pick, so it cannot pin the sequencer sentinel"
-  # Rebuild the task branch on top of the advanced main, so the fast-forward
-  # itself stays valid and the pending sequence is the only objection left. The
-  # tree is clean here, so nothing in the status listing can produce a refusal.
-  git -C "$proj" checkout -q -B "$BRANCH" main
-  printf 'incoming\n' > "$proj/tracked.txt"
-  commit_in "$proj" 'change tracked.txt'
-  git -C "$proj" checkout -q main
+  # The committed pick advanced main past the task branch, which is exactly the
+  # ordering this case pins: the generic fast-forward check now has something to
+  # complain about, and reaching it first would tell the operator to have the
+  # crewmate rebase - wrong advice, because aborting the sequence is what restores
+  # main and makes the fast-forward valid again. The tree is clean here, so
+  # nothing in the status listing can produce a refusal either.
+  git -C "$proj" merge-base --is-ancestor main "$BRANCH" \
+    && fail "refuse-pending-sequence: fixture left main an ancestor of $BRANCH, so it cannot pin the check ordering"
 
   attempt_merge "$case_dir"
 
@@ -526,8 +572,10 @@ test_refuses_pending_cherry_pick_sequence() {
     "refuse-pending-sequence: refusal was not actionable"
   assert_no_grep 'has diverged' "$case_dir/stderr" \
     "refuse-pending-sequence: the pending sequence was reported as ordinary divergence"
+  assert_no_grep 'rebase' "$case_dir/stderr" \
+    "refuse-pending-sequence: the refusal prescribed a rebase, which does not settle a pending sequence"
   assert_not_merged "$proj" refuse-pending-sequence
-  pass "fm-merge-local names a cherry-pick sequence still queued after its conflicted pick was committed"
+  pass "fm-merge-local names a pending cherry-pick sequence ahead of the divergence its own commit caused"
 }
 
 test_refuses_in_progress_rebase() {
@@ -839,6 +887,7 @@ test_refuses_modified_path_the_merge_changes
 test_refuses_modified_path_the_merge_removes
 test_refuses_untracked_file_at_an_added_path
 test_refuses_untracked_file_inside_an_untracked_directory
+test_refuses_collapsed_untracked_directory
 test_refuses_untracked_file_where_the_merge_needs_a_directory
 test_refuses_untracked_files_under_a_path_the_merge_turns_into_a_file
 test_refuses_rename_endpoint_the_merge_removes
