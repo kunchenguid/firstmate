@@ -282,8 +282,11 @@ The extension must listen for pi's `turn_end` event, not `agent_end`, so the wat
 Pi sets `PI_CODING_AGENT=true` for its children; this is its harness-detection env marker.
 
 **Primary-session guard fact (verified 2026-07-26, Pi 0.81.1).**
-The firstmate PRIMARY's own `.pi/extensions/fm-primary-turnend-guard.ts` listens for logical-run `agent_end`, not per-tool-loop `turn_end` and not post-settle `agent_settled`, and uses `pi.sendUserMessage(..., { deliverAs: "followUp" })` to force one guarded follow-up when `bin/fm-turnend-guard.sh` returns 2.
+The firstmate PRIMARY's own `.pi/extensions/fm-primary-turnend-guard.ts` blocks from logical-run `agent_end`, not per-tool-loop `turn_end`, and uses `pi.sendUserMessage(..., { deliverAs: "followUp" })` to force one guarded follow-up when `bin/fm-turnend-guard.sh` returns 2.
 Queuing from `agent_end` keeps the run going so the turn never settles blind; `docs/turnend-guard.md` owns the mechanism.
+The same file also registers a second `agent_settled` listener that does nothing but release the single-follow-up latch, because `agent_settled` is the only event pi guarantees once per logical run.
+`agent_end` fires again only if the run actually continues, so a run that dies after the guard queued its follow-up would otherwise leave the latch set and let the next logical run end unguarded.
+Removing that settle listener is a regression, not a cleanup; `tests/fm-turnend-guard.test.sh` fails without it.
 Without `deliverAs: "followUp"`, Pi rejects the send while the agent is still processing.
 Pi's primary watcher protocol also requires the tracked `.pi/extensions/fm-primary-pi-watch.ts` extension, same trust-once discovery as the turn-end guard.
 The model arms through `fm_watch_arm_pi`, never a foreground bash arm; the watcher tool result and clean-exit fallback are owned by `docs/supervision-protocols/pi.md`.
