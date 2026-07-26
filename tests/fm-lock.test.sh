@@ -473,6 +473,43 @@ EOF
   pass "reclaim owner publication failures are distinct from contention"
 }
 
+test_stale_reclaim_write_failure_stays_stale() {
+  local rec home fakebin out rc=0
+  rec=$(new_home stale-write-failure)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  make_ps_denied "$fakebin"
+  printf '999999\n' > "$home/state/.lock"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/mv"
+  chmod +x "$fakebin/mv"
+
+  out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    "$LOCK" reclaim --expected 999999 2>&1) || rc=$?
+
+  expect_code 11 "$rc" "stale reclaim write failure"
+  assert_contains "$out" "LOCK_RESULT=STALE_RECLAIMABLE" "write failure hid the stale main lock"
+  assert_grep "999999" "$home/state/.lock" "write failure changed the stale owner"
+  pass "main-lock write failures preserve stale classification"
+}
+
+test_stale_reclaim_identity_failure_stays_stale() {
+  local rec home fakebin out rc=0
+  rec=$(new_home stale-identity-failure)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  make_ps_denied "$fakebin"
+  printf '999999\n' > "$home/state/.lock"
+
+  out=$(/usr/bin/env -u CODEX_THREAD_ID FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    "$LOCK" reclaim --expected 999999 2>&1) || rc=$?
+
+  expect_code 11 "$rc" "stale reclaim identity failure"
+  assert_contains "$out" "LOCK_RESULT=STALE_RECLAIMABLE" "identity failure hid the stale main lock"
+  pass "pre-mutex identity failures preserve stale classification"
+}
+
 test_confirmed_closed_codex_owner_is_reclaimed_exactly() {
   local rec home fakebin out rc=0
   rec=$(new_home reclaim-confirmed-codex)
@@ -530,6 +567,8 @@ run_one() {
     mutex-symlink) test_reclaim_mutex_symlink_is_not_followed ;;
     invalid-state) test_state_path_failure_is_not_reclaim_busy ;;
     publication-failure) test_reclaim_owner_publication_failure_is_not_busy ;;
+    stale-write-failure) test_stale_reclaim_write_failure_stays_stale ;;
+    stale-identity-failure) test_stale_reclaim_identity_failure_stays_stale ;;
     *) fail "unknown test selector: $1" ;;
   esac
 }
@@ -557,4 +596,6 @@ else
   test_reclaim_mutex_symlink_is_not_followed
   test_state_path_failure_is_not_reclaim_busy
   test_reclaim_owner_publication_failure_is_not_busy
+  test_stale_reclaim_write_failure_stays_stale
+  test_stale_reclaim_identity_failure_stays_stale
 fi

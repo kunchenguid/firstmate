@@ -304,11 +304,11 @@ reclaim_mutex_generation() {
 }
 
 reclaim_mutex_age() {
-  local m now
+  local path=${1:-$RECLAIM_LOCK} m now
   if [ "$(uname)" = Darwin ]; then
-    m=$(stat -f %m "$RECLAIM_LOCK" 2>/dev/null) || return 1
+    m=$(stat -f %m "$path" 2>/dev/null) || return 1
   else
-    m=$(stat -c %Y "$RECLAIM_LOCK" 2>/dev/null) || return 1
+    m=$(stat -c %Y "$path" 2>/dev/null) || return 1
   fi
   case "$m" in ''|*[!0-9]*) return 1 ;; esac
   now=$(date +%s) || return 1
@@ -353,8 +353,21 @@ remove_reclaim_mutex() {
 }
 
 write_reclaim_owner() {
-  local mypid=${BASHPID:-$$} now back_pid back_started
+  local generation=$1 gate mypid=${BASHPID:-$$} now back_pid back_started current
+  gate="$RECLAIM_LOCK/.generation-$generation"
+  [ -d "$gate" ] || return 1
+  current=$(reclaim_mutex_generation 2>/dev/null || true)
+  [ "$current" = "$generation" ] || return 1
   now=$(date +%s 2>/dev/null) || return 1
+  if ! printf '%s\n' "$mypid" > "$gate/pid"; then
+    return 1
+  fi
+  if ! printf '%s\n' "$now" > "$gate/started"; then
+    return 1
+  fi
+  [ "$(cat "$gate/pid" 2>/dev/null || true)" = "$mypid" ] \
+    && [ "$(cat "$gate/started" 2>/dev/null || true)" = "$now" ] \
+    || return 1
   if ! printf '%s\n' "$mypid" > "$RECLAIM_LOCK/pid"; then
     return 1
   fi
@@ -363,28 +376,90 @@ write_reclaim_owner() {
   fi
   back_pid=$(cat "$RECLAIM_LOCK/pid" 2>/dev/null || true)
   back_started=$(cat "$RECLAIM_LOCK/started" 2>/dev/null || true)
-  [ "$back_pid" = "$mypid" ] && [ "$back_started" = "$now" ]
+  current=$(reclaim_mutex_generation 2>/dev/null || true)
+  [ "$back_pid" = "$mypid" ] && [ "$back_started" = "$now" ] \
+    && [ "$current" = "$generation" ] && [ -d "$gate" ]
 }
 
 release_reclaim_lock() {
-  local recorded mypid=${BASHPID:-$$}
+  local recorded generation gate claimed mypid=${BASHPID:-$$}
   if [ "$RECLAIM_HELD" -ne 1 ]; then
     return 0
   fi
   recorded=$(cat "$RECLAIM_LOCK/pid" 2>/dev/null || true)
   if [ "$recorded" = "$mypid" ]; then
+    generation=$(reclaim_mutex_generation 2>/dev/null || true)
+    gate="$RECLAIM_LOCK/.generation-$generation"
+    claimed="$RECLAIM_LOCK/.generation-claimed-$generation"
+    if [ -n "$generation" ] && [ -d "$gate" ]; then
+      perl -e 'exit(rename($ARGV[0], $ARGV[1]) ? 0 : 1)' \
+        "$gate" "$claimed" 2>/dev/null || {
+        RECLAIM_HELD=0
+        return 1
+      }
+      rm -rf "$claimed" 2>/dev/null || true
+    fi
     remove_reclaim_mutex
   fi
   RECLAIM_HELD=0
 }
 
 detach_abandoned_reclaim_mutex() {
-  local generation=$1 quarantine abandoned_rc=0
+  local generation=$1 gate claimed quarantine current pid now claim_pid gate_pid age min_age
+  gate="$RECLAIM_LOCK/.generation-$generation"
+  claimed="$RECLAIM_LOCK/.generation-claimed-$generation"
   quarantine="$STATE/.lock-reclaim-retired.${BASHPID:-$$}.$RANDOM.$generation"
   [ ! -e "$quarantine" ] && [ ! -L "$quarantine" ] || return 2
-  reclaim_mutex_is_provably_abandoned "$generation" || abandoned_rc=$?
-  [ "$abandoned_rc" -eq 0 ] || return "$abandoned_rc"
   command -v perl >/dev/null 2>&1 || return 2
+  if [ -d "$claimed" ]; then
+    claim_pid=$(cat "$claimed/pid" 2>/dev/null || true)
+    case "$claim_pid" in
+      ''|*[!0-9]*)
+        age=$(reclaim_mutex_age "$claimed" 2>/dev/null || true)
+        case "$age" in ''|*[!0-9]*) return 1 ;; esac
+        min_age=$RECLAIM_MUTEX_STALE_AFTER
+        case "$min_age" in ''|*[!0-9]*) min_age=2 ;; esac
+        [ "$min_age" -lt 2 ] && min_age=2
+        [ "$age" -ge "$min_age" ] || return 1
+        ;;
+      *)
+        kill -0 "$claim_pid" 2>/dev/null && return 1
+        ;;
+    esac
+    perl -e 'exit(rename($ARGV[0], $ARGV[1]) ? 0 : 1)' \
+      "$claimed" "$gate" 2>/dev/null || return 1
+  elif [ ! -d "$gate" ]; then
+    mkdir "$gate" 2>/dev/null || return 1
+  fi
+  gate_pid=$(cat "$gate/pid" 2>/dev/null || true)
+  case "$gate_pid" in
+    ''|*[!0-9]*) ;;
+    *) kill -0 "$gate_pid" 2>/dev/null && return 1 ;;
+  esac
+  if ! perl -e 'exit(rename($ARGV[0], $ARGV[1]) ? 0 : 1)' \
+    "$gate" "$claimed" 2>/dev/null; then
+    return 1
+  fi
+  now=$(date +%s 2>/dev/null) || return 2
+  printf '%s\n' "${BASHPID:-$$}" > "$claimed/pid" || return 2
+  printf '%s\n' "$now" > "$claimed/started" || return 2
+  current=$(reclaim_mutex_generation 2>/dev/null || true)
+  if [ "$current" != "$generation" ]; then
+    rm -rf "$claimed" 2>/dev/null || true
+    return 1
+  fi
+  pid=$(cat "$RECLAIM_LOCK/pid" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) ;;
+    *)
+      if kill -0 "$pid" 2>/dev/null; then
+        rm -f "$claimed/pid" "$claimed/started" 2>/dev/null || true
+        perl -e 'exit(rename($ARGV[0], $ARGV[1]) ? 0 : 1)' \
+          "$claimed" "$gate" 2>/dev/null || true
+        return 1
+      fi
+      ;;
+  esac
   if ! perl -e 'exit(rename($ARGV[0], $ARGV[1]) ? 0 : 1)' \
     "$RECLAIM_LOCK" "$quarantine" 2>/dev/null; then
     return 2
@@ -396,12 +471,15 @@ detach_abandoned_reclaim_mutex() {
 
 # Returns 0 held, 1 busy (live or mid-acquire), 2 storage or malformed-state failure.
 acquire_reclaim_lock() {
-  local attempt=0 generation abandoned_rc detach_rc
+  local attempt=0 generation gate abandoned_rc detach_rc
   RECLAIM_ACQUIRE_ERROR=
   while [ "$attempt" -lt 2 ]; do
     attempt=$((attempt + 1))
     if mkdir "$RECLAIM_LOCK" 2>/dev/null; then
-      if write_reclaim_owner; then
+      generation=$(reclaim_mutex_generation 2>/dev/null || true)
+      gate="$RECLAIM_LOCK/.generation-$generation"
+      if [ -n "$generation" ] && mkdir "$gate" 2>/dev/null \
+        && write_reclaim_owner "$generation"; then
         RECLAIM_HELD=1
         return 0
       fi
@@ -545,8 +623,8 @@ reclaim_expected() {
   fi
 
   if ! current_owner; then
-    emit_result IDENTITY_UNAVAILABLE "cannot identify this session through readable process ancestry or CODEX_THREAD_ID"
-    return "$EXIT_IDENTITY_UNAVAILABLE"
+    emit_classified_lock "reclaim refused; cannot identify this session through readable process ancestry or CODEX_THREAD_ID"
+    return $?
   fi
   current=$CURRENT_OWNER
 
@@ -585,8 +663,8 @@ reclaim_expected() {
   CURRENT_OWNER=$current
   if ! write_owner "$CURRENT_OWNER"; then
     release_reclaim_lock
-    emit_result IDENTITY_UNAVAILABLE "failed to write the new lock owner"
-    return "$EXIT_IDENTITY_UNAVAILABLE"
+    emit_classified_lock "reclaim failed to write the new lock owner"
+    return $?
   fi
   release_reclaim_lock
   emit_result OWNED "reclaimed from $expected"
