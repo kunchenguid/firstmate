@@ -1351,18 +1351,12 @@ SH
   pass "teardown drops collected retired signals before the task ID is reused"
 }
 
-test_teardown_after_signal_filter_does_not_wake_empty_queue() {
-  local case_dir status_line status_sig real_grep real_sleep pid i signal_count
-  case_dir=$(make_case signal-filter-teardown)
+test_teardown_waits_for_live_signal_triage() {
+  local case_dir status_line real_grep real_sleep pid teardown_pid i signal_count
+  case_dir=$(make_case signal-triage-teardown)
   write_meta "$case_dir" local-only ship
   status_line='needs-decision: choose release target'
   printf '%s\n' "$status_line" > "$case_dir/state/task-x1.status"
-  cp -p "$case_dir/state/task-x1.status" "$case_dir/status-reference"
-  if [ "$(uname)" = Darwin ]; then
-    status_sig=$(stat -f '%z:%Fm' "$case_dir/state/task-x1.status")
-  else
-    status_sig=$(stat -c '%s:%Y' "$case_dir/state/task-x1.status")
-  fi
   real_grep=$(command -v grep)
   real_sleep=$(command -v sleep)
   cat > "$case_dir/fakebin/grep" <<'SH'
@@ -1397,43 +1391,28 @@ SH
     i=$((i + 1))
   done
   [ -e "$case_dir/signal-filter-blocked" ] \
-    || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "signal-filter-teardown: watcher did not pause after active filtering"; }
-  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
-    || fail "signal-filter-teardown: forced teardown failed"
-  : > "$case_dir/signal-filter-resume"
-  i=0
-  while [ "$i" -lt 10 ] && kill -0 "$pid" 2>/dev/null; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  kill -0 "$pid" 2>/dev/null \
-    || { wait "$pid" 2>/dev/null || true; fail "signal-filter-teardown: watcher emitted an empty-queue wake"; }
-  [ ! -s "$case_dir/watch.out" ] || fail "signal-filter-teardown: retired signal produced a watcher wake"
-  [ ! -s "$case_dir/state/.wake-queue" ] || fail "signal-filter-teardown: retired signal produced a queue record"
-  [ ! -e "$case_dir/state/.seen-task-x1_status" ] \
-    || fail "signal-filter-teardown: retired signal advanced its suppressor"
+    || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "signal-triage-teardown: watcher did not pause during active filtering"; }
 
-  printf '%s\n' 'window=fm-task-x1' 'kind=ship' > "$case_dir/state/task-x1.meta"
-  cp -p "$case_dir/status-reference" "$case_dir/state/task-x1.status"
-  i=0
-  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 50 ]; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  if kill -0 "$pid" 2>/dev/null; then
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-    fail "signal-filter-teardown: next live actionable signal did not wake"
-  fi
-  wait "$pid" || fail "signal-filter-teardown: watcher failed after task reuse: $(cat "$case_dir/watch.err")"
+  FM_REAL_GREP_FOR_TEST="$real_grep" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" &
+  teardown_pid=$!
+  sleep 0.2
+  kill -0 "$teardown_pid" 2>/dev/null \
+    || { wait "$teardown_pid" 2>/dev/null || true; fail "signal-triage-teardown: teardown retired metadata during active triage"; }
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "signal-triage-teardown: metadata disappeared before active triage completed"
+
+  : > "$case_dir/signal-filter-resume"
+  wait "$pid" || fail "signal-triage-teardown: watcher failed after active triage: $(cat "$case_dir/watch.err")"
+  wait "$teardown_pid" || fail "signal-triage-teardown: teardown failed after active triage"
   signal_count=$(grep -c "$(printf '\tsignal\ttask-x1.status\t')" "$case_dir/state/.wake-queue" 2>/dev/null || true)
   [ "$signal_count" -eq 1 ] \
-    || fail "signal-filter-teardown: next live signal queued $signal_count times instead of once"
+    || fail "signal-triage-teardown: committed live signal queued $signal_count times instead of once"
   grep -F "signal: $case_dir/state/task-x1.status" "$case_dir/watch.out" >/dev/null \
-    || fail "signal-filter-teardown: next live signal did not wake"
-  [ "$(cat "$case_dir/state/.seen-task-x1_status")" = "$status_sig" ] \
-    || fail "signal-filter-teardown: next live signal did not advance its suppressor"
-  pass "teardown after signal filtering cannot wake without a durable queue record"
+    || fail "signal-triage-teardown: committed live signal did not wake"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "signal-triage-teardown: teardown did not retire metadata after active triage"
+  pass "teardown serializes worker retirement with live signal triage"
 }
 
 test_teardown_waits_for_live_signal_queue_commit() {
@@ -1678,7 +1657,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
-test_teardown_after_signal_filter_does_not_wake_empty_queue
+test_teardown_waits_for_live_signal_triage
 test_teardown_waits_for_live_signal_queue_commit
 test_teardown_waits_for_live_stale_queue_commit
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close

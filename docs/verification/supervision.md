@@ -118,12 +118,15 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
+The current Pi live entry point additionally asserts that a watcher wake triggers exactly one handling turn without rendering its body, private state path, or queue-drain instruction.
 
 Deterministic entry points:
 
 ```sh
 tests/fm-pi-watch-extension.test.sh
 tests/fm-watcher-lock.test.sh
+tests/fm-watch-triage.test.sh
+tests/fm-teardown.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
