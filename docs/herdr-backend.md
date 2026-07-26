@@ -176,7 +176,7 @@ The capture owner requests at least 200 lines from Herdr and trims locally to th
 This generous floor is required for small composer and peek reads.
 
 Herdr's native agent state can read idle while a harness waits on its own long foreground tool.
-The shared crew-state path therefore corroborates every native non-busy or unreadable result with the rendered busy regex before concluding that a pane is not working.
+The shared crew-state path therefore corroborates every native non-busy or unreadable result with the recorded harness's rendered busy signature before concluding that a pane is not working.
 A human-blocked permission dialog has no busy banner and still surfaces.
 
 ## Composer and injection safety
