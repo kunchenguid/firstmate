@@ -600,8 +600,8 @@ EOF
 
   expect_code 0 "$rc" "abandoned generation claim recovery"
   assert_contains "$out" "LOCK_RESULT=OWNED" "abandoned generation claim did not recover"
-  [ -z "$(find "$home/state" -name '.lock-reclaim-claim-retired*' -print)" ] \
-    || fail "generation-claim quarantine was not removed"
+  [ -n "$(find "$home/state" -type d -name '.lock-reclaim-claim-retired*' -print -quit)" ] \
+    || fail "generation-claim tombstone was not retained"
   pass "generation claims honor the configured abandonment threshold"
 }
 
