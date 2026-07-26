@@ -29,9 +29,16 @@ shell_quote() {
   printf "'"
 }
 
-# The verified launch command per adapter, as a template. Returns 1 for a
-# harness with no verified adapter - that non-zero return is the unverified-
-# adapter guard every caller relies on, so never add a permissive default arm.
+# The verified launch command per adapter, as a template. A non-zero return has
+# two distinct causes, and a caller reporting the refusal must tell them apart:
+#   1. the harness has no verified adapter at all - the unverified-adapter guard
+#      every caller relies on, whose remedy is a raw launch command;
+#   2. the harness is verified but this kind is deliberately unsupported for it -
+#      today only kimi with kind=primary, whose remedy is a different harness,
+#      NOT the raw-launch escape hatch.
+# Never add a permissive default arm to either case. bin/fm-spawn.sh:437 and :441
+# name only cause 1 because fm-spawn never passes kind=primary; a consumer that
+# does pass it owes the user the cause-2 wording.
 #
 # kind selects the session shape:
 #   ship|scout   a crewmate working one task in an isolated worktree
@@ -70,10 +77,25 @@ shell_quote() {
 # substitute __KIMIBIN__, and it only ever launches crewmates, so a primary kimi
 # template could not be substituted by the caller that would ask for it.
 #
-# Every primary template below is the shape this repo empirically verified for a
-# briefless PRIMARY launch, not the crewmate command with its brief argument
-# subtracted; each arm cites the evidence that fixes its flags, and
-# tests/fm-launch-lib.test.sh pins each one against those same citations.
+# No primary template below is the crewmate command with its brief argument
+# subtracted; each arm cites the specific in-repo evidence that fixes its flags,
+# and tests/fm-launch-lib.test.sh pins each one against those same citations.
+# The evidence is not uniform, and each arm says which kind it rests on: opencode
+# and grok are pinned to an empirical briefless PRIMARY launch in a live e2e test,
+# pi to the documented bare launch, and claude and codex to the secondmate
+# precedent - this file's own `secondmate` kind is a firstmate PRIMARY (see the
+# kind list above), and its shipped crewmate templates - the claude arm and the
+# codex `kind = secondmate` arm in the second case block below - launch that
+# interactive primary with exactly the autonomy flags those two arms carry.
+#
+# CONSUMER OBLIGATION (binding, not advisory): the claude and codex primary
+# templates launch a session that runs with NO permission prompts, and the
+# opencode primary template allows every permission outright. A consumer that
+# composes a primary launch from this library MUST surface that fact to the
+# captain at launch time - one short line at launch or in the menu row is enough.
+# The captain is entitled to know the posture of the session their front door
+# starts; this obligation lives here so every consumer inherits it from the one
+# owner instead of rediscovering it.
 launch_template() {
   local harness=$1 kind=${2:-ship}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
@@ -82,16 +104,33 @@ launch_template() {
       case "$harness" in
         # The ghost-text suppression prefix is firstmate-required on every claude
         # launch, primary included (see the crewmate arm below for why).
-        # --dangerously-skip-permissions carries over from the crewmate command:
-        # README.md:90 documents the primary launch as bare `claude`, and the only
-        # in-repo launch carrying the flag is the headless print-mode session at
-        # tests/fm-claude-stop-autoarm-live-e2e.test.sh:115, so the repo pins the
-        # prefix but not this flag's place in an interactive primary.
+        # --dangerously-skip-permissions is settled knowledge, decided and recorded
+        # rather than inherited by accident. The evidence is the secondmate
+        # precedent: the claude arm in the crewmate case block below serves every
+        # crewmate kind INCLUDING secondmate, and this `secondmate` kind is itself a
+        # firstmate PRIMARY launched in a provisioned home, so the repo already
+        # ships an interactive firstmate primary carrying this flag. The captain's
+        # own attended session already runs as `claude --dangerously-skip-permissions`,
+        # so keeping it preserves the status quo instead of creating new exposure,
+        # and dropping it would break the supervision contract: a firstmate stalled
+        # on a permission prompt cannot run bin/fm-wake-drain.sh to drain its wake
+        # queue or bin/fm-watch-arm.sh to arm its own watcher. Note that README.md:90
+        # documents the primary launch as bare `claude` and the only in-repo claude
+        # launch carrying the flag directly is the headless print-mode session at
+        # tests/fm-claude-stop-autoarm-live-e2e.test.sh:115; the secondmate
+        # precedent, not those, is what fixes this arm. See the CONSUMER OBLIGATION
+        # in the header: a consumer must tell the captain this session has no
+        # permission prompts.
         claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__' ;;
-        # --dangerously-bypass-approvals-and-sandbox likewise carries over from the
-        # crewmate command; tests/fm-codex-continuity-live-e2e.test.sh:40 uses it
-        # under headless `codex exec`, which is not evidence of the interactive
-        # primary TUI shape. No in-repo primary codex TUI launch exists to pin.
+        # --dangerously-bypass-approvals-and-sandbox rests on the same secondmate
+        # precedent: the codex `kind = secondmate` arm in the crewmate case block
+        # below is the SECONDMATE template, and it launches an
+        # interactive firstmate primary with exactly this flag. The same status-quo
+        # and supervision-contract reasoning as the claude arm applies. It is worth
+        # recording what is NOT the evidence here:
+        # tests/fm-codex-continuity-live-e2e.test.sh:40 runs `codex exec`, headless,
+        # so it says nothing about the interactive primary TUI shape. The header's
+        # CONSUMER OBLIGATION covers this arm too.
         codex) printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox' ;;
         # --prompt carries the crewmate's brief, so it has no place in a briefless
         # primary; --auto is the empirically verified briefless form (a primary
