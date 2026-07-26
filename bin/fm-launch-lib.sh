@@ -88,14 +88,30 @@ shell_quote() {
 # codex `kind = secondmate` arm in the second case block below - launch that
 # interactive primary with exactly the autonomy flags those two arms carry.
 #
-# CONSUMER OBLIGATION (binding, not advisory): the claude and codex primary
-# templates launch a session that runs with NO permission prompts, and the
-# opencode primary template allows every permission outright. A consumer that
-# composes a primary launch from this library MUST surface that fact to the
-# captain at launch time - one short line at launch or in the menu row is enough.
-# The captain is entitled to know the posture of the session their front door
-# starts; this obligation lives here so every consumer inherits it from the one
-# owner instead of rediscovering it.
+# CONSUMER OBLIGATION (binding, not advisory). The rule, which governs whatever
+# the templates below happen to say: whenever a primary template carries a
+# permission-bypass flag - anything that auto-approves, skips, or pre-allows the
+# permission prompts an interactive session would otherwise raise - a consumer
+# composing that launch MUST surface it to the captain at launch time. One short
+# line at launch or in the menu row is enough. The captain is entitled to know
+# the posture of the session their front door starts. The rule binds by flag, not
+# by the roster below, so an adapter that gains a bypass flag later is covered the
+# day it gains it, and a consumer cannot satisfy the letter of this note while
+# silently shipping a no-prompt session.
+#
+# As of this commit the rule catches four of the five primary templates, each by a
+# different mechanism:
+#   claude    --dangerously-skip-permissions
+#   codex     --dangerously-bypass-approvals-and-sandbox
+#   opencode  OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}', which
+#             pre-allows every permission before the TUI starts
+#   grok      --always-approve, which .agents/skills/harness-adapters/SKILL.md:304
+#             records as auto-approving every tool execution, verified to run
+#             fully unattended and equivalent to --permission-mode bypassPermissions
+# pi is the sole exception, and its absence here is deliberate rather than an
+# oversight: its primary template is bare `pi` with no autonomy flag, so a pi
+# primary still prompts and there is nothing for a consumer to disclose. If that
+# ever changes, the rule above already covers it.
 launch_template() {
   local harness=$1 kind=${2:-ship}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
@@ -135,7 +151,9 @@ launch_template() {
         # --prompt carries the crewmate's brief, so it has no place in a briefless
         # primary; --auto is the empirically verified briefless form (a primary
         # opencode TUI is launched that way in
-        # tests/fm-opencode-primary-live-e2e.test.sh:256 and :310).
+        # tests/fm-opencode-primary-live-e2e.test.sh:256 and :310). The
+        # OPENCODE_CONFIG_CONTENT JSON pre-allows every permission, so the header's
+        # CONSUMER OBLIGATION covers this arm too.
         opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--auto' ;;
         # Bare `pi` is the documented primary launch (README.md:102); the project
         # trust prompt approved once per clone is what makes the tracked
@@ -144,7 +162,9 @@ launch_template() {
         # --approve --no-session --no-context-files --no-extensions with explicit
         # -e paths, but those are that test's isolation scaffolding - it runs
         # against a throwaway clone - not the verified primary form, so they are
-        # deliberately not copied here.
+        # deliberately not copied here. --approve is part of that scaffolding, and
+        # leaving it out is why pi is the one primary template the header's CONSUMER
+        # OBLIGATION does not catch: a pi primary still prompts.
         pi) printf '%s' 'pi __MODELFLAG____EFFORTFLAG__' ;;
         # --trust is supervision-safety knowledge, not one-time setup trivia:
         # without folder trust the primary turn-end guard FAILS OPEN
@@ -154,7 +174,10 @@ launch_template() {
         # is tests/fm-grok-continuity-live-e2e.test.sh:76,
         # `grok --trust --always-approve --reasoning-effort low`, where
         # --reasoning-effort is what __EFFORTFLAG__ resolves to; README.md:96
-        # documents the same `grok --trust`.
+        # documents the same `grok --trust`. --always-approve auto-approves every
+        # tool execution (.agents/skills/harness-adapters/SKILL.md:304), so the
+        # header's CONSUMER OBLIGATION covers this arm: a consumer must tell the
+        # captain this session has no permission prompts.
         grok) printf '%s' 'grok --trust --always-approve __MODELFLAG____EFFORTFLAG__' ;;
         # kimi refuses rather than emitting an unsubstitutable command: README.md:61
         # lists only Claude Code, Grok, Pi, Codex, and OpenCode as verified primary
