@@ -34,7 +34,12 @@
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      green, so a green PR is never silently read as still-validating. ALSO:
+#      when the attributed run is already TERMINAL (done/failed, including
+#      cancelled) and the status log's last verb is a declared paused:, emit
+#      paused with source status-log and keep the terminal run outcome as
+#      secondary detail - a historical record must not overrule a fresher
+#      self-declared wait. Active and parked runs still outrank a pause line.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -589,6 +594,19 @@ if [ "$HAVE_RUN" = 1 ]; then
         else
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded (run $RUN_STATE)"
         fi
+      fi
+      ;;
+  esac
+
+  # Declared pause outranks a TERMINAL (historical) run only. Active/parked
+  # runs still win: the crew is mid-validation, so a pause line is stale.
+  # Mirror the CI-green status-log override shape: emit from status-log and
+  # keep the prior run-step outcome as secondary detail so a supervisor still
+  # sees that the run cancelled/failed/completed.
+  case "$RUN_STATE" in
+    failed|done)
+      if status_is_paused "$LOG_LINE"; then
+        emit paused status-log "$(status_line_note "$LOG_LINE")${SEP}$RUN_DETAIL"
       fi
       ;;
   esac
