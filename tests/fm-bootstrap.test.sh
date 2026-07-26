@@ -676,7 +676,13 @@ make_routine_bootstrap_fixture() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message) printf '%s\n' codex ;;
+  display-message)
+    case "$*" in
+      *'#{cursor_y}'*) printf '%s\n' 0 ;;
+      *) printf '%s\n' codex ;;
+    esac
+    ;;
+  capture-pane) printf '\n' ;;
   list-windows) printf '%s\n' fm-sm ;;
 esac
 exit 0
