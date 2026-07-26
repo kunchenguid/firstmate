@@ -144,14 +144,21 @@ fm_tmux_composer_row_state() {  # <raw-row> [bordered] [allow-busy] -> empty|pen
 }
 
 fm_tmux_row_has_composer_edge() {  # <plain-row>
-  local row=$1
+  local row=$1 first last
   row="${row#"${row%%[![:space:]]*}"}"
   row="${row%"${row##*[![:space:]]}"}"
-  case "$row" in
-    '│'*|*'│'|'┃'*|*'┃'|'║'*|*'║'|'╭'*|*'╭'|'╮'*|*'╮'|\
-    '┌'*|*'┌'|'┐'*|*'┐'|'╔'*|*'╔'|'╗'*|*'╗'|'┏'*|*'┏'|'┓'*|*'┓'|\
-    '╰'*|*'╰'|'╯'*|*'╯'|'└'*|*'└'|'┘'*|*'┘'|'╚'*|*'╚'|'╝'*|*'╝'|\
-    '┗'*|*'┗'|'┛'*|*'┛'|'─'*|*'─'|'━'*|*'━'|'═'*|*'═'|'|'*|*'|')
+  [ -n "$row" ] || return 1
+  first=${row%"${row#?}"}
+  last=${row#"${row%?}"}
+  case "$first" in
+    '│'|'┃'|'║'|'╭'|'╮'|'┌'|'┐'|'╔'|'╗'|'┏'|'┓'|'╰'|'╯'|'└'|'┘'|\
+    '╚'|'╝'|'┗'|'┛'|'─'|'━'|'═'|'|')
+      return 0
+      ;;
+  esac
+  case "$last" in
+    '│'|'┃'|'║'|'╭'|'╮'|'┌'|'┐'|'╔'|'╗'|'┏'|'┓'|'╰'|'╯'|'└'|'┘'|\
+    '╚'|'╝'|'┗'|'┛'|'─'|'━'|'═'|'|')
       return 0
       ;;
   esac
@@ -162,11 +169,15 @@ fm_tmux_row_has_composer_edge() {  # <plain-row>
 # complete bordered box that structurally contains the cursor. The cursor may be
 # on any content row or on the bottom border; no fixed cursor offset is used.
 fm_tmux_find_composer_box() {  # <cursor-y> <plain-visible-pane> -> "<top> <bottom>"
-  local cy=$1 pane=$2 line trimmed kind family current_family= side_family
+  local cy=$1 pane=$2 line left_stripped right_stripped trimmed kind family
+  local current_family= side_family line_left line_right current_left=-1 current_right=-1
   local row=0 top=-1 valid=0 content_rows=0 unsafe=0 cursor_structural=0
   while IFS= read -r line; do
-    trimmed="${line#"${line%%[![:space:]]*}"}"
-    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    left_stripped="${line#"${line%%[![:space:]]*}"}"
+    right_stripped="${line%"${line##*[![:space:]]}"}"
+    trimmed="${left_stripped%"${left_stripped##*[![:space:]]}"}"
+    line_left=$((${#line} - ${#left_stripped}))
+    line_right=${#right_stripped}
     kind=
     family=
     case "$trimmed" in
@@ -189,11 +200,14 @@ fm_tmux_find_composer_box() {  # <cursor-y> <plain-visible-pane> -> "<top> <bott
       fi
       top=$row
       current_family=$family
+      current_left=$line_left
+      current_right=$line_right
       valid=1
       content_rows=0
     elif [ "$kind" = bottom ] || { [ "$kind" = ascii ] && [ "$top" -ge 0 ]; }; then
       if [ "$top" -ge 0 ] && [ "$family" = "$current_family" ] \
          && [ "$valid" = 1 ] && [ "$content_rows" -gt 0 ] \
+         && [ "$line_left" -eq "$current_left" ] && [ "$line_right" -eq "$current_right" ] \
          && [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; then
         printf '%s %s' "$top" "$row"
         return 0
@@ -204,6 +218,8 @@ fm_tmux_find_composer_box() {  # <cursor-y> <plain-visible-pane> -> "<top> <bott
       fi
       top=-1
       current_family=
+      current_left=-1
+      current_right=-1
       valid=0
       content_rows=0
     elif [ "$top" -ge 0 ]; then
@@ -216,7 +232,11 @@ fm_tmux_find_composer_box() {  # <cursor-y> <plain-visible-pane> -> "<top> <bott
       esac
       case "$current_family:$side_family" in
         rounded:single|light:single|heavy:heavy|double:double|ascii:ascii)
-          content_rows=$((content_rows + 1))
+          if [ "$line_left" -eq "$current_left" ] && [ "$line_right" -eq "$current_right" ]; then
+            content_rows=$((content_rows + 1))
+          else
+            valid=0
+          fi
           ;;
         *) valid=0 ;;
       esac
@@ -234,14 +254,13 @@ EOF
   return 1
 }
 
-# fm_tmux_composer_state: classify the complete composer box of <target> as
-# empty, pending, or unknown. A structurally located box is read from its top
-# border through its bottom border, and every content row is ghost-stripped and
-# classified through bin/fm-composer-lib.sh. Any real text on any row is positive
-# evidence of pending input; only an entirely empty box is empty. If no complete
-# box contains the cursor and there is no composer-edge glyph at all, the old
-# cursor-row classifier remains as compatibility for genuinely non-bordered
-# composers. Any unbounded edge is structurally unsafe and returns unknown.
+# fm_tmux_composer_state classification contract:
+# A row is structural only when its first or last non-whitespace character is a
+# composer edge. A complete box has matching border families and identical
+# untrimmed left and right bounds on every row. Real content on any proven row is
+# pending. Empty is limited to a genuinely empty composer, an all-empty proven
+# box, an empty non-bordered fallback row, or the submit core's busy-queued Enter
+# conversion. Unreadable, unbounded, or inconsistent structure is unknown.
 fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 cy raw pane plain box box_status top bottom row row_raw state unknown_seen=0
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }

@@ -205,6 +205,17 @@ make_bordered_case() {
 #!/usr/bin/env bash
 set -u
 COMPOSER="${FM_FAKE_COMPOSER:?FM_FAKE_COMPOSER unset}"
+write_composer() {
+  text=$1
+  width=$((${#text} + 4))
+  border=
+  i=0
+  while [ "$i" -lt "$width" ]; do
+    border="${border}─"
+    i=$((i + 1))
+  done
+  printf '╭%s╮\n│ > %s │\n╰%s╯\n' "$border" "$text" "$border" > "$COMPOSER"
+}
 case "${1:-}" in
   display-message)
     print=0
@@ -231,12 +242,12 @@ case "${1:-}" in
         [ "${FM_FAKE_PERSIST_SWALLOW:-0}" = 1 ] || rm -f "$FM_FAKE_SWALLOW"
       else
         [ -n "${FM_FAKE_SENT:-}" ] && printf '[ENTER]\n' >> "$FM_FAKE_SENT"
-        printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$COMPOSER"
+        write_composer ""
       fi
     elif [ "$lit" = 1 ]; then
       [ "${FM_FAKE_SEND_FAIL:-0}" = 1 ] && exit 1
       [ -n "${FM_FAKE_SENT:-}" ] && printf '%s\n' "$text" >> "$FM_FAKE_SENT"
-      printf '╭────────────────╮\n│ > %s │\n╰────────────────╯\n' "$text" > "$COMPOSER"
+      write_composer "$text"
     fi
     exit 0 ;;
 esac

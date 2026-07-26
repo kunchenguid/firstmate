@@ -176,7 +176,7 @@ test_dim_ghost_inside_bordered_composer_is_not_pending() {
   fb=$(make_fake_tmux "$dir")
   capture="$dir/styled.txt"
   # Bordered composer (claude box) holding only dim ghost text.
-  printf '╭─────────────────────────────────────╮\n│ \033[2mtry the other approach instead\033[0m │\n╰─────────────────────────────────────╯\n' > "$capture"
+  printf '╭─────────────────────────────────────╮\n│ \033[2mtry the other approach instead\033[0m      │\n╰─────────────────────────────────────╯\n' > "$capture"
   if PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
      fm_pane_input_pending "fakepane"; then
     fail "dim ghost in a bordered composer falsely read as pending"
@@ -311,7 +311,7 @@ test_bottom_border_cursor_reads_ghost_only_box_as_empty() {
   dir="$TMP_ROOT/bottom-border-ghost"; mkdir -p "$dir"
   fb=$(make_fake_tmux "$dir")
   capture="$dir/styled.txt"
-  printf '╭────────────────────╮\n│ ❯ \033[38;2;50;47;70mType a message...\033[0m │\n╰────────────────────╯\n' > "$capture"
+  printf '╭────────────────────────╮\n│ ❯ \033[38;2;50;47;70mType a message...\033[0m    │\n╰────────────────────────╯\n' > "$capture"
   out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=2 \
     fm_tmux_composer_state "fakepane")
   [ "$out" = empty ] \
@@ -325,7 +325,7 @@ test_bordered_busy_signatures_are_pending() {
   fb=$(make_fake_tmux "$dir")
   capture="$dir/styled.txt"
   for signature in 'Working...' 'Ctrl+c:cancel'; do
-    printf '╭────────────────────╮\n│ %s │\n╰────────────────────╯\n' "$signature" > "$capture"
+    printf '╭────────────────────╮\n│ %-18s │\n╰────────────────────╯\n' "$signature" > "$capture"
     out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
       fm_tmux_composer_state "fakepane")
     [ "$out" = pending ] \
@@ -388,6 +388,24 @@ test_mismatched_box_families_are_unknown() {
   pass "fm_tmux_composer_state: inconsistent box geometry fails closed"
 }
 
+test_misaligned_box_is_unknown() {
+  local dir fb capture out fixture
+  dir="$TMP_ROOT/misaligned-box"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  for fixture in offset width; do
+    case "$fixture" in
+      offset) printf ' ╭────╮\n │    │\n╰────╯\n' > "$capture" ;;
+      width) printf '╭────╮\n│     │\n╰────╯\n' > "$capture" ;;
+    esac
+    out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+      fm_tmux_composer_state "fakepane")
+    [ "$out" = unknown ] \
+      || fail "a box with inconsistent $fixture geometry should be unknown, got '$out'"
+  done
+  pass "fm_tmux_composer_state: misaligned box bounds fail closed"
+}
+
 test_fallback_capture_race_with_edge_is_unknown() {
   local dir fb capture row_capture out
   dir="$TMP_ROOT/fallback-race"; mkdir -p "$dir"
@@ -436,6 +454,21 @@ test_non_bordered_composer_uses_compatibility_fallback() {
   pass "fm_tmux_composer_state: panes without bordered structure retain compatibility fallback"
 }
 
+test_non_bordered_interior_edges_are_pending() {
+  local dir fb capture out row
+  dir="$TMP_ROOT/non-bordered-interior-edges"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  for row in '› cat file | grep x' '› explain │ this glyph'; do
+    printf '%s\n' "$row" > "$capture"
+    out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+      fm_tmux_composer_state "fakepane")
+    [ "$out" = pending ] \
+      || fail "non-bordered interior edge row '$row' should be pending, got '$out'"
+  done
+  pass "fm_tmux_composer_state: interior edge glyphs retain non-bordered fallback"
+}
+
 # --- fm-peek.sh stays escape-free (LLM-facing path) -------------------------
 
 test_peek_output_is_escape_free() {
@@ -481,7 +514,9 @@ test_non_bordered_busy_footer_remains_empty
 test_clipped_bordered_box_is_unknown
 test_asymmetric_composer_edges_are_unknown
 test_mismatched_box_families_are_unknown
+test_misaligned_box_is_unknown
 test_fallback_capture_race_with_edge_is_unknown
 test_legitimate_empty_routes_remain_empty
 test_non_bordered_composer_uses_compatibility_fallback
+test_non_bordered_interior_edges_are_pending
 test_peek_output_is_escape_free

@@ -59,7 +59,7 @@ test_busy_pane_pending_returns_empty() {
   composer="$dir/composer"
   sent="$dir/sent.log"
   vfile="$dir/verdict"
-  printf '╭────────────────────────────╮\n│ > fix findings 1 and 3    │\n╰────────────────────────────╯\n' > "$composer"
+  printf '╭────────────────────────────╮\n│ > fix findings 1 and 3     │\n╰────────────────────────────╯\n' > "$composer"
   : > "$sent"
   touch "$dir/.swallow"
   # Pre-check: composer state should be pending (via function, not $()).
@@ -82,7 +82,7 @@ test_idle_pane_pending_returns_pending() {
   composer="$dir/composer"
   sent="$dir/sent.log"
   vfile="$dir/verdict"
-  printf '╭────────────────────────────╮\n│ > fix findings 1 and 3    │\n╰────────────────────────────╯\n' > "$composer"
+  printf '╭────────────────────────────╮\n│ > fix findings 1 and 3     │\n╰────────────────────────────╯\n' > "$composer"
   : > "$sent"
   touch "$dir/.swallow"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
@@ -99,7 +99,7 @@ test_busy_pane_composer_clears_first_try() {
   composer="$dir/composer"
   sent="$dir/sent.log"
   vfile="$dir/verdict"
-  printf '╭────────────────────────────╮\n│ > fix findings 1 and 3    │\n╰────────────────────────────╯\n' > "$composer"
+  printf '╭────────────────────────────╮\n│ > fix findings 1 and 3     │\n╰────────────────────────────╯\n' > "$composer"
   : > "$sent"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" FM_FAKE_PANE_BUSY=1 \
     fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
@@ -114,7 +114,7 @@ test_idle_pane_composer_clears_first_try() {
   composer="$dir/composer"
   sent="$dir/sent.log"
   vfile="$dir/verdict"
-  printf '╭────────────────────────────╮\n│ > fix findings 1 and 3    │\n╰────────────────────────────╯\n' > "$composer"
+  printf '╭────────────────────────────╮\n│ > fix findings 1 and 3     │\n╰────────────────────────────╯\n' > "$composer"
   : > "$sent"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" FM_FAKE_PANE_BUSY=0 \
     fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null

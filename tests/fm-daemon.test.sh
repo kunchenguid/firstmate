@@ -883,7 +883,7 @@ test_pane_input_pending_honors_idle_override_after_border_strip() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   capture="$dir/pane.txt"
-  printf '╭────────────────╮\n│ custom idle>  │\n╰────────────────╯\n' > "$capture"
+  printf '╭────────────────╮\n│ custom idle>   │\n╰────────────────╯\n' > "$capture"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=1 \
     FM_COMPOSER_IDLE_RE='^custom idle>$' pane_input_pending "fakepane" \
     && fail "FM_COMPOSER_IDLE_RE was not applied after border stripping"
@@ -991,12 +991,8 @@ test_pane_input_pending_bordered_idle_not_pending() {
   local dir state fakebin capture line
   dir=$(make_supercase pending-bordered-idle)
   state="$dir/state"; fakebin="$dir/fakebin"; capture="$dir/pane.txt"
-  for line in \
-    "│ >                                            │" \
-    "│ ❯                                            │" \
-    "│ >  │" \
-    "│                                              │"; do
-    printf '╭────────────────────────────────────────────────╮\n%s\n╰────────────────────────────────────────────────╯\n' "$line" > "$capture"
+  for line in '>' '❯' '>' ''; do
+    printf '╭──────────────────────────────────────────────╮\n│ %-44s │\n╰──────────────────────────────────────────────╯\n' "$line" > "$capture"
     if PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=1 \
       pane_input_pending "fakepane"; then
       fail "bordered idle composer falsely detected as pending: <$line>"
@@ -1012,7 +1008,7 @@ test_pane_input_pending_bordered_with_text_is_pending() {
   local dir state fakebin capture
   dir=$(make_supercase pending-bordered-text)
   state="$dir/state"; fakebin="$dir/fakebin"; capture="$dir/pane.txt"
-  printf '╭────────────────────────────────────────────────╮\n│ > fix findings 1 and 3, skip 2               │\n╰────────────────────────────────────────────────╯\n' > "$capture"
+  printf '╭────────────────────────────────────────────────╮\n│ > fix findings 1 and 3, skip 2                 │\n╰────────────────────────────────────────────────╯\n' > "$capture"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=1 \
     pane_input_pending "fakepane" \
     || fail "real text inside a bordered composer was not detected as pending"
