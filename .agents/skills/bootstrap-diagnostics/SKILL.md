@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, ISOLATION, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -27,6 +27,13 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
+- `ISOLATION: task <id> collapsed onto the primary checkout - agent process <pid> is running in <path> ...` - a restore or resume put that task's live agent inside the primary checkout instead of its own worktree, so anything it writes lands in the shared checkout.
+  The finding comes from the agent process itself, not a pane reading, so treat it as proven.
+  Stop that worker before it writes anything further, load `stuck-crewmate-recovery` to reconcile its recorded work, and relaunch it in an isolated worktree; never dispose of a worktree or steer the task while this line stands.
+- `ISOLATION: task <id> is running as a worker of home <path>, not this home ...` - a live agent declared for a different home is acting against this home's records, which is the home-inheritance defect itself.
+  Stop that worker, then reconcile ownership from the home that actually launched it rather than adopting it here.
+- `ISOLATION: task <id> is not in its recorded worktree - agent process <pid> is running in <path> ...` - the task's recorded worktree is stale relative to where its agent actually is.
+  Reconcile the record before any teardown or steer; disposal paths already refuse the slot, and forcing past that would risk another task's work.
 - `CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>` - the optional dispatch profile file exists but failed low-cost bootstrap validation; stop profile-based dispatch, report the actionable error, and require correction of the malformed schema, unverified harness name, or invalid harness/effort pair rather than falling back around it or selecting a bad profile.
 - `FLEET_SYNC: <repo>: skipped: <reason>` - a benign one-off skip (offline, no origin, local-only); bootstrap continued, investigate only if it blocks work.
   A skip can also report the bounded fleet-refresh timeout (`FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT`, or a fleet-size-aware default with a 20 second floor); a timeout never blocks startup.

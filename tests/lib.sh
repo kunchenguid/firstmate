@@ -169,6 +169,17 @@ fm_write_secondmate_meta() {
     "projects=$projects"
 }
 
+# --- launched-agent home declaration ----------------------------------------
+
+# fm_worker_env_prefix <role> <task-id> <home>: the exact home declaration
+# bin/fm-spawn.sh prepends to every launch command. Composed from the one owner
+# (bin/fm-worker-isolation-lib.sh) so a test pinning a HARNESS TEMPLATE does not
+# also re-pin the declaration; tests/fm-worker-isolation.test.sh pins the
+# declaration's own bytes.
+fm_worker_env_prefix() {
+  ( . "$ROOT/bin/fm-worker-isolation-lib.sh" && fm_worker_launch_env_prefix "$@" )
+}
+
 # --- common assertions ------------------------------------------------------
 
 # assert_contains <haystack> <needle> <msg>

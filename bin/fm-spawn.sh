@@ -83,7 +83,15 @@
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
+#   git worktree root distinct from the primary project checkout, from this
+#   home, and from the firstmate repo.
+#   EVERY launch carries an explicit home declaration so no task child inherits
+#   the launching home's operational environment; bin/fm-worker-isolation-lib.sh
+#   owns the variables, per-role values, and the refusals that depend on them.
+#   The worktree-settle poll reads the live process cwd through /proc where the
+#   provider exposes a pane process id, falling back to the provider's pane cwd
+#   only as a hint (bin/fm-agent-cwd-lib.sh), and the resolved slot is stamped
+#   with its current owner for teardown (bin/fm-slot-owner-lib.sh).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -140,6 +148,16 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+# shellcheck source=bin/fm-agent-cwd-lib.sh
+. "$SCRIPT_DIR/fm-agent-cwd-lib.sh"
+# shellcheck source=bin/fm-slot-owner-lib.sh
+. "$SCRIPT_DIR/fm-slot-owner-lib.sh"
+# A task worker never dispatches: it has no home of its own to spawn from, and
+# spawning from an inherited one would create a direct report the real primary
+# never records (bin/fm-worker-isolation-lib.sh).
+fm_worker_refuse_primary_operation "spawn" || exit 1
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -833,7 +851,7 @@ real_path_or_raw() {  # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real guarded guarded_real
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -848,6 +866,16 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+  # Home isolation, not just project isolation: a task worktree that resolves
+  # to this home or to the firstmate repo would put a worker inside the
+  # operational home whatever its project argument said.
+  for guarded in "$FM_HOME" "$FM_ROOT"; do
+    guarded_real=$(real_path_or_raw "$guarded")
+    if [ "$wt_real" = "$guarded_real" ]; then
+      echo "error: $source resolved to the active operational home '$guarded_real'; refusing to launch a task worker inside the home it would otherwise own. Inspect target $inspect_target" >&2
+      exit 1
+    fi
+  done
 }
 
 herdr_projection_meta_field_exact() {  # <meta> <key>
@@ -1155,6 +1183,21 @@ spawn_current_path() {  # <target>
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
   esac
 }
+# The method of record for "where did this pane actually go" is the live
+# process's own cwd, read through /proc; the provider's pane cwd is a HINT used
+# only where no per-pane process id is exposed. bin/fm-agent-cwd-lib.sh owns
+# that resolution and the per-provider matrix. Reading the pane instead can name
+# an entirely different process - a herdr pane listing once reported a worker's
+# cwd as the primary checkout while /proc showed it correctly isolated.
+spawn_settle_path() {  # <target>
+  local target=$1 record
+  record=$(fm_agent_cwd_verdict "" "$BACKEND" "$target")
+  if [ "$(fm_agent_verdict_field "$record" source)" = proc ]; then
+    fm_agent_verdict_field "$record" cwd
+    return 0
+  fi
+  spawn_current_path "$target" || true
+}
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
@@ -1228,7 +1271,10 @@ kimi_spawn_fail() {  # <detail>
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Wait for the treehouse subshell: the live process's cwd moves from the
+  # project to the worktree. spawn_settle_path prefers /proc over the pane
+  # field, so this poll is proof rather than a hint wherever the provider
+  # exposes a per-pane process id.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
@@ -1250,7 +1296,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
   candidate=""
   for _ in $(seq 1 60); do
-    p=$(spawn_current_path "$WT_TARGET" || true)
+    p=$(spawn_settle_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
       if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
@@ -1418,6 +1464,13 @@ $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
 fi
 
+# Stamp CURRENT ownership into the slot's private git directory before the
+# metadata that points at it exists. `worktree=` alone is a historical record of
+# a slot once used, so teardown needs a live statement of who holds it now
+# (bin/fm-slot-owner-lib.sh). Best-effort: a slot that cannot be stamped simply
+# contributes no stamp evidence later.
+fm_slot_stamp_write "$WT" "$ID" "$(real_path_or_raw "$FM_HOME")" 2>/dev/null || true
+
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 {
@@ -1477,10 +1530,26 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+# Home declaration for EVERY task child, not just secondmates. A pane inherits
+# this process's exported operational-home environment, so a crewmate launched
+# without an explicit declaration resolves the PRIMARY's state directory in
+# every firstmate script it runs - the 2026-07-24 incident where an audit worker
+# took the primary's own session ownership. bin/fm-worker-isolation-lib.sh owns
+# the variable set, the per-role values, and the downstream refusals; a
+# secondmate keeps a concrete FM_HOME because it IS the primary of that home,
+# while a crewmate or scout gets no home at all.
 if [ "$KIND" = secondmate ]; then
-  sq_home=$(shell_quote "$PROJ_ABS")
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+  WORKER_HOME=$PROJ_ABS
+  WORKER_ROLE=secondmate
+else
+  WORKER_HOME=$(real_path_or_raw "$FM_HOME")
+  WORKER_ROLE=crewmate
 fi
+WORKER_ENV_PREFIX=$(fm_worker_launch_env_prefix "$WORKER_ROLE" "$ID" "$WORKER_HOME") || {
+  echo "error: could not build the home declaration for $ID; refusing to launch a task child that would inherit this home" >&2
+  exit 1
+}
+LAUNCH="$WORKER_ENV_PREFIX$LAUNCH"
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.

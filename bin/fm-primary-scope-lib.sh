@@ -3,6 +3,11 @@
 # in a genuine firstmate primary home.
 # This file is sourced by hook entrypoints and has no side effects on source.
 
+_FM_PRIMARY_SCOPE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The declared-agent-role contract has one owner; this predicate only consumes it.
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$_FM_PRIMARY_SCOPE_LIB_DIR/fm-worker-isolation-lib.sh"
+
 # Return 0 when $1 carries a genuine secondmate-home marker.
 fm_root_is_secondmate_home() {
   local marker="$1/.fm-secondmate-home" id LC_ALL=C
@@ -20,8 +25,12 @@ fm_root_is_secondmate_home() {
 # Return 0 when $1 is a genuine primary root whose effective state dir is $2.
 # A valid secondmate marker force-includes a linked secondmate home.
 # Otherwise only a plain checkout is primary, never a linked task worktree.
+# A declared task worker is never primary anywhere, whatever root and state it
+# was handed: an inherited FM_HOME or FM_ROOT_OVERRIDE would otherwise let a
+# worker launched inside a primary checkout fire that home's hooks.
 fm_primary_scope_matches() {
   local root=$1 state=$2 git_dir git_common_dir
+  fm_worker_is_task_worker && return 1
   if ! fm_root_is_secondmate_home "$root"; then
     git_dir=$(git -C "$root" rev-parse --git-dir 2>/dev/null) || return 1
     git_common_dir=$(git -C "$root" rev-parse --git-common-dir 2>/dev/null) || return 1

@@ -100,6 +100,10 @@
     {
       "source": "docs/codex-app-backend.md",
       "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/worker-isolation.md",
+      "target": "docs/verification/worker-isolation.md"
     }
   ],
   "surfaces": [
@@ -308,12 +312,20 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/worker-isolation.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/watcher-continuity.md",
       "audience": "operator-current"
     },
     {
       "path": "docs/wedge-alarm.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/worker-isolation.md",
+      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/zellij-backend.md",

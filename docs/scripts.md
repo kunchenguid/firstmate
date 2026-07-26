@@ -28,6 +28,10 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-ensure-agents-md.sh` | Ensure a project's real `AGENTS.md`, its `CLAUDE.md` symlink, and the canonical self-governance section |
 | `fm-guard.sh`            | Warn on primary-checkout tangles, pending queued wakes, and stale watcher liveness   |
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
+| `fm-worker-isolation-lib.sh` | Shared launched-agent home declaration: per-role launch environment and the task-worker refusals it enables (docs/worker-isolation.md) |
+| `fm-agent-cwd-lib.sh`    | Shared authoritative agent-process working directory, with the per-provider process-id matrix (docs/worker-isolation.md) |
+| `fm-slot-owner-lib.sh`   | Shared pooled-worktree slot ownership evidence and the release-or-retain verdict (docs/worker-isolation.md) |
+| `fm-isolation-sweep.sh`  | Re-assert task-worker isolation after a restart or restore; prints `ISOLATION:` findings |
 | `fm-session-lock-lib.sh` | Shared session-lock harness identity (ancestry walk and holder liveness) for fm-lock.sh and the Claude Stop auto-arm |
 | `fm-claude-stop-autoarm.sh` | Claude Stop `asyncRewake` hook owning tokenless watcher continuity with single-flight exit-2 rewake (docs/watcher-continuity.md) |
 | `fm-turnend-guard.sh`    | Shared primary turn-end guard predicate so no turn ends blind (docs/turnend-guard.md) |

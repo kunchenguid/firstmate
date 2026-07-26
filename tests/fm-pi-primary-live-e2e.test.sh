@@ -180,6 +180,7 @@ run_native_ahoy_regressions() {
   cp \
     "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" \
+    "$ROOT/bin/fm-worker-isolation-lib.sh" \
     "$ROOT/bin/fm-gate-refuse-lib.sh" \
     "$ROOT/bin/fm-operational-input.sh" \
     "$AHOY_PROJECT/bin/"

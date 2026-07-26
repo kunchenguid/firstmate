@@ -807,6 +807,53 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
   pass "fm-teardown.sh backend=orca: scout report gate then helper-backed worktree removal"
 }
 
+# Pooled slots are reused, so a recorded worktree= is a historical reference and
+# not proof of current ownership (bin/fm-slot-owner-lib.sh, docs/worker-isolation.md).
+# On the Orca path a contested slot refuses OUTRIGHT rather than retiring the
+# lease the way the pooled-worktree path does, because silently skipping the
+# removal would strand an Orca-owned worktree behind a cleared record.
+test_scout_teardown_refuses_orca_worktree_referenced_by_another_task() {
+  local proj wt data state config id out rc neutral
+  id="orcacontestedz9"
+  proj="$TMP_ROOT/contested-project"
+  wt="$TMP_ROOT/contested-wt"
+  data="$TMP_ROOT/contested-data"
+  state="$TMP_ROOT/contested-state"
+  config="$TMP_ROOT/contested-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-contested" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-contested" \
+    "decisions_reviewed=1" "decision_keys="
+  # A still-recorded paused task naming the same slot - the 2026-07-25 shape.
+  fm_write_meta "$state/paused-$id.meta" \
+    "window=fm-paused-$id" "terminal=term-paused" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-paused"
+  orca_case contested
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-contested","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "Orca teardown should refuse a worktree another task still records"$'\n'"$out"
+  assert_contains "$out" "lease RETAINED" "the Orca refusal did not report the retained lease"
+  assert_contains "$out" "paused-$id" "the Orca refusal did not name the other holder"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "a contested Orca worktree was removed anyway"
+  assert_present "$wt" "a contested Orca worktree was deleted"
+  assert_present "$state/$id.meta" "a refused Orca teardown should preserve its own metadata"
+  assert_present "$state/paused-$id.meta" "a refused Orca teardown cleared the other holder's record"
+  pass "fm-teardown.sh backend=orca: refuses a worktree still recorded by another task"
+}
+
 test_scout_teardown_refuses_orca_id_path_mismatch() {
   local proj wt other_wt data state config id out rc neutral
   id="orcascoutmismatchz5"
@@ -1314,6 +1361,7 @@ test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_target_exists_rejects_orca_error_json
 test_scout_teardown_removes_orca_worktree_via_helper
+test_scout_teardown_refuses_orca_worktree_referenced_by_another_task
 test_scout_teardown_refuses_orca_id_path_mismatch
 test_teardown_removes_orca_worktree_when_path_missing
 test_teardown_preserves_metadata_when_orca_remove_error_json

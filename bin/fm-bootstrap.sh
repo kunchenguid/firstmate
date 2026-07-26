@@ -12,6 +12,7 @@
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
+#                 "ISOLATION: task <id> <collapse or ownership finding>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -41,6 +42,11 @@
 #          failed names whether the endpoint was missing or agent-less.
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
+#          An ISOLATION line means a task's live agent process is provably not
+#          in its recorded worktree - a restore that collapsed the worktree onto
+#          the primary checkout, or an agent declared for another home. It is
+#          read-only, runs in detect-only mode too, and reports only from an
+#          authoritative process reading, never from a pane path.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -848,6 +854,11 @@ gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
 # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
 # primary only; detached-HEAD worktrees and secondmate homes never trip it.
+# Worker-isolation sweep: the spawn-time assertion does not survive a restore,
+# so every session re-establishes it from live process evidence. Read-only, so
+# it runs in detect-only mode too. bin/fm-isolation-sweep.sh owns the evidence
+# discipline and the exact ISOLATION line shapes.
+"$SCRIPT_DIR/fm-isolation-sweep.sh" 2>/dev/null || true
 tangle_branch=$(fm_primary_tangle_branch "$FM_ROOT" 2>/dev/null || true)
 if [ -n "$tangle_branch" ]; then
   tangle_default=$(fm_default_branch "$FM_ROOT" 2>/dev/null || echo main)

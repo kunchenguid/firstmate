@@ -5,9 +5,27 @@
 # PID of any one tool call, which is dead moments after it is written.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
+#
+# This script is the ONLY writer of state/.lock. The owner record is never
+# hand-edited, and acquisition never displaces a live holder: an existing lock
+# naming another live harness refuses, and a declared task worker
+# (bin/fm-worker-isolation-lib.sh) refuses acquisition before touching the
+# record at all, while its read-only `status` inspection stays available.
+# A task child that inherited a primary's FM_HOME would otherwise resolve THIS
+# home's state directory and take the primary's own session ownership - the
+# 2026-07-24 incident where a suspended-then-resumed primary came back locked
+# out of its own home and stopped monitoring.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-worker-isolation-lib.sh
+. "$SCRIPT_DIR/fm-worker-isolation-lib.sh"
+# Refuse acquisition before any state directory is resolved or created, so a
+# task worker cannot even publish a probe file into the home it inherited.
+# Read-only `status` keeps its documented always-exit-0 contract.
+if [ "${1:-}" != status ]; then
+  fm_worker_refuse_primary_operation "session lock acquisition" || exit 1
+fi
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
