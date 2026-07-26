@@ -433,7 +433,7 @@ test_backend_input_boundary_rejects_dead_and_missing_agents() {
 }
 
 test_submit_rechecks_liveness_during_settle() {
-  local dir fb pane log comm sleep_count verdict
+  local dir fb pane log comm sleep_count verdict home err rc
   dir="$TMP_ROOT/submit-liveness"; mkdir -p "$dir"
   fb=$(make_fake_tmux "$dir")
   pane="$dir/pane.txt"
@@ -477,6 +477,49 @@ SH
   [ "$verdict" = send-failed ] || fail "Cursor crash during Enter settle returned '$verdict'"
   [ "$(grep -Fc -- 'send-keys -t sess:win Enter' "$log")" -eq 1 ] \
     || fail "Cursor crash during Enter settle did not stop after one Enter"
+
+  home="$dir/home"
+  err="$dir/send.err"
+  mkdir -p "$home/state"
+  fm_write_meta "$home/state/exit.meta" "window=sess:win" "kind=ship" "harness=cursor"
+
+  printf 'node\n' > "$comm"
+  : > "$log"
+  : > "$sleep_count"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_STYLED="$pane" FM_FAKE_CY=10 FM_FAKE_WINDOWS=win \
+    FM_FAKE_COMM_FILE="$comm" FM_FAKE_SEND_LOG="$log" \
+    FM_FAKE_SLEEP_COUNT="$sleep_count" FM_FAKE_EXIT_ON_SLEEP=2 \
+    FM_SEND_SETTLE=0 FM_GATE_REFUSE_BYPASS=1 \
+    "$ROOT/bin/fm-send.sh" exit --lifecycle-exit /exit >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -eq 0 ] || fail "authorized Cursor lifecycle exit failed: $(tail -1 "$err")"
+  grep -F -- 'send-keys -t sess:win -l /exit' "$log" >/dev/null \
+    || fail "authorized Cursor lifecycle exit never typed /exit"
+  [ "$(grep -Fc -- 'send-keys -t sess:win Enter' "$log")" -eq 1 ] \
+    || fail "authorized Cursor lifecycle exit did not submit exactly once"
+
+  printf 'node\n' > "$comm"
+  : > "$log"
+  : > "$sleep_count"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_STYLED="$pane" FM_FAKE_CY=10 FM_FAKE_WINDOWS=win \
+    FM_FAKE_COMM_FILE="$comm" FM_FAKE_SEND_LOG="$log" \
+    FM_FAKE_SLEEP_COUNT="$sleep_count" FM_FAKE_EXIT_ON_SLEEP=2 \
+    FM_SEND_SETTLE=0 FM_GATE_REFUSE_BYPASS=1 \
+    "$ROOT/bin/fm-send.sh" exit /exit >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "ordinary /exit text inferred lifecycle authorization"
+
+  printf 'zsh\n' > "$comm"
+  : > "$log"
+  : > "$sleep_count"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_STYLED="$pane" FM_FAKE_CY=10 FM_FAKE_WINDOWS=win \
+    FM_FAKE_COMM_FILE="$comm" FM_FAKE_SEND_LOG="$log" \
+    FM_FAKE_SLEEP_COUNT="$sleep_count" FM_FAKE_EXIT_ON_SLEEP=2 \
+    FM_SEND_SETTLE=0 FM_GATE_REFUSE_BYPASS=1 \
+    "$ROOT/bin/fm-send.sh" exit --lifecycle-exit /exit >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "authorized lifecycle exit relaxed the pre-submit dead-agent check"
+  [ ! -s "$log" ] || fail "authorized lifecycle exit sent input to an already-dead agent"
   pass "tmux submit rechecks Cursor liveness during settle and confirmation"
 }
 

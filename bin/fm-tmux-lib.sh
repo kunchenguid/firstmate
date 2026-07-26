@@ -425,20 +425,35 @@ fm_tmux_submit_input_allowed() {
   [ -z "$input_check" ] || "$input_check" "$target"
 }
 
-fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [input-check]
-  local target=$1 retries=$2 sleep_s=$3 input_check=${4:-} i=0 state
+fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [input-check] [submit-mode]
+  local target=$1 retries=$2 sleep_s=$3 input_check=${4:-} submit_mode=${5:-ordinary}
+  local i=0 state submitted=0
   while :; do
     fm_tmux_submit_input_allowed "$target" "$input_check" \
       || { printf 'send-failed'; return 0; }
-    tmux send-keys -t "$target" Enter 2>/dev/null || true
+    if tmux send-keys -t "$target" Enter 2>/dev/null; then
+      submitted=1
+    fi
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target")
-    if [ "$state" = empty ]; then
-      fm_tmux_submit_input_allowed "$target" "$input_check" \
-        || { printf 'send-failed'; return 0; }
+    if ! fm_tmux_submit_input_allowed "$target" "$input_check"; then
+      if [ "$submit_mode" = lifecycle-exit ] && [ "$submitted" = 1 ]; then
+        printf 'empty'
+      else
+        printf 'send-failed'
+      fi
+      return 0
     fi
     case "$state" in
       pending|pending-unproven) ;;
+      empty)
+        if [ "$submit_mode" = lifecycle-exit ] && [ "$submitted" != 1 ]; then
+          printf 'send-failed'
+        else
+          printf 'empty'
+        fi
+        return 0
+        ;;
       *) printf '%s' "$state"; return 0 ;;
     esac
     i=$((i + 1))
@@ -454,7 +469,8 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [input-check]
   # Treat it as submitted so the caller does not re-send.
   # On an idle pane, keep reporting pending - a genuine swallow.
   if fm_pane_is_busy "$target"; then
-    if fm_tmux_submit_input_allowed "$target" "$input_check"; then
+    if fm_tmux_submit_input_allowed "$target" "$input_check" \
+      && { [ "$submit_mode" != lifecycle-exit ] || [ "$submitted" = 1 ]; }; then
       printf 'empty'
     else
       printf 'send-failed'
@@ -464,11 +480,12 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [input-check]
   fi
 }
 
-fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [input-check]
+fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [input-check] [submit-mode]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 input_check=${6:-}
+  local submit_mode=${7:-ordinary}
   fm_tmux_submit_input_allowed "$target" "$input_check" \
     || { printf 'send-failed'; return 0; }
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$input_check"
+  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$input_check" "$submit_mode"
 }

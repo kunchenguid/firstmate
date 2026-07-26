@@ -54,8 +54,8 @@ fm_backend_tmux_send_key() {  # <target> <key>
 
 # fm_backend_tmux_send_text_submit: type <text> into <target> once, then
 # submit with Enter, retried (Enter only, never retyped) until the composer clears.
-fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  fm_tmux_submit_core "$1" "$2" "$3" "$4" "$5" fm_backend_tmux_agent_accepts_input
+fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [submit-mode]
+  fm_tmux_submit_core "$1" "$2" "$3" "$4" "$5" fm_backend_tmux_agent_accepts_input "${7:-ordinary}"
 }
 
 fm_backend_tmux_composer_state() {  # <target>

@@ -465,6 +465,8 @@ That is the preserved-not-relaunched arm, and death detection is unaffected beca
 `node` is deliberately not added to the alive patterns: it is far too generic to prove any agent is alive.
 The tmux operator-input boundary accepts `alive`, `ambiguous`, and `unreadable` liveness for structural composer proof, but rejects authoritative `dead` and `missing` states before reporting an empty composer or steering text or keys.
 Text submission rechecks that boundary before every input and before confirming an empty composer throughout settle and retry.
+Use `FM_HOME=<this-firstmate-home> bin/fm-send.sh <target> --lifecycle-exit /exit` for a supervised Cursor exit.
+Only that explicit, metadata-bound mode accepts dead or missing as the expected postcondition after a verified exit command and successful Enter; ordinary text, including an unflagged `/exit`, stays strict.
 The raw backend key primitive remains available to spawn and lifecycle mechanics before an agent exists.
 This preserves live Cursor steering while preventing an exited pane's shell prompt from becoming an injection target even when its glyph resembles an agent composer.
 

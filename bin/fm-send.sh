@@ -7,6 +7,7 @@
 #   tmux window search, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
 # Special keys instead of text: fm-send.sh <target> --key Enter
+# Authorized lifecycle exit: fm-send.sh <target> --lifecycle-exit <verified-exit-command>
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
@@ -193,6 +194,20 @@ shift
 
 fm_backend_validate "$TARGET_BACKEND" || exit 1
 
+LIFECYCLE_EXIT=0
+if [ "${1:-}" = --lifecycle-exit ]; then
+  LIFECYCLE_EXIT=1
+  shift
+  if [ "$#" -ne 1 ] || [ -z "$TARGET_META" ] || [ -z "$TARGET_HARNESS" ] || [ "$TARGET_BACKEND" != tmux ]; then
+    echo "error: --lifecycle-exit requires one verified exit command for a metadata-routed tmux harness" >&2
+    exit 1
+  fi
+  case "$TARGET_HARNESS:$1" in
+    claude:/exit|codex:/quit|opencode:/exit|pi:/quit|grok:/exit|kimi:/exit|cursor:/exit|cursor:/quit) ;;
+    *) echo "error: '$1' is not the verified lifecycle-exit command for harness '$TARGET_HARNESS'" >&2; exit 1 ;;
+  esac
+fi
+
 # Classify a from-firstmate -> secondmate request. Only a task selector resolved
 # through this home's meta whose authoritative kind is secondmate is marked: the
 # secondmate then routes its reply via the status path (see fm-marker-lib.sh).
@@ -202,7 +217,7 @@ MARK_FROM_FIRSTMATE=0
 PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
 TARGET_TASK_ID=
-if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
+if [ "$LIFECYCLE_EXIT" = 0 ] && [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
   MARK_FROM_FIRSTMATE=1
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
 fi
@@ -268,9 +283,11 @@ else
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
+  submit_mode=ordinary
+  [ "$LIFECYCLE_EXIT" = 0 ] || submit_mode=lifecycle-exit
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary.
-  if ! verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
+  if ! verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$submit_mode"); then
     if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
       fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
     fi
