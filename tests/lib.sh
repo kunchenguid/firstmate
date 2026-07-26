@@ -228,7 +228,10 @@ pass() {
 # directly (tests/wake-helpers.sh, tests/fm-lint.test.sh).
 
 FM_TEST_CLEANUP_DIRS=()
-# Always reclaim the git PATH shim dir on EXIT (even if no fm_test_tmproot call).
+# Registered here rather than at first use, so the git PATH shim dir is still
+# reclaimed when a test never calls fm_test_tmproot. It rides this library's
+# EXIT trap: a file that installs its own EXIT trap without calling
+# fm_test_cleanup (see above) leaves the shim dir behind under TMPDIR.
 FM_TEST_CLEANUP_DIRS+=("$FM_TEST_GIT_WRAP_DIR")
 FM_TEST_CLEANUP_LIST="$FM_TEST_GIT_WRAP_DIR/cleanup-dirs"
 : > "$FM_TEST_CLEANUP_LIST"
