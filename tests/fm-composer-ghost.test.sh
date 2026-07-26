@@ -365,9 +365,9 @@ test_asymmetric_composer_edges_are_unknown() {
   dir="$TMP_ROOT/asymmetric-box"; mkdir -p "$dir"
   fb=$(make_fake_tmux "$dir")
   capture="$dir/styled.txt"
-  for row in '│ > text' 'text │' '│ > text ┃' '──────'; do
+  for row in '│ > text' 'text │' '│ > text ┃' '──────' '+----' 'text +'; do
     printf '%s\n' "$row" > "$capture"
-    out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    out=$(PATH="$fb:$PATH" LC_ALL=C FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
       fm_tmux_composer_state "fakepane")
     [ "$out" = unknown ] \
       || fail "unbounded composer-edge row '$row' should be unknown, got '$out'"
@@ -404,6 +404,39 @@ test_misaligned_box_is_unknown() {
       || fail "a box with inconsistent $fixture geometry should be unknown, got '$out'"
   done
   pass "fm_tmux_composer_state: misaligned box bounds fail closed"
+}
+
+test_differing_widths_use_asymmetric_verdicts() {
+  local dir fb capture out
+  dir="$TMP_ROOT/differing-widths"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  printf '╭──────────╮\n│ > text │\n╰──────────╯\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = pending ] \
+    || fail "text in a differing-width box should be pending, got '$out'"
+  printf '╭──────────╮\n│        │\n╰──────────╯\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = unknown ] \
+    || fail "an empty differing-width box should be unknown, never empty, got '$out'"
+  pass "fm_tmux_composer_state: differing widths prefer pending or unknown, never empty"
+}
+
+test_wide_composer_text_is_pending() {
+  local dir fb capture out text
+  dir="$TMP_ROOT/wide-text"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  for text in '修复登录问题' 'fix the bug 🔧'; do
+    printf '╭────────────────────╮\n│ > %s │\n╰────────────────────╯\n' "$text" > "$capture"
+    out=$(PATH="$fb:$PATH" LC_ALL=C FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+      fm_tmux_composer_state "fakepane")
+    [ "$out" = pending ] \
+      || fail "wide composer text '$text' should be pending, got '$out'"
+  done
+  pass "fm_tmux_composer_state: emoji and CJK text remain pending under the C locale"
 }
 
 test_fallback_capture_race_with_edge_is_unknown() {
@@ -461,7 +494,7 @@ test_non_bordered_interior_edges_are_pending() {
   capture="$dir/styled.txt"
   for row in '› cat file | grep x' '› explain │ this glyph'; do
     printf '%s\n' "$row" > "$capture"
-    out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    out=$(PATH="$fb:$PATH" LC_ALL=C FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
       fm_tmux_composer_state "fakepane")
     [ "$out" = pending ] \
       || fail "non-bordered interior edge row '$row' should be pending, got '$out'"
@@ -515,6 +548,8 @@ test_clipped_bordered_box_is_unknown
 test_asymmetric_composer_edges_are_unknown
 test_mismatched_box_families_are_unknown
 test_misaligned_box_is_unknown
+test_differing_widths_use_asymmetric_verdicts
+test_wide_composer_text_is_pending
 test_fallback_capture_race_with_edge_is_unknown
 test_legitimate_empty_routes_remain_empty
 test_non_bordered_composer_uses_compatibility_fallback

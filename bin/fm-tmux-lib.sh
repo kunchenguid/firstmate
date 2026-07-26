@@ -144,21 +144,14 @@ fm_tmux_composer_row_state() {  # <raw-row> [bordered] [allow-busy] -> empty|pen
 }
 
 fm_tmux_row_has_composer_edge() {  # <plain-row>
-  local row=$1 first last
+  local row=$1
   row="${row#"${row%%[![:space:]]*}"}"
   row="${row%"${row##*[![:space:]]}"}"
-  [ -n "$row" ] || return 1
-  first=${row%"${row#?}"}
-  last=${row#"${row%?}"}
-  case "$first" in
-    '│'|'┃'|'║'|'╭'|'╮'|'┌'|'┐'|'╔'|'╗'|'┏'|'┓'|'╰'|'╯'|'└'|'┘'|\
-    '╚'|'╝'|'┗'|'┛'|'─'|'━'|'═'|'|')
-      return 0
-      ;;
-  esac
-  case "$last" in
-    '│'|'┃'|'║'|'╭'|'╮'|'┌'|'┐'|'╔'|'╗'|'┏'|'┓'|'╰'|'╯'|'└'|'┘'|\
-    '╚'|'╝'|'┗'|'┛'|'─'|'━'|'═'|'|')
+  case "$row" in
+    '│'*|*'│'|'┃'*|*'┃'|'║'*|*'║'|'╭'*|*'╭'|'╮'*|*'╮'|\
+    '┌'*|*'┌'|'┐'*|*'┐'|'╔'*|*'╔'|'╗'*|*'╗'|'┏'*|*'┏'|'┓'*|*'┓'|\
+    '╰'*|*'╰'|'╯'*|*'╯'|'└'*|*'└'|'┘'*|*'┘'|'╚'*|*'╚'|'╝'*|*'╝'|\
+    '┗'*|*'┗'|'┛'*|*'┛'|'─'*|*'─'|'━'*|*'━'|'═'*|*'═'|'|'*|*'|'|'+'*|*'+')
       return 0
       ;;
   esac
@@ -166,18 +159,19 @@ fm_tmux_row_has_composer_edge() {  # <plain-row>
 }
 
 # fm_tmux_find_composer_box: print the zero-based top and bottom rows of the
-# complete bordered box that structurally contains the cursor. The cursor may be
-# on any content row or on the bottom border; no fixed cursor offset is used.
-fm_tmux_find_composer_box() {  # <cursor-y> <plain-visible-pane> -> "<top> <bottom>"
-  local cy=$1 pane=$2 line left_stripped right_stripped trimmed kind family
-  local current_family= side_family line_left line_right current_left=-1 current_right=-1
+# complete bordered box that structurally contains the cursor, plus whether its
+# geometry is ambiguous. The cursor may be on any content row or on the bottom
+# border; no fixed cursor offset is used.
+fm_tmux_find_composer_box() {  # <cursor-y> <plain-visible-pane> -> "<top> <bottom> <ambiguous>"
+  local cy=$1 pane=$2 line indent left_stripped trimmed kind family current_family=
+  local side_family top_inner top_spaces= geometry_check=0 geometry_ambiguous=0
+  local content_inner content_probe content_spaces bottom_inner bottom_spaces
+  local current_indent=
   local row=0 top=-1 valid=0 content_rows=0 unsafe=0 cursor_structural=0
   while IFS= read -r line; do
+    indent=${line%%[![:space:]]*}
     left_stripped="${line#"${line%%[![:space:]]*}"}"
-    right_stripped="${line%"${line##*[![:space:]]}"}"
     trimmed="${left_stripped%"${left_stripped##*[![:space:]]}"}"
-    line_left=$((${#line} - ${#left_stripped}))
-    line_right=${#right_stripped}
     kind=
     family=
     case "$trimmed" in
@@ -200,16 +194,37 @@ fm_tmux_find_composer_box() {  # <cursor-y> <plain-visible-pane> -> "<top> <bott
       fi
       top=$row
       current_family=$family
-      current_left=$line_left
-      current_right=$line_right
+      current_indent=$indent
       valid=1
       content_rows=0
+      geometry_ambiguous=0
+      geometry_check=1
+      top_inner=$trimmed
+      case "$family" in
+        rounded) top_inner=${top_inner#╭}; top_inner=${top_inner%╮}; top_spaces=${top_inner//─/ } ;;
+        light) top_inner=${top_inner#┌}; top_inner=${top_inner%┐}; top_spaces=${top_inner//─/ } ;;
+        double) top_inner=${top_inner#╔}; top_inner=${top_inner%╗}; top_spaces=${top_inner//═/ } ;;
+        heavy) top_inner=${top_inner#┏}; top_inner=${top_inner%┓}; top_spaces=${top_inner//━/ } ;;
+        ascii) top_inner=${top_inner#+}; top_inner=${top_inner%+}; top_spaces=${top_inner//-/ } ;;
+      esac
+      case "$top_spaces" in *[![:space:]]*) geometry_check=0 ;; esac
     elif [ "$kind" = bottom ] || { [ "$kind" = ascii ] && [ "$top" -ge 0 ]; }; then
       if [ "$top" -ge 0 ] && [ "$family" = "$current_family" ] \
          && [ "$valid" = 1 ] && [ "$content_rows" -gt 0 ] \
-         && [ "$line_left" -eq "$current_left" ] && [ "$line_right" -eq "$current_right" ] \
          && [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; then
-        printf '%s %s' "$top" "$row"
+        [ "$indent" = "$current_indent" ] || geometry_ambiguous=1
+        if [ "$geometry_check" = 1 ]; then
+          bottom_inner=$trimmed
+          case "$family" in
+            rounded) bottom_inner=${bottom_inner#╰}; bottom_inner=${bottom_inner%╯}; bottom_spaces=${bottom_inner//─/ } ;;
+            light) bottom_inner=${bottom_inner#└}; bottom_inner=${bottom_inner%┘}; bottom_spaces=${bottom_inner//─/ } ;;
+            double) bottom_inner=${bottom_inner#╚}; bottom_inner=${bottom_inner%╝}; bottom_spaces=${bottom_inner//═/ } ;;
+            heavy) bottom_inner=${bottom_inner#┗}; bottom_inner=${bottom_inner%┛}; bottom_spaces=${bottom_inner//━/ } ;;
+            ascii) bottom_inner=${bottom_inner#+}; bottom_inner=${bottom_inner%+}; bottom_spaces=${bottom_inner//-/ } ;;
+          esac
+          [ "$bottom_spaces" = "$top_spaces" ] || geometry_ambiguous=1
+        fi
+        printf '%s %s %s' "$top" "$row" "$geometry_ambiguous"
         return 0
       fi
       if { [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; } \
@@ -218,8 +233,7 @@ fm_tmux_find_composer_box() {  # <cursor-y> <plain-visible-pane> -> "<top> <bott
       fi
       top=-1
       current_family=
-      current_left=-1
-      current_right=-1
+      current_indent=
       valid=0
       content_rows=0
     elif [ "$top" -ge 0 ]; then
@@ -232,10 +246,24 @@ fm_tmux_find_composer_box() {  # <cursor-y> <plain-visible-pane> -> "<top> <bott
       esac
       case "$current_family:$side_family" in
         rounded:single|light:single|heavy:heavy|double:double|ascii:ascii)
-          if [ "$line_left" -eq "$current_left" ] && [ "$line_right" -eq "$current_right" ]; then
-            content_rows=$((content_rows + 1))
-          else
-            valid=0
+          content_rows=$((content_rows + 1))
+          [ "$indent" = "$current_indent" ] || geometry_ambiguous=1
+          if [ "$geometry_check" = 1 ]; then
+            content_inner=$trimmed
+            case "$side_family" in
+              single) content_inner=${content_inner#│}; content_inner=${content_inner%│} ;;
+              heavy) content_inner=${content_inner#┃}; content_inner=${content_inner%┃} ;;
+              double) content_inner=${content_inner#║}; content_inner=${content_inner%║} ;;
+              ascii) content_inner=${content_inner#|}; content_inner=${content_inner%|} ;;
+            esac
+            content_probe="${content_inner#"${content_inner%%[![:space:]]*}"}"
+            content_probe="${content_probe%"${content_probe##*[![:space:]]}"}"
+            case "$content_probe" in
+              '') content_spaces=$content_inner; [ "$content_spaces" = "$top_spaces" ] || geometry_ambiguous=1 ;;
+              '>') content_spaces=${content_inner/>/ }; [ "$content_spaces" = "$top_spaces" ] || geometry_ambiguous=1 ;;
+              '❯') content_spaces=${content_inner/❯/ }; [ "$content_spaces" = "$top_spaces" ] || geometry_ambiguous=1 ;;
+              '›') content_spaces=${content_inner/›/ }; [ "$content_spaces" = "$top_spaces" ] || geometry_ambiguous=1 ;;
+            esac
           fi
           ;;
         *) valid=0 ;;
@@ -256,20 +284,24 @@ EOF
 
 # fm_tmux_composer_state classification contract:
 # A row is structural only when its first or last non-whitespace character is a
-# composer edge. A complete box has matching border families and identical
-# untrimmed left and right bounds on every row. Real content on any proven row is
-# pending. Empty is limited to a genuinely empty composer, an all-empty proven
-# box, an empty non-bordered fallback row, or the submit core's busy-queued Enter
-# conversion. Unreadable, unbounded, or inconsistent structure is unknown.
+# composer edge. A complete box has matching border families and bounded top and
+# bottom rows. Real content on any proven row is pending, even when geometry is
+# ambiguous. Empty requires positive proof: a genuinely empty composer, an
+# all-empty unambiguous box, an empty non-bordered fallback row, or the submit
+# core's busy-queued Enter conversion. Other structural ambiguity is unknown,
+# never empty.
 fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cy raw pane plain box box_status top bottom row row_raw state unknown_seen=0
+  local target=$1 cy raw pane plain box box_status top bottom geometry_ambiguous
+  local row row_raw state unknown_seen=0
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   pane=$(tmux capture-pane -e -p -t "$target" -S 0 -E - 2>/dev/null) || { printf 'unknown'; return 0; }
   plain=$(printf '%s\n' "$pane" | fm_composer_strip_ansi)
   if box=$(fm_tmux_find_composer_box "$cy" "$plain"); then
-    top=${box% *}
-    bottom=${box#* }
+    top=${box%% *}
+    box=${box#* }
+    bottom=${box%% *}
+    geometry_ambiguous=${box#* }
     row=$((top + 1))
     while [ "$row" -lt "$bottom" ]; do
       row_raw=$(printf '%s\n' "$pane" | sed -n "$((row + 1))p")
@@ -280,7 +312,11 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
       esac
       row=$((row + 1))
     done
-    if [ "$unknown_seen" = 1 ]; then printf 'unknown'; else printf 'empty'; fi
+    if [ "$unknown_seen" = 1 ] || [ "$geometry_ambiguous" = 1 ]; then
+      printf 'unknown'
+    else
+      printf 'empty'
+    fi
     return 0
   else
     box_status=$?
