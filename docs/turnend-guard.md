@@ -41,7 +41,7 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 - Claude registers two `Stop` hooks in `.claude/settings.json`, both anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
 - Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
 - OpenCode listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
-- Pi listens for `agent_end` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
+- Pi listens for `agent_end` in `.pi/extensions/fm-primary-turnend-guard.ts`, injects at most one follow-up per logical agent run through `pi.sendUserMessage(..., { deliverAs: "followUp" })` when the guard returns 2, and runs the shared predicate at every `agent_end` the run reaches.
 - Grok registers a `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` and uses `bin/fm-turnend-guard-grok.sh` to resume the reported session once when the shared guard returns 2.
   The adapter intentionally omits `--permission-mode`, so a passive hook cannot grant stronger permissions than the resumed session default.
 
@@ -65,7 +65,8 @@ OpenCode and Grok expose passive callbacks for this purpose.
 Their adapters fail open at the hook boundary to protect the user session but schedule one bounded follow-up when the predicate blocks.
 The generated prompts use the canonical `turn-end-guard` kind after the U+2063 `FIRSTMATE_OP: ` prefix, so Ahoy does not treat them as captain messages.
 Each adapter owns a loop latch.
-Pi keeps the latch across internal tool turns and clears it only when the generated follow-up settles or delivery fails.
+Pi keeps the latch across internal tool turns and clears it when the generated follow-up settles or delivery fails.
+A second `agent_settled` handler clears the latch and does nothing else, because `agent_end` fires again only if the run continues: a run that dies after the guard queued its follow-up would otherwise leave the latch set and let the next logical run end unguarded.
 Because `agent_end` also fires at auto-retry and compaction boundaries, a Pi run that needs one of those while supervision is already unhealthy spends its single latched follow-up at that earlier boundary rather than at the final one.
 The recovery instruction still lands in the same run, so this is an ordering nuance rather than a blind turn end.
 Grok's project hook requires the checkout to be trusted with `/hooks-trust` or launch-time `--trust`.

@@ -165,5 +165,19 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  // Latch release of last resort. agent_end is emitted from inside the agent
+  // loop and only fires again if the run continues, so a run that dies after the
+  // guard queued its follow-up - ESC while the follow-up is still queued, a fatal
+  // session error, a discarded queue - leaves the latch set, and the NEXT logical
+  // run's agent_end consumes it and skips the guard, ending one turn blind.
+  // agent_settled is emitted from _runAgentPrompt's finally (pi 0.81.1
+  // dist/core/agent-session.js:752), so it always runs. This cannot reintroduce
+  // re-entrancy: agent_settled fires only after the whole agent loop has exited,
+  // so no further agent_end for that run can follow it, and the handler never
+  // invokes the predicate or sends a message - it only assigns false.
+  pi.on("agent_settled", () => {
+    guardFollowupActive = false;
+  });
+
   markLoaded();
 }

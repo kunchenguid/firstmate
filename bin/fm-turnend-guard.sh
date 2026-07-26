@@ -11,7 +11,9 @@
 # This script is push-based: verified harness turn-end hooks invoke it every time
 # the primary is about to end a turn.
 # Claude and codex can block directly by preserving exit status 2 and stderr.
-# OpenCode, pi, and grok adapters use the same predicate and force one bounded
+# Pi also blocks directly: a follow-up queued from its agent_end handler keeps the
+# same run going, so the idle signal never escapes.
+# OpenCode and grok adapters use the same predicate and force one bounded
 # follow-up because their turn-end events are passive.
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
 # and fail-open tradeoffs.

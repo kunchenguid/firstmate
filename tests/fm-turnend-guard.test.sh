@@ -781,7 +781,10 @@ test_pi_extension_forces_followup() {
   [ -f "$ext" ] || fail "tracked pi primary extension is missing"
   content=$(cat "$ext")
   assert_contains "$content" 'pi.on("agent_end"' "pi extension must block the turn end from agent_end, not after it settles"
-  assert_not_contains "$content" 'pi.on("agent_settled"' "pi extension must not guard from the post-settle idle signal"
+  assert_contains "$content" 'pi.on("agent_settled", () => {
+    guardFollowupActive = false;
+  });' "pi extension must release the latch from the guaranteed settle event, and only release it"
+  assert_not_contains "$content" 'pi.on("agent_settled", async' "pi extension must not guard from the post-settle idle signal"
   assert_contains "$content" 'fm-turnend-guard.sh' "pi extension must invoke the shared guard"
   assert_contains "$content" 'sendUserMessage' "pi extension must force a follow-up turn"
   assert_contains "$content" 'encodeFirstmateOperationalInput' "pi extension must use the typed operational-input constructor"
@@ -803,17 +806,20 @@ test_pi_extension_forces_followup() {
 # Regression for the 2026-07-26 finding that the Pi guard only ever reacted to a
 # turn end instead of preventing one. Pi CAN block: a follow-up queued from an
 # agent_end handler keeps the same run going and agent_settled never fires.
-# Hooking agent_settled instead emits the idle signal first, so anything watching
-# for idle - the composer classifier, a pull-based guard - sees a blind turn end
-# before the follow-up re-opens it.
 #
 # This models Pi's real loop (dist/core/agent-session.js:745-757, :780-782):
 #   await agent.prompt(...)             -> emits agent_end
 #   while (await handlePostAgentRun())  -> true iff agent_end handlers queued work
 #     await agent.continue()            -> emits agent_end again
 #   finally -> _emitAgentSettled()      -> emits agent_settled, THE IDLE SIGNAL
-# Against the agent_settled version nothing is queued at agent_end, the loop
-# exits, and the idle signal escapes before any follow-up: this test fails.
+# What this harness checks is that the guard is wired into that loop at all: the
+# blocking handler exists on agent_end, it queues exactly one follow-up, and the
+# queued follow-up drives exactly one continuation before the loop can exit.
+# Against the agent_settled version there is no agent_end handler to run, so the
+# loop exits with nothing queued and this test fails.
+# The ordering itself - one idle signal with the agent_end guard versus two with
+# the agent_settled version - is a real-Pi measurement, recorded in
+# docs/verification/supervision.md; this harness does not prove it.
 test_pi_extension_blocks_before_the_idle_signal() {
   local repo home ext out status
   repo="$TMP_ROOT/pi-block-before-idle-root"
@@ -840,8 +846,6 @@ import { pathToFileURL } from "node:url";
 const handlers = new Map();
 let queued = [];
 let followUps = 0;
-let idleEmitted = false;
-let idleEmittedBeforeFirstFollowUp = false;
 
 const pi = {
   on(event, handler) {
@@ -850,7 +854,6 @@ const pi = {
   async sendUserMessage(message, options) {
     followUps += 1;
     if (options?.deliverAs !== "followUp") throw new Error("guard prompt was not a follow-up");
-    if (idleEmitted) idleEmittedBeforeFirstFollowUp = true;
     queued.push(message);
   },
 };
@@ -871,11 +874,9 @@ while (queued.length > 0) {
   await agentEnd({ type: "agent_end", messages: [] }, {});
   runs += 1;
 }
-idleEmitted = true;
 await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
 
 if (followUps !== 1) throw new Error(`expected exactly one blocking follow-up, saw ${followUps}`);
-if (idleEmittedBeforeFirstFollowUp) throw new Error("idle signal was emitted before the guard blocked: the turn ended blind");
 if (runs !== 2) throw new Error(`expected the blocked run to continue exactly once, saw ${runs} runs`);
 EOF
 )
@@ -883,6 +884,86 @@ EOF
   expect_code 0 "$status" "Pi guard must block the turn end before the idle signal fires"
   [ -z "$out" ] || fail "Pi block-before-idle guard test printed output: $out"
   pass ".pi primary extension: guard blocks the run before agent_settled emits the idle signal"
+}
+
+# agent_end is emitted from inside Pi's agent loop, so it only fires again if the
+# run actually continues. A run that dies after the guard queued its follow-up -
+# ESC while the follow-up is still queued, a fatal session error, a discarded
+# queue - would leave the latch set forever, and the next logical run's agent_end
+# would spend it and skip the guard entirely: one blind turn end. agent_settled
+# comes from _runAgentPrompt's finally and always runs, so it releases the latch.
+# Without that release the first assertion below sees followUps === 1.
+test_pi_extension_releases_the_latch_when_a_run_dies_before_continuing() {
+  local repo home ext out status
+  repo="$TMP_ROOT/pi-latch-release-root"
+  home="$TMP_ROOT/pi-latch-release-home"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'supervision is off\n' >&2
+exit 2
+SH
+  cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let followUps = 0;
+
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  async sendUserMessage(message, options) {
+    followUps += 1;
+    if (options?.deliverAs !== "followUp") throw new Error("guard prompt was not a follow-up");
+  },
+};
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+
+const agentEnd = handlers.get("agent_end");
+if (!agentEnd) throw new Error("agent_end handler was not registered; the guard cannot block a turn end");
+const agentSettled = handlers.get("agent_settled");
+if (!agentSettled) throw new Error("agent_settled handler was not registered; the latch can never be released");
+
+// A run that dies after the guard queued its follow-up: no second agent_end.
+await agentEnd({ type: "agent_end", messages: [] }, {});
+if (followUps !== 1) throw new Error(`expected one follow-up from the interrupted run, saw ${followUps}`);
+await agentSettled({ type: "agent_settled" }, {});
+
+// The next logical run must still be guarded.
+await agentEnd({ type: "agent_end", messages: [] }, {});
+if (followUps !== 2) {
+  throw new Error(`stuck latch skipped the guard on the run after an interrupted one: that turn ended blind (follow-ups: ${followUps})`);
+}
+await agentEnd({ type: "agent_end", messages: [] }, {});
+await agentSettled({ type: "agent_settled" }, {});
+
+// The release must not re-open the guard: one follow-up per logical run, still.
+for (let run = 0; run < 3; run += 1) {
+  const before = followUps;
+  await agentEnd({ type: "agent_end", messages: [] }, {});
+  await agentEnd({ type: "agent_end", messages: [] }, {});
+  await agentSettled({ type: "agent_settled" }, {});
+  if (followUps - before !== 1) throw new Error(`logical run ${run} injected ${followUps - before} follow-ups`);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi guard must release its latch on the guaranteed settle event"
+  [ -z "$out" ] || fail "Pi latch-release guard test printed output: $out"
+  pass ".pi primary extension: an interrupted run releases the latch without re-opening the guard"
 }
 
 test_pi_extension_injects_once_per_logical_agent_run() {
@@ -1212,6 +1293,7 @@ test_opencode_plugin_forces_followup
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_forces_followup
 test_pi_extension_blocks_before_the_idle_signal
+test_pi_extension_releases_the_latch_when_a_run_dies_before_continuing
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_grok_hook_invokes_adapter

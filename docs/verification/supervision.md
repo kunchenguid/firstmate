@@ -61,7 +61,7 @@ The detailed reconciliation and task chronology stay in the private audit report
 
 ## Turn-end guard
 
-The direct and passive mechanisms were validated across all five harnesses on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24.
+The direct and passive mechanisms were validated across all five harnesses on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24 and Pi's blocking `agent_end` path revalidated on 2026-07-26 against pi 0.81.1.
 
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |
@@ -122,7 +122,7 @@ tests/fm-supervision-instructions.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 ```
 
-The three Node-driven Pi extension cases in `tests/fm-turnend-guard.test.sh` import the `.ts` extension directly and need a Node build with TypeScript type stripping.
+The four Node-driven Pi extension cases in `tests/fm-turnend-guard.test.sh` import the `.ts` extension directly and need a Node build with TypeScript type stripping.
 They pass on the CI runners.
 On a Node compiled without type stripping, such as the Debian system build, the import fails with `ERR_UNKNOWN_FILE_EXTENSION` and the case reports `not ok` rather than skipping.
 `tests/fm-pi-watch-extension.test.sh` and `tests/fm-calm-pi-extension.test.sh` have the same requirement.
