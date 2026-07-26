@@ -22,7 +22,7 @@ Every path exits 0, including malformed state and adapter errors, because a Clau
 | --- | --- | --- |
 | Claude | `.claude/settings.json` registers `SessionStart` for `startup`, `resume`, and `clear`, excludes `compact`, and invokes the wrapper through `CLAUDE_PROJECT_DIR`. | Native stdout context injection is supported. |
 | Codex | `.codex/hooks.json` anchors to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and executes the wrapper. | Native stdout context injection is supported. |
-| Cursor | `.cursor/hooks.json` registers the wrapper on the `sessionStart` event through `CURSOR_PROJECT_DIR` with `failClosed: false`. | Documented fail-open: Cursor Agent 2026.07.16-899851b executes no hooks for accounts without Cursor's server-side hooks rollout (2026-07-18, `docs/turnend-guard.md`), and `sessionStart` is confirmed in the installed bundle's hook-event registry rather than by an observed firing. |
+| Cursor | `.cursor/hooks.json` registers the wrapper on the `sessionStart` event through `CURSOR_PROJECT_DIR` with `failClosed: false`. | Documented fail-open: accounts without Cursor's server-side hooks rollout execute no hooks, and `sessionStart` is confirmed in the installed bundle's hook-event registry rather than by an observed firing. |
 | OpenCode | `.opencode/plugins/fm-primary-sessionstart-nudge.js` listens for `session.created`, runs once per session id, and calls `client.session.promptAsync` only when the wrapper prints a nudge. | Interactive TUI delivery is supported; headless `opencode run` is intentionally fail-open because the process can exit before the queued turn. |
 | Pi | `.pi/extensions/fm-primary-turnend-guard.ts` handles `session_start` reasons `startup`, `new`, and `resume`, then injects the wrapper output with `pi.sendMessage`. | The custom message reaches model context without racing an initial positional prompt. |
 | Grok | `.grok/hooks/fm-primary-sessionstart-nudge.json` registers a project `SessionStart` hook and invokes the wrapper through inline-defaulted `${GROK_WORKSPACE_ROOT:-}`. | The project hook runs when the checkout is trusted, but Grok currently discards hook stdout from model context, so this path is intentionally fail-open. |
@@ -32,12 +32,6 @@ The watcher-arm and turn-end plugins run later on `session.idle`, and the guard 
 
 Grok's guaranteed-loading alternative is a global token-guarded hook like the pattern used by `bin/fm-spawn.sh`.
 That alternative expands trust and writes outside this repository, so Firstmate never installs it or grants folder trust automatically.
-
-### Cursor Agent 2026.07.16-899851b (2026-07-18)
-
-A scratch-project catch-all hook logger registered on `sessionStart`, `preToolUse`, and `stop` recorded nothing across print-mode (`--print --trust --force`) and interactive tmux runs that both completed a Shell tool call, so no hook event - including `sessionStart` - executes for this individual Pro account.
-The installed bundle's hook-event registry contains `sessionStart` with an output validator accepting an `env` map, and its config reader discovers enterprise, team, user, project, and Claude-compat hook files, so the tracked wiring matches the installed contract and activates only when Cursor's server-side rollout enables hook execution.
-The full probe commands and bundle evidence live in `docs/turnend-guard.md`.
 
 ## Regression coverage
 

@@ -99,7 +99,7 @@ Identical in shape to `docs/arm-pretool-check.md`:
 - Default deny mode also writes `{"decision":"deny","reason":"[persistent-cd] reason"}` to stdout for Grok.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
-- Cursor blocks on exit 2 when its account has Cursor's server-side hooks rollout; without it no hooks execute at all, so the Cursor wiring is fail-open at the platform layer (`docs/turnend-guard.md`, 2026-07-18 record).
+- Cursor blocks on exit 2 when its account has Cursor's server-side hooks rollout; without it no hooks execute at all, so the Cursor wiring is fail-open at the platform layer ([verification evidence](verification/supervision.md#cursor-hook-availability)).
 - OpenCode throws only when the checker exits 2.
 - Pi returns `{block: true}` only when the checker exits 2.
 

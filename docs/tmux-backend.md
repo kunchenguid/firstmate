@@ -91,31 +91,4 @@ tests/fm-tmux-submit-busy.test.sh
 tests/fm-bootstrap.test.sh
 ```
 
-### Cursor Agent verification, 2026-07-14
-
-Version: `2026.07.09-a3815c0`.
-Launch command: `cursor-agent --force --model gpt-5.6-sol-high`.
-Command run while the interactive TUI was live: `tmux display-message -p -t fm-cursor-verify '#{pane_current_command}'`.
-Exact output: `node`.
-Commands then read the same pane's `#{pane_pid}` and ran `ps -o pid=,ppid=,pgid=,comm=,args= -g <foreground-pgid>`.
-The single foreground row's arguments began with `$HOME/.local/bin/cursor-agent --use-system-ca .../cursor-agent/versions/2026.07.09-a3815c0/index.js`.
-This is why the liveness classifier inspects only a `node` pane's own pid and requires argv[0]'s basename to equal `cursor-agent`; unrelated Node programs remain `ambiguous`/`unknown`.
-
-The busy TUI was captured while the agent ran `sleep 30`.
-Its status line was `⠘⠆ Running  50 tokens`, while the idle TUI had no `Running ... tokens` line.
-The shared busy regex therefore matches a leading spinner token followed by `Running`, a numeric token count, and `tokens`, without depending on one animated braille glyph.
-
-### Cursor Agent reverification, 2026-07-18
-
-Version: `2026.07.16-899851b`.
-Launch command in a scratch tmux session: `cursor-agent --force --model auto`.
-`tmux list-panes -F '#{pane_pid} #{pane_current_command}'` reported `node`; `ps -o tpgid= -p <pane_pid>` named the pane pid itself, and a sole-column `ps -o comm= -p <tpgid>` printed the full argv[0] `$HOME/.local/bin/cursor-agent`, with `ps -o args=` beginning `$HOME/.local/bin/cursor-agent --use-system-ca .../versions/2026.07.16-899851b/index.js`.
-Both liveness paths therefore hold on this build: macOS `comm` resolves to the exact `cursor-agent` basename directly, and the `node` route still requires the `cursor-agent` argv[0] basename.
-
-The busy signature changed on this build.
-While a turn ran (`sleep 20` through the Shell tool), the composer footer row read `→ Add a follow-up                       ctrl+c to stop` and a transient `1 task` line appeared; the `Running  <N> tokens` status line of 2026.07.09 never appeared.
-At idle the footer showed only `→ Add a follow-up` with no `ctrl+c to stop`.
-The shared busy regex therefore matches an end-anchored `ctrl+c to stop` (the anchor keeps mid-transcript prose from matching) and retains the older `Running  <N> tokens` pattern for pre-2026.07.16 builds.
-Piping the interactive launch through `tee` broke the TTY and made `cursor-agent` fail with `Error: No prompt provided for print mode`, so liveness probes must never wrap the launch in a pipe.
-
-[`verification/runtime-backends.md`](verification/runtime-backends.md#tmux) records the active foreground-process and submit evidence.
+[`verification/runtime-backends.md`](verification/runtime-backends.md#tmux) records the active foreground-process, Cursor liveness and busy-signature, and submit evidence.

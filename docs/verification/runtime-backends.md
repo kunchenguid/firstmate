@@ -32,10 +32,28 @@ Claude, Codex, OpenCode, and Grok were observed under their own process names.
 Kimi Code CLI 0.29.1 was observed under `kimi` on 2026-07-25.
 Pi remained a generic `node` process and is intentionally inconclusive.
 
+Cursor Agent `2026.07.09-a3815c0` was verified on 2026-07-14 with:
+
+```sh
+cursor-agent --force --model gpt-5.6-sol-high
+tmux display-message -p -t fm-cursor-verify '#{pane_current_command}'
+```
+
+The tmux command reported `node`.
+The pane's foreground process-group arguments began with `$HOME/.local/bin/cursor-agent`, which supports requiring argv[0]'s basename to equal `cursor-agent` and leaving unrelated Node processes ambiguous.
+The busy TUI showed a braille spinner followed by `Running  50 tokens`, while the idle TUI had no matching line.
+
+Cursor Agent `2026.07.16-899851b` was reverified on 2026-07-18 with `cursor-agent --force --model auto`.
+`tmux list-panes -F '#{pane_pid} #{pane_current_command}'` again reported `node`; `ps -o tpgid= -p <pane_pid>` resolved the foreground group, and `ps -o args= -p <tpgid>` began with the exact `cursor-agent` launcher path.
+While a Shell tool ran `sleep 20`, the composer footer ended in `ctrl+c to stop`; at idle it showed only `Add a follow-up`.
+The shared busy regex therefore retains the older `Running  <N> tokens` signature and the newer end-anchored stop hint.
+Piping the interactive launch through `tee` broke the TTY and produced `Error: No prompt provided for print mode`, so liveness probes must not wrap the launch in a pipe.
+
 The structural multi-row composer reader, Kimi pointer-delivery path, and OpenCode 1.18.4 busy-queue behavior are pinned by:
 
 ```sh
 tests/fm-composer-ghost.test.sh
+tests/fm-cursor-harness.test.sh
 tests/fm-kimi-harness.test.sh
 tests/fm-tmux-submit-busy.test.sh
 ```

@@ -151,6 +151,7 @@ Prose may improve without changing adapter behavior.
 - Default deny mode also writes `{"decision":"deny","reason":"[code] reason"}` to stdout for Grok.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
+- Cursor blocks on exit 2 when its account executes hooks; without the server-side hooks rollout, the Cursor wiring is fail-open at the platform layer.
 - OpenCode throws only when the checker exits 2.
 - Pi returns `{block: true}` only when the checker exits 2.
 
@@ -228,17 +229,7 @@ Native supervision paths were also validated in the same scratch project:
 
 Every native-path automatic marker was present and every deny sentinel remained absent.
 
-## Cursor live validation record, 2026-07-14
-
-Cursor Agent `2026.07.09-a3815c0` was run in a git-initialized scratch project with a project `.cursor/hooks.json`.
-Command run: `cursor-agent --print --trust --force --model gpt-5.6-sol-high "Use the shell tool to run printf CURSORTOOL, then report the output."`.
-The `preToolUse` payload contained `tool_name: "Shell"` and `.tool_input.command: "printf CURSORTOOL"`, along with `cwd`, `workspace_roots`, `conversation_id`, and `session_id`.
-The hook process received `CURSOR_PROJECT_DIR` equal to the scratch project.
-Returning `{"permission":"allow"}` allowed the command and the model observed `CURSORTOOL`.
-Cursor's documented and installed exit-code contract maps exit 2 to a deny, so the tracked `Shell` matcher forwards the complete stdin payload to `bin/fm-arm-pretool-check.sh`; the checker remains the semantic owner.
-
-A 2026-07-18 revalidation on Cursor Agent `2026.07.16-899851b` with an individual Pro account found no hook execution at all for accounts without Cursor's server-side hooks rollout (`docs/turnend-guard.md` owns the dated evidence).
-The tracked Cursor seatbelt is therefore fail-open at the platform layer: it denies automatically only when Cursor executes project hooks, and the emitted supervision instructions remain the working guard otherwise.
+[`verification/supervision.md`](verification/supervision.md#cursor-hook-availability) owns Cursor's versioned `preToolUse` payload, exit behavior, and account-gating evidence.
 
 ## Automated validation
 

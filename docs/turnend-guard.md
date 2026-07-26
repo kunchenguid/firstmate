@@ -64,7 +64,7 @@ Each adapter owns a loop latch.
 Pi keeps the latch across internal tool turns and clears it only when the generated follow-up settles or delivery fails.
 Grok's project hook requires the checkout to be trusted with `/hooks-trust` or launch-time `--trust`.
 OpenCode's forced follow-up is supported for persistent TUI sessions and remains fail-open in headless `opencode run`.
-Cursor's stop adapter is similarly fail-open and account-gated; see Cursor empirical notes below.
+Cursor's stop adapter is similarly fail-open and account-gated; active evidence lives in [`verification/supervision.md`](verification/supervision.md#cursor-hook-availability).
 
 If a passive adapter cannot invoke its SDK, find `grok`, or recover a Grok session id, the next pull-based `fm-guard.sh` call reports the problem.
 That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it always points to the active harness protocol rather than embedding another repair command.
@@ -84,37 +84,23 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - Unreadable hook input remains fail-open.
 - No harness adapter uses a shell ampersand to manufacture supervision.
 
-## Cursor empirical notes
+## Cursor hook availability and worker fallback
 
-Cursor Agent `2026.07.09-a3815c0` was validated on 2026-07-14 in a git-initialized scratch project.
-Hook file used: `.cursor/hooks.json`.
-Command run: `cursor-agent --print --trust --force --model gpt-5.6-sol-high "Reply with exactly FIRST"`.
-Observed output: the project `stop` hook received `status`, `loop_count: 0`, `workspace_roots`, `conversation_id`, and `session_id`; `CURSOR_PROJECT_DIR` and hook process PWD both resolved to the scratch project; returning `{"followup_message":"CURSORHOOK: reply with exactly SECOND"}` caused one same-session continuation.
-The tracked adapter sets `loop_limit: 1` and also allows any payload whose `loop_count` is already nonzero.
-The local tracked-background Shell mechanism was exercised with `block_until_ms: 0`; the command returned a background-task handle immediately and later reported `CURSOR_BG_DONE` with exit code 0.
-Desktop Agents Window proof remains incomplete: this environment did not expose a desktop Agents Window process tree, so the remaining check is to run `bin/fm-session-start.sh` from that window and confirm its tool subprocess either descends from `cursor-agent` or exposes a Cursor-specific marker that can be added without matching a generic `agent` process.
+Cursor hook execution is account-gated, so every tracked Cursor hook integration remains strictly fail-open.
+The turn-end guard, seatbelts, session-start nudge, and worker turn-end signal activate only when Cursor executes hooks; the watcher and emitted supervision protocol remain authoritative when it does not.
 
-Task-worker hook loading was tested separately with a correctly structured plugin root containing `.cursor-plugin/plugin.json` with `"hooks":"hooks/hooks.json"` and `hooks/hooks.json` containing an absolute `stop` callback.
-Commands run: `cursor-agent --print --trust --force --plugin-dir <plugin-root> --workspace <scratch> --model gpt-5.6-sol-high "Reply exactly PLUGIN"` and the equivalent interactive TUI launch.
-Exact model outputs were `PLUGIN` and `PLUGININTERACTIVE`, but the callback marker remained absent in both cases.
-Debug startup reported `plugin_imports_team_settings_ms: 1` and no ad hoc plugin-hook execution; user and project hooks still fired.
-Firstmate therefore keeps passing the correctly structured task plugin for forward compatibility and installs one additive entry in `~/.cursor/hooks.json` as the documented fallback.
-That fallback reads `workspace_roots`, requires a gitignored `.fm-cursor-turnend` token in the task worktree, validates the token against a private Firstmate registry, and no-ops for unrelated Cursor sessions.
+Cursor workers receive a correctly structured task plugin for forward compatibility plus one additive user-level fallback stop hook.
+The fallback reads `workspace_roots`, requires a gitignored `.fm-cursor-turnend` token in the task worktree, validates the token against a private Firstmate registry, and no-ops for unrelated Cursor sessions.
 It merges into the existing `stop` array and refuses malformed existing configuration instead of overwriting it.
-`bin/fm-cursor-lib.sh` owns the shared-artifact mechanics: the hook script is written atomically (mktemp plus rename in the same directory), install and teardown serialize on a bounded mkdir lock, and the teardown that removes the last registry token also removes the shared hook script, Firstmate's own `hooks.json` stop entry, and the empty registry directory, so no Firstmate global state persists after the final Cursor task.
-If install cannot acquire that lock, spawn continues without mutating the shared fallback artifacts or registering a task token.
-Every uncertain cleanup path (lock timeout, malformed `hooks.json`) skips cleanup and leaves the strict-no-op hook installed for the next teardown to retry.
+`bin/fm-cursor-lib.sh` owns atomic writes, bounded serialization across spawn and teardown, and last-token cleanup of the shared hook artifacts.
+If the lock cannot be acquired, spawn continues without registering or exposing a task token; uncertain cleanup leaves the strict-no-op hook installed for a later teardown retry.
 
-Cursor Agent `2026.07.16-899851b` was revalidated on 2026-07-18 in a git-initialized scratch project on an individual Pro account, and hook execution proved to be gated server-side.
-Commands run: `cursor-agent --print --output-format text --trust --force --model auto "Use the shell tool to run: printf HOOKPROBE. Then reply with exactly DONE."` (with cwd in the scratch project and again with `--workspace`), the same probe through `--plugin-dir` with the structured task plugin, and an interactive tmux TUI turn that executed a Shell tool call in a workspace whose `.cursor/projects/<hash>/.workspace-trusted` marker existed.
-Observed output: the model ran the Shell tool and answered `DONE`/`TUIDONE` in every case, but no registered hook executed - not the project `.cursor/hooks.json` `preToolUse`/`stop` catch-all logger, not the plugin's `hooks/hooks.json` stop hook, and not the pre-existing user-level `~/.claude/settings.json` Stop hook that this build's config reader also discovers.
-The installed bundle contains the full hook executor (event registry including `sessionStart`, `preToolUse`, `stop`; `loop_limit`, `failClosed`, and timeout handling; `CURSOR_PROJECT_DIR` and `CLAUDE_PROJECT_DIR` env injection; enterprise/team/user/project plus Claude-compat config paths) and a `claude_code_hooks_enabled` server-config field, and locally flipping that cached flag was reverted by the next server config refresh.
-The 2026-07-14 record above (hooks firing on 2026.07.09-a3815c0) was collected on a different account, so hook availability varies by account rollout, not only CLI version.
-Every tracked Cursor hook integration therefore stays strictly fail-open: the turn-end guard, seatbelts, nudge, and worker turn-end fallback activate only when Cursor executes hooks, and the watcher's pane-based staleness supervision plus the emitted supervision protocol carry the load when it does not.
+Desktop Agents Window process ancestry remains unverified, so that entry point must not be treated as fully supported until a tool subprocess proves a `cursor-agent` ancestor or another Cursor-specific marker.
+[`verification/supervision.md`](verification/supervision.md#cursor-hook-availability) owns the versioned hook, plugin, account-gating, and background-task evidence.
 
 ## Regression coverage
 
-`tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the cooperative `--claude` claim wait, epoch allow, re-block budget, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, and Grok resume permission and recursion safety.
+`tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the cooperative `--claude` claim wait, epoch allow, re-block budget, Pi logical-run latching, missing-`jq` behavior, the five pre-Cursor primary registrations, and Grok resume permission and recursion safety.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.

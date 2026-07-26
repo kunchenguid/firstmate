@@ -46,6 +46,10 @@ pi -p -e .pi/extensions/fm-primary-turnend-guard.ts \
 Observed result: `PI_SMOKE_DONE`, with one session-start execution.
 The earlier `sendUserMessage` counterfactual raced the positional prompt; the current non-triggering `pi.sendMessage` custom message did not.
 
+Cursor Agent `2026.07.16-899851b` was checked on 2026-07-18 in print and interactive modes with a scratch-project logger registered for `sessionStart`, `preToolUse`, and `stop`.
+Both sessions completed a Shell tool call, but no hook event fired on the individual Pro account used for the check.
+The installed bundle contains the `sessionStart` registry and output validator, so the tracked adapter matches the installed contract but remains fail-open until Cursor's server-side hook rollout enables execution for the account.
+
 Current deterministic and live entry points:
 
 ```sh
@@ -61,7 +65,7 @@ The detailed reconciliation and task chronology stay in the private audit report
 
 ## Turn-end guard
 
-The direct and passive mechanisms were validated across all five harnesses on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24.
+The direct and passive mechanisms were validated across the five previously supported harnesses on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24.
 
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |
@@ -70,6 +74,35 @@ The direct and passive mechanisms were validated across all five harnesses on 20
 | OpenCode | 1.17.6 | Passive `session.idle` callback | Throwing could not block, while `promptAsync` scheduled one TUI follow-up; headless remained fail-open. |
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
 | Grok | 0.2.93 | Passive `Stop` plus bounded resume | Project hook ran under trust, resumed once without inherited bypass permissions, and the environment latch prevented recursion. |
+
+### Cursor hook availability
+
+Cursor Agent `2026.07.09-a3815c0` was validated on 2026-07-14 in a git-initialized scratch project.
+
+```sh
+cursor-agent --print --trust --force --model gpt-5.6-sol-high \
+  "Reply with exactly FIRST"
+```
+
+The project `stop` hook received `status`, zero-based `loop_count`, `workspace_roots`, `conversation_id`, and `session_id`.
+`CURSOR_PROJECT_DIR` and the hook process working directory both resolved to the scratch project.
+Returning one `followup_message` caused one same-session continuation, and a tracked background Shell call with `block_until_ms: 0` returned a handle before later reporting successful completion.
+The same build's `preToolUse` hook received `tool_name: "Shell"` and `.tool_input.command: "printf CURSORTOOL"` with the workspace and session identifiers; an allow response let the model observe `CURSORTOOL`.
+
+A correctly structured task plugin was also exercised in print and interactive modes with `.cursor-plugin/plugin.json` pointing to `hooks/hooks.json`.
+The model completed both runs, but the plugin callback did not fire, so Firstmate retains the plugin for forward compatibility and uses its additive token-scoped user hook as the worker fallback.
+
+Cursor Agent `2026.07.16-899851b` was revalidated on 2026-07-18 in print mode with cwd and explicit `--workspace`, through the task plugin, and in an interactive trusted tmux workspace.
+The model completed a Shell tool call in every run, but no project, user, Claude-compatible, or plugin hook executed on the individual Pro account.
+The installed bundle contains the `sessionStart`, `preToolUse`, and `stop` registry, `loop_limit`, `failClosed`, timeout handling, project-directory environment injection, all supported config paths, and a server-controlled hooks-enabled field.
+The earlier firing and later no-op results came from different accounts, so hook availability varies by account rollout rather than CLI version alone.
+
+Current deterministic coverage:
+
+```sh
+tests/fm-cursor-harness.test.sh
+tests/fm-spawn-dispatch-profile.test.sh
+```
 
 The secondmate-home scope and manual-repair wake path were measured with Claude Code 2.1.207 on 2026-07-12, when a native background completion re-invoked the idle model with no human input.
 The current Stop-owned main/secondmate inclusion and child-worktree exclusion are covered deterministically by `tests/fm-claude-stop-autoarm.test.sh`.
@@ -104,6 +137,7 @@ No credential material was copied into a fixture.
 ```text
 Claude Code 2.1.219
 codex-cli 0.144.4
+Cursor Agent 2026.07.16-899851b
 OpenCode 1.17.18
 Pi 0.80.10
 grok 0.2.103 (89c3d36fb6f1) [stable]
@@ -113,6 +147,7 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | --- | --- | --- |
 | Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | Session start reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
 | Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper. |
+| Cursor | Manual scratch tracked-background Shell probe | `block_until_ms: 0` returned a task handle immediately and later reported successful completion, proving the protocol's tracked wait shape independently of hook availability. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
