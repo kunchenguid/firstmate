@@ -33,6 +33,18 @@
 #   - Any label starting with `fm-` is refused, because that prefix is the
 #     reserved task-endpoint namespace: herdr's recovery scan treats every
 #     fm-* tab in a home's workspace as a live task.
+#   - An endpoint that ALREADY carries an fm- label is refused. A crewmate or
+#     scout working in a firstmate-repo worktree runs bin/fm-session-start.sh
+#     too, and its home has no secondmate marker and resolves the same
+#     "firstmate" label, so every other refusal here passes: without reading the
+#     label the endpoint currently carries, this step would rename a live
+#     fm-<task-id> worker endpoint to "firstmate", dropping it out of the
+#     namespace fm_backend_herdr_list_live scans for recovery and orphan
+#     discovery, and putting the supervisor's name on a crewmate pane - the
+#     exact incident above, inverted. The current label is read through
+#     fm_backend_current_self_label and this FAILS CLOSED: a label that cannot
+#     be read at all is not evidence the endpoint is safe to rename, so it is
+#     refused too.
 #   - A runtime with no verified self-label operation is reported, not faked.
 #
 # The runtime is resolved with fm_backend_detect (the runtime this process is
@@ -83,6 +95,12 @@ fi
 
 RUNTIME=$(fm_backend_detect 2>/dev/null) || RUNTIME=""
 [ -n "$RUNTIME" ] || note "this firstmate is not running inside a terminal runtime that can label its own tab."
+
+CURRENT=$(fm_backend_current_self_label "$RUNTIME" 2>&1) || \
+  note "could not read what this terminal tab is currently called in $RUNTIME, so it was left alone rather than risk renaming a worker endpoint. ${CURRENT:-no detail reported}"
+case "$CURRENT" in
+  fm-*) note "this terminal tab is already a worker endpoint called '$CURRENT', so it was left alone: that is the name firstmate reaches its crew by, and this pane is not firstmate." ;;
+esac
 
 OUT=$(fm_backend_label_self "$RUNTIME" "$LABEL" 2>&1) || \
   note "could not label this firstmate's own terminal tab in $RUNTIME; it keeps its previous name. ${OUT:-no detail reported}"

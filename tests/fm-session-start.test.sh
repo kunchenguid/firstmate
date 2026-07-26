@@ -1404,6 +1404,93 @@ EOF
   pass "fm-label-self.sh: refuses to put firstmate's own endpoint in the reserved fm- task namespace"
 }
 
+# make_fake_tmux_window: a `tmux` stub that reports <name> as the caller's own
+# window name and logs every invocation, so the self-label step can be driven
+# without a real tmux server. The window id lookup and the name lookup are the
+# same `display-message -p` call shape bin/backends/tmux.sh uses.
+make_fake_tmux_window() {  # <fakebin> <window-name> <log>
+  local fakebin=$1 name=$2 log=$3
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "\$*" >> "$log"
+if [ "\${1:-}" = display-message ]; then
+  case " \$* " in
+    *'#{window_id}'*) printf '@7\n' ;;
+    *'#{window_name}'*) printf '%s\n' '$name' ;;
+  esac
+fi
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+}
+
+# The exact 2026-07-26 incident shape, inverted: a crewmate or scout in a
+# firstmate-repo worktree runs bin/fm-session-start.sh too, its home carries no
+# secondmate marker, and the resolved label is plain "firstmate" - so every
+# other refusal passes and only reading the CURRENT label stops this step from
+# renaming a live worker endpoint out of the fm- namespace recovery scans.
+test_label_self_refuses_an_endpoint_that_is_already_a_worker() {
+  local rec root home fakebin out log
+  rec=$(new_world label-self-worker)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  : "$root"
+  log="$home/tmux.log"
+  make_fake_tmux_window "$fakebin" "fm-crew-pane-identity-guardrails" "$log"
+  out=$(label_self "$home" PATH="$fakebin:$BASE_PATH" TMUX=fake,1,0 TMUX_PANE=%0)
+  case "$out" in
+    *"already a worker endpoint"*) : ;;
+    *) fail "a worker endpoint must be refused with a plain note, not renamed"$'\n'"$out" ;;
+  esac
+  case "$(cat "$log" 2>/dev/null)" in
+    *rename-window*) fail "renaming a live fm-<task-id> endpoint drops the task out of label-matched recovery"$'\n'"$(cat "$log")" ;;
+  esac
+  pass "fm-label-self.sh: leaves an endpoint that already carries an fm- worker label alone"
+}
+
+# The guard must not pass by refusing everything: a genuinely positional,
+# captain-launched endpoint is still labeled.
+test_label_self_labels_a_positional_endpoint() {
+  local rec root home fakebin out log
+  rec=$(new_world label-self-positional)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  : "$root"
+  log="$home/tmux.log"
+  make_fake_tmux_window "$fakebin" "1" "$log"
+  out=$(label_self "$home" PATH="$fakebin:$BASE_PATH" TMUX=fake,1,0 TMUX_PANE=%0)
+  [ -z "$out" ] || fail "a successful labeling is silent, got: $out"
+  case "$(cat "$log" 2>/dev/null)" in
+    *"rename-window -t @7 firstmate"*) : ;;
+    *) fail "firstmate's own positional endpoint must still be labeled"$'\n'"$(cat "$log" 2>/dev/null)" ;;
+  esac
+  pass "fm-label-self.sh: still labels a genuinely unlabeled, captain-launched endpoint"
+}
+
+# An unreadable current label is not evidence the endpoint is safe to rename.
+test_label_self_fails_closed_on_an_unreadable_current_label() {
+  local rec root home fakebin out log
+  rec=$(new_world label-self-unreadable)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  : "$root"
+  log="$home/tmux.log"
+  make_fake_tmux_window "$fakebin" "" "$log"
+  out=$(label_self "$home" PATH="$fakebin:$BASE_PATH" TMUX=fake,1,0 TMUX_PANE=%0)
+  case "$out" in
+    *"could not read what this terminal tab is currently called"*) : ;;
+    *) fail "an unreadable current name must be reported, not treated as safe"$'\n'"$out" ;;
+  esac
+  case "$(cat "$log" 2>/dev/null)" in
+    *rename-window*) fail "the self-label step must fail closed when it cannot read the current name" ;;
+  esac
+  pass "fm-label-self.sh: fails closed when the endpoint's current name cannot be read"
+}
+
 test_label_self_reports_an_unlabelable_runtime() {
   local rec root home fakebin out
   rec=$(new_world label-self-noruntime)
@@ -1445,6 +1532,9 @@ EOF
 test_context_digest_absent_empty_present
 test_label_self_refuses_in_a_secondmate_home
 test_label_self_refuses_a_task_namespace_label
+test_label_self_refuses_an_endpoint_that_is_already_a_worker
+test_label_self_labels_a_positional_endpoint
+test_label_self_fails_closed_on_an_unreadable_current_label
 test_label_self_reports_an_unlabelable_runtime
 test_session_start_runs_the_self_label_step
 test_lock_refusal_read_only_path

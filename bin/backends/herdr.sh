@@ -267,6 +267,19 @@ fm_backend_herdr_label_self() {  # <label>
   local label=$1 session tab
   [ -n "$label" ] || { echo "error: fm_backend_herdr_label_self needs a label" >&2; return 1; }
   fm_backend_herdr_tool_check || return 1
+  tab=$(fm_backend_herdr_self_tab_id) || return 1
+  session=$(fm_backend_herdr_session)
+  fm_backend_herdr_cli "$session" tab rename "$tab" "$label" >/dev/null 2>&1 \
+    || { echo "error: herdr tab rename failed for $tab" >&2; return 1; }
+  return 0
+}
+
+# fm_backend_herdr_self_tab_id: the tab id the CALLER ITSELF is running in,
+# resolved from herdr's own injected HERDR_TAB_ID and falling back to a `pane
+# get` on HERDR_PANE_ID. Shared by the two self-endpoint operations so both
+# address exactly the same tab, and so neither ever resolves one by label.
+fm_backend_herdr_self_tab_id() {
+  local session tab
   session=$(fm_backend_herdr_session)
   tab=${HERDR_TAB_ID:-}
   if [ -z "$tab" ]; then
@@ -275,9 +288,29 @@ fm_backend_herdr_label_self() {  # <label>
       | jq -r '.result.pane.tab_id // empty' 2>/dev/null)
   fi
   [ -n "$tab" ] || { echo "error: could not resolve this herdr pane's own tab id" >&2; return 1; }
-  fm_backend_herdr_cli "$session" tab rename "$tab" "$label" >/dev/null 2>&1 \
-    || { echo "error: herdr tab rename failed for $tab" >&2; return 1; }
-  return 0
+  printf '%s' "$tab"
+}
+
+# fm_backend_herdr_current_self_label: the label the caller's OWN tab carries
+# right now, or a failure with an explanation. bin/fm-label-self.sh reads this
+# before renaming anything and fails closed on an error, so an unreadable label
+# must never be reported as an empty-but-successful one.
+#
+# Session-wide `tab list` (no --workspace) is the same shape
+# fm_backend_herdr_resolve_bare_selector already uses: the caller's own tab is
+# in whatever workspace the captain happened to launch it in, which is exactly
+# the workspace this home's own container lookup does NOT resolve.
+fm_backend_herdr_current_self_label() {
+  local session tab tabs label
+  fm_backend_herdr_tool_check || return 1
+  tab=$(fm_backend_herdr_self_tab_id) || return 1
+  session=$(fm_backend_herdr_session)
+  tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) \
+    || { echo "error: herdr tab list failed for session $session" >&2; return 1; }
+  label=$(printf '%s' "$tabs" | jq -r --arg t "$tab" \
+    '.result.tabs[]? | select(.tab_id == $t) | select((.label | type) == "string") | .label' 2>/dev/null | head -1)
+  [ -n "$label" ] || { echo "error: could not read the current label of herdr tab $tab" >&2; return 1; }
+  printf '%s' "$label"
 }
 
 # fm_backend_herdr_projection_id: generate a compact 128-bit base64url token.
@@ -953,25 +986,37 @@ fm_backend_herdr_workspace_task_tab_count() {  # <session> <workspace-id>
   printf '%s' "$n"
 }
 
-# fm_backend_herdr_workspace_find: this HOME's own workspace id inside
-# <session> (fm_backend_herdr_workspace_label), or empty (never creates).
-# Read-only, safe for recovery/list paths.
+# fm_backend_herdr_workspace_resolve: the SINGLE place the canonical/legacy
+# crew-workspace precedence rule lives. Echoes "<workspace-id><TAB><origin>",
+# where <origin> is `canonical` or `legacy`, or nothing at all when this home
+# has no adoptable workspace. Read-only: one `workspace list`, plus one `tab
+# list` only on the legacy branch (a canonical match never needs a task-tab
+# probe).
 #
-# Legacy fallback (the primary's pre-migration "firstmate" label): when no
-# canonically labeled workspace exists, a legacy-labeled one is adopted ONLY
-# when it actually holds at least one fm-<id> task tab. That keeps every task
-# already recorded under the old label reachable - both for spawn adoption and
-# for fm_backend_herdr_list_live recovery, which scopes to this function's
-# result - while a tab-less legacy match is deliberately NOT adopted: it holds
-# no recoverable task by definition, and refusing it removes the residual
-# adopt-a-human's-lookalike-workspace hazard that the seeded-default-tab prune
-# incident below is about.
-fm_backend_herdr_workspace_find() {  # <session>
+# Precedence, in order:
+#   - a workspace carrying this home's canonical label
+#     (fm_backend_herdr_workspace_label) always wins;
+#   - otherwise the primary's pre-migration "firstmate" label
+#     (fm_backend_herdr_workspace_legacy_label; empty for a secondmate home) is
+#     adopted ONLY when that workspace actually holds at least one fm-<id> task
+#     tab. That keeps every task already recorded under the old label reachable
+#     - both for spawn adoption and for fm_backend_herdr_list_live recovery,
+#     which scopes to fm_backend_herdr_workspace_find's result - while a
+#     tab-less legacy match is deliberately NOT adopted: it holds no recoverable
+#     task by definition, and refusing it removes the residual
+#     adopt-a-human's-lookalike-workspace hazard that the seeded-default-tab
+#     prune incident below is about.
+#
+# The <origin> field is what lets fm_backend_herdr_workspace_migrate_legacy_label
+# reuse this same resolution instead of repeating it: "legacy" is exactly the
+# state that needs renaming, and "canonical" is exactly the state that must
+# refuse to rename so two containers are never merged onto one label.
+fm_backend_herdr_workspace_resolve() {  # <session> -> "<workspace-id>\t<canonical|legacy>"
   local session=$1 list wsid legacy
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 0
   wsid=$(fm_backend_herdr_workspace_id_in_list "$list" "$(fm_backend_herdr_workspace_label)")
   if [ -n "$wsid" ]; then
-    printf '%s' "$wsid"
+    printf '%s\tcanonical' "$wsid"
     return 0
   fi
   legacy=$(fm_backend_herdr_workspace_legacy_label)
@@ -979,7 +1024,17 @@ fm_backend_herdr_workspace_find() {  # <session>
   wsid=$(fm_backend_herdr_workspace_id_in_list "$list" "$legacy")
   [ -n "$wsid" ] || return 0
   [ "$(fm_backend_herdr_workspace_task_tab_count "$session" "$wsid")" -gt 0 ] || return 0
-  printf '%s' "$wsid"
+  printf '%s\tlegacy' "$wsid"
+}
+
+# fm_backend_herdr_workspace_find: this HOME's own workspace id inside
+# <session> (fm_backend_herdr_workspace_label), or empty (never creates).
+# Read-only, safe for recovery/list paths. The id half of
+# fm_backend_herdr_workspace_resolve, which owns the precedence rule.
+fm_backend_herdr_workspace_find() {  # <session>
+  local resolved
+  resolved=$(fm_backend_herdr_workspace_resolve "$1")
+  printf '%s' "${resolved%%$'\t'*}"
 }
 
 # fm_backend_herdr_workspace_migrate_legacy_label: rename this home's
@@ -1003,19 +1058,34 @@ fm_backend_herdr_workspace_find() {  # <session>
 #     is the same positive proof of ownership fm_backend_herdr_workspace_find
 #     requires before adopting it. A human's coincidentally-labeled workspace
 #     is therefore never renamed.
-fm_backend_herdr_workspace_migrate_legacy_label() {  # <session>
-  local session=$1 canonical legacy list wsid
+#
+# All three are read straight off fm_backend_herdr_workspace_resolve rather than
+# re-derived here: a `legacy` origin means precisely "no canonical workspace
+# exists AND this legacy-labeled one holds a task tab", so the precedence rule
+# has exactly one implementation and cannot drift between the two callers. The
+# secondmate short-circuit stays ABOVE the resolve call, so a home with no
+# legacy label still makes zero herdr calls for the migration.
+#
+# <resolved> is an optional pre-computed fm_backend_herdr_workspace_resolve
+# result, so fm_backend_herdr_container_ensure pays for ONE `workspace list` per
+# spawn instead of one for the migration and another for the ensure. Omitting it
+# resolves inline, which is what the standalone/test call shape does.
+fm_backend_herdr_workspace_migrate_legacy_label() {  # <session> [resolved]
+  local session=$1 canonical legacy resolved wsid
   legacy=$(fm_backend_herdr_workspace_legacy_label)
   [ -n "$legacy" ] || return 0
   canonical=$(fm_backend_herdr_workspace_label)
   if [ "$canonical" = "$legacy" ]; then
     return 0
   fi
-  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 0
-  [ -z "$(fm_backend_herdr_workspace_id_in_list "$list" "$canonical")" ] || return 0
-  wsid=$(fm_backend_herdr_workspace_id_in_list "$list" "$legacy")
+  if [ "$#" -ge 2 ]; then
+    resolved=$2
+  else
+    resolved=$(fm_backend_herdr_workspace_resolve "$session")
+  fi
+  [ "${resolved#*$'\t'}" = "legacy" ] || return 0
+  wsid=${resolved%%$'\t'*}
   [ -n "$wsid" ] || return 0
-  [ "$(fm_backend_herdr_workspace_task_tab_count "$session" "$wsid")" -gt 0 ] || return 0
   fm_backend_herdr_cli "$session" workspace rename "$wsid" "$canonical" >/dev/null 2>&1 || true
   return 0
 }
@@ -1119,11 +1189,20 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
 # focuses regardless of --no-focus (herdr always needs something focused to
 # attach to). --no-focus is passed unconditionally anyway, for defense in
 # depth and because it is a no-op in the already-safe case.
-fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
+#
+# <resolved> is an optional pre-computed fm_backend_herdr_workspace_resolve
+# result. Passing it reuses that ONE lookup instead of repeating it; a rename
+# moves no workspace id, so a result resolved before the legacy-label migration
+# is still correct after it. Omitting it looks the workspace up inline.
+fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [resolved]
   local session=$1 cwd=$2 wsid out label
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
-  wsid=$(fm_backend_herdr_workspace_find "$session")
+  if [ "$#" -ge 3 ]; then
+    wsid=${3%%$'\t'*}
+  else
+    wsid=$(fm_backend_herdr_workspace_find "$session")
+  fi
   if [ -n "$wsid" ]; then
     FM_BACKEND_HERDR_WS_ID=$wsid
     printf '%s' "$wsid"
@@ -1154,16 +1233,19 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd>
 # must be threaded through to fm_backend_herdr_create_task, which is the only
 # function allowed to prune it (fm_backend_herdr_workspace_prune_seeded_default_tab).
 fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
-  local cwd=${1:-$PWD} session label
+  local cwd=${1:-$PWD} session label resolved
   fm_backend_herdr_version_check || return 1
   session=$(fm_backend_herdr_session)
   fm_backend_herdr_server_ensure "$session" || return 1
+  # Resolve this home's container ONCE and hand the same answer to both steps
+  # below, so a spawn costs one `workspace list` rather than two.
+  resolved=$(fm_backend_herdr_workspace_resolve "$session")
   # Converge a pre-migration crew-workspace label before the ensure below, so a
   # home carrying tasks under the old label keeps ONE container instead of
-  # gaining a second one. Best-effort and never fatal: workspace_find adopts
-  # the legacy label either way.
-  fm_backend_herdr_workspace_migrate_legacy_label "$session"
-  fm_backend_herdr_workspace_ensure "$session" "$cwd" >/dev/null || { label=$(fm_backend_herdr_workspace_label); echo "error: failed to ensure herdr workspace '$label' in session '$session'" >&2; return 1; }
+  # gaining a second one. Best-effort and never fatal: the resolved id is the
+  # same one either way, because a rename moves no workspace id.
+  fm_backend_herdr_workspace_migrate_legacy_label "$session" "$resolved"
+  fm_backend_herdr_workspace_ensure "$session" "$cwd" "$resolved" >/dev/null || { label=$(fm_backend_herdr_workspace_label); echo "error: failed to ensure herdr workspace '$label' in session '$session'" >&2; return 1; }
   if [ -z "$FM_BACKEND_HERDR_WS_ID" ]; then
     label=$(fm_backend_herdr_workspace_label)
     echo "error: failed to ensure herdr workspace '$label' in session '$session'" >&2

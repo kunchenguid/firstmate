@@ -193,6 +193,30 @@ tmux set-option -g allow-rename off >/dev/null 2>&1 || true
 tmux set-window-option -g automatic-rename off >/dev/null 2>&1 || true
 pass "real tmux: fm_backend_tmux_label_self labels firstmate's own window, refuses outside tmux, and the label survives a harness terminal-title rewrite"
 
+# A crewmate runs bin/fm-session-start.sh too, and in a firstmate-repo worktree
+# every other refusal passes - so the ONE thing standing between the self-label
+# step and a renamed live worker window is reading the name it already carries.
+WORKER_PANE=$(tmux new-window -dP -F '#{pane_id}' -t "$SESSION:" -n fm-smoke-worker sh) \
+  || fail "could not create the worker-endpoint probe window"
+[ -n "$WORKER_PANE" ] || fail "could not resolve the worker-endpoint probe pane id"
+
+WORKER_LABEL=$(TMUX="fake,1,0" TMUX_PANE="$WORKER_PANE" fm_backend_tmux_current_self_label) \
+  || fail "fm_backend_tmux_current_self_label failed against real tmux"
+[ "$WORKER_LABEL" = fm-smoke-worker ] \
+  || fail "fm_backend_tmux_current_self_label must report the window's real current name, got '$WORKER_LABEL'"
+
+SELF_OUT=$(env TMUX="fake,1,0" TMUX_PANE="$WORKER_PANE" FM_SELF_LABEL=firstmate \
+  FM_HOME="$SHIM_DIR" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-label-self.sh" 2>&1)
+case "$SELF_OUT" in
+  *"already a worker endpoint"*) : ;;
+  *) fail "fm-label-self.sh must refuse a window that is already a worker endpoint"$'\n'"$SELF_OUT" ;;
+esac
+WORKER_NAME=$(tmux display-message -p -t "$WORKER_PANE" '#{window_name}')
+[ "$WORKER_NAME" = fm-smoke-worker ] \
+  || fail "a live fm-<id> worker window was renamed to '$WORKER_NAME'; that drops the task out of label-matched recovery"
+tmux kill-window -t "$WORKER_PANE" >/dev/null 2>&1 || true
+pass "real tmux: fm_backend_tmux_current_self_label reads the real window name, and fm-label-self.sh leaves an fm-<id> worker window alone"
+
 # --- kill and recovery-grade missing-window classification ------------------
 
 fm_backend_tmux_kill "$TARGET"

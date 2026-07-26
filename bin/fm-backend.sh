@@ -603,6 +603,29 @@ fm_backend_label_self() {  # <backend> <label>
   esac
 }
 
+# fm_backend_current_self_label: the label the caller's OWN endpoint carries
+# right now, printed on stdout. The read half of fm_backend_label_self, and the
+# reason bin/fm-label-self.sh can tell firstmate's own unlabeled endpoint apart
+# from a worker endpoint it must never touch: a crewmate running
+# bin/fm-session-start.sh in a firstmate-repo worktree passes every other
+# refusal, so without reading the CURRENT label the self-label step would rename
+# a live fm-<task-id> tab out of the namespace herdr's recovery scan
+# (fm_backend_herdr_list_live) selects on. Each arm resolves the caller's own
+# endpoint from the backend's own ambient markers, never from a label lookup,
+# and returns non-zero rather than an empty label when it cannot read one, so
+# the caller can fail closed. Only the two runtime-auto-detected backends
+# implement it, matching fm_backend_label_self exactly.
+fm_backend_current_self_label() {  # <backend>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_current_self_label "$@" ;;
+    herdr) fm_backend_herdr_current_self_label "$@" ;;
+    *) echo "error: backend '$backend' has no verified way to read firstmate's own endpoint label" >&2; return 1 ;;
+  esac
+}
+
 fm_backend_remove_worktree() {  # <backend> <worktree-id>
   local backend=$1
   shift

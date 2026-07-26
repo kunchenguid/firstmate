@@ -877,6 +877,31 @@ test_no_run_idle_pane_uses_log() {
   pass "no run + idle pane uses the status-log verb"
 }
 
+# The captain-override record bin/fm-brief.sh rule 9 requires lands on an
+# already-idle, already-done pane in the common case, and a scout has no
+# no-mistakes run to override this fallback path. Because map_log_state
+# reconciles from the LAST status line, that record must reuse the task's own
+# terminal verb: a bare `working:` appended after `done:` would report a
+# finished task as working again, which is exactly the stale-records failure the
+# rule exists to prevent.
+test_override_record_after_done_keeps_the_task_done() {
+  reset_fakes
+  local d; d=$(new_case override-after-done)
+  make_repo_on_branch "$d/wt" fm/feat-override
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-override.meta" "window=fm:fm-feat-override" "worktree=$d/wt" "kind=scout"
+  {
+    printf 'done: reproduced the bug and wrote the report\n'
+    printf 'done: acted outside this brief on captain instruction - merged PR 42 in another lane; task deliverable unchanged\n'
+  } > "$d/state/feat-override.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-override)
+  assert_contains "$out" "state: done" "an override recorded after done: must not reopen a finished task"
+  assert_contains "$out" "acted outside this brief" "the override record must stay visible to firstmate"
+  pass "a captain-override record appended after done: keeps the task done and stays visible"
+}
+
 test_no_run_idle_pane_uses_keyed_log() {
   reset_fakes
   local d; d=$(new_case keyed-idle)
@@ -1261,6 +1286,7 @@ test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane
 test_no_run_herdr_idle_agent_status_and_idle_pane_stays_idle
 test_no_run_idle_pane_uses_log
+test_override_record_after_done_keeps_the_task_done
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb

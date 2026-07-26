@@ -111,6 +111,19 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
 fm_backend_tmux_label_self() {  # <label>
   local label=$1 wid
   [ -n "$label" ] || { echo "error: fm_backend_tmux_label_self needs a label" >&2; return 1; }
+  wid=$(fm_backend_tmux_self_window_id) || return 1
+  tmux rename-window -t "$wid" "$label" 2>/dev/null || { echo "error: tmux rename-window failed for $wid" >&2; return 1; }
+  tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
+  tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
+  return 0
+}
+
+# fm_backend_tmux_self_window_id: the window id of the window the CALLER ITSELF
+# runs in, resolved from tmux's own $TMUX_PANE and falling back to the client's
+# current window. Shared by the two self-endpoint operations so both address
+# exactly the same window, and so neither ever resolves one by label.
+fm_backend_tmux_self_window_id() {
+  local wid
   [ -n "${TMUX:-}" ] || { echo "error: not running inside tmux (\$TMUX is unset)" >&2; return 1; }
   if [ -n "${TMUX_PANE:-}" ]; then
     wid=$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}' 2>/dev/null)
@@ -118,10 +131,20 @@ fm_backend_tmux_label_self() {  # <label>
     wid=$(tmux display-message -p '#{window_id}' 2>/dev/null)
   fi
   [ -n "$wid" ] || { echo "error: could not resolve this tmux pane's own window id" >&2; return 1; }
-  tmux rename-window -t "$wid" "$label" 2>/dev/null || { echo "error: tmux rename-window failed for $wid" >&2; return 1; }
-  tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
-  tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
-  return 0
+  printf '%s' "$wid"
+}
+
+# fm_backend_tmux_current_self_label: the name the caller's OWN window carries
+# right now, or a failure with an explanation. bin/fm-label-self.sh reads this
+# before renaming anything and fails closed on an error, so an unreadable name
+# must never be reported as an empty-but-successful one.
+fm_backend_tmux_current_self_label() {
+  local wid name
+  wid=$(fm_backend_tmux_self_window_id) || return 1
+  name=$(tmux display-message -p -t "$wid" '#{window_name}' 2>/dev/null) \
+    || { echo "error: tmux display-message failed for $wid" >&2; return 1; }
+  [ -n "$name" ] || { echo "error: could not read the current name of tmux window $wid" >&2; return 1; }
+  printf '%s' "$name"
 }
 
 # fm_backend_tmux_current_path: the live pane's current working directory, or

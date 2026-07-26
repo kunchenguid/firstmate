@@ -466,6 +466,21 @@ test_label_self_dispatch_reports_unsupported_backends() {
   pass "fm_backend_label_self: backends with no verified self-label operation report the limitation instead of faking it"
 }
 
+# The read half of the same operation. bin/fm-label-self.sh fails CLOSED on it,
+# so a backend that cannot read the caller's own current label must return
+# non-zero rather than an empty-but-successful answer that would read as
+# "unlabeled, safe to rename".
+test_current_self_label_dispatch_reports_unsupported_backends() {
+  local backend out
+  for backend in zellij orca cmux; do
+    out=$(fm_backend_current_self_label "$backend" 2>&1) \
+      && fail "fm_backend_current_self_label must refuse the $backend backend"
+    assert_contains "$out" "no verified way to read firstmate's own endpoint label" \
+      "fm_backend_current_self_label did not explain the $backend limitation"
+  done
+  pass "fm_backend_current_self_label: backends with no verified way to read their own label refuse instead of reporting an empty one"
+}
+
 test_backend_validate_refuses_unknown() {
   fm_backend_validate tmux 2>/dev/null || fail "fm_backend_validate should accept tmux"
   fm_backend_validate orca 2>/dev/null || fail "fm_backend_validate should accept orca"
@@ -1116,6 +1131,7 @@ test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_label_self_dispatch_reports_unsupported_backends
+test_current_self_label_dispatch_reports_unsupported_backends
 test_backend_source_shell_portable
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta

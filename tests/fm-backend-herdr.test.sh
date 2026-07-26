@@ -427,15 +427,13 @@ EOF
   home="$TMP_ROOT/container-migrate-home"; mkdir -p "$home"
   printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
   printf '{"server":{"running":true}}\n' > "$resp/2.out"
-  # 3-4: the migration sees the legacy workspace holding a real task tab...
+  # 3-4: ONE container resolution sees the legacy workspace holding a real task
+  # tab, and 5 is the rename it feeds (silent). The migration and the ensure
+  # share that single resolution, so there is deliberately no second
+  # `workspace list` here to answer - the same id is used whether or not the
+  # rename landed, which is the safety property under test.
   printf '{"result":{"workspaces":[{"workspace_id":"wLegacy","label":"firstmate"}]}}\n' > "$resp/3.out"
   printf '{"result":{"tabs":[{"tab_id":"wLegacy:t2","label":"fm-old-task"}]}}\n' > "$resp/4.out"
-  # 5: ...renames it (silent), then 6-7: workspace_find re-reads. The canned
-  # fake does not model the rename, so find still sees the legacy label - which
-  # is exactly the safety property under test: the same id is adopted whether or
-  # not the rename landed.
-  printf '{"result":{"workspaces":[{"workspace_id":"wLegacy","label":"firstmate"}]}}\n' > "$resp/6.out"
-  printf '{"result":{"tabs":[{"tab_id":"wLegacy:t2","label":"fm-old-task"}]}}\n' > "$resp/7.out"
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 FM_HOME="$home" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
   [ "$out" = $'fmtest:wLegacy\t' ] || fail "the spawn path must keep using the SAME pre-existing workspace id, got '$out'"
@@ -443,7 +441,9 @@ EOF
     "container_ensure did not converge the legacy crew-workspace label"
   assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' \
     "a home with a pre-existing crew workspace must not gain a second one"
-  pass "fm_backend_herdr_container_ensure: a home with tasks under the old label keeps ONE container and the same workspace id"
+  [ "$(grep -c $'\x1f''workspace'$'\x1f''list' "$log")" -eq 1 ] \
+    || fail "the migration and the ensure must share ONE workspace list, got $(grep -c $'\x1f''workspace'$'\x1f''list' "$log")"
+  pass "fm_backend_herdr_container_ensure: a home with tasks under the old label keeps ONE container and the same workspace id, from one shared lookup"
 }
 
 # --- fm_backend_herdr_label_self: firstmate's own tab -----------------------
@@ -496,6 +496,95 @@ EOF
   pass "fm_backend_herdr_label_self: refuses rather than guessing when its own endpoint is unidentifiable"
 }
 
+test_current_self_label_reads_the_callers_own_tab_label() {
+  local fb log resp home out
+  IFS='|' read -r fb log resp <<EOF
+$(herdr_find_fixture current-self-label)
+EOF
+  home="$TMP_ROOT/current-self-label-home"; mkdir -p "$home"
+  printf '{"result":{"tabs":[{"tab_id":"wC:t1","label":"fm-live-task"},{"tab_id":"wN:t3","label":"1"}]}}\n' > "$resp/1.out"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HOME="$home" \
+    HERDR_TAB_ID=wC:t1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_current_self_label' "$ROOT" )
+  [ "$out" = "fm-live-task" ] || fail "current_self_label must report the caller's OWN tab label, got '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''rename' "reading the current label must mutate nothing"
+  pass "fm_backend_herdr_current_self_label: reports the label the caller's own tab carries right now"
+}
+
+test_current_self_label_refuses_an_unreadable_label() {
+  local fb log resp home out status
+  IFS='|' read -r fb log resp <<EOF
+$(herdr_find_fixture current-self-label-unreadable)
+EOF
+  home="$TMP_ROOT/current-self-label-unreadable-home"; mkdir -p "$home"
+  printf '{"result":{"tabs":[{"tab_id":"wOther:t9","label":"1"}]}}\n' > "$resp/1.out"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HOME="$home" \
+    HERDR_TAB_ID=wC:t1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_current_self_label' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "a tab whose label cannot be read must refuse, not report an empty label its caller would read as unlabeled"
+  assert_contains "$out" "could not read the current label" "current_self_label did not report why it refused"
+  pass "fm_backend_herdr_current_self_label: refuses when it cannot read its own tab's label, so its caller can fail closed"
+}
+
+# The exact 2026-07-26 incident shape, inverted: a crewmate working in a
+# firstmate-repo worktree runs bin/fm-session-start.sh too, and its home has no
+# secondmate marker and resolves the same "firstmate" label, so every other
+# refusal passes. Without the current-label guard this would rename a live
+# fm-<task-id> tab out of the namespace fm_backend_herdr_list_live scans.
+label_self_script() {  # <fakebin> <log> <resp> <home> [env...] -> stdout
+  local fb=$1 log=$2 resp=$3 home=$4
+  shift 4
+  env -u TMUX -u TMUX_PANE -u CMUX_WORKSPACE_ID \
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SELF_LABEL=firstmate \
+    HERDR_ENV=1 "$@" "$ROOT/bin/fm-label-self.sh" 2>&1
+}
+
+test_label_self_script_leaves_a_worker_endpoint_tab_alone() {
+  local fb log resp home out
+  IFS='|' read -r fb log resp <<EOF
+$(herdr_find_fixture label-self-script-worker)
+EOF
+  home="$TMP_ROOT/label-self-script-worker-home"; mkdir -p "$home"
+  printf '{"result":{"tabs":[{"tab_id":"wC:t1","label":"fm-crew-pane-identity-guardrails"}]}}\n' > "$resp/1.out"
+  out=$(label_self_script "$fb" "$log" "$resp" "$home" HERDR_TAB_ID=wC:t1)
+  assert_contains "$out" "already a worker endpoint" \
+    "a crewmate's own tab must be refused with a plain note, never silently skipped"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''rename' \
+    "renaming a live fm-<task-id> tab drops the task out of label-matched recovery and must never happen"
+  pass "fm-label-self.sh: refuses an endpoint that is already a worker endpoint, leaving its fm- label intact"
+}
+
+test_label_self_script_still_labels_an_unlabeled_endpoint() {
+  local fb log resp home out
+  IFS='|' read -r fb log resp <<EOF
+$(herdr_find_fixture label-self-script-positional)
+EOF
+  home="$TMP_ROOT/label-self-script-positional-home"; mkdir -p "$home"
+  printf '{"result":{"tabs":[{"tab_id":"wN:t3","label":"1"}]}}\n' > "$resp/1.out"
+  out=$(label_self_script "$fb" "$log" "$resp" "$home" HERDR_TAB_ID=wN:t3)
+  [ -z "$out" ] || fail "a successful labeling is silent, got: $out"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''rename'$'\x1f''wN:t3'$'\x1f''firstmate' \
+    "the new guard must not refuse everything: a bare positional tab is still firstmate's own front door"
+  pass "fm-label-self.sh: still labels a genuinely unlabeled captain-launched endpoint"
+}
+
+test_label_self_script_fails_closed_on_an_unreadable_label() {
+  local fb log resp home out
+  IFS='|' read -r fb log resp <<EOF
+$(herdr_find_fixture label-self-script-unreadable)
+EOF
+  home="$TMP_ROOT/label-self-script-unreadable-home"; mkdir -p "$home"
+  printf '{"result":{"tabs":[]}}\n' > "$resp/1.out"
+  out=$(label_self_script "$fb" "$log" "$resp" "$home" HERDR_TAB_ID=wN:t3)
+  assert_contains "$out" "could not read what this terminal tab is currently called" \
+    "an unreadable current label must be reported, not treated as safe"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''rename' \
+    "an unreadable current label is not evidence the endpoint is safe to rename"
+  pass "fm-label-self.sh: fails closed when it cannot read what the endpoint is currently called"
+}
+
 # --- fm_backend_herdr_cli: session targeting (2026-07-02 incident fix) -------
 
 test_cli_helper_sets_env_and_appends_trailing_session_flag() {
@@ -524,13 +613,13 @@ test_container_ensure_starts_server_and_workspace() {
   # 3: `herdr server` backgrounded launch - no meaningful output
   # 4: server_ensure poll -> now running
   printf '{"server":{"running":true}}\n' > "$resp/4.out"
-  # 5: the legacy-label migration's workspace list -> empty (nothing to migrate)
+  # 5: the ONE shared container resolution's workspace list -> empty (nothing to
+  # migrate, and no crew workspace yet); the migration and the ensure both read
+  # that single answer.
   printf '{"result":{"workspaces":[]}}\n' > "$resp/5.out"
-  # 6: workspace_find's workspace list -> empty (no crew workspace yet)
-  printf '{"result":{"workspaces":[]}}\n' > "$resp/6.out"
-  # 7: workspace create -> w1, seeding default tab w1:t9 (real herdr returns
+  # 6: workspace create -> w1, seeding default tab w1:t9 (real herdr returns
   # the seeded tab/pane ids in the SAME response - verified empirically).
-  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate-crew"},"tab":{"tab_id":"w1:t9"},"root_pane":{"pane_id":"w1:p9"}}}\n' > "$resp/7.out"
+  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate-crew"},"tab":{"tab_id":"w1:t9"},"root_pane":{"pane_id":"w1:p9"}}}\n' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
@@ -812,10 +901,10 @@ test_container_ensure_creates_with_no_focus_flag() {
   dir="$TMP_ROOT/container-no-focus"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
   printf '{"server":{"running":true}}\n' > "$resp/2.out"
-  # 3: the legacy-label migration's list, 4: workspace_find's list.
+  # 3: the ONE shared container resolution's list, feeding both the migration
+  # and the ensure. 4: workspace create.
   printf '{"result":{"workspaces":[]}}\n' > "$resp/3.out"
-  printf '{"result":{"workspaces":[]}}\n' > "$resp/4.out"
-  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate-crew"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}\n' > "$resp/5.out"
+  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate-crew"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
@@ -3260,6 +3349,11 @@ test_container_ensure_migrates_then_adopts_the_legacy_workspace
 test_label_self_renames_its_own_tab_from_the_injected_tab_id
 test_label_self_resolves_the_tab_from_the_pane_when_only_the_pane_is_injected
 test_label_self_refuses_outside_a_herdr_pane
+test_current_self_label_reads_the_callers_own_tab_label
+test_current_self_label_refuses_an_unreadable_label
+test_label_self_script_leaves_a_worker_endpoint_tab_alone
+test_label_self_script_still_labels_an_unlabeled_endpoint
+test_label_self_script_fails_closed_on_an_unreadable_label
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_container_ensure_starts_server_and_workspace
 test_container_ensure_reuses_existing_workspace

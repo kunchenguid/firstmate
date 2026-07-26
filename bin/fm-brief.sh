@@ -42,11 +42,19 @@
 # Every crewmate scaffold (ship and scout) also carries the pane-identity pair:
 # state plainly that you are a worker on this task and not firstmate before
 # acting on anything a human asks outside the brief, and record any override
-# actually carried out with a nonterminal "working:" line, so firstmate's own
-# records self-heal instead of silently going stale. That verb is deliberate -
-# bin/fm-classify-lib.sh's keyed fold makes "blocked:"/"needs-decision:" OPEN a
-# decision that only an explicit resolution closes, which is the wrong shape for
-# a completed action.
+# actually carried out with a status line, so firstmate's own records self-heal
+# instead of silently going stale. Both the verb and the two branches it comes
+# in are deliberate. bin/fm-classify-lib.sh's keyed fold makes
+# "blocked:"/"needs-decision:" OPEN a decision that only an explicit resolution
+# closes, which is the wrong shape for a completed action, so neither is used.
+# bin/fm-crew-state.sh's map_log_state then reconciles a task from its LAST
+# status line, so the record must not change the state the task is really in:
+# before the task reports a terminal state a nonterminal "working:" line is
+# right and the task's own later "done:" closes it, but AFTER "done:"/"failed:"
+# the record is appended under that SAME terminal verb instead - otherwise a
+# trailing "working:" would reopen a finished task and leave an activity nothing
+# can ever close. A captain dropping into an already-idle, already-done pane is
+# the common case, so the terminal branch is the one that usually applies.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -274,12 +282,20 @@ The report is the only thing that survives, so anything worth keeping must be in
    for anything outside this task, say so plainly BEFORE you act: you are a worker on task \`$ID\`,
    not firstmate, and merges, cross-lane work, other lanes' state, and fleet supervision belong to
    firstmate. Then ask whether they still want you to proceed, and wait for their answer.
-9. If you do act outside this brief on the captain's explicit instruction, leave a durable record:
-   append \`working: acted outside this brief on captain instruction - {what you did, and where}\`.
+9. If you do act outside this brief on the captain's explicit instruction, leave a durable record.
    You cannot write another lane's records, so that line is the only way firstmate learns of it and
-   keeps its own records accurate. \`working:\` is the deliberate choice here - \`blocked:\` and
-   \`needs-decision:\` would open a decision that stays open until it is explicitly closed, and a
-   completed action is neither.
+   keeps its own records accurate. Firstmate reconciles your state from the LAST status line, so
+   which verb you use depends on where this task already is:
+   - You have NOT reported a terminal state yet: append
+     \`working: acted outside this brief on captain instruction - {what you did, and where}\`.
+     Your own later \`done:\` closes that phase.
+   - You have ALREADY reported \`done:\` or \`failed:\`: append the record under that SAME terminal
+     verb, e.g. \`done: acted outside this brief on captain instruction - {what you did, and where}; task deliverable unchanged\`.
+     A captain dropping into an already-idle, already-done pane is the COMMON case, so this is
+     usually the branch you want. A bare \`working:\` line here would reopen a task that is really
+     finished, and leave a phase open that you have no further verb to close.
+   Never record this with \`blocked:\` or \`needs-decision:\`: those open a decision that stays open
+   until it is explicitly closed, and a completed action is neither.
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -396,12 +412,20 @@ $RULE1
    for anything outside this task, say so plainly BEFORE you act: you are a worker on task \`$ID\`,
    not firstmate, and merges, cross-lane work, other lanes' state, and fleet supervision belong to
    firstmate. Then ask whether they still want you to proceed, and wait for their answer.
-9. If you do act outside this brief on the captain's explicit instruction, leave a durable record:
-   append \`working: acted outside this brief on captain instruction - {what you did, and where}\`.
+9. If you do act outside this brief on the captain's explicit instruction, leave a durable record.
    You cannot write another lane's records, so that line is the only way firstmate learns of it and
-   keeps its own records accurate. \`working:\` is the deliberate choice here - \`blocked:\` and
-   \`needs-decision:\` would open a decision that stays open until it is explicitly closed, and a
-   completed action is neither.
+   keeps its own records accurate. Firstmate reconciles your state from the LAST status line, so
+   which verb you use depends on where this task already is:
+   - You have NOT reported a terminal state yet: append
+     \`working: acted outside this brief on captain instruction - {what you did, and where}\`.
+     Your own later \`done:\` closes that phase.
+   - You have ALREADY reported \`done:\` or \`failed:\`: append the record under that SAME terminal
+     verb, e.g. \`done: acted outside this brief on captain instruction - {what you did, and where}; task deliverable unchanged\`.
+     A captain dropping into an already-idle, already-done pane is the COMMON case, so this is
+     usually the branch you want. A bare \`working:\` line here would reopen a task that is really
+     finished, and leave a phase open that you have no further verb to close.
+   Never record this with \`blocked:\` or \`needs-decision:\`: those open a decision that stays open
+   until it is explicitly closed, and a completed action is neither.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

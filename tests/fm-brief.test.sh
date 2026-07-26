@@ -338,8 +338,16 @@ test_crewmate_scaffolds_carry_the_pane_identity_contract() {
     # which is the wrong shape for an action that is already finished.
     assert_grep "working: acted outside this brief" "$brief" \
       "$id: the override record must use the nonterminal working: verb"
+    # ...but firstmate reconciles state from the LAST status line
+    # (bin/fm-crew-state.sh's map_log_state), so an override recorded AFTER the
+    # task already reported done: must reuse that terminal verb instead, or the
+    # record would reopen a finished task. Both branches must be present.
+    assert_grep "done: acted outside this brief" "$brief" \
+      "$id: the override record must have an already-finished branch that keeps the terminal verb"
+    assert_grep "COMMON case" "$brief" \
+      "$id: the brief must say the already-done pane is the common case, so the terminal branch is the one usually applied"
   done
-  pass "fm-brief.sh: ship and scout scaffolds require a crewmate to identify itself and to durably record a captain override"
+  pass "fm-brief.sh: ship and scout scaffolds require a crewmate to identify itself and to durably record a captain override under the right verb"
 }
 
 # The recorded override line must actually fold the way the brief claims: a
@@ -357,6 +365,25 @@ test_override_record_classifies_as_a_nonterminal_phase() {
   open_activities=$(bash -c '. "$0/bin/fm-classify-lib.sh"; status_open_activities "$1"' "$ROOT" "$status_file")
   [ -z "$open_activities" ] || fail "the task's own done: must close the override phase: $open_activities"
   pass "fm-classify-lib: a captain-override record folds as a nonterminal phase and never as an unresolved blocker"
+}
+
+# The ordering the mid-task branch above does NOT cover, and the common one: the
+# captain drops into a pane that already reported done:, so the override record
+# lands LAST. Under the terminal-verb branch it must still fold clean - no open
+# decision, and no open activity the crewmate has no further verb left to close.
+test_override_record_after_done_folds_clean() {
+  local status_file open_decisions open_activities
+  status_file="$TMP_ROOT/override-classify-after-done.status"
+  mkdir -p "$TMP_ROOT"
+  {
+    printf 'done: fix implemented\n'
+    printf 'done: acted outside this brief on captain instruction - merged PR 42 in another lane; task deliverable unchanged\n'
+  } > "$status_file"
+  open_decisions=$(bash -c '. "$0/bin/fm-classify-lib.sh"; status_open_decisions "$1"' "$ROOT" "$status_file")
+  [ -z "$open_decisions" ] || fail "an override recorded after done: must not open a decision: $open_decisions"
+  open_activities=$(bash -c '. "$0/bin/fm-classify-lib.sh"; status_open_activities "$1"' "$ROOT" "$status_file")
+  [ -z "$open_activities" ] || fail "an override recorded after done: must leave no activity nothing can close: $open_activities"
+  pass "fm-classify-lib: an override recorded after the task already finished leaves nothing open"
 }
 
 test_pause_verb_override_renders_all_brief_scaffolds() {
@@ -449,5 +476,6 @@ test_secondmate_marked_request_reporting_contract
 test_pause_verb_override_renders_all_brief_scaffolds
 test_crewmate_scaffolds_carry_the_pane_identity_contract
 test_override_record_classifies_as_a_nonterminal_phase
+test_override_record_after_done_folds_clean
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
