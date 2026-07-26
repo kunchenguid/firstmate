@@ -678,6 +678,7 @@ test_unknown_backend_state_uses_capture_fallback() {
       corr=$(fm_pending_reply_create "$home" "$state" "hibit" "$backend fallback")
       fm_pending_reply_mark_delivered "$state" "$corr"
       fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "session:fm-hibit"
+      printf 'harness=pi\n' >> "$state/hibit.meta"
       [ "$backend" = tmux ] || printf 'backend=%s\n' "$backend" >> "$state/hibit.meta"
       fm_backend_busy_state() { printf 'unknown'; }
       fm_backend_capture() { printf '%s' "$FM_PENDING_TEST_CAPTURE"; }
