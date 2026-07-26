@@ -151,8 +151,8 @@ pane_readable() {  # <target>
 }
 # crew_pane_is_busy: the busy-signature fallback, backend-aware the same way -
 # fm_backend_busy_state's native semantic state (herdr's agent.get) when
-# available, else the shared tmux pane-regex reader (fm_pane_is_busy,
-# bin/fm-tmux-lib.sh) unchanged for tmux/unknown.
+# available, else the shared harness-scoped pane-regex reader
+# (fm_pane_is_busy, bin/fm-tmux-lib.sh).
 #
 # `busy` alone is trusted outright. Both `idle` and unknown/unparseable fall
 # through to the shared tail-regex corroboration, NOT just unknown: herdr's
@@ -163,9 +163,9 @@ pane_readable() {  # <target>
 # `no-mistakes axi run` without --yes, which blocks synchronously until a gate
 # or outcome - AGENTS.md section 7) is not generating for that whole span, so
 # agent.get can read idle/blocked (bin/backends/herdr.sh maps both to `idle`)
-# while the pane's own rendered text still shows the harness's busy banner
-# (BUSY_REGEX, e.g. "esc to interrupt") for the entire tool call, exactly like
-# tmux's regex-only reader would correctly report. Trusting herdr's `idle`
+# while the pane's own rendered text still shows that recorded harness's busy
+# signature for the entire tool call, exactly like tmux's regex-only reader
+# would correctly report. Trusting herdr's `idle`
 # outright (skipping that corroboration) is what let a still-working crew read
 # as not-busy here, and - combined with a no-mistakes run-step lookup that also
 # missed attribution (see nm_runs_status_for_branch) - as not provably working in

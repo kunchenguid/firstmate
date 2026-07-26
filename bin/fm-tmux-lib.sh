@@ -45,9 +45,9 @@
 # as a known gap in `docs/herdr-backend.md` rather than patched here, so the
 # tmux adapter does not paper over a herdr-specific shape.
 #
-# Per-harness override: FM_COMPOSER_IDLE_RE matches an empty composer after
-# ghost and structural border stripping. FM_BUSY_REGEX overrides the busy
-# footer set (mirrors fm-watch.sh / the daemon).
+# Overrides: FM_COMPOSER_IDLE_RE matches an empty composer after ghost and
+# structural border stripping. FM_BUSY_REGEX globally overrides harness-scoped
+# busy-footer matching (mirrors fm-watch.sh / the daemon).
 #
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.
