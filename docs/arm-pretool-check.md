@@ -23,6 +23,7 @@ It tokenizes the bytes and classifies lexical execution positions only.
 `bin/fm-arm-pretool-check.sh` supports these entry forms:
 
 - Stdin JSON at `.tool_input.command` for Claude and Codex.
+- Stdin JSON at `.tool_input.command` for Cursor.
 - Stdin JSON at `.toolInput.command` for Grok.
 - `--command <exact string>` for OpenCode and Pi.
 - `--background` as a compatibility-only field that never changes the decision.
@@ -157,6 +158,7 @@ Prose may improve without changing adapter behavior.
 
 | Harness | Exact command field | Adapter behavior on checker exit 2 |
 | --- | --- | --- |
+| Cursor | `.tool_input.command` | `.cursor/hooks.json` forwards the complete stdin payload and Cursor blocks on exit 2. |
 | Codex | `.tool_input.command` | The `.codex/hooks.json` command forwards the complete stdin payload and Codex blocks on exit 2. |
 | Claude | `.tool_input.command` | `.claude/settings.json` forwards stdin with `--claude`, leaving stdout empty and returning the stderr deny object. |
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |
@@ -225,6 +227,18 @@ Native supervision paths were also validated in the same scratch project:
 - Pi loaded both primary extensions, called `fm_watch_arm_pi`, and created the scratch automatic-arm marker.
 
 Every native-path automatic marker was present and every deny sentinel remained absent.
+
+## Cursor live validation record, 2026-07-14
+
+Cursor Agent `2026.07.09-a3815c0` was run in a git-initialized scratch project with a project `.cursor/hooks.json`.
+Command run: `cursor-agent --print --trust --force --model gpt-5.6-sol-high "Use the shell tool to run printf CURSORTOOL, then report the output."`.
+The `preToolUse` payload contained `tool_name: "Shell"` and `.tool_input.command: "printf CURSORTOOL"`, along with `cwd`, `workspace_roots`, `conversation_id`, and `session_id`.
+The hook process received `CURSOR_PROJECT_DIR` equal to the scratch project.
+Returning `{"permission":"allow"}` allowed the command and the model observed `CURSORTOOL`.
+Cursor's documented and installed exit-code contract maps exit 2 to a deny, so the tracked `Shell` matcher forwards the complete stdin payload to `bin/fm-arm-pretool-check.sh`; the checker remains the semantic owner.
+
+A 2026-07-18 revalidation on Cursor Agent `2026.07.16-899851b` with an individual Pro account found no hook execution at all for accounts without Cursor's server-side hooks rollout (`docs/turnend-guard.md` owns the dated evidence).
+The tracked Cursor seatbelt is therefore fail-open at the platform layer: it denies automatically only when Cursor executes project hooks, and the emitted supervision instructions remain the working guard otherwise.
 
 ## Automated validation
 

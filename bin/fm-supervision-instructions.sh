@@ -81,7 +81,7 @@ if [ -z "$HARNESS" ]; then
 fi
 
 case "$HARNESS" in
-  claude|codex|opencode|pi|grok) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
+  claude|codex|cursor|opencode|pi|grok) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
 [ -f "$SNIPPET" ] || SNIPPET="$DOC_DIR/unknown.md"
@@ -138,6 +138,9 @@ repair_line() {
       ;;
     codex)
       printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
+      ;;
+    cursor)
+      printf '%s%s\n' "$prefix" 'resume supervision with bin/fm-watch-arm.sh as its own Cursor tracked background Shell task, never shell &.'
       ;;
     pi)
       printf '%s%s%s%s%s%s\n' "$prefix" 'repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e ' "$pi_turnend_ext" ' -e ' "$pi_ext" ' if the extensions are not loaded.'

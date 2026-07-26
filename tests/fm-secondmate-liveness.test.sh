@@ -450,6 +450,46 @@ test_sweep_never_acts_on_unverified_harness_dead_reading() {
   pass "sweep: an unverified harness blocks recovery with a concrete diagnostic"
 }
 
+test_sweep_trusts_cursor_dead_only_on_tmux() {
+  local w fb tmuxfb herdrfb log out
+  w=$(new_world sweep-cursor-backends)
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  # tmux backend: a bare-shell pane under a cursor secondmate is a verified
+  # confident-dead reading (docs/tmux-backend.md), so the sweep acts on it.
+  add_sm_home "$w" sm1 firstmate:fm-sm1 cursor
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+  assert_contains "$(cat "$log")" "kill-window -t firstmate:fm-sm1" \
+    "a confident-dead cursor secondmate on tmux should be killed for respawn"
+  rm -f "$w/home/state/sm1.meta"
+
+  # herdr backend: herdr's native agent registry is unverified for
+  # cursor-agent, so its dead/no-agent reading must be downgraded to
+  # inconclusive instead of triggering a respawn of a possibly-live agent.
+  herdrfb="$w/herdrfb"
+  mkdir -p "$herdrfb"
+  cat > "$herdrfb/herdr" <<'SH'
+#!/usr/bin/env bash
+# Minimal herdr liveness fake: the pane exists but no agent is registered,
+# which fm_backend_herdr_pane_agent_state maps to no-agent -> dead.
+case "$1 $2" in
+  'pane get') printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$3" ;;
+  'agent get') printf '{"error":{"code":"agent_not_found"}}\n' >&2; exit 1 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$herdrfb/herdr"
+  add_sm_home "$w" sm2 hsess:p1 cursor
+  printf 'backend=herdr\n' >> "$w/home/state/sm2.meta"
+  : > "$log"
+  out=$(run_bootstrap "$herdrfb:$tmuxfb:$fb" "$w/home" zsh "$log")
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm2: skipped: liveness probe inconclusive (backend=herdr)" \
+    "a cursor dead reading on a non-tmux backend must downgrade to inconclusive"
+  [ ! -s "$log" ] || fail "a non-tmux cursor dead reading must never kill or respawn: $(cat "$log")"
+  pass "sweep: cursor dead verdicts are trusted on tmux and downgraded on unverified backends"
+}
+
 test_sweep_converges_no_retouch_once_alive() {
   local w fb tmuxfb log out1 out2
   w=$(new_world sweep-idempotent)
@@ -518,6 +558,7 @@ test_sweep_never_acts_on_ambiguous_existing_process
 test_sweep_never_acts_on_transient_unreadability
 test_sweep_reports_missing_endpoint_relaunch_failure
 test_sweep_never_acts_on_unverified_harness_dead_reading
+test_sweep_trusts_cursor_dead_only_on_tmux
 test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only
 test_sweep_noop_with_no_secondmate_meta

@@ -59,7 +59,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|kimi)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|cursor|opencode|pi|grok|kimi)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -82,6 +82,11 @@
 #   provisioned firstmate home; the default is kind=ship.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
+#   Cursor workers use --force, --approve-mcps, --workspace, and a task plugin
+#   under state/. The plugin is paired with one additive user-level stop-hook
+#   fallback (bin/fm-cursor-lib.sh owns the shared-artifact contract) because
+#   cursor-agent does not execute hooks for accounts without Cursor's
+#   server-side hooks rollout (verified 2026-07-18 on 2026.07.16-899851b).
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
@@ -101,6 +106,8 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+#     __CURSORPLUGIN__ absolute path to the task's Cursor plugin root
+#     __WORKSPACE__ absolute path to the task worktree or secondmate home
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -140,6 +147,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-cursor-lib.sh
+. "$SCRIPT_DIR/fm-cursor-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -388,7 +397,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok|kimi)
+    ''|claude|codex|cursor|opencode|pi|grok|kimi)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -431,6 +440,15 @@ launch_template() {
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      fi
+      ;;
+    cursor)
+      # --approve-mcps keeps a project-configured MCP server's trust prompt from
+      # wedging an unattended worker; --force already grants command execution.
+      if [ "$kind" = secondmate ]; then
+        printf '%s' 'cursor-agent --force --approve-mcps --workspace __WORKSPACE__ __MODELFLAG__"$(cat __BRIEF__)"'
+      else
+        printf '%s' 'cursor-agent --force --approve-mcps --plugin-dir __CURSORPLUGIN__ --workspace __WORKSPACE__ __MODELFLAG__"$(cat __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -565,7 +583,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok|kimi)
+    claude|codex|cursor|opencode|pi|grok|kimi)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -604,6 +622,9 @@ effort_flag_for_harness() {
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
+    # Cursor accepts --model but has no standalone effort flag. Parameterized
+    # model values can carry an effort setting when the caller explicitly puts
+    # it in the model string; the separate firstmate effort axis is omitted.
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
@@ -1335,6 +1356,50 @@ EOF
     codex*)
       # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
       ;;
+    cursor*)
+      # cursor-agent accepts a correctly structured --plugin-dir but does not
+      # execute hooks at all for accounts without Cursor's server-side hooks
+      # rollout (verified 2026-07-18 on 2026.07.16-899851b; docs/turnend-guard.md).
+      # Keep the task plugin wired for forward compatibility, and install one
+      # additive user-level fallback hook. The fallback is a no-op unless a
+      # workspace root carries a valid Firstmate token pointer.
+      # bin/fm-cursor-lib.sh owns the shared-artifact contract: the hook script
+      # write is atomic, the hooks.json merge is additive and idempotent, and
+      # the lock serializes this install against a concurrent teardown's
+      # last-token cleanup. On lock timeout the install proceeds anyway - it
+      # converges to the same installed state and must never block a spawn.
+      CURSOR_HOME="$HOME/.cursor"
+      CURSOR_HOOKS_DIR="$CURSOR_HOME/hooks"
+      CURSOR_AUTH_DIR="$CURSOR_HOOKS_DIR/fm-turn-end.d"
+      CURSOR_PLUGIN_DIR="$STATE/$ID.cursor-plugin"
+      mkdir -p "$CURSOR_AUTH_DIR" "$CURSOR_PLUGIN_DIR/.cursor-plugin" "$CURSOR_PLUGIN_DIR/hooks"
+      cursor_locked=0
+      if fm_cursor_hooks_lock "$CURSOR_HOOKS_DIR"; then
+        cursor_locked=1
+      fi
+      old_umask=$(umask)
+      umask 077
+      auth_file=$(mktemp "$CURSOR_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      printf '%s\n' "$TURNEND" > "$auth_file"
+      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.cursor-turnend-token"
+      if ! fm_cursor_write_turnend_hook "$CURSOR_HOOKS_DIR" "$CURSOR_AUTH_DIR"; then
+        [ "$cursor_locked" -eq 0 ] || fm_cursor_hooks_unlock "$CURSOR_HOOKS_DIR"
+        echo "error: failed to install Firstmate's Cursor turn-end hook in $CURSOR_HOOKS_DIR" >&2
+        exit 1
+      fi
+      cursor_hook_command=$(shell_quote "$CURSOR_HOOKS_DIR/fm-turn-end.sh")
+      if ! fm_cursor_merge_stop_entry "$CURSOR_HOME" "$cursor_hook_command"; then
+        [ "$cursor_locked" -eq 0 ] || fm_cursor_hooks_unlock "$CURSOR_HOOKS_DIR"
+        exit 1
+      fi
+      [ "$cursor_locked" -eq 0 ] || fm_cursor_hooks_unlock "$CURSOR_HOOKS_DIR"
+      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-cursor-turnend"
+      exclude_path '.fm-cursor-turnend'
+      cursor_plugin_hook=$(json_escape "$cursor_hook_command")
+      printf '{"name":"firstmate-task-%s","version":"1.0.0","hooks":"hooks/hooks.json"}\n' "$ID" > "$CURSOR_PLUGIN_DIR/.cursor-plugin/plugin.json"
+      printf '{"hooks":{"stop":[{"command":"%s","timeout":5,"failClosed":false}]}}\n' "$cursor_plugin_hook" > "$CURSOR_PLUGIN_DIR/hooks/hooks.json"
+      ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
       # clean equivalent of codex's notify= and pi's turn_end. But grok only loads
@@ -1467,6 +1532,8 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
+sq_cursorplugin=$(shell_quote "$STATE/$ID.cursor-plugin")
+sq_workspace=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -1477,6 +1544,8 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+LAUNCH=${LAUNCH//__CURSORPLUGIN__/$sq_cursorplugin}
+LAUNCH=${LAUNCH//__WORKSPACE__/$sq_workspace}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"

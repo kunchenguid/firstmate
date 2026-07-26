@@ -3,8 +3,8 @@
 # Behavior tests for the watcher-arm PreToolUse seatbelt (docs/arm-pretool-check.md).
 #
 # bin/fm-arm-command-policy.mjs is the single owner of command classification.
-# This suite drives the stable shell transport through all five harness entry
-# forms and asserts the per-harness wiring contract without spawning a harness.
+# This suite drives every stable shell transport shape and asserts each
+# harness's wiring contract without spawning a harness.
 # Empirical harness evidence lives in docs/arm-pretool-check.md.
 set -u
 
@@ -500,6 +500,19 @@ test_codex_hooks_pretool_wired() {
   pass ".codex/hooks.json: PreToolUse hook invokes the shared checker"
 }
 
+test_cursor_hooks_pretool_wired() {
+  local settings command matcher
+  settings="$ROOT/.cursor/hooks.json"
+  [ -f "$settings" ] || fail "tracked Cursor primary hooks are missing"
+  command=$(jq -r '.hooks.preToolUse[0].command // empty' "$settings")
+  [ -n "$command" ] || fail "preToolUse hook command is missing from Cursor primary hooks"
+  assert_contains "$command" 'CURSOR_PROJECT_DIR' "Cursor pretool hook must anchor via CURSOR_PROJECT_DIR"
+  assert_contains "$command" 'fm-arm-pretool-check.sh' "Cursor pretool hook must invoke the shared checker"
+  matcher=$(jq -r '.hooks.preToolUse[0].matcher // empty' "$settings")
+  [ "$matcher" = "Shell" ] || fail "Cursor pretool hook must matcher-scope to Shell, got: $matcher"
+  pass ".cursor/hooks.json: preToolUse hook invokes the shared checker"
+}
+
 test_opencode_pretool_plugin_wired() {
   local plugin content
   plugin="$ROOT/.opencode/plugins/fm-primary-pretool-check.js"
@@ -557,6 +570,7 @@ test_grok_pretool_hook_wired
 test_grok_turnend_hook_uses_safe_var_pattern
 test_claude_settings_pretool_hook_wired
 test_codex_hooks_pretool_wired
+test_cursor_hooks_pretool_wired
 test_opencode_pretool_plugin_wired
 test_pi_extension_carries_pretool_check
 test_shellcheck_clean

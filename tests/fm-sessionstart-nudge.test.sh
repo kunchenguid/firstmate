@@ -164,6 +164,12 @@ test_tracked_harness_registration() {
   assert_contains "$command" 'root=$(pwd -P)' "Codex SessionStart hook is not pwd-anchored"
   assert_contains "$command" 'fm-sessionstart-nudge.sh' "Codex SessionStart hook does not invoke the wrapper"
 
+  command=$(jq -r '.hooks.sessionStart[0].command // empty' "$ROOT/.cursor/hooks.json")
+  assert_contains "$command" 'CURSOR_PROJECT_DIR' "Cursor sessionStart hook must anchor through CURSOR_PROJECT_DIR"
+  assert_contains "$command" 'fm-sessionstart-nudge.sh' "Cursor sessionStart hook does not invoke the wrapper"
+  jq -e '.hooks.sessionStart[0].failClosed == false' "$ROOT/.cursor/hooks.json" >/dev/null \
+    || fail "Cursor sessionStart hook must stay fail-open"
+
   command=$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$ROOT/.grok/hooks/fm-primary-sessionstart-nudge.json")
   # shellcheck disable=SC2016
   assert_contains "$command" '${GROK_WORKSPACE_ROOT:-}' "Grok SessionStart hook lacks an inline-default workspace root"
@@ -183,7 +189,7 @@ test_tracked_harness_registration() {
   assert_contains "$opencode_plugin" 'fm-sessionstart-nudge.sh' "OpenCode plugin does not invoke the wrapper"
   assert_contains "$opencode_plugin" 'promptAsync' "OpenCode plugin does not prompt the nudge turn"
 
-  pass "all five verified harnesses register the shared session-start nudge"
+  pass "all six verified harnesses register the shared session-start nudge"
 }
 
 test_genuine_primary_nudges

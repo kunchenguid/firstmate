@@ -398,6 +398,18 @@ test_codex_wiring() {
   pass ".codex/hooks.json: PreToolUse invokes the cd-guard alongside the arm guard"
 }
 
+test_cursor_wiring() {
+  local settings command
+  settings="$ROOT/.cursor/hooks.json"
+  [ -f "$settings" ] || fail "tracked .cursor/hooks.json is missing"
+  command=$(jq -r '[.hooks.preToolUse[].command | select(contains("fm-cd-pretool-check.sh"))][0] // empty' "$settings")
+  [ -n "$command" ] || fail "Cursor preToolUse must invoke fm-cd-pretool-check.sh"
+  assert_contains "$command" 'CURSOR_PROJECT_DIR' "Cursor cd hook must anchor from CURSOR_PROJECT_DIR"
+  jq -e '[.hooks.preToolUse[].command | select(contains("fm-arm-pretool-check.sh"))] | length == 1' "$settings" >/dev/null \
+    || fail "Cursor cd hook must not displace the watcher-arm hook"
+  pass ".cursor/hooks.json: preToolUse invokes the cd-guard alongside the arm guard"
+}
+
 test_grok_wiring() {
   local settings command
   settings="$ROOT/.grok/hooks/fm-primary-cd-check.json"
@@ -455,6 +467,7 @@ test_prefilter_skips_node_without_cd_substring
 test_policy_cli_direct
 test_claude_wiring
 test_codex_wiring
+test_cursor_wiring
 test_grok_wiring
 test_opencode_wiring
 test_pi_wiring

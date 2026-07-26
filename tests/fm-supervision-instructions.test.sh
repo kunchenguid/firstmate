@@ -139,6 +139,18 @@ test_grok_command_sources_effective_config() {
   pass "grok rendered command sources the effective x-mode config"
 }
 
+test_cursor_is_tracked_background_notify() {
+  local out
+  out=$("$RENDER" --harness cursor)
+  assert_contains "$out" "Mode: Cursor tracked background-notify supervision." "Cursor snippet missing background-notify mode"
+  assert_contains "$out" "block_until_ms: 0" "Cursor snippet missing tracked background task instruction"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "Cursor snippet missing watcher arm"
+  assert_not_contains "$out" "foreground checkpoint" "Cursor must not use the Codex foreground checkpoint"
+  out=$("$RENDER" --harness cursor --repair-line)
+  assert_contains "$out" "Cursor tracked background Shell task" "Cursor repair line is not background-notify shaped"
+  pass "Cursor supervision uses tracked background Shell completion"
+}
+
 test_pi_snippet_uses_effective_extension_path() {
   local home out turnend watch
   home="$TMP_ROOT/pi-home"
@@ -162,4 +174,5 @@ test_repair_lines
 test_cross_harness_ordinary_continuation_and_repair_matrix
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
+test_cursor_is_tracked_background_notify
 test_pi_snippet_uses_effective_extension_path

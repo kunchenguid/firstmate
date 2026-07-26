@@ -61,7 +61,10 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel".
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel";
+# Cursor: an end-anchored "ctrl+c to stop" composer footer (verified 2026-07-18
+# on Cursor Agent 2026.07.16-899851b; the end anchor keeps mid-transcript prose
+# from matching), plus the older 2026.07.09 "Running  <N> tokens" status line.
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this
 # signature separate from the shared default because that shape is not generic
@@ -76,12 +79,15 @@
 # busy signals on their own.
 # The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
 # exposes no stable ASCII busy token.
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
+# Cursor signatures also live in the shared default so callers that only consult
+# FM_TMUX_BUSY_REGEX_DEFAULT (and Cursor's own harness case) see both builds.
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop[[:space:]]*$|^[[:space:]]*[^[:space:]]+[[:space:]]+Running[[:space:]]+[0-9]+[[:space:]]+tokens([[:space:]]|$)'
 FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
+FM_TMUX_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop[[:space:]]*$|^[[:space:]]*[^[:space:]]+[[:space:]]+Running[[:space:]]+[0-9]+[[:space:]]+tokens([[:space:]]|$)'
 FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]
@@ -96,6 +102,7 @@ fm_busy_lines_match() {  # [harness]
       opencode) regex=$FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT ;;
       pi) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_TMUX_GROK_BUSY_REGEX_DEFAULT ;;
+      cursor) regex=$FM_TMUX_CURSOR_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_TMUX_KIMI_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_TMUX_BUSY_REGEX_DEFAULT ;;
       *)

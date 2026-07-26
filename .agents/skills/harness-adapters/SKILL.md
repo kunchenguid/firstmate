@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, grok, and kimi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, cursor, opencode, pi, grok, and kimi.
 user-invocable: false
 metadata:
   internal: true
@@ -52,7 +52,7 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 
 The primary integrations for `claude`, `codex`, `opencode`, `pi`, and `grok` have empirically validated hook paths for the "no turn ends blind" guard.
 `claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
-`opencode`, `pi`, and `grok` expose passive lifecycle callbacks for this purpose, so their tracked primary adapters force one bounded follow-up or resume when the shared predicate blocks.
+`cursor`, `opencode`, `pi`, and `grok` expose passive lifecycle callbacks for this purpose, so their tracked primary adapters force one bounded follow-up or resume when the shared predicate blocks.
 Kimi is outside the primary turn-end guard scope, while `docs/turnend-guard.md` owns its separate guarded global hook for crew wake signals.
 The exact hook files, commands, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
 `docs/verification/supervision.md` "Turn-end guard" owns active validation evidence.
@@ -86,6 +86,7 @@ Full mechanics, scoping, and fail-open behavior live in `docs/sessionstart-nudge
 
 - `claude`: verified native `SessionStart` stdout injection; `.claude/settings.json` matches `startup`, `resume`, and `clear`, but not `compact`.
 - `codex`: verified on 0.144.4; `.codex/hooks.json` receives `source=startup`, and wrapper stdout reaches model context.
+- `cursor`: `.cursor/hooks.json` registers the wrapper on the bundle-confirmed `sessionStart` event, but Cursor Agent 2026.07.16-899851b executes no hooks at all for accounts without Cursor's server-side hooks rollout, so this adapter is documented fail-open and the emitted supervision block plus AGENTS.md section 3 remain the working enforcement.
 - `opencode`: verified on 1.17.18; `session.created` plus `client.session.promptAsync` starts the nudge turn in the TUI, while `opencode run` remains fail-open headless.
 - `pi`: verified native `session_start`; the existing primary extension handles `startup`, `new`, and `resume` and uses `pi.sendMessage` to inject context without racing a positional launch prompt.
 - `grok`: the 0.2.103 project `SessionStart` event fires with `source=new`, but stdout does not reach model context; the tracked project hook remains fail-open, and a global token-guarded fallback requires a captain decision.
@@ -95,6 +96,7 @@ Full mechanics, scoping, and fail-open behavior live in `docs/sessionstart-nudge
 At session start, `bin/fm-session-start.sh` prints exactly one watcher supervision block for the detected primary harness.
 Do not substitute another harness's wait shape when resuming supervision.
 Claude's Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns tokenless re-arm around `bin/fm-watch-arm.sh`, and Grok uses tracked background-notify cycles around `bin/fm-watch-arm.sh`.
+Cursor uses a tracked background Shell task around `bin/fm-watch-arm.sh`.
 Codex uses bounded foreground checkpoints through `bin/fm-watch-checkpoint.sh` because Codex cannot reason while a foreground tool call is running.
 OpenCode uses `.opencode/plugins/fm-primary-watch-arm.js`, which coordinates with the turn-end guard plugin and wakes the TUI with `client.session.promptAsync`.
 Pi uses the tracked `.pi/extensions/fm-primary-turnend-guard.ts` plus the tracked `.pi/extensions/fm-primary-pi-watch.ts`, both project-local extensions Pi auto-discovers once trusted.
@@ -119,6 +121,7 @@ The supported launch-profile flags below are verified locally; each row records 
 |---|---|---|---|
 | claude | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on Claude Code 2.1.196. |
 | codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. |
+| cursor | `--model <model>` | none | Verified on Cursor Agent 2026.07.16-899851b (2026-07-18). `--help` documents quoted bracket model overrides such as `claude-opus-4-8[context=1m,effort=high,fast=false]`, but there is no standalone effort flag, so firstmate records and omits the separate effort axis and leaves any effort choice inside the caller's model string. |
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-13 on Pi 0.80.6. `pi --help` advertises `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; `pi --print --model openai-codex/gpt-5.6-sol --thinking max 'Reply with exactly OK.'` completed successfully. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
@@ -151,6 +154,7 @@ Natural language is acceptable if uncertain.
 
 - claude: `/<skill>`, for example `/no-mistakes`.
 - codex: `$<skill>`, for example `$no-mistakes`; `/<skill>` is claude-only and codex rejects it as "Unrecognized command".
+- cursor: natural language; no dedicated skill invocation syntax was verified.
 - opencode: no separate verified skill invocation beyond normal slash-command behavior; use natural language if the exact skill command is uncertain.
 - pi: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the structural composer reader; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
@@ -222,6 +226,44 @@ Verified on 2026-07-08: Codex runs the Stop hook command with process PWD set to
 The tracked hook anchors to `pwd -P`, verifies that root is firstmate-shaped and hook-bearing, and then invokes `bin/fm-turnend-guard.sh` with the original payload.
 Codex's primary watcher protocol is `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`, not `bin/fm-watch-arm.sh`.
 The checkpoint is deliberately foreground and bounded so Codex regains control regularly to process user messages and queued wakes.
+
+## cursor (CLI VERIFIED 2026-07-18, Cursor Agent 2026.07.16-899851b; first verified 2026-07-14 on 2026.07.09-a3815c0)
+
+Cursor Agent's local CLI command is `cursor-agent`.
+The installer also symlinks a generic `~/.local/bin/agent` to the same launcher; firstmate always launches and matches the specific `cursor-agent` name, never `agent`.
+Firstmate launches workers with `--force`, `--approve-mcps`, an explicit `--workspace`, and the positional brief.
+For model and effort behavior, see the [launch-profile-axes table](#launch-profile-axes).
+
+| Fact | Value |
+|---|---|
+| Busy-pane signature | The composer footer shows an end-anchored `ctrl+c to stop` exactly while a turn is running (2026.07.16); older 2026.07.09 builds showed a braille spinner followed by `Running  <N> tokens`. The shared busy regex matches both. |
+| Exit command | `/quit` (plus one Enter to accept its slash popup) exits cleanly at idle; two rapid `Ctrl+C` presses at idle also exit, but a delayed second press misses the confirmation window. |
+| Interrupt | Single `Ctrl+C` mid-turn cancels the active turn (the tool call reports `Cancelled`) and returns to an idle composer; the interrupted prompt is not restored into the composer on 2026.07.16. |
+| Trust dialog | First interactive launch in a new workspace shows `Workspace Trust Required`; press `a` (`Trust this workspace`) to proceed, and trust persists per path. Print mode needs `--trust` instead. |
+| Autonomy | `--force` (`--yolo` is only its alias and is avoided because Firstmate's unrelated project setting already uses that word). |
+| Resume | `cursor-agent --continue` resumes the most recent session for the workspace; `--resume [chatId]` is also available. |
+| Skill invocation | Natural language; no dedicated syntax was verified. |
+| Submit shape | The first Enter after typed text may leave the prompt in the composer; `fm_tmux_submit_core`'s cursor-row-verified retry sends the genuine second Enter, so `fm-send` steering works unchanged. |
+| Non-TTY launch | Without a TTY, `cursor-agent` falls back to print mode and fails with `No prompt provided for print mode`; never pipe its interactive launch. |
+
+`cursor-agent` is a Node launcher whose process arguments retain the exact `cursor-agent` executable path.
+On macOS a sole-column `ps -o comm=` reports that argv[0] path directly, and on the `node` `pane_current_command` path the tmux liveness probe requires the exact `cursor-agent` argv[0] basename; neither ever matches a generic process named `agent`.
+`cursor-agent` exports `CURSOR_AGENT=1` and `CURSOR_INVOKED_AS=cursor-agent` to its tool subprocesses (verified 2026-07-18), but detection deliberately stays ancestry-based: inherited environment survives nested launches (a cursor tool shell inside a Claude session still carries `CLAUDECODE=1`), so an env shortcut would misattribute nested harnesses.
+
+Hook execution is server-gated: on 2026-07-18, Cursor Agent 2026.07.16-899851b executed no project, user, Claude-compat, or plugin hooks in print or interactive mode for an individual Pro account, while the 2026-07-14 evidence on 2026.07.09-a3815c0 recorded project `preToolUse` and `stop` hooks firing for a different account.
+Every Cursor hook integration is therefore strictly fail-open: the wiring is tracked and correct per the installed bundle's hook contract, and supervision never depends on a hook firing.
+`docs/turnend-guard.md` owns the dated evidence for both readings.
+
+Cursor workers receive a correctly structured task plugin through `--plugin-dir`, plus one additive user-level fallback stop hook that is token-scoped to Firstmate task worktrees and no-ops elsewhere.
+It never overwrites a target project's Cursor hooks, and `bin/fm-cursor-lib.sh` owns its atomic install, the lock against concurrent spawns and teardowns, and the deterministic removal of the shared hook artifacts when the last Cursor task's token is gone.
+When hooks do not execute, worker turn-end signals simply never arrive and the watcher's pane-based staleness path supervises the worker.
+
+The primary checkout's `.cursor/hooks.json` registers a `sessionStart` nudge, `preToolUse` seatbelts, and a passive `stop` hook.
+The stop adapter returns one `followup_message` when the shared predicate blocks and uses Cursor's `loop_count` plus `loop_limit: 1` to prevent recursion.
+Cursor's primary watcher protocol is a tracked background Shell task running `bin/fm-watch-arm.sh`; task completion is the wake, and it works with or without hook execution.
+
+Desktop Agents Window hook loading is documented by Cursor's shared project-hook contract but was not exercised here.
+Before treating that entry point as fully verified, run `bin/fm-session-start.sh` from the desktop Agents Window and confirm the tool subprocess has a `cursor-agent` ancestor or another Cursor-specific marker.
 
 ## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.6; 1.18.4 busy-queue re-verified 2026-07-20)
 

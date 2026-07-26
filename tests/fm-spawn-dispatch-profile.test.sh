@@ -84,7 +84,7 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
@@ -330,6 +330,41 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   pass "opencode receives --model and omits the unsupported effort axis"
 }
 
+test_cursor_threads_model_and_omits_effort_axis() {
+  local rec id out status launch fallback
+  id=profile-cursor-z18
+  rec=$(make_spawn_case profile-cursor cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.6-sol-high --effort high)
+  status=$?
+  expect_code 0 "$status" "cursor spawn with model and recorded effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor gpt-5.6-sol-high high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "cursor-agent --force --approve-mcps --plugin-dir '$HOME_DIR/state/$id.cursor-plugin' --workspace '$WT_DIR' --model 'gpt-5.6-sol-high'" \
+    "cursor launch did not thread force, approve-mcps, plugin, workspace, and model flags"
+  assert_not_contains "$launch" "--effort" "cursor launch must not invent a standalone effort flag"
+  assert_not_contains "$launch" "--reasoning-effort" "cursor launch must not pass another harness's reasoning flag"
+  assert_grep '"hooks":"hooks/hooks.json"' "$HOME_DIR/state/$id.cursor-plugin/.cursor-plugin/plugin.json" \
+    "cursor task plugin manifest does not point at hooks/hooks.json"
+  assert_grep '"stop"' "$HOME_DIR/state/$id.cursor-plugin/hooks/hooks.json" \
+    "cursor task plugin does not register a stop hook"
+  fallback=$(jq -r '.hooks.stop[0].command' "$HOME_DIR/state/$id.cursor-plugin/hooks/hooks.json")
+  assert_contains "$fallback" "$HOME_DIR/.cursor/hooks/fm-turn-end.sh" \
+    "cursor task plugin stop hook must use the absolute fallback path"
+  assert_grep 'fm-turn-end.sh' "$HOME_DIR/.cursor/hooks.json" \
+    "cursor fallback hook was not merged into the isolated user config"
+  assert_grep 'token=fm.' "$WT_DIR/.fm-cursor-turnend" \
+    "cursor task worktree pointer is missing"
+  printf '%s' '{"workspace_roots":["/unrelated/project"]}' | sh -c "$fallback" >/dev/null
+  assert_absent "$HOME_DIR/state/$id.turn-ended" \
+    "cursor fallback hook must no-op outside a token-scoped task worktree"
+  printf '%s' "$(jq -cn --arg root "$WT_DIR" '{workspace_roots: [$root]}')" | sh -c "$fallback" >/dev/null
+  assert_present "$HOME_DIR/state/$id.turn-ended" \
+    "cursor fallback hook did not resolve the task token and touch turn-ended"
+  pass "cursor receives --model, records but omits effort, and wires plugin plus additive fallback hook"
+}
+
 test_pi_threads_model_and_max_effort() {
   local rec id out status launch
   id=profile-pi-z8
@@ -401,6 +436,7 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
+test_cursor_threads_model_and_omits_effort_axis
 test_pi_threads_model_and_max_effort
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch

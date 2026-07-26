@@ -437,6 +437,17 @@ secondmate_liveness_sweep() {
     agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
     case "$harness" in
       claude|codex|opencode|pi|grok|kimi) ;;
+      cursor)
+        # Only tmux's argv0-based classifier is verified to read a live
+        # node-wrapped cursor-agent correctly (docs/tmux-backend.md); herdr's
+        # native agent registry is unverified for cursor-agent, so a non-tmux
+        # cursor dead/missing verdict is downgraded rather than trusted for respawn.
+        if [ "$backend" != tmux ]; then
+          case "$agent_state" in
+            dead|missing) agent_state=inconclusive ;;
+          esac
+        fi
+        ;;
       *)
         case "$agent_state" in dead|missing) agent_state=unverified-harness ;; esac
         ;;
@@ -468,6 +479,9 @@ secondmate_liveness_sweep() {
         ;;
       unreadable)
         echo "SECONDMATE_LIVENESS: secondmate $id: skipped: endpoint probe unreadable (backend=$backend)"
+        ;;
+      inconclusive)
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: liveness probe inconclusive (backend=$backend)"
         ;;
       unverified-harness)
         echo "SECONDMATE_LIVENESS: secondmate $id: skipped: recorded harness '$harness' is unverified for recovery (backend=$backend)"
@@ -713,7 +727,7 @@ crew_dispatch_validate() {
     return 0
   fi
   err=$(jq -r '
-    def verified($h): ["claude","codex","opencode","pi","grok","kimi"] | index($h);
+    def verified($h): ["claude","codex","cursor","opencode","pi","grok","kimi"] | index($h);
     def effort_ok($h; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
@@ -721,7 +735,7 @@ crew_dispatch_validate() {
       elif $h == "codex" then (["low","medium","high","xhigh"] | index($e))
       elif $h == "grok" then (["low","medium","high"] | index($e))
       elif $h == "pi" then (["low","medium","high","xhigh","max"] | index($e))
-      elif $h == "opencode" or $h == "kimi" then false
+      elif ($h == "cursor" or $h == "opencode" or $h == "kimi") then false
       else true
       end;
     def profiles($value):
