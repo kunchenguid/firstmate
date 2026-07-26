@@ -327,11 +327,10 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
     esac
   }
   # These fixtures reproduce the observed spinner shape rather than byte-exact
-  # transcriptions. Leading whitespace is deliberately varied, while separator
-  # whitespace stays fixed because every observed capture had it.
+  # transcriptions. Leading and separator whitespace are deliberately varied.
   printf ' 🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"\n│ > │\n' > "$capture"
   fm_pane_is_busy fake kimi || fail "the first real Kimi spinner shape was not recognized as busy"
-  printf '   🌗 · Tip: /plugins: manage plugins ...\n│ > │\n' > "$capture"
+  printf '   🌗·Tip: /plugins: manage plugins ...\n│ > │\n' > "$capture"
   fm_pane_is_busy fake kimi || fail "the tool-execution Kimi spinner shape was not recognized as busy"
   printf 'ordinary response ending with 🌕\n│ > │\n' > "$capture"
   if fm_pane_is_busy fake kimi; then
@@ -369,7 +368,7 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
 }
 
 test_watcher_scopes_moon_spinner_to_recorded_kimi_task() (
-  local state="$TMP_ROOT/watch-state" busy_capture='  🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
+  local state="$TMP_ROOT/watch-state" busy_capture='  🌑· Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
   mkdir -p "$state"
   printf 'window=fake\nharness=kimi\n' > "$state/kimi-watch.meta"
   unset FM_BUSY_REGEX
