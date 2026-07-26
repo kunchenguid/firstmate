@@ -36,6 +36,21 @@ test_help_includes_entire_header() {
   pass "fm-brief.sh: --help renders the complete header"
 }
 
+# CI may run a newer Bash whose lexer accepts apostrophes in these heredoc
+# bodies, while macOS Bash 3.2 cannot find the command substitution's closing
+# parenthesis. Pin the source-level compatibility invariant independently of
+# the Bash version executing this test.
+test_ship_dod_heredocs_have_no_apostrophes() {
+  local offenders
+  offenders=$(awk '
+    /DOD=\$\(cat <<EOF/ { in_dod=1; next }
+    in_dod && /^EOF$/ { in_dod=0; next }
+    in_dod && index($0, sprintf("%c", 39)) { print NR ":" $0 }
+  ' "$ROOT/bin/fm-brief.sh")
+  [ -z "$offenders" ] || fail "fm-brief.sh ship Definition-of-done heredocs contain Bash 3.2-breaking apostrophes: $offenders"
+  pass "fm-brief.sh: ship Definition-of-done heredocs avoid apostrophes"
+}
+
 # Registry with one project per delivery mode, so each ship-mode DOD branch is
 # exercised. A project absent from the registry defaults to no-mistakes.
 write_registry() {
@@ -384,6 +399,7 @@ test_scout_and_secondmate_scaffold() {
 
 test_script_parses
 test_help_includes_entire_header
+test_ship_dod_heredocs_have_no_apostrophes
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
