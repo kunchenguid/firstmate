@@ -74,7 +74,7 @@ At session start, `bin/fm-session-start.sh` emits exactly one primary-harness su
 That block owns the live wait shape for the running primary harness: Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
 `bin/fm-watch-arm.sh` remains the verified arm wrapper for protocols that call it; it forks the watcher as a tracked child, verifies it is genuinely alive with a fresh liveness beacon, and prints an honest `started`, `attached`, or nonzero `FAILED` status.
 On `attached` it stays live across identity-matched successors, and an unexplained clean child close either attaches to a verified healthy successor or becomes the typed nonzero `watcher: FAILED - cycle ended without an actionable reason` result.
-The arm layer records one bounded lifecycle row per observed cycle in `state/.watch-cycle-exits.log`; `state/.watch-triage.log` remains exclusively the absorbed-wake debug log.
+The arm layer records one bounded lifecycle row per observed cycle in `state/.watch-cycle-exits.log`; `state/.watch-triage.log` carries absorbed wakes plus the sampled supervision measurements below, and carries no lifecycle semantics.
 A stale cycle's ledger row records `reason=actionable-stale-<branch>`, so actionable wakes are countable per classification rule from telemetry that already existed rather than from a second collector.
 Two further measurements ride the same two logs and are deliberately sampled rather than continuous: the watcher stamps a `slow poll` line only once a poll's classification work reaches `FM_SLOW_POLL_SECS`, which is the saturation threshold that would justify a second supervisor, and it stamps this home's recorded endpoint count onto the rare no-change heartbeat line so sustained concurrency has a historical series.
 After the drain commits its authoritative output, `bin/fm-wake-drain.sh` appends one `drain:` line recording how many distinct wakes the turn was handed and how long the oldest of them waited.
@@ -191,7 +191,7 @@ An explicit backend target, the key-send path, and any message the harness itsel
 Generated briefs teach the rule at the only moment a worker reads instructions.
 Deliberately not extended to crewmates: the correlated pending-reply record. Acknowledgement machinery answers "sent but not received"; the observed failure is a message never sent, which no acknowledgement protocol can detect.
 The parent guards every marked request against a missing correlated report without reading the secondmate conversation; `bin/fm-pending-reply-lib.sh` owns the correlation, recovery, escalation, and retention contract.
-Explicit backend-target sends and direct human typing stay unmarked, so captain intervention in a secondmate pane remains conversational.
+Direct human typing stays unmarked, so captain intervention in a worker pane remains conversational.
 After seeding a secondmate, `fm-backlog-handoff.sh` validates the fleet-specific handoff, then atomically delegates already-judged in-scope queued item moves to `tasks-axi mv` so the domain queue starts in the right place.
 Idle secondmate panes are healthy; teardown is explicit and refuses while the secondmate home has in-flight work unless the captain has approved discard with `--force`.
 
