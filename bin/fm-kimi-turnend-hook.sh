@@ -170,6 +170,13 @@ def block(marker: bytes) -> bytes:
     )
 
 
+def without_region(data: bytes, region) -> bytes:
+    prefix = data[: region[0]]
+    suffix = data[region[1] :]
+    separator = b"\n" if region[2] == BEGIN_OWNS_NEWLINE and suffix else b""
+    return prefix + separator + suffix
+
+
 def atomic_write(path: str, data: bytes, mode: int) -> None:
     fd, temporary = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=os.path.dirname(path))
     try:
@@ -217,7 +224,7 @@ try:
         original = stream.read()
     parse_toml(original, "config.toml")
     region = locate_region(original)
-    outside = original if region is None else original[: region[0]] + original[region[1] :]
+    outside = original if region is None else without_region(original, region)
     if HOOK_NAME in outside:
         refuse("config.toml references fm-turn-end.sh outside the Firstmate-owned region.")
 

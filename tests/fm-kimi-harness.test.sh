@@ -248,6 +248,43 @@ EOF
   pass "Kimi hook install is idempotent and removal restores every foreign config byte"
 }
 
+test_kimi_hook_remove_preserves_owned_newline_boundary() {
+  local appended config expected home original
+  home="$TMP_ROOT/config-owned-newline"
+  config="$home/.kimi-code/config.toml"
+  original="$home/original.toml"
+  expected="$home/expected.toml"
+  appended="$home/appended.toml"
+  mkdir -p "$home/.kimi-code"
+  printf 'default_model = "test"' > "$config"
+  cp "$config" "$original"
+
+  HOME="$home" "$KIMI_HOOK" install || fail "Kimi hook install refused config without a final newline"
+  HOME="$home" "$KIMI_HOOK" remove || fail "Kimi hook removal failed without appended config"
+  cmp -s "$original" "$config" \
+    || fail "pristine removal did not restore the absent final newline byte-identically"
+
+  HOME="$home" "$KIMI_HOOK" install || fail "second Kimi hook install refused config without a final newline"
+  printf '[captain]\nenabled = true\n' > "$appended"
+  cat "$appended" >> "$config"
+  HOME="$home" "$KIMI_HOOK" remove || fail "Kimi hook removal joined config appended after its region"
+  {
+    cat "$original"
+    printf '\n'
+    cat "$appended"
+  } > "$expected"
+  cmp -s "$expected" "$config" \
+    || fail "removal did not preserve appended captain config on its own line"
+  "$PYTHON_BIN" - "$config" <<'PY' || fail "config with appended captain TOML did not parse after removal"
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as stream:
+    tomllib.load(stream)
+PY
+  pass "Kimi hook removal preserves owned newline boundaries and pristine bytes"
+}
+
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config() {
   local missing malformed partial out rc
   missing="$TMP_ROOT/config-missing"
@@ -617,6 +654,7 @@ test_kimi_bordered_prompt_needs_no_override() {
 test_tracked_files_have_no_user_absolute_paths
 test_existing_launch_templates_are_byte_pinned
 test_kimi_hook_install_is_surgical_idempotent_and_removable
+test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
