@@ -232,6 +232,7 @@ The checkpoint is deliberately foreground and bounded so Codex regains control r
 | Interrupt | double Escape; known flaky while a long shell command runs, so a wedged pane may need `/exit` and relaunch |
 
 No trust dialog.
+xAI server-side `web_search` / `x_search` are not attached to the default coding agent loop; fleet workers call `bin/fm-xsearch.sh` (or the optional OpenCode custom-tool example) instead — see `docs/xai-server-search.md`.
 Opencode can auto-upgrade itself in the background and the running TUI can exit mid-task, observed live from 1.15.7 to 1.17.3.
 If a pane shows the exit banner, relaunch with `--continue` to resume the session.
 `--prompt` does not auto-submit alongside `--continue`, so send the next instruction via `fm-send` once the TUI is up.
@@ -268,6 +269,9 @@ The follow-up was verified in the interactive TUI; `opencode run` can exit befor
 | Exit command | `/quit` |
 | Interrupt | single Escape |
 
+Pi's Responses path serializes client function tools only; it does not emit xAI built-in `web_search` / `x_search`.
+Fleet X/web server search goes through `bin/fm-xsearch.sh` (see `docs/xai-server-search.md`).
+
 Pi has no permission system, so crewmates are always autonomous.
 Keep the brief as one positional argument.
 Multiple positional args become separate queued messages; `fm-spawn`'s template already does this correctly.
@@ -293,6 +297,7 @@ When a secondmate is launched on Pi, `fm-spawn.sh --secondmate` launches Pi with
 Grok Build TUI (`grok`), a Claude-Code-compatible CLI from xAI.
 Launch with a positional prompt: `grok --always-approve "$(cat <brief>)"`.
 For Grok's supported reasoning-effort values and omission behavior, see the [launch-profile-axes table](#launch-profile-axes).
+For xAI server-side `web_search` / `x_search` (Responses API, SuperGrok OAuth), workers call `bin/fm-xsearch.sh` rather than assuming the TUI attaches those tools — see `docs/xai-server-search.md`.
 
 | Fact | Value |
 |---|---|

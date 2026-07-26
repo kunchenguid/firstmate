@@ -322,6 +322,14 @@
     {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
+    },
+    {
+      "path": "docs/xai-server-search.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/examples/opencode-xai-search-tool.ts",
+      "audience": "operator-example"
     }
   ]
 }

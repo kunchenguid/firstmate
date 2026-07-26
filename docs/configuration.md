@@ -357,6 +357,12 @@ In dry-run, `fm-x-dismiss.sh` records `{request_id, endpoint:"dismiss"}` to the 
 The live answer and follow-up bodies intentionally stay the same shape, including optional `image`; the relay distinguishes them by endpoint, and dismiss stays `{request_id}`.
 These paths need `jq` to build the JSON payload, but they run before token and network checks, so they need neither `FMX_PAIRING_TOKEN` nor `curl`.
 
+## xAI server-side search (web_search / x_search)
+
+Fleet Grok X Search and Web Search use `bin/fm-xsearch.sh` against the xAI Responses API with existing SuperGrok OAuth (OpenCode or Pi auth stores) or an optional `XAI_API_KEY`.
+This is separate from X-mode above and does not use the X Developer API.
+[docs/xai-server-search.md](xai-server-search.md) is the single owner of auth resolution, CLI flags, cost guardrails, and OpenCode tool attachment.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
