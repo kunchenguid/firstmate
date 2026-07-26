@@ -69,6 +69,7 @@ It never raw-deletes an Orca worktree.
 - Escape is unsupported.
 - Orca exposes no stable CLI version or protocol marker, so readiness is the compatibility gate rather than a version floor.
 - Only the verified terminal-handle and worktree result fields are accepted; speculative response shapes are rejected.
+- Firstmate cannot label its own Orca terminal, so session start prints one plain note instead of renaming anything.
 
 ## Regression entry points
 

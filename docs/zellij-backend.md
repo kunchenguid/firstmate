@@ -97,6 +97,7 @@ Real test cleanup uses only an isolated non-`firstmate` session and the guard in
 - CLI exit status is not meaningful; a target can still disappear after structural readiness checks.
 - Worktree cwd discovery requires the spawn-time marker probe.
 - An ambiguous unscoped legacy title requires manual cleanup and respawn.
+- Firstmate cannot label its own Zellij tab, so session start prints one plain note instead of renaming anything.
 
 ## Regression entry points
 
