@@ -354,7 +354,7 @@ Kimi Code CLI launches from the absolute path resolved from `PATH`, falling back
 | Binary | Executable `kimi` from `PATH`, then executable `$HOME/.kimi-code/bin/kimi`; spawning refuses if neither exists. |
 | Launch | Bare interactive TUI with `--auto`, followed by readiness-gated pointer delivery; positional prompts are rejected. |
 | Models | `kimi-code/kimi-for-coding` (default), `kimi-code/kimi-for-coding-highspeed`, `kimi-code/k3`, and `kimi-code/k3-256k`. |
-| Busy-pane signature | A transient line containing only a rotating moon-phase glyph followed by `Thinking`; the line is absent when idle. |
+| Busy-pane signature | A transient line with leading whitespace, a rotating moon-phase glyph, the ` · ` separator, and rotating `Tip:` text; the line is absent when idle. |
 | Exit command | `/exit` |
 | Interrupt | Single Escape, which prints `Interrupted by user`. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; firstmate skills are discovered. |
@@ -370,7 +370,9 @@ This launch-then-send shape is mandatory because Kimi rejects a positional brief
 Sending before readiness was reproduced as a silent drop with a zero exit status, an empty composer, `context: 0%`, no echoed user message, and a healthy-looking idle pane.
 The brief path must be absolute because the brief lives outside the task worktree, and Kimi reads it there without `--add-dir`.
 
-Kimi's footer tip rotates independently and can display `ctrl+c: cancel` while completely idle, so tip text is never used as its busy signature.
+A live spinner capture is `  🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"`, with the same moon-plus-middot shape observed during tool execution.
+Kimi's footer tip rotates independently and can display `ctrl+c: cancel` while completely idle, so tip text is never used as its busy signature without the leading moon-plus-middot spinner structure.
+The idle status bar can contain lowercase `thinking`, which is the model's effort label rather than a busy signal.
 The spinner match covers the full moon-phase glyph set rather than one frame, but it remains locale- and emoji-font-sensitive because Kimi exposes no stable ASCII busy token.
 
 [`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns Kimi's verified global hook surface, approval boundary, and absence from the enabled integrations.

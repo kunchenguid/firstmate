@@ -288,7 +288,7 @@ SH
 }
 
 test_kimi_busy_signature_is_scoped_to_spinner_lines() {
-  local capture phase
+  local capture phase kimi_regex_lines
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-tmux-lib.sh"
   unset FM_BUSY_REGEX
@@ -299,35 +299,43 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
       *) return 0 ;;
     esac
   }
-  for phase in 🌑 🌒 🌓 🌔 🌕 🌖 🌗 🌘; do
-    printf '%s Thinking\n│ > │\n' "$phase" > "$capture"
-    fm_pane_is_busy fake kimi || fail "kimi moon phase $phase was not recognized as busy"
-  done
+  printf '  🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"\n│ > │\n' > "$capture"
+  fm_pane_is_busy fake kimi || fail "the first real Kimi spinner capture was not recognized as busy"
+  printf '  🌗 · Tip: /plugins: manage plugins ...\n│ > │\n' > "$capture"
+  fm_pane_is_busy fake kimi || fail "the tool-execution Kimi spinner capture was not recognized as busy"
   printf 'ordinary response ending with 🌕\n│ > │\n' > "$capture"
   if fm_pane_is_busy fake kimi; then
     fail "a moon outside Kimi's spinner-line shape was misread as busy"
   fi
   printf '🌕 Full moon details\n│ > │\n' > "$capture"
   if fm_pane_is_busy fake kimi; then
-    fail "moon-led Kimi output was misread as the complete spinner row"
+    fail "moon-led Kimi output without the middot separator was misread as busy"
   fi
-  printf '🌕 Thinking\n│ > │\n' > "$capture"
+  printf '  🌗 · Tip: /plugins: manage plugins ...\n│ > │\n' > "$capture"
   if fm_pane_is_busy fake codex; then
-    fail "Kimi's moon spinner signature leaked into another harness"
+    fail "Kimi's real spinner signature leaked into another harness"
   fi
   printf 'tip: ctrl+c: cancel\n│ > │\n' > "$capture"
   if fm_pane_is_busy fake kimi; then
     fail "kimi's independently rotating idle tip was misread as busy"
   fi
+  printf 'auto  K2.7 Coding thinking  /some/path\n│ > │\n' > "$capture"
+  if fm_pane_is_busy fake kimi; then
+    fail "Kimi's idle thinking-effort status label was misread as busy"
+  fi
+  kimi_regex_lines=$(grep 'KIMI_BUSY_REGEX' "$ROOT/bin/fm-tmux-lib.sh" "$ROOT/bin/fm-watch.sh")
+  if printf '%s\n' "$kimi_regex_lines" | grep -qi thinking; then
+    fail "Kimi busy regex still depends on a Thinking or thinking token"
+  fi
   for phase in 🌑 🌒 🌓 🌔 🌕 🌖 🌗 🌘; do
     grep -Fq "$phase" "$ROOT/bin/fm-watch.sh" \
       || fail "fm-watch default is missing kimi moon phase $phase"
   done
-  pass "busy detection: Kimi moon phases require its harness and spinner-line shape"
+  pass "busy detection: real Kimi moon-plus-middot captures require its harness while idle labels stay idle"
 }
 
 test_watcher_scopes_moon_spinner_to_recorded_kimi_task() (
-  local state="$TMP_ROOT/watch-state"
+  local state="$TMP_ROOT/watch-state" busy_capture='  🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
   mkdir -p "$state"
   printf 'window=fake\nharness=kimi\n' > "$state/kimi-watch.meta"
   unset FM_BUSY_REGEX
@@ -338,20 +346,23 @@ test_watcher_scopes_moon_spinner_to_recorded_kimi_task() (
   . "$ROOT/bin/fm-watch.sh"
   # shellcheck disable=SC2329 # Runtime override called by the sourced watcher.
   fm_backend_busy_state() { printf 'unknown'; }
-  window_is_busy fake '🌕 Thinking' \
-    || fail "fm-watch did not recognize a recorded Kimi spinner line"
+  window_is_busy fake "$busy_capture" \
+    || fail "fm-watch did not recognize the real Kimi spinner-line shape"
   printf 'window=fake\nharness=codex\n' > "$state/kimi-watch.meta"
-  if window_is_busy fake '🌕 Thinking'; then
-    fail "fm-watch applied Kimi's moon spinner to a recorded Codex task"
+  if window_is_busy fake "$busy_capture"; then
+    fail "fm-watch applied Kimi's real spinner signature to a recorded Codex task"
   fi
   printf 'window=fake\nharness=kimi\n' > "$state/kimi-watch.meta"
   if window_is_busy fake 'ordinary response ending with 🌕'; then
     fail "fm-watch treated an ordinary Kimi moon as a spinner line"
   fi
   if window_is_busy fake '🌕 Full moon details'; then
-    fail "fm-watch treated moon-led Kimi output as the complete spinner row"
+    fail "fm-watch treated moon-led Kimi output without the middot separator as busy"
   fi
-  pass "fm-watch: moon spinner matching is scoped by metadata and line shape"
+  if window_is_busy fake 'auto  K2.7 Coding thinking  /some/path'; then
+    fail "fm-watch treated Kimi's idle thinking-effort status label as busy"
+  fi
+  pass "fm-watch: real moon-plus-middot spinner matching is scoped by metadata and line shape"
 )
 
 test_kimi_bordered_prompt_needs_no_override() {
