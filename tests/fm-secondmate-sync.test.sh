@@ -350,6 +350,7 @@ SH
 exit 0
 SH
   chmod +x "$fakebin/quota-axi"
+  fm_fake_stamped_harnesses "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
