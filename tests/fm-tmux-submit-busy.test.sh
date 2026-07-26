@@ -152,8 +152,12 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   # Each verified harness must use only its own signature.
   printf 'Ctrl+c:cancel\n' > "$composer"
   pane_busy cross claude && fail "Claude must ignore Grok's cancel footer"
+  printf 'esc interrupt\n' > "$composer"
+  pane_busy cross claude && fail "Claude must ignore OpenCode's interrupt footer"
   printf 'Working...\n' > "$composer"
   pane_busy cross codex && fail "Codex must ignore Pi's Working footer"
+  printf 'esc interrupt\n' > "$composer"
+  pane_busy cross codex && fail "Codex must ignore OpenCode's interrupt footer"
   printf 'Ctrl+c:cancel\n' > "$composer"
   pane_busy cross opencode && fail "OpenCode must ignore Grok's cancel footer"
   printf 'esc interrupt\n' > "$composer"
@@ -170,6 +174,12 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   pane_busy fallback || fail "no-harness fallback should retain Pi's shared signature"
   printf 'Ctrl+c:cancel\n' > "$composer"
   pane_busy fallback || fail "no-harness fallback should retain Grok's shared signature"
+
+  # An unknown nonempty harness takes its own conservative combined fallback.
+  printf 'Working...\n' > "$composer"
+  pane_busy unknown future-harness || fail "unknown-harness fallback should retain Pi's shared signature"
+  printf 'Ctrl+c:cancel\n' > "$composer"
+  pane_busy unknown future-harness || fail "unknown-harness fallback should retain Grok's shared signature"
 
   # Older Claude Code and the existing Pi and Grok signatures remain unchanged.
   printf 'esc to interrupt\n' > "$composer"

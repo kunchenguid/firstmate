@@ -67,8 +67,8 @@
 # signature separate from the shared default because that shape is not generic
 # enough to classify arbitrary harness output safely.
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
-FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc (to )?interrupt|…[[:space:]]+\([0-9]+[smh]'
-FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc (to )?interrupt'
+FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
+FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
@@ -85,9 +85,11 @@ fm_busy_lines_match() {  # [harness]
       opencode) regex=$FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT ;;
       pi) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_TMUX_GROK_BUSY_REGEX_DEFAULT ;;
+      '') regex=$FM_TMUX_BUSY_REGEX_DEFAULT ;;
       *)
-        # No harness is the compatibility path for existing callers. Unknown
-        # harnesses deliberately retain the historical combined pattern.
+        # Unknown harnesses conservatively retain the combined pattern, which
+        # can produce cross-harness false positives. Register a newly verified
+        # adapter explicitly instead of leaving it on this fallback.
         regex=$FM_TMUX_BUSY_REGEX_DEFAULT
         ;;
     esac
