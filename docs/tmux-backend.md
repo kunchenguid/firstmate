@@ -98,7 +98,7 @@ Launch command: `cursor-agent --force --model gpt-5.6-sol-high`.
 Command run while the interactive TUI was live: `tmux display-message -p -t fm-cursor-verify '#{pane_current_command}'`.
 Exact output: `node`.
 Commands then read the same pane's `#{pane_pid}` and ran `ps -o pid=,ppid=,pgid=,comm=,args= -g <foreground-pgid>`.
-The single foreground row's arguments began with `/Users/shawn.petros/.local/bin/cursor-agent --use-system-ca .../cursor-agent/versions/2026.07.09-a3815c0/index.js`.
+The single foreground row's arguments began with `$HOME/.local/bin/cursor-agent --use-system-ca .../cursor-agent/versions/2026.07.09-a3815c0/index.js`.
 This is why the liveness classifier inspects only a `node` pane's own pid and requires argv[0]'s basename to equal `cursor-agent`; unrelated Node programs remain `ambiguous`/`unknown`.
 
 The busy TUI was captured while the agent ran `sleep 30`.
@@ -109,7 +109,7 @@ The shared busy regex therefore matches a leading spinner token followed by `Run
 
 Version: `2026.07.16-899851b`.
 Launch command in a scratch tmux session: `cursor-agent --force --model auto`.
-`tmux list-panes -F '#{pane_pid} #{pane_current_command}'` reported `node`; `ps -o tpgid= -p <pane_pid>` named the pane pid itself, and a sole-column `ps -o comm= -p <tpgid>` printed the full argv[0] `/Users/abhishekbojja/.local/bin/cursor-agent`, with `ps -o args=` beginning `/Users/abhishekbojja/.local/bin/cursor-agent --use-system-ca .../versions/2026.07.16-899851b/index.js`.
+`tmux list-panes -F '#{pane_pid} #{pane_current_command}'` reported `node`; `ps -o tpgid= -p <pane_pid>` named the pane pid itself, and a sole-column `ps -o comm= -p <tpgid>` printed the full argv[0] `$HOME/.local/bin/cursor-agent`, with `ps -o args=` beginning `$HOME/.local/bin/cursor-agent --use-system-ca .../versions/2026.07.16-899851b/index.js`.
 Both liveness paths therefore hold on this build: macOS `comm` resolves to the exact `cursor-agent` basename directly, and the `node` route still requires the `cursor-agent` argv[0] basename.
 
 The busy signature changed on this build.
