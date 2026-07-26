@@ -135,7 +135,14 @@ export default function (pi: ExtensionAPI) {
     return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
   });
 
-  pi.on("agent_settled", async () => {
+  // agent_end, not agent_settled. Pi drains both queues before emitting agent_end,
+  // so a follow-up queued from an agent_end handler makes _handlePostAgentRun()
+  // return true and the session calls agent.continue() - the run keeps going and
+  // never settles (pi 0.81.1 dist/core/agent-session.js:745-757 and :780-782).
+  // agent_settled fires after that loop exits, so a guard hooked there emits the
+  // idle signal first and only then re-opens the turn: reactive, not preventive.
+  // Verified 2026-07-26 against pi 0.81.1; see docs/turnend-guard.md.
+  pi.on("agent_end", async () => {
     if (guardFollowupActive) {
       guardFollowupActive = false;
       return;

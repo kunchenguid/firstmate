@@ -780,7 +780,8 @@ test_pi_extension_forces_followup() {
   ext="$ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
   [ -f "$ext" ] || fail "tracked pi primary extension is missing"
   content=$(cat "$ext")
-  assert_contains "$content" 'agent_settled' "pi extension must run after one logical agent run settles"
+  assert_contains "$content" 'pi.on("agent_end"' "pi extension must block the turn end from agent_end, not after it settles"
+  assert_not_contains "$content" 'pi.on("agent_settled"' "pi extension must not guard from the post-settle idle signal"
   assert_contains "$content" 'fm-turnend-guard.sh' "pi extension must invoke the shared guard"
   assert_contains "$content" 'sendUserMessage' "pi extension must force a follow-up turn"
   assert_contains "$content" 'encodeFirstmateOperationalInput' "pi extension must use the typed operational-input constructor"
@@ -796,7 +797,92 @@ test_pi_extension_forces_followup() {
   assert_contains "$content" 'runPretoolCheck(command)' "pi extension changed the PreToolUse checker invocation"
   assert_contains "$content" 'return { block: true, reason:' "pi extension changed the checker exit-2 block result"
   assert_not_contains "$content" 'Run bin/fm-watch-arm.sh as a background task' "pi extension must not hardcode the old watcher-arm instruction"
-  pass ".pi primary extension: agent_settled forces one follow-up through the shared guard"
+  pass ".pi primary extension: agent_end forces one follow-up through the shared guard"
+}
+
+# Regression for the 2026-07-26 finding that the Pi guard only ever reacted to a
+# turn end instead of preventing one. Pi CAN block: a follow-up queued from an
+# agent_end handler keeps the same run going and agent_settled never fires.
+# Hooking agent_settled instead emits the idle signal first, so anything watching
+# for idle - the composer classifier, a pull-based guard - sees a blind turn end
+# before the follow-up re-opens it.
+#
+# This models Pi's real loop (dist/core/agent-session.js:745-757, :780-782):
+#   await agent.prompt(...)             -> emits agent_end
+#   while (await handlePostAgentRun())  -> true iff agent_end handlers queued work
+#     await agent.continue()            -> emits agent_end again
+#   finally -> _emitAgentSettled()      -> emits agent_settled, THE IDLE SIGNAL
+# Against the agent_settled version nothing is queued at agent_end, the loop
+# exits, and the idle signal escapes before any follow-up: this test fails.
+test_pi_extension_blocks_before_the_idle_signal() {
+  local repo home ext out status
+  repo="$TMP_ROOT/pi-block-before-idle-root"
+  home="$TMP_ROOT/pi-block-before-idle-home"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'supervision is off\n' >&2
+exit 2
+SH
+  cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let queued = [];
+let followUps = 0;
+let idleEmitted = false;
+let idleEmittedBeforeFirstFollowUp = false;
+
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  async sendUserMessage(message, options) {
+    followUps += 1;
+    if (options?.deliverAs !== "followUp") throw new Error("guard prompt was not a follow-up");
+    if (idleEmitted) idleEmittedBeforeFirstFollowUp = true;
+    queued.push(message);
+  },
+};
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+
+const agentEnd = handlers.get("agent_end");
+if (!agentEnd) throw new Error("agent_end handler was not registered; the guard cannot block a turn end");
+
+// Faithful model of Pi's agent loop.
+let runs = 0;
+await agentEnd({ type: "agent_end", messages: [] }, {});
+runs += 1;
+while (queued.length > 0) {
+  queued = [];
+  if (runs > 10) throw new Error("guard did not converge; latch failed to release");
+  await agentEnd({ type: "agent_end", messages: [] }, {});
+  runs += 1;
+}
+idleEmitted = true;
+await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+
+if (followUps !== 1) throw new Error(`expected exactly one blocking follow-up, saw ${followUps}`);
+if (idleEmittedBeforeFirstFollowUp) throw new Error("idle signal was emitted before the guard blocked: the turn ended blind");
+if (runs !== 2) throw new Error(`expected the blocked run to continue exactly once, saw ${runs} runs`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi guard must block the turn end before the idle signal fires"
+  [ -z "$out" ] || fail "Pi block-before-idle guard test printed output: $out"
+  pass ".pi primary extension: guard blocks the run before agent_settled emits the idle signal"
 }
 
 test_pi_extension_injects_once_per_logical_agent_run() {
@@ -838,22 +924,23 @@ const pi = {
     if (!message.includes("watcher cycle is missing, failed, or unhealthy")) throw new Error(`guard prompt omitted recovery-only state: ${message}`);
     if (message.includes("Resume supervision according to the session-start operating block")) throw new Error(`guard prompt used ordinary continuity: ${message}`);
     if (options?.deliverAs !== "followUp") throw new Error("guard prompt was not a follow-up");
-    await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+    // The queued follow-up makes Pi continue the same run, which ends again.
+    await handlers.get("agent_end")?.({ type: "agent_end", messages: [] }, {});
   },
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 if (handlers.has("turn_end")) throw new Error("guard still treats internal Pi turns as logical runs");
-const settled = handlers.get("agent_settled");
-if (!settled) throw new Error("agent_settled handler was not registered");
+const runEnd = handlers.get("agent_end");
+if (!runEnd) throw new Error("agent_end handler was not registered");
 
-await settled({ type: "agent_settled" }, {});
+await runEnd({ type: "agent_end", messages: [] }, {});
 if (prompts !== 1) throw new Error(`no-tool run injected ${prompts} follow-ups`);
 
 for (let i = 0; i < 3; i += 1) {
   await handlers.get("turn_end")?.({ type: "turn_end", turnIndex: i }, {});
 }
-await settled({ type: "agent_settled" }, {});
+await runEnd({ type: "agent_end", messages: [] }, {});
 if (prompts !== 2) throw new Error(`multi-tool run produced ${prompts - 1} follow-ups`);
 
 const guardRuns = readFileSync(process.env.FM_GUARD_LOG, "utf8").trim().split("\n").length;
@@ -898,14 +985,14 @@ const pi = {
   async sendUserMessage() {
     attempts += 1;
     if (attempts === 1) throw new Error("synthetic delivery failure");
-    await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+    await handlers.get("agent_end")?.({ type: "agent_end", messages: [] }, {});
   },
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
-const settled = handlers.get("agent_settled");
-await settled({ type: "agent_settled" }, {});
-await settled({ type: "agent_settled" }, {});
+const runEnd = handlers.get("agent_end");
+await runEnd({ type: "agent_end", messages: [] }, {});
+await runEnd({ type: "agent_end", messages: [] }, {});
 if (attempts !== 2) throw new Error(`expected delivery retry, saw ${attempts} attempts`);
 EOF
 )
@@ -1124,6 +1211,7 @@ test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_forces_followup
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_forces_followup
+test_pi_extension_blocks_before_the_idle_signal
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_grok_hook_invokes_adapter

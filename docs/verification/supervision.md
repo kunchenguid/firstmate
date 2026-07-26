@@ -68,7 +68,7 @@ The direct and passive mechanisms were validated across all five harnesses on 20
 | Claude | 2.1.219 | Cooperative blocking `Stop` guard plus `asyncRewake` auto-arm | A fresh unsupervised session ran session start first, reclaimed a stale dead-owner lock, completed two tokenless rewake cycles with no model arm command or guard continuation, and left a competing live owner unchanged. |
 | Codex | 0.142.1 | Blocking `Stop` hook | Hook process root stayed anchored to the trusted checkout and one continuation ran. |
 | OpenCode | 1.17.6 | Passive `session.idle` callback | Throwing could not block, while `promptAsync` scheduled one TUI follow-up; headless remained fail-open. |
-| Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
+| Pi | 0.81.1 | Blocking `agent_end` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns, and the run continued without emitting the idle signal. |
 | Grok | 0.2.93 | Passive `Stop` plus bounded resume | Project hook ran under trust, resumed once without inherited bypass permissions, and the environment latch prevented recursion. |
 
 The secondmate-home scope and manual-repair wake path were measured with Claude Code 2.1.207 on 2026-07-12, when a native background completion re-invoked the idle model with no human input.
@@ -88,6 +88,32 @@ Observed output:
 ok - Claude 2.1.219 (Claude Code) live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary
 ```
 
+### Pi blocks the turn end rather than reacting to it
+
+Measured with pi 0.81.1 on 2026-07-26 against a local mock provider, so no model request left the machine.
+A probe extension appended `SETTLED` on `agent_settled` and the stubbed predicate appended `GUARD` and exited 2, giving the ordering directly.
+
+```sh
+pi --version
+pi -p "hello" --provider mockp --model mock-model \
+  -e ./.pi/extensions/fm-primary-turnend-guard.ts -e ./.pi/extensions/probe.ts --no-session -nbt
+```
+
+Observed probe log with the shipped `agent_end` guard, and with the same file edited back to `agent_settled`:
+
+```text
+0.81.1
+
+agent_end     GUARD SETTLED            SETTLED count: 1
+agent_settled GUARD SETTLED SETTLED    SETTLED count: 2
+```
+
+One idle signal means the guard blocked and the follow-up was consumed inside the same run.
+Two means the run settled blind before the follow-up re-opened it, which is the defect this mechanism replaces.
+
+Blocking is repeatable rather than one-shot: a probe that re-queued from `agent_end` continued for 12 consecutive blocks with no ceiling, and `agent_settled` fired exactly once after it stopped.
+Firstmate still latches to a single follow-up per logical run, so the ceiling is Firstmate's policy and not a Pi limit.
+
 Current entry points:
 
 ```sh
@@ -95,6 +121,11 @@ tests/fm-turnend-guard.test.sh
 tests/fm-supervision-instructions.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 ```
+
+The three Node-driven Pi extension cases in `tests/fm-turnend-guard.test.sh` import the `.ts` extension directly and need a Node build with TypeScript type stripping.
+They pass on the CI runners.
+On a Node compiled without type stripping, such as the Debian system build, the import fails with `ERR_UNKNOWN_FILE_EXTENSION` and the case reports `not ok` rather than skipping.
+`tests/fm-pi-watch-extension.test.sh` and `tests/fm-calm-pi-extension.test.sh` have the same requirement.
 
 ## Watcher continuity
 
