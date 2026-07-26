@@ -143,6 +143,7 @@ const pi = {
   },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 if (!handler) {
@@ -217,6 +218,7 @@ const pi = {
   sendUserMessage: async () => {},
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 if (!tool) throw new Error("Pi watch tool was not registered");
@@ -284,6 +286,7 @@ const pi = {
   sendUserMessage: async () => {},
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 const initial = await tool.execute("tool-call-first", {}, undefined, undefined, {});
@@ -344,6 +347,7 @@ const pi = {
   sendUserMessage: async () => {},
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-first", {}, undefined, undefined, {});
@@ -421,6 +425,7 @@ const pi = {
   },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-continuity", {}, undefined, undefined, {});
@@ -492,6 +497,7 @@ const pi = {
   },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-hung-successor", {}, undefined, undefined, {});
@@ -564,6 +570,7 @@ const pi = {
   },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-unretired-successor", {}, undefined, undefined, {});
@@ -648,6 +655,7 @@ async function waitFor(predicate, message) {
   throw new Error(message);
 }
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-late-close", {}, undefined, undefined, {});
@@ -720,6 +728,7 @@ const pi = {
   },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-empty", {}, undefined, undefined, {});
@@ -775,6 +784,7 @@ const pi = {
   },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-established-empty", {}, undefined, undefined, {});
@@ -829,6 +839,7 @@ const pi = {
 };
 const lock = `${process.env.FM_HOME}/state/.lock`;
 writeFileSync(lock, `${process.pid}\n`);
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-lock-close", {}, undefined, undefined, {});
@@ -880,6 +891,7 @@ const pi = {
   },
   sendUserMessage: async () => {},
 };
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 if (!tool) throw new Error("Pi watch tool was not registered");
@@ -956,6 +968,7 @@ const pi = {
   sendUserMessage: async () => {},
 };
 const before = process.listenerCount("exit");
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 if (process.listenerCount("exit") !== before + 1) {
@@ -1003,6 +1016,7 @@ const pi = {
   sendUserMessage: async () => {},
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-exit", {}, undefined, undefined, {});
@@ -1090,6 +1104,7 @@ SH
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const client = { session: { promptAsync: async () => {} } };
 const hooks = await mod.FmPrimaryWatchArm({
@@ -1140,6 +1155,7 @@ SH
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const client = { session: { promptAsync: async () => {} } };
 const hooks = await mod.FmPrimaryWatchArm({
@@ -1189,6 +1205,7 @@ SH
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const client = { session: { promptAsync: async () => {} } };
 const hooks = await mod.FmPrimaryWatchArm({
@@ -1242,6 +1259,7 @@ SH
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const client = { session: { promptAsync: async () => {} } };
 await mod.FmPrimaryWatchArm({
@@ -1296,6 +1314,7 @@ SH
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompts = 0;
 let rowsAtPrompt = 0;
@@ -1384,6 +1403,7 @@ SH
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const prompts = [];
 const client = {
@@ -1457,6 +1477,7 @@ SH
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompt = "";
 let rowsAtPrompt = 0;
@@ -1531,6 +1552,7 @@ SH
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompt = "";
 let rowsAtPrompt = 0;
@@ -1611,6 +1633,7 @@ SH
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const prompts = [];
 const client = {
@@ -1695,6 +1718,7 @@ SH
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompts = 0;
 const client = {
@@ -1751,6 +1775,7 @@ SH
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompt = "";
 const client = {
@@ -1806,6 +1831,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompt = "";
 const client = {

@@ -821,10 +821,11 @@ SH
 exit 0
 SH
   chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
-  out=$(PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$ext" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const handlers = new Map();
 let prompts = 0;
 const pi = {
@@ -886,9 +887,10 @@ SH
 exit 0
 SH
   chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
-  out=$(PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$ext" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
+if (process.env.FM_ROOT_OVERRIDE) process.chdir(process.env.FM_ROOT_OVERRIDE);
 const handlers = new Map();
 let attempts = 0;
 const pi = {

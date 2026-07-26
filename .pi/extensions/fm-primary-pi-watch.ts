@@ -1,7 +1,7 @@
 // Firstmate primary watcher bridge for Pi.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -59,6 +59,21 @@ function refreshWatchToolShell(
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
+
+// Home guard: no-op the entire extension if the session cwd is not within the
+// firstmate home this extension was installed in. Uses `root` (extension-file-
+// location-based) rather than FM_HOME so a user-scoped load in a foreign project
+// cannot override the check with a mismatched env var.
+function isAtFirstmateHome(): boolean {
+  try {
+    const cwd = realpathSync(process.cwd());
+    const home = realpathSync(root);
+    return cwd === home || cwd.startsWith(home + "/");
+  } catch {
+    return false;
+  }
+}
+
 const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
@@ -163,6 +178,7 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
 }
 
 export default function (pi: ExtensionAPI) {
+  if (!isAtFirstmateHome()) return;
   let calmPresentation: CalmPresentationState = {
     active: false,
     stockExportRendering: false,
