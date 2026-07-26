@@ -78,8 +78,11 @@
 #   (fm-config-inherit-lib.sh). A successful launch clears pending inherited
 #   config reread generations because the new agent reads the converged files.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
-#   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
-#   provisioned firstmate home; the default is kind=ship.
+#   see AGENTS.md task lifecycle). Scout spawns whose project is this firstmate repo
+#   or one of its git worktrees receive an automatic role disclaimer in the delivered
+#   brief unless the source brief already contains ROLE NOTE:.
+#   --secondmate records kind=secondmate and launches in a provisioned firstmate home;
+#   the default is kind=ship.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
@@ -824,6 +827,45 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# A firstmate-repo scout otherwise reads this repo's AGENTS.md and can mistake
+# itself for the supervising firstmate. Keep the correction structural instead of
+# relying on every caller to hand-write the same role note.
+git_common_dir_real() {  # <git-worktree-or-repo>
+  local repo=$1 common common_abs
+  common=$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common" in
+    /*) common_abs=$common ;;
+    *) common_abs=$repo/$common ;;
+  esac
+  cd "$common_abs" 2>/dev/null && pwd -P
+}
+
+project_is_firstmate_checkout() {  # <project-real-path>
+  local project=$1 root_common project_common
+  root_common=$(git_common_dir_real "$FM_ROOT") || return 1
+  project_common=$(git_common_dir_real "$project") || return 1
+  [ "$project_common" = "$root_common" ]
+}
+
+prepare_delivered_brief() {
+  local delivered
+  DELIVERED_BRIEF=$BRIEF_REAL
+  DELIVERED_BRIEF_REAL=$BRIEF_REAL
+  if [ "$KIND" = scout ] \
+    && project_is_firstmate_checkout "$PROJ_ABS_REAL" \
+    && ! grep -F 'ROLE NOTE:' "$BRIEF_REAL" >/dev/null; then
+    delivered="$BRIEF_DIR_REAL/brief.with-scout-role-note.md"
+    {
+      printf '%s\n' "ROLE NOTE: You are a scout, not the firstmate supervisor. This repo's AGENTS.md does not apply to you. Do not run bin/fm-session-start.sh, arm watchers, or touch state/. Your brief is your only job."
+      printf '\n'
+      cat "$BRIEF_REAL"
+    } > "$delivered"
+    DELIVERED_BRIEF=$delivered
+    DELIVERED_BRIEF_REAL=$delivered
+  fi
+}
+prepare_delivered_brief
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -1461,7 +1503,7 @@ META_WINDOW=$T
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
-sq_brief=$(shell_quote "$BRIEF")
+sq_brief=$(shell_quote "$DELIVERED_BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
@@ -1498,7 +1540,7 @@ if [ "$HARNESS" = kimi ]; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
     exit 1
   fi
-  KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  KIMI_POINTER="Read the brief at $DELIVERED_BRIEF_REAL and follow it exactly."
   KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
   KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
   KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
