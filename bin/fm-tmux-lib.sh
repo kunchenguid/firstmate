@@ -67,12 +67,13 @@
 # signature separate from the shared default because that shape is not generic
 # enough to classify arbitrary harness output safely.
 # Kimi's anchored moon-phase spinner is separate because bare moon glyphs in
-# ordinary output must not classify another harness as busy. Leading whitespace
-# and whitespace around the middot are optional because prose examples preserve
-# the spinner's shape rather than defining byte-exact spacing. The line end stays
-# unanchored because rotating tip text follows but is not required. The idle
-# status bar's lowercase `thinking` label and independently rotating tip text are
-# not busy signals on their own.
+# ordinary output must not classify another harness as busy. Leading whitespace is
+# OPTIONAL; whitespace on both sides of the separator is REQUIRED because every
+# captured spinner row had it. A zero-whitespace form has NEVER been observed and
+# is deliberately not matched. The line end is intentionally unanchored because
+# rotating tip text follows and is not required to be present. The idle status
+# bar's lowercase `thinking` label and independently rotating tip text are not
+# busy signals on their own.
 # The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
 # exposes no stable ASCII busy token.
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
@@ -81,7 +82,7 @@ FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
-FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]*·[[:space:]]*'
+FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex

@@ -78,7 +78,12 @@ case "${1:-}" in
             ;;
           pointer-typed)
             if [ "${FM_FAKE_KIMI_DELIVERY:-yes}" = yes ]; then
-              printf 'delivered\n' > "$FM_FAKE_KIMI_STATE"
+              if [ "${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" = yes ] \
+                 && [ ! -f "$FM_FAKE_KIMI_SWALLOWED" ]; then
+                : > "$FM_FAKE_KIMI_SWALLOWED"
+              else
+                printf 'delivered\n' > "$FM_FAKE_KIMI_STATE"
+              fi
             else
               printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
             fi
@@ -143,6 +148,8 @@ run_spawn() {
     FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     FM_FAKE_POINTER_LOG="$case_dir/pointer.log" \
     FM_FAKE_KIMI_STATE="$case_dir/kimi.state" \
+    FM_FAKE_KIMI_SWALLOWED="$case_dir/kimi.swallowed" \
+    FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
     FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
@@ -161,7 +168,8 @@ test_kimi_launch_then_send_is_verified() {
   id=kimi-success-z1
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
-  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+  out=$(FM_FAKE_KIMI_SWALLOW_FIRST=yes run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model kimi-code/k3 --effort high)
   rc=$?
   expect_code 0 "$rc" "verified kimi launch-then-send should succeed"
@@ -327,10 +335,11 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
     esac
   }
   # These fixtures reproduce the observed spinner shape rather than byte-exact
-  # transcriptions. Leading and separator whitespace are deliberately varied.
+  # transcriptions. Leading whitespace is deliberately varied; separator whitespace
+  # follows the captured contract.
   printf ' 🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"\n│ > │\n' > "$capture"
   fm_pane_is_busy fake kimi || fail "the first real Kimi spinner shape was not recognized as busy"
-  printf '   🌗·Tip: /plugins: manage plugins ...\n│ > │\n' > "$capture"
+  printf '   🌗 · Tip: /plugins: manage plugins ...\n│ > │\n' > "$capture"
   fm_pane_is_busy fake kimi || fail "the tool-execution Kimi spinner shape was not recognized as busy"
   printf 'ordinary response ending with 🌕\n│ > │\n' > "$capture"
   if fm_pane_is_busy fake kimi; then
@@ -368,7 +377,7 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
 }
 
 test_watcher_scopes_moon_spinner_to_recorded_kimi_task() (
-  local state="$TMP_ROOT/watch-state" busy_capture='  🌑· Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
+  local state="$TMP_ROOT/watch-state" busy_capture='  🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
   mkdir -p "$state"
   printf 'window=fake\nharness=kimi\n' > "$state/kimi-watch.meta"
   unset FM_BUSY_REGEX
