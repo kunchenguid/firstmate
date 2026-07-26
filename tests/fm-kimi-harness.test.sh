@@ -14,9 +14,13 @@ PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
+# Launch templates moved out of fm-spawn.sh into their single owner,
+# bin/fm-launch-lib.sh; the byte pin follows the definitions.
+LAUNCH_LIB="$ROOT/bin/fm-launch-lib.sh"
+
 assert_source_line() {
   local line=$1
-  grep -Fqx -- "$line" "$SPAWN" || fail "existing launch template changed: $line"
+  grep -Fqx -- "$line" "$LAUNCH_LIB" || fail "existing launch template changed: $line"
 }
 
 test_existing_launch_templates_are_byte_pinned() {
@@ -27,7 +31,7 @@ test_existing_launch_templates_are_byte_pinned() {
   assert_source_line "        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"'"
   assert_source_line "        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PIEXT__ \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"'"
   assert_source_line "    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__\"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"' ;;"
-  pass "fm-spawn: the five pre-existing adapters' launch templates stay byte-pinned"
+  pass "fm-launch-lib: the five pre-existing adapters' launch templates stay byte-pinned"
 }
 
 test_tracked_files_have_no_user_absolute_paths() {

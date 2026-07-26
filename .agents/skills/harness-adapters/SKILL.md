@@ -25,7 +25,8 @@ If `config/crew-harness` is unset or `default`, there is no concrete value to in
 Inheritance also copies the literal `config/crew-dispatch.json` file, so secondmates apply the same best-fit profile rules for their own crewmates.
 
 Each adapter splits into mechanics and knowledge.
-The per-task mechanics, including launch command, autonomy flag, and any enabled crewmate turn-end hook, live in `bin/fm-spawn.sh`.
+The per-task mechanics, including the autonomy flag and any enabled crewmate turn-end hook, live in `bin/fm-spawn.sh`.
+`bin/fm-launch-lib.sh` is the single owner of every verified launch command, for crewmate, scout, secondmate, and primary sessions alike; never hand-write one.
 The primary-session "no turn ends blind" guard contract and harness hook installation paths live in `docs/turnend-guard.md`.
 The primary-session watcher wake protocols are rendered from `docs/supervision-protocols/` by `bin/fm-supervision-instructions.sh`.
 The supervision knowledge lives here: busy signature, exit command, interrupt, dialogs, resume behavior, skill invocation, and quirks.
@@ -177,7 +178,7 @@ If such a dialog is showing, accept it from an active firstmate session using `F
 
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
 A plain `tmux capture-pane` cannot tell that ghost text apart from typed text.
-Firstmate launches every claude crewmate and secondmate with `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`, scoped to firstmate-launched agents through `bin/fm-spawn.sh`, so it never touches the captain's global config.
+Firstmate launches every claude crewmate and secondmate with `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`, scoped to firstmate-launched agents through the launch templates in `bin/fm-launch-lib.sh`, so it never touches the captain's global config.
 The CLI's `--prompt-suggestions` flag is print/SDK-mode only and does not suppress the interactive composer ghost text, verified empirically on v2.1.186.
 As defense in depth for any pane that flag cannot reach, including the captain's own firstmate composer that away-mode reads, the shared `fm_composer_strip_ghost` extractor in `bin/fm-composer-lib.sh` removes dim/faint SGR 2 ghost runs before pending-input classification on both ANSI-capable readers (tmux and herdr).
 Its broader dark-TRUECOLOR placeholder handling and dark-theme tradeoff are documented in `docs/herdr-backend.md` "Composer and injection safety", with active captures in `docs/verification/runtime-backends.md`.

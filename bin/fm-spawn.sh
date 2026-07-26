@@ -92,7 +92,8 @@
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
-#   Launch templates live in launch_template() below; placeholders replaced before launch:
+#   Launch templates live in launch_template() in bin/fm-launch-lib.sh, the single owner
+#   of every firstmate launch command; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
@@ -128,6 +129,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SUB_HOME_MARKER=".fm-secondmate-home"
+# shellcheck source=bin/fm-launch-lib.sh
+. "$SCRIPT_DIR/fm-launch-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -410,54 +413,6 @@ else
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
-# The verified launch command per adapter. The knowledge half of each adapter
-# (busy signature, exit command, dialogs, quirks) lives in the harness-adapters skill.
-launch_template() {
-  local harness=$1 kind=${2:-ship}
-  # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
-  case "$harness" in
-    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
-    # predicted-next-prompt ghost text, which renders as dim/faint text inside an
-    # otherwise-empty composer and would otherwise read like real typed input when
-    # firstmate captures the pane (see the harness-adapters skill). It is a per-launch env
-    # prefix scoped to this firstmate-launched agent; it never touches the captain's
-    # global config. The CLI's --prompt-suggestions flag is print/SDK-mode only and
-    # does NOT suppress the interactive ghost text (verified empirically), so the env
-    # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
-    # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    codex)
-      if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
-      else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
-      fi
-      ;;
-    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    pi)
-      if [ "$kind" = secondmate ]; then
-        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
-      else
-        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
-      fi
-      ;;
-    # grok (Grok Build TUI): a positional prompt starts the supervised interactive
-    # session. --always-approve auto-approves every tool execution (verified: the
-    # crewmate runs fully autonomously, no permission gate), which an unattended
-    # crewmate needs; it is the targeted equivalent of claude's
-    # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
-    # launch command - it is a Stop-event hook installed below (global hook +
-    # per-task pointer), so the template is identical for ship/scout/secondmate.
-    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    # Kimi Code rejects a positional prompt, so it launches bare and receives
-    # only an absolute brief pointer after the TUI readiness gate below.
-    # Its turn-end signal is a globally configured Stop hook plus a guarded
-    # per-task worktree token, so no launch placeholder belongs here.
-    kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
-    *) return 1 ;;
-  esac
-}
-
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
@@ -531,12 +486,6 @@ secondmate_registry_value() {
   printf '%s\n' "$value"
 }
 
-shell_quote() {
-  printf "'"
-  printf '%s' "$1" | sed "s/'/'\\\\''/g"
-  printf "'"
-}
-
 resolve_kimi_binary() {
   local candidate dir fallback
   candidate=$(command -v kimi 2>/dev/null || true)
@@ -559,57 +508,6 @@ resolve_kimi_binary() {
   fi
   echo "error: kimi executable not found; searched PATH for 'kimi' and fallback '$fallback'" >&2
   return 1
-}
-
-model_flag_for_harness() {
-  local harness=$1 model=$2
-  [ -n "$model" ] && [ "$model" != default ] || return 0
-  case "$harness" in
-    claude|codex|opencode|pi|grok|kimi)
-      printf -- '--model %s ' "$(shell_quote "$model")"
-      ;;
-  esac
-}
-
-effort_flag_for_harness() {
-  local harness=$1 effort=$2
-  [ -n "$effort" ] && [ "$effort" != default ] || return 0
-  case "$harness" in
-    claude)
-      case "$effort" in
-        low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
-    codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
-      case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
-      esac
-      ;;
-    grok)
-      # grok exposes both --effort and --reasoning-effort; firstmate's profile
-      # axis is the reasoning knob. As of grok 0.2.99, --reasoning-effort accepts
-      # only low|medium|high and rejects both xhigh and max, so omit those rather
-      # than passing a known-bad value.
-      case "$effort" in
-        low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
-    pi)
-      # Pi 0.80.6 accepts the full shared effort vocabulary, including max, through
-      # its --thinking flag.
-      case "$effort" in
-        low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
-    # opencode's interactive `opencode --prompt` launch has a verified --model
-    # flag but no verified effort flag. Its `opencode run --variant` flag belongs
-    # to a different, non-interactive launch mode, so fm-spawn does not pass it.
-    # kimi likewise has no reasoning-effort flag; the requested axis stays in
-    # task metadata but never reaches the launch command.
-  esac
 }
 
 case "$LAUNCH" in

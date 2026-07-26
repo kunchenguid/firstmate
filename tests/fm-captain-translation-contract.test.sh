@@ -238,7 +238,7 @@ test_ahoy_scans_visible_history_for_open_decisions() {
 }
 
 test_ahoy_user_role_injections_share_one_marker() {
-  local daemon grok_guard opencode_guard opencode_watch pi_guard pi_watch owner sessionstart spawn
+  local daemon grok_guard opencode_guard opencode_watch pi_guard pi_watch owner sessionstart spawn launch_lib
   daemon=$(cat "$ROOT/bin/fm-supervise-daemon.sh")
   grok_guard=$(cat "$ROOT/bin/fm-turnend-guard-grok.sh")
   opencode_guard=$(cat "$ROOT/.opencode/plugins/fm-primary-turnend-guard.js")
@@ -248,6 +248,8 @@ test_ahoy_user_role_injections_share_one_marker() {
   owner=$(cat "$ROOT/bin/fm-operational-input.sh")
   sessionstart=$(cat "$ROOT/bin/fm-sessionstart-nudge.sh")
   spawn=$(cat "$ROOT/bin/fm-spawn.sh")
+  # Launch templates live in their single owner, bin/fm-launch-lib.sh.
+  launch_lib=$(cat "$ROOT/bin/fm-launch-lib.sh")
 
   assert_contains "$owner" 'FM_OPERATIONAL_PREFIX="${FM_OPERATIONAL_MARK}FIRSTMATE_OP: "' \
     "canonical owner lost the landed Ahoy prefix"
@@ -269,9 +271,9 @@ test_ahoy_user_role_injections_share_one_marker() {
     "Pi guard does not retain its exact current kind"
   assert_contains "$pi_watch" '"watcher"' \
     "Pi watcher does not retain its exact current kind"
-  assert_contains "$spawn" 'encode launch-brief' \
+  assert_contains "$launch_lib" 'encode launch-brief' \
     "cross-harness launches do not use the canonical launch-instruction kind"
-  for producer in "$daemon" "$grok_guard" "$opencode_guard" "$opencode_watch" "$pi_guard" "$pi_watch" "$sessionstart" "$spawn"; do
+  for producer in "$daemon" "$grok_guard" "$opencode_guard" "$opencode_watch" "$pi_guard" "$pi_watch" "$sessionstart" "$spawn" "$launch_lib"; do
     assert_not_contains "$producer" 'FIRSTMATE_OP: ' \
       "a current producer copied the canonical marker grammar"
   done
