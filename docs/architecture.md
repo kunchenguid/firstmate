@@ -65,6 +65,7 @@ A bounded direct-report terminal tail can help diagnose a mismatch by showing th
 The snapshot strips control sequences, retains only capture metadata and literal event-corroboration flags, and never lets terminal evidence override a valid structured classification.
 The default path remains local-only; live GitHub enrichment exists only behind the bearings `--include-prs` opt-in.
 Optional X mode integrates with the watcher only after explicit opt-in; [configuration.md](configuration.md#x-mode-env) owns its generated-artifact and dispatch mechanics.
+[`supervision-dormant-designs.md`](supervision-dormant-designs.md) owns the larger supervision architectures this design deliberately does not build - a batch abstraction, speculative-parallel execution, a second or hierarchical supervisor, a model in the supervision loop, and a typed event bus - each with the measurable trigger that would justify revisiting it.
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
 That block owns the live wait shape for the running primary harness: Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
