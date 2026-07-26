@@ -119,6 +119,7 @@ Real tests share the captain's running app rather than creating an isolated cmux
 - The only-workspace cleanup path leaves a fresh default workspace and cannot close the window.
 - Label lookup and recovery are currently scoped to the current cmux window, so a task moved to a non-current window is a known recovery blind spot.
 - Workspace ids do not survive app relaunch and are never recovery authority.
+- Firstmate cannot label its own cmux workspace, so session start reports that limitation once instead of renaming anything.
 
 ## Regression entry points
 

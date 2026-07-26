@@ -32,6 +32,10 @@ Claude, Codex, OpenCode, and Grok were observed under their own process names.
 Kimi Code CLI 0.29.1 was observed under `kimi` on 2026-07-25.
 Pi remained a generic `node` process and is intentionally inconclusive.
 
+Window-name persistence was verified on 2026-07-26 with tmux 3.6a on a private socket.
+`rename-window` alone already turned `automatic-rename` off for that window, and the new name survived a continuous application OSC 2 title rewrite under default options and under `allow-rename on` plus global `automatic-rename on`.
+`tests/fm-backend-tmux-smoke.test.sh` pins that persistence for firstmate's own window label, together with the refusal to rename a window that already carries an `fm-<id>` worker name.
+
 The structural multi-row composer reader, Kimi pointer-delivery path, and OpenCode 1.18.4 busy-queue behavior are pinned by:
 
 ```sh
@@ -75,6 +79,7 @@ The CLI matrix was checked directly:
 | Native state | `herdr agent get <pane>` | Working and done transitions were visible; long foreground tool waits required rendered-busy corroboration. |
 | Restart | guarded named-session stop then start | Workspace, tab, pane, and labels persisted; the agent process and registration did not. |
 | Close | `herdr pane close <pane> --session <name>` | The exact one-pane task tab closed; closing a final tab could remove the workspace. |
+| Label independence | `herdr pane get <pane>` | A live agent pane reported its continuously rewritten `terminal_title` as a field separate from its tab `label`, which still carried its spawn-time `fm-<id>` name, so an explicitly set tab label persists. |
 
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
