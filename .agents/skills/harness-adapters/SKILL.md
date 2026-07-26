@@ -464,6 +464,7 @@ Like claude's and kimi's, this signature stays out of the shared unrecorded-harn
 That is the preserved-not-relaunched arm, and death detection is unaffected because an exited cursor pane falls back to the login shell and reads `dead`.
 `node` is deliberately not added to the alive patterns: it is far too generic to prove any agent is alive.
 The tmux operator-input boundary accepts `alive`, `ambiguous`, and `unreadable` liveness for structural composer proof, but rejects authoritative `dead` and `missing` states before reporting an empty composer or steering text or keys.
+Text submission rechecks that boundary before every input and before confirming an empty composer throughout settle and retry.
 The raw backend key primitive remains available to spawn and lifecycle mechanics before an agent exists.
 This preserves live Cursor steering while preventing an exited pane's shell prompt from becoming an injection target even when its glyph resembles an agent composer.
 

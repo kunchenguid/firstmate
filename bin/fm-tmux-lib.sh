@@ -420,12 +420,23 @@ fm_pane_is_busy() {  # <target> [harness]
 # `empty` so the caller does not re-send), while an idle pane keeps `pending` as
 # a genuine swallow. Pending-unproven receives the same Enter retry budget but
 # never reaches this exception.
-fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
-  local target=$1 retries=$2 sleep_s=$3 i=0 state
+fm_tmux_submit_input_allowed() {
+  local target=$1 input_check=${2:-}
+  [ -z "$input_check" ] || "$input_check" "$target"
+}
+
+fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [input-check]
+  local target=$1 retries=$2 sleep_s=$3 input_check=${4:-} i=0 state
   while :; do
+    fm_tmux_submit_input_allowed "$target" "$input_check" \
+      || { printf 'send-failed'; return 0; }
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target")
+    if [ "$state" = empty ]; then
+      fm_tmux_submit_input_allowed "$target" "$input_check" \
+        || { printf 'send-failed'; return 0; }
+    fi
     case "$state" in
       pending|pending-unproven) ;;
       *) printf '%s' "$state"; return 0 ;;
@@ -443,15 +454,21 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
   # Treat it as submitted so the caller does not re-send.
   # On an idle pane, keep reporting pending - a genuine swallow.
   if fm_pane_is_busy "$target"; then
-    printf 'empty'
+    if fm_tmux_submit_input_allowed "$target" "$input_check"; then
+      printf 'empty'
+    else
+      printf 'send-failed'
+    fi
   else
     printf 'pending'
   fi
 }
 
-fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5
+fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [input-check]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 input_check=${6:-}
+  fm_tmux_submit_input_allowed "$target" "$input_check" \
+    || { printf 'send-failed'; return 0; }
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s"
+  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$input_check"
 }

@@ -77,7 +77,14 @@ case "${1:-}" in
     for a in "$@"; do
       case "$a" in
         *cursor_y*) printf '%s\n' "${FM_FAKE_CY:-0}"; exit 0 ;;
-        *pane_current_command*) printf '%s\n' "${FM_FAKE_COMM:-node}"; exit 0 ;;
+        *pane_current_command*)
+          if [ -n "${FM_FAKE_COMM_FILE:-}" ]; then
+            cat "$FM_FAKE_COMM_FILE"
+          else
+            printf '%s\n' "${FM_FAKE_COMM:-node}"
+          fi
+          exit 0
+          ;;
       esac
     done
     printf 'fakepane\n'; exit 0 ;;
@@ -425,6 +432,54 @@ test_backend_input_boundary_rejects_dead_and_missing_agents() {
   pass "tmux input boundary rejects dead and missing agents but preserves live cursor steering"
 }
 
+test_submit_rechecks_liveness_during_settle() {
+  local dir fb pane log comm sleep_count verdict
+  dir="$TMP_ROOT/submit-liveness"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  pane="$dir/pane.txt"
+  log="$dir/send.log"
+  comm="$dir/comm"
+  sleep_count="$dir/sleep-count"
+  make_pane_file "$pane" '❯'
+  cat > "$fb/sleep" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$FM_FAKE_SLEEP_COUNT" ] || count=$(cat "$FM_FAKE_SLEEP_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_FAKE_SLEEP_COUNT"
+if [ "$count" -eq "$FM_FAKE_EXIT_ON_SLEEP" ]; then
+  printf 'zsh\n' > "$FM_FAKE_COMM_FILE"
+fi
+SH
+  chmod +x "$fb/sleep"
+
+  printf 'node\n' > "$comm"
+  : > "$log"
+  : > "$sleep_count"
+  verdict=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$pane" FM_FAKE_CY=10 \
+    FM_FAKE_WINDOWS=win FM_FAKE_COMM_FILE="$comm" FM_FAKE_SEND_LOG="$log" \
+    FM_FAKE_SLEEP_COUNT="$sleep_count" FM_FAKE_EXIT_ON_SLEEP=1 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit tmux sess:win steer 3 0 0' "$ROOT")
+  [ "$verdict" = send-failed ] || fail "Cursor exit during initial settle returned '$verdict'"
+  grep -F -- 'send-keys -t sess:win -l steer' "$log" >/dev/null \
+    || fail "Cursor settle-exit case never received its literal text"
+  if grep -F -- 'send-keys -t sess:win Enter' "$log" >/dev/null; then
+    fail "Cursor exit during initial settle received Enter at its shell"
+  fi
+
+  printf 'node\n' > "$comm"
+  : > "$log"
+  : > "$sleep_count"
+  verdict=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$pane" FM_FAKE_CY=10 \
+    FM_FAKE_WINDOWS=win FM_FAKE_COMM_FILE="$comm" FM_FAKE_SEND_LOG="$log" \
+    FM_FAKE_SLEEP_COUNT="$sleep_count" FM_FAKE_EXIT_ON_SLEEP=2 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit tmux sess:win steer 3 0 0' "$ROOT")
+  [ "$verdict" = send-failed ] || fail "Cursor crash during Enter settle returned '$verdict'"
+  [ "$(grep -Fc -- 'send-keys -t sess:win Enter' "$log")" -eq 1 ] \
+    || fail "Cursor crash during Enter settle did not stop after one Enter"
+  pass "tmux submit rechecks Cursor liveness during settle and confirmation"
+}
+
 test_busy_signature_matches_only_the_composer_anchored_hint
 test_busy_signature_is_not_shared_across_harnesses
 test_busy_signature_survives_tool_execution_rendering
@@ -440,5 +495,6 @@ test_conflicting_markers_use_nearest_ancestry
 test_cursor_is_an_accepted_configured_crew_harness
 test_agent_liveness_states
 test_backend_input_boundary_rejects_dead_and_missing_agents
+test_submit_rechecks_liveness_during_settle
 
 echo "# all fm-cursor-harness tests passed"
