@@ -13,14 +13,16 @@
 # Uncommitted work in the project blocks the merge only on a GENUINE COLLISION:
 # a path that is both uncommitted in the project checkout and rewritten by this
 # exact fast-forward, including an untracked entry and an incoming path that
-# cannot both exist because one is a directory where the other is a file. Ignored
-# files, and untracked or modified paths the fast-forward never touches, cannot
-# be clobbered by it, so they do not block it, and a refusal names every
-# colliding path and what the incoming commits do to it. A state this guard
-# cannot classify confidently - an unresolved conflict, a merge, cherry-pick,
-# revert, rebase, bisect, or patch application left in progress, an unrecognized
-# status code, a git command that fails - refuses instead of proceeding, naming
-# the operation it found and how to conclude or abandon it.
+# cannot both exist because one is a directory where the other is a file. An
+# untracked or modified path the fast-forward never touches cannot be clobbered
+# by it, and an ignored path is declared disposable - git itself overwrites one
+# without complaint, and this guard matches git rather than second-guessing it -
+# so neither blocks the merge. A refusal names every colliding path and what the
+# incoming commits do to it. A state this guard cannot classify confidently - an
+# unresolved conflict, a merge, cherry-pick, revert, rebase, bisect, or patch
+# application left in progress, an unrecognized status code, a git command that
+# fails - refuses instead of proceeding, naming the operation it found and how to
+# conclude or abandon it.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
