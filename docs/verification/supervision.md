@@ -124,7 +124,7 @@ FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 
 The four Node-driven Pi extension cases in `tests/fm-turnend-guard.test.sh` import the `.ts` extension directly and need a Node build with TypeScript type stripping.
 They pass on the CI runners.
-On a Node compiled without type stripping, such as the Debian system build, the import fails with `ERR_UNKNOWN_FILE_EXTENSION` and the case reports `not ok` rather than skipping.
+On a Node compiled without type stripping, such as the Debian system build, the import fails with `ERR_UNKNOWN_FILE_EXTENSION`; the first such case reports `not ok` rather than skipping, and because `fail` in `tests/lib.sh` exits, the suite aborts there instead of reaching the remaining cases.
 `tests/fm-pi-watch-extension.test.sh` and `tests/fm-calm-pi-extension.test.sh` have the same requirement.
 
 ## Watcher continuity

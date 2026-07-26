@@ -61,7 +61,7 @@ The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 millis
 When none of those proofs appears, it re-blocks up to `FM_CLAUDE_TURNEND_BLOCK_BUDGET` times (default 3, below Claude's 8-block override), then allows degraded with a visible `systemMessage`.
 Any allow resets the budget.
 
-OpenCode and Grok expose passive callbacks for this purpose.
+OpenCode and Grok expose passive callbacks for this purpose, and Pi's blocking `agent_end` callback shares the same injection path.
 Their adapters fail open at the hook boundary to protect the user session but schedule one bounded follow-up when the predicate blocks.
 The generated prompts use the canonical `turn-end-guard` kind after the U+2063 `FIRSTMATE_OP: ` prefix, so Ahoy does not treat them as captain messages.
 Each adapter owns a loop latch.
@@ -72,7 +72,7 @@ The recovery instruction still lands in the same run, so this is an ordering nua
 Grok's project hook requires the checkout to be trusted with `/hooks-trust` or launch-time `--trust`.
 OpenCode's forced follow-up is supported for persistent TUI sessions and remains fail-open in headless `opencode run`.
 
-If a passive adapter cannot invoke its SDK, find `grok`, or recover a Grok session id, the next pull-based `fm-guard.sh` call reports the problem.
+If a follow-up-injecting adapter cannot invoke its SDK, find `grok`, or recover a Grok session id, the next pull-based `fm-guard.sh` call reports the problem.
 That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it always points to the active harness protocol rather than embedding another repair command.
 
 ## Compatibility limits

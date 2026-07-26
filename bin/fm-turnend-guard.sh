@@ -32,7 +32,8 @@
 # Stop payloads carry stop_hook_active=true when the CURRENT stop attempt was
 # itself already forced by an earlier block this turn; on that signal we always
 # allow the stop, whether or not watcher supervision actually got resumed.
-# Passive harness adapters provide their own one-follow-up guard before calling
+# Harness adapters that inject a follow-up instead of returning exit status 2
+# (opencode, grok, and pi) provide their own one-follow-up guard before calling
 # this script.
 # That bounds those harnesses to at most one forced continuation per turn -
 # never a wedged, un-endable session - while still nagging again on a later turn
