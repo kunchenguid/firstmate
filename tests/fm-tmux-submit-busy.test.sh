@@ -122,6 +122,22 @@ test_idle_pane_composer_clears_first_try() {
   pass "fm_tmux_submit_enter_core: idle pane clears composer on first Enter - returns empty as before"
 }
 
+test_busy_pane_unknown_stays_unknown() {
+  local dir fakebin composer vfile
+  dir="$TMP_ROOT/busy-unknown"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  vfile="$dir/verdict"
+  printf '│ > unbounded\n' > "$composer"
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_PANE_BUSY=1 \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
+    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = unknown ] \
+    || fail "a busy pane must not convert an unsafe composer to empty, got '$(cat "$vfile")'"
+  pass "fm_tmux_submit_enter_core: busy conversion is limited to proven pending input"
+}
+
 test_claude_busy_signature_uses_real_capture_shapes() {
   local dir fakebin composer
   dir="$TMP_ROOT/claude-signature"
@@ -197,4 +213,5 @@ test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
 test_busy_pane_composer_clears_first_try
 test_idle_pane_composer_clears_first_try
+test_busy_pane_unknown_stays_unknown
 test_claude_busy_signature_uses_real_capture_shapes

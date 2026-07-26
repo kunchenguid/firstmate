@@ -51,8 +51,21 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
     has_e=0
-    for a in "$@"; do [ "$a" = "-e" ] && has_e=1; done
+    start= end= prev=
+    for a in "$@"; do
+      [ "$a" = "-e" ] && has_e=1
+      case "$prev" in
+        -S) start=$a ;;
+        -E) end=$a ;;
+      esac
+      prev=$a
+    done
     f="${FM_FAKE_STYLED:-/dev/null}"
+    if [ -n "${FM_FAKE_ROW:-}" ] \
+       && [ "$start" = "${FM_FAKE_CY:-0}" ] \
+       && [ "$end" = "${FM_FAKE_CY:-0}" ]; then
+      f=$FM_FAKE_ROW
+    fi
     if [ "$has_e" = 1 ]; then
       cat "$f" 2>/dev/null
     else
@@ -347,6 +360,69 @@ test_clipped_bordered_box_is_unknown() {
   pass "fm_tmux_composer_state: an unbounded bordered box fails closed as unknown"
 }
 
+test_asymmetric_composer_edges_are_unknown() {
+  local dir fb capture out row
+  dir="$TMP_ROOT/asymmetric-box"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  for row in '│ > text' 'text │' '│ > text ┃' '──────'; do
+    printf '%s\n' "$row" > "$capture"
+    out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+      fm_tmux_composer_state "fakepane")
+    [ "$out" = unknown ] \
+      || fail "unbounded composer-edge row '$row' should be unknown, got '$out'"
+  done
+  pass "fm_tmux_composer_state: clipped and asymmetric composer edges fail closed"
+}
+
+test_mismatched_box_families_are_unknown() {
+  local dir fb capture out
+  dir="$TMP_ROOT/mismatched-box"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  printf '╭────────╮\n┃ >      ┃\n╰────────╯\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = unknown ] \
+    || fail "a box with mismatched border families should be unknown, got '$out'"
+  pass "fm_tmux_composer_state: inconsistent box geometry fails closed"
+}
+
+test_fallback_capture_race_with_edge_is_unknown() {
+  local dir fb capture row_capture out
+  dir="$TMP_ROOT/fallback-race"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  row_capture="$dir/row.txt"
+  printf '› deploy staging\n' > "$capture"
+  printf '│ > │\n' > "$row_capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_ROW="$row_capture" FM_FAKE_CY=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = unknown ] \
+    || fail "an edge appearing between full-pane and fallback captures should be unknown, got '$out'"
+  pass "fm_tmux_composer_state: fallback capture races cannot admit unbounded edges"
+}
+
+test_legitimate_empty_routes_remain_empty() {
+  local dir fb capture out fixture cursor
+  dir="$TMP_ROOT/legitimate-empty"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  for fixture in bordered double-bordered agent-prompt blank; do
+    case "$fixture" in
+      bordered) printf '╭────╮\n│    │\n╰────╯\n' > "$capture"; cursor=1 ;;
+      double-bordered) printf '╔════╗\n║    ║\n╚════╝\n' > "$capture"; cursor=1 ;;
+      agent-prompt) printf '›\n' > "$capture"; cursor=0 ;;
+      blank) printf '\n' > "$capture"; cursor=0 ;;
+    esac
+    out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY="$cursor" \
+      fm_tmux_composer_state "fakepane")
+    [ "$out" = empty ] \
+      || fail "legitimate empty route '$fixture' should remain empty, got '$out'"
+  done
+  pass "fm_tmux_composer_state: only proven structural and non-bordered empty routes stay empty"
+}
+
 test_non_bordered_composer_uses_compatibility_fallback() {
   local dir fb capture out
   dir="$TMP_ROOT/non-bordered-fallback"; mkdir -p "$dir"
@@ -403,5 +479,9 @@ test_bottom_border_cursor_reads_ghost_only_box_as_empty
 test_bordered_busy_signatures_are_pending
 test_non_bordered_busy_footer_remains_empty
 test_clipped_bordered_box_is_unknown
+test_asymmetric_composer_edges_are_unknown
+test_mismatched_box_families_are_unknown
+test_fallback_capture_race_with_edge_is_unknown
+test_legitimate_empty_routes_remain_empty
 test_non_bordered_composer_uses_compatibility_fallback
 test_peek_output_is_escape_free
