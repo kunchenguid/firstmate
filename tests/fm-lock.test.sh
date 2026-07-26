@@ -496,6 +496,77 @@ EOF
   pass "generation gate symlinks are classified without traversal"
 }
 
+test_nonregular_mutex_metadata_is_rejected() {
+  local rec home fakebin generation out rc=0
+  rec=$(new_home nonregular-metadata)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  make_ps_denied "$fakebin"
+  printf '999999\n' > "$home/state/.lock"
+  mkdir "$home/state/.lock-reclaim"
+  mkfifo "$home/state/.lock-reclaim/pid"
+  touch -t 200001010000 "$home/state/.lock-reclaim"
+
+  out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
+
+  expect_code 11 "$rc" "nonregular canonical mutex metadata"
+  assert_contains "$out" "LOCK_RESULT=STALE_RECLAIMABLE" "canonical FIFO hid stale main-lock state"
+  assert_not_contains "$out" "LOCK_RESULT=RECLAIM_BUSY" "canonical FIFO was mislabeled contention"
+
+  rc=0
+  rec=$(new_home nonregular-claim-metadata)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  make_ps_denied "$fakebin"
+  printf '999999\n' > "$home/state/.lock"
+  mkdir "$home/state/.lock-reclaim"
+  if [ "$(uname)" = Darwin ]; then
+    generation=$(stat -f '%d.%i' "$home/state/.lock-reclaim")
+  else
+    generation=$(stat -c '%d.%i' "$home/state/.lock-reclaim")
+  fi
+  mkdir "$home/state/.lock-reclaim/.generation-claimed-$generation"
+  mkfifo "$home/state/.lock-reclaim/.generation-claimed-$generation/pid"
+  touch -t 200001010000 "$home/state/.lock-reclaim"
+
+  out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
+
+  expect_code 11 "$rc" "nonregular generation metadata"
+  assert_contains "$out" "LOCK_RESULT=STALE_RECLAIMABLE" "generation FIFO hid stale main-lock state"
+  assert_not_contains "$out" "LOCK_RESULT=RECLAIM_BUSY" "generation FIFO was mislabeled contention"
+  pass "nonregular mutex metadata is rejected without blocking"
+}
+
+test_interrupted_reclaim_emits_typed_result() {
+  local rec home fakebin out child rc=0
+  rec=$(new_home interrupted-reclaim)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  make_ps_denied "$fakebin"
+  out="$TMP_ROOT/interrupted-reclaim/output"
+  printf '999999\n' > "$home/state/.lock"
+  mkdir "$home/state/.lock-reclaim"
+  printf '%s\n' "$$" > "$home/state/.lock-reclaim/pid"
+  date +%s > "$home/state/.lock-reclaim/started"
+
+  CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_RECLAIM_BUSY_RETRIES=20 FM_RECLAIM_BUSY_SLEEP_SECS=0.2 \
+    "$LOCK" reclaim --expected 999999 > "$out" 2>&1 &
+  child=$!
+  sleep 0.1
+  kill -TERM "$child"
+  wait "$child" || rc=$?
+
+  expect_code 143 "$rc" "interrupted reclaim"
+  assert_grep "LOCK_RESULT=STALE_RECLAIMABLE" "$out" "signal-interrupted reclaim omitted typed stale result"
+  pass "signal-interrupted reclaim emits a typed main-lock result"
+}
+
 test_state_path_failure_is_not_reclaim_busy() {
   local rec home fakebin out rc=0
   rec=$(new_home invalid-state-path)
@@ -626,6 +697,8 @@ run_one() {
     typed-failures) test_reclaim_failure_paths_always_emit_lock_result ;;
     mutex-symlink) test_reclaim_mutex_symlink_is_not_followed ;;
     generation-symlink) test_generation_symlinks_are_not_followed ;;
+    nonregular-metadata) test_nonregular_mutex_metadata_is_rejected ;;
+    interrupted-reclaim) test_interrupted_reclaim_emits_typed_result ;;
     invalid-state) test_state_path_failure_is_not_reclaim_busy ;;
     publication-failure) test_reclaim_owner_publication_failure_is_not_busy ;;
     stale-write-failure) test_stale_reclaim_write_failure_stays_stale ;;
@@ -656,6 +729,8 @@ else
   test_reclaim_failure_paths_always_emit_lock_result
   test_reclaim_mutex_symlink_is_not_followed
   test_generation_symlinks_are_not_followed
+  test_nonregular_mutex_metadata_is_rejected
+  test_interrupted_reclaim_emits_typed_result
   test_state_path_failure_is_not_reclaim_busy
   test_reclaim_owner_publication_failure_is_not_busy
   test_stale_reclaim_write_failure_stays_stale

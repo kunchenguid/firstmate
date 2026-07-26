@@ -69,6 +69,7 @@ PID_IDENTITY=
 PID_IDENTITY_DETAIL=
 RECLAIM_HELD=0
 RECLAIM_ACQUIRE_ERROR=
+RECLAIM_COMMAND_ACTIVE=0
 
 usage() {
   sed -n '28,36p' "$0" | sed 's/^# \{0,1\}//'
@@ -321,6 +322,8 @@ reclaim_mutex_age() {
 reclaim_mutex_is_provably_abandoned() {
   local generation=$1 current pid age min_age
   [ -d "$RECLAIM_LOCK" ] && [ ! -L "$RECLAIM_LOCK" ] || return 2
+  reclaim_metadata_is_safe "$RECLAIM_LOCK/pid" || return 2
+  reclaim_metadata_is_safe "$RECLAIM_LOCK/started" || return 2
   current=$(reclaim_mutex_generation 2>/dev/null || true)
   [ "$current" = "$generation" ] || return 1
   pid=$(cat "$RECLAIM_LOCK/pid" 2>/dev/null || true)
@@ -348,20 +351,73 @@ reclaim_mutex_is_provably_abandoned() {
 
 remove_reclaim_mutex() {
   [ ! -L "$RECLAIM_LOCK" ] || return 1
+  reclaim_metadata_is_safe "$RECLAIM_LOCK/pid" || return 1
+  reclaim_metadata_is_safe "$RECLAIM_LOCK/started" || return 1
   rm -f "$RECLAIM_LOCK/pid" "$RECLAIM_LOCK/started" 2>/dev/null || true
   rmdir "$RECLAIM_LOCK" 2>/dev/null
+}
+
+reclaim_metadata_is_safe() {
+  local path=$1
+  [ ! -L "$path" ] && { [ ! -e "$path" ] || [ -f "$path" ]; }
 }
 
 reclaim_generation_dir_is_safe() {
   local path=$1
   [ ! -L "$path" ] && [ -d "$path" ] \
-    && [ ! -L "$path/pid" ] && [ ! -L "$path/started" ]
+    && reclaim_metadata_is_safe "$path/pid" \
+    && reclaim_metadata_is_safe "$path/started"
+}
+
+acquire_generation_claim() {
+  local generation=$1 claim pid age attempt=0 now
+  claim="$RECLAIM_LOCK/.generation-claim-$generation"
+  while [ "$attempt" -lt 2 ]; do
+    attempt=$((attempt + 1))
+    if mkdir "$claim" 2>/dev/null; then
+      now=$(date +%s 2>/dev/null) || return 2
+      printf '%s\n' "${BASHPID:-$$}" > "$claim/pid" || return 2
+      printf '%s\n' "$now" > "$claim/started" || return 2
+      reclaim_generation_dir_is_safe "$claim" || return 2
+      [ "$(cat "$claim/pid" 2>/dev/null || true)" = "${BASHPID:-$$}" ] \
+        && [ "$(cat "$claim/started" 2>/dev/null || true)" = "$now" ] \
+        || return 2
+      return 0
+    fi
+    reclaim_generation_dir_is_safe "$claim" || return 2
+    pid=$(cat "$claim/pid" 2>/dev/null || true)
+    case "$pid" in
+      ''|*[!0-9]*)
+        age=$(reclaim_mutex_age "$claim" 2>/dev/null || true)
+        case "$age" in ''|*[!0-9]*) return 2 ;; esac
+        [ "$age" -ge 2 ] || return 1
+        ;;
+      *)
+        kill -0 "$pid" 2>/dev/null && return 1
+        ;;
+    esac
+    rm -f "$claim/pid" "$claim/started" 2>/dev/null || return 2
+    rmdir "$claim" 2>/dev/null || return 1
+  done
+  return 1
+}
+
+release_generation_claim() {
+  local generation=$1 claim pid
+  claim="$RECLAIM_LOCK/.generation-claim-$generation"
+  reclaim_generation_dir_is_safe "$claim" || return 1
+  pid=$(cat "$claim/pid" 2>/dev/null || true)
+  [ "$pid" = "${BASHPID:-$$}" ] || return 1
+  rm -f "$claim/pid" "$claim/started" 2>/dev/null || return 1
+  rmdir "$claim" 2>/dev/null
 }
 
 write_reclaim_owner() {
   local generation=$1 gate mypid=${BASHPID:-$$} now back_pid back_started current
   gate="$RECLAIM_LOCK/.generation-$generation"
   reclaim_generation_dir_is_safe "$gate" || return 1
+  reclaim_metadata_is_safe "$RECLAIM_LOCK/pid" || return 1
+  reclaim_metadata_is_safe "$RECLAIM_LOCK/started" || return 1
   current=$(reclaim_mutex_generation 2>/dev/null || true)
   [ "$current" = "$generation" ] || return 1
   now=$(date +%s 2>/dev/null) || return 1
@@ -393,6 +449,10 @@ release_reclaim_lock() {
   if [ "$RECLAIM_HELD" -ne 1 ]; then
     return 0
   fi
+  reclaim_metadata_is_safe "$RECLAIM_LOCK/pid" || {
+    RECLAIM_HELD=0
+    return 1
+  }
   recorded=$(cat "$RECLAIM_LOCK/pid" 2>/dev/null || true)
   if [ "$recorded" = "$mypid" ]; then
     generation=$(reclaim_mutex_generation 2>/dev/null || true)
@@ -413,12 +473,14 @@ release_reclaim_lock() {
 }
 
 detach_abandoned_reclaim_mutex() {
-  local generation=$1 gate claimed quarantine current pid now claim_pid gate_pid age min_age
+  local generation=$1 gate claimed quarantine current pid now claim_pid gate_pid age min_age claim_rc=0
   gate="$RECLAIM_LOCK/.generation-$generation"
   claimed="$RECLAIM_LOCK/.generation-claimed-$generation"
   quarantine="$STATE/.lock-reclaim-retired.${BASHPID:-$$}.$RANDOM.$generation"
   [ ! -e "$quarantine" ] && [ ! -L "$quarantine" ] || return 2
   command -v perl >/dev/null 2>&1 || return 2
+  acquire_generation_claim "$generation" || claim_rc=$?
+  [ "$claim_rc" -eq 0 ] || return "$claim_rc"
   if [ -e "$claimed" ] || [ -L "$claimed" ]; then
     reclaim_generation_dir_is_safe "$claimed" || return 2
     claim_pid=$(cat "$claimed/pid" 2>/dev/null || true)
@@ -459,8 +521,11 @@ detach_abandoned_reclaim_mutex() {
   current=$(reclaim_mutex_generation 2>/dev/null || true)
   if [ "$current" != "$generation" ]; then
     rm -rf "$claimed" 2>/dev/null || true
+    release_generation_claim "$generation" 2>/dev/null || true
     return 1
   fi
+  reclaim_metadata_is_safe "$RECLAIM_LOCK/pid" || return 2
+  reclaim_metadata_is_safe "$RECLAIM_LOCK/started" || return 2
   pid=$(cat "$RECLAIM_LOCK/pid" 2>/dev/null || true)
   case "$pid" in
     ''|*[!0-9]*) ;;
@@ -469,6 +534,7 @@ detach_abandoned_reclaim_mutex() {
         rm -f "$claimed/pid" "$claimed/started" 2>/dev/null || true
         perl -e 'exit(rename($ARGV[0], $ARGV[1]) ? 0 : 1)' \
           "$claimed" "$gate" 2>/dev/null || true
+        release_generation_claim "$generation" 2>/dev/null || true
         return 1
       fi
       ;;
@@ -755,10 +821,19 @@ acquire_default() {
   return "$EXIT_IDENTITY_UNAVAILABLE"
 }
 
+handle_lock_signal() {
+  local code=$1
+  release_reclaim_lock
+  if [ "$RECLAIM_COMMAND_ACTIVE" -eq 1 ]; then
+    emit_classified_lock "reclaim interrupted by signal"
+  fi
+  exit "$code"
+}
+
 trap release_reclaim_lock EXIT
-trap 'release_reclaim_lock; exit 129' HUP
-trap 'release_reclaim_lock; exit 130' INT
-trap 'release_reclaim_lock; exit 143' TERM
+trap 'handle_lock_signal 129' HUP
+trap 'handle_lock_signal 130' INT
+trap 'handle_lock_signal 143' TERM
 
 case "${1:-}" in
   '')
@@ -769,6 +844,7 @@ case "${1:-}" in
     status_lock
     ;;
   reclaim)
+    RECLAIM_COMMAND_ACTIVE=1
     shift
     expected=
     confirmed_closed=0
