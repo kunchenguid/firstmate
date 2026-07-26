@@ -1358,6 +1358,74 @@ test_park_scan_can_be_switched_off() {
   pass "the park sweep honours FM_PARK_SCAN_MAX and can be switched off entirely"
 }
 
+# The cap alone re-read the same first FM_PARK_SCAN_MAX tasks on every sweep, so
+# a fleet larger than the cap left every task past it never park-scanned - the
+# silent-gate hole this sweep exists to close, permanently open for exactly the
+# fleets big enough to lose a worker in. The persisted cursor rotates the sweep
+# window deterministically, so both bounds hold at once: at most FM_PARK_SCAN_MAX
+# reads per sweep, and full coverage within ceil(N/cap) sweeps. This drives five
+# ship tasks against the default cap of three; it fails against a sweep that
+# always restarts at the top of the glob.
+test_park_scan_rotates_across_a_fleet_larger_than_the_cap() {
+  local dir state out i sig key gate cursor surfaced
+  gate='parked at review: 2 finding(s)'
+  dir=$(make_case park-rotation); state="$dir/state"; out="$dir/watch.out"
+  printf 'running the review step... esc to interrupt\n' > "$dir/pane.txt"
+  for i in 1 2 3 4 5; do
+    printf 'window=test:fm-p%s\nkind=ship\n' "$i" > "$state/p$i.meta"
+    printf 'working: handed to validation\n' > "$state/p$i.status"
+    sig=$(seen_sig "$state/p$i.status"); printf '%s' "$sig" > "$state/.seen-p${i}_status"
+  done
+
+  # The cap still bounds one sweep. No task is parked, so nothing surfaces and
+  # the sweep runs to its own limit: the cursor must advance by exactly the cap,
+  # not by the fleet size.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  ! park_sweep_once "$dir" "test:fm-p1" "$out" || fail "a fleet with no parked run surfaced: $(cat "$out")"
+  [ "$(cat "$state/.park-scan-cursor" 2>/dev/null || true)" = 3 ] \
+    || fail "one sweep did not stop at the cap: cursor is '$(cat "$state/.park-scan-cursor" 2>/dev/null || true)', expected 3"
+
+  # Every task is now parked at a gate already seen once, so whichever task a
+  # sweep reads first surfaces and ends that sweep. Five sweeps must therefore
+  # cover all five tasks in glob order, wrapping the cursor back to the start.
+  export FM_FAKE_CREW_STATE="state: parked · source: run-step · $gate"
+  printf '0' > "$state/.park-scan-cursor"
+  for i in 1 2 3 4 5; do
+    key=$(printf '%s' "test:fm-p$i" | tr ':/.' '___')
+    printf '%s' "$gate" > "$state/.park-$key"
+  done
+  for i in 1 2 3 4 5; do
+    : > "$out"; : > "$state/.wake-queue"
+    park_sweep_once "$dir" "test:fm-p1" "$out" \
+      || fail "sweep $i did not surface any parked task: cursor '$(cat "$state/.park-scan-cursor" 2>/dev/null || true)'"
+    grep -F "test:fm-p$i" "$out" >/dev/null \
+      || fail "sweep $i surfaced the wrong task - the sweep did not rotate: $(cat "$out")"
+  done
+  surfaced=0
+  for i in 1 2 3 4 5; do
+    key=$(printf '%s' "test:fm-p$i" | tr ':/.' '___')
+    [ -e "$state/.park-surfaced-$key" ] && surfaced=$((surfaced + 1))
+  done
+  [ "$surfaced" = 5 ] \
+    || fail "only $surfaced of 5 ship tasks were ever park-scanned - tasks past the cap are starved"
+  cursor=$(cat "$state/.park-scan-cursor" 2>/dev/null || true)
+  [ "$cursor" = 0 ] || fail "the cursor did not wrap modulo the ship-window count: '$cursor'"
+
+  # A corrupt or out-of-range cursor is only a hint: it must degrade to
+  # restarting coverage, never to skipping the sweep or indexing off the end.
+  printf 'not-a-number' > "$state/.park-scan-cursor"
+  : > "$out"; : > "$state/.wake-queue"
+  for i in 1 2 3 4 5; do
+    key=$(printf '%s' "test:fm-p$i" | tr ':/.' '___')
+    rm -f "$state/.park-surfaced-$key"
+    printf '%s' "$gate" > "$state/.park-$key"
+  done
+  park_sweep_once "$dir" "test:fm-p1" "$out" || fail "a corrupt cursor stopped the park sweep entirely"
+  grep -F "test:fm-p1" "$out" >/dev/null || fail "a corrupt cursor did not restart coverage at the top: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "the park sweep rotates its bounded window so every ship task is covered within ceil(N/cap) sweeps"
+}
+
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case nonterminal-stale-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1584,7 +1652,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 # silently wrong for the decorated wedge and pause reasons and would now be wrong
 # for all six. stale_reason_window is the one owner of that extraction.
 test_stale_reason_branch_tags() {
-  local arm_reason_type out
+  local out arm_out arm_state
   [ "$(stale_reason nonterminal 'test:fm-a')" = 'stale: test:fm-a [branch=nonterminal]' ] \
     || fail "undecorated stale reason did not render its branch tag"
   [ "$(stale_reason wedge 'test:fm-a' 'idle 300s, possible wedge, escalation 2')" \
@@ -1605,31 +1673,41 @@ test_stale_reason_branch_tags() {
     || fail "a plain window was not returned unchanged"
 
   # The arm layer's lifecycle ledger is the only durable per-wake record, so the
-  # branch has to reach it for actionable wakes to be countable per rule. Source
-  # the arm script for its classifier only; its runtime stops at the source guard.
-  out=$(mktemp "$TMP_ROOT/arm-reason.XXXXXX")
-  # shellcheck source=/dev/null
-  . "$ROOT/bin/fm-watch-arm.sh"
-  printf 'stale: test:fm-a (idle 300s, possible wedge, escalation 2) [branch=wedge]\n' > "$out"
-  arm_reason_type=$(watch_output_reason_type "$out")
-  [ "$arm_reason_type" = 'actionable-stale-wedge' ] \
-    || fail "cycle ledger did not record the stale branch: $arm_reason_type"
-  printf 'stale: test:fm-a [branch=pause-resurface]\n' > "$out"
-  [ "$(watch_output_reason_type "$out")" = 'actionable-stale-pause-resurface' ] \
+  # branch has to reach it for actionable wakes to be countable per rule. The arm
+  # script's runtime stops at its source guard, but sourcing it still pulls in
+  # bin/fm-wake-lib.sh, which resolves and creates its own STATE and rebinds the
+  # suite-wide STATE/TRIAGE_LOG/FM_WAKE_QUEUE/WATCH. This test runs first, so
+  # every later test would inherit that. Call the classifier in a subshell with
+  # its own state dir instead: same assertions, no suite-wide mutation and no
+  # directory written into the working tree.
+  arm_state=$(mktemp -d "$TMP_ROOT/arm-state.XXXXXX")
+  arm_reason_type() {  # <reason-line> -> ledger classification
+    local line=$1
+    printf '%s\n' "$line" > "$arm_out"
+    (
+      FM_STATE_OVERRIDE="$arm_state"
+      export FM_STATE_OVERRIDE
+      # shellcheck source=/dev/null
+      . "$ROOT/bin/fm-watch-arm.sh"
+      watch_output_reason_type "$arm_out"
+    )
+  }
+  arm_out=$(mktemp "$TMP_ROOT/arm-reason.XXXXXX")
+  out=$(arm_reason_type 'stale: test:fm-a (idle 300s, possible wedge, escalation 2) [branch=wedge]')
+  [ "$out" = 'actionable-stale-wedge' ] \
+    || fail "cycle ledger did not record the stale branch: $out"
+  [ "$(arm_reason_type 'stale: test:fm-a [branch=pause-resurface]')" = 'actionable-stale-pause-resurface' ] \
     || fail "cycle ledger did not record a hyphenated stale branch"
   # An untagged reason keeps the classification it has always had, so a watcher
   # and an arm layer at different versions cannot produce an unreadable row.
-  printf 'stale: test:fm-a\n' > "$out"
-  [ "$(watch_output_reason_type "$out")" = 'actionable-stale' ] \
+  [ "$(arm_reason_type 'stale: test:fm-a')" = 'actionable-stale' ] \
     || fail "an untagged stale reason lost its ledger classification"
   # A malformed tag must not leak arbitrary text into a ledger field.
-  printf 'stale: test:fm-a [branch=NOT A BRANCH]\n' > "$out"
-  [ "$(watch_output_reason_type "$out")" = 'actionable-stale' ] \
+  [ "$(arm_reason_type 'stale: test:fm-a [branch=NOT A BRANCH]')" = 'actionable-stale' ] \
     || fail "a malformed branch tag was copied into the ledger"
-  printf 'signal: %s/a.status\n' "$TMP_ROOT" > "$out"
-  [ "$(watch_output_reason_type "$out")" = 'actionable-signal' ] \
+  [ "$(arm_reason_type "signal: $TMP_ROOT/a.status")" = 'actionable-signal' ] \
     || fail "signal classification changed"
-  rm -f "$out"
+  rm -rf "$arm_out" "$arm_state"
   pass "stale wake reasons carry, and give back, the classification branch that produced them"
 }
 
@@ -1668,6 +1746,7 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_park_scan_surfaces_an_unanswered_gate
 test_park_scan_stays_silent_when_the_run_moves
 test_park_scan_can_be_switched_off
+test_park_scan_rotates_across_a_fleet_larger_than_the_cap
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status

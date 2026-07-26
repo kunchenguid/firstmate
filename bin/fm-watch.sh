@@ -903,34 +903,68 @@ while :; do
   # changes. Only a run-attributed gate is visible here; a worker blocked on
   # something outside its run is not, and nothing detects that deterministically
   # today short of the worker declaring it, which the status protocol already is.
+  #
+  # PARK_SCAN_MAX and state/.park-scan-cursor solve two DIFFERENT problems and
+  # both are required; do not delete the cap because the cursor looks like it
+  # made it redundant. The cap bounds the work of ONE sweep - each scanned task
+  # costs a bounded but real `no-mistakes` call, so an uncapped sweep over a
+  # large fleet is an unbounded-work bug on every interval. The cursor bounds the
+  # TIME TO FULL COVERAGE - the cap alone re-read the same first PARK_SCAN_MAX
+  # tasks forever, so every task past the cap was never park-scanned at all and
+  # the silent-gate hole this sweep exists to close stayed permanently open for
+  # them. Together: at most PARK_SCAN_MAX reads per sweep, and every ship task
+  # covered within ceil(N/PARK_SCAN_MAX) sweeps.
+  #
+  # The rotation is a persisted offset into recorded_windows' stable glob order,
+  # advanced by the number of ship windows actually scanned and wrapped modulo
+  # the ship-window count - deterministic, so coverage is provable rather than
+  # probabilistic. It is advanced BEFORE each window is read, because wake()
+  # exits the cycle: an offset advanced afterwards would be lost on exactly the
+  # sweeps that surfaced something, and the next sweep would re-read the window
+  # it just reported. The cursor lives beside .last-park-scan under STATE with
+  # the rest of the watcher's per-sweep bookkeeping, and is only a hint: a
+  # missing, corrupt or out-of-range value reads as 0 and simply restarts
+  # coverage from the top of the fleet.
   if [ "$PARK_SCAN_MAX" -gt 0 ] && [ "$(age_of "$STATE/.last-park-scan")" -ge "$PARK_SCAN_INTERVAL" ]; then
     touch "$STATE/.last-park-scan"
-    park_scanned=0
+    park_windows=()
     while IFS= read -r w; do
-      [ "$park_scanned" -lt "$PARK_SCAN_MAX" ] || break
       [ "$(window_kind "$w")" = ship ] || continue
-      task=$(window_to_task "$w" "$STATE")
-      [ -n "$task" ] || continue
-      park_scanned=$((park_scanned + 1))
-      key=$(printf '%s' "$w" | tr ':/.' '___')
-      gate=$(crew_parked_gate "$task")
-      if [ -z "$gate" ]; then
-        rm -f "$STATE/.park-$key" "$STATE/.park-surfaced-$key"
-        continue
-      fi
-      if [ "$(cat "$STATE/.park-surfaced-$key" 2>/dev/null || true)" = "$gate" ]; then
-        triage_log "absorbed park (already surfaced, $gate): $w"
-        continue
-      fi
-      if [ "$(cat "$STATE/.park-$key" 2>/dev/null || true)" = "$gate" ]; then
-        printf '%s' "$gate" > "$STATE/.park-surfaced-$key"
-        reason=$(stale_reason park "$w" "$gate across two sweeps - the run is waiting on a response the worker has not given")
-        fm_wake_append stale "$w" "$reason" || exit 1
-        wake "$reason"
-      fi
-      printf '%s' "$gate" > "$STATE/.park-$key"
-      triage_log "absorbed park (first sighting, $gate): $w"
+      [ -n "$(window_to_task "$w" "$STATE")" ] || continue
+      park_windows+=("$w")
     done < <(recorded_windows)
+    park_total=${#park_windows[@]}
+    if [ "$park_total" -gt 0 ]; then
+      park_cursor=$(cat "$STATE/.park-scan-cursor" 2>/dev/null || true)
+      case "$park_cursor" in ''|*[!0-9]*) park_cursor=0 ;; esac
+      park_cursor=$((park_cursor % park_total))
+      park_scanned=0
+      while [ "$park_scanned" -lt "$PARK_SCAN_MAX" ] && [ "$park_scanned" -lt "$park_total" ]; do
+        w=${park_windows[$(((park_cursor + park_scanned) % park_total))]}
+        park_scanned=$((park_scanned + 1))
+        printf '%s' "$(((park_cursor + park_scanned) % park_total))" > "$STATE/.park-scan-cursor"
+        task=$(window_to_task "$w" "$STATE")
+        [ -n "$task" ] || continue
+        key=$(printf '%s' "$w" | tr ':/.' '___')
+        gate=$(crew_parked_gate "$task")
+        if [ -z "$gate" ]; then
+          rm -f "$STATE/.park-$key" "$STATE/.park-surfaced-$key"
+          continue
+        fi
+        if [ "$(cat "$STATE/.park-surfaced-$key" 2>/dev/null || true)" = "$gate" ]; then
+          triage_log "absorbed park (already surfaced, $gate): $w"
+          continue
+        fi
+        if [ "$(cat "$STATE/.park-$key" 2>/dev/null || true)" = "$gate" ]; then
+          printf '%s' "$gate" > "$STATE/.park-surfaced-$key"
+          reason=$(stale_reason park "$w" "$gate across two sweeps - the run is waiting on a response the worker has not given")
+          fm_wake_append stale "$w" "$reason" || exit 1
+          wake "$reason"
+        fi
+        printf '%s' "$gate" > "$STATE/.park-$key"
+        triage_log "absorbed park (first sighting, $gate): $w"
+      done
+    fi
   fi
 
   # On the first changed signal, linger one grace period and re-scan before

@@ -302,7 +302,8 @@ watch_output_has_wake() {
 }
 
 # A stale reason carries the classification branch that produced it as a
-# "[branch=<name>]" tag (bin/fm-push-transition-lib.sh's stale_reason). Carrying
+# "[branch=<name>]" tag (bin/fm-classify-lib.sh's stale_reason, the one owner of
+# that format). Carrying
 # it into this ledger row is what makes actionable wakes countable per branch
 # from state/.watch-cycle-exits.log, which is the existing telemetry surface -
 # no second collector is introduced for it. An untagged stale reason (an older

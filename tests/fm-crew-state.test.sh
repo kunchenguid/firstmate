@@ -1161,12 +1161,56 @@ test_progress_fingerprint_degrades_gracefully() {
 
   # Torn-down worktree and missing metadata report no evidence rather than a
   # state line, and exit 0 so a caller can compare the result unconditionally.
+  # No evidence is the EMPTY string: a punctuation skeleton with empty fields is
+  # a distinct non-empty token, so it would compare UNEQUAL to a healthy
+  # fingerprint and the caller would read the failed read as forward progress.
   fm_write_meta "$d/state/gone-d.meta" "window=fm:fm-gone-d" "worktree=$d/no-such-worktree" "kind=ship"
   out=$(run_progress "$d" gone-d) || fail "--progress on a torn-down worktree did not exit 0"
-  [ "$out" = "////" ] || fail "--progress on a torn-down worktree did not report empty evidence: $out"
+  [ -z "$out" ] || fail "--progress on a torn-down worktree did not report empty evidence: $out"
   out=$(run_progress "$d" never-existed) || fail "--progress on missing metadata did not exit 0"
-  [ "$out" = "////" ] || fail "--progress on missing metadata did not report empty evidence: $out"
+  [ -z "$out" ] || fail "--progress on missing metadata did not report empty evidence: $out"
   pass "--progress degrades to empty evidence rather than to a false reset"
+}
+
+# A FAILED run read and a genuine NO RUN are different answers, and printing the
+# same token for both is what turns "could not tell" into "the run advanced": the
+# caller resets its wedge timer on any difference, so a fingerprint that flips
+# between the full form and a sha-only form as the CLI comes and goes absorbs the
+# escalation twice - once on the way down and once on the way back - on a worker
+# that may be genuinely frozen. A run read that was owed and did not answer must
+# therefore be EMPTY, which compares equal and escalates. The consumer half of
+# that contract - an empty fingerprint mid-chain escalates instead of absorbing,
+# and does not overwrite the stored baseline - is owned by
+# test_wedge_escalation_unreadable_progress_still_escalates in
+# tests/fm-watch-triage.test.sh.
+test_progress_fingerprint_is_empty_when_the_run_read_fails() {
+  reset_fakes
+  local d short healthy timedout coarse
+  d=$(new_case progress-degraded-read)
+  make_repo_on_branch "$d/wt" fm/prog-e
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/prog-e.meta" "window=fm:fm-prog-e" "worktree=$d/wt" "kind=ship"
+
+  FM_FAKE_AXI_STATUS="$(run_ci_with_active_steps fm/prog-e 10m 1m)"
+  healthy=$(run_progress "$d" prog-e)
+  [ -n "$healthy" ] || fail "a healthy ship read produced no fingerprint at all"
+
+  # The CLI answered with nothing: timed out, or died. The head sha is still
+  # readable, but reporting it alone would differ from the healthy form above.
+  FM_FAKE_AXI_STATUS=""
+  timedout=$(run_progress "$d" prog-e)
+  [ -z "$timedout" ] \
+    || fail "a ship task whose run read returned nothing reported '$timedout' instead of no evidence - the wedge timer would reset on the difference from '$healthy'"
+
+  # The coarse runs-list fallback answered with a bare status word and no step
+  # detail. Enough for the state machine, not enough to compare progress with.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="  running    fm/prog-e ${short}  2026-07-02 22:05"
+  coarse=$(run_progress "$d" prog-e)
+  [ -z "$coarse" ] \
+    || fail "a coarse-fallback run read reported '$coarse' instead of no evidence"
+  pass "--progress reports no evidence when a run read was owed and did not answer"
 }
 
 test_scout_skips_run_lookup() {
@@ -1395,6 +1439,7 @@ test_progress_fingerprint_is_stable_under_no_change
 test_progress_fingerprint_moves_on_real_progress
 test_progress_fingerprint_without_a_run_tracks_commits
 test_progress_fingerprint_degrades_gracefully
+test_progress_fingerprint_is_empty_when_the_run_read_fails
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta

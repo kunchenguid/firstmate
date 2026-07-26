@@ -96,11 +96,14 @@ emit() {  # <state> <source> [detail]
 }
 
 # In --progress mode every exit prints a progress fingerprint (see
-# crew_progress_fingerprint below), never a state line. The two bail-outs here
+# compute_progress_fingerprint below), never a state line. The two bail-outs here
 # fire before a worktree is even resolved, so there is no evidence of progress to
-# report at all: an empty fingerprint compares equal to itself, which leaves the
-# caller's wedge escalation behaving exactly as it does today.
-progress_bail() { printf '////\n'; exit 0; }
+# report at all, and NO EVIDENCE IS THE EMPTY STRING - not a punctuation skeleton
+# with empty fields. A skeleton is a distinct non-empty token, so it compares
+# UNEQUAL to a healthy fingerprint and the caller reads a failed read as forward
+# progress. Emitting nothing keeps the caller's wedge escalation behaving exactly
+# as it does without a fingerprint at all.
+progress_bail() { exit 0; }
 
 # --- meta resolution --------------------------------------------------------
 
@@ -266,6 +269,20 @@ strip_quotes() {
 # covers scouts and pre-validation ship work, which have no attributed run at
 # all - for them a new commit is the only available evidence of progress.
 #
+# A FAILED read and NO RUN are different answers and must not print the same
+# thing. "No run" is a real, positive observation: a scout, a secondmate, or a
+# ship task that has not started validating genuinely has no run, and the head
+# sha is legitimately the whole fingerprint. "Could not read the run" is the
+# absence of an observation: the bounded no-mistakes call was attempted for a
+# task that could have had a run and answered with nothing (timed out, the CLI
+# is not installed, or only the coarse runs-list status word came back, which
+# carries no step detail). Printing the sha-only form there would make the
+# fingerprint flip between two shapes as the CLI comes and goes, and each flip
+# reads to the caller as forward progress - the exact false negative this
+# mechanism exists to prevent. A degraded read therefore prints the EMPTY
+# fingerprint, which compares equal and escalates. RUN_DEGRADED (set with
+# HAVE_RUN/RUN_SOURCE, below) is that distinction.
+#
 # tests/fm-crew-state.test.sh asserts that two reads of an unchanged run produce
 # byte-identical output. That assertion is the direct guard against a ticking
 # field being reintroduced here, and it must not be dropped.
@@ -293,8 +310,14 @@ nm_active_step_row() {
   '
 }
 
-crew_progress_fingerprint() {
+# Named apart from fm-classify-lib.sh's caller-facing crew_progress_fingerprint
+# <id>, which this script is sourced alongside and which shells back out to this
+# script with --progress. Two incompatible contracts under one name meant the
+# only thing keeping `fm-crew-state.sh <id> --progress` from re-exec'ing itself
+# forever was this definition happening to be declared after that source line.
+compute_progress_fingerprint() {
   local completed='' step='' status='' round='' head='' row rest
+  [ "${RUN_DEGRADED:-0}" = 1 ] && return 0
   if [ "${HAVE_RUN:-0}" = 1 ] && [ "${RUN_SOURCE:-}" = full ]; then
     completed=$(nm_completed_step_count | tr -d '[:space:]')
     case "$completed" in ''|*[!0-9]*) completed='' ;; esac
@@ -558,26 +581,44 @@ HAVE_RUN=0
 # run-step block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
+# RUN_DEGRADED marks "a run lookup was owed for this crew and came back with no
+# usable answer" - as distinct from both "a run was attributed" and "this crew
+# never has a run". Read only by compute_progress_fingerprint, whose header
+# explains why the two no-run cases must not print the same token. The state
+# machine below is unaffected: it already treats HAVE_RUN=0 the same either way,
+# falling back to pane then status log.
+RUN_DEGRADED=0
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
-if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
-  RUN_OUT=$(nm_run axi status)
-  if [ -n "$RUN_OUT" ]; then
-    run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
-      HAVE_RUN=1
+if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ]; then
+  # The one authority on this crew's run not being installed is a non-answer,
+  # not an observation that no run exists.
+  command -v no-mistakes >/dev/null 2>&1 || RUN_DEGRADED=1
+  if [ "$RUN_DEGRADED" = 0 ]; then
+    RUN_OUT=$(nm_run axi status)
+    if [ -z "$RUN_OUT" ]; then
+      # Timed out, or the CLI answered with nothing at all.
+      RUN_DEGRADED=1
     else
-      # The active-or-most-recent run is for another branch, or same branch with
-      # a rewritten/diverged head (the CLI is alive and answered; only the
-      # attribution missed) - try the coarse fallback.
-      # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
-      # primary call means the CLI itself did not respond, so retrying it
-      # immediately with a second bounded call would just double the wait
-      # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
+      run_branch=$(strip_quotes "$(nm_field branch)")
+      if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
         HAVE_RUN=1
-        RUN_SOURCE=coarse
+      else
+        # The active-or-most-recent run is for another branch, or same branch
+        # with a rewritten/diverged head (the CLI is alive and answered; only
+        # the attribution missed) - try the coarse fallback.
+        # Deliberately not attempted when the primary call came back empty: that
+        # means the CLI itself did not respond, so retrying it immediately with a
+        # second bounded call would just double the wait for no better answer.
+        COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
+        if [ -n "$COARSE_STATUS" ]; then
+          HAVE_RUN=1
+          RUN_SOURCE=coarse
+          # A bare status word carries no step detail, so it is a degraded read
+          # for fingerprint purposes even though it is enough for the state
+          # machine below.
+          RUN_DEGRADED=1
+        fi
       fi
     fi
   fi
@@ -588,8 +629,7 @@ fi
 # log read, which is the one genuinely expensive call in this script and has no
 # bearing on whether the run advanced.
 if [ "$MODE" = progress ]; then
-  # shellcheck disable=SC2119 # No arguments: the fingerprint reads resolved globals.
-  crew_progress_fingerprint
+  compute_progress_fingerprint
   exit 0
 fi
 

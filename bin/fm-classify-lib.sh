@@ -403,7 +403,11 @@ crew_is_provably_working() {  # <id>
 # fingerprint leaves a caller's wedge escalation behaving exactly as it did
 # before this existed. That is the safe direction: treating "could not tell" as
 # progress would silence the escalation on a genuinely frozen worker, which is
-# the one failure this whole mechanism exists to keep detectable.
+# the one failure this whole mechanism exists to keep detectable. "Failure" here
+# includes a run read that was owed and did not answer, not just a reader that
+# died - a partially-populated fingerprint would be a distinct non-empty token
+# and would compare UNEQUAL, which is the same false negative wearing a
+# different shape.
 #
 # NOT a pure read - it makes the same bounded no-mistakes call crew_absorb_class
 # does, minus the ci-log read - so callers use it only where the alternative is
