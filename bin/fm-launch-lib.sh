@@ -89,18 +89,16 @@ shell_quote() {
 # interactive primary with exactly the autonomy flags those two arms carry.
 #
 # CONSUMER OBLIGATION (binding, not advisory). The rule, which governs whatever
-# the templates below happen to say: whenever a primary template carries a
-# permission-bypass flag - anything that auto-approves, skips, or pre-allows the
-# permission prompts an interactive session would otherwise raise - a consumer
-# composing that launch MUST surface it to the captain at launch time. One short
-# line at launch or in the menu row is enough. The captain is entitled to know
-# the posture of the session their front door starts. The rule binds by flag, not
-# by the roster below, so an adapter that gains a bypass flag later is covered the
-# day it gains it, and a consumer cannot satisfy the letter of this note while
-# silently shipping a no-prompt session.
+# the templates below happen to say: EVERY primary template here starts a session
+# that runs without permission prompts, and a consumer composing a primary launch
+# MUST surface that to the captain at launch time. One short line at launch or in
+# the menu row is enough. The captain is entitled to know the posture of the
+# session their front door starts. There are no exempt adapters. The rule binds on
+# the posture, not on the presence of a particular flag, so a consumer cannot
+# satisfy the letter of this note while silently shipping a no-prompt session.
 #
-# As of this commit the rule catches four of the six primary templates, each by a
-# different mechanism:
+# All six reach that posture, four by an explicit bypass and the pi family
+# structurally:
 #   claude    --dangerously-skip-permissions
 #   codex     --dangerously-bypass-approvals-and-sandbox
 #   opencode  OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}', which
@@ -108,12 +106,15 @@ shell_quote() {
 #   grok      --always-approve, which .agents/skills/harness-adapters/SKILL.md:304
 #             records as auto-approving every tool execution, verified to run
 #             fully unattended and equivalent to --permission-mode bypassPermissions
-# The pi family (pi and pi-signed, which share one arm) is the sole exception,
-# and its absence here is deliberate rather than an oversight: its primary
-# template is the bare selected binary with only the FM_PI_HARNESS identity
-# marker, which changes no permission posture, so a pi primary still prompts and
-# there is nothing for a consumer to disclose. If that ever changes, the rule
-# above already covers it.
+#   pi        (and pi-signed, which shares its arm) no flag, because none exists
+#             to pass: SKILL.md:272 records that pi has no permission system at
+#             all, so a pi session is autonomous by construction. Its template -
+#             the bare selected binary plus the FM_PI_HARNESS identity marker,
+#             which changes no permission posture - is complete, NOT missing an
+#             autonomy flag its siblings carry - do not add one.
+# Pi's first-run project trust dialog (SKILL.md:276-278) is folder trust, not a
+# permission prompt, and is a separate concern that neither satisfies nor softens
+# this obligation.
 launch_template() {
   local harness=$1 kind=${2:-ship}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
@@ -164,9 +165,12 @@ launch_template() {
         # --approve --no-session --no-context-files --no-extensions with explicit
         # -e paths, but those are that test's isolation scaffolding - it runs
         # against a throwaway clone - not the verified primary form, so they are
-        # deliberately not copied here. --approve is part of that scaffolding, and
-        # leaving it out is why the pi family holds the one primary template the
-        # header's CONSUMER OBLIGATION does not catch: a pi primary still prompts.
+        # deliberately not copied here. This template carries no autonomy flag
+        # because pi has none to carry: SKILL.md:272 records that pi has no
+        # permission system, so the session is autonomous by construction. The
+        # header's CONSUMER OBLIGATION therefore covers this arm like every other -
+        # a pi primary runs without permission prompts too, it just gets there
+        # structurally rather than by a bypass flag. Nothing is missing here.
         # The FM_PI_HARNESS identity marker rides every Pi-family launch, primary
         # included (README.md:104 documents the signed primary as
         # `FM_PI_HARNESS=pi-signed pi-signed`): the selected $harness is both the
