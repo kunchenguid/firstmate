@@ -1,5 +1,6 @@
 import {
   getMarkdownTheme,
+  keyText,
   type ExtensionAPI,
   UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
@@ -81,6 +82,11 @@ export function calmPresentationIsActive(): boolean {
 
 export function calmPresentationHides(itemClass: CalmTranscriptClass): boolean {
   return calm && !stockExportRendering && !calmTranscriptClassIsVisible(itemClass);
+}
+
+export function calmTechnicalFailureText(): string {
+  const revealKey = keyText("app.tools.expand") || "Ctrl+O";
+  return `Technical step failed - ${revealKey} shows evidence.`;
 }
 
 export function registerFirstmateSyntheticPresentation(pi: ExtensionAPI): void {

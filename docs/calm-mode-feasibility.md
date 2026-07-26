@@ -57,7 +57,7 @@ The single-thinking, tool-call-only, tool-result, Calm-off, and `clearOnShrink` 
 PR 927 made Calm persistent and described controlled rows as gapless while retaining a documented unsupported boundary for collapsed-thinking spacing.
 PR 936 removed the unsafe operational-input reroute and preserved legacy zero-height entries but did not change assistant-message layout.
 
-The fix installs one idempotent Pi 0.81.1 through 0.82.0 presentation adapter on the exported `AssistantMessageComponent.updateContent` method.
+The fix installs one idempotent Pi 0.81.1 through 0.82.1 presentation adapter on the exported `AssistantMessageComponent.updateContent` method.
 Only while Calm is active and Pi has collapsed thinking does the adapter pass a shallow thinking-free presentation copy into Pi's ordinary layout calculation, then retain the original message on the component for invalidation and thinking expansion.
 The persisted assistant message, provider context, tool execution, export data, and expansion history remain unchanged.
 Collapsed thinking-only assistant messages now render zero rows, thinking before visible assistant text adds no spacing beyond the text-only baseline, and expanding thinking still renders the original reasoning.
@@ -114,7 +114,7 @@ The real Pi viewport moved the unchanged assistant text from row 7 to row 2, ren
 The leading cause would have been falsified if the row or height remained, the provider lost or duplicated the message, or the persisted role or bytes changed.
 None occurred.
 
-The fix installs a separate idempotent Pi 0.81.1 through 0.82.0 presentation adapter on the exported `InteractiveMode.addMessageToChat` method.
+The fix installs a separate idempotent Pi 0.81.1 through 0.82.1 presentation adapter on the exported `InteractiveMode.addMessageToChat` method.
 It delegates current recognition to `bin/fm-operational-input.sh`, adds only the evidence-backed bare-U+2063 `Supervisor escalate (` presentation compatibility shape, mounts a `UserMessageComponent` subclass that preserves Pi's stock row plus leading spacer while Calm is off, and returns zero rendered lines while Calm is on.
 It never intercepts the input event, rewrites the message, changes its role, filters model context, or changes session data.
 Messages containing an image are left on Pi's ordinary path even when their text equals an operational envelope because Firstmate's authoritative producers are text-only.
@@ -148,7 +148,7 @@ Serialized session data and Pi 0.81.1's sidebar tree also retain legacy hidden o
 The taxonomy was derived from Pi 0.81.1's installed public declarations, documentation, examples, `interactive-mode.js`, and its exported component implementations.
 The test fixture enumerates every class below through the centralized policy, and the interactive fixture exercises the screenshot classes, current user-role operational input, and legacy synthetic presentation entries.
 
-| Policy class | Pi transcript path | Calm result on Pi 0.81.1 through 0.82.0 |
+| Policy class | Pi transcript path | Calm result on Pi 0.81.1 through 0.82.1 |
 | --- | --- | --- |
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including every tested operational near miss. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
@@ -167,12 +167,12 @@ The test fixture enumerates every class below through the centralized policy, an
 | `system-notice` | `showStatus`, `showError`, compaction, retry, and startup warning rows | Unsupported boundary; remains visible. |
 | `cache-notice` | Non-persisted cache-miss `Text` row | Unsupported boundary; remains visible. |
 | `project-trust-warning` | Non-persisted startup `Text` row | Unsupported boundary; remains visible. |
-| `synthetic-user` | Firstmate extension `sendUserMessage`, terminal-injected input, Firstmate-generated Pi positional brief, or the already non-displayed session-start nudge | Canonically classified text-only operational user messages stay ordinary semantic user messages but render through the zero-height Pi 0.81.1 through 0.82.0 adapter under Calm; legacy entries stay gaplessly controllable, and the session-start nudge retains its existing non-displayed custom-message path. |
+| `synthetic-user` | Firstmate extension `sendUserMessage`, terminal-injected input, Firstmate-generated Pi positional brief, or the already non-displayed session-start nudge | Canonically classified text-only operational user messages stay ordinary semantic user messages but render through the zero-height Pi 0.81.1 through 0.82.1 adapter under Calm; legacy entries stay gaplessly controllable, and the session-start nudge retains its existing non-displayed custom-message path. |
 | `synthetic-assistant` | No authoritative Firstmate source found | Policy-hidden, but Pi exposes no generic assistant-role renderer. |
 | `unknown` | Future or unclassified transcript component | Policy-hidden, but no generic renderer exists; never claimed as covered. |
 
 The installed extension API has no supported global transcript filter, user-message renderer, assistant-message renderer, chat-container API, or generic custom-tool wrapper.
-Pi 0.81.1 through 0.82.0 export `AssistantMessageComponent` and `InteractiveMode`, so Calm uses separate version-bounded, idempotent adapters for assistant thinking layout and the complete operational-user transcript row while leaving all message data and non-Calm rendering unchanged.
+Pi 0.81.1 through 0.82.1 export `AssistantMessageComponent` and `InteractiveMode`, so Calm uses separate version-bounded, idempotent adapters for assistant thinking layout and the complete operational-user transcript row while leaving all message data and non-Calm rendering unchanged.
 General component replacement, ANSI cursor erasure, provider-context mutation, and installed-file patching remain rejected as unsupported or preservation-breaking workarounds.
 
 ## Cross-harness verification record
@@ -197,7 +197,7 @@ grok 0.2.106 (bde89716f679)
 | Claude Code 2.1.218 | Not feasible through the inspected supported project surface. | Project hooks can observe lifecycle and tool events, while the plugin CLI packages supported components; neither inspected surface exposes a transcript-row renderer or transcript-wide redraw API. |
 | Codex CLI 0.144.6 | Not feasible through the inspected supported project surface. | The tracked hooks expose session, pre-tool, and stop handling, while the plugin and feature inventories expose no TUI tool-row renderer or transcript redraw control. |
 | OpenCode 1.17.18 | Not feasible without violating the preservation boundary. | Plugins expose events and tool execution hooks, not a built-in transcript-row renderer; same-name tool replacement changes execution rather than presentation alone. |
-| Pi 0.81.1 through 0.82.0 | Partially feasible with two version-bounded exported-class adapters. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, and expansion redraws; exported assistant and interactive-mode classes provide the version-pinned collapsed-thinking and operational-user layout boundaries, while generic user, tool, and status filtering remains unavailable. |
+| Pi 0.81.1 through 0.82.1 | Partially feasible with two version-bounded exported-class adapters. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, and expansion redraws; exported assistant and interactive-mode classes provide the version-pinned collapsed-thinking and operational-user layout boundaries, while generic user, tool, and status filtering remains unavailable. |
 | Grok CLI 0.2.106 | Not feasible through the inspected supported project surface. | Project hooks expose lifecycle and tool interception, while the plugin CLI exposes no row-renderer contract; `--minimal` changes the whole screen mode rather than selected transcript rows. |
 
 These conclusions are deliberately limited to the named versions and supported surfaces.
@@ -276,4 +276,62 @@ ok - Pi calm native E2E keeps Working and captain turns visible, hides exact ope
 
 $ tests/fm-pi-primary-types.test.sh
 ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.81.1
+```
+
+## 2026-07-26 Pi 0.82.1 and static presentation verification
+
+Pi 0.82.1 preserved the two version-bounded layout seams, all seven built-in renderer slots, watcher rendering, expansion redraw, native working activity, operational-input semantics, and stock export evidence.
+The compatibility review read the installed Pi 0.82.1 README plus `docs/extensions.md`, `docs/tui.md`, `docs/themes.md`, `docs/settings.md`, `docs/keybindings.md`, `docs/session-format.md`, and `docs/packages.md` completely, then inspected the directly relevant built-in renderer, minimal-mode, message, entry, working-indicator, hidden-thinking, question, todo, override, and theme examples.
+The compatibility preflight now certifies every required surface before registering any override; an uncertified version or missing seam registers no Calm tool renderer and warns once that stock rendering is active.
+The deterministic native TUI run covered 80, 100, and 160 columns, absent-default on, explicit off, successful collapsed rows, complete stock `Ctrl+O` expansion, re-collapse without session mutation, thinking expansion, restart, and export.
+The focused component run additionally covered collapsed built-in and watcher errors, each with one text failure message and reveal-key hint before complete stock expansion.
+
+```text
+$ pi --version
+0.82.1
+
+$ FM_PI_PACKAGE_DIR="$HOME/.local/lib/node_modules/@earendil-works/pi-coding-agent" tests/fm-calm-pi-extension.test.sh
+ok - Pi calm extension is presentation-only with one persisted visibility choice, no Calm status row, native working visibility, supported redraw controls, and the Firstmate watcher-tool integration
+ok - Pi calm resolves its persistent home independently of Pi's launch directory
+ok - Pi 0.82.1 is explicitly certified and unsupported or missing renderer surfaces fall back atomically to stock rendering
+ok - Pi calm centralizes transcript visibility, preserves execution/export data, keeps native working visible, and persists its choice across session starts
+ok - Pi operational follow-up E2E processes exact user-role notifications once while Calm on and the absent default hide current and adjacent rows, explicit off renders them, and restart preserves semantics
+ok - Pi Calm native /skill:ahoy geometry keeps collapsed thinking and successful tools at zero height across 80, 100, and 160 columns while Ctrl+O restores stock evidence without re-execution
+ok - Pi Calm native E2E keeps Working and captain turns visible, honors explicit off, hides exact operational rows when enabled, survives restart, and preserves export evidence
+
+$ PATH="$PWD/.no-mistakes/toolchain/typescript/node_modules/.bin:$PATH" FM_PI_PACKAGE_DIR="$HOME/.local/lib/node_modules/@earendil-works/pi-coding-agent" tests/fm-pi-primary-types.test.sh
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.82.1
+
+$ tests/fm-present-report.test.sh
+ok - Markdown presentation is escaped, accessible, timestamped, local-only, and does not open unsolicited tabs
+ok - Bearings renders every all-current worker, secondmate, decision, completion, and gate exactly once with timestamp and omissions
+ok - only explicit --open launches a local page and opener failure falls back without blocking
+ok - rendering failure leaves no partial page and falls back to canonical Markdown
+```
+
+The static-page browser pass used `chrome-devtools-axi` against direct `file://` report and Bearings pages at desktop, a requested 375 by 812 narrow viewport, keyboard-only focus traversal, native disclosure activation, and CSS zoom 2.
+The browser bridge enforces a 500-pixel minimum inner width; at that width and zoom 2, both pages reported zero document overflow, one H1, no script elements, no refresh metadata, and only the single local file request.
+Keyboard traversal focused the skip link first and the omissions summary second, and Enter exposed the complete omission list.
+
+```text
+$ chrome-devtools-axi eval '({title:document.title,lang:document.documentElement.lang,main:!!document.querySelector("main"),observed:document.querySelector("time")?.dateTime,headings:[...document.querySelectorAll("h1,h2")].map(x=>x.textContent),records:document.querySelectorAll("[data-record-id]").length,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,refresh:!!document.querySelector("meta[http-equiv=refresh]")})'
+{"title":"Fleet bearings","lang":"en","main":true,"observed":"2026-07-26T16:00:00Z","headings":["Fleet bearings","Captain's Call","Recently Landed","Underway","Charted Next"],"records":6,"overflow":0,"refresh":false}
+
+$ chrome-devtools-axi press Tab
+$ chrome-devtools-axi eval '({tag:document.activeElement.tagName,text:document.activeElement.textContent.trim()})'
+{"tag":"A","text":"Skip to report"}
+
+$ chrome-devtools-axi press Tab
+$ chrome-devtools-axi press Enter
+$ chrome-devtools-axi eval '({tag:document.activeElement.tagName,expanded:document.activeElement.parentElement.open,omissions:document.activeElement.parentElement.textContent.includes("live PR discovery")})'
+{"tag":"SUMMARY","expanded":true,"omissions":true}
+
+$ chrome-devtools-axi eval '() => { document.body.style.zoom="2"; return {h1:document.querySelectorAll("h1").length,regions:document.querySelectorAll("main section[aria-labelledby]").length,records:document.querySelectorAll("[data-record-id]").length,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,zoom:getComputedStyle(document.body).zoom,refresh:!!document.querySelector("meta[http-equiv=refresh]")}; }'
+{"h1":1,"regions":4,"records":6,"overflow":0,"zoom":"2","refresh":false}
+
+$ chrome-devtools-axi network
+GET file:///.../.lavish/bearings-20260726T161600Z.html [200]
+
+$ node "$HOME/.agents/skills/impeccable/scripts/detect.mjs" --json bin/fm-present-report.sh
+[]
 ```

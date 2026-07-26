@@ -1,26 +1,33 @@
 # Pi Calm mode
 
-Calm is a Pi-only conversation presentation toggle.
-It is off by default, and the last `/calm` choice persists for the effective Firstmate home across Pi session starts and resumes.
+Calm is a Pi-only conversation presentation preference.
+On a certified Pi version, Calm is on when `config/calm` is absent, while an explicit `off` preference always wins and persists across session starts and resumes.
+Use `/calm on`, `/calm off`, or `/calm status`; bare `/calm` remains a backward-compatible toggle.
 
 While Calm is active, Pi's built-in `Working...` activity remains visible and no separate Calm status row is added.
-Calm hides collapsed thinking labels, the shells for Pi's seven built-in tools, the `fm_watch_arm_pi` tool shell, and canonically classified Firstmate operational user rows.
-The operational inputs remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
+When Pi's tool display is collapsed, successful rows for Pi's seven built-in tools and `fm_watch_arm_pi` occupy zero lines.
+Pi's standard `Ctrl+O` restores those known tools' complete stock call and result rendering in place without re-execution, and a second `Ctrl+O` collapses them again without losing data.
+A collapsed known-tool error keeps one concise text-labeled failure message with the configured reveal-key hint, while expansion shows its complete stock evidence.
+Collapsed thinking labels, canonically classified Firstmate operational user rows, and legacy synthetic presentation entries remain zero-height at their separately certified presentation seams.
+Pi's `Ctrl+T` reasoning expansion remains independent from tool expansion.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
 Calm changes presentation only.
 Tool execution, input delivery, ordering, model context, session storage, diagnostics, and `/export` and `/share` operation remain unchanged.
-Every hidden Firstmate input remains available to the model and in serialized session data and exported artifacts.
+Every hidden Firstmate input and tool result remains available to the model, serialized session data, and exported artifacts.
 Legacy operational custom messages remain in session data and Pi's sidebar tree, although the main HTML transcript may omit them.
-Toggling Calm off restores ordinary rendering, and `Ctrl+O` expansion state is preserved.
+`/calm off` restores ordinary stock rendering.
+
+The extension certifies the installed Pi version and every required renderer seam before applying any Calm override.
+An unsupported version or missing seam receives no partial Calm behavior, keeps stock rendering, and shows one actionable compatibility warning.
 
 Pi's supported presentation API does not expose a global transcript filter.
-Expanded reasoning and its reserved spacing, built-in tool images, user-bash rows, skill and summary rows, generic status notices, and arbitrary custom-tool or extension rows remain visible.
+Expanded reasoning, built-in tool images, user-bash rows, skill and summary rows, generic status notices, and arbitrary custom-tool or extension rows remain visible.
 These are supported-API boundaries rather than hidden-content failures.
 
 [`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy and empirical evidence.
 [`configuration.md`](configuration.md#pi-calm-preference-configcalm) owns the persisted preference file and resolution rules.
-`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, and `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter.
+`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility and collapsed-failure policy, and `.pi/extensions/lib/fm-calm-compatibility.ts` owns the certified Pi matrix and required surface result.
 
 Regression entry points:
 

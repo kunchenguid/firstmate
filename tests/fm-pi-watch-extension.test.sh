@@ -30,6 +30,7 @@ install_pi_watch_extension_fixture() {
 JSON
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/index.js" <<'JS'
 export function getMarkdownTheme() { return {}; }
+export function keyText(_key, label) { return label; }
 export class UserMessageComponent {
   render() { return []; }
   invalidate() {}

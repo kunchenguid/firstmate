@@ -11,17 +11,17 @@ metadata:
 Generate a complete standalone snapshot from the fleet's current state, so the captain can resume in one read after a break, a night, or a context reset.
 The deliverable is a dated markdown file plus a concise chat summary that each stand on the current snapshot rather than an earlier report.
 This skill is read-mostly.
-It reads fleet state and writes exactly one report file.
+It reads fleet state, writes one canonical Markdown report, and may create one derived snapshot plus one static HTML page under `.lavish/` only for an explicit `/bearings` or explicit show/open request.
 It never tears down a task, merges a PR, dispatches new work, or mutates any task state as a side effect of producing the brief - those belong to the captain's explicit word and the normal task lifecycle.
 
 ## What it does
 
-1. **Gather live fleet state with one deterministic command.**
-   Run `bin/fm-bearings-snapshot.sh` and read its compact output.
-   It is the single bounded, deterministic source for this report and renders TOON by default.
+1. **Gather live fleet state once with the complete current-view flags.**
+   Run `bin/fm-bearings-snapshot.sh --json --all-in-flight --all-decisions --all-secondmates --all-queued --all-unhealthy` and use that single JSON result for the Markdown report, chat digest, and any browser projection.
+   This command is the bounded deterministic source for the report; the all-current flags remove current worker, decision, secondmate, gate, and unhealthy-endpoint projection caps while historical surfaces remain bounded and disclosed.
    Do not hand-probe the snapshot schema and do not make ad-hoc `gh-axi`/`gh` calls to assemble fleet facts; this command already assembles them.
    The command's header and `--help` output own its exact fields, bounds, opt-ins, and output contract.
-   When the captain asks to include PRs, use the command's live-PR opt-in; otherwise keep the default local-only read.
+   When the captain asks to include PRs, add the command's live-PR opt-in; otherwise keep the local-only read.
    If the command is unavailable, fall back to `bin/fm-fleet-snapshot.sh --json` and `bin/fm-crew-state.sh <id>`; never infer current state from a raw `tail` of `state/<id>.status`, which is append-only wake-event history whose last line goes stale.
    For registered secondmates, use the snapshot's structured-home classification and provenance; a parent event or bounded terminal contradiction is fallback evidence, never authority over readable structured home state.
    Structured captain-held decisions come from `decision-hold-lifecycle` and appear under `decisions_open`; do not scrape reports or visual-review artifacts to supplement them.
@@ -38,12 +38,14 @@ It never tears down a task, merges a PR, dispatches new work, or mutates any tas
    - **Underway** - each live direct report making progress, with its current state, and the plans / main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
    - **Charted Next** - queued or gated work, including any main-inventory integrity warning, with each item's blocker, date, or integrity reason.
 
-3. **Write the dated report file so it persists, then surface the mandatory four-section digest in chat.**
+3. **Write the dated report file, optionally project the same snapshot, then surface the mandatory four-section digest in chat.**
    - Write the full report to `data/status-report-<YYYY-MM-DD>.md` using today's date.
      This is the required artifact; it lives in gitignored `data/`.
      If today's file already exists, delete it first, then create a new file from scratch.
+   - Only when the captain's current request explicitly invokes `/bearings` or explicitly asks to show/open the overview, save the exact gathered JSON under the effective home's `.lavish/`, load `report-presentation`, and use its Bearings path to create and open the static page.
+     When another skill falls back to Bearings, or the request asks only for a text status report, do not render or open a browser page.
    - The chat response is the concise four-section digest defined by the contract below: materially shorter than the report file, complete as a current snapshot, internally consistent with the file, and linked to that file for the full picture.
-   - For a richer review surface, optionally offer a Lavish board with `lavish-axi` when the report has enough structure to deserve one, but the markdown file is the required artifact and the four-section chat digest is the required minimum.
+   - If browser presentation falls back, mention the canonical Markdown path within the normal concise digest without adding a fifth section or treating the report as failed.
 
 ## Chat-response contract
 
@@ -79,5 +81,6 @@ Rules that keep the contract unambiguous:
 ## Supervision discipline
 
 This skill is read-mostly and changes no fleet state.
-Do not tear down a task, merge a PR, dispatch queued work, or mutate any `state/` or `data/` file other than the single report file as a side effect of generating the brief.
+Do not tear down a task, merge a PR, dispatch queued work, or mutate any `state/` or `data/` file other than the single canonical report as a side effect of generating the brief.
+The explicit browser path may write only its derived JSON and HTML artifacts under `.lavish/` through `report-presentation`.
 If the state you read suggests an action - a PR ready to merge, a queued item whose gate has arrived, or a needs-decision finding - name it in its section and leave the action to the normal lifecycle and configured authority rather than taking it from inside this skill.

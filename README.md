@@ -104,9 +104,11 @@ pi
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
-Pi's `/calm` toggle hides supported transcript chrome, including canonically classified Firstmate operational user rows, while retaining native working activity and all model context and session data.
+On certified Pi versions, Calm defaults on when no preference exists; `/calm on`, `/calm off`, and `/calm status` manage the home-local choice, while bare `/calm` still toggles it.
+Collapsed successful known-tool rows occupy zero lines, `Ctrl+O` restores their complete stock evidence, and collapsed failures retain one concise reveal hint.
+Calm also hides supported transcript chrome, including canonically classified Firstmate operational user rows, while retaining native working activity and all model context and session data.
 The hidden operational inputs remain ordinary user-role messages with unchanged delivery, ordering, authority, persistence, and exports.
-The preference persists for the effective Firstmate home, and toggling it off restores ordinary rendering.
+An explicit off restores ordinary rendering, while an uncertified Pi renderer stays entirely stock and warns once.
 [Calm's current behavior and supported limits](docs/calm.md) are separate from its [version-scoped maintainer evidence](docs/calm-mode-feasibility.md).
 
 ### Talk to it
@@ -169,9 +171,11 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine notifications in bash, escalates captain-relevant events and bounded declared-external-wait rechecks as batched digests, and actively alerts if delivery gets stuck while you step away |
 | `/ahoy`            | Recap visible session events since the prior real captain message plus visibly unanswered captain decisions, falling back to Bearings when invoked as the session's first real captain message |
-| `/bearings`        | Generate a standalone current-status report from bounded local fleet and registered-secondmate state, with live PR enrichment only when requested, written to a dated file in `data/` and surfaced concisely in chat; read-mostly, mutates no task state |
+| `/bearings`        | Generate a standalone current-status report from all current local fleet and registered-secondmate state, keep canonical Markdown in `data/`, open a timestamped static local browser page from the same snapshot, and surface the four-section digest in chat; live PR enrichment remains opt-in |
 | `/updatefirstmate` | Self-update the running firstmate and its secondmates to the latest from origin with fast-forward-only pulls, then re-read instructions and nudge secondmates |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, route each finding to its disk home per AGENTS.md, file undone next steps to the backlog, and report what is now safe to reset |
+
+An explicit request to show or open a completed Markdown report creates an accessible timestamped static reading page under the local `.lavish/` directory; rendering or browser failure leaves Markdown as the non-blocking fallback, and background completions never open tabs.
 
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
 

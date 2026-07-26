@@ -1,9 +1,9 @@
 // Firstmate's home-persistent Pi transcript presentation toggle.
 //
-// Compatibility boundary: Pi 0.81.1 and 0.82.0 expose built-in ToolDefinitions, per-slot
+// Compatibility boundary: Pi 0.81.1 through 0.82.1 expose built-in ToolDefinitions, per-slot
 // renderers, renderShell: "self", session_start replacement reasons,
 // ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), and
-// setHiddenThinkingLabel(). The focused tests pin those assumptions. Version-bounded
+// setHiddenThinkingLabel(). A preflight certifies those assumptions before any override. Version-bounded
 // presentation adapters cover collapsed assistant thinking and operational user rows;
 // Pi still exposes no global renderer for arbitrary built-in or custom rows.
 // docs/configuration.md owns the home-local Calm preference contract.
@@ -19,10 +19,12 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
   ExtensionAPI,
+  ExtensionContext,
   ToolDefinition,
   ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
 import {
+  AssistantMessageComponent,
   createBashToolDefinition,
   createEditToolDefinition,
   createFindToolDefinition,
@@ -30,14 +32,18 @@ import {
   createLsToolDefinition,
   createReadToolDefinition,
   createWriteToolDefinition,
+  InteractiveMode,
+  VERSION,
 } from "@earendil-works/pi-coding-agent";
-import { Box, Container, getKeybindings, type Component } from "@earendil-works/pi-tui";
+import { Box, Container, getKeybindings, Text, type Component } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
 import { installCalmAssistantLayout } from "./lib/fm-calm-assistant-layout.ts";
+import { calmCompatibilityFailure } from "./lib/fm-calm-compatibility.ts";
 import { installCalmOperationalUserLayout } from "./lib/fm-calm-operational-user-layout.ts";
 import {
   calmPresentationHides,
   calmPresentationIsActive,
+  calmTechnicalFailureText,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
   registerFirstmateSyntheticPresentation,
   setCalmPresentation,
@@ -75,8 +81,38 @@ const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
 
 export default function (pi: ExtensionAPI) {
-  installCalmAssistantLayout();
-  installCalmOperationalUserLayout();
+  const builtInFactories = [
+    createReadToolDefinition,
+    createBashToolDefinition,
+    createEditToolDefinition,
+    createWriteToolDefinition,
+    createGrepToolDefinition,
+    createFindToolDefinition,
+    createLsToolDefinition,
+  ] as const;
+  const builtInRenderers: string[] = [];
+  for (const factory of builtInFactories) {
+    try {
+      const definition = factory(process.cwd());
+      if (definition.renderCall && definition.renderResult) builtInRenderers.push(definition.name);
+    } catch {
+      // The compatibility result below owns the actionable stock-rendering fallback.
+    }
+  }
+  const interactivePrototype = InteractiveMode.prototype as unknown as { addMessageToChat?: unknown };
+  let compatibilityFailure = calmCompatibilityFailure(VERSION, {
+    assistantLayout: typeof AssistantMessageComponent.prototype.updateContent === "function",
+    operationalUserLayout: typeof interactivePrototype.addMessageToChat === "function",
+    builtInRenderers,
+  });
+  if (!compatibilityFailure) {
+    try {
+      installCalmAssistantLayout();
+      installCalmOperationalUserLayout();
+    } catch (error) {
+      compatibilityFailure = error instanceof Error ? error.message : String(error);
+    }
+  }
 
   let exportRendering = false;
   let removeTerminalInputHandler: (() => void) | undefined;
@@ -86,9 +122,12 @@ export default function (pi: ExtensionAPI) {
   const calmPreferencePath = resolve(configDirectory, "calm");
   const loadCalmPreference = (): boolean => {
     try {
-      return readFileSync(calmPreferencePath, "utf8").trim() === "on";
-    } catch {
+      const preference = readFileSync(calmPreferencePath, "utf8").trim();
+      if (preference === "on") return true;
+      if (preference === "off") return false;
       return false;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT";
     }
   };
   const persistCalmPreference = (active: boolean): void => {
@@ -112,6 +151,29 @@ export default function (pi: ExtensionAPI) {
       stockExportRendering: exportRendering,
     });
   };
+
+  if (compatibilityFailure) {
+    const warning = `Firstmate Calm is disabled for Pi ${VERSION}: ${compatibilityFailure}; stock rendering is active. Update Firstmate before enabling Calm.`;
+    let warned = false;
+    setCalmPresentation(false);
+    setCalmStockExportRendering(false);
+    pi.on("session_start", (_event, ctx) => {
+      ctx.ui.setWorkingVisible(true);
+      ctx.ui.setHiddenThinkingLabel(undefined);
+      ctx.ui.setStatus("firstmate-calm", undefined);
+      if (!warned) {
+        warned = true;
+        ctx.ui.notify(warning, "warning");
+      }
+    });
+    pi.registerCommand("calm", {
+      description: "Set, clear, inspect, or toggle Firstmate's supported conversation presentation.",
+      handler: async (_args, ctx) => {
+        ctx.ui.notify(warning, "warning");
+      },
+    });
+    return;
+  }
 
   registerFirstmateSyntheticPresentation(pi);
 
@@ -169,7 +231,7 @@ export default function (pi: ExtensionAPI) {
       return shell;
     };
 
-    pi.registerTool({
+    const wrapped: ToolDefinition<TParams, TDetails, TState> = {
       ...original,
       renderShell: "self",
 
@@ -183,7 +245,7 @@ export default function (pi: ExtensionAPI) {
         context: RenderContext<TParams, TDetails, TState>,
       ) {
         if (exportRendering) return originalRenderCall(args, theme, context);
-        if (calmPresentationHides("assistant-tool-call")) return new Container();
+        if (calmPresentationHides("assistant-tool-call") && !context.expanded) return new Container();
         if (originalSelfShell) return originalRenderCall(args, theme, context);
 
         const state = shellStateFor(context);
@@ -201,7 +263,16 @@ export default function (pi: ExtensionAPI) {
         context: RenderContext<TParams, TDetails, TState>,
       ) {
         if (exportRendering) return originalRenderResult(result, options, theme, context);
-        if (calmPresentationHides("tool-result")) return new Container();
+        if (calmPresentationHides("tool-result") && !options.expanded) {
+          if (context.isError) {
+            return new Text(
+              theme.fg("error", calmTechnicalFailureText()),
+              0,
+              0,
+            );
+          }
+          return new Container();
+        }
         if (originalSelfShell) return originalRenderResult(result, options, theme, context);
 
         const state = shellStateFor(context);
@@ -212,7 +283,8 @@ export default function (pi: ExtensionAPI) {
         refreshStandardShell(state, theme, context);
         return new Container();
       },
-    });
+    };
+    pi.registerTool(wrapped);
   }
 
   registerBuiltIn(createReadToolDefinition);
@@ -223,17 +295,27 @@ export default function (pi: ExtensionAPI) {
   registerBuiltIn(createFindToolDefinition);
   registerBuiltIn(createLsToolDefinition);
 
-  pi.on("session_start", (_event, ctx) => {
-    exportRendering = false;
-    setCalmPresentation(loadCalmPreference());
-    setCalmStockExportRendering(false);
+  const applyCalmPresentation = (
+    active: boolean,
+    ctx: ExtensionContext,
+  ): void => {
+    setCalmPresentation(active);
     publishPresentationState();
     ctx.ui.setWorkingVisible(true);
-    ctx.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
+    ctx.ui.setHiddenThinkingLabel(active ? "" : undefined);
     ctx.ui.setStatus("firstmate-calm", undefined);
+    const expanded = ctx.ui.getToolsExpanded();
+    ctx.ui.setToolsExpanded(!expanded);
+    ctx.ui.setToolsExpanded(expanded);
+  };
+
+  pi.on("session_start", (_event, ctx) => {
+    exportRendering = false;
+    setCalmStockExportRendering(false);
+    applyCalmPresentation(loadCalmPreference(), ctx);
     removeTerminalInputHandler?.();
     removeTerminalInputHandler = ctx.ui.onTerminalInput((data) => {
-      if (!getKeybindings().matches(data, "tui.input.submit")) return;
+      if (!getKeybindings().matches(data, "tui.input.submit")) return undefined;
 
       const input = ctx.ui.getEditorText().trim();
       if (
@@ -241,7 +323,7 @@ export default function (pi: ExtensionAPI) {
         input !== "/export" &&
         !input.startsWith("/export ")
       ) {
-        return;
+        return undefined;
       }
 
       exportRendering = true;
@@ -255,23 +337,25 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setToolsExpanded(!expanded);
         ctx.ui.setToolsExpanded(expanded);
       }, 0);
+      return undefined;
     });
   });
 
   pi.registerCommand("calm", {
-    description: "Toggle Firstmate's supported conversation-only transcript presentation.",
-    handler: async (_args, ctx) => {
-      const active = !calmPresentationIsActive();
+    description: "Set, clear, inspect, or toggle Firstmate's supported conversation presentation.",
+    handler: async (args, ctx) => {
+      const action = args.trim().toLowerCase();
+      if (action === "status") {
+        ctx.ui.notify(`Calm is ${calmPresentationIsActive() ? "on" : "off"}.`, "info");
+        return;
+      }
+      if (action && action !== "on" && action !== "off") {
+        ctx.ui.notify("Usage: /calm [on|off|status]", "error");
+        return;
+      }
+      const active = action === "on" || (action === "" && !calmPresentationIsActive());
       persistCalmPreference(active);
-      setCalmPresentation(active);
-      publishPresentationState();
-      ctx.ui.setWorkingVisible(true);
-      ctx.ui.setHiddenThinkingLabel(active ? "" : undefined);
-      ctx.ui.setStatus("firstmate-calm", undefined);
-
-      const expanded = ctx.ui.getToolsExpanded();
-      ctx.ui.setToolsExpanded(!expanded);
-      ctx.ui.setToolsExpanded(expanded);
+      applyCalmPresentation(active, ctx);
     },
   });
 }

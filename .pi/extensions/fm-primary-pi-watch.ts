@@ -9,6 +9,7 @@ import { Box, Container, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
   type CalmPresentationState,
+  calmTechnicalFailureText,
   calmTranscriptClassIsVisible,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
 } from "./lib/fm-calm-visibility.ts";
@@ -433,7 +434,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({}),
     renderShell: "self",
     renderCall: (_args, theme, context) => {
-      if (calmHides("assistant-tool-call")) return new Container();
+      if (calmHides("assistant-tool-call") && !context.expanded) return new Container();
       if (calmPresentation.stockExportRendering) {
         return new Text(theme.fg("toolTitle", theme.bold("fm_watch_arm_pi")), 0, 0);
       }
@@ -441,8 +442,17 @@ export default function (pi: ExtensionAPI) {
       state.call = new Text(theme.fg("toolTitle", theme.bold("fm_watch_arm_pi")), 0, 0);
       return refreshWatchToolShell(state, theme, context);
     },
-    renderResult: (result, _options, theme, context) => {
-      if (calmHides("tool-result")) return new Container();
+    renderResult: (result, options, theme, context) => {
+      if (calmHides("tool-result") && !options.expanded) {
+        if (context.isError) {
+          return new Text(
+            theme.fg("error", calmTechnicalFailureText()),
+            0,
+            0,
+          );
+        }
+        return new Container();
+      }
       const output = result.content
         .filter((item) => item.type === "text")
         .map((item) => item.text)

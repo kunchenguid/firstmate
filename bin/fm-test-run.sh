@@ -124,7 +124,7 @@ family_for_basename() {
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-kimi-harness.test.sh|fm-herdr-lab.test.sh|fm-instruction-owners.test.sh|fm-lint.test.sh|\
     fm-install-herdr.test.sh|fm-nm-test-contract.test.sh|fm-no-mistakes-ownership.test.sh|\
-    fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
+    fm-operational-input.test.sh|fm-pi-primary-types.test.sh|fm-present-report.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|fm-stow-contract.test.sh|\
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-tmux-submit-busy.test.sh|fm-transition-lib.test.sh|\
@@ -676,6 +676,9 @@ families_for_changed_path() {
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings
       ;;
+    bin/fm-present-report.sh)
+      printf '%s\n' pure-contract-unit
+      ;;
     bin/fm-install-herdr.sh|bin/fm-install-treehouse.sh|bin/fm-herdr-ci-cleanup.sh)
       printf '%s\n' pure-contract-unit
       # Pin or cleanup changes also select the real-Herdr family so the required
@@ -688,6 +691,10 @@ families_for_changed_path() {
     bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
     bin/fm-primary-scope-lib.sh|bin/fm-project-mode.sh|bin/fm-promote.sh|\
     bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)
+      printf '%s\n' pure-contract-unit
+      ;;
+    .agents/skills/bearings/SKILL.md)
+      printf '%s\n' snapshot-bearings
       printf '%s\n' pure-contract-unit
       ;;
     .agents/skills/*/SKILL.md)

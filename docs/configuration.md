@@ -26,9 +26,12 @@ Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, whil
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
-The only values it writes are `on` and `off`, each followed by one newline; an absent, unreadable, or unrecognized value defaults to off.
-The `/calm` command replaces the file atomically before changing live presentation, so a failed write leaves the current choice unchanged rather than claiming persistence.
+The only values it writes are `on` and `off`, each followed by one newline.
+On a certified Pi version, an absent file defaults to on without creating the file, an explicit `off` always wins, and an unreadable or unrecognized value keeps stock rendering.
+`/calm on` and `/calm off` replace the file atomically before changing live presentation, so a failed write leaves the current choice unchanged rather than claiming persistence.
+`/calm status` reports the effective choice without writing, and bare `/calm` remains a backward-compatible toggle.
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
+If the installed Pi version or required renderer surface is not certified, Calm applies no presentation override and warns once that stock rendering is active.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
