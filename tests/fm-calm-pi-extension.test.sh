@@ -890,6 +890,11 @@ if (JSON.stringify(watchActual.render(100)) !== JSON.stringify(watchBaseline.ren
   throw new Error("Firstmate watcher tool changed stock rendering while Calm was off");
 }
 
+const technicalFailureResult = {
+  content: [{ type: "text", text: "CALM_TECHNICAL_FAILURE_RAW_EVIDENCE" }],
+  details: { ok: false, message: "CALM_TECHNICAL_FAILURE_RAW_EVIDENCE" },
+  isError: true,
+};
 function completedErrorRow(name, id, args, definition) {
   const row = new ToolExecutionComponent(
     name,
@@ -902,11 +907,7 @@ function completedErrorRow(name, id, args, definition) {
   );
   row.markExecutionStarted();
   row.setArgsComplete();
-  row.updateResult({
-    content: [{ type: "text", text: "CALM_TECHNICAL_FAILURE_RAW_EVIDENCE" }],
-    details: { ok: false, message: "CALM_TECHNICAL_FAILURE_RAW_EVIDENCE" },
-    isError: true,
-  });
+  row.updateResult(technicalFailureResult);
   return row;
 }
 const bashTool = tools.find((tool) => tool.name === "bash");
@@ -923,6 +924,12 @@ if (JSON.stringify(errorActual.render(100)) !== JSON.stringify(errorBaseline.ren
 }
 if (JSON.stringify(watchErrorActual.render(100)) !== JSON.stringify(watchErrorBaseline.render(100))) {
   throw new Error("watcher technical error changed stock rendering while Calm was off");
+}
+if (
+  !errorActual.render(100).join("\n").includes("CALM_TECHNICAL_FAILURE_RAW_EVIDENCE") ||
+  !watchErrorActual.render(100).join("\n").includes("CALM_TECHNICAL_FAILURE_RAW_EVIDENCE")
+) {
+  throw new Error("Calm-off stock technical errors no longer retain complete error evidence");
 }
 
 const customDefinition = {
@@ -1216,15 +1223,28 @@ for (const { name, actual } of rows) {
     throw new Error(`${name} was not hidden before export rendering`);
   }
 }
-for (const [label, row] of [["built-in", errorActual], ["watcher", watchErrorActual]]) {
+for (const [label, row, definition] of [
+  ["built-in", errorActual, bashTool],
+  ["watcher", watchErrorActual, watchTool],
+]) {
+  const expectedHint = visibility.calmTechnicalFailureText();
+  const hintColorRequests = [];
+  definition.renderResult(
+    technicalFailureResult,
+    { expanded: false },
+    { fg: (color, text) => { hintColorRequests.push({ color, text }); return text; } },
+    { isError: true },
+  );
   const collapsedFailure = row.render(100);
   if (
     collapsedFailure.filter((line) => line !== "").length !== 1 ||
-    !collapsedFailure.join("\n").includes("Technical step failed") ||
-    !collapsedFailure.join("\n").includes("shows evidence") ||
-    collapsedFailure.join("\n").includes("CALM_TECHNICAL_FAILURE_RAW_EVIDENCE")
+    !collapsedFailure.join("\n").includes(expectedHint) ||
+    collapsedFailure.join("\n").includes("CALM_TECHNICAL_FAILURE_RAW_EVIDENCE") ||
+    hintColorRequests.length !== 1 ||
+    hintColorRequests[0].color !== "dim" ||
+    hintColorRequests.some(({ color }) => color === "error")
   ) {
-    throw new Error(`${label} collapsed failure did not retain exactly one concise reveal hint: ${JSON.stringify(collapsedFailure)}`);
+    throw new Error(`${label} collapsed failure did not retain exactly one dim concise reveal hint: ${JSON.stringify({ collapsedFailure, hintColorRequests })}`);
   }
 }
 for (const { baseline } of rows) baseline.setExpanded(true);

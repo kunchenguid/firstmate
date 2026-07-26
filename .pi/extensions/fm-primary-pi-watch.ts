@@ -446,7 +446,7 @@ export default function (pi: ExtensionAPI) {
       if (calmHides("tool-result") && !options.expanded) {
         if (context.isError) {
           return new Text(
-            theme.fg("error", calmTechnicalFailureText()),
+            theme.fg("dim", calmTechnicalFailureText()),
             0,
             0,
           );
