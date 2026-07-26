@@ -65,6 +65,7 @@ test_ship_modes_generate_clean_briefs() {
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
     assert_grep "# Definition of done" "$brief" "$id: brief missing Definition of done section"
+    assert_grep "Never add an agent name as a commit co-author." "$brief" "$id: brief missing the no-agent-co-author rule"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
@@ -370,6 +371,7 @@ test_scout_and_secondmate_scaffold() {
   brief="$BRIEF_HOME/data/brief-scout-q6/brief.md"
   assert_present "$brief" "scout brief was not scaffolded"
   assert_grep "SCOUT task" "$brief" "scout brief must declare itself a scout task"
+  assert_grep "Never add an agent name as a commit co-author." "$brief" "scout brief must carry the no-agent-co-author rule"
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
@@ -377,6 +379,7 @@ test_scout_and_secondmate_scaffold() {
     || fail "fm-brief.sh secondmate scaffold exited non-zero"
   brief="$BRIEF_HOME/data/brief-sm-q6/brief.md"
   assert_present "$brief" "secondmate charter was not scaffolded"
+  assert_grep "Never add an agent name as a commit co-author." "$brief" "secondmate charter must carry the no-agent-co-author rule"
   assert_grep "persistent second mate" "$brief" \
     "secondmate charter must declare its role"
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
