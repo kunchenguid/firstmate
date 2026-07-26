@@ -28,6 +28,9 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 . "$LAUNCH_LIB"
 
 HARNESSES=(claude codex opencode pi grok kimi)
+# The harnesses README.md:61 lists as verified for a PRIMARY session. kimi is
+# deliberately absent, so launch_template refuses it for kind=primary.
+PRIMARY_HARNESSES=(claude codex opencode pi grok)
 
 # assert_template <kind> <harness> <expected>
 assert_template() {
@@ -82,19 +85,87 @@ test_secondmate_templates_are_pinned() {
 
 # --- the primary kind -------------------------------------------------------
 
-test_primary_templates_are_pinned() {
+# Each primary shape gets its own test naming the evidence that fixes its flags,
+# so an edit that drops a load-bearing flag fails here rather than reaching a
+# reviewer. A primary template is NOT the crewmate command minus its brief; it is
+# whatever this repo empirically verified for a briefless PRIMARY launch.
+
+test_primary_claude_template_is_pinned() {
+  # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false is the ghost-text suppression a
+  # hand-copied command already dropped once. README.md:90 documents the primary
+  # launch as bare `claude`; the only in-repo launch carrying
+  # --dangerously-skip-permissions is the headless print-mode session at
+  # tests/fm-claude-stop-autoarm-live-e2e.test.sh:115, so this pin records the
+  # flag's presence rather than claiming an interactive primary verified it.
   assert_template primary claude 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__'
+  pass "launch_template: the claude primary template is pinned"
+}
+
+test_primary_codex_template_is_pinned() {
+  # tests/fm-codex-continuity-live-e2e.test.sh:40 runs codex headlessly via
+  # `codex exec`, which is not evidence of the interactive primary TUI shape;
+  # --dangerously-bypass-approvals-and-sandbox carries over from the crewmate
+  # command and this pin holds it steady until a primary TUI launch verifies it.
   assert_template primary codex 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox'
+  pass "launch_template: the codex primary template is pinned"
+}
+
+test_primary_opencode_template_is_pinned() {
+  # tests/fm-opencode-primary-live-e2e.test.sh:256 and :310 both launch a primary
+  # opencode TUI as OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' with
+  # `opencode --auto`. --prompt belongs to the crewmate, which has a brief to pass.
   assert_template primary opencode 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--auto'
+  pass "launch_template: the opencode primary template is pinned"
+}
+
+test_primary_pi_template_is_pinned() {
+  # README.md:102 documents the primary launch as bare `pi`, and README.md:106
+  # records that the once-per-clone project trust prompt is what auto-loads the
+  # tracked .pi/extensions/*.ts. tests/fm-pi-primary-live-e2e.test.sh:266 adds
+  # --approve --no-session --no-context-files --no-extensions plus explicit -e
+  # paths, but that is the test's own isolation scaffolding against a throwaway
+  # clone, not the verified primary form, so it must not leak into this template.
   assert_template primary pi 'pi __MODELFLAG____EFFORTFLAG__'
-  assert_template primary grok 'grok --always-approve __MODELFLAG____EFFORTFLAG__'
-  assert_template primary kimi '__KIMIBIN__ __MODELFLAG__--auto'
-  pass "launch_template: every verified adapter has a primary template"
+  pass "launch_template: the pi primary template is pinned"
+}
+
+test_primary_grok_template_is_pinned() {
+  # tests/fm-grok-continuity-live-e2e.test.sh:76 launches a primary grok as
+  # `grok --trust --always-approve --reasoning-effort low`, where
+  # --reasoning-effort is what __EFFORTFLAG__ resolves to; README.md:96 documents
+  # `grok --trust` too. --trust is load-bearing, not setup trivia:
+  # .agents/skills/harness-adapters/SKILL.md:345 records that without folder trust
+  # the primary turn-end guard fails open, README.md:105 and
+  # docs/turnend-guard.md:63 say the same, and trust being granted once per clone
+  # means a fresh clone is exactly when dropping it bites.
+  assert_template primary grok 'grok --trust --always-approve __MODELFLAG____EFFORTFLAG__'
+  pass "launch_template: the grok primary template is pinned, --trust included"
+}
+
+test_primary_kimi_refuses() {
+  # README.md:61 lists only Claude Code, Grok, Pi, Codex, and OpenCode as verified
+  # primary harnesses (docs/configuration.md:177 defers that narrower set to
+  # README), and __KIMIBIN__ is resolvable by bin/fm-spawn.sh alone, which never
+  # launches a primary. Refusing beats handing back an unsubstitutable command.
+  launch_template kimi primary >/dev/null 2>&1 \
+    && fail "launch_template kimi primary must refuse: kimi is not a verified primary harness and only fm-spawn.sh can resolve __KIMIBIN__"
+  [ -z "$(launch_template kimi primary 2>/dev/null)" ] \
+    || fail "launch_template kimi primary must emit nothing when it refuses"
+  pass "launch_template: kimi has no primary template and refuses instead of emitting __KIMIBIN__"
+}
+
+test_primary_kimi_refusal_leaves_the_crewmate_template_intact() {
+  # bin/fm-spawn.sh depends on the kimi crewmate command byte-for-byte.
+  local kind
+  for kind in ship scout secondmate; do
+    assert_template "$kind" kimi '__KIMIBIN__ __MODELFLAG__--auto'
+  done
+  pass "launch_template: the kimi crewmate template is unaffected by the primary refusal"
 }
 
 test_primary_carries_no_task_scoped_placeholder() {
   local h tpl
-  for h in "${HARNESSES[@]}"; do
+  for h in "${PRIMARY_HARNESSES[@]}"; do
     tpl=$(launch_template "$h" primary)
     case "$tpl" in
       *__BRIEF__*|*__OPINPUT__*|*__TURNEND__*|*__PIEXT__*|*__PITURNEND__*|*__PIWATCH__*)
@@ -115,6 +186,8 @@ test_primary_keeps_the_autonomy_and_ghost_text_knowledge() {
     "the codex primary template must keep its autonomy flag"
   assert_contains "$(launch_template grok primary)" '--always-approve' \
     "the grok primary template must keep its autonomy flag"
+  assert_contains "$(launch_template grok primary)" '--trust' \
+    "the grok primary template must keep --trust, without which the primary turn-end guard fails open"
   assert_contains "$(launch_template opencode primary)" '"permission":{"*":"allow"}' \
     "the opencode primary template must keep its permission config"
   assert_contains "$(launch_template opencode primary)" '--auto' \
@@ -124,7 +197,7 @@ test_primary_keeps_the_autonomy_and_ghost_text_knowledge() {
 
 test_primary_and_ship_share_a_model_and_effort_surface() {
   local h
-  for h in "${HARNESSES[@]}"; do
+  for h in "${PRIMARY_HARNESSES[@]}"; do
     assert_contains "$(launch_template "$h" primary)" '__MODELFLAG__' \
       "the $h primary template must accept the shared model flag"
     case "$(launch_template "$h" ship)" in
@@ -234,13 +307,21 @@ test_no_other_tracked_script_hand_writes_a_launch_command() {
   # knowledge, so a hand-copied codex, opencode, grok, or kimi command is caught
   # too and not just claude's. Each pattern must still match the library itself;
   # a pattern that matches nothing would pass this guard while checking nothing.
+  #
+  # The two --auto markers are anchored to the binary they belong to. A bare
+  # --auto would also match unrelated legitimate flags - `gh pr merge --auto` in
+  # bin/fm-pr-*.sh is the obvious one - and fail with a misleading "a launch
+  # command is hand-written" message. Double-quoted so the single quote inside
+  # the character class stays literal; it stops the match at the template's own
+  # quoting so the pattern cannot run past the end of a launch string.
   local markers=(
     'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION'
     '--dangerously-skip-permissions'
     '--dangerously-bypass-approvals-and-sandbox'
     'OPENCODE_CONFIG_CONTENT='
     '--always-approve'
-    '--auto([^-a-z]|$)'
+    "opencode [^']*--auto([^-a-z]|$)"
+    "(kimi|__KIMIBIN__)[^']*--auto([^-a-z]|$)"
   )
   local marker owners status matches
   for marker in "${markers[@]}"; do
@@ -262,7 +343,13 @@ test_no_other_tracked_script_hand_writes_a_launch_command() {
 test_ship_and_scout_templates_are_pinned
 test_ship_is_the_default_kind
 test_secondmate_templates_are_pinned
-test_primary_templates_are_pinned
+test_primary_claude_template_is_pinned
+test_primary_codex_template_is_pinned
+test_primary_opencode_template_is_pinned
+test_primary_pi_template_is_pinned
+test_primary_grok_template_is_pinned
+test_primary_kimi_refuses
+test_primary_kimi_refusal_leaves_the_crewmate_template_intact
 test_primary_carries_no_task_scoped_placeholder
 test_primary_keeps_the_autonomy_and_ghost_text_knowledge
 test_primary_and_ship_share_a_model_and_effort_surface
