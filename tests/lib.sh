@@ -92,9 +92,42 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 #   A PATH shim keeps command -v returning an absolute path that always ends at
 #   the real binary.
 #
-# FM_TEST_REAL_GIT is the absolute real binary. Prefer it when a mock must
-# re-exec the unwrapped binary (see fm-teardown, fm-fleet-sync,
-# fm-secondmate-sync). `command -v git` after sourcing this library is the shim.
+# Rule for NEW tests that mock git
+# --------------------------------
+# Follow this without reading the shim body. A hang wastes an hour; a red
+# assertion wastes a minute. LOUD = empty capture or immediate assertion
+# failure. SILENT = hang or a corrupted pin that greens the wrong thing.
+#
+#   1. Source this library BEFORE any fakebin/git is on PATH and before
+#      capturing "the real git". Loading with a fake already first pins
+#      FM_TEST_REAL_GIT to that fake - SILENT wrong pin (or hang if the
+#      fake then re-execs "real").
+#   2. Call-through only via "$FM_TEST_REAL_GIT" - exported below as the
+#      absolute path to the unwrapped binary - or a copy of it baked into
+#      the mock at write time. Models: fm-teardown, fm-fleet-sync,
+#      fm-secondmate-sync (search REAL_GIT_FOR_TEST / real_git=).
+#   3. After load, command -v / type -P / which git is this wrap, not the
+#      host binary. Comparing it to /usr/bin/git fails LOUDLY. Re-execing
+#      the wrap path terminates (does not hang) but still relocates stdout
+#      (see 7).
+#   4. Never `exec git "$@"` from a PATH-shadowing fakebin/git.
+#      SILENT hang: busy loop until the suite times out.
+#   5. Never `real=$(command -v git)` inside the mock while fakebin is
+#      first on PATH - finds itself; same SILENT hang as 4.
+#   6. PATH=fakebin:$PATH keeps the wrap for non-mocked invocations;
+#      PATH=fakebin:$BASE_PATH drops it for a hermetic SUT - SILENT:
+#      dropping the wrap restores the capture-corruption hazard (a
+#      captured path can absorb hook output). Pin with $FM_TEST_REAL_GIT
+#      either way - PATH order does not replace (2).
+#   7. Non-allow-listed subcommands send stdout to stderr under the wrap
+#      (see keep= / 1>&2 below). Capturing stdout alone yields empty text -
+#      usually LOUD (empty path, failed assertion); silent only if the
+#      test checks exit status alone. Need porcelain/hook text: capture
+#      with 2>&1, or set FM_TEST_GIT_HOOK_STDOUT=keep only for a
+#      deliberate probe - never as a silent global for ordinary fixtures.
+#
+# Executable pin (shapes above, keep-mode, toolbin symlink): do not restate
+# here - run tests/fm-fixture-git-stdout.test.sh.
 
 FM_TEST_REAL_GIT=$(type -P git 2>/dev/null || true)
 if [ -z "$FM_TEST_REAL_GIT" ] || [ ! -x "$FM_TEST_REAL_GIT" ]; then
