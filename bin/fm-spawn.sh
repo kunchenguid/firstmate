@@ -684,7 +684,7 @@ name_flag_for_harness() {
 case "$LAUNCH" in
   *__KIMIBIN__*)
     KIMI_BIN=$(resolve_kimi_binary) || exit 1
-    LAUNCH=${LAUNCH//__KIMIBIN__/$(shell_quote "$KIMI_BIN")}
+    LAUNCH=${LAUNCH//__KIMIBIN__/"$(shell_quote "$KIMI_BIN")"}
     if [ "$KIND" != secondmate ]; then
       "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" install || {
         echo "error: refusing Kimi spawn because the global turn-end hook could not be installed safely" >&2
@@ -1222,12 +1222,7 @@ spawn_send_text_line() {  # <target> <text>
   esac
 }
 spawn_current_path() {  # <target>
-  case "$BACKEND" in
-    tmux) fm_backend_tmux_current_path "$1" ;;
-    herdr) fm_backend_herdr_current_path "$1" ;;
-    zellij) fm_backend_zellij_current_path "$1" "$W" ;;
-    cmux) fm_backend_cmux_current_path "$1" "$W" ;;
-  esac
+  fm_backend_current_path "$BACKEND" "$1" "$W"
 }
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in

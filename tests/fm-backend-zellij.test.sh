@@ -1028,7 +1028,6 @@ test_spawn_refuses_zellij_secondmate_before_home_mutation() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$subhome" claude --backend zellij --secondmate 2>&1 )
   status=$?
-  set +e
   [ "$status" -ne 0 ] || fail "backend=zellij --secondmate should be refused"
   assert_contains "$out" "backend=zellij does not support --secondmate spawns yet" \
     "zellij secondmate refusal should happen at backend selection"
