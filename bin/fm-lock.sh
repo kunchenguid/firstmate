@@ -48,7 +48,11 @@ RECLAIM_MUTEX_STALE_AFTER="${FM_RECLAIM_MUTEX_STALE_AFTER:-2}"
 # Short busy-mutex retries for free-claim and stale reclaim (not live takeover).
 RECLAIM_BUSY_RETRIES="${FM_RECLAIM_BUSY_RETRIES:-4}"
 RECLAIM_BUSY_SLEEP_SECS="${FM_RECLAIM_BUSY_SLEEP_SECS:-0.05}"
-mkdir -p "$STATE"
+if ! mkdir -p "$STATE" 2>/dev/null || [ ! -d "$STATE" ]; then
+  printf '%s\n' "LOCK_RESULT=IDENTITY_UNAVAILABLE"
+  printf '%s\n' "LOCK_DETAIL=cannot access lock state directory: $STATE"
+  exit 12
+fi
 
 HARNESS_RE='claude|codex|opencode|grok|^pi$'
 EXIT_LIVE_OTHER=10
@@ -330,6 +334,7 @@ reclaim_mutex_is_provably_abandoned() {
 }
 
 remove_reclaim_mutex() {
+  [ ! -L "$RECLAIM_LOCK" ] || return 1
   rm -f "$RECLAIM_LOCK/pid" "$RECLAIM_LOCK/started" 2>/dev/null || true
   rmdir "$RECLAIM_LOCK" 2>/dev/null || true
   # Legacy/malformed leftover: directory with unexpected files.
@@ -339,13 +344,17 @@ remove_reclaim_mutex() {
 }
 
 write_reclaim_owner() {
-  local mypid=${BASHPID:-$$} back
+  local mypid=${BASHPID:-$$} now back_pid back_started
+  now=$(date +%s 2>/dev/null) || return 1
   if ! printf '%s\n' "$mypid" > "$RECLAIM_LOCK/pid"; then
     return 1
   fi
-  date +%s > "$RECLAIM_LOCK/started" 2>/dev/null || true
-  back=$(cat "$RECLAIM_LOCK/pid" 2>/dev/null || true)
-  [ "$back" = "$mypid" ]
+  if ! printf '%s\n' "$now" > "$RECLAIM_LOCK/started"; then
+    return 1
+  fi
+  back_pid=$(cat "$RECLAIM_LOCK/pid" 2>/dev/null || true)
+  back_started=$(cat "$RECLAIM_LOCK/started" 2>/dev/null || true)
+  [ "$back_pid" = "$mypid" ] && [ "$back_started" = "$now" ]
 }
 
 release_reclaim_lock() {
@@ -358,6 +367,19 @@ release_reclaim_lock() {
     remove_reclaim_mutex
   fi
   RECLAIM_HELD=0
+}
+
+claim_abandoned_reclaim_mutex() {
+  local claim="$RECLAIM_LOCK/.reclaim-claim"
+  [ ! -L "$RECLAIM_LOCK" ] || return 1
+  mkdir "$claim" 2>/dev/null || return 1
+  if ! reclaim_mutex_is_provably_abandoned; then
+    rmdir "$claim" 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$RECLAIM_LOCK/pid" "$RECLAIM_LOCK/started" 2>/dev/null || true
+  rmdir "$claim" 2>/dev/null || return 1
+  remove_reclaim_mutex
 }
 
 # Returns 0 held, 1 busy (live or mid-acquire), after one abandon-and-retry.
@@ -374,8 +396,9 @@ acquire_reclaim_lock() {
       return 1
     fi
     if reclaim_mutex_is_provably_abandoned; then
-      remove_reclaim_mutex
-      continue
+      if claim_abandoned_reclaim_mutex; then
+        continue
+      fi
     fi
     return 1
   done
@@ -595,7 +618,10 @@ case "${1:-}" in
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --expected)
-          [ "$#" -gt 1 ] || { echo "error: --expected requires an owner" >&2; exit 2; }
+          [ "$#" -gt 1 ] || {
+            emit_result IDENTITY_UNAVAILABLE "reclaim usage error: --expected requires an owner"
+            exit "$EXIT_IDENTITY_UNAVAILABLE"
+          }
           expected=$2
           shift 2
           ;;
@@ -604,16 +630,18 @@ case "${1:-}" in
           shift
           ;;
         *)
-          echo "error: unknown reclaim argument: $1" >&2
-          usage >&2
-          exit 2
+          emit_result IDENTITY_UNAVAILABLE "reclaim usage error: unknown argument $1"
+          exit "$EXIT_IDENTITY_UNAVAILABLE"
           ;;
       esac
     done
-    [ -n "$expected" ] || { echo "error: reclaim requires --expected <owner>" >&2; exit 2; }
+    [ -n "$expected" ] || {
+      emit_result IDENTITY_UNAVAILABLE "reclaim usage error: --expected owner is required"
+      exit "$EXIT_IDENTITY_UNAVAILABLE"
+    }
     if [ "$confirmed_closed" -eq 1 ] && [ "${expected#codex-thread:}" = "$expected" ]; then
-      echo "error: --confirmed-closed is valid only for a codex-thread owner" >&2
-      exit 2
+      emit_result IDENTITY_UNAVAILABLE "reclaim usage error: --confirmed-closed requires a codex-thread owner"
+      exit "$EXIT_IDENTITY_UNAVAILABLE"
     fi
     reclaim_expected "$expected" "$confirmed_closed"
     ;;

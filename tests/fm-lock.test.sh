@@ -328,7 +328,62 @@ EOF
   [ "$rc" -ne 0 ] || fail "confirmed reclaim accepted mismatched expected owner"
   assert_contains "$out" "LOCK_RESULT=" "confirmed mismatch reclaim omitted LOCK_RESULT"
 
+  for args in \
+    "reclaim" \
+    "reclaim --expected" \
+    "reclaim --bogus" \
+    "reclaim --expected 999999 --confirmed-closed"
+  do
+    rc=0
+    out=$(FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$LOCK" $args 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "invalid reclaim invocation succeeded: $args"
+    assert_contains "$out" "LOCK_RESULT=" "invalid reclaim invocation omitted LOCK_RESULT: $args"
+  done
+
   pass "every reclaim failure path emits LOCK_RESULT"
+}
+
+test_reclaim_mutex_symlink_is_not_followed() {
+  local rec home fakebin outside out rc=0
+  rec=$(new_home mutex-symlink)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  make_ps_denied "$fakebin"
+  outside="$TMP_ROOT/mutex-symlink/outside"
+  mkdir -p "$outside"
+  printf '999999\n' > "$home/state/.lock"
+  printf '%s\n' "$$" > "$outside/pid"
+  printf 'sentinel\n' > "$outside/started"
+  ln -s "$outside" "$home/state/.lock-reclaim"
+
+  out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
+
+  expect_code 13 "$rc" "symlink reclaim mutex"
+  assert_contains "$out" "LOCK_RESULT=RECLAIM_BUSY" "symlink mutex was not safely refused"
+  assert_grep "$$" "$outside/pid" "symlink mutex traversal removed the foreign pid"
+  assert_grep "sentinel" "$outside/started" "symlink mutex traversal removed the foreign timestamp"
+  [ -L "$home/state/.lock-reclaim" ] || fail "symlink mutex was unexpectedly replaced"
+  pass "reclaim mutex symlinks are never traversed"
+}
+
+test_state_path_failure_is_not_reclaim_busy() {
+  local rec home fakebin out rc=0
+  rec=$(new_home invalid-state-path)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  rm -rf "$home/state"
+  printf 'not-a-directory\n' > "$home/state"
+
+  out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
+
+  expect_code 12 "$rc" "invalid state path"
+  assert_contains "$out" "LOCK_RESULT=IDENTITY_UNAVAILABLE" "state I/O failure lacked a typed result"
+  assert_not_contains "$out" "LOCK_RESULT=RECLAIM_BUSY" "state I/O failure was mislabeled mutex contention"
+  pass "state directory failures are distinct from reclaim contention"
 }
 
 test_confirmed_closed_codex_owner_is_reclaimed_exactly() {
@@ -382,6 +437,8 @@ run_one() {
     orphan-mutex-free) test_orphan_reclaim_mutex_with_free_lock_recovers ;;
     live-mutex) test_live_reclaim_mutex_owner_is_not_taken ;;
     typed-failures) test_reclaim_failure_paths_always_emit_lock_result ;;
+    mutex-symlink) test_reclaim_mutex_symlink_is_not_followed ;;
+    invalid-state) test_state_path_failure_is_not_reclaim_busy ;;
     *) fail "unknown test selector: $1" ;;
   esac
 }
@@ -403,4 +460,6 @@ else
   test_orphan_reclaim_mutex_with_free_lock_recovers
   test_live_reclaim_mutex_owner_is_not_taken
   test_reclaim_failure_paths_always_emit_lock_result
+  test_reclaim_mutex_symlink_is_not_followed
+  test_state_path_failure_is_not_reclaim_busy
 fi
