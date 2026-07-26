@@ -259,7 +259,11 @@ test_intake_reuses_evidence_and_parallelizes_safe_work() {
 
 test_compressed_agents_retains_authority_and_supervision_safety() {
   for phrase in \
-    'A lock-refused session must not spawn, steer, merge, drain the wake queue' \
+    'Only a proven `LIVE_OTHER` lock outcome means another active session is managing the fleet and puts this session in read-only mode.' \
+    '`STALE_RECLAIMABLE`, `IDENTITY_UNAVAILABLE`, and `RECLAIM_BUSY` are separate outcomes: do not claim another live owner, and do not mutate fleet state until the same session has acquired or atomically reclaimed the lock.' \
+    'On `LIVE_OTHER`, the queue is left untouched for the proven live owner, and the guard'\''s tangle/watcher-liveness alarms still print in read-only advisory mode without drain, supervision repair, or checkout repair commands.' \
+    'On any other non-owned outcome, the queue is also left untouched without assuming that another session owns it.' \
+    'A session that has not acquired or atomically reclaimed the lock must not spawn, steer, merge, drain the wake queue' \
     'A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.' \
     'The selected delivery path owns its own rigor.' \
     'When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.' \

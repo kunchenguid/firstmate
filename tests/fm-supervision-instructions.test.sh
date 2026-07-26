@@ -37,9 +37,67 @@ test_conditional_stanzas() {
   assert_contains "$out" "- Away mode: active" "afk stanza missing"
   assert_contains "$out" "- X mode: active" "x-mode stanza missing"
   assert_contains "$out" "$config/x-mode.env" "x-mode stanza did not render the effective config path"
-  assert_contains "$out" 'Mode: Codex foreground checkpoint.' "codex snippet missing"
-  assert_not_contains "$out" "Source \`config/x-mode.env\`" "snippet kept the repo-relative x-mode config path"
-  pass "renderer includes read-only, afk, and effective x-mode current-state stanzas"
+  assert_contains "$out" 'Mode: non-owned lock state (LIVE_OTHER) - supervision withheld.' "read-only render lost the withheld mode line"
+  assert_not_contains "$out" 'Mode: Codex foreground checkpoint.' "read-only render still emitted the codex mutation protocol"
+  assert_not_contains "$out" "load /afk and keep normal harness supervision paused" "read-only afk stanza still instructed daemon ownership actions"
+  assert_not_contains "$out" "before launching any watcher process" "read-only x-mode stanza still instructed launching a watcher"
+  pass "renderer includes read-only, afk, and effective x-mode current-state stanzas without mutation instructions"
+}
+
+test_non_owned_states_withhold_mutation_instructions() {
+  local out state
+  for state in LIVE_OTHER STALE_RECLAIMABLE IDENTITY_UNAVAILABLE RECLAIM_BUSY; do
+    out=$("$RENDER" --harness claude --lock-state "$state")
+    assert_contains "$out" "Mode: non-owned lock state ($state) - supervision withheld." \
+      "$state render lost the withheld mode line"
+    assert_contains "$out" "no non-owned lock state may mutate fleet state" \
+      "$state render lost the no-mutation contract line"
+    assert_contains "$out" "- Ordinary wake: none; this session does not own the fleet lock" \
+      "$state render kept an ordinary-wake mutation instruction"
+    assert_not_contains "$out" "Mode: Claude Stop-hook-owned supervision." \
+      "$state render still emitted the claude mutation protocol"
+    assert_not_contains "$out" "bin/fm-watch-arm.sh" \
+      "$state render still instructed arming the watcher"
+    assert_not_contains "$out" "bin/fm-wake-drain.sh" \
+      "$state render still instructed draining the wake queue"
+  done
+
+  out=$("$RENDER" --harness claude --lock-state STALE_RECLAIMABLE)
+  assert_contains "$out" "bin/fm-lock.sh reclaim --expected <recorded-owner>" \
+    "stale render did not offer the atomic reclaim"
+  assert_contains "$out" "re-run bin/fm-session-start.sh" \
+    "stale render did not point back to the owned continuation"
+  assert_contains "$out" "The one permitted mutation is the atomic lock reclaim itself" \
+    "stale render did not scope the permitted mutation to the reclaim"
+
+  out=$("$RENDER" --harness claude --lock-state RECLAIM_BUSY)
+  assert_contains "$out" "The reclaim mutex is temporarily held" \
+    "busy render lost temporary-contention guidance"
+  assert_contains "$out" "not an identity failure" \
+    "busy render did not separate contention from identity failure"
+  assert_contains "$out" "Retry bin/fm-lock.sh" \
+    "busy render did not offer a short retry"
+  assert_not_contains "$out" "Restore identity evidence" \
+    "busy render pointed at identity recovery instead of retry"
+
+  out=$("$RENDER" --harness claude --lock-state LIVE_OTHER)
+  assert_not_contains "$out" "reclaim --expected" \
+    "live-other render offered a reclaim against a proven live owner"
+
+  out=$("$RENDER" --harness claude --lock-state IDENTITY_UNAVAILABLE)
+  assert_not_contains "$out" "reclaim --expected <recorded-owner>" \
+    "identity-unavailable render offered an unconditional reclaim"
+  assert_contains "$out" "Neither a live rival nor a stale owner is proven" \
+    "identity-unavailable render lost its no-rival-claim line"
+  assert_contains "$out" "--confirmed-closed" \
+    "identity-unavailable render lost the captain-confirmed codex-thread path"
+
+  out=$("$RENDER" --harness claude --lock-state OWNED)
+  assert_contains "$out" "Mode: Claude Stop-hook-owned supervision." \
+    "owned render lost the normal claude protocol"
+  assert_not_contains "$out" "supervision withheld" \
+    "owned render incorrectly withheld supervision"
+  pass "non-owned lock states withhold mutation instructions while keeping the reclaim path"
 }
 
 test_repair_lines() {
@@ -158,6 +216,7 @@ test_pi_snippet_uses_effective_extension_path() {
 test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
+test_non_owned_states_withhold_mutation_instructions
 test_repair_lines
 test_cross_harness_ordinary_continuation_and_repair_matrix
 test_grok_is_background_notify

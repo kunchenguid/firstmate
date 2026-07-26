@@ -5,9 +5,9 @@
 #
 # Coverage:
 #   - absent-file markers vs empty-but-present files in the context digest
-#   - the lock-refusal read-only path: banner leads, every mutating step is
-#     skipped (including bootstrap's five mutating sweeps, verified by their
-#     ABSENCE), the digest still completes
+#   - typed lock outcomes: only LIVE_OTHER enters read-only, unresolved identity
+#     remains non-mutating without asserting a rival, and stale Codex fallback
+#     reclaim continues through wake drain in the same startup
 #   - output section ordering: diagnostics/banners lead, bulk file dumps follow
 #   - context-aware next-step guidance for read-only, AFK, X mode, and normal
 #     watcher ownership
@@ -160,6 +160,15 @@ exit 1
 SH
   chmod +x "$fakebin/ps"
   printf '%s\n' "$harness" > "$fakebin/.harness-name"
+}
+
+make_fake_ps_denied() {
+  local fakebin=$1
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/ps"
 }
 
 make_fake_ps_pi_holder() {
@@ -625,6 +634,10 @@ EOF
   assert_not_contains "$out" "drain them with bin/fm-wake-drain.sh" "read-only guard printed a mutating drain instruction"
   assert_not_contains "$out" "After draining queued wakes" "read-only guard printed a drain-then-rearm instruction"
   assert_not_contains "$out" "run bin/fm-watch-arm.sh" "read-only guard printed a mutating watcher-arm instruction"
+  assert_contains "$out" "Mode: non-owned lock state (LIVE_OTHER) - supervision withheld." "read-only supervision block did not withhold the harness protocol"
+  assert_not_contains "$out" "Mode: Claude background-notify supervision." "read-only supervision block still emitted the claude mutation protocol"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh" "read-only supervision block still instructed arming the watcher"
+  assert_not_contains "$out" "reclaim --expected" "read-only supervision block offered a reclaim against a proven live owner"
   assert_not_contains "$out" "git -C $root checkout main" "read-only bootstrap printed a state-changing checkout remediation"
 
   # Detect-only bootstrap diagnostics still ran (the fakebin's PATH excludes
@@ -662,13 +675,13 @@ EOF
 
   expect_code 0 "$status" "fm-session-start.sh must exit 0 when lock publication fails"
   assert_contains "$out" "cannot write session lock" "lock publication failure was not surfaced"
-  assert_contains "$out" "READ-ONLY SESSION" "lock publication failure did not force a read-only session"
-  assert_contains "$out" "FLEET LOCK OWNERSHIP WAS NOT VERIFIED" "lock publication failure was misreported as a live holder"
-  assert_contains "$out" "lacks verified fleet-lock ownership" "lock publication failure did not explain why queued wakes remain untouched"
+  assert_contains "$out" "LOCK_RESULT=IDENTITY_UNAVAILABLE" "lock publication failure was not typed as identity-unavailable"
+  assert_contains "$out" "LOCK IDENTITY UNAVAILABLE" "lock publication failure did not disable mutating startup steps"
+  assert_contains "$out" "skipped (lock outcome IDENTITY_UNAVAILABLE)" "lock publication failure did not explain why queued wakes remain untouched"
   assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK" "lock publication failure falsely claimed a live lock holder"
   [ -s "$home/state/.wake-queue" ] || fail "lock publication failure allowed the wake queue to mutate"
 
-  pass "session start stays read-only when lock ownership cannot be published"
+  pass "session start stays non-mutating when lock ownership cannot be published"
 }
 
 test_session_lock_concurrent_single_winner() {
@@ -712,26 +725,33 @@ esac
 SH
   chmod +x "$fakebin/ps"
 
+  # Each contender is a separate bash process (not a subshell) so its own $$ is
+  # a real live pid on every bash, including macOS bash 3.2 without BASHPID.
+  cat > "$home/lock-contender.sh" <<'WORKER'
+#!/usr/bin/env bash
+set -u
+home=$1 ready=$2 completed=$3 winners=$4 root=$5 fakebin=$6 base_path=$7 i=$8
+harness_pid=$$
+: > "$home/state/harness-$harness_pid"
+: > "$ready/$i"
+while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
+  sleep 0.01
+done
+if FM_HOME="$home" FM_FAKE_LOCK_STATE="$home/state" \
+  FM_FAKE_HARNESS_PID="$harness_pid" PATH="$fakebin:$base_path" \
+  "$root/bin/fm-lock.sh" >/dev/null 2>&1; then
+  printf '%s\n' "$harness_pid" >> "$winners"
+fi
+: > "$completed/$i"
+while [ "$(find "$completed" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
+  sleep 0.01
+done
+WORKER
   pids=
   i=1
   while [ "$i" -le 40 ]; do
-    (
-      harness_pid=$BASHPID
-      : > "$home/state/harness-$harness_pid"
-      : > "$ready/$i"
-      while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
-        sleep 0.01
-      done
-      if FM_HOME="$home" FM_FAKE_LOCK_STATE="$home/state" \
-        FM_FAKE_HARNESS_PID="$harness_pid" PATH="$fakebin:$BASE_PATH" \
-        "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1; then
-        printf '%s\n' "$harness_pid" >> "$winners"
-      fi
-      : > "$completed/$i"
-      while [ "$(find "$completed" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
-        sleep 0.01
-      done
-    ) &
+    bash "$home/lock-contender.sh" \
+      "$home" "$ready" "$completed" "$winners" "$ROOT" "$fakebin" "$BASE_PATH" "$i" &
     pids="$pids $!"
     i=$((i + 1))
   done
@@ -742,6 +762,64 @@ SH
   [ "$count" -eq 1 ] || fail "concurrent session-lock acquisition produced $count winners"
 
   pass "concurrent session-lock acquisition admits exactly one live harness"
+}
+
+test_identity_unavailable_is_not_live_other_read_only() {
+  local rec root home fakebin holder_pid out status=0
+  rec=$(new_world identity-unavailable)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_denied "$fakebin"
+  append_wake "$home/state" signal task-x "working: must remain queued" || fail "seed wake failed"
+
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+
+  out=$(CODEX_THREAD_ID=current-thread run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  expect_code 0 "$status" "fm-session-start.sh must report an unavailable identity without failing the digest"
+  assert_contains "$out" "LOCK_RESULT=IDENTITY_UNAVAILABLE" "identity-unavailable lock result was not surfaced"
+  assert_contains "$out" "LOCK IDENTITY UNAVAILABLE" "identity-unavailable startup did not get its own clear banner"
+  assert_not_contains "$out" "READ-ONLY SESSION" "identity-unavailable startup was mislabeled as live-other read-only"
+  assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION" "identity-unavailable startup asserted an unproved live rival"
+  assert_contains "$out" "skipped (lock outcome IDENTITY_UNAVAILABLE)" "identity-unavailable startup did not skip wake mutation explicitly"
+  [ -s "$home/state/.wake-queue" ] || fail "identity-unavailable startup drained the wake queue without owning the lock"
+  assert_contains "$out" "Mode: non-owned lock state (IDENTITY_UNAVAILABLE) - supervision withheld." "identity-unavailable supervision block did not withhold the harness protocol"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh" "identity-unavailable supervision block still instructed arming the watcher"
+  assert_not_contains "$out" "reclaim --expected <recorded-owner>" "identity-unavailable supervision block offered an unconditional reclaim"
+
+  pass "session start enters live-other read-only mode only for a proven LIVE_OTHER result"
+}
+
+test_stale_lock_with_denied_ps_reclaims_and_continues() {
+  local rec root home fakebin out status=0
+  rec=$(new_world stale-reclaim-denied-ps)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_denied "$fakebin"
+  printf '999999\n' > "$home/state/.lock"
+  append_wake "$home/state" signal task-x "working: drain after reclaim" || fail "seed wake failed"
+
+  out=$(CODEX_THREAD_ID=current-thread run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "fm-session-start.sh after stale reclaim"
+  assert_contains "$out" "LOCK_RESULT=OWNED" "stale lock was not reclaimed by the same session start"
+  assert_contains "$out" "$(printf 'signal\ttask-x\tworking: drain after reclaim')" "same session did not continue into wake drain after reclaim"
+  assert_not_contains "$out" "READ-ONLY SESSION" "stale reclaim incorrectly latched session start read-only"
+  assert_not_contains "$out" "LOCK IDENTITY UNAVAILABLE" "dead numeric owner was treated as ambiguous when kill -0 proved it stale"
+  assert_grep "codex-thread:current-thread" "$home/state/.lock" "session start did not install its Codex thread identity"
+  [ ! -s "$home/state/.wake-queue" ] || fail "same session did not drain the wake queue after reclaim"
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS" "reclaimed session start lost its supervision block"
+  assert_not_contains "$out" "supervision withheld" "reclaimed session start still withheld the owned supervision protocol"
+
+  pass "stale numeric lock plus denied ps is reclaimed and startup continues in the same session"
 }
 
 # --- output ordering ----------------------------------------------------------
@@ -1359,6 +1437,8 @@ test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_session_lock_concurrent_single_winner
+test_identity_unavailable_is_not_live_other_read_only
+test_stale_lock_with_denied_ps_reclaims_and_continues
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start
 test_session_start_relaunches_missing_pi_secondmate
