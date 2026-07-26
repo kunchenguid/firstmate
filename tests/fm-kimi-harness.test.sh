@@ -287,6 +287,33 @@ SH
   pass "fm-harness: markerless kimi is detected by ancestry after env-marker precedence"
 }
 
+test_kimi_session_lock_identity() {
+  local home fakebin out
+  home="$TMP_ROOT/session-lock-home"
+  fakebin=$(fm_fakebin "$TMP_ROOT/session-lock-fake")
+  mkdir -p "$home/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' '/opt/kimi/bin/kimi'; exit 0 ;;
+  *"args="*) printf '%s\n' 'kimi'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" \
+    || fail "fm-lock did not acquire from Kimi ancestry"
+  case "$(cat "$home/state/.lock")" in
+    ''|*[!0-9]*) fail "fm-lock did not record the Kimi harness ancestor" ;;
+  esac
+  printf '%s\n' "$$" > "$home/state/.lock"
+  out=$(FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: held by live harness pid" \
+    "fm-lock did not recognize Kimi as a live holder"
+  pass "fm-lock recognizes Kimi ancestry and live lock holders"
+}
+
 test_kimi_busy_signature_is_scoped_to_spinner_lines() {
   local capture phase kimi_regex_lines
   # shellcheck source=/dev/null
@@ -384,6 +411,7 @@ test_kimi_missing_binary_refuses_before_pane_creation
 test_kimi_unconfirmed_delivery_fails_loudly
 test_kimi_readiness_gate_precedes_pointer
 test_kimi_detection_uses_ancestry_after_markers
+test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines
 test_watcher_scopes_moon_spinner_to_recorded_kimi_task
 test_kimi_bordered_prompt_needs_no_override
