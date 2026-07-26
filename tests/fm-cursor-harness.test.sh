@@ -396,6 +396,32 @@ test_backend_input_boundary_rejects_dead_and_missing_agents() {
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_text_submit tmux sess:win steer 1 0 0' "$ROOT")
   [ "$verdict" = send-failed ] || fail "missing cursor target steer returned '$verdict'"
   [ ! -s "$log" ] || fail "missing cursor target received tmux input"
+
+  if PATH="$fb:$PATH" FM_FAKE_WINDOWS=win FM_FAKE_COMM=zsh FM_FAKE_SEND_LOG="$log" \
+      bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_operator_key tmux sess:win Enter' "$ROOT"; then
+    fail "dead cursor shell accepted an operator key"
+  fi
+  [ ! -s "$log" ] || fail "dead cursor shell received an operator key"
+
+  if PATH="$fb:$PATH" FM_FAKE_WINDOWS=other FM_FAKE_COMM=node FM_FAKE_SEND_LOG="$log" \
+      bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_operator_key tmux sess:win Enter' "$ROOT"; then
+    fail "missing cursor target accepted an operator key"
+  fi
+  [ ! -s "$log" ] || fail "missing cursor target received an operator key"
+
+  PATH="$fb:$PATH" FM_FAKE_WINDOWS=win FM_FAKE_COMM=node FM_FAKE_SEND_LOG="$log" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_operator_key tmux sess:win Enter' "$ROOT" \
+    || fail "live ambiguous cursor target refused an operator key"
+  grep -F -- 'send-keys -t sess:win Enter' "$log" >/dev/null \
+    || fail "live ambiguous cursor operator key never reached tmux"
+
+  : > "$log"
+  PATH="$fb:$PATH" FM_BACKEND_LIB_DIR="$ROOT/bin" \
+    FM_FAKE_WINDOWS=win FM_FAKE_COMM=zsh FM_FAKE_SEND_LOG="$log" \
+    bash -c '. "$0/bin/backends/tmux.sh"; fm_backend_tmux_send_key sess:win Enter' "$ROOT" \
+    || fail "raw tmux key primitive refused a lifecycle key"
+  grep -F -- 'send-keys -t sess:win Enter' "$log" >/dev/null \
+    || fail "raw tmux lifecycle key never reached tmux"
   pass "tmux input boundary rejects dead and missing agents but preserves live cursor steering"
 }
 

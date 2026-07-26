@@ -721,6 +721,15 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   esac
 }
 
+fm_backend_send_operator_key() {  # <backend> <target> <key> [expected-label]
+  local backend=$1 target=$2
+  if [ "$backend" = tmux ]; then
+    fm_backend_source "$backend" || return 1
+    fm_backend_tmux_agent_accepts_input "$target" || return 1
+  fi
+  fm_backend_send_key "$@"
+}
+
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict; callers require exact empty for confirmed delivery.

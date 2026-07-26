@@ -178,7 +178,24 @@ test_recorded_dead_agent_refuses_before_steering() {
   [ "$rc" -ne 0 ] || fail "recorded dead agent should refuse steering"
   assert_contains "$(cat "$err")" "text not sent" "dead-agent refusal should be explicit"
   [ ! -s "$log" ] || fail "recorded dead agent still received tmux input"$'\n'"$(cat "$log")"
-  pass "fm-send strict: recorded dead agents refuse before steering"
+
+  : > "$log"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_COMM=zsh FM_SEND_SETTLE=0 \
+    "$SEND" fm-dead-agent --key Enter >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "recorded dead agent should refuse key steering"
+  assert_contains "$(cat "$err")" "key 'Enter' not sent" "dead-agent key refusal should be explicit"
+  [ ! -s "$log" ] || fail "recorded dead agent still received a tmux key"$'\n'"$(cat "$log")"
+
+  fm_write_meta "$home/state/missing-agent.meta" "window=sess:fm-missing-agent" "kind=ship" "harness=cursor"
+  : > "$log"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_COMM=node FM_SEND_SETTLE=0 \
+    "$SEND" fm-missing-agent --key Enter >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "missing agent should refuse key steering"
+  assert_contains "$(cat "$err")" "key 'Enter' not sent" "missing-agent key refusal should be explicit"
+  [ ! -s "$log" ] || fail "missing agent still received a tmux key"$'\n'"$(cat "$log")"
+  pass "fm-send strict: dead and missing agents refuse before steering"
 }
 
 test_exact_lane_id_send_still_works

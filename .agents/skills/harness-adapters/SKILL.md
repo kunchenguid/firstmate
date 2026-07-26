@@ -133,7 +133,7 @@ The supported launch-profile flags below are verified locally; each row records 
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 Cursor dispatch profiles accept the recorded effort vocabulary `low`, `medium`, `high`, `xhigh`, and `max`.
-An effort-bearing Cursor dispatch profile must select a model whose name ends in that effort tier because no separate effort flag is emitted.
+Bootstrap validates only that shared vocabulary; intake selects a supported tiered model from `cursor-agent models`, and the selected model name remains the executable source of effort.
 
 ### Model support discovery
 
@@ -463,7 +463,8 @@ Like claude's and kimi's, this signature stays out of the shared unrecorded-harn
 `ps -o comm=` reports `cursor-agent` for the foreground process-group leader, but tmux's `#{pane_current_command}` resolves the pane to the bundled `node`, so `fm_backend_tmux_agent_state` returns `ambiguous` for a live cursor pane.
 That is the preserved-not-relaunched arm, and death detection is unaffected because an exited cursor pane falls back to the login shell and reads `dead`.
 `node` is deliberately not added to the alive patterns: it is far too generic to prove any agent is alive.
-The tmux backend accepts `alive`, `ambiguous`, and `unreadable` liveness for structural composer proof, but rejects authoritative `dead` and `missing` states before reporting an empty composer or sending any input.
+The tmux operator-input boundary accepts `alive`, `ambiguous`, and `unreadable` liveness for structural composer proof, but rejects authoritative `dead` and `missing` states before reporting an empty composer or steering text or keys.
+The raw backend key primitive remains available to spawn and lifecycle mechanics before an agent exists.
 This preserves live Cursor steering while preventing an exited pane's shell prompt from becoming an injection target even when its glyph resembles an agent composer.
 
 Cursor has no turn-end hook, so like opencode its wake signal is the crewmate's own status appends plus pane staleness and the busy signature.
