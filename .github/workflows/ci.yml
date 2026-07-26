@@ -323,16 +323,12 @@ jobs:
           /bin/bash --version | head -1
           command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
 
-          # Parse the whole maintained shell surface with stock macOS Bash so a
-          # 3.2-only parser defect (issues #958/#1069) cannot slip through when
-          # every developer machine and the Linux lanes run Bash 5. This mirrors
-          # bin/fm-lint.sh's canonical file set (bin/*.sh, bin/backends/*.sh,
-          # tests/*.sh) so parse scope and lint scope cannot drift apart.
-          shopt -s nullglob
+          shell_inventory="$RUNNER_TEMP/fm-shell-inventory"
+          bin/fm-lint.sh --list-files > "$shell_inventory"
           parse_fail=0
-          for f in bin/*.sh bin/backends/*.sh tests/*.sh; do
+          while IFS= read -r f; do
             /bin/bash -n "$f" || { echo "::error::stock macOS Bash 3.2 failed to parse $f"; parse_fail=1; }
-          done
+          done < "$shell_inventory"
           [ "$parse_fail" -eq 0 ] || { echo "::error::stock macOS Bash 3.2 parse sweep failed"; exit 1; }
 
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
