@@ -13,8 +13,9 @@
 #   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
 #   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
-#   (d') terminal run + trailing paused: -> paused (status-log), terminal detail kept;
-#       active/parked runs still outrank a declared pause
+#   (d') terminal done/cancelled run + trailing paused: -> paused (status-log),
+#       terminal detail leading; a terminal FAILED run, active/parked runs, and an
+#       actively-monitored ci-green run all still outrank a declared pause
 #   (e) cross-branch attribution: this branch's own run found via list lookup
 #   (f) no run + busy pane                                        -> pane
 #   (g) no run + idle pane falls to the status-log verb           -> status-log
@@ -704,9 +705,11 @@ test_terminal_failed() {
   pass "terminal failed run is authoritative"
 }
 
-# (d') A trailing declared pause outranks a TERMINAL attributed run only.
-# Active/parked runs still win. Terminal outcome stays as secondary detail so
-# a supervisor reading the one-liner still learns the run cancelled/failed/done.
+# (d') A trailing declared pause outranks an attributed run only when that run
+# reached a TRUE terminal outcome of done or cancelled. Active, parked, ci-green
+# monitoring, and terminal FAILED runs all still win. The terminal outcome leads
+# the detail so a supervisor reading the truncated one-liner still learns the run
+# finished.
 test_terminal_cancelled_plus_paused() {
   reset_fakes
   local d; d=$(new_case cancelled-paused)
@@ -725,7 +728,11 @@ test_terminal_cancelled_plus_paused() {
   pass "terminal cancelled + trailing paused: reports paused with run cancelled detail"
 }
 
-test_terminal_failed_plus_paused() {
+# A genuine run FAILURE is never absorbed by a trailing paused:. Nothing in the
+# status log or `axi status` timestamps either event, so a pause appended before
+# or during the run cannot be told from one declared after it - masking real work
+# failure behind a benign external wait. Failure wins; cancelled (above) does not.
+test_terminal_failed_plus_paused_surfaces_failure() {
   reset_fakes
   local d; d=$(new_case failed-paused)
   make_repo_on_branch "$d/wt" fm/feat-fail-pause
@@ -735,12 +742,49 @@ test_terminal_failed_plus_paused() {
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-fail-pause)"
   FM_FAKE_BUSY=0
   local out; out=$(run_crew_state "$d" feat-fail-pause)
-  assert_contains "$out" "state: paused" "failed + paused: -> paused"
-  assert_contains "$out" "source: status-log" "failed + paused: is status-log sourced"
-  assert_contains "$out" "waiting on external rate-limit reset" "pause reason is carried"
-  assert_contains "$out" "run failed" "terminal failed outcome survives as secondary detail"
-  assert_not_contains "$out" "state: failed" "failed must not remain primary state over paused:"
-  pass "terminal failed + trailing paused: reports paused with run failed detail"
+  assert_contains "$out" "state: failed" "failed + paused: keeps surfacing the failure"
+  assert_contains "$out" "source: run-step" "failed + paused: stays run-step sourced"
+  assert_contains "$out" "run failed" "failure detail is reported"
+  assert_not_contains "$out" "state: paused" "paused: must not mask a genuine run failure"
+  pass "terminal failed + trailing paused: still reports failed"
+}
+
+# A bare paused: with no reason must not emit a doubled separator.
+test_terminal_cancelled_plus_bare_paused() {
+  reset_fakes
+  local d; d=$(new_case cancelled-bare-paused)
+  make_repo_on_branch "$d/wt" fm/feat-bare-pause
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-bare-pause.meta" "window=fm:fm-feat-bare-pause" "worktree=$d/wt" "kind=ship"
+  printf 'paused:\n' > "$d/state/feat-bare-pause.status"
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-bare-pause)"
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-bare-pause)
+  assert_contains "$out" "state: paused" "cancelled + bare paused: -> paused"
+  assert_contains "$out" "run cancelled" "terminal cancelled outcome is the detail"
+  assert_not_contains "$out" " ·  · " "empty pause note must not double the separator"
+  pass "cancelled + bare paused: emits a single separator"
+}
+
+# Regression for the ci-green mapping: an ACTIVE run whose ci log reads green is
+# mapped to done while it keeps monitoring for merge/close. That is not a
+# terminal outcome, so a trailing paused: must not take it over.
+test_ci_green_monitoring_outranks_paused() {
+  reset_fakes
+  local d; d=$(new_case ci-green-outranks-pause)
+  make_repo_on_branch "$d/wt" fm/feat-cigreen-pause
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cigreen-pause.meta" "window=fm:fm-feat-cigreen-pause" "worktree=$d/wt" "kind=ship"
+  printf 'paused: awaiting maintainer merge\n' > "$d/state/feat-cigreen-pause.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cigreen-pause)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-cigreen-pause)
+  assert_contains "$out" "state: done" "ci-green monitoring run outranks trailing paused:"
+  assert_contains "$out" "source: run-step" "ci-green monitoring stays run-step sourced"
+  assert_contains "$out" "still monitoring for merge/close" "ci-green detail is preserved"
+  assert_not_contains "$out" "state: paused" "paused: must not beat an actively monitored ci-green run"
+  pass "ci-green (still monitoring) run still outranks a declared pause"
 }
 
 test_terminal_done_plus_paused() {
@@ -1370,10 +1414,12 @@ test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
 test_terminal_cancelled_plus_paused
-test_terminal_failed_plus_paused
+test_terminal_failed_plus_paused_surfaces_failure
+test_terminal_cancelled_plus_bare_paused
 test_terminal_done_plus_paused
 test_active_run_outranks_paused
 test_parked_run_outranks_paused
+test_ci_green_monitoring_outranks_paused
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
