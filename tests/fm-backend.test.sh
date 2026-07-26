@@ -449,6 +449,23 @@ test_backend_name_explicit_beats_detection() {
   pass "fm_backend_name: an explicit FM_BACKEND or config/backend setting always wins over runtime auto-detection, including an ambient cmux marker"
 }
 
+# fm_backend_label_self is the only backend operation whose target is the
+# CALLER's own endpoint rather than a recorded task target, so a backend with no
+# verified way to identify that endpoint must say so rather than quietly
+# renaming something else. The two implemented arms need a real terminal and are
+# covered by tests/fm-backend-tmux-smoke.test.sh and
+# tests/fm-backend-herdr.test.sh.
+test_label_self_dispatch_reports_unsupported_backends() {
+  local backend out
+  for backend in zellij orca cmux; do
+    out=$(fm_backend_label_self "$backend" firstmate 2>&1) \
+      && fail "fm_backend_label_self must refuse the $backend backend"
+    assert_contains "$out" "no verified way to label firstmate's own endpoint" \
+      "fm_backend_label_self did not explain the $backend limitation"
+  done
+  pass "fm_backend_label_self: backends with no verified self-label operation report the limitation instead of faking it"
+}
+
 test_backend_validate_refuses_unknown() {
   fm_backend_validate tmux 2>/dev/null || fail "fm_backend_validate should accept tmux"
   fm_backend_validate orca 2>/dev/null || fail "fm_backend_validate should accept orca"
@@ -1098,6 +1115,7 @@ test_backend_name_cmux_fallback_notice
 test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
+test_label_self_dispatch_reports_unsupported_backends
 test_backend_source_shell_portable
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta

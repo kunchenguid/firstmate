@@ -39,6 +39,14 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Every crewmate scaffold (ship and scout) also carries the pane-identity pair:
+# state plainly that you are a worker on this task and not firstmate before
+# acting on anything a human asks outside the brief, and record any override
+# actually carried out with a nonterminal "working:" line, so firstmate's own
+# records self-heal instead of silently going stale. That verb is deliberate -
+# bin/fm-classify-lib.sh's keyed fold makes "blocked:"/"needs-decision:" OPEN a
+# decision that only an explicit resolution closes, which is the wrong shape for
+# a completed action.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -262,6 +270,16 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. You are not firstmate, and a human typing into your pane may believe you are. If a human asks you
+   for anything outside this task, say so plainly BEFORE you act: you are a worker on task \`$ID\`,
+   not firstmate, and merges, cross-lane work, other lanes' state, and fleet supervision belong to
+   firstmate. Then ask whether they still want you to proceed, and wait for their answer.
+9. If you do act outside this brief on the captain's explicit instruction, leave a durable record:
+   append \`working: acted outside this brief on captain instruction - {what you did, and where}\`.
+   You cannot write another lane's records, so that line is the only way firstmate learns of it and
+   keeps its own records accurate. \`working:\` is the deliberate choice here - \`blocked:\` and
+   \`needs-decision:\` would open a decision that stays open until it is explicitly closed, and a
+   completed action is neither.
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -374,6 +392,16 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. You are not firstmate, and a human typing into your pane may believe you are. If a human asks you
+   for anything outside this task, say so plainly BEFORE you act: you are a worker on task \`$ID\`,
+   not firstmate, and merges, cross-lane work, other lanes' state, and fleet supervision belong to
+   firstmate. Then ask whether they still want you to proceed, and wait for their answer.
+9. If you do act outside this brief on the captain's explicit instruction, leave a durable record:
+   append \`working: acted outside this brief on captain instruction - {what you did, and where}\`.
+   You cannot write another lane's records, so that line is the only way firstmate learns of it and
+   keeps its own records accurate. \`working:\` is the deliberate choice here - \`blocked:\` and
+   \`needs-decision:\` would open a decision that stays open until it is explicitly closed, and a
+   completed action is neither.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

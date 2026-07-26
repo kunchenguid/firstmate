@@ -34,9 +34,15 @@ Real harness credential tests remain opt-in rather than part of default CI.
 ## Watching and task containers
 
 Each Firstmate home gets one durable workspace with one task tab per endpoint.
-The primary workspace is `firstmate`.
-A secondmate home uses `2ndmate-<secondmate-id>`, derived from its validated `.fm-secondmate-home` marker.
+The primary workspace is `firstmate-crew`.
+It contains only spawned workers: the primary Firstmate is launched by the captain, never by `bin/fm-spawn.sh`, so its own pane is never inside it.
+A secondmate home uses `2ndmate-<secondmate-id>`, derived from its validated `.fm-secondmate-home` marker, and carries no `-crew` suffix because a secondmate IS spawned into its own home workspace alongside its children.
+The rule is that a workspace label names what that workspace actually contains.
 The secondmate process and every child it launches resolve the same home label; a secondmate launched by the primary receives a narrowly scoped home override during container creation.
+
+Firstmate labels its own tab `firstmate` at session start through `bin/fm-label-self.sh`, so the supervisor is identifiable beside the `fm-<task-id>` worker tabs.
+An explicitly set tab label is independent of the pane's `terminal_title`, which the harness rewrites continuously, so the label persists.
+A secondmate home is refused: its own tab is labeled `fm-<secondmate-id>` and the main Firstmate reaches it by that label.
 
 Attach to the selected named Herdr session and switch to the relevant home workspace to watch its task tabs.
 Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` without attaching.
@@ -46,8 +52,13 @@ The first workspace in a completely empty Herdr session must become focused beca
 
 Herdr does not enforce workspace or tab label uniqueness.
 Firstmate adopts the first workspace matching its derived home label and refuses duplicate task tabs inside it.
-Avoid naming a personal workspace `firstmate` or `2ndmate-<id>` because the adapter cannot distinguish that label collision from its own container.
+Avoid naming a personal workspace `firstmate-crew` or `2ndmate-<id>` because the adapter cannot distinguish that label collision from its own container.
 An older secondmate workspace using `firstmate-<id>` is not migrated automatically; rename it manually before expecting new tasks or recovery to use it.
+
+A home whose primary workspace still carries the earlier `firstmate` label keeps working without any manual step.
+No task metadata ever recorded the label, so a workspace still labeled `firstmate` is adopted for both spawning and recovery while it holds at least one `fm-<id>` tab, and the next spawn renames that same workspace in place, preserving its id, tabs, and panes.
+A workspace labeled `firstmate` that holds no task tab is neither adopted nor renamed, so a personal workspace that merely shares the old name is left alone.
+With optional presentation spaces enabled, a task projected under the earlier label falls back to the ordinary flat layout once, which is the same safe fallback any unmatched projection binding takes.
 
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
 The per-home workspace is reused while it has task tabs.

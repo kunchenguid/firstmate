@@ -1355,7 +1355,98 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
+# --- firstmate's own endpoint label (bin/fm-label-self.sh) -------------------
+#
+# The supervisor was the one endpoint with no standing label, which is how a
+# captain came to steer a crewmate pane believing it was firstmate. These pin
+# the refusals that keep a cosmetic convenience from damaging endpoint
+# IDENTITY, plus the digest wiring.
+
+# tests/lib.sh disables self-labeling suite-wide so a run from inside a real
+# terminal never relabels the developer's own window or tab; these tests turn it
+# back on for exactly their own invocation, with every runtime marker stripped
+# so no real endpoint is ever a candidate.
+label_self() {  # <home> [env-assignments...] -> the script's stdout
+  local home=$1
+  shift
+  env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_TAB_ID -u HERDR_PANE_ID -u CMUX_WORKSPACE_ID \
+    FM_SELF_LABEL=firstmate FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$@" "$ROOT/bin/fm-label-self.sh" 2>&1
+}
+
+test_label_self_refuses_in_a_secondmate_home() {
+  local rec root home fakebin out
+  rec=$(new_world label-self-secondmate)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  : "$root" "$fakebin"
+  printf 'sm-label-1\n' > "$home/.fm-secondmate-home"
+  out=$(label_self "$home" TMUX=fake,1,0 TMUX_PANE=%0)
+  case "$out" in
+    *"secondmate home"*) : ;;
+    *) fail "a secondmate home's endpoint label is its parent's identity handle and must not be renamed"$'\n'"$out" ;;
+  esac
+  pass "fm-label-self.sh: refuses in a secondmate home, whose fm- endpoint label the main firstmate reaches it by"
+}
+
+test_label_self_refuses_a_task_namespace_label() {
+  local rec root home fakebin out
+  rec=$(new_world label-self-reserved)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  : "$root" "$fakebin"
+  out=$(label_self "$home" FM_SELF_LABEL=fm-not-a-task TMUX=fake,1,0 TMUX_PANE=%0)
+  case "$out" in
+    *"reserved for worker endpoints"*) : ;;
+    *) fail "the fm- prefix is the task-endpoint namespace and must be refused"$'\n'"$out" ;;
+  esac
+  pass "fm-label-self.sh: refuses to put firstmate's own endpoint in the reserved fm- task namespace"
+}
+
+test_label_self_reports_an_unlabelable_runtime() {
+  local rec root home fakebin out
+  rec=$(new_world label-self-noruntime)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  : "$root" "$fakebin"
+  out=$(label_self "$home")
+  case "$out" in
+    *"not running inside a terminal runtime"*) : ;;
+    *) fail "with no runtime markers the script must say so, not silently claim success"$'\n'"$out" ;;
+  esac
+  pass "fm-label-self.sh: reports a runtime that cannot label its own tab instead of faking it"
+}
+
+test_session_start_runs_the_self_label_step() {
+  local rec root home fakebin out
+  rec=$(new_world label-self-digest)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  out=$(env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_TAB_ID -u HERDR_PANE_ID -u CMUX_WORKSPACE_ID \
+    -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    FM_SELF_LABEL=firstmate FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
+    "$SESSION_START")
+  case "$out" in
+    *"not running inside a terminal runtime"*) : ;;
+    *) fail "the session-start digest did not run the self-label step"$'\n'"$out" ;;
+  esac
+  case "$out" in
+    *"not running inside a terminal runtime"*"BOOTSTRAP"*) : ;;
+    *) fail "the self-label step must run before the bootstrap section"$'\n'"$out" ;;
+  esac
+  pass "fm-session-start.sh: labels firstmate's own endpoint at session start and reports when it cannot"
+}
+
 test_context_digest_absent_empty_present
+test_label_self_refuses_in_a_secondmate_home
+test_label_self_refuses_a_task_namespace_label
+test_label_self_reports_an_unlabelable_runtime
+test_session_start_runs_the_self_label_step
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_session_lock_concurrent_single_winner

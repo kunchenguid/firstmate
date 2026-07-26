@@ -31,6 +31,9 @@ tmux attach -t firstmate
 ```
 
 Each task window is named `fm-<id>`.
+Firstmate names its own window `firstmate` at session start through `bin/fm-label-self.sh`, so the supervisor is identifiable beside those worker windows.
+The name is pinned with `automatic-rename` and `allow-rename` off, exactly like a task window, so an agent's terminal-title rewrite cannot replace it.
+A secondmate home is refused: its own window is named `fm-<secondmate-id>` and the main Firstmate reaches it by that name.
 
 ```sh
 tmux list-windows -t <session-name>

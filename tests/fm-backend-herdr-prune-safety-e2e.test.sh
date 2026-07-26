@@ -6,8 +6,9 @@
 #
 # Reproduces the exact collision shape against a private, throwaway
 # HERDR_SESSION (never the captain's default): a startup-workspace-shaped
-# layout - one tab labeled "1" in a pre-existing workspace labeled
-# "firstmate" - with a live long-running process in that pane, exactly as
+# layout - one tab labeled "1" in a pre-existing workspace whose label
+# collides with the primary home's own crew-workspace label - with a live
+# long-running process in that pane, exactly as
 # the captain's own live crewmate session looked at incident time. Then
 # drives the real spawn-time container_ensure +
 # create_task path and asserts the live pane (and its live process) survive
@@ -50,17 +51,18 @@ fm_backend_source herdr || fail "fm_backend_source herdr failed"
 fm_backend_herdr_version_check || fail "version_check failed against the real installed herdr"
 
 # --- 1. reproduce the label-collision startup-workspace shape ---------------
-# Explicitly label the startup workspace "firstmate" to create the collision
+# Explicitly label the startup workspace with the primary home's own crew label
+# to create the collision
 # deterministically. Herdr's unlabeled workspace-label derivation is not a
 # stable test contract, while the adopted-workspace state is the behavior
 # this regression must exercise. The seeded tab remains labeled "1".
 
-LIVE_CWD="$SCRATCH/firstmate"
+LIVE_CWD="$SCRATCH/firstmate-crew"
 mkdir -p "$LIVE_CWD"
 
 fm_backend_herdr_server_ensure "$SESSION" || fail "could not start the isolated session's server"
 
-CREATE_OUT=$(fm_backend_herdr_cli "$SESSION" workspace create --cwd "$LIVE_CWD" --label firstmate --no-focus) \
+CREATE_OUT=$(fm_backend_herdr_cli "$SESSION" workspace create --cwd "$LIVE_CWD" --label firstmate-crew --no-focus) \
   || fail "could not create the label-collision startup workspace"
 LIVE_WSID=$(printf '%s' "$CREATE_OUT" | jq -r '.result.workspace.workspace_id // empty')
 LIVE_TAB_ID=$(printf '%s' "$CREATE_OUT" | jq -r '.result.tab.tab_id // empty')
@@ -70,8 +72,8 @@ if [ -z "$LIVE_WSID" ] || [ -z "$LIVE_TAB_ID" ] || [ -z "$LIVE_PANE_ID" ]; then
 fi
 
 LIVE_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$LIVE_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
-[ "$LIVE_LABEL" = firstmate ] || fail "the startup workspace label should be 'firstmate', got '$LIVE_LABEL' - repro setup is wrong"
-pass "repro setup: a pre-existing workspace labeled 'firstmate' collides with the primary home's own label"
+[ "$LIVE_LABEL" = firstmate-crew ] || fail "the startup workspace label should be 'firstmate-crew', got '$LIVE_LABEL' - repro setup is wrong"
+pass "repro setup: a pre-existing workspace labeled 'firstmate-crew' collides with the primary home's own label"
 
 # Simulate a live long-running agent in that pane: a heartbeat loop that
 # appends to a marker file, so liveness is independently verifiable (not just

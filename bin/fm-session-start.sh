@@ -27,6 +27,13 @@
 #
 #   1. lock          - acquire the per-home session lock FIRST, before any
 #                       mutating step runs.
+#   1b. self label    - bin/fm-label-self.sh gives firstmate's OWN terminal
+#                       endpoint a standing label, so the supervisor is
+#                       identifiable next to the fm-<task-id> worker endpoints.
+#                       It touches only the pane this process runs in, never
+#                       shared fleet state, so it runs in read-only mode too;
+#                       it always exits 0 and prints only when it could not
+#                       label the endpoint.
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
 #                       diagnostics always run. Bootstrap's five MUTATING sweeps
@@ -264,6 +271,13 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '%s\n' "$BAR"
   }
 fi
+
+# --- 1b. self label ------------------------------------------------------
+# Labels only the pane this process runs in, so it is safe in read-only mode
+# and needs no lock. Silent on success by contract; its one failure line is
+# plain prose, not a bootstrap diagnostic token.
+SELF_LABEL_OUT=$("$SCRIPT_DIR/fm-label-self.sh" 2>&1 || true)
+[ -n "$SELF_LABEL_OUT" ] && printf '%s\n' "$SELF_LABEL_OUT"
 
 # --- 2. bootstrap --------------------------------------------------------
 subsection "BOOTSTRAP"

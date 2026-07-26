@@ -951,7 +951,7 @@ case "$BACKEND" in
     # secondmate's home), so FM_HOME here still names the primary. Shadow it
     # to PROJ_ABS for just these two calls (bash restores it automatically
     # after each prefixed simple-command call) so the secondmate's tab lands
-    # in the secondmate's own workspace, not the primary's "firstmate" one.
+    # in the secondmate's own workspace, not the primary's crew workspace.
     HERDR_LABEL_HOME=$FM_HOME
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS

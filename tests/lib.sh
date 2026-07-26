@@ -34,6 +34,16 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Keep the suite out of the developer's OWN terminal. bin/fm-label-self.sh
+# labels the endpoint its caller is running in, and several suites drive the
+# real bin/fm-session-start.sh, which invokes it - so a suite run from inside a
+# real tmux window or herdr tab would otherwise relabel that window or tab. An
+# empty label is the script's documented no-op, so this disables it suite-wide;
+# a test that needs the real behavior sets FM_SELF_LABEL explicitly for exactly
+# that invocation.
+FM_SELF_LABEL=''
+export FM_SELF_LABEL
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

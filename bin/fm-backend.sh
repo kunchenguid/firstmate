@@ -584,6 +584,25 @@ fm_backend_kill() {  # <backend> <target>
   esac
 }
 
+# fm_backend_label_self: label the terminal endpoint FIRSTMATE ITSELF occupies,
+# so the supervisor is identifiable at a glance next to the fm-<task-id> worker
+# endpoints it spawns. This is the only backend operation whose target is the
+# caller's own pane rather than a recorded task target, so each arm resolves it
+# from the backend's own ambient markers and never from a label lookup.
+# bin/fm-label-self.sh is the sole caller and owns the safety refusals.
+# Only the two runtime-auto-detected backends implement it; the rest report the
+# limitation rather than pretending to have labeled anything.
+fm_backend_label_self() {  # <backend> <label>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_label_self "$@" ;;
+    herdr) fm_backend_herdr_label_self "$@" ;;
+    *) echo "error: backend '$backend' has no verified way to label firstmate's own endpoint" >&2; return 1 ;;
+  esac
+}
+
 fm_backend_remove_worktree() {  # <backend> <worktree-id>
   local backend=$1
   shift

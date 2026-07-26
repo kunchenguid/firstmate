@@ -156,6 +156,43 @@ if fm_backend_tmux_resolve_bare_selector "no-such-window-xyz" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that does not exist"
 
+# --- firstmate's OWN window label -------------------------------------------
+# fm_backend_tmux_label_self targets the caller's own window through tmux's own
+# $TMUX/$TMUX_PANE markers, so this supplies a real pane id the same way a real
+# firstmate process inherits one. The property that matters is that the label
+# STICKS: an agent harness rewrites its terminal title continuously, so a label
+# an OSC 2 sequence could overwrite would silently do nothing.
+#
+# The probe window is created with a plain `new-window` (NOT
+# fm_backend_tmux_create_task, which already pins the name) under deliberately
+# hostile global options, so the pinning is actually exercised. Its command
+# rewrites the terminal title in a loop and needs no interactive shell.
+
+tmux set-option -g allow-rename on >/dev/null 2>&1 || true
+tmux set-window-option -g automatic-rename on >/dev/null 2>&1 || true
+SELF_PANE=$(tmux new-window -dP -F '#{pane_id}' -t "$SESSION:" -n captain-launched \
+  "sh -c 'while :; do printf \"\\033]2;harness-title-probe\\007\"; sleep 0.2; done'") \
+  || fail "could not create the self-label probe window"
+[ -n "$SELF_PANE" ] || fail "could not resolve the self-label probe pane id"
+
+if TMUX='' TMUX_PANE="$SELF_PANE" fm_backend_tmux_label_self firstmate 2>/dev/null; then
+  fail "fm_backend_tmux_label_self must refuse outside tmux (\$TMUX unset)"
+fi
+
+TMUX="fake,1,0" TMUX_PANE="$SELF_PANE" fm_backend_tmux_label_self firstmate \
+  || fail "fm_backend_tmux_label_self failed against real tmux"
+SELF_NAME=$(tmux display-message -p -t "$SELF_PANE" '#{window_name}')
+[ "$SELF_NAME" = firstmate ] || fail "fm_backend_tmux_label_self did not rename its own window, got '$SELF_NAME'"
+
+sleep 1
+SELF_NAME=$(tmux display-message -p -t "$SELF_PANE" '#{window_name}')
+[ "$SELF_NAME" = firstmate ] \
+  || fail "a continuous application terminal-title rewrite overwrote firstmate's own window label, got '$SELF_NAME'"
+tmux kill-window -t "$SELF_PANE" >/dev/null 2>&1 || true
+tmux set-option -g allow-rename off >/dev/null 2>&1 || true
+tmux set-window-option -g automatic-rename off >/dev/null 2>&1 || true
+pass "real tmux: fm_backend_tmux_label_self labels firstmate's own window, refuses outside tmux, and the label survives a harness terminal-title rewrite"
+
 # --- kill and recovery-grade missing-window classification ------------------
 
 fm_backend_tmux_kill "$TARGET"

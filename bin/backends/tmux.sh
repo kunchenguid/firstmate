@@ -94,6 +94,36 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
   printf '%s\n' "$wid"
 }
 
+# fm_backend_tmux_label_self: rename the window the CALLER ITSELF runs in, so
+# firstmate's own pane has a standing front door instead of tmux's positional
+# default name. Called only through bin/fm-label-self.sh, which owns the
+# refusals that make this safe (never in a secondmate home, never an fm-<id>
+# label). The window is resolved from tmux's own $TMUX_PANE, falling back to
+# the client's current window, so this never targets a task window by name.
+#
+# The name is pinned exactly like fm_backend_tmux_create_task pins a task
+# window: verified with real tmux 3.6a on a private socket that `rename-window`
+# alone already turns automatic-rename off for that window and the name then
+# survives an application OSC 2 title change, both under default options and
+# under a hostile `allow-rename on` + global `automatic-rename on` config; the
+# two explicit set-window-option calls are the same defense in depth the task
+# path uses.
+fm_backend_tmux_label_self() {  # <label>
+  local label=$1 wid
+  [ -n "$label" ] || { echo "error: fm_backend_tmux_label_self needs a label" >&2; return 1; }
+  [ -n "${TMUX:-}" ] || { echo "error: not running inside tmux (\$TMUX is unset)" >&2; return 1; }
+  if [ -n "${TMUX_PANE:-}" ]; then
+    wid=$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}' 2>/dev/null)
+  else
+    wid=$(tmux display-message -p '#{window_id}' 2>/dev/null)
+  fi
+  [ -n "$wid" ] || { echo "error: could not resolve this tmux pane's own window id" >&2; return 1; }
+  tmux rename-window -t "$wid" "$label" 2>/dev/null || { echo "error: tmux rename-window failed for $wid" >&2; return 1; }
+  tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
+  tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
+  return 0
+}
+
 # fm_backend_tmux_current_path: the live pane's current working directory, or
 # empty on any tmux error. Mirrors fm-spawn.sh's worktree-discovery poll:
 # `tmux display-message -p -t "$T" '#{pane_current_path}'`.

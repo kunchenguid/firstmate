@@ -60,7 +60,7 @@ case "$CONTAINER" in
   *) fail "container_ensure returned an unexpected shape: $CONTAINER" ;;
 esac
 [ -n "$SEEDED_TAB_ID" ] || fail "the first container_ensure in a brand-new isolated session must CREATE the workspace and report its seeded default tab id"
-pass "real herdr: container_ensure starts the isolated session's server, creates the firstmate workspace ($CONTAINER), and reports its seeded default tab id ($SEEDED_TAB_ID)"
+pass "real herdr: container_ensure starts the isolated session's server, creates the crew workspace ($CONTAINER), and reports its seeded default tab id ($SEEDED_TAB_ID)"
 
 # A second container_ensure must reuse (ADOPT) the same workspace (idempotent)
 # and report an EMPTY seeded tab id - the created-vs-adopted gate that fixes
@@ -72,7 +72,7 @@ CONTAINER2=${CONTAINER2_RAW%%$'\t'*}
 SEEDED_TAB_ID2=${CONTAINER2_RAW#*$'\t'}
 [ "$CONTAINER2" = "$CONTAINER" ] || fail "container_ensure is not idempotent: '$CONTAINER' vs '$CONTAINER2'"
 [ -z "$SEEDED_TAB_ID2" ] || fail "an ADOPTED (reused) workspace must report an EMPTY seeded default tab id, got '$SEEDED_TAB_ID2'"
-pass "real herdr: container_ensure is idempotent (reuses/adopts the existing firstmate workspace, reports no seeded default tab on adoption)"
+pass "real herdr: container_ensure is idempotent (reuses/adopts the existing crew workspace, reports no seeded default tab on adoption)"
 
 # --- create_task + duplicate refusal + default-tab prune ---------------------
 
@@ -230,7 +230,7 @@ sleep 0.5
 fm_backend_herdr_server_ensure "$SESSION" || fail "the isolated session's server did not come back up after the stop"
 
 POST_LIST=$(herdr workspace list --session "$SESSION" 2>&1)
-POST_PRIMARY_ID=$(printf '%s' "$POST_LIST" | jq -r '.result.workspaces[]? | select(.label == "firstmate") | .workspace_id')
+POST_PRIMARY_ID=$(printf '%s' "$POST_LIST" | jq -r '.result.workspaces[]? | select(.label == "firstmate-crew") | .workspace_id')
 POST_SM_ID=$(printf '%s' "$POST_LIST" | jq -r --arg l "2ndmate-smoketest-sm1" '.result.workspaces[]? | select(.label == $l) | .workspace_id')
 [ "$POST_PRIMARY_ID" = "${CONTAINER#*:}" ] || fail "the primary workspace id did not survive the restart: before=${CONTAINER#*:} after=$POST_PRIMARY_ID"
 [ "$POST_SM_ID" = "$SM_WSID" ] || fail "the secondmate workspace id did not survive the restart: before=$SM_WSID after=$POST_SM_ID"
