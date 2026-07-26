@@ -37,6 +37,10 @@ if ! command -v python3 >/dev/null 2>&1; then
   printf 'fm-kimi-turnend-hook: refused: python3 with tomllib is required to validate config.toml.\n' >&2
   exit 1
 fi
+if [ "$ACTION" = install ] && ! command -v jq >/dev/null 2>&1; then
+  printf 'fm-kimi-turnend-hook: refused: jq is required by the installed Kimi turn-end hook.\n' >&2
+  exit 1
+fi
 
 python3 - "$ACTION" "$HOME/.kimi-code" <<'PY'
 import os

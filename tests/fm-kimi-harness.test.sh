@@ -279,8 +279,30 @@ test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config() {
   pass "Kimi hook install refuses missing, malformed, and surprising config without writing"
 }
 
+test_kimi_hook_install_refuses_without_jq() {
+  local home config before fakebin out rc
+  home="$TMP_ROOT/config-no-jq"
+  config="$home/.kimi-code/config.toml"
+  before="$home/config-before.toml"
+  fakebin=$(fm_fakebin "$home/no-jq")
+  mkdir -p "$home/.kimi-code"
+  printf '# Captain config\nmodel = "test"\n' > "$config"
+  cp "$config" "$before"
+  ln -s "$(command -v bash)" "$fakebin/bash"
+  ln -s "$(command -v python3)" "$fakebin/python3"
+
+  rc=0
+  out=$(HOME="$home" PATH="$fakebin" "$KIMI_HOOK" install 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "Kimi hook install succeeded without jq"
+  assert_contains "$out" "jq is required" "missing-jq refusal did not name jq"
+  cmp -s "$before" "$config" || fail "missing-jq refusal changed config bytes"
+  assert_absent "$home/.kimi-code/fm-turn-end.sh" "missing-jq refusal wrote the hook script"
+  assert_absent "$home/.kimi-code/fm-turn-end.d" "missing-jq refusal wrote the registry"
+  pass "Kimi hook install refuses without jq before any config write"
+}
+
 test_kimi_hook_is_silent_and_requires_registered_workspace_token() {
-  local id rec out rc hook target token no_token snapshot_before snapshot_after
+  local id rec out rc hook target token no_token snapshot_before snapshot_after fakebin
   id=kimi-hook-auth-z6
   rec=$(make_spawn_case hook-auth "$id")
   read_spawn_record "$rec"
@@ -311,6 +333,16 @@ test_kimi_hook_is_silent_and_requires_registered_workspace_token() {
   expect_code 0 "$rc" "registered Kimi hook invocation did not exit zero"
   [ -z "$out" ] || fail "registered Kimi hook invocation printed output: $out"
   assert_present "$target" "registered Kimi hook invocation did not touch the turn-end marker"
+
+  rm "$target"
+  fakebin=$(fm_fakebin "$CASE_DIR/no-jq")
+  ln -s "$(command -v bash)" "$fakebin/bash"
+  out=$(printf '{"hook_event_name":"Stop","session_id":"crew","cwd":"%s","stop_hook_active":false}\n' "$WT_DIR" \
+    | HOME="$HOME_DIR" PATH="$fakebin" "$hook" 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "Kimi hook without jq must still exit zero"
+  [ -z "$out" ] || fail "Kimi hook without jq printed output: $out"
+  assert_absent "$target" "Kimi hook without jq touched the turn-end marker"
   pass "Kimi hook stays silent and inert without a Firstmate registry token"
 }
 
@@ -583,6 +615,7 @@ test_tracked_files_have_no_user_absolute_paths
 test_existing_launch_templates_are_byte_pinned
 test_kimi_hook_install_is_surgical_idempotent_and_removable
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
+test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
