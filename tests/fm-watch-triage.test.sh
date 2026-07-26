@@ -773,6 +773,36 @@ test_verified_wait_uses_supported_endpoint_liveness() {
   pass "verified waits use positive endpoint liveness on backends without recovery-grade agent state"
 }
 
+test_working_timer_reclassifies_verified_wait() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case working-timer-verified-wait); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-transition-wait"
+  printf 'idle validation output\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/transition-wait.meta"
+  printf 'working: validation in progress\n' > "$state/transition-wait.status"
+  sig=$(seen_sig "$state/transition-wait.status")
+  printf '%s' "$sig" > "$state/.seen-transition-wait_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle validation output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '2\n' > "$state/.count-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=codex FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 1 finding(s)' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_VERIFIED_WAIT_RECHECK_SECS=240 FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 20 || { reap "$pid"; fail "working-to-parked transition wedge-escalated: $(cat "$out")"; }
+  [ -e "$state/.verified-wait-$key" ] || { reap "$pid"; fail "working timer did not transition to verified-wait tracking"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "working timer remained armed after transition to verified wait"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "working-to-parked transition queued a false wedge"; }
+  reap "$pid"
+  pass "working wedge timers reclassify verified waits before escalation"
+}
+
 test_signal_batch_rebuilds_after_locked_retirement() {
   local dir state fakebin out lock_ready lock_wait retire retire_pid pid real_sleep
   dir=$(make_case signal-retirement-batch); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1466,6 +1496,7 @@ test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_verified_validation_decision_is_not_stale
 test_verified_wait_uses_supported_endpoint_liveness
+test_working_timer_reclassifies_verified_wait
 test_signal_batch_rebuilds_after_locked_retirement
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode

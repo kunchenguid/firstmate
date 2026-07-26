@@ -281,13 +281,12 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
-# both places a hash can be absorbed this way: the plain non-terminal path,
-# and the stale_is_terminal-overridden path (a captain-relevant status-log
-# line that an active run/busy pane outranked).
+# escalates once STALE_ESCALATE_SECS have elapsed. Rechecks authoritative state
+# only at the escalation boundary. Shared by both places a hash can be absorbed
+# this way: the plain non-terminal path, and the stale_is_terminal-overridden
+# path (a captain-relevant status-log line that an active run/busy pane outranked).
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason key task h
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -297,6 +296,13 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        task=$(window_to_task "$win" "$STATE")
+        if [ "$(crew_absorb_class "$task")" = waiting ]; then
+          key=$(printf '%s' "$win" | tr ':/.' '___')
+          h=$(cat "$STATE/.stale-$key" 2>/dev/null || true)
+          handle_paused_stale "$win" "$task" "$h" waiting
+          return
+        fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
