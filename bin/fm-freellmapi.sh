@@ -260,8 +260,19 @@ cmd_start() {
   [ -f "$APP_DIR/server/dist/index.js" ] \
     || die "no built install at $APP_DIR; run: fm-freellmapi.sh install --accept-risks"
 
-  if running_pid >/dev/null; then
-    die "already running (pid $(cat "$PID_FILE")); use status or stop"
+  local recorded_pid
+  if [ -f "$PID_FILE" ]; then
+    recorded_pid=$(cat "$PID_FILE" 2>/dev/null || true)
+    case "$recorded_pid" in
+      ''|*[!0-9]*) ;;
+      *)
+        if pid_alive "$recorded_pid"; then
+          pid_is_our_server "$recorded_pid" \
+            || die "pid $recorded_pid is live but its lane identity cannot authenticate it; refusing to overwrite the pid record"
+          die "already running (pid $recorded_pid); use status or stop"
+        fi
+        ;;
+    esac
   fi
 
   ensure_encryption_key

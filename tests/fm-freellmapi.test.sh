@@ -322,6 +322,37 @@ EOF
   pass "start fails closed when the binding is unverifiable"
 }
 
+test_start_preserves_unverifiable_live_pid_record() {
+  local root home fakebin cap pid recorded
+  root=$(fm_test_tmproot fm-freellmapi)
+  read -r home fakebin <<EOF
+$(fresh_home "$root")
+EOF
+  cap="$root/cap"
+  server_fakes "$fakebin" "$cap"
+  built_install "$home"
+  run_tool "$home" "$fakebin" start
+  expect_code 0 "$CODE" "initial start"
+  pid=$(cat "$home/data/freellmapi/run/server.pid")
+  rm "$home/data/freellmapi/run/server.identity"
+
+  set +e
+  OUT=$(FM_HOME="$home" PATH="$fakebin:$PATH" FAKE_LSOF_EXIT=1 \
+    FM_FREELLMAPI_START_TIMEOUT=3 FM_FREELLMAPI_STOP_TIMEOUT=2 "$TOOL" start 2>&1)
+  CODE=$?
+  set -e
+  [ "$CODE" -ne 0 ] || fail "start must refuse an unauthenticated live pid record"
+  recorded=$(cat "$home/data/freellmapi/run/server.pid")
+  [ "$recorded" = "$pid" ] || fail "refused start must preserve the original live pid record"
+  assert_absent "$home/data/freellmapi/run/server.identity" "refused start must not replace the missing identity record"
+  assert_absent "$cap/node-signal.capture" "refused start must not signal the unauthenticated live process"
+  assert_contains "$OUT" "cannot authenticate" "refusal must explain the live record cannot be authenticated"
+
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "start preserves an unverifiable live pid record"
+}
+
 test_start_refuses_malformed_encryption_key() {
   local root home fakebin cap
   root=$(fm_test_tmproot fm-freellmapi)
@@ -565,6 +596,7 @@ test_start_refuses_without_install
 test_start_binds_loopback_and_never_leaks_key
 test_start_stops_service_on_non_loopback_listener
 test_start_fails_closed_when_binding_unverifiable
+test_start_preserves_unverifiable_live_pid_record
 test_start_refuses_malformed_encryption_key
 test_seed_keys_refuses_missing_env_and_var
 test_seed_keys_refuses_unrecorded_service_before_secrets
