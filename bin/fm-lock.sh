@@ -28,6 +28,7 @@
 #   Do not manually delete retained claim tombstones; escalate suspected
 #   tombstone corruption for a generation-aware recovery instead.
 #
+# BEGIN USAGE
 # Usage: fm-lock.sh
 #          Acquire a free lock or atomically reclaim a proven-stale lock.
 #        fm-lock.sh status
@@ -37,6 +38,7 @@
 #          --confirmed-closed is accepted only for a codex-thread owner and only
 #          after the captain explicitly confirms that its old window is closed.
 # There is deliberately no unconditional clear command.
+# END USAGE
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -77,7 +79,11 @@ RECLAIM_ACQUIRE_ERROR=
 RECLAIM_COMMAND_ACTIVE=0
 
 usage() {
-  sed -n '28,36p' "$0" | sed 's/^# \{0,1\}//'
+  awk '
+    /^# BEGIN USAGE$/ { printing = 1; next }
+    /^# END USAGE$/ { exit }
+    printing { sub(/^# ?/, ""); print }
+  ' "$0"
 }
 
 valid_codex_thread_id() {
