@@ -85,6 +85,15 @@ test_exact_lane_id_send_still_works() {
   pass "fm-send strict: exact task/lane ids resolve through home metadata"
 }
 
+test_help_without_fm_home_succeeds() {
+  local out rc
+
+  out=$(env -u FM_HOME "$SEND" --help 2>&1); rc=$?
+  expect_code 0 "$rc" "help should succeed without FM_HOME"
+  assert_contains "$out" "Usage: fm-send.sh <target> <text...>" "help should print usage instead of resolving --help as a target"
+  pass "fm-send strict: help does not require FM_HOME or target resolution"
+}
+
 test_unset_fm_home_fails() {
   local dir fb err log rc
   dir="$TMP_ROOT/nohome"; mkdir -p "$dir"
@@ -161,6 +170,7 @@ test_healthy_fm_id_send_still_works() {
 }
 
 test_exact_lane_id_send_still_works
+test_help_without_fm_home_succeeds
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails
