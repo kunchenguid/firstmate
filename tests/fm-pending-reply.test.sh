@@ -717,6 +717,8 @@ test_kimi_capture_fallback_uses_recorded_harness() (
   state="$home/state"
   sm_home="$home/sm"
   mkdir -p "$sm_home/state"
+  # This fixture clock is intentionally scoped to the isolated subshell.
+  # shellcheck disable=SC2030,SC2031
   export FM_PENDING_REPLY_NOW=10020
   corr=$(fm_pending_reply_create "$home" "$state" hibit "kimi fallback")
   fm_pending_reply_mark_delivered "$state" "$corr"
@@ -767,11 +769,15 @@ test_tick_skips_terminal_and_reuses_target_observation() {
     fm_write_secondmate_meta "$state/hibit.meta" "$home/hibit" "sess:fm-hibit"
     fm_write_secondmate_meta "$state/resolved.meta" "$home/resolved" "sess:fm-resolved"
     fm_write_secondmate_meta "$state/escalated.meta" "$home/escalated" "sess:fm-escalated"
+    # Runtime overrides called indirectly by the pending-reply tick.
+    # shellcheck disable=SC2329
     fm_backend_busy_state() {
       printf '%s\t%s\n' "$1" "$2" >> "$probe_log"
       printf 'busy'
     }
+    # shellcheck disable=SC2329
     fm_backend_capture() { fail "native busy observations should not capture"; }
+    # shellcheck disable=SC2329
     fm_pending_reply_find_resolve_line() {
       local status_file=$1 corr=$2 line
       printf '%s\t%s\n' "$status_file" "$corr" >> "$scan_log"
