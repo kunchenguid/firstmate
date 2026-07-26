@@ -30,7 +30,8 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `ISOLATION: task <id> collapsed onto the primary checkout - agent process <pid> is running in <path> ...` - a restore or resume put that task's live agent inside the primary checkout instead of its own worktree, so anything it writes lands in the shared checkout.
   The finding comes from the agent process itself, not a pane reading, so treat it as proven.
   Stop that worker before it writes anything further, load `stuck-crewmate-recovery` to reconcile its recorded work, and relaunch it in an isolated worktree; never dispose of a worktree or steer the task while this line stands.
-- `ISOLATION: task <id> is running as a worker of home <path>, not this home ...` - a live agent declared for a different home is acting against this home's records, which is the home-inheritance defect itself.
+- `ISOLATION: task <id> is running as a worker of home <path>, not the home that owns it ...` - a live agent declared for a different home is acting against this home's records, which is the home-inheritance defect itself.
+  A secondmate legitimately declares its own home and never trips this line, so a reported mismatch is always a genuine one.
   Stop that worker, then reconcile ownership from the home that actually launched it rather than adopting it here.
 - `ISOLATION: task <id> is not in its recorded worktree - agent process <pid> is running in <path> ...` - the task's recorded worktree is stale relative to where its agent actually is.
   Reconcile the record before any teardown or steer; disposal paths already refuse the slot, and forcing past that would risk another task's work.

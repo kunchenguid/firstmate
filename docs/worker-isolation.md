@@ -79,6 +79,13 @@ Per-provider process id availability:
 A provider with no process id is not a failure of the library.
 It means a task that also lacks the declaration marker has only a hint, which is reported as `unknown` rather than promoted to evidence.
 
+A tmux target is resolved to its stable window id by exact enumeration before any pane is read.
+`display-message` given a window name it cannot find silently answers for the *active client's* window instead, so a task whose window name was lost or auto-renamed would hand back firstmate's own pane, whose working directory is the primary checkout - a healthy worker reported as collapsed.
+No exact match reports `unknown`, which is why a caller must never re-derive the pane pid from a name itself.
+
+A caller that asks about many tasks passes one process index built from a single `/proc` walk.
+Asking per task instead re-walks every process for every task, and the resume sweep runs on the session-start critical path over a home that has held seventeen concurrent tasks.
+
 Reading another process's environment needs care that is easy to get wrong.
 The mode bits on `/proc/<pid>/environ` are not sufficient permission, because the kernel additionally requires ptrace read access; a same-uid but privileged process passes a readability test and still fails at open.
 The failing redirect has to be silenced with the group form, since redirections are applied left to right and a trailing `2>/dev/null` on the same command is set up only after the input redirect has already printed to stderr.
@@ -100,6 +107,24 @@ Retaining means the lease is retired rather than returned.
 `bin/fm-teardown.sh` leaves the directory completely untouched - no branch delete, no hook-file removal, no pool return - and still completes the rest of the teardown, reporting the retained slot on its completion line.
 A conflicting secondmate home or Orca worktree refuses outright instead, because silently skipping their removal would strand a registry entry or an Orca-owned worktree.
 
+Retention is not a one-way door.
+A task that retains because another task's metadata still names the slot gives up its own ownership stamp on the way out, so the holder left behind can release the slot normally once nothing else references it.
+That clear is deliberately narrow: a stamp naming a *different* task is always preserved, because it is the evidence that stops a stale task from disposing of a slot whose real occupant is merely paused or between processes, and destroying preserved work would be strictly worse than leaking a slot.
+The live-occupant check stays a blocking condition and is never weakened to compensate.
+
+#### Reclaiming an already-leaked slot
+
+A slot leaked before that rule existed has no record left to release it: no metadata in any home names it, and its stamp names a task that no longer exists.
+Reclaim it by hand, in this order, and stop at the first step that fails.
+
+1. Confirm nothing records the slot: `grep -l "worktree=<slot>" <home>/state/*.meta` across every home, including secondmate homes, must find nothing.
+2. Confirm nothing lives in it: no process under `/proc` declaring `FM_AGENT_TASK` may have that slot as its `cwd`, and `git -C <slot> status` must show no work worth keeping.
+3. Read the stamp at `$(git -C <slot> rev-parse --absolute-git-dir)/fm-slot-owner` and confirm the task it names is gone from every home's state directory.
+4. Delete that stamp file, then return the slot from its project with `cd <project> && treehouse return --force <slot>`.
+
+`--force` on `bin/fm-teardown.sh` is deliberately not a shortcut for this.
+It is the captain's authority to discard *this* task's work, never authority to release another task's slot, so the gate stays in place and the reclaim stays a deliberate, evidence-checked operator act.
+
 ### Restore-time re-assertion
 
 `bin/fm-isolation-sweep.sh` re-establishes at session start what spawn could only assert at launch.
@@ -109,6 +134,10 @@ It is read-only, always exits 0, and prints one `ISOLATION:` line per task whose
 It reports only from an authoritative process reading.
 A task with no such reading is silent by default and reported as an unproven `BOOTSTRAP_INFO` fact under `FM_ISOLATION_VERBOSE=1`, because reporting a violation from a pane path is precisely the false positive that corrected the method in the first place.
 
+Which home a record expects is read from the record, never assumed to be the home running the sweep.
+A secondmate declares its own home while its record lives in the launching primary's state directory, so comparing every declaration against this home would report every healthy secondmate in the fleet as a foreign worker on every session start.
+A sweep that cries wolf on a normal fleet is worse than no sweep, because the `bootstrap-diagnostics` skill tells the agent to treat these lines as proven.
+
 ## Extension points
 
 - A new operational-home variable belongs in `FM_WORKER_ISOLATION_HOME_VARS` in `bin/fm-worker-isolation-lib.sh`, not at a call site, or task children will inherit it.
@@ -117,7 +146,7 @@ A task with no such reading is silent by default and reported as an unproven `BO
 
 ## Regression coverage
 
-`tests/fm-worker-isolation.test.sh` covers all four mechanisms: the declaration's exact bytes and its refusals, the launch declaration for every verified harness, each consuming refusal, the process-cwd method of record against a deliberately lying pane path, the provider matrix, all three slot-conflict forms plus the clean-disposal case, teardown retiring a contested lease under `--force`, and the four sweep outcomes.
+`tests/fm-worker-isolation.test.sh` covers all four mechanisms: the declaration's exact bytes and its refusals, the launch declaration for every verified harness, each consuming refusal, the process-cwd method of record against a deliberately lying pane path, the provider matrix, the stable-window-id resolution and its refusal to answer from a lost window name, all three slot-conflict forms plus the clean-disposal case, teardown retiring a contested lease under `--force`, the contested-then-released and still-blocked stamp sequences, and the sweep outcomes including a healthy secondmate staying silent.
 Kimi's launch declaration is asserted in `tests/fm-kimi-harness.test.sh`, which owns that adapter's readiness and delivery gates.
 
 ## Maintaining this file

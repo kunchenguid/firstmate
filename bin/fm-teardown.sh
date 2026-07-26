@@ -58,7 +58,10 @@
 # slot is released, bin/fm-slot-owner-lib.sh must find no conflicting reference.
 # A conflict RETIRES the lease instead of returning it: the directory is left
 # untouched on disk, the rest of the teardown (endpoint and records) still runs,
-# and the completion line says the slot was retained. This gate is not waived by
+# and the completion line says the slot was retained. A retiring task also gives
+# up its OWN ownership stamp so the holder left behind can still release the
+# slot once nothing references it; docs/worker-isolation.md owns the operator
+# reclaim path for a slot that no record names at all. This gate is not waived by
 # --force, which grants authority over this task's work only, never over another
 # task's slot. A conflicting SECONDMATE home or Orca worktree refuses outright
 # instead, because skipping their removal would strand a registry entry or an
@@ -798,8 +801,13 @@ slot_release_allowed() {  # <state-dir> <task-id> <worktree> <home> <label>
   verdict=$(fm_slot_disposal_verdict "$state" "$id" "$wt" "$home")
   [ "$verdict" = dispose ] && return 0
   TEARDOWN_SLOT_RETAINED=1
+  # Hand this task's own claim over as it goes, so the holder left behind can
+  # still release the slot. bin/fm-slot-owner-lib.sh owns exactly when that is
+  # safe - never when the stamp names someone else.
+  fm_slot_stamp_relinquish "$wt" "$id" "$verdict"
   echo "teardown: $label $wt lease RETAINED, not returned to the pool: ${verdict#retain: }" >&2
   echo "teardown: the directory is left untouched on disk so the slot cannot be reissued while another task still references it; --force does not waive this gate." >&2
+  echo "teardown: once nothing references the slot, tearing down its remaining holder releases it; docs/worker-isolation.md owns the operator reclaim path for a slot no record names at all." >&2
   return 1
 }
 
@@ -958,8 +966,13 @@ EOF
   printf '%s\n' "$abs_home_path"
 }
 
-remove_firstmate_home() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path
+# The slot scope is a PARAMETER, not this run's globals: a nested child
+# secondmate home was recorded and stamped by its own parent secondmate's home,
+# so judging it against the primary's state directory and FM_HOME would compare
+# against a home that never owned it and retain every time. Callers pass the
+# scope that actually stamped the home being removed.
+remove_firstmate_home() {  # <home> <label> [expected-id] [state-dir] [home-scope]
+  local home=$1 label=$2 expected_id=${3:-} state_scope=${4:-$STATE} home_scope=${5:-$FM_HOME} abs_home_path
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
@@ -969,7 +982,7 @@ remove_firstmate_home() {
       echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
       return 1
     }
-    slot_release_allowed "$STATE" "${expected_id:-$ID}" "$abs_home_path" "$FM_HOME" "$label" || return 1
+    slot_release_allowed "$state_scope" "${expected_id:-$ID}" "$abs_home_path" "$home_scope" "$label" || return 1
     fm_slot_stamp_clear "$abs_home_path"
     teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
@@ -1047,8 +1060,13 @@ cleanup_firstmate_home_children() {
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
-        cleanup_firstmate_home_children "$child_home"
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id"
+        cleanup_firstmate_home_children "$child_home" || return $?
+        # This child home belongs to the home being cleaned, not to the primary:
+        # pass that scope, and refuse rather than fall through to the record
+        # deletion below, which would strand the home, its state, and its
+        # backlog on disk after their routing entry was already cleared.
+        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" \
+          "$sub_state" "$home" || return 1
       fi
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then

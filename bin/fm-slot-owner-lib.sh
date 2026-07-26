@@ -30,6 +30,14 @@
 # Absence of evidence is not evidence: a slot with no stamp (every task spawned
 # before stamping existed) and no conflicting reference still disposes normally.
 #
+# Retention must not be a one-way door either. A task that retains on rule 1
+# gives up its own stamp as it goes (fm_slot_stamp_relinquish), so the holder
+# left behind can still release the slot once nothing references it. A stamp
+# naming someone ELSE is never cleared, because that stamp is what stops a stale
+# task from disposing of a slot whose real occupant is merely paused.
+# docs/worker-isolation.md owns the operator reclaim path for a slot that was
+# already leaked before this rule existed.
+#
 # The stamp lives in the worktree's PRIVATE git directory, never in the working
 # tree, so it can never dirty a status check or leak into a commit. Writing is
 # refused for anything that is not a linked worktree, so a primary checkout can
@@ -44,6 +52,11 @@ _FM_SLOT_OWNER_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_SLOT_OWNER_LIB_DIR/fm-agent-cwd-lib.sh"
 
 FM_SLOT_OWNER_STAMP_NAME=fm-slot-owner
+
+# The exact prefix of the rule-1 (metadata reference) retain verdict. One owner,
+# because fm_slot_stamp_relinquish keys the only stamp clear that is safe off
+# this specific reason.
+FM_SLOT_RETAIN_META_PREFIX='retain: slot is also recorded by task(s) '
 
 # fm_slot_stamp_path <worktree>: the stamp path for a LINKED worktree, or 1 for
 # a plain checkout (whose git dir is shared and must never be stamped).
@@ -167,7 +180,7 @@ fm_slot_disposal_verdict() {
     return 0
   fi
   if refs=$(fm_slot_meta_referencing_tasks "$state" "$self" "$wt"); then
-    printf 'retain: slot is also recorded by task(s) %s in this home' "$(fm_slot_join_ids "$refs")"
+    printf '%s%s in this home' "$FM_SLOT_RETAIN_META_PREFIX" "$(fm_slot_join_ids "$refs")"
     return 0
   fi
   if stamp_task=$(fm_slot_stamp_field "$wt" task); then
@@ -187,4 +200,43 @@ fm_slot_disposal_verdict() {
     return 0
   fi
   printf 'dispose'
+}
+
+# fm_slot_stamp_relinquish <worktree> <task-id> <verdict>
+# Give up THIS task's claim on a slot it is retaining, so a retained lease can
+# still be released later by whoever is left holding it.
+#
+# Without this the gate is a one-way door. Task B stamps a slot, paused task A's
+# stale metadata also names it, B tears down and retains on rule 1, and B's
+# metadata is then removed. When A finally tears down, no reference is left to
+# justify the retention - but the stamp still names B, so rule 2 retains forever
+# and the pool has silently lost a slot that nothing references.
+#
+# The clear is deliberately NARROW, and the narrowness is the whole safety
+# argument:
+#   - retained by ANOTHER TASK'S METADATA while the stamp names SELF: this is
+#     the true owner handing the slot back to the other holder, so its stamp
+#     must not outlive it;
+#   - retained because the stamp names a DIFFERENT task: PRESERVE it. The stamp
+#     is positive evidence the slot was reissued to someone else, and clearing
+#     it would let a later teardown of the stale task dispose of a slot whose
+#     real occupant merely has no live process at that moment (paused or exited
+#     work), destroying preserved work - strictly worse than the leak above;
+#   - retained by a live occupant: PRESERVE it, for the same reason.
+# Metadata references stay checked first and stay authoritative in
+# fm_slot_disposal_verdict; that ordering is what protects a live-but-paused
+# task from having its slot reissued, and nothing here weakens it.
+#
+# Always succeeds: a slot with no stamp, or one stamped for someone else, simply
+# keeps whatever evidence it has.
+fm_slot_stamp_relinquish() {  # <worktree> <task-id> <verdict>
+  local wt=$1 self=$2 verdict=$3 stamp_task
+  case "$verdict" in
+    "$FM_SLOT_RETAIN_META_PREFIX"*) ;;
+    *) return 0 ;;
+  esac
+  stamp_task=$(fm_slot_stamp_field "$wt" task) || return 0
+  [ "$stamp_task" = "$self" ] || return 0
+  fm_slot_stamp_clear "$wt"
+  return 0
 }

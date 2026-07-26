@@ -118,12 +118,44 @@ fm_agent_proc_env() {
   printf '%s' "$value"
 }
 
-# fm_agent_pids_for_task <task-id>: every live process whose environment
-# declares this task, newline separated. Only the launch command itself carries
-# the marker, so the set is the agent plus its descendants.
+# fm_agent_task_pid_index: one `<task-id>\t<pid>` line per live process that
+# declares a task, built from a SINGLE walk of /proc.
+#
+# Reading one process's environment costs several processes of its own, so a
+# caller that asks about MANY tasks builds this index once and hands it back to
+# the lookups below. Asking per task instead is O(tasks x processes), which the
+# resume sweep pays on the session-start critical path - and the incident it
+# exists for had 17 concurrent tasks.
+# Returns 1 when procfs is unavailable or no live process declares a task.
+fm_agent_task_pid_index() {
+  local entry pid task found=1
+  [ -d /proc ] || return 1
+  for entry in /proc/[0-9]*; do
+    [ -d "$entry" ] || continue
+    pid=${entry#/proc/}
+    task=$(fm_agent_proc_env "$pid" FM_AGENT_TASK) || continue
+    printf '%s\t%s\n' "$task" "$pid"
+    found=0
+  done
+  return "$found"
+}
+
+# fm_agent_pids_for_task <task-id> [pid-index]: every live process whose
+# environment declares this task, newline separated. Only the launch command
+# itself carries the marker, so the set is the agent plus its descendants.
+# A supplied <pid-index> (fm_agent_task_pid_index) is consulted instead of
+# walking /proc again; an empty one is a real answer - no process declares a
+# task - not a missing argument.
 fm_agent_pids_for_task() {
-  local id=$1 entry pid found=1
+  local id=$1 index pids entry pid found=1
   [ -n "$id" ] || return 1
+  if [ "$#" -ge 2 ]; then
+    index=$2
+    pids=$(printf '%s\n' "$index" | awk -F'\t' -v t="$id" '$1 == t {print $2}')
+    [ -n "$pids" ] || return 1
+    printf '%s\n' "$pids"
+    return 0
+  fi
   [ -d /proc ] || return 1
   for entry in /proc/[0-9]*; do
     [ -d "$entry" ] || continue
@@ -135,13 +167,17 @@ fm_agent_pids_for_task() {
   return "$found"
 }
 
-# fm_agent_pid_for_task <task-id>: the ROOT-most declared process for the task -
-# the launched agent itself rather than one of its tool subprocesses, which is
-# the process whose cwd answers "is this worker isolated?". The root is the
-# match whose own parent is not also a match.
+# fm_agent_pid_for_task <task-id> [pid-index]: the ROOT-most declared process
+# for the task - the launched agent itself rather than one of its tool
+# subprocesses, which is the process whose cwd answers "is this worker
+# isolated?". The root is the match whose own parent is not also a match.
 fm_agent_pid_for_task() {
   local id=$1 matches pid ppid
-  matches=$(fm_agent_pids_for_task "$id") || return 1
+  if [ "$#" -ge 2 ]; then
+    matches=$(fm_agent_pids_for_task "$id" "$2") || return 1
+  else
+    matches=$(fm_agent_pids_for_task "$id") || return 1
+  fi
   [ -n "$matches" ] || return 1
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
@@ -160,6 +196,33 @@ EOF
   printf '%s' "$(printf '%s\n' "$matches" | sort -n | head -1)"
 }
 
+# fm_agent_tmux_window_id <target>: the STABLE window id behind a tmux target.
+#
+# A `@<n>` target is already stable and passes straight through. A
+# `<session>:<name>` target is resolved by EXACT enumeration and is never handed
+# to tmux for resolution, because `display-message -t <unknown-name>` silently
+# falls back to the ACTIVE CLIENT's window. A task whose window name was lost or
+# auto-renamed would then answer with firstmate's OWN pane pid, whose cwd is the
+# primary checkout - a healthy worker reported as a collapse, which is the exact
+# false-violation class this library exists to eliminate. bin/fm-spawn.sh pins
+# the window name and targets the id for the same reason.
+# No exact match returns 1, so the caller reports `unknown` rather than another
+# window's evidence.
+fm_agent_tmux_window_id() {  # <target>
+  local target=${1:-} session window wid
+  case "$target" in
+    '') return 1 ;;
+    @*) printf '%s' "$target"; return 0 ;;
+    *:*) session=${target%%:*}; window=${target#*:} ;;
+    *) return 1 ;;
+  esac
+  [ -n "$session" ] && [ -n "$window" ] || return 1
+  wid=$(tmux list-windows -t "=$session" -F '#{window_id} #{window_name}' 2>/dev/null \
+    | awk -v w="$window" '{ id = $1; $1 = ""; sub(/^ /, ""); if ($0 == w) { print id; exit } }')
+  [ -n "$wid" ] || return 1
+  printf '%s' "$wid"
+}
+
 # fm_agent_backend_shell_pid <backend> <target>: the backend's pane/shell pid.
 #
 # Provider matrix (verified surfaces, docs/worker-isolation.md owns the record):
@@ -171,11 +234,12 @@ EOF
 # A provider with no pid is not a failure of this function; it means the caller
 # has only a hint for tasks that also lack the declared-agent marker.
 fm_agent_backend_shell_pid() {
-  local backend=$1 target=$2 pid
+  local backend=$1 target=$2 pid wid
   case "$backend" in
     tmux)
       command -v tmux >/dev/null 2>&1 || return 1
-      pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null | tr -d '[:space:]')
+      wid=$(fm_agent_tmux_window_id "$target") || return 1
+      pid=$(tmux display-message -p -t "$wid" '#{pane_pid}' 2>/dev/null | tr -d '[:space:]')
       fm_agent_pid_is_numeric "$pid" || return 1
       printf '%s' "$pid"
       ;;
@@ -229,13 +293,22 @@ fm_agent_harness_pid_below() {
   printf '%s' "$best"
 }
 
-# fm_agent_cwd_verdict <task-id> [backend] [target]
+# fm_agent_cwd_verdict <task-id> [backend] [target] [pid-index]
 # Print the tab-separated verdict record documented in this file's header.
 # Never falls back to a pane value: a caller that wants a hint must ask its
 # backend for one and label it as a hint.
+# A caller looping over many tasks passes one fm_agent_task_pid_index so the
+# declared-agent lookup costs a single /proc walk for the whole loop.
 fm_agent_cwd_verdict() {
-  local id=${1:-} backend=${2:-} target=${3:-} pid cwd shell_pid
-  if [ -n "$id" ] && pid=$(fm_agent_pid_for_task "$id"); then
+  local id=${1:-} backend=${2:-} target=${3:-} pid='' cwd shell_pid
+  if [ -n "$id" ]; then
+    if [ "$#" -ge 4 ]; then
+      pid=$(fm_agent_pid_for_task "$id" "$4") || pid=
+    else
+      pid=$(fm_agent_pid_for_task "$id") || pid=
+    fi
+  fi
+  if [ -n "$pid" ]; then
     if cwd=$(fm_agent_proc_cwd "$pid"); then
       printf 'proc\t%s\t%s' "$pid" "$cwd"
       return 0

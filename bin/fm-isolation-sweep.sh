@@ -51,6 +51,13 @@ esac
 HOME_REAL=$(fm_agent_canonical_dir "$FM_HOME") || HOME_REAL=$FM_HOME
 ROOT_REAL=$(fm_agent_canonical_dir "$FM_ROOT") || ROOT_REAL=$FM_ROOT
 
+# One /proc walk for the whole sweep, reused for every task below. Asking per
+# task instead costs a full walk each time - O(tasks x processes) of forked
+# environment reads on the session-start critical path, and the incident this
+# sweep exists for had 17 concurrent tasks. An empty index is a real answer (no
+# live process declares a task), not a missing one.
+PID_INDEX=$(fm_agent_task_pid_index) || PID_INDEX=
+
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   id=$(basename "$meta" .meta)
@@ -59,7 +66,7 @@ for meta in "$STATE"/*.meta; do
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
 
-  record=$(fm_agent_cwd_verdict "$id" "$backend" "$target")
+  record=$(fm_agent_cwd_verdict "$id" "$backend" "$target" "$PID_INDEX")
   source=$(fm_agent_verdict_field "$record" source)
   if [ "$source" != proc ]; then
     if [ "${FM_ISOLATION_VERBOSE:-0}" = 1 ]; then
@@ -73,11 +80,26 @@ for meta in "$STATE"/*.meta; do
 
   # A resumed agent that carries a declared owning home from another home is the
   # inheritance defect itself, not merely a misplaced cwd.
+  #
+  # The home a record EXPECTS is not always this one. A secondmate is
+  # deliberately launched with FM_AGENT_OWNER_HOME set to its OWN home while its
+  # record lives in the launching primary's state directory, because it is the
+  # primary of that home and only there (bin/fm-worker-isolation-lib.sh).
+  # Comparing it against this home would report every healthy secondmate in the
+  # fleet as a foreign worker on every session start, so the expected owner is
+  # taken from the record itself.
+  kind=$(fm_meta_get "$meta" kind)
+  expected_home=$HOME_REAL
+  if [ "$kind" = secondmate ]; then
+    expected_declared=$(fm_meta_get "$meta" home)
+    [ -n "$expected_declared" ] || expected_declared=$recorded
+    expected_home=$(fm_agent_canonical_dir "$expected_declared") || expected_home=$expected_declared
+  fi
   declared_home=$(fm_agent_proc_env "$pid" FM_AGENT_OWNER_HOME 2>/dev/null || true)
   if [ -n "$declared_home" ]; then
     declared_real=$(fm_agent_canonical_dir "$declared_home") || declared_real=$declared_home
-    if [ "$declared_real" != "$HOME_REAL" ]; then
-      echo "ISOLATION: task $id is running as a worker of home $declared_real, not this home ($HOME_REAL); stop it before it acts on this home's records"
+    if [ "$declared_real" != "$expected_home" ]; then
+      echo "ISOLATION: task $id is running as a worker of home $declared_real, not the home that owns it ($expected_home); stop it before it acts on that home's records"
       continue
     fi
   fi

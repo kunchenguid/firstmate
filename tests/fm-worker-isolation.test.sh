@@ -143,6 +143,15 @@ case "$*" in
   *"#{pane_pid}"*) printf '%s\n' "${FM_FAKE_PANE_PID:-}"; exit 0 ;;
 esac
 case "${1:-}" in
+  # The stable-window-id enumeration. The duplicate-name check spawn runs first
+  # asks for '#{window_name}' alone and must still answer nothing, or spawn
+  # would refuse the launch as a duplicate.
+  list-windows)
+    case "$*" in
+      *"#{window_id}"*) printf '%s %s\n' "${FM_FAKE_WINDOW_ID:-@1}" "${FM_FAKE_WINDOW_NAME:-}" ;;
+    esac
+    exit 0
+    ;;
   display-message) printf 'firstmate\n'; exit 0 ;;
   send-keys)
     prev=
@@ -352,6 +361,100 @@ test_provider_process_id_matrix_is_explicit() {
   pass "providers with no verified per-pane process id report unknown instead of a pane value"
 }
 
+make_window_id_fakebin() {  # <dir>
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows)
+    case "$*" in
+      *"#{window_id}"*) printf '@7 fm-live\n' ;;
+    esac
+    exit 0
+    ;;
+  display-message)
+    case "$*" in
+      # The one honest answer: the pane of the window actually asked for.
+      *"-t @7 "*) printf '4242\n' ;;
+      # What real tmux does with a target it cannot resolve - it answers for the
+      # ACTIVE CLIENT's window, which is firstmate's own pane.
+      *) printf '9999\n' ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  printf '%s\n' "$fakebin"
+}
+
+# agent_cwd_call <fakebin> <function> [args...]: call one bin/fm-agent-cwd-lib.sh
+# function with <fakebin> ahead of PATH, in a child shell so the fake provider
+# never leaks into the rest of the suite.
+agent_cwd_call() {
+  local fakebin=$1
+  shift
+  PATH="$fakebin:$PATH" bash -c '. "$1/bin/fm-agent-cwd-lib.sh" || exit 1; shift; "$@"' \
+    _ "$ROOT" "$@"
+}
+
+test_tmux_pane_pid_comes_from_the_stable_window_id() {
+  local fakebin out
+  fakebin=$(make_window_id_fakebin "$TMP_ROOT/window-id")
+  out=$(agent_cwd_call "$fakebin" fm_agent_backend_shell_pid tmux 'firstmate:fm-live')
+  [ "$out" = 4242 ] \
+    || fail "the pane pid was not read through the window's stable id: $out"
+  pass "a tmux pane pid is read through the window's stable id, not its name"
+}
+
+test_a_lost_window_name_never_answers_with_firstmates_own_pane() {
+  local fakebin out status
+  fakebin=$(make_window_id_fakebin "$TMP_ROOT/window-lost")
+  out=$(agent_cwd_call "$fakebin" fm_agent_backend_shell_pid tmux 'firstmate:fm-renamed-away')
+  status=$?
+  expect_code 1 "$status" "a window name that resolves to nothing must not yield a pid"
+  [ -z "$out" ] || fail "a lost window name answered with another window's pane pid: $out"
+  out=$(agent_cwd_call "$fakebin" fm_agent_cwd_verdict '' tmux 'firstmate:fm-renamed-away')
+  case "$out" in
+    unknown*) : ;;
+    *) fail "a lost window name produced a verdict instead of unknown: $out" ;;
+  esac
+  pass "a lost or renamed window reports unknown instead of firstmate's own pane"
+}
+
+test_one_proc_walk_answers_every_task_in_a_sweep() {
+  local dir dir_real index one two out
+  require_procfs || { pass "skip: this host has no readable procfs for the process index"; return 0; }
+  dir="$TMP_ROOT/proc-index"
+  mkdir -p "$dir"
+  dir_real=$(cd "$dir" && pwd -P)
+  one="index-one-d6-$RUN_TAG"
+  two="index-two-d6-$RUN_TAG"
+  start_declared_agent "$dir" "$one" "$TMP_ROOT/proc-home" >/dev/null
+  start_declared_agent "$dir" "$two" "$TMP_ROOT/proc-home" >/dev/null
+  index=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" && fm_agent_task_pid_index )
+  assert_contains "$index" "$one" "the single process walk missed a declared task"
+  assert_contains "$index" "$two" "the single process walk missed a declared task"
+  out=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" \
+    && fm_agent_cwd_verdict "$two" '' '' "$index" )
+  case "$out" in
+    proc*"$dir_real") : ;;
+    *) fail "a verdict taken from the shared index did not prove the process cwd: $out" ;;
+  esac
+  # An index with no entry for the task is a real answer, not a missing
+  # argument: it must not silently fall back to a fresh walk that finds one.
+  out=$( . "$ROOT/bin/fm-agent-cwd-lib.sh" \
+    && fm_agent_cwd_verdict "$two" '' '' '' )
+  case "$out" in
+    unknown*) : ;;
+    *) fail "an empty shared index was treated as no index at all: $out" ;;
+  esac
+  pass "one /proc walk answers every task in a sweep, and an empty index is a real answer"
+}
+
 test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
   local rec id out status lying pid
   require_procfs || { pass "skip: this host has no readable procfs for spawn settle proof"; return 0; }
@@ -367,6 +470,7 @@ test_spawn_settles_on_proc_evidence_over_a_lying_pane_path() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$lying" FM_FAKE_PANE_PID="$pid" \
+    FM_FAKE_WINDOW_NAME="fm-$id" \
     FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --harness claude 2>&1)
@@ -492,6 +596,80 @@ test_a_live_agent_of_another_task_retains_the_slot() {
   pass "a slot occupied by another task's live agent retains its lease"
 }
 
+test_a_relinquished_slot_is_releasable_by_its_remaining_holder() {
+  # The exact reported leak sequence. B is the stamped true owner and paused A's
+  # stale metadata also names the slot, so B retains and its own metadata goes.
+  # If B's stamp outlived it, A's later teardown would retain on the stamp with
+  # nothing left referencing the slot, and the pool would lose it forever.
+  local rec verdict stamp
+  rec=$(make_slot_world slot-relinquish)
+  read_slot_world "$rec"
+  fm_write_meta "$WORLD/home/state/owner-e7.meta" \
+    "window=firstmate:fm-owner-e7" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  fm_write_meta "$WORLD/home/state/paused-e7.meta" \
+    "window=firstmate:fm-paused-e7" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" owner-e7 "$WORLD/home" )
+
+  verdict=$(slot_verdict "$WORLD/home/state" owner-e7 "$WT_DIR" "$WORLD/home")
+  case "$verdict" in
+    "retain: slot is also recorded by task(s) paused-e7"*) : ;;
+    *) fail "the stamped owner did not retain against the paused task's record: $verdict" ;;
+  esac
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_relinquish "$WT_DIR" owner-e7 "$verdict" )
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
+  [ "$stamp" = none ] \
+    || fail "the retiring owner's own stamp outlived it and still names $stamp"
+  rm -f "$WORLD/home/state/owner-e7.meta"
+
+  verdict=$(slot_verdict "$WORLD/home/state" paused-e7 "$WT_DIR" "$WORLD/home")
+  [ "$verdict" = dispose ] \
+    || fail "the last holder could not release a slot nothing else references: $verdict"
+  pass "a retiring owner gives up its own stamp so the remaining holder can still release the slot"
+}
+
+test_a_stamp_naming_another_task_survives_a_retain_and_still_blocks() {
+  # The complementary case, and the reason the clear above is narrow. Here the
+  # stamp names a THIRD task, so it is positive evidence the slot was reissued.
+  # Clearing it would let the stale task dispose of a slot whose real occupant
+  # merely has no live process right now - destroying preserved work.
+  local rec verdict stamp
+  rec=$(make_slot_world slot-preserve)
+  read_slot_world "$rec"
+  fm_write_meta "$WORLD/home/state/stale-e8.meta" \
+    "window=firstmate:fm-stale-e8" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  fm_write_meta "$WORLD/home/state/other-e8.meta" \
+    "window=firstmate:fm-other-e8" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$WT_DIR" reissued-e8 "$WORLD/home" )
+
+  verdict=$(slot_verdict "$WORLD/home/state" stale-e8 "$WT_DIR" "$WORLD/home")
+  case "$verdict" in
+    "retain: slot is also recorded by task(s) other-e8"*) : ;;
+    *) fail "the metadata conflict was not the retain reason under test: $verdict" ;;
+  esac
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_relinquish "$WT_DIR" stale-e8 "$verdict" )
+  stamp=$( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_field "$WT_DIR" task || printf 'none' )
+  [ "$stamp" = reissued-e8 ] \
+    || fail "a stamp naming another task was cleared on retain: $stamp"
+  rm -f "$WORLD/home/state/stale-e8.meta" "$WORLD/home/state/other-e8.meta"
+
+  verdict=$(slot_verdict "$WORLD/home/state" stale-e8 "$WT_DIR" "$WORLD/home")
+  case "$verdict" in
+    "retain: slot ownership stamp names task reissued-e8"*) : ;;
+    *) fail "a preserved stamp stopped blocking disposal for a stale task: $verdict" ;;
+  esac
+  pass "a stamp naming another task survives a retain and still blocks that slot's disposal"
+}
+
 test_teardown_retires_a_contested_lease_even_with_force() {
   local rec fakebin out status
   rec=$(make_slot_world slot-teardown)
@@ -610,6 +788,39 @@ test_sweep_reports_an_agent_declared_for_another_home() {
   pass "the resume sweep reports an agent that declares another home as its owner"
 }
 
+test_sweep_is_silent_for_a_healthy_secondmate() {
+  # A secondmate is deliberately launched declaring its OWN home while its
+  # record lives in the launching primary's state directory. Judging that
+  # declaration against the sweeping home would print an actionable, wrong
+  # "stop this worker" line on every session start in any fleet that has one.
+  local world out id sub_home
+  require_procfs || { pass "skip: this host has no readable procfs for the resume sweep"; return 0; }
+  world=$(make_sweep_home sweep-secondmate)
+  id="dom-f5-$RUN_TAG"
+  sub_home="$world/secondmate-home"
+  mkdir -p "$sub_home/state"
+  fm_write_secondmate_meta "$world/home/state/$id.meta" "$sub_home" "firstmate:fm-$id"
+  start_declared_agent "$sub_home" "$id" "$sub_home" secondmate >/dev/null
+  out=$(run_sweep "$world")
+  [ -z "$out" ] || fail "the resume sweep reported a healthy live secondmate: $out"
+  pass "the resume sweep stays silent for a secondmate that declares its own home"
+}
+
+test_sweep_still_reports_a_secondmate_running_for_a_foreign_home() {
+  local world out id sub_home
+  require_procfs || { pass "skip: this host has no readable procfs for the resume sweep"; return 0; }
+  world=$(make_sweep_home sweep-secondmate-foreign)
+  id="dom-f6-$RUN_TAG"
+  sub_home="$world/secondmate-home"
+  mkdir -p "$sub_home/state" "$world/other-home"
+  fm_write_secondmate_meta "$world/home/state/$id.meta" "$sub_home" "firstmate:fm-$id"
+  start_declared_agent "$sub_home" "$id" "$world/other-home" secondmate >/dev/null
+  out=$(run_sweep "$world")
+  assert_contains "$out" "ISOLATION: task $id is running as a worker of home" \
+    "the resume sweep excused a secondmate declaring a home its record does not name"
+  pass "the resume sweep still reports a secondmate whose declared home is not the one it owns"
+}
+
 test_crewmate_declaration_clears_every_inherited_home
 test_secondmate_declaration_pins_only_its_own_home
 test_declaration_refuses_rather_than_emitting_a_partial_prefix
@@ -622,16 +833,23 @@ test_worker_cannot_spawn_or_tear_down
 test_proc_cwd_is_read_from_the_live_process
 test_declared_agent_lookup_returns_the_root_most_process
 test_provider_process_id_matrix_is_explicit
+test_tmux_pane_pid_comes_from_the_stable_window_id
+test_a_lost_window_name_never_answers_with_firstmates_own_pane
+test_one_proc_walk_answers_every_task_in_a_sweep
 test_spawn_settles_on_proc_evidence_over_a_lying_pane_path
 test_slot_stamp_records_ownership_and_never_stamps_a_plain_checkout
 test_clean_ownership_disposes
 test_a_second_recorded_task_retains_the_slot
 test_a_stamp_naming_another_task_retains_the_slot
 test_a_live_agent_of_another_task_retains_the_slot
+test_a_relinquished_slot_is_releasable_by_its_remaining_holder
+test_a_stamp_naming_another_task_survives_a_retain_and_still_blocks
 test_teardown_retires_a_contested_lease_even_with_force
 test_sweep_reports_a_worktree_that_collapsed_onto_the_primary_checkout
 test_sweep_is_silent_for_a_correctly_isolated_worker
 test_sweep_never_promotes_a_pane_path_to_evidence
 test_sweep_reports_an_agent_declared_for_another_home
+test_sweep_is_silent_for_a_healthy_secondmate
+test_sweep_still_reports_a_secondmate_running_for_a_foreign_home
 
 echo "# all fm-worker-isolation tests passed"

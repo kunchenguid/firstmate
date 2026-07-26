@@ -1378,6 +1378,70 @@ EOF
   pass "secondmate teardown refuses a home still recorded by another task"
 }
 
+# A NESTED child secondmate home was recorded and stamped by its own parent
+# secondmate, so its ownership evidence names the parent's state directory and
+# the parent's home - never the primary's. Judging it against the primary's
+# scope compares against a home that never owned it, retains every time, and
+# blocks the whole force teardown; the child's records would then be the only
+# thing that could be cleared, stranding the home, its state, and its backlog.
+test_secondmate_force_teardown_scopes_a_nested_child_home_to_its_parent() {
+  # Named primary_home, not home: bin/fm-slot-owner-lib.sh is sourced below and
+  # carries its own `home` local, which makes shellcheck read the two as one.
+  local primary_home subhome nested nested_abs fakebin log fmroot
+  primary_home="$TMP_ROOT/nested-scope-home"
+  subhome="$TMP_ROOT/nested-scope-subhome"
+  nested="$TMP_ROOT/nested-scope-child"
+  fmroot="$TMP_ROOT/nested-scope-fmroot"
+  make_firstmate_git_root "$fmroot"
+  git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
+  git -C "$fmroot" worktree add --quiet --detach "$nested" HEAD
+  mkdir -p "$primary_home/state" "$primary_home/data" "$subhome/state" "$nested/state"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  printf 'child\n' > "$nested/.fm-secondmate-home"
+  nested_abs=$(cd "$nested" && pwd -P)
+  cat > "$primary_home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  cat > "$subhome/state/child.meta" <<EOF
+window=firstmate:fm-child
+worktree=$nested
+project=$nested
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$nested
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$primary_home/data/secondmates.md"
+  # Stamped the way each home's own spawn stamps it: the child by the parent
+  # secondmate's home, the parent by the primary's.
+  ( . "$ROOT/bin/fm-slot-owner-lib.sh" \
+    && fm_slot_stamp_write "$nested" child "$subhome" \
+    && fm_slot_stamp_write "$subhome" domain "$primary_home" ) \
+    || fail "the nested home fixture could not be stamped"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/nested-scope-fake")
+  log="$TMP_ROOT/nested-scope-fake/tmux.log"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$primary_home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/nested-scope-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>/dev/null \
+    || fail "force teardown refused a nested child home its own parent owned"
+  grep -F "treehouse return --force $nested_abs" "$log" >/dev/null \
+    || fail "the nested child home lease was never returned to the pool"
+  [ ! -d "$nested" ] || fail "force teardown left the nested child home on disk"
+  [ ! -e "$subhome" ] || fail "force teardown left the parent secondmate home on disk"
+  [ ! -e "$primary_home/state/domain.meta" ] || fail "force teardown did not clear parent meta"
+  pass "a nested child secondmate home is judged against its own parent's scope, not the primary's"
+}
+
 test_secondmate_teardown_refuses_failed_leased_home_return() {
   local home subhome subhome_abs fakebin log fmroot err rc
   home="$TMP_ROOT/teardown-return-fail-home"
@@ -2268,6 +2332,7 @@ test_secondmate_spawn_refuses_operational_dirs_outside_subhome
 test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home
 test_secondmate_teardown_refuses_home_referenced_by_another_task
+test_secondmate_force_teardown_scopes_a_nested_child_home_to_its_parent
 test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
