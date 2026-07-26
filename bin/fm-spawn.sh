@@ -233,6 +233,8 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+CURSOR_ABORT_CLEANUP=0
+CURSOR_ABORT_LOCK_HELD=0
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -307,6 +309,21 @@ spawn_abort_cleanup() {
           } > "$STATE/$ID.meta" 2>/dev/null || true
         fi
       fi
+    fi
+  fi
+  if [ "$CURSOR_ABORT_CLEANUP" = 1 ]; then
+    CURSOR_ABORT_CLEANUP=0
+    if [ "$CURSOR_ABORT_LOCK_HELD" = 1 ]; then
+      CURSOR_ABORT_LOCK_HELD=0
+      fm_cursor_hooks_unlock "${HOME}/.cursor/hooks" 2>/dev/null || true
+    fi
+    if [ -n "${ID:-}" ] && [ -n "${STATE:-}" ]; then
+      fm_cursor_remove_turnend_auth "$STATE" "$ID" 2>/dev/null || true
+      rm -rf "$STATE/$ID.cursor-plugin" 2>/dev/null || true
+      rm -f "$STATE/$ID.cursor-turnend-token" 2>/dev/null || true
+    fi
+    if [ -n "${WT:-}" ]; then
+      rm -f "$WT/.fm-cursor-turnend" 2>/dev/null || true
     fi
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
@@ -1376,6 +1393,7 @@ EOF
       cursor_locked=0
       if fm_cursor_hooks_lock "$CURSOR_HOOKS_DIR"; then
         cursor_locked=1
+        CURSOR_ABORT_LOCK_HELD=1
       fi
       old_umask=$(umask)
       umask 077
@@ -1383,17 +1401,22 @@ EOF
       umask "$old_umask"
       printf '%s\n' "$TURNEND" > "$auth_file"
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.cursor-turnend-token"
+      # Token is durable now; abort cleanup must reclaim it if later steps fail.
+      CURSOR_ABORT_CLEANUP=1
       if ! fm_cursor_write_turnend_hook "$CURSOR_HOOKS_DIR" "$CURSOR_AUTH_DIR"; then
         [ "$cursor_locked" -eq 0 ] || fm_cursor_hooks_unlock "$CURSOR_HOOKS_DIR"
+        CURSOR_ABORT_LOCK_HELD=0
         echo "error: failed to install Firstmate's Cursor turn-end hook in $CURSOR_HOOKS_DIR" >&2
         exit 1
       fi
       cursor_hook_command=$(shell_quote "$CURSOR_HOOKS_DIR/fm-turn-end.sh")
       if ! fm_cursor_merge_stop_entry "$CURSOR_HOME" "$cursor_hook_command"; then
         [ "$cursor_locked" -eq 0 ] || fm_cursor_hooks_unlock "$CURSOR_HOOKS_DIR"
+        CURSOR_ABORT_LOCK_HELD=0
         exit 1
       fi
       [ "$cursor_locked" -eq 0 ] || fm_cursor_hooks_unlock "$CURSOR_HOOKS_DIR"
+      CURSOR_ABORT_LOCK_HELD=0
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-cursor-turnend"
       exclude_path '.fm-cursor-turnend'
       cursor_plugin_hook=$(json_escape "$cursor_hook_command")
@@ -1525,6 +1548,8 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+CURSOR_ABORT_CLEANUP=0
+CURSOR_ABORT_LOCK_HELD=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
