@@ -27,7 +27,7 @@ SuperGrok / X Premium OAuth already used by OpenCode or Pi is enough.
 The access token is sent as `Authorization: Bearer` to `https://api.x.ai/v1`.
 Near-expiry OAuth tokens are refreshed against `https://auth.x.ai/oauth2/token` and written back to the same store (mode `600`) when possible.
 
-Sign in once with OpenCode `/connect` → xAI (SuperGrok) or the equivalent Pi login.
+Sign in once with OpenCode `/connect` -> xAI (SuperGrok) or the equivalent Pi login.
 You do not need a separate `XAI_API_KEY` for OAuth.
 
 ## API shape
