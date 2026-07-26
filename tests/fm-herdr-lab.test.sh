@@ -12,7 +12,7 @@ FAKE_LOG="$TMP_ROOT/herdr.log"
 TRIPWIRES="$TMP_ROOT/tripwires"
 REAL_SLEEP=$(command -v sleep)
 mkdir -p "$FAKE_STATE"
-printf '%s\n' '/Users/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
+printf '%s\n' '/home/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
 : > "$FAKE_LOG"
 
 cat > "$FAKEBIN/herdr" <<'SH'
@@ -176,7 +176,7 @@ test_changed_default_trips_after_teardown() {
   run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "changed default fleet state must fail teardown"
   assert_present "$TRIPWIRES/$name.fleet-state.json" "failed tripwire should retain evidence"
-  printf '%s\n' '/Users/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
+  printf '%s\n' '/home/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
   rm -f "$TRIPWIRES/$name.fleet-state.json"
   pass "fm-herdr-lab: changed default fleet state is a hard failure"
 }
