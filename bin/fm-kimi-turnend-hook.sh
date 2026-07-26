@@ -173,6 +173,7 @@ def block(marker: bytes) -> bytes:
 def without_region(data: bytes, region) -> bytes:
     prefix = data[: region[0]]
     suffix = data[region[1] :]
+    # Retain a newline so removal cannot join the captain's preceding line to content appended after installation.
     separator = b"\n" if region[2] == BEGIN_OWNS_NEWLINE and suffix else b""
     return prefix + separator + suffix
 
