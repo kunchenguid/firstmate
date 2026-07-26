@@ -2,13 +2,16 @@
 # Behavior tests for bin/fm-brief.sh.
 #
 # Regression coverage for the heredoc-in-command-substitution parse bug (issue
-# #166): each ship-mode branch builds its Definition-of-done text with
-# `VAR=$(cat <<EOF ... EOF)`. Bash's lexer tracks quote state through the
-# heredoc body while it scans for the matching `)` of the command
-# substitution, so a single unescaped apostrophe anywhere in that body breaks
-# parsing of the *entire rest of the script* - `bash -n` fails, not just the
-# generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
-# is unaffected, so the secondmate charter block does not need this guard.
+# #166, recurred under stock macOS bash 3.2.57 on 2026-07-24/25). Bash 3.2's
+# command-substitution scanner tracks quote state through a heredoc body
+# nested inside `$(cat <<EOF ... EOF)`, so a single unescaped apostrophe
+# anywhere in that body breaks parsing of the *entire rest of the script* -
+# `bash -n` fails, not just the generated brief; bash 4+ parses it fine. Each
+# ship-mode DOD block now assigns via `read -r -d '' VAR <<EOF ... EOF`
+# instead, which is not itself a command substitution, so it stays 3.2-safe
+# regardless of future apostrophes in the body. A plain `cat > file <<EOF ...
+# EOF` (not wrapped in `$(...)`) was never affected, so the secondmate
+# charter block never needed this guard.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -27,6 +30,20 @@ test_script_parses() {
   expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
   [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
   pass "fm-brief.sh: bash -n succeeds"
+}
+
+# Pin the exact regression: stock macOS bash 3.2.57 parses the whole bin/
+# directory clean, not just the ambient `bash` on the test runner (which may
+# already be a newer bash that never exhibited the bug).
+test_script_parses_under_stock_macos_bash() {
+  local script out rc
+  [ -x /bin/bash ] || { pass "fm-brief.sh: /bin/bash -n check skipped without /bin/bash"; return 0; }
+  for script in "$ROOT"/bin/*.sh; do
+    out=$(/bin/bash -n "$script" 2>&1); rc=$?
+    expect_code 0 "$rc" "/bin/bash -n $script must parse cleanly (got: $out)"
+    [ -z "$out" ] || fail "/bin/bash -n $script emitted unexpected output: $out"
+  done
+  pass "fm-brief.sh: /bin/bash -n succeeds across bin/*.sh"
 }
 
 test_help_includes_entire_header() {
@@ -383,6 +400,7 @@ test_scout_and_secondmate_scaffold() {
 }
 
 test_script_parses
+test_script_parses_under_stock_macos_bash
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
