@@ -10,6 +10,10 @@ firstmate's always-loaded operating contract and routing index for conditional p
 
 A zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet, classifies detected wakes in bash, and wakes the first mate only when something is actionable.
 Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, authenticated check output such as PR merge polling or an X-mode mention, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS`, declared external waits that remain paused past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
+A bounded park sweep adds the one wake class that does not depend on pane state at all: a validation run that reaches a decision gate produces no signal, no stale pane, and no log line of any kind, so a worker that never answers its gate was silent until something unrelated happened to look at it.
+The sweep reads at most `FM_PARK_SCAN_MAX` tasks every `FM_PARK_SCAN_SECS`, surfaces only a gate seen unchanged across two sweeps, and surfaces that gate only once; a run that keeps moving between gates, or leaves them, stays silent.
+Setting `FM_PARK_SCAN_MAX` to zero switches it off, because it is the only supervision change here that adds wakes rather than removing them.
+It sees only gates the run itself names: a worker blocked on something outside its run is not visible to it, and the status protocol is what already covers that.
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
 That escalation resets on a pane-hash change, a busy signature, or forward progress in the crew's pipeline.
 The progress term exists because a healthy worker driving a no-mistakes run can produce neither of the first two: the pipeline owns the branch and renders nothing to the worker's own pane, so a validating worker used to escalate on the same unchanged hash indefinitely.

@@ -140,6 +140,21 @@ PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT
 # 5c trigger 3: proven-unreliable-at-runtime). A watcher restart re-probes
 # capability, so a transient herdr hiccup self-heals on the next cycle chain.
 EVENT_CAP_FAIL_MAX=${FM_EVENT_CAP_FAIL_MAX:-3}
+# Park scan: a validation run that reaches a decision gate emits no wake of any
+# kind. The gate state is computed correctly, but nothing polls for the
+# transition - it is consulted only after a stale pane has already triggered
+# classification, and a parked worker's pane may never go stale, so a worker that
+# does not answer its gate is silent until something unrelated happens to look at
+# it. The observed instance was ten minutes of silence, caught only because
+# firstmate inspected the pane during an unrelated wake.
+# This is the only wake class here that surfaces regardless of pane state, which
+# is why it is bounded twice: a slow cadence, and a hard cap on how many tasks
+# one sweep may read. It is also the only increment that ADDS wakes, so both
+# bounds are configuration rather than constants.
+PARK_SCAN_INTERVAL=${FM_PARK_SCAN_SECS:-120}   # seconds between park sweeps
+case "$PARK_SCAN_INTERVAL" in ''|*[!0-9]*) PARK_SCAN_INTERVAL=120 ;; esac
+PARK_SCAN_MAX=${FM_PARK_SCAN_MAX:-3}           # tasks read per sweep; 0 disables
+case "$PARK_SCAN_MAX" in ''|*[!0-9]*) PARK_SCAN_MAX=3 ;; esac
 # Slow-poll telemetry threshold. The only supervision question a per-poll
 # duration answers is "can this loop still hold its cadence" - the saturation
 # signal that would justify a second supervisor process or a supervisor
@@ -873,6 +888,49 @@ while :; do
       wake "$reason"
     fi
     touch "$STATE/.last-check"
+  fi
+
+  # Park scan. Placed with the other slow sweep and before the signal scan for
+  # the same anti-starvation reason: wake() exits the cycle, so a sweep placed
+  # after the per-wake paths would be starved by a chatty sibling crewmate
+  # exactly when a quiet parked worker most needs noticing. It is due only every
+  # PARK_SCAN_INTERVAL, so most cycles skip this block entirely.
+  #
+  # A gate must be seen UNCHANGED across two sweeps before it surfaces: a run
+  # that reaches a gate and gets answered promptly is normal and must stay
+  # silent, and one sweep cannot tell those apart. Once surfaced, the same gate
+  # is not surfaced again - firstmate has been told - until the gate itself
+  # changes. Only a run-attributed gate is visible here; a worker blocked on
+  # something outside its run is not, and nothing detects that deterministically
+  # today short of the worker declaring it, which the status protocol already is.
+  if [ "$PARK_SCAN_MAX" -gt 0 ] && [ "$(age_of "$STATE/.last-park-scan")" -ge "$PARK_SCAN_INTERVAL" ]; then
+    touch "$STATE/.last-park-scan"
+    park_scanned=0
+    while IFS= read -r w; do
+      [ "$park_scanned" -lt "$PARK_SCAN_MAX" ] || break
+      [ "$(window_kind "$w")" = ship ] || continue
+      task=$(window_to_task "$w" "$STATE")
+      [ -n "$task" ] || continue
+      park_scanned=$((park_scanned + 1))
+      key=$(printf '%s' "$w" | tr ':/.' '___')
+      gate=$(crew_parked_gate "$task")
+      if [ -z "$gate" ]; then
+        rm -f "$STATE/.park-$key" "$STATE/.park-surfaced-$key"
+        continue
+      fi
+      if [ "$(cat "$STATE/.park-surfaced-$key" 2>/dev/null || true)" = "$gate" ]; then
+        triage_log "absorbed park (already surfaced, $gate): $w"
+        continue
+      fi
+      if [ "$(cat "$STATE/.park-$key" 2>/dev/null || true)" = "$gate" ]; then
+        printf '%s' "$gate" > "$STATE/.park-surfaced-$key"
+        reason=$(stale_reason park "$w" "$gate across two sweeps - the run is waiting on a response the worker has not given")
+        fm_wake_append stale "$w" "$reason" || exit 1
+        wake "$reason"
+      fi
+      printf '%s' "$gate" > "$STATE/.park-$key"
+      triage_log "absorbed park (first sighting, $gate): $w"
+    done < <(recorded_windows)
   fi
 
   # On the first changed signal, linger one grace period and re-scan before

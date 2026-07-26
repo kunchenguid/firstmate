@@ -1242,6 +1242,122 @@ test_wedge_escalation_unreadable_progress_still_escalates() {
   pass "an unreadable progress fingerprint escalates and preserves the stored baseline"
 }
 
+# --- a run parked at a gate with no response wakes on a bounded sweep ---------
+#
+# A validation run that reaches a decision gate emits no wake of any kind. The
+# gate state is computed correctly, but nothing polls for the transition, and a
+# parked worker's pane may never go stale - so a worker that does not answer its
+# gate is silent until something unrelated happens to look at it. The observed
+# instance was ten minutes of silence, caught only because firstmate inspected
+# the pane during an unrelated wake. This is also the only wake class that
+# surfaces regardless of pane state, and the only increment that ADDS wakes, so
+# what it must NOT do is pinned as carefully as what it must.
+#
+# Every case below runs exactly one sweep: with no .last-park-scan on disk the
+# age reads as effectively infinite, so a very long interval still lets the first
+# sweep run and then blocks every later one in the same process. That makes each
+# transition of the two-sweep state machine assertable on its own.
+park_case() {  # <name> <window> <task> -> echoes dir
+  local dir state capture_file sig
+  dir=$(make_case "$1"); state="$dir/state"; capture_file="$dir/pane.txt"
+  # A busy pane: the sweep must not need a stale pane to notice a gate, and
+  # keeping this pane busy proves any wake came from the sweep and nothing else.
+  printf 'running the review step... esc to interrupt\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$2" > "$state/$3.meta"
+  printf 'working: handed to validation\n' > "$state/$3.status"
+  sig=$(seen_sig "$state/$3.status"); printf '%s' "$sig" > "$state/.seen-${3}_status"
+  printf '%s\n' "$dir"
+}
+
+# One sweep, then stop. Returns 0 if the watcher surfaced a wake, 1 if it kept
+# absorbing (the caller asserts which one it wanted). PARK_MAX in the caller's
+# environment overrides the sweep cap.
+park_sweep_once() {  # <dir> <window> <out>
+  local dir=$1 window=$2 out=$3 pid rc
+  rm -f "$dir/state/.last-park-scan"
+  : > "$out"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PARK_SCAN_SECS=999999 FM_PARK_SCAN_MAX="${PARK_MAX:-3}" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  if wait_live "$pid" 40; then reap "$pid"; rc=1; else wait "$pid" 2>/dev/null; rc=0; fi
+  return "$rc"
+}
+
+test_park_scan_surfaces_an_unanswered_gate() {
+  local dir state out window key gate
+  window="test:fm-parked"; gate='parked at review: 2 finding(s)'
+  dir=$(park_case park-scan "$window" parked); state="$dir/state"; out="$dir/watch.out"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE="state: parked · source: run-step · $gate"
+
+  # First sighting stays silent: a run that reaches a gate and is answered
+  # promptly is normal, and one sweep cannot tell that from an unanswered one.
+  ! park_sweep_once "$dir" "$window" "$out" || fail "a first-sighting gate surfaced immediately: $(cat "$out")"
+  [ "$(cat "$state/.park-$key" 2>/dev/null || true)" = "$gate" ] \
+    || fail "the first sweep did not record the observed gate"
+  [ ! -s "$out" ] || fail "the first sweep printed a wake reason: $(cat "$out")"
+
+  # Second sweep, same gate: nobody answered it.
+  park_sweep_once "$dir" "$window" "$out" || fail "an unanswered gate did not surface on the second sweep"
+  grep -F "$gate" "$out" >/dev/null || fail "the park wake did not name the gate: $(cat "$out")"
+  grep -F "[branch=park]" "$out" >/dev/null || fail "the park wake did not tag its classification branch"
+  [ "$(cat "$state/.park-surfaced-$key" 2>/dev/null || true)" = "$gate" ] \
+    || fail "the surfaced gate was not recorded"
+
+  # Having told firstmate once, the same gate must not surface again.
+  : > "$state/.wake-queue"
+  ! park_sweep_once "$dir" "$window" "$out" || fail "an already-surfaced gate surfaced again: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "an already-surfaced gate enqueued a second wake"
+  unset FM_FAKE_CREW_STATE
+  pass "a run parked at an unanswered gate surfaces once on the second bounded sweep"
+}
+
+test_park_scan_stays_silent_when_the_run_moves() {
+  local dir state out window key
+  window="test:fm-moving"
+  dir=$(park_case park-moving "$window" moving); state="$dir/state"; out="$dir/watch.out"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  # A gate was seen last sweep, and the run has since moved to a different one.
+  # A moving run is not a park, so this stays silent even though a gate is
+  # present on both sweeps.
+  printf 'parked at review: 2 finding(s)' > "$state/.park-$key"
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at fix_review: 1 finding(s)'
+  ! park_sweep_once "$dir" "$window" "$out" || fail "a run that moved between gates surfaced as parked: $(cat "$out")"
+  [ ! -s "$out" ] || fail "a changed gate printed a wake reason: $(cat "$out")"
+  [ "$(cat "$state/.park-$key" 2>/dev/null || true)" = 'parked at fix_review: 1 finding(s)' ] \
+    || fail "the sweep did not advance to the newly observed gate"
+
+  # The run left the gate entirely: the sweep forgets it, so a later park starts
+  # its own two-sweep count instead of surfacing on the first sighting.
+  printf 'parked at fix_review: 1 finding(s)' > "$state/.park-surfaced-$key"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  ! park_sweep_once "$dir" "$window" "$out" || fail "a working run surfaced from the park sweep: $(cat "$out")"
+  [ ! -e "$state/.park-$key" ] || fail "the sweep kept park state for a run that is no longer parked"
+  [ ! -e "$state/.park-surfaced-$key" ] || fail "the sweep kept surfaced state for a run that is no longer parked"
+  unset FM_FAKE_CREW_STATE
+  pass "the park sweep stays silent while the run keeps moving, and forgets a run that leaves its gate"
+}
+
+test_park_scan_can_be_switched_off() {
+  local dir state out window key gate
+  window="test:fm-capped"; gate='parked at review: 2 finding(s)'
+  dir=$(park_case park-capped "$window" capped); state="$dir/state"; out="$dir/watch.out"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE="state: parked · source: run-step · $gate"
+  # An already-seen gate that would surface on this sweep. This wake class is the
+  # only one that adds wakes, so it has to be switchable off without a code edit.
+  printf '%s' "$gate" > "$state/.park-$key"
+  PARK_MAX=0 park_sweep_once "$dir" "$window" "$out" \
+    && fail "the park sweep ran with its cap at zero: $(cat "$out")"
+  [ ! -s "$out" ] || fail "a disabled park sweep still surfaced: $(cat "$out")"
+  [ ! -e "$state/.park-surfaced-$key" ] || fail "a disabled park sweep still advanced its state"
+  unset FM_FAKE_CREW_STATE
+  pass "the park sweep honours FM_PARK_SCAN_MAX and can be switched off entirely"
+}
+
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case nonterminal-stale-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1549,6 +1665,9 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
+test_park_scan_surfaces_an_unanswered_gate
+test_park_scan_stays_silent_when_the_run_moves
+test_park_scan_can_be_switched_off
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status

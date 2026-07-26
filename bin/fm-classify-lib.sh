@@ -418,6 +418,27 @@ crew_progress_fingerprint() {  # <id>
   printf '%s' "$out" | head -1 | tr -d '\r'
 }
 
+# The pipeline gate a crew's run is parked at, or empty when it is not parked.
+# Reuses bin/fm-crew-state.sh's own gate detection through the same authoritative
+# line crew_absorb_class reads, rather than re-deriving "is this parked" from run
+# output a second time. The returned text is both the comparison token and the
+# human-readable gate name, and it is stable while the run sits at that gate.
+#
+# NOT a pure read - same bounded no-mistakes call as crew_absorb_class - so
+# callers run it on a slow bounded sweep, never every poll.
+crew_parked_gate() {  # <id>
+  local id=$1 line state
+  [ -n "$id" ] || return 0
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 0 ;; esac
+  state=${line#state: }; state=${state%% *}
+  [ "$state" = parked ] || return 0
+  case "$line" in
+    *"parked at "*) printf 'parked at %s' "${line#*"parked at "}" ;;
+    *) printf 'a pipeline gate' ;;
+  esac
+}
+
 # 0 if crew <id>'s authoritative current state is a declared external-wait pause.
 # The stale path absorbs such a crew (on a long re-surface cadence) instead of
 # escalating a possible wedge.
