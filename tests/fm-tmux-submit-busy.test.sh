@@ -175,11 +175,13 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   printf 'Ctrl+c:cancel\n' > "$composer"
   pane_busy fallback || fail "no-harness fallback should retain Grok's shared signature"
 
-  # An unknown nonempty harness takes its own conservative combined fallback.
+  # A supplied harness must never use another harness's signature. This is
+  # particularly important for Kimi: its idle key-tip rotation can include the
+  # same cancel token Grok uses to mean busy.
   printf 'Working...\n' > "$composer"
-  pane_busy unknown future-harness || fail "unknown-harness fallback should retain Pi's shared signature"
+  pane_busy unknown kimi && fail "Kimi must ignore Pi's Working footer"
   printf 'Ctrl+c:cancel\n' > "$composer"
-  pane_busy unknown future-harness || fail "unknown-harness fallback should retain Grok's shared signature"
+  pane_busy unknown kimi && fail "idle Kimi must ignore Grok's cancel footer"
 
   # Older Claude Code and the existing Pi and Grok signatures remain unchanged.
   printf 'esc to interrupt\n' > "$composer"

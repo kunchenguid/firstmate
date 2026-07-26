@@ -87,10 +87,9 @@ fm_busy_lines_match() {  # [harness]
       grok) regex=$FM_TMUX_GROK_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_TMUX_BUSY_REGEX_DEFAULT ;;
       *)
-        # Unknown harnesses conservatively retain the combined pattern, which
-        # can produce cross-harness false positives. Register a newly verified
-        # adapter explicitly instead of leaving it on this fallback.
-        regex=$FM_TMUX_BUSY_REGEX_DEFAULT
+        # A supplied harness must never borrow another harness's signature.
+        # Register its verified signature explicitly before classifying it busy.
+        regex=
         ;;
     esac
   fi
