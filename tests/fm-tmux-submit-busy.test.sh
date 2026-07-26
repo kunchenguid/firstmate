@@ -190,9 +190,6 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   pane_busy pi pi || fail "Pi Working footer should be busy"
   printf 'Ctrl+c:cancel\n' > "$composer"
   pane_busy grok grok || fail "Grok legacy Ctrl+c:cancel footer should be busy"
-  # Live Grok 0.2.112 mid-turn uses Esc:cancel; a green suite must require it.
-  printf 'Esc:cancel\n' > "$composer"
-  pane_busy grok grok || fail "Grok live Esc:cancel footer should be busy"
   pass "fm_pane_is_busy: Claude spinner is scoped, multi-frame, and backward-compatible"
 }
 
@@ -231,8 +228,25 @@ test_grok_busy_signature_uses_real_capture_shapes() {
   printf '  Ctrl+c:cancel\n' > "$composer"
   pane_busy legacy grok || fail "legacy Ctrl+c:cancel must still match harness=grok"
 
+  # Live 0.2.112 tool-approval keybind bar (disposable session, default
+  # permission mode, no --always-approve). Esc:cancel is ABSENT here; the bar
+  # carries the legacy Ctrl+c:cancel instead, so the new token cannot be what
+  # makes a human-blocked approval read as busy.
+  # (a) The whole live bar DOES match today, purely via legacy Ctrl+c:cancel.
+  # That is pre-existing, deliberate, and pinned here rather than glossed over;
+  # narrowing the legacy token is out of scope for this branch and filed apart.
+  printf '  1/4:select  │  Ctrl+o:always-approve  │  Ctrl+c:cancel\n' > "$composer"
+  pane_busy approval grok || fail "live Grok approval bar matches today via legacy Ctrl+c:cancel"
+  # (b) The same approval shape without the legacy token must NOT match: the
+  # approval bar is a negative fixture for Esc:cancel specifically.
+  printf '  1/4:select  │  Ctrl+o:always-approve\n' > "$composer"
+  pane_busy approval-no-legacy grok && fail "Grok approval shape must not match without Ctrl+c:cancel"
+
   # Cross-harness isolation: live Esc:cancel is GROK-only (must not bleed).
   printf '  Shift+Tab:mode  │  Esc:cancel  │  Ctrl+.:shortcuts\n' > "$composer"
+  # Positively validate the fixture first, so the negatives below cannot pass
+  # vacuously on a mock/sourcing failure or a changed separator shape.
+  pane_busy bleed grok || fail "bleed fixture must match harness=grok before asserting isolation"
   pane_busy bleed claude && fail "Claude must ignore Grok Esc:cancel footer"
   pane_busy bleed codex && fail "Codex must ignore Grok Esc:cancel footer"
   pane_busy bleed opencode && fail "OpenCode must ignore Grok Esc:cancel footer"
@@ -241,19 +255,6 @@ test_grok_busy_signature_uses_real_capture_shapes() {
   pane_busy bleed nosuchharness && fail "unregistered harness must ignore Grok Esc:cancel footer"
   # Shared no-harness fallback deliberately omits Esc:cancel (see #1049 / rebuild brief).
   pane_busy bleed && fail "no-harness shared default must not match Grok Esc:cancel"
-
-  # Source constant still keeps both tokens.
-  case "$FM_TMUX_GROK_BUSY_REGEX_DEFAULT" in
-    *'Esc:cancel'*) ;;
-    *) fail "FM_TMUX_GROK_BUSY_REGEX_DEFAULT must contain Esc:cancel" ;;
-  esac
-  case "$FM_TMUX_GROK_BUSY_REGEX_DEFAULT" in
-    *'Ctrl\+c:cancel'*) ;;
-    *) fail "FM_TMUX_GROK_BUSY_REGEX_DEFAULT must keep Ctrl\\+c:cancel for older installs" ;;
-  esac
-  case "$FM_TMUX_BUSY_REGEX_DEFAULT" in
-    *'Esc:cancel'*) fail "shared default must not gain Esc:cancel (cross-harness bleed)" ;;
-  esac
 
   pass "fm_pane_is_busy: Grok Esc:cancel is scoped, live-shaped, and idle-safe"
 }
