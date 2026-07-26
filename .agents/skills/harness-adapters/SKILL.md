@@ -306,8 +306,8 @@ For Grok's supported reasoning-effort values and omission behavior, see the [lau
 
 **Incident (2026-07-03, herdr backend only, grok 0.2.82):** two grok/herdr crewmates were sent `/no-mistakes` via `fm-send`; both left it fully typed but unsubmitted in the composer for minutes (footer still `Enter:send`), and `fm-send` exited 0 with no error.
 Reproduced live: the herdr adapter's submit-verification at the time treated ANY pane-content change after Enter as "submitted", and the popup-close-with-placeholder-fill described above IS a visible content change even though nothing was actually sent.
-The tmux backend was never affected - `fm_tmux_composer_state` reads the actual cursor row, correctly sees the placeholder text as still-pending, and its retry loop already sends the needed second Enter.
-Fixed in the Herdr adapter (`fm_backend_herdr_composer_state`, `bin/backends/herdr.sh`) by classifying the composer's own row structurally instead of diffing raw content; see `docs/herdr-backend.md` "Composer and injection safety" for the current boundary and `tests/fm-backend-herdr.test.sh` for regression coverage.
+The tmux backend's structural `fm_tmux_composer_state` read sees placeholder-filled text on any content row as still pending, so its retry loop sends the needed second Enter.
+The Herdr adapter (`fm_backend_herdr_composer_state`, `bin/backends/herdr.sh`) classifies the composer's own row structurally instead of diffing raw content; see `docs/herdr-backend.md` "Composer and injection safety" for the current boundary and `tests/fm-backend-herdr.test.sh` for regression coverage.
 
 Startup dialog: the "Run Grok Build in a project directory?" project picker appears ONLY when grok is launched from a non-project directory (home, Desktop, Downloads, `/tmp`).
 `fm-spawn` launches inside the treehouse worktree (a git repo root), so the picker never appears and grok treats the worktree as a trusted project automatically - no post-launch keystroke is needed.
@@ -320,11 +320,10 @@ Verified live against grok 0.2.93: real input is the bright `38;2;224;222;244` (
 This assumes a dark terminal theme, the fleet reality; the SGR-2 signal stays theme-independent.
 Regression coverage: `tests/fm-composer-ghost.test.sh` (`test_strip_ghost_drops_dark_truecolor_ghost`, `test_dark_truecolor_ghost_only_composer_is_not_pending`) and `tests/fm-backend-herdr.test.sh` (`test_composer_state_grok_dark_truecolor_placeholder_is_empty`, `test_composer_state_grok_bright_truecolor_real_text_is_pending`).
 
-**Residual gap, tmux-only (unfixed):**
-in that same pristine placeholder-only state, tmux's own `#{cursor_y}` points at the composer box's BOTTOM BORDER row, one row below the actual text row (the box appears to render one row lower before any real typing starts); once real text is typed the cursor correctly aligns with the text row again.
-This is a row-SELECTION quirk, orthogonal to the styling fix above, and affects only the tmux path (herdr uses a structural composer-row scan, not `cursor_y`, so it is unaffected).
-A correct fix needs a row-window read near `cursor_y` rather than the single `cursor_y` row.
-In practice `fm-spawn` launches grok with the brief as its initial prompt, so a live task's composer is never observed in this pristine pre-typing state - but this is unverified for every path (e.g. a steer sent before grok's first real turn settles) and needs dedicated investigation before relying on it.
+**Tmux bottom-border cursor quirk (fixed):**
+In a pristine placeholder-only composer, tmux's `#{cursor_y}` can point at the box's bottom border instead of its text row.
+The shared tmux reader now locates the complete box structurally and classifies every content row, so the cursor may sit on a content row or the bottom border without changing the result.
+The same structural read covers multi-row composers without fixed cursor offsets, while Herdr retains its own structural composer-row scan.
 
 Turn-end hook: grok fires a `Stop` hook at every turn boundary, giving firstmate a precise per-turn wake instead of only stale-pane detection.
 grok loads PROJECT hooks (`<worktree>/.grok/hooks/`, `<worktree>/.claude/settings.local.json`) only after the folder is granted hook-trust in `~/.grok/trusted_folders.toml`, which is not automatic and which firstmate will not establish by editing grok's own managed trust store.
@@ -372,7 +371,9 @@ The brief path must be absolute because the brief lives outside the task worktre
 
 Observed live spinner captures included optional leading whitespace, a moon-phase glyph, whitespace around `·`, and rotating tip text, with the same shape observed during tool execution.
 Because every captured spinner row had whitespace on both sides of `·`, the matcher requires that whitespace, deliberately does not match the never-observed zero-whitespace form, and does not require trailing tip text.
-The startup input-readiness window is the established cause of Kimi's first-Enter delivery defect: the banner is not the cause, and Grok's cursor-row quirk does not apply.
+The startup input-readiness window is the established cause of Kimi's first-Enter delivery defect, while the banner is not the cause.
+An early Enter can expand Kimi's composer to multiple content rows, leaving the pointer text on the first row and the cursor on an empty later row, which is the same single-cursor-row reading defect exposed by Grok's bottom-border cursor quirk.
+The shared tmux reader now locates the complete bordered composer and treats real text on any content row as positive evidence that submission is still pending.
 No rendering signal is trustworthy for proving that Kimi will accept input during this window, so delivery retries Enter through the shared submit core and retains the existing postcondition verification rather than relaxing readiness or delivery checks.
 Kimi's footer tip rotates independently and can display `ctrl+c: cancel` while completely idle, so tip text is never used as its busy signature without the leading moon-plus-middot spinner structure.
 The idle status bar can contain lowercase `thinking`, which is the model's effort label rather than a busy signal.

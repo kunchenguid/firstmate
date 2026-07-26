@@ -19,15 +19,15 @@
 # "suggestion" as dim/faint text inside an otherwise-empty composer. A plain
 # capture cannot tell it apart from text a human typed, so the old reader saw an
 # idle pane as holding pending input and the daemon deferred injection / firstmate
-# misjudged the pane. The composer reader now captures just the cursor line WITH
-# ANSI styling (tmux capture-pane -e) and extracts the real typed content with the
-# shared, fleet-wide fm_composer_strip_ghost (bin/fm-composer-lib.sh), which drops
-# every de-emphasised run - dim/faint (SGR 2) AND a dark/muted truecolor
-# foreground - so ghost/placeholder text never counts as real input. The styled
-# capture is consumed internally and parsed into a boolean here; it is NEVER
-# surfaced (fm-peek and every human/LLM-facing path stay plain), and only the
-# single composer row is captured, so no escape-laden pane bulk is produced. This
-# is harness-generic: any harness that de-emphasises placeholder/ghost text
+# misjudged the pane. The composer reader now captures the visible pane WITH ANSI
+# styling (tmux capture-pane -e), locates a bordered composer structurally, and
+# extracts the real typed content from every row with the shared, fleet-wide
+# fm_composer_strip_ghost (bin/fm-composer-lib.sh), which drops every
+# de-emphasised run - dim/faint (SGR 2) AND a dark/muted truecolor foreground -
+# so ghost/placeholder text never counts as real input. The styled capture is
+# consumed internally and parsed into a boolean here; it is NEVER surfaced
+# (fm-peek and every human/LLM-facing path stay plain). This is harness-generic:
+# any harness that de-emphasises placeholder/ghost text
 # benefits, and the herdr adapter routes through the same owner (task
 # afk-herdr-false-pending), so the two backends cannot drift.
 #
@@ -117,44 +117,20 @@ fm_busy_lines_match() {  # [harness]
 # so the tmux and herdr adapters cannot drift apart on what counts as ghost text.
 fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 
-# fm_tmux_composer_state: classify the cursor/composer line of <target> as
-#   empty   - no pending input (blank, a busy footer, an empty agent composer, or
-#             only de-emphasised ghost/placeholder text). Safe to inject; also the positive
-#             acknowledgement that a submit landed.
-#   pending - real, unsubmitted text on the cursor line (a human mid-typing, or a
-#             previous injection whose Enter was swallowed). Defer / retry.
-#   unknown - the pane could not be read (tmux error), OR the cursor line is a
-#             bare shell prompt (`$`/`%`/`#`/`>`) - a dead shell, not an agent
-#             composer, so NOT a safe injection target. The caller decides.
-#
-# The cursor line is captured WITH ANSI styling (capture-pane -e) and bounded to
-# the single composer row (-S/-E). The bordered flag (a genuine composer box) is
-# read from the PLAIN row (fm_composer_strip_ansi keeps ghost text so the box
-# border is still visible), while the real-typed CONTENT is extracted with the
-# shared fm_composer_strip_ghost so dim/faint AND dark-truecolor ghost text drops
-# out before classification (grok's dark box border drops with the ghost, which
-# is why the bordered flag is read from the plain row, not the ghost-stripped
-# one). Both are internal only, never surfaced. The detector strips the harness's
-# box-drawing composer borders ("│ … │", heavy "┃", or a plain ASCII "|") using
-# literal-string substitution (bash 3.2 safe, locale-independent - no \u escapes,
-# no multibyte character classes), and delegates the empty/pending/unknown
-# decision to the shared owner fm_composer_classify_content
-# (bin/fm-composer-lib.sh). The bordered flag is what lets a bordered `│ > │`
-# (claude's own idle composer) read empty while a bare, unbordered `$ ` dead-shell
-# prompt reads unknown.
-fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cy raw plain stripped bordered=0
-  cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
-  case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
-  raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || { printf 'unknown'; return 0; }
-  # bordered: from the plain row (borders survive an all-ANSI strip).
+# fm_tmux_composer_row_state: classify one raw styled candidate row.
+# A structural caller forces bordered=1; the compatibility fallback detects the
+# old single-row border shape from the plain row.
+fm_tmux_composer_row_state() {  # <raw-row> [bordered] -> empty|pending|unknown
+  local raw=$1 bordered=${2:-auto} plain stripped
   plain=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
   plain="${plain#"${plain%%[![:space:]]*}"}"
   plain="${plain%"${plain##*[![:space:]]}"}"
-  case "$plain" in
-    '│'*'│'|'┃'*'┃'|'|'*'|') bordered=1 ;;
-  esac
-  # content: from the ghost-stripped row (real typed text only).
+  if [ "$bordered" = auto ]; then
+    bordered=0
+    case "$plain" in
+      '│'*'│'|'┃'*'┃'|'|'*'|') bordered=1 ;;
+    esac
+  fi
   stripped=$(printf '%s\n' "$raw" | fm_composer_strip_ghost)
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
@@ -165,8 +141,7 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   esac
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  # A busy footer landing on the cursor line is not pending input (tmux-specific:
-  # only tmux captures the raw cursor row, which may BE the footer).
+  # A busy footer landing where the composer is read is not pending input.
   if [ -n "$stripped" ] \
      && printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
     printf 'empty'; return 0
@@ -174,7 +149,93 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   fm_composer_classify_content "$bordered" "$stripped" "${FM_COMPOSER_IDLE_RE:-}" insensitive "$plain"
 }
 
-# fm_pane_input_pending: 0 (pending) if the cursor line holds real unsubmitted
+# fm_tmux_find_composer_box: print the zero-based top and bottom rows of the
+# complete bordered box that structurally contains the cursor. The cursor may be
+# on any content row or on the bottom border; no fixed cursor offset is used.
+fm_tmux_find_composer_box() {  # <cursor-y> <plain-visible-pane> -> "<top> <bottom>"
+  local cy=$1 pane=$2 line trimmed kind family current_family=
+  local row=0 top=-1 valid=0 content_rows=0
+  while IFS= read -r line; do
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    kind=
+    family=
+    case "$trimmed" in
+      '╭'*'╮') kind=top; family=rounded ;;
+      '┌'*'┐') kind=top; family=light ;;
+      '╔'*'╗') kind=top; family=double ;;
+      '┏'*'┓') kind=top; family=heavy ;;
+      '╰'*'╯') kind=bottom; family=rounded ;;
+      '└'*'┘') kind=bottom; family=light ;;
+      '╚'*'╝') kind=bottom; family=double ;;
+      '┗'*'┛') kind=bottom; family=heavy ;;
+      '+'*'+') kind=ascii; family=ascii ;;
+    esac
+    if [ "$kind" = top ] || { [ "$kind" = ascii ] && [ "$top" -lt 0 ]; }; then
+      top=$row
+      current_family=$family
+      valid=1
+      content_rows=0
+    elif [ "$kind" = bottom ] || { [ "$kind" = ascii ] && [ "$top" -ge 0 ]; }; then
+      if [ "$top" -ge 0 ] && [ "$family" = "$current_family" ] \
+         && [ "$valid" = 1 ] && [ "$content_rows" -gt 0 ] \
+         && [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; then
+        printf '%s %s' "$top" "$row"
+        return 0
+      fi
+      top=-1
+      current_family=
+      valid=0
+      content_rows=0
+    elif [ "$top" -ge 0 ]; then
+      case "$trimmed" in
+        '│'*'│'|'┃'*'┃'|'|'*'|') content_rows=$((content_rows + 1)) ;;
+        *) valid=0 ;;
+      esac
+    fi
+    row=$((row + 1))
+  done <<EOF
+$pane
+EOF
+  return 1
+}
+
+# fm_tmux_composer_state: classify the complete composer box of <target> as
+# empty, pending, or unknown. A structurally located box is read from its top
+# border through its bottom border, and every content row is ghost-stripped and
+# classified through bin/fm-composer-lib.sh. Any real text on any row is positive
+# evidence of pending input; only an entirely empty box is empty. If no complete
+# box contains the cursor, the old cursor-row classifier remains as compatibility
+# for non-bordered composers. A read failure or unsafe bare shell prompt is
+# unknown.
+fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
+  local target=$1 cy raw pane plain box top bottom row row_raw state unknown_seen=0
+  cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
+  case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
+  pane=$(tmux capture-pane -e -p -t "$target" -S 0 -E - 2>/dev/null) || { printf 'unknown'; return 0; }
+  plain=$(printf '%s\n' "$pane" | fm_composer_strip_ansi)
+  if box=$(fm_tmux_find_composer_box "$cy" "$plain"); then
+    top=${box% *}
+    bottom=${box#* }
+    row=$((top + 1))
+    while [ "$row" -lt "$bottom" ]; do
+      row_raw=$(printf '%s\n' "$pane" | sed -n "$((row + 1))p")
+      state=$(fm_tmux_composer_row_state "$row_raw" 1)
+      case "$state" in
+        pending) printf 'pending'; return 0 ;;
+        unknown) unknown_seen=1 ;;
+      esac
+      row=$((row + 1))
+    done
+    if [ "$unknown_seen" = 1 ]; then printf 'unknown'; else printf 'empty'; fi
+    return 0
+  fi
+  raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  fm_tmux_composer_row_state "$raw" auto
+}
+
+# fm_pane_input_pending: 0 (pending) if the composer holds real unsubmitted
 # text, 1 otherwise. An unreadable pane is treated as NOT pending (fail-safe:
 # the same bias the old daemon used — an unknown pane defers nothing here).
 fm_pane_input_pending() {  # <target>

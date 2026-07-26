@@ -139,9 +139,9 @@ case "${1:-}" in
     [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
     exit 0 ;;
   capture-pane)
-    # Honor a single-line band capture (-S N -E M, both non-negative) the way the
-    # composer reader now bounds its capture to the cursor row; otherwise (e.g.
-    # fm_pane_is_busy's "-S -40" tail) return the whole capture. -e is accepted and
+    # Honor a single-line band capture (-S N -E M, both non-negative) for the
+    # composer reader's non-bordered compatibility fallback; otherwise (e.g. its
+    # structural full-pane scan or fm_pane_is_busy's "-S -40" tail) return the whole capture. -e is accepted and
     # ignored: this fake emits plain text, which the dim-stripper passes through.
     _S=""; _E=""; shift
     while [ "$#" -gt 0 ]; do

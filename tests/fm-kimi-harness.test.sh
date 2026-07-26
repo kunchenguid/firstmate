@@ -45,9 +45,32 @@ make_spawn_fakebin() {
 set -u
 printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
 state=$(cat "$FM_FAKE_KIMI_STATE" 2>/dev/null || true)
+fake_screen() {
+  case "$state" in
+    ready)
+      printf 'Welcome to Kimi Code!\ncontext: 0%% (0/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n'
+      ;;
+    pointer-typed)
+      printf 'context: 0%% (0/256k)\n╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\n'
+      ;;
+    delivered)
+      printf '✨ Read the brief at %s and follow it exactly.\ncontext: 1%% (2k/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n' "$FM_FAKE_BRIEF_REAL"
+      ;;
+    *)
+      printf 'shell starting\n$ \n'
+      ;;
+  esac
+}
+fake_cursor_y() {
+  case "$state" in
+    pointer-typed) printf '3\n' ;;
+    ready|delivered) printf '3\n' ;;
+    *) printf '1\n' ;;
+  esac
+}
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
-  *"#{cursor_y}"*) printf '0\n'; exit 0 ;;
+  *"#{cursor_y}"*) fake_cursor_y; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -99,19 +122,18 @@ case "${1:-}" in
     exit 0
     ;;
   capture-pane)
-    case "$state" in
-      ready)
-        printf 'Welcome to Kimi Code!\ncontext: 0%% (0/256k)\n│ > │\n'
-        ;;
-      pointer-typed)
-        printf 'context: 0%% (0/256k)\n│ > pending │\n'
-        ;;
-      delivered)
-        printf '✨ Read the brief at %s and follow it exactly.\ncontext: 1%% (2k/256k)\n│ > │\n' "$FM_FAKE_BRIEF_REAL"
-        ;;
-      *)
-        printf 'shell starting\n$ \n'
-        ;;
+    start= end= prev=
+    for arg in "$@"; do
+      case "$prev" in
+        -S) start=$arg ;;
+        -E) end=$arg ;;
+      esac
+      case "$arg" in -S|-E) prev=$arg ;; *) prev= ;; esac
+    done
+    case "$start:$end" in
+      *[!0-9:]*|'':*|*:'') fake_screen ;;
+      *) fake_screen | awk -v start="$start" -v end="$end" \
+           'NR - 1 >= start && NR - 1 <= end' ;;
     esac
     exit 0
     ;;

@@ -13,7 +13,8 @@
 #      normal-intensity, brightly-coloured text.
 #   2. fm_pane_input_pending reads a ghost-only composer (either style) as NOT
 #      pending, while still treating real (normal/bright) text as pending.
-#   3. The human/LLM-facing capture path (fm-peek.sh) stays PLAIN - no escape codes
+#   3. The tmux reader structurally scans every row of a multi-row composer.
+#   4. The human/LLM-facing capture path (fm-peek.sh) stays PLAIN - no escape codes
 #      ever reach firstmate's context.
 set -u
 
@@ -35,7 +36,9 @@ ESC=$(printf '\033')
 # escape-free line for the plain (peek) path. capture-pane returns the styled
 # fixture verbatim WITH -e (mirrors `tmux capture-pane -e`), and the same content
 # with SGR sequences stripped WITHOUT -e (mirrors a plain capture). cursor_y comes
-# from FM_FAKE_CY.
+# from FM_FAKE_CY. The fake deliberately returns the complete fixture for every
+# capture, which exercises the structural scan while preserving the historical
+# single-row fallback fixtures.
 make_fake_tmux() {  # <dir>
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -250,6 +253,59 @@ test_real_text_with_trailing_ghost_is_pending() {
   pass "fm_pane_input_pending: real text plus a trailing ghost run is still pending"
 }
 
+# --- fm_tmux_composer_state: structural multi-row box scan ------------------
+
+test_two_row_composer_reads_text_above_empty_cursor_row() {
+  local dir fb capture out
+  dir="$TMP_ROOT/two-row"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  cat > "$capture" <<'EOF'
+╭────────────────────────────────────────────────────╮
+│ > Read the brief at /tmp/brief.md and follow it.   │
+│                                                    │
+╰────────────────────────────────────────────────────╯
+EOF
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=2 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = pending ] \
+    || fail "two-row composer text above the empty cursor row should be pending, got '$out'"
+  pass "fm_tmux_composer_state: text above an empty cursor row is pending"
+}
+
+test_wrapped_composer_reads_all_content_rows() {
+  local dir fb capture out
+  dir="$TMP_ROOT/wrapped"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  cat > "$capture" <<'EOF'
+╭────────────────────────────────────────────╮
+│ > This deliberately long instruction wraps │
+│ across a second composer content row and   │
+│ across a third composer content row too.   │
+│                                            │
+╰────────────────────────────────────────────╯
+EOF
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=4 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = pending ] \
+    || fail "a three-row wrapped composer should be pending, got '$out'"
+  pass "fm_tmux_composer_state: a message wrapped across three rows is pending"
+}
+
+test_bottom_border_cursor_reads_ghost_only_box_as_empty() {
+  local dir fb capture out
+  dir="$TMP_ROOT/bottom-border-ghost"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  printf '╭────────────────────╮\n│ ❯ \033[38;2;50;47;70mType a message...\033[0m │\n╰────────────────────╯\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=2 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] \
+    || fail "a ghost-only box with the cursor on its bottom border should be empty, got '$out'"
+  pass "fm_tmux_composer_state: Grok's bottom-border cursor quirk reads an empty box structurally"
+}
+
 # --- fm-peek.sh stays escape-free (LLM-facing path) -------------------------
 
 test_peek_output_is_escape_free() {
@@ -287,4 +343,7 @@ test_colored_text_with_2_payload_still_pending
 test_dark_truecolor_ghost_only_composer_is_not_pending
 test_dark_truecolor_bare_shell_prompt_is_unknown
 test_real_text_with_trailing_ghost_is_pending
+test_two_row_composer_reads_text_above_empty_cursor_row
+test_wrapped_composer_reads_all_content_rows
+test_bottom_border_cursor_reads_ghost_only_box_as_empty
 test_peek_output_is_escape_free
