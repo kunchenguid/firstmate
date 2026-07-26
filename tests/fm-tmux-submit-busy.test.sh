@@ -122,7 +122,67 @@ test_idle_pane_composer_clears_first_try() {
   pass "fm_tmux_submit_enter_core: idle pane clears composer on first Enter - returns empty as before"
 }
 
+test_claude_busy_signature_uses_real_capture_shapes() {
+  local dir fakebin composer
+  dir="$TMP_ROOT/claude-signature"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  pane_busy() {
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
+      bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_pane_is_busy "$2" "$3"' \
+      _ "$ROOT" "$1" "${2:-}"
+  }
+
+  # Live Claude 2.1.220 capture 1: spinner glyph and word from one turn.
+  printf '✢ Pollinating… (16s · ↓ 1.1k tokens · thought for 1s)\n' > "$composer"
+  pane_busy live claude || fail "Claude capture 1 should be busy"
+
+  # Live Claude 2.1.220 capture 2: a later turn with a changed glyph and word.
+  printf '✽ Proofing… (5s · thinking with high effort)\n' > "$composer"
+  pane_busy live claude || fail "Claude capture 2 should be busy"
+
+  # Real idle Claude capture shape from the verified pane sample.
+  printf '✻ Worked for 31s\n' > "$composer"
+  pane_busy idle claude && fail "Claude Worked-for capture must be idle"
+
+  # The new signature is Claude-scoped and must not widen the shared default.
+  printf '✢ Pollinating… (16s · ↓ 1.1k tokens)\n' > "$composer"
+  pane_busy live && fail "Claude signature must not match without the Claude harness"
+
+  # Each verified harness must use only its own signature.
+  printf 'Ctrl+c:cancel\n' > "$composer"
+  pane_busy cross claude && fail "Claude must ignore Grok's cancel footer"
+  printf 'Working...\n' > "$composer"
+  pane_busy cross codex && fail "Codex must ignore Pi's Working footer"
+  printf 'Ctrl+c:cancel\n' > "$composer"
+  pane_busy cross opencode && fail "OpenCode must ignore Grok's cancel footer"
+  printf 'esc interrupt\n' > "$composer"
+  pane_busy cross pi && fail "Pi must ignore OpenCode's interrupt footer"
+  printf 'esc to interrupt\n' > "$composer"
+  pane_busy cross grok && fail "Grok must ignore Claude's legacy interrupt footer"
+  printf 'esc to interrupt\n' > "$composer"
+  pane_busy own codex || fail "Codex's escape footer should be busy"
+  printf 'esc interrupt\n' > "$composer"
+  pane_busy own opencode || fail "OpenCode's interrupt footer should be busy"
+
+  # No harness keeps the historical combined-pattern compatibility fallback.
+  printf 'Working...\n' > "$composer"
+  pane_busy fallback || fail "no-harness fallback should retain Pi's shared signature"
+  printf 'Ctrl+c:cancel\n' > "$composer"
+  pane_busy fallback || fail "no-harness fallback should retain Grok's shared signature"
+
+  # Older Claude Code and the existing Pi and Grok signatures remain unchanged.
+  printf 'esc to interrupt\n' > "$composer"
+  pane_busy old-claude claude || fail "older Claude escape footer should be busy"
+  printf 'Working...\n' > "$composer"
+  pane_busy pi pi || fail "Pi Working footer should be busy"
+  printf 'Ctrl+c:cancel\n' > "$composer"
+  pane_busy grok grok || fail "Grok cancel footer should be busy"
+  pass "fm_pane_is_busy: Claude spinner is scoped, multi-frame, and backward-compatible"
+}
+
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
 test_busy_pane_composer_clears_first_try
 test_idle_pane_composer_clears_first_try
+test_claude_busy_signature_uses_real_capture_shapes

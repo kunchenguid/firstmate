@@ -61,9 +61,39 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
-# (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel".
+# Claude's current spinner has a rotating glyph and word, but every active-turn
+# line has an ellipsis followed by a parenthesized elapsed duration. Keep this
+# signature separate from the shared default because that shape is not generic
+# enough to classify arbitrary harness output safely.
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
+FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc (to )?interrupt|…[[:space:]]+\([0-9]+[smh]'
+FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc (to )?interrupt'
+FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
+FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
+FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
+
+fm_busy_lines_match() {  # [harness]
+  local harness=${1:-} lines regex
+  IFS= read -r -d '' lines || true
+  if [ -n "${FM_BUSY_REGEX:-}" ]; then
+    regex=$FM_BUSY_REGEX
+  else
+    case "$harness" in
+      claude) regex=$FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT ;;
+      codex) regex=$FM_TMUX_CODEX_BUSY_REGEX_DEFAULT ;;
+      opencode) regex=$FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT ;;
+      pi) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
+      grok) regex=$FM_TMUX_GROK_BUSY_REGEX_DEFAULT ;;
+      *)
+        # No harness is the compatibility path for existing callers. Unknown
+        # harnesses deliberately retain the historical combined pattern.
+        regex=$FM_TMUX_BUSY_REGEX_DEFAULT
+        ;;
+    esac
+  fi
+  [ -n "$regex" ] && printf '%s' "$lines" | grep -qiE "$regex"
+}
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised
@@ -140,11 +170,11 @@ fm_pane_input_pending() {  # <target>
 
 # fm_pane_is_busy: 0 if the pane's last few non-blank lines show a busy footer
 # (an agent mid-turn). Scans a 40-line tail like fm-watch.sh.
-fm_pane_is_busy() {  # <target>
-  local win=$1 tail40
+fm_pane_is_busy() {  # <target> [harness]
+  local win=$1 harness=${2:-} tail40
   tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
+    | fm_busy_lines_match "$harness"
 }
 
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
