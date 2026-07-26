@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-brief.sh.
 #
-# Regression coverage for the heredoc-in-command-substitution parse bug (issue
-# #166): each ship-mode branch builds its Definition-of-done text with
-# `VAR=$(cat <<EOF ... EOF)`. Bash's lexer tracks quote state through the
-# heredoc body while it scans for the matching `)` of the command
-# substitution, so a single unescaped apostrophe anywhere in that body breaks
-# parsing of the *entire rest of the script* - `bash -n` fails, not just the
-# generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
-# is unaffected, so the secondmate charter block does not need this guard.
+# Regression coverage for the heredoc-in-command-substitution parse bug (issues
+# #166, #958, #1069). Building a variable with `VAR=$(cat <<EOF ... EOF)` is
+# unsafe on Bash 3.2 (macOS /bin/bash): the lexer scans for the matching `)` of
+# the command substitution textually and tracks quote state through the heredoc
+# body, so a single apostrophe, unbalanced quote, or unbalanced paren anywhere
+# in that body breaks parsing of the *entire rest of the script* - `bash -n`
+# fails, not just the generated brief. The DOD and Herdr-section builders now
+# use `IFS= read -r -d '' VAR <<EOF || true` instead, which removes the `$(...)`
+# wrapper and eliminates the whole defect class regardless of future prose.
+# test_no_heredoc_in_command_substitution guards that structure directly.
+# Ambient `bash -n` here is Bash 5 and cannot see the bug, so the real
+# cross-version enforcement lives in the macos-stock-bash CI job.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -18,15 +22,30 @@ TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
-# The script itself must always parse. This is the direct regression test for
-# issue #166: a stray apostrophe in any of the three DOD heredoc bodies
-# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
+# The script itself must always parse under the ambient bash. That is Bash 5 in
+# CI and locally, where the issue #958/#1069 parser bug does not fire, so this
+# is a weak guard on its own; test_no_heredoc_in_command_substitution and the
+# macos-stock-bash CI job carry the real cross-version enforcement.
 test_script_parses() {
   local out rc
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
   expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
   [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
   pass "fm-brief.sh: bash -n succeeds"
+}
+
+# Structural class guard (issues #166, #958, #1069): never build a variable by
+# wrapping a heredoc in a command substitution (`VAR=$(cat <<EOF ... EOF)`).
+# That construct is what breaks Bash 3.2 parsing, and pinning one historical
+# apostrophe phrase (as the old test did) missed the #945 reintroduction. This
+# guards the *shape* directly against the whole file, so any future DOD or
+# section builder that reintroduces the class fails here regardless of prose.
+test_no_heredoc_in_command_substitution() {
+  local hits
+  hits=$(grep -nE '\$\([^)]*<<' "$ROOT/bin/fm-brief.sh" || true)
+  [ -z "$hits" ] || fail "fm-brief.sh wraps a heredoc in a command substitution (breaks Bash 3.2 parsing):
+$hits"
+  pass "fm-brief.sh: no heredoc is nested inside a command substitution (Bash 3.2 parse-safe)"
 }
 
 test_help_includes_entire_header() {
@@ -114,9 +133,13 @@ test_no_mistakes_dod_wording() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`help`' "$brief" \
     "no-mistakes DOD must render literal backticks around help"
-  assert_no_grep "no-mistakes' own guidance" "$brief" \
-    "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
-  pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
+  # The apostrophe in "firstmate's authority check" is now structurally safe
+  # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
+  # being reworded or escaped away. test_no_heredoc_in_command_substitution
+  # guards the structure that makes it safe.
+  assert_grep "firstmate's authority check" "$brief" \
+    "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
+  pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
 test_ship_project_memory_wording() {
@@ -383,6 +406,7 @@ test_scout_and_secondmate_scaffold() {
 }
 
 test_script_parses
+test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
