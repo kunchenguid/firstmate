@@ -88,7 +88,7 @@ state/               volatile runtime signals; gitignored
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.kimi-turnend-token   firstmate-owned Kimi hook registry token for the task; removed by teardown
-  <id>.meta          task metadata written by fm-spawn and appended by fm-pr-check, including through fm-pr-merge (canonical pr=/pr_head=, for GitHub pull requests and GitLab merge requests; docs/gitlab-merge-watch.md) and fm-x-link (X-mode fields); see bin/fm-spawn.sh --help and docs/configuration.md "Runtime backend" for the exact field set (section 8, section 14)
+  <id>.meta          task metadata written by fm-spawn and appended by fm-pr-check, including through fm-pr-merge (canonical pr=/pr_head=, for GitHub pull requests and GitLab merge requests; docs/gitlab-merge-watch.md) and fm-x-link (X-mode fields); see bin/fm-spawn.sh's header and docs/configuration.md "Runtime backend" for the exact field set (section 8, section 14)
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Optional presentation spaces"
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified X shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check

@@ -79,7 +79,7 @@ This is secondmate-only: crewmate/scout model resolution is untouched by this fi
 This section is the single owner of the secondmate sync and inherited-local-material propagation contract; `AGENTS.md` sections 3 and 4 point here.
 Before launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe; dirty, diverged, or in-flight homes launch unchanged with a warning.
 The locked session-start bootstrap sweep runs the same guarded fast-forward for every live secondmate home, discovered from `state/<id>.meta` records with `kind=secondmate` (`data/secondmates.md` only backfills `home=` for older records).
-That no-fetch path is a purely local fast-forward of tracked files, never an origin fetch, and it never touches the gitignored operational dirs, so a secondmate's backlog, projects, and in-flight work are never disturbed; a linked worktree advances immediately, while a standalone clone that lacks the target receives firstmate updates through `/updatefirstmate`'s origin refresh.
+That no-fetch path is a purely local fast-forward of tracked files, never an origin fetch, and it never touches the gitignored operational dirs, so a secondmate's backlog, projects, and in-flight work are never disturbed; a linked worktree advances immediately, while a standalone clone that lacks the target receives firstmate updates through `/updatefirstmate`'s fork refresh.
 The same launch and the same locked bootstrap sweep also propagate the primary's declared inherited local material: `config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`, `config/herdr-presentation-spaces`, and the one shared captain-preference file `data/captain-shared.md`.
 Because these paths are gitignored, that propagation is a separate, primary-authoritative copy independent of the tracked-files fast-forward: it re-converges every live home whether or not its tracked files advanced, and it touches only the declared items.
 Propagation failures warn without blocking secondmate launch or session-start continuation, and the destination keeps whatever safely validated state the helper left behind.
@@ -147,6 +147,11 @@ It refuses any destination that is not a genuine seeded firstmate home with safe
 Do not hand off `local-only` items.
 
 ## Recovery
+
+The locked session-start sweep in `bin/fm-bootstrap.sh` already accounts for every registered secondmate before you act.
+It classifies each recorded endpoint through the recovery-grade `fm_backend_agent_state` contract in `bin/fm-backend.sh` and relaunches only from `dead` or `missing`; an `alive`, `ambiguous`, `unreadable`, or `unverified` target is preserved untouched rather than respawned on a guess.
+Every skipped or failed guarantee prints a `SECONDMATE_LIVENESS:` line, whose handling is owned by `bootstrap-diagnostics`.
+Only tmux and herdr have verified classifiers, so a secondmate on another backend, or one whose recorded harness is outside the verified set, is reported rather than auto-respawned.
 
 For `kind=secondmate` meta with no window, treat the secondmate as a dead persistent direct report and respawn it with:
 
