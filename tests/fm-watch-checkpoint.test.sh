@@ -12,6 +12,7 @@ make_home() {
   local name=$1 home
   home="$TMP_ROOT/$name"
   mkdir -p "$home/state" "$home/data" "$home/config"
+  touch "$home/state/.last-account-session-sync" "$home/state/.last-report-retention"
   printf '%s\n' "$home"
 }
 

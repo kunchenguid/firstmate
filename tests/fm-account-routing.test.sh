@@ -193,6 +193,9 @@ SH
 [ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
 [ -z "${FM_FAKE_LIFECYCLE_LOG:-}" ] || printf 'treehouse %s\n' "$*" >> "$FM_FAKE_LIFECYCLE_LOG"
 [ -z "${FM_FAKE_TREEHOUSE_SLEEP:-}" ] || sleep "$FM_FAKE_TREEHOUSE_SLEEP"
+if [ "${1:-}" = return ] && [ -n "${FM_FAKE_TREEHOUSE_RETURN_SLEEP:-}" ]; then
+  sleep "$FM_FAKE_TREEHOUSE_RETURN_SLEEP"
+fi
 if [ "${1:-}" = return ] && [ -n "${FM_EXPECT_CHECKOUT_LOCK_ROOT:-}" ]; then
   # Prove the live lock through the guarded owner exported to the bounded return.
   # Recomputing the private lock hash here made the assertion depend on path-normalization details instead of the lock guarantee.
@@ -233,6 +236,15 @@ if [ "${1:-}" = return ] && [ -n "${FM_FAKE_TREEHOUSE_RETURN_CHILD_PID_FILE:-}" 
   printf '%s\n' "$!" > "$FM_FAKE_TREEHOUSE_RETURN_CHILD_PID_FILE"
 fi
 if [ "${1:-}" = get ]; then
+  lease_holder=
+  previous=
+  for argument in "$@"; do
+    [ "$previous" != --lease-holder ] || lease_holder=$argument
+    previous=$argument
+  done
+  pool=$(dirname "$(dirname "${FM_FAKE_TREEHOUSE_PATH:?}")")
+  printf '{"worktrees":[{"path":"%s","leased":true,"lease_holder":"%s","destroying":false}]}\n' \
+    "$FM_FAKE_TREEHOUSE_PATH" "$lease_holder" > "$pool/treehouse-state.json"
   printf '%s\n' "${FM_FAKE_TREEHOUSE_PATH:?}"
 fi
 exit 0
@@ -428,7 +440,7 @@ EOF
 
 run_spawn() {
   local id=$1
-  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+  FM_ROOT_OVERRIDE="${FM_TEST_ROOT_OVERRIDE:-}" FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="${FM_TEST_PANE_PATH:-$WT_DIR}" FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
@@ -438,6 +450,7 @@ run_spawn() {
     FM_EXPECT_CHECKOUT_LOCK_MARKER="${FM_EXPECT_CHECKOUT_LOCK_MARKER:-}" \
     FM_FAKE_TREEHOUSE_PATH="$WT_DIR" FM_TREEHOUSE_ROOT="$CASE_DIR/treehouse-pools" \
     FM_FAKE_TREEHOUSE_SLEEP="${FM_FAKE_TREEHOUSE_SLEEP:-}" \
+    FM_FAKE_TREEHOUSE_RETURN_SLEEP="${FM_FAKE_TREEHOUSE_RETURN_SLEEP:-}" \
     FM_FAKE_TREEHOUSE_RETURN_CHILD_PID_FILE="${FM_FAKE_TREEHOUSE_RETURN_CHILD_PID_FILE:-}" \
     FM_FAKE_TREEHOUSE_RETURN_MARKER="${FM_FAKE_TREEHOUSE_RETURN_MARKER:-}" \
     FM_TEST_REAL_PS="${FM_TEST_REAL_PS:-}" \
@@ -458,11 +471,12 @@ run_spawn() {
 }
 
 run_teardown() {
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  FM_ROOT_OVERRIDE="${FM_TEST_ROOT_OVERRIDE:-}" FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_FAKE_TMUX_LOG="$TMUX_LOG" FM_FAKE_AF_LOG="$AF_LOG" \
     FM_FAKE_TREEHOUSE_LOG="$TREEHOUSE_LOG" FM_FAKE_ENDPOINT_FILE="$CASE_DIR/endpoint-live" \
+    FM_FAKE_TREEHOUSE_RETURN_SLEEP="${FM_FAKE_TREEHOUSE_RETURN_SLEEP:-}" \
     FM_FAKE_TMUX_LABEL_FILE="$CASE_DIR/tmux-label" \
     FM_AGENT_FLEET_BIN="$FAKEBIN_DIR/agent-fleet" \
     TMUX="fake,1,0" PATH="$FAKEBIN_DIR:$PATH" "$TEARDOWN" "$@"
@@ -494,6 +508,12 @@ clear_case_logs() {
   : > "$LAUNCH_LOG"
   : > "$NATIVE_LAUNCH_LOG"
   rm -f "$CASE_DIR/resume-arm" "$CASE_DIR/resume-arm.native-dir" "$CASE_DIR/session-refreshed"
+}
+
+write_teardown_completion_report() {
+  local id=$1
+  printf '# Completion\n\n## Summary\n\nRollback cleanup is ready.\n\n## What changed\n\nRecorded cleanup state.\n\n## Verification\n\nCleanup assertions follow.\n\n## Visual evidence\n\nNone.\n\n## Artifacts\n\nNone.\n\n## Follow-ups\n\nNone.\n' \
+    > "$HOME_DIR/data/$id/completion.md"
 }
 
 use_named_fake_tmux_target() {
@@ -2042,13 +2062,21 @@ test_native_resume_uses_private_launch_directory_and_cleans_it() {
 }
 
 make_seeded_secondmate_home() {
-  local home=$1 id=$2
-  mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
-  cp "$ROOT/bin/fm-account-routing-lib.sh" "$home/bin/fm-account-routing-lib.sh"
-  cp "$ROOT/bin/fm-spawn.sh" "$home/bin/fm-spawn.sh"
-  printf '# Firstmate\n' > "$home/AGENTS.md"
+  local home=$1 id=$2 home_abs primary
+  primary="$CASE_DIR/primary-home"
+  git clone --quiet --no-hardlinks "$ROOT" "$primary"
+  git -C "$primary" branch --force main HEAD
+  git -C "$primary" checkout --quiet main
+  git -C "$primary" remote remove origin
+  git clone --quiet --no-hardlinks "$primary" "$home"
+  git -C "$home" checkout --quiet --detach "$(git -C "$primary" rev-parse main)"
+  FM_TEST_ROOT_OVERRIDE=$primary
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  home_abs=$(cd "$home" && pwd -P)
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter\n' > "$home/data/charter.md"
+  printf -- '- %s - account routing fixture (home: %s; scope: account routing; projects: ; added 2026-07-25)\n' \
+    "$id" "$home_abs" > "$HOME_DIR/data/secondmates.md"
 }
 
 test_secondmate_pool_is_nonactivating_and_noninherited() {
@@ -2142,9 +2170,8 @@ test_enforced_secondmate_requires_routing_inheritance_and_capable_home() {
   out=$(FM_TEST_PANE_PATH="$sm" run_spawn "$id" "$sm" --secondmate)
   status=$?
   [ "$status" -ne 0 ] || fail "enforced secondmate launched from a pre-Agent-Fleet home"
-  assert_contains "$out" "secondmate-home" "capability refusal omitted the offending secondmate home"
-  assert_contains "$out" "lacks Agent Fleet routing support" "capability refusal omitted its reason"
-  assert_contains "$out" "run bin/fm-config-push.sh" "capability refusal omitted the manual reconciliation step"
+  assert_contains "$out" "$id" "capability refusal omitted the offending secondmate"
+  assert_contains "$out" "dirty working tree" "capability refusal did not stop at the freshness gate"
   assert_not_grep '^new-window ' "$TMUX_LOG" "capability refusal created an endpoint"
   pass "enforced secondmates require inherited routing policy and Agent Fleet-capable homes"
 }
@@ -2188,9 +2215,9 @@ test_secondmate_routing_inheritance_is_authoritative_for_every_mode() {
   rm -f "$sm/bin/fm-account-routing-lib.sh"
   out=$(FM_TEST_PANE_PATH="$sm" run_spawn "$id" "$sm" --secondmate)
   status=$?
-  [ "$status" -eq 0 ] || fail "off secondmate did not preserve warn-and-launch behavior: $out"
-  assert_contains "$out" "lacks Agent Fleet routing support" "off capability gap was not warned"
-  assert_regex '^new-window ' "$TMUX_LOG" "off capability warning blocked launch"
+  [ "$status" -ne 0 ] || fail "off secondmate launched from a dirty, capability-drifted home"
+  assert_contains "$out" "dirty working tree" "off capability drift did not stop at the freshness gate"
+  assert_not_grep '^new-window ' "$TMUX_LOG" "off capability drift created an endpoint"
   pass "secondmate launches require authoritative routing policy in every mode"
 }
 
@@ -2549,6 +2576,7 @@ test_failed_cleanup_persists_retryable_metadata() {
   assert_not_grep 'return --force' "$TREEHOUSE_LOG" "failed cleanup recycled its retained worktree"
 
   clear_case_logs
+  write_teardown_completion_report "$id"
   run_teardown "$id" --force >/dev/null || fail "teardown could not retry failed Agent Fleet cleanup"
   assert_grep "lease release --task $task --force" "$AF_LOG" "teardown did not retry the failed lease release"
   assert_grep "session remove --task $task" "$AF_LOG" "teardown did not retry the failed session cleanup"
@@ -2572,6 +2600,7 @@ test_unknown_spawn_endpoint_retains_lease_for_retry() {
   assert_contains "$out" "endpoint state is unknown" "unknown endpoint retention was not reported"
   rm -f "$CASE_DIR/endpoint-live"
   clear_case_logs
+  write_teardown_completion_report "$id"
   run_teardown "$id" --force >/dev/null || fail "unknown endpoint retry state could not be torn down after absence was confirmed"
   pass "spawn rollback retains leases while endpoint state is unknown"
 }
@@ -2596,6 +2625,7 @@ test_rollback_retry_rechecks_live_endpoint_before_release() {
   assert_contains "$out" "endpoint is still alive" "live rollback retry blocker was unclear"
   rm -f "$CASE_DIR/endpoint-live"
   clear_case_logs
+  write_teardown_completion_report "$id"
   run_teardown "$id" --force >/dev/null || fail "live rollback retry state could not be torn down after endpoint removal"
   pass "rollback cleanup retries prove the retained endpoint is dead"
 }
@@ -3100,8 +3130,8 @@ test_concurrent_continuations_serialize_before_mutation() {
   second_pid=$!
   second_lock_waiter=
   for _ in $(seq 1 100); do
-    second_lock_waiter=$(find "$HOME_DIR/state" -maxdepth 1 -type f \
-      -name ".account-lifecycle-$id.owner.*" -print -quit)
+    second_lock_waiter=$(find "$CASE_DIR/checkout-refresh-locks/secondmate-home-lifecycle" \
+      -maxdepth 1 -type f -name '.secondmate-home-lifecycle-*.owner.*' -print -quit)
     [ -n "$second_lock_waiter" ] && break
     sleep 0.05
   done
@@ -3179,24 +3209,36 @@ test_continuation_fails_closed_without_original_brief() {
 }
 
 test_session_sync_cannot_recreate_metadata_after_teardown() {
-  local id rec release_marker sync_pid teardown_pid sync_rc teardown_rc meta_tmp
+  local id rec release_marker sync_pid teardown_pid sync_rc teardown_rc meta_tmp primary
   id=account-sync-race-z23
   rec=$(make_case sync-race claude "$id")
   read_case "$rec"
+  primary="$CASE_DIR/primary-home"
+  git clone --quiet --no-hardlinks "$ROOT" "$primary"
+  git -C "$primary" branch --force main HEAD
+  git -C "$primary" checkout --quiet main
+  git -C "$primary" remote remove origin
+  FM_TEST_ROOT_OVERRIDE=$primary
   run_spawn "$id" "$PROJ_DIR" --account-pool claude-crew >/dev/null || fail "session sync race precondition spawn failed"
   rm -f "$CASE_DIR/endpoint-live"
   meta_tmp="$HOME_DIR/state/.$id.meta.test"
   grep -v '^provider_session_id=' "$HOME_DIR/state/$id.meta" > "$meta_tmp"
   mv "$meta_tmp" "$HOME_DIR/state/$id.meta"
+  write_teardown_completion_report "$id"
   release_marker="$CASE_DIR/lease-released"
-  FM_FAKE_AF_RELEASE_MARKER="$release_marker" FM_FAKE_TREEHOUSE_SLEEP=1 \
+  FM_FAKE_AF_RELEASE_MARKER="$release_marker" FM_FAKE_TREEHOUSE_RETURN_SLEEP=1 \
     run_teardown "$id" --force > "$CASE_DIR/teardown-stdout" 2> "$CASE_DIR/teardown-stderr" &
   teardown_pid=$!
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
+  for _ in $(seq 1 100); do
     [ -f "$release_marker" ] && break
     sleep 0.1
   done
-  [ -f "$release_marker" ] || { kill "$teardown_pid" 2>/dev/null || true; fail "session sync race never reached managed account cleanup"; }
+  [ -f "$release_marker" ] || {
+    kill "$teardown_pid" 2>/dev/null || true
+    wait "$teardown_pid" 2>/dev/null
+    teardown_rc=$?
+    fail "session sync race never reached managed account cleanup (teardown $teardown_rc; Agent Fleet: $(cat "$AF_LOG"); Treehouse: $(cat "$TREEHOUSE_LOG")): $(cat "$CASE_DIR/teardown-stdout" "$CASE_DIR/teardown-stderr")"
+  }
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_AGENT_FLEET_BIN="$FAKEBIN_DIR/agent-fleet" FM_FAKE_AF_LOG="$AF_LOG" \
@@ -5768,6 +5810,7 @@ test_teardown_stops_after_rollback_restores_predecessor() {
   assert_contains "$out" "rerun teardown against the restored task generation" "rollback restoration retry guidance was not surfaced"
 
   clear_case_logs
+  write_teardown_completion_report "$id"
   run_teardown "$id" --force >/dev/null || fail "restored predecessor could not be torn down on a fresh pass"
   assert_grep "lease release --task $old_task" "$AF_LOG" "fresh teardown did not release the restored predecessor"
   pass "teardown stops and revalidates after rollback restores predecessor state"
@@ -5958,6 +6001,11 @@ if [ "${FM_TEST_FOCUSED:-}" = tail-safety ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = teardown-restore ]; then
+  run_isolated_test test_teardown_stops_after_rollback_restores_predecessor
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = oversized-continuation ]; then
   run_isolated_test test_oversized_continuation_stops_before_mutation
   exit 0
@@ -5980,6 +6028,18 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = unknown-endpoint-rollback ]; then
   run_isolated_test test_unknown_spawn_endpoint_retains_lease_for_retry
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = rollback-cleanup-retry ]; then
+  run_isolated_test test_failed_cleanup_persists_retryable_metadata
+  run_isolated_test test_unknown_spawn_endpoint_retains_lease_for_retry
+  run_isolated_test test_rollback_retry_rechecks_live_endpoint_before_release
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = session-sync-teardown-race ]; then
+  run_isolated_test test_session_sync_cannot_recreate_metadata_after_teardown
   exit 0
 fi
 

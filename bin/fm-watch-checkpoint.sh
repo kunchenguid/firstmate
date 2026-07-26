@@ -55,7 +55,7 @@ ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.err.XXXXXX") || {
 trap 'rm -f "$OUT" "$ERR"' EXIT
 
 run_with_perl_timeout() {
-  perl -e '
+  perl -MPOSIX=:sys_wait_h -e '
     my $seconds = shift;
     my $pid = fork;
     die "fork failed\n" unless defined $pid;
@@ -65,9 +65,19 @@ run_with_perl_timeout() {
       die "exec failed: $!\n";
     }
     local $SIG{ALRM} = sub {
+      my $exited = 0;
       kill "TERM", -$pid;
-      select undef, undef, undef, 0.2;
-      kill "KILL", -$pid;
+      for (1 .. 40) {
+        if (waitpid($pid, WNOHANG) == $pid) {
+          $exited = 1;
+          last;
+        }
+        select undef, undef, undef, 0.05;
+      }
+      if (!$exited) {
+        kill "KILL", -$pid;
+        waitpid $pid, 0;
+      }
       exit 124;
     };
     alarm $seconds;

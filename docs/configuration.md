@@ -313,7 +313,9 @@ Treehouse-acquired secondmate homes receive the same proof before seeding.
 They use the same locked, bounded acquisition entrypoint as ordinary task worktrees.
 Explicit secondmate homes are refreshed and must independently match the same live upstream or local default tip before seeding and again before launch.
 A stale, dirty, or uninspectable acquisition remains durably leased without forced return and is surfaced for manual recovery.
-If an unmanaged spawn fails after publishing metadata or task artifacts, it restores the prior task generation before returning only a worktree whose repository identity, cleanliness, and expected detached tip are re-proven.
+If an unmanaged spawn fails after publishing metadata or task artifacts, it restores the prior task generation.
+Any failed unmanaged spawn returns its acquired worktree only after its endpoint is confirmed absent or known never to have been created, and only when repository identity, cleanliness, expected detached tip, guarded Treehouse return, and completed removal are all proven.
+Otherwise it retains the worktree and cleanup metadata for explicit teardown.
 That makes the acquisition proof explicit even if the background owner was offline.
 Orca is an explicit legacy-recovery-only exception because this change creates no new Orca tasks or acquisitions.
 

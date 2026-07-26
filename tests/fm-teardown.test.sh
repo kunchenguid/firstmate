@@ -181,7 +181,13 @@ SH
 #!/usr/bin/env bash
 state="$(dirname "$0")/.tmux-live"
 case "${1:-}" in
-  display-message) [ -f "$state" ]; exit $? ;;
+  display-message)
+    [ -f "$state" ] || exit 1
+    case " $* " in
+      *' #{pane_current_command} '*) printf '%s\n' bash ;;
+    esac
+    exit 0
+    ;;
   list-windows) [ ! -f "$state" ] || printf '%s\n' fm-task-x1; exit 0 ;;
   kill-window) rm -f "$state"; exit 0 ;;
 esac
@@ -1848,7 +1854,7 @@ test_managed_teardown_retains_lease_when_endpoint_state_is_unknown() {
 #!/usr/bin/env bash
 case "${1:-}" in
   display-message) exit 1 ;;
-  list-panes) echo 'permission denied' >&2; exit 74 ;;
+  list-windows) echo 'permission denied' >&2; exit 74 ;;
   kill-window) exit 74 ;;
 esac
 exit 0
