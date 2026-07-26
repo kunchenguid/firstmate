@@ -88,6 +88,14 @@ Observed output:
 ok - Claude 2.1.219 (Claude Code) live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary
 ```
 
+Current entry points:
+
+```sh
+tests/fm-turnend-guard.test.sh
+tests/fm-supervision-instructions.test.sh
+FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
+```
+
 ### Pi blocks the turn end rather than reacting to it
 
 Measured with pi 0.81.1 on 2026-07-26 against a local mock provider, so no model request left the machine.
@@ -114,18 +122,15 @@ Two means the run settled blind before the follow-up re-opened it, which is the 
 Blocking is repeatable rather than one-shot: a probe that re-queued from `agent_end` continued for 12 consecutive blocks with no ceiling, and `agent_settled` fired exactly once after it stopped.
 Firstmate still latches to a single follow-up per logical run, so the ceiling is Firstmate's policy and not a Pi limit.
 
-Current entry points:
+The four Node-driven Pi extension cases in `tests/fm-turnend-guard.test.sh` import the `.ts` extension directly, so they need a Node build with TypeScript type stripping.
+On the Node v22.22.1 Debian system build used here that support is absent: the import fails with `ERR_UNKNOWN_FILE_EXTENSION`, and adding `--experimental-strip-types` fails with `ERR_NO_TYPESCRIPT` because the binary was compiled without TypeScript support.
+Those cases therefore report `not ok` rather than skipping, and because `fail` in `tests/lib.sh` exits, the first one aborts the script before the remaining cases run.
+`tests/fm-pi-watch-extension.test.sh` and `tests/fm-calm-pi-extension.test.sh` carry the same requirement and also fail on this Node build.
+The same is true on unmodified `origin/main`, so this limitation is pre-existing rather than introduced by the `agent_end` guard.
 
-```sh
-tests/fm-turnend-guard.test.sh
-tests/fm-supervision-instructions.test.sh
-FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
-```
-
-The four Node-driven Pi extension cases in `tests/fm-turnend-guard.test.sh` import the `.ts` extension directly and need a Node build with TypeScript type stripping.
-They pass on the CI runners.
-On a Node compiled without type stripping, such as the Debian system build, the import fails with `ERR_UNKNOWN_FILE_EXTENSION`; the first such case reports `not ok` rather than skipping, and because `fail` in `tests/lib.sh` exits, the suite aborts there instead of reaching the remaining cases.
-`tests/fm-pi-watch-extension.test.sh` and `tests/fm-calm-pi-extension.test.sh` have the same requirement.
+Whether these cases pass in CI is unverified from this worktree.
+`.github/workflows/ci.yml` pins only `runs-on: ubuntu-latest`, with no `setup-node` step and no pinned Node version, so the runner's Node is whatever GitHub currently ships and can change without a repository change.
+No CI run was observed.
 
 ## Watcher continuity
 
