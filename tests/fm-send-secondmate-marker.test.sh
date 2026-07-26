@@ -143,25 +143,85 @@ test_exact_secondmate_task_id_is_marked() {
   pass "fm-send: an exact kind=secondmate task id is marked with corr exactly once"
 }
 
-test_crewmate_target_is_not_marked() {
-  local dir fb log home rc got
+# A crewmate or scout steer carries the generic firstmate-steer kind, NOT the
+# secondmate from-firstmate carrier: the two marks mean different things, and only
+# the secondmate one opens a reply expectation. A worker that cannot tell a
+# firstmate steer from a human at the keyboard has composed a message addressed
+# to the captain into its own pane and blocked on it.
+test_crewmate_target_is_marked_as_a_steer() {
+  local dir fb log home rc got expected
   dir="$TMP_ROOT/crew"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home crew)
   fm_write_meta "$home/state/build.meta" \
     "window=sess:fm-build" "worktree=$home/wt" "project=$home/p" \
     "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
+  fm_operational_input_construct firstmate-steer "fix the test" expected \
+    || fail "could not construct a firstmate-steer message"
   run_send "$fb" "$home" "$log" "fm-build" "fix the test"; rc=$?
   expect_code 0 "$rc" "send to a stable-label crewmate target should succeed"
   got=$(cat "$log")
-  [ "$got" = "fix the test" ] \
-    || fail "stable-label crewmate send: expected bare text, got marker or other"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
+  [ "$got" = "$expected" ] \
+    || fail "stable-label crewmate send: expected a firstmate-steer mark"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
+  case "$got" in
+    *"$FM_FROMFIRST_LABEL"*) fail "a crewmate steer used the secondmate reply-routing carrier" ;;
+  esac
+  [ -z "$(ls -A "$home/state/pending-replies" 2>/dev/null || true)" ] \
+    || fail "a crewmate steer created a pending-reply expectation"
+
+  fm_operational_input_construct firstmate-steer "fix the exact test" expected
   run_send "$fb" "$home" "$log" "build" "fix the exact test"; rc=$?
   expect_code 0 "$rc" "send to an exact-id crewmate target should succeed"
   got=$(cat "$log")
-  [ "$got" = "fix the exact test" ] \
-    || fail "exact-id crewmate send: expected bare text, got marker or other"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
-  pass "fm-send: exact-id and stable-label kind=ship selectors are sent unmarked"
+  [ "$got" = "$expected" ] \
+    || fail "exact-id crewmate send: expected a firstmate-steer mark"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
+
+  # A scout is an ordinary crewmate for this purpose.
+  fm_write_meta "$home/state/probe.meta" \
+    "window=sess:fm-probe" "worktree=$home/wt" "project=$home/p" \
+    "harness=echo" "kind=scout"
+  fm_operational_input_construct firstmate-steer "check the logs" expected
+  run_send "$fb" "$home" "$log" "probe" "check the logs"; rc=$?
+  expect_code 0 "$rc" "send to a scout target should succeed"
+  [ "$(cat "$log")" = "$expected" ] || fail "a scout steer was not marked"
+  pass "fm-send: kind=ship and kind=scout selectors carry the firstmate-steer mark and no reply expectation"
+}
+
+# A message the harness itself dispatches must stay bare: any prefix in front of
+# a slash command turns it into plain text and the steer silently does not run.
+# This is the carve-out that keeps "/no-mistakes" working.
+test_harness_dispatched_commands_stay_bare() {
+  local dir fb log home rc
+  dir="$TMP_ROOT/crew-cmd"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home crew-cmd)
+  fm_write_meta "$home/state/build.meta" \
+    "window=sess:fm-build" "worktree=$home/wt" "project=$home/p" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  run_send "$fb" "$home" "$log" "build" "/no-mistakes"; rc=$?
+  expect_code 0 "$rc" "slash-command steer should succeed"
+  [ "$(cat "$log")" = "/no-mistakes" ] \
+    || fail "a slash command was prefixed and would no longer dispatch: $(cat "$log")"
+
+  fm_write_meta "$home/state/cdx.meta" \
+    "window=sess:fm-cdx" "worktree=$home/wt" "project=$home/p" \
+    "harness=codex" "kind=ship" "mode=no-mistakes" "yolo=off"
+  # shellcheck disable=SC2016 # A literal leading '$' is the codex skill form under test.
+  run_send "$fb" "$home" "$log" "cdx" '$review'; rc=$?
+  expect_code 0 "$rc" "codex skill-invocation steer should succeed"
+  # shellcheck disable=SC2016 # Same literal '$' as above.
+  [ "$(cat "$log")" = '$review' ] \
+    || fail "a codex skill invocation was prefixed: $(cat "$log")"
+
+  # The same leading "$" on a non-codex harness is ordinary prose and IS marked.
+  # shellcheck disable=SC2016 # A literal '$5' is the prose case under test.
+  run_send "$fb" "$home" "$log" "build" '$5 a month is the budget'; rc=$?
+  expect_code 0 "$rc" "dollar-prefixed prose steer should succeed"
+  case "$(cat "$log")" in
+    *"FIRSTMATE_OP:"*) : ;;
+    *) fail "dollar-prefixed prose to a non-codex target was left unmarked" ;;
+  esac
+  pass "fm-send: slash commands and codex skill invocations stay bare so the harness still dispatches them"
 }
 
 test_explicit_window_is_not_marked() {
@@ -255,7 +315,8 @@ test_marked_send_preserves_trailing_newlines() {
 
 test_secondmate_target_is_marked
 test_exact_secondmate_task_id_is_marked
-test_crewmate_target_is_not_marked
+test_crewmate_target_is_marked_as_a_steer
+test_harness_dispatched_commands_stay_bare
 test_explicit_window_is_not_marked
 test_key_path_is_not_marked
 test_marker_is_label_plus_invisible_separator

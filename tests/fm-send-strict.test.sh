@@ -83,7 +83,12 @@ test_exact_lane_id_send_still_works() {
     "$SEND" mpf-lane-m8 "lost dispatch" >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "exact task id send should succeed when metadata exists"
   got=$(cat "$log")
-  assert_contains "$got" "target=sess:fm-mpf-lane-m8 literal=1 arg=lost dispatch" "exact id should type literal text to the meta target"
+  # The body reaches the resolved target. A metadata-routed crewmate steer also
+  # carries the firstmate-steer mark (bin/fm-send.sh), so match the body rather
+  # than the whole literal argument; the marker itself is pinned in
+  # tests/fm-send-secondmate-marker.test.sh.
+  assert_contains "$got" "target=sess:fm-mpf-lane-m8 literal=1 arg=" "exact id should type literal text to the meta target"
+  assert_contains "$got" "lost dispatch" "exact id should type the steer body"
   assert_contains "$got" "target=sess:fm-mpf-lane-m8 literal=0 arg=Enter" "exact id should submit with Enter"
   pass "fm-send strict: exact task/lane ids resolve through home metadata"
 }
@@ -157,7 +162,10 @@ test_healthy_fm_id_send_still_works() {
     "$SEND" fm-lane-ok "hello captain" >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "healthy fm-id send should succeed"
   got=$(cat "$log")
-  assert_contains "$got" "target=sess:fm-lane-ok literal=1 arg=hello captain" "healthy send should type literal text to the meta target"
+  # Body match, not whole-argument match: a metadata-routed crewmate steer also
+  # carries the firstmate-steer mark (see tests/fm-send-secondmate-marker.test.sh).
+  assert_contains "$got" "target=sess:fm-lane-ok literal=1 arg=" "healthy send should type literal text to the meta target"
+  assert_contains "$got" "hello captain" "healthy send should type the steer body"
   assert_contains "$got" "target=sess:fm-lane-ok literal=0 arg=Enter" "healthy send should submit with Enter"
   assert_contains "$(cat "$err")" "requested message WILL still be sent" "fm-send guard banner should keep send-specific continuation wording"
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"

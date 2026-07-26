@@ -9,6 +9,13 @@
 #   U+2063 FIRSTMATE_OP: v1 <kind>: <body>
 #
 # The landed U+2063 + "FIRSTMATE_OP: " prefix is permanent compatibility.
+# `firstmate-steer` carries an ordinary supervision message from firstmate to a
+# crewmate or scout. A worker receives exactly one marked message at birth - its
+# launch brief - and before this kind existed every later steer arrived bare,
+# indistinguishable from a human typing into the pane. The operating contract
+# forbids a crewmate from addressing the captain while the transport gave it no
+# way to tell who was speaking, and both directions of that confusion have been
+# observed.
 # The version and kind header make current inputs structurally typed without
 # deriving provenance from body prose. The established from-firstmate routing
 # marker remains a current compatibility carrier because already-running
@@ -28,7 +35,7 @@ FM_OPERATIONAL_MARK=$'\xE2\x81\xA3'
 FM_OPERATIONAL_PREFIX="${FM_OPERATIONAL_MARK}FIRSTMATE_OP: "
 FM_OPERATIONAL_VERSION=v1
 FM_OPERATIONAL_HEADER_PREFIX="${FM_OPERATIONAL_PREFIX}${FM_OPERATIONAL_VERSION} "
-FM_OPERATIONAL_KINDS='session-start watcher turn-end-guard away-supervisor launch-brief'
+FM_OPERATIONAL_KINDS='session-start watcher turn-end-guard away-supervisor launch-brief firstmate-steer'
 
 # Compatibility name retained for the away-mode owner and its tests.
 # shellcheck disable=SC2034 # Public source-library variable used by callers.

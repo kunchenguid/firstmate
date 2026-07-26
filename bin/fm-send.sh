@@ -25,9 +25,26 @@
 # records kind=secondmate, the text uses the live-charter-compatible
 # from-firstmate carrier owned by bin/fm-operational-input.sh so the secondmate
 # routes its reply via its status file or a status-pointed doc instead of
-# stranding it in chat the main firstmate never reads. A crewmate/scout target,
-# an explicit backend-target escape-hatch target, and the --key path are never
-# marked - their behavior is unchanged.
+# stranding it in chat the main firstmate never reads.
+#
+# A crewmate or scout target is marked with the generic `firstmate-steer`
+# operational kind from the same owner. A worker used to receive exactly one
+# marked message - its launch brief - and a bare stream afterwards, so it could
+# not tell a firstmate steer from the captain typing into its pane. That is not
+# hypothetical: a crewmate composed "Captain, the pipeline paused on one decision
+# you need to make..." into its own pane and blocked for ten minutes, and the
+# captain has separately opened a crewmate pane believing it was firstmate. A
+# steer carries no reply expectation, so unlike the secondmate path it creates no
+# pending-reply record.
+#
+# Two carve-outs, both narrow. An explicit backend-target escape-hatch target and
+# the --key path stay unmarked, as before. And a message the HARNESS itself must
+# dispatch - a leading "/" slash command anywhere, or a leading "$" skill
+# invocation on codex - is sent bare, because any prefix in front of it turns the
+# command into plain text and the steer silently fails to run. Those are the same
+# two shapes the submit settle below already recognizes as harness-dispatched.
+# The identity confusion this closes is about prose that reads like a person
+# speaking; a slash command cannot be mistaken for the captain asking a question.
 #
 # Parent-owned pending-reply expectation: every newly marked secondmate request
 # also receives a privacy-safe correlation id and a durable parent record under
@@ -193,18 +210,24 @@ shift
 
 fm_backend_validate "$TARGET_BACKEND" || exit 1
 
-# Classify a from-firstmate -> secondmate request. Only a task selector resolved
-# through this home's meta whose authoritative kind is secondmate is marked: the
-# secondmate then routes its reply via the status path (see fm-marker-lib.sh).
-# An explicit backend target (the escape hatch for endpoints outside this home)
-# and any crewmate/scout target are left unmarked, and so is the --key path.
+# Classify the request. Only a task selector resolved through this home's meta is
+# marked at all: an explicit backend target is the escape hatch for endpoints
+# outside this home and stays bare, and so does the --key path. A secondmate
+# selector takes the from-firstmate carrier and its reply-routing contract; every
+# other selector is an ordinary crewmate or scout and takes the generic
+# firstmate-steer kind, which carries no reply expectation.
 MARK_FROM_FIRSTMATE=0
+MARK_FIRSTMATE_STEER=0
 PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
 TARGET_TASK_ID=
-if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
-  MARK_FROM_FIRSTMATE=1
-  TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ]; then
+  if [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
+    MARK_FROM_FIRSTMATE=1
+    TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+  else
+    MARK_FIRSTMATE_STEER=1
+  fi
 fi
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
@@ -226,6 +249,14 @@ if [ "${1:-}" = "--key" ]; then
   fi
 else
   MESSAGE=$*
+  if [ "$MARK_FIRSTMATE_STEER" = 1 ]; then
+    # Harness-dispatched commands are sent bare; see the carve-out note above.
+    case "$MESSAGE" in
+      /*) ;;
+      \$*) [ "$TARGET_HARNESS" = codex ] || fm_operational_input_construct firstmate-steer "$MESSAGE" MESSAGE ;;
+      *) fm_operational_input_construct firstmate-steer "$MESSAGE" MESSAGE ;;
+    esac
+  fi
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never

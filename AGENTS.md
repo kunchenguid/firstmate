@@ -260,6 +260,7 @@ After spawning, confirm the worker is processing the brief, handle any trust dia
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
 Steer a worker with short single-line messages through fail-closed `fm-send`; put long instructions in a file.
+Every metadata-routed steer is marked as coming from firstmate, so a worker can always tell firstmate from a human at its keyboard; only a harness-dispatched command such as a slash command is sent bare, and `bin/fm-send.sh` owns that boundary.
 A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
 For the parent-owned correlation, recovery, and escalation contract on marked secondmate requests, see `bin/fm-pending-reply-lib.sh`.
 Supervise all live work under section 8.

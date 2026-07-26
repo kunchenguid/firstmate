@@ -580,9 +580,13 @@ test_unmarked_captain_input_creates_no_expectation() {
     "window=sess:fm-build" "worktree=$home/wt" "project=$home/p" \
     "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
   run_send "$fb" "$home" "$log" "build" "captain says hello"; rc=$?
-  expect_code 0 "$rc" "unmarked crewmate send should succeed"
-  [ "$(cat "$log")" = "captain says hello" ] \
-    || fail "crewmate send should stay unmarked"$'\n'"$(cat "$log" | od -An -c)"
+  expect_code 0 "$rc" "crewmate send should succeed"
+  # A crewmate steer is marked so the worker knows who is speaking, but it uses
+  # the generic firstmate-steer kind, NOT the secondmate reply-routing carrier -
+  # only the latter opens a durable expectation, which is what this pins.
+  case "$(cat "$log")" in
+    *"$FM_FROMFIRST_LABEL"*) fail "a crewmate steer used the secondmate reply-routing carrier"$'\n'"$(cat "$log" | od -An -c)" ;;
+  esac
   pending_count=$(find "$home/state/pending-replies" -type f 2>/dev/null | wc -l | tr -d ' ')
   [ "$pending_count" = 0 ] || fail "unmarked input must create no pending-reply records (got $pending_count)"
   pass "direct unmarked captain input creates no expectation"
