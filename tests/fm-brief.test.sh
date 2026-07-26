@@ -362,6 +362,39 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# The browser-as-a-user rule has a single owner shared by the ship and scout
+# scaffolds, so it must render identically in both rather than drifting into
+# two divergent copies.
+test_browser_as_user_rule_reaches_ship_and_scout() {
+  local home brief kind
+  home="$TMP_ROOT/browser-rule-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-browser-ship some-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-browser-scout some-proj --scout >/dev/null 2>&1
+  for kind in ship scout; do
+    brief="$home/data/brief-browser-$kind/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    assert_grep "driving the browser AS A REAL USER" "$brief" \
+      "$kind brief lost the drive-the-browser-as-a-user instruction"
+    assert_grep "never proves what a page actually rendered" "$brief" \
+      "$kind brief lost the reason code and database reads are insufficient"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    assert_grep 'Use `chrome-devtools-axi` to drive a real browser interactively' "$brief" \
+      "$kind brief lost the interactive browser tool"
+    assert_grep "Playwright/e2e harness for a scripted, repeatable run" "$brief" \
+      "$kind brief lost the scripted repeatable reproduction path"
+    assert_grep "drive the system browser with Playwright instead of falling back to code reading" "$brief" \
+      "$kind brief lost the environment-agnostic system-browser fallback"
+    assert_grep "that reproduction becomes the regression test" "$brief" \
+      "$kind brief lost the reproduction-becomes-the-regression-test rule"
+  done
+  diff <(sed -n '/^3\. Use gh-axi/,/regression test\.$/p' "$home/data/brief-browser-ship/brief.md") \
+       <(sed -n '/^3\. Use gh-axi/,/regression test\.$/p' "$home/data/brief-browser-scout/brief.md") \
+    >/dev/null 2>&1 \
+    || fail "ship and scout browser rules diverged; they must share one owner"
+  pass "fm-brief.sh: ship and scout share one browser-as-a-user rule"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -396,4 +429,5 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_browser_as_user_rule_reaches_ship_and_scout
 test_scout_and_secondmate_scaffold

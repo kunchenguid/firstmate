@@ -33,6 +33,13 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
+# Ship and scout scaffolds share one browser rule: web work must reproduce and
+# verify user-visible behavior by driving the browser as a real user, with
+# chrome-devtools-axi for interactive rendered state and the project's
+# Playwright/e2e harness for a scripted repeatable flow that becomes the
+# regression test once a fix is authorized. It stays environment-agnostic:
+# when a bundled interactive browser cannot launch, Playwright drives the
+# system browser instead of the worker falling back to code reading.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
@@ -226,6 +233,17 @@ EOF
 )
 fi
 
+# Rule 3 is shared by the ship and scout scaffolds so the browser-as-a-user
+# contract has one owner and cannot drift between the two variants.
+BROWSER_RULE=$(cat <<'EOF'
+3. Use gh-axi for GitHub operations.
+   When the task involves user-visible web behavior, reproduce and verify it by driving the browser AS A REAL USER; reading code, API responses, or database rows never proves what a page actually rendered.
+   Use `chrome-devtools-axi` to drive a real browser interactively and inspect live rendered state, and the project's Playwright/e2e harness for a scripted, repeatable run of the same user flow.
+   If a bundled interactive browser cannot launch in this environment, drive the system browser with Playwright instead of falling back to code reading.
+   When a fix is authorized, that reproduction becomes the regression test.
+EOF
+)
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -244,7 +262,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+$BROWSER_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -353,7 +371,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+$BROWSER_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
