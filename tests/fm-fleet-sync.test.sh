@@ -188,7 +188,9 @@ SH
 run_sync_guarded() {
   local home=$1 fakebin=$2 outf=$3 errf=$4 realgit
   shift 4
-  realgit=$(command -v git)
+  # Absolute real binary from lib.sh - not `command -v git`, which resolves to
+  # the test PATH shim and would send this mock back through a PATH fake.
+  realgit=$FM_TEST_REAL_GIT
   PATH="$fakebin:$PATH" REAL_GIT_FOR_TEST="$realgit" \
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-fleet-sync.sh" "$@" >"$outf" 2>"$errf"

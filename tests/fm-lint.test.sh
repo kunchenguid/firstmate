@@ -417,10 +417,9 @@ test_seeded_module_boundary_parity() {
     return
   fi
   local tmp rel adapter dispatcher dep owner test_root out rc
+  # Registered from this shell (not a $( ) subshell), so the array reaches
+  # lib.sh's cleanup; lib.sh already installed the EXIT trap at load.
   tmp=$(mktemp -d "$ROOT/.fm-lint-parity.XXXXXX")
-  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
-    trap fm_test_cleanup EXIT
-  fi
   FM_TEST_CLEANUP_DIRS+=("$tmp")
   rel=${tmp#"$ROOT/"}
   adapter="$tmp/adapter.sh"

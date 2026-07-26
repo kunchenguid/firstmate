@@ -10,7 +10,9 @@ set -u
 . "$ROOT/bin/fm-tmux-lib.sh"
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-tmux-submit-busy.XXXXXX")
-trap 'rm -rf "$TMP_ROOT"' EXIT
+# Chain fm_test_cleanup: this trap replaces lib.sh's, which reclaims the git
+# PATH shim dir. Without the chain each run leaves one fm-test-gitwrap.* behind.
+trap 'rm -rf "$TMP_ROOT"; fm_test_cleanup' EXIT
 
 # Override fm_pane_is_busy for testing: FM_FAKE_PANE_BUSY=1 means busy.
 fm_pane_is_busy() {
