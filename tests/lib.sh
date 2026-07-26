@@ -99,6 +99,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FM_TEST_REAL_GIT=$(type -P git 2>/dev/null || true)
 if [ -z "$FM_TEST_REAL_GIT" ] || [ ! -x "$FM_TEST_REAL_GIT" ]; then
   printf 'tests/lib.sh: cannot resolve a real git binary for fixture wrapping\n' >&2
+  # shellcheck disable=SC2317 # exit is reached when this file is executed, not sourced.
   return 1 2>/dev/null || exit 1
 fi
 export FM_TEST_REAL_GIT
@@ -109,6 +110,7 @@ FM_TEST_GIT_WRAP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-gitwrap.XXXXXX")
 FM_TEST_BASH=$(type -P bash 2>/dev/null || true)
 if [ -z "$FM_TEST_BASH" ] || [ ! -x "$FM_TEST_BASH" ]; then
   printf 'tests/lib.sh: cannot resolve bash for the git PATH shim shebang\n' >&2
+  # shellcheck disable=SC2317 # exit is reached when this file is executed, not sourced.
   return 1 2>/dev/null || exit 1
 fi
 # shellcheck disable=SC2016
