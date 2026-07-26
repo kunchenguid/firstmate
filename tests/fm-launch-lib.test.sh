@@ -89,7 +89,7 @@ test_secondmate_templates_are_pinned() {
 test_primary_templates_are_pinned() {
   assert_template primary claude 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__'
   assert_template primary codex 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox'
-  assert_template primary opencode 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__'
+  assert_template primary opencode 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--auto'
   assert_template primary pi 'FM_PI_HARNESS=pi pi __MODELFLAG____EFFORTFLAG__'
   assert_template primary pi-signed 'FM_PI_HARNESS=pi-signed pi-signed __MODELFLAG____EFFORTFLAG__'
   assert_template primary grok 'grok --always-approve __MODELFLAG____EFFORTFLAG__'
@@ -122,6 +122,8 @@ test_primary_keeps_the_autonomy_and_ghost_text_knowledge() {
     "the grok primary template must keep its autonomy flag"
   assert_contains "$(launch_template opencode primary)" '"permission":{"*":"allow"}' \
     "the opencode primary template must keep its permission config"
+  assert_contains "$(launch_template opencode primary)" '--auto' \
+    "the opencode primary template must keep the verified briefless --auto form"
   pass "launch_template: primary templates keep each adapter's verified autonomy and ghost-text knowledge"
 }
 
@@ -234,11 +236,33 @@ test_fm_spawn_defines_none_of_the_three_functions() {
 }
 
 test_no_other_tracked_script_hand_writes_a_launch_command() {
-  local matches
-  matches=$(git -C "$ROOT" grep -lF -- '--dangerously-skip-permissions' -- bin | grep -v '^bin/fm-launch-lib.sh$' || true)
-  [ -z "$matches" ] \
-    || fail "a launch command is hand-written outside bin/fm-launch-lib.sh: $matches"
-  pass "one owner: no other script under bin/ hand-writes a harness launch command"
+  # One marker per verified adapter's autonomy, permission, or ghost-text
+  # knowledge, so a hand-copied codex, opencode, grok, or kimi command is caught
+  # too and not just claude's. Each pattern must still match the library itself;
+  # a pattern that matches nothing would pass this guard while checking nothing.
+  local markers=(
+    'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION'
+    '--dangerously-skip-permissions'
+    '--dangerously-bypass-approvals-and-sandbox'
+    'OPENCODE_CONFIG_CONTENT='
+    '--always-approve'
+    '--auto([^-a-z]|$)'
+  )
+  local marker owners status matches
+  for marker in "${markers[@]}"; do
+    owners=$(git -C "$ROOT" grep -lE -e "$marker" -- bin)
+    status=$?
+    [ "$status" -le 1 ] \
+      || fail "the one-owner guard could not run git grep for '$marker' (git grep exited $status)"
+    case $'\n'"$owners"$'\n' in
+      *$'\n'bin/fm-launch-lib.sh$'\n'*) ;;
+      *) fail "the one-owner guard's '$marker' pattern no longer matches bin/fm-launch-lib.sh, so it checks nothing" ;;
+    esac
+    matches=$(printf '%s\n' "$owners" | grep -v '^bin/fm-launch-lib.sh$' | grep -v '^$')
+    [ -z "$matches" ] \
+      || fail "a launch command is hand-written outside bin/fm-launch-lib.sh ('$marker'): $matches"
+  done
+  pass "one owner: no other script under bin/ hand-writes any verified harness launch command"
 }
 
 test_ship_and_scout_templates_are_pinned
