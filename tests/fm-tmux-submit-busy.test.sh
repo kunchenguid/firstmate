@@ -189,8 +189,73 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   printf 'Working...\n' > "$composer"
   pane_busy pi pi || fail "Pi Working footer should be busy"
   printf 'Ctrl+c:cancel\n' > "$composer"
-  pane_busy grok grok || fail "Grok cancel footer should be busy"
+  pane_busy grok grok || fail "Grok legacy Ctrl+c:cancel footer should be busy"
+  # Live Grok 0.2.112 mid-turn uses Esc:cancel; a green suite must require it.
+  printf 'Esc:cancel\n' > "$composer"
+  pane_busy grok grok || fail "Grok live Esc:cancel footer should be busy"
   pass "fm_pane_is_busy: Claude spinner is scoped, multi-frame, and backward-compatible"
+}
+
+# Fresh captures 2026-07-26 against installed grok 0.2.112 (9bbd559437aa).
+# Mid-turn: self pane w15:pC (agent_status=working) via fm_backend_capture herdr.
+# Idle: live idle grok pane w15:p5 (agent_status=idle) via same path.
+# Separators are U+2502 (box drawing), not ASCII pipe. Do not require
+# Ctrl+b:send to bg as a discriminator - it is intermittent mid-turn.
+test_grok_busy_signature_uses_real_capture_shapes() {
+  local dir fakebin composer
+  dir="$TMP_ROOT/grok-signature"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  pane_busy() {
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
+      bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_pane_is_busy "$2" "$3"' \
+      _ "$ROOT" "$1" "${2:-}"
+  }
+
+  # Positive: live mid-turn keybind bar (Esc:cancel present).
+  printf '  Shift+Tab:mode  │  Esc:cancel  │  Ctrl+b:send to bg  │  Ctrl+.:shortcuts\n' > "$composer"
+  pane_busy midturn grok || fail "live Grok mid-turn footer must match harness=grok"
+
+  # Negative: live idle keybind bar (Esc:cancel absent). Safety-critical.
+  printf '  Shift+Tab:mode  │  Ctrl+.:shortcuts\n' > "$composer"
+  pane_busy idle grok && fail "live Grok idle footer must not match harness=grok"
+
+  # Negative: human-blocked overlay footers must never read as working.
+  # Esc:unselect is a deliberate near-miss: a naive Esc: prefix would false-busy.
+  printf '  Esc:unselect  │  Tab:scrollback  │  Shift+x:dismiss\n' > "$composer"
+  pane_busy overlay-project grok && fail "project-dir overlay must not match harness=grok"
+  printf '  Enter:send  │  Shift+Tab:mode  │  Ctrl+.:shortcuts\n' > "$composer"
+  pane_busy overlay-slash grok && fail "slash autocomplete overlay must not match harness=grok"
+
+  # Pinned known behaviour: older Grok permission dialog still matches.
+  printf '  Ctrl+c:cancel\n' > "$composer"
+  pane_busy legacy grok || fail "legacy Ctrl+c:cancel must still match harness=grok"
+
+  # Cross-harness isolation: live Esc:cancel is GROK-only (must not bleed).
+  printf '  Shift+Tab:mode  │  Esc:cancel  │  Ctrl+.:shortcuts\n' > "$composer"
+  pane_busy bleed claude && fail "Claude must ignore Grok Esc:cancel footer"
+  pane_busy bleed codex && fail "Codex must ignore Grok Esc:cancel footer"
+  pane_busy bleed opencode && fail "OpenCode must ignore Grok Esc:cancel footer"
+  pane_busy bleed pi && fail "Pi must ignore Grok Esc:cancel footer"
+  pane_busy bleed kimi && fail "Kimi must ignore Grok Esc:cancel footer"
+  pane_busy bleed nosuchharness && fail "unregistered harness must ignore Grok Esc:cancel footer"
+  # Shared no-harness fallback deliberately omits Esc:cancel (see #1049 / rebuild brief).
+  pane_busy bleed && fail "no-harness shared default must not match Grok Esc:cancel"
+
+  # Source constant still keeps both tokens.
+  case "$FM_TMUX_GROK_BUSY_REGEX_DEFAULT" in
+    *'Esc:cancel'*) ;;
+    *) fail "FM_TMUX_GROK_BUSY_REGEX_DEFAULT must contain Esc:cancel" ;;
+  esac
+  case "$FM_TMUX_GROK_BUSY_REGEX_DEFAULT" in
+    *'Ctrl\+c:cancel'*) ;;
+    *) fail "FM_TMUX_GROK_BUSY_REGEX_DEFAULT must keep Ctrl\\+c:cancel for older installs" ;;
+  esac
+  case "$FM_TMUX_BUSY_REGEX_DEFAULT" in
+    *'Esc:cancel'*) fail "shared default must not gain Esc:cancel (cross-harness bleed)" ;;
+  esac
+
+  pass "fm_pane_is_busy: Grok Esc:cancel is scoped, live-shaped, and idle-safe"
 }
 
 test_busy_pane_pending_returns_empty
@@ -198,3 +263,4 @@ test_idle_pane_pending_returns_pending
 test_busy_pane_composer_clears_first_try
 test_idle_pane_composer_clears_first_try
 test_claude_busy_signature_uses_real_capture_shapes
+test_grok_busy_signature_uses_real_capture_shapes
