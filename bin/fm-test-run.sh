@@ -121,7 +121,9 @@ family_for_basename() {
     fm-calm-pi-extension.test.sh|fm-captain-translation-contract.test.sh|fm-cd-pretool-check.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
-    fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
+    fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-fixture-git-stdout.test.sh|\
+    fm-grok-harness.test.sh|\
+    fm-harness-drift.test.sh|\
     fm-herdr-lab.test.sh|fm-instruction-owners.test.sh|fm-lint.test.sh|\
     fm-install-herdr.test.sh|fm-nm-test-contract.test.sh|fm-no-mistakes-ownership.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
@@ -658,6 +660,10 @@ families_for_changed_path() {
     bin/fm-secondmate*|bin/fm-home-seed.sh|bin/fm-backlog-handoff.sh|\
     bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*)
       printf '%s\n' secondmate
+      ;;
+    bin/fm-harness-drift.sh)
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' session-bootstrap
       ;;
     bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-tangle*|bin/fm-update.sh|\

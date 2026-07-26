@@ -247,7 +247,9 @@ test_no_fetch_in_local_path() {
 
   fakebin="$w/fakebin"
   log="$w/fetch.log"
-  real_git=$(command -v git)
+  # Absolute real binary from lib.sh - not `command -v git`, which resolves to
+  # the test PATH shim and would send this mock back through a PATH fake.
+  real_git=$FM_TEST_REAL_GIT
   mkdir -p "$fakebin"
   cat > "$fakebin/git" <<SH
 #!/usr/bin/env bash
@@ -350,6 +352,7 @@ SH
 exit 0
 SH
   chmod +x "$fakebin/quota-axi"
+  fm_fake_stamped_harnesses "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

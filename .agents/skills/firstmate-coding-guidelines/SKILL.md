@@ -12,8 +12,8 @@ metadata:
 # firstmate-coding-guidelines
 
 Load this before changing firstmate's shared, tracked material, as defined by `AGENTS.md` section 1.
-It exists because `AGENTS.md` grew from 585 to 958 lines between its last two restructures, entirely from conditional detail added inline instead of routed to its right home.
-Applying the rules below on every change is what keeps that from happening again.
+It exists because `AGENTS.md` bloats whenever conditional detail is added inline instead of routed to its right home, and every session of every fleet member pays that cost whether or not it hits the situation the detail describes.
+Applying the rules below on every change is what keeps that from happening.
 
 ## Knowledge-placement decision tree
 

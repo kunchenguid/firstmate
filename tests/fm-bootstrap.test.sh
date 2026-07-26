@@ -71,6 +71,7 @@ SH
   chmod +x "$fakebin/no-mistakes"
   add_tasks_axi "$fakebin" "0.1.1"
   add_quota_axi "$fakebin"
+  fm_fake_stamped_harnesses "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
