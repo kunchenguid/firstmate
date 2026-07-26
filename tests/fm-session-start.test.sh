@@ -635,7 +635,7 @@ EOF
   assert_not_contains "$out" "After draining queued wakes" "read-only guard printed a drain-then-rearm instruction"
   assert_not_contains "$out" "run bin/fm-watch-arm.sh" "read-only guard printed a mutating watcher-arm instruction"
   assert_contains "$out" "Mode: non-owned lock state (LIVE_OTHER) - supervision withheld." "read-only supervision block did not withhold the harness protocol"
-  assert_not_contains "$out" "Mode: Claude background-notify supervision." "read-only supervision block still emitted the claude mutation protocol"
+  assert_not_contains "$out" "Mode: Claude Stop-hook-owned supervision." "read-only supervision block still emitted the claude mutation protocol"
   assert_not_contains "$out" "bin/fm-watch-arm.sh" "read-only supervision block still instructed arming the watcher"
   assert_not_contains "$out" "reclaim --expected" "read-only supervision block offered a reclaim against a proven live owner"
   assert_not_contains "$out" "git -C $root checkout main" "read-only bootstrap printed a state-changing checkout remediation"
@@ -674,10 +674,12 @@ EOF
   chmod 0700 "$home/state"
 
   expect_code 0 "$status" "fm-session-start.sh must exit 0 when lock publication fails"
-  assert_contains "$out" "cannot write session lock" "lock publication failure was not surfaced"
-  assert_contains "$out" "READ-ONLY SESSION" "lock publication failure did not force a read-only session"
-  assert_contains "$out" "FLEET LOCK OWNERSHIP WAS NOT VERIFIED" "lock publication failure was misreported as a live holder"
-  assert_contains "$out" "lacks verified fleet-lock ownership" "lock publication failure did not explain why queued wakes remain untouched"
+  assert_contains "$out" "LOCK_RESULT=IDENTITY_UNAVAILABLE" "lock publication failure was not typed"
+  assert_contains "$out" "cannot access lock state directory" "lock publication failure was not surfaced"
+  assert_contains "$out" "LOCK IDENTITY UNAVAILABLE" "lock publication failure did not get the unavailable-identity banner"
+  assert_contains "$out" "FLEET LOCK NOT ACQUIRED" "lock publication failure did not state that ownership was unavailable"
+  assert_contains "$out" "skipped (lock outcome IDENTITY_UNAVAILABLE)" "lock publication failure did not explain why queued wakes remain untouched"
+  assert_not_contains "$out" "READ-ONLY SESSION" "lock publication failure was mislabeled as LIVE_OTHER read-only"
   assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK" "lock publication failure falsely claimed a live lock holder"
   [ -s "$home/state/.wake-queue" ] || fail "lock publication failure allowed the wake queue to mutate"
 
@@ -729,7 +731,9 @@ SH
   i=1
   while [ "$i" -le 40 ]; do
     (
-      harness_pid=$BASHPID
+      # Bash 3.2 has no BASHPID. A short-lived child can portably report this
+      # background subshell's real PID as its PPID.
+      harness_pid=$(sh -c 'printf "%s\n" "$PPID"')
       : > "$home/state/harness-$harness_pid"
       : > "$ready/$i"
       while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do

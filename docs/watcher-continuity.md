@@ -10,7 +10,7 @@ Each adapter starts the next arm before delivering the wake prompt, checks curre
 A failed follow-up never cancels continuity restoration.
 Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
 The hook fires on every Stop, and an eligible primary with supervision need admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
-A numeric session-lock owner that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, while a live owner, absent lock, or malformed lock keeps the competing hook inert.
+A numeric session-lock owner that fails the shared `fm_harness_pid_alive` predicate is delegated to `bin/fm-lock.sh`, which reclaims only a proven-stale owner before auto-arm state changes; a live or ambiguous owner, absent lock, or malformed lock keeps the competing hook inert.
 The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
 While supervision is still needed and away mode remains inactive, an actionable close or typed failure wakes the idle session through exit 2.
 

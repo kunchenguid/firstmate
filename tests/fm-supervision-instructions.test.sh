@@ -54,7 +54,7 @@ test_non_owned_states_withhold_mutation_instructions() {
       "$state render lost the no-mutation contract line"
     assert_contains "$out" "- Ordinary wake: none; this session does not own the fleet lock" \
       "$state render kept an ordinary-wake mutation instruction"
-    assert_not_contains "$out" "Mode: Claude background-notify supervision." \
+    assert_not_contains "$out" "Mode: Claude Stop-hook-owned supervision." \
       "$state render still emitted the claude mutation protocol"
     assert_not_contains "$out" "bin/fm-watch-arm.sh" \
       "$state render still instructed arming the watcher"
@@ -93,7 +93,7 @@ test_non_owned_states_withhold_mutation_instructions() {
     "identity-unavailable render lost the captain-confirmed codex-thread path"
 
   out=$("$RENDER" --harness claude --lock-state OWNED)
-  assert_contains "$out" "Mode: Claude background-notify supervision." \
+  assert_contains "$out" "Mode: Claude Stop-hook-owned supervision." \
     "owned render lost the normal claude protocol"
   assert_not_contains "$out" "supervision withheld" \
     "owned render incorrectly withheld supervision"

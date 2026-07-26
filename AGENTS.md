@@ -129,8 +129,8 @@ Read the complete digest once and trust it as this turn's startup and recovery i
 Do not separately re-read the context, backlog, metadata, or bulk status inputs it just printed unless a source was reported absent or corrupt, older history is specifically needed, or a targeted workflow must inspect before writing.
 An `ABSENT` captain, shared-captain, secondmate, or learnings file means the firstmate repo's built-in defaults, no shared captain preferences, no registered secondmates, or no captured learnings; rebuild an absent or stale project registry from the clones before dispatch.
 
-If the session lock cannot be acquired and verified, report its exact diagnostic and remain read-only; another active session is only one possible cause.
-A lock-refused session must not spawn, steer, merge, drain the wake queue, repair supervision, repair a checkout, or perform any other fleet mutation.
+If the session lock cannot be acquired and verified, report its exact diagnostic and remain non-owning; another active session is only one possible cause.
+A non-owning session must not spawn, steer, merge, drain the wake queue, repair supervision, repair a checkout, or perform any other fleet mutation.
 Only a proven `LIVE_OTHER` lock outcome means another active session is managing the fleet and puts this session in read-only mode.
 `STALE_RECLAIMABLE`, `IDENTITY_UNAVAILABLE`, and `RECLAIM_BUSY` are separate outcomes: do not claim another live owner, and do not mutate fleet state until the same session has acquired or atomically reclaimed the lock.
 `RECLAIM_BUSY` is temporary reclaim-mutex contention - retry briefly and re-check `bin/fm-lock.sh status` rather than treating it as an identity failure.
