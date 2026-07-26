@@ -326,10 +326,13 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
       *) return 0 ;;
     esac
   }
+  # These fixtures reproduce the observed spinner shape rather than byte-exact
+  # transcriptions. Leading whitespace is deliberately varied because the
+  # matcher is whitespace-insensitive by design and must not be pinned to prose.
   printf ' 🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"\n│ > │\n' > "$capture"
-  fm_pane_is_busy fake kimi || fail "the first real Kimi spinner capture was not recognized as busy"
-  printf ' 🌗 · Tip: /plugins: manage plugins ...\n│ > │\n' > "$capture"
-  fm_pane_is_busy fake kimi || fail "the tool-execution Kimi spinner capture was not recognized as busy"
+  fm_pane_is_busy fake kimi || fail "the first real Kimi spinner shape was not recognized as busy"
+  printf '   🌗 · Tip: /plugins: manage plugins ...\n│ > │\n' > "$capture"
+  fm_pane_is_busy fake kimi || fail "the tool-execution Kimi spinner shape was not recognized as busy"
   printf 'ordinary response ending with 🌕\n│ > │\n' > "$capture"
   if fm_pane_is_busy fake kimi; then
     fail "a moon outside Kimi's spinner-line shape was misread as busy"
@@ -338,11 +341,7 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
   if fm_pane_is_busy fake kimi; then
     fail "moon-led Kimi output without the middot separator was misread as busy"
   fi
-  printf ' 🌑 · \n│ > │\n' > "$capture"
-  if fm_pane_is_busy fake kimi; then
-    fail "Kimi spinner prefix without following tip text was misread as busy"
-  fi
-  printf ' 🌗 · Tip: /plugins: manage plugins ...\n│ > │\n' > "$capture"
+  printf '  🌗 · Tip: /plugins: manage plugins ...\n│ > │\n' > "$capture"
   if fm_pane_is_busy fake codex; then
     fail "Kimi's real spinner signature leaked into another harness"
   fi
@@ -350,7 +349,11 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
   if fm_pane_is_busy fake kimi; then
     fail "kimi's independently rotating idle tip was misread as busy"
   fi
-  printf 'auto K2.7 Coding thinking /some/path\n│ > │\n' > "$capture"
+  printf 'Ctrl+c:cancel\n│ > │\n' > "$capture"
+  if fm_pane_is_busy fake kimi; then
+    fail "Grok's exact busy token leaked into Kimi's harness-scoped matcher"
+  fi
+  printf 'auto  K2.7 Coding thinking  /some/path\n│ > │\n' > "$capture"
   if fm_pane_is_busy fake kimi; then
     fail "Kimi's idle thinking-effort status label was misread as busy"
   fi
@@ -360,13 +363,13 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
   fi
   for phase in 🌑 🌒 🌓 🌔 🌕 🌖 🌗 🌘; do
     grep -Fq "$phase" "$ROOT/bin/fm-tmux-lib.sh" \
-      || fail "shared Kimi busy regex is missing moon phase $phase"
+      || fail "shared Kimi matcher is missing moon phase $phase"
   done
   pass "busy detection: real Kimi moon-plus-middot captures require its harness while idle labels stay idle"
 }
 
 test_watcher_scopes_moon_spinner_to_recorded_kimi_task() (
-  local state="$TMP_ROOT/watch-state" busy_capture=' 🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
+  local state="$TMP_ROOT/watch-state" busy_capture='  🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
   mkdir -p "$state"
   printf 'window=fake\nharness=kimi\n' > "$state/kimi-watch.meta"
   unset FM_BUSY_REGEX
@@ -390,10 +393,13 @@ test_watcher_scopes_moon_spinner_to_recorded_kimi_task() (
   if window_is_busy fake '🌕 Full moon details'; then
     fail "fm-watch treated moon-led Kimi output without the middot separator as busy"
   fi
-  if window_is_busy fake 'auto K2.7 Coding thinking /some/path'; then
+  if window_is_busy fake 'auto  K2.7 Coding thinking  /some/path'; then
     fail "fm-watch treated Kimi's idle thinking-effort status label as busy"
   fi
-  pass "fm-watch: real moon-plus-middot spinner matching is scoped by metadata and line shape"
+  if window_is_busy fake 'Ctrl+c:cancel'; then
+    fail "fm-watch let Grok's exact busy token classify a recorded Kimi task busy"
+  fi
+  pass "fm-watch: Kimi spinner matching is metadata-scoped and ignores Grok's busy token"
 )
 
 test_kimi_bordered_prompt_needs_no_override() {

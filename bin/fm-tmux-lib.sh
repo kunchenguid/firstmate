@@ -68,17 +68,19 @@
 # enough to classify arbitrary harness output safely.
 # Kimi's anchored moon-phase spinner is separate because bare moon glyphs in
 # ordinary output must not classify another harness as busy. The live spinner
-# row is a moon glyph followed by ` · ` and rotating tip text; the idle status
-# bar's lowercase `thinking` label and independently rotating tip text are not
-# busy signals on their own. The full moon-phase set remains locale- and
-# emoji-font-sensitive because Kimi exposes no stable ASCII busy token.
+# row is a moon glyph followed by ` · ` and rotating tip text, but the matcher
+# stops at the separator because the presence of tip text in every frame is not
+# verified. The idle status bar's lowercase `thinking` label and independently
+# rotating tip text are not busy signals on their own. The full moon-phase set
+# remains locale- and emoji-font-sensitive because Kimi exposes no stable ASCII
+# busy token.
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
-FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+[^[:space:]]'
+FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex
