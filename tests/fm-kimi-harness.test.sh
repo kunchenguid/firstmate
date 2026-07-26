@@ -1,0 +1,426 @@
+#!/usr/bin/env bash
+# Behavior tests for the verified Kimi Code CLI crewmate adapter.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+SPAWN="$ROOT/bin/fm-spawn.sh"
+TMP_ROOT=$(fm_test_tmproot fm-kimi-harness)
+BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+
+assert_source_line() {
+  local line=$1
+  grep -Fqx -- "$line" "$SPAWN" || fail "existing launch template changed: $line"
+}
+
+test_existing_launch_templates_are_byte_pinned() {
+  assert_source_line "    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__\"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"' ;;"
+  assert_source_line "        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"'"
+  assert_source_line "        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c \"notify=[\\\"bash\\\",\\\"-c\\\",\\\"touch __TURNEND__\\\"]\" \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"'"
+  assert_source_line "    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\\''{\"permission\":{\"*\":\"allow\"}}'\\'' opencode __MODELFLAG__--prompt \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"' ;;"
+  assert_source_line "        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"'"
+  assert_source_line "        printf '%s' 'pi __MODELFLAG____EFFORTFLAG__-e __PIEXT__ \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"'"
+  assert_source_line "    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__\"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"' ;;"
+  pass "fm-spawn: the five pre-existing adapters' launch templates stay byte-pinned"
+}
+
+test_tracked_files_have_no_user_absolute_paths() {
+  local pattern="/""Users/" matches
+  matches=$(git -C "$ROOT" grep -n -F "$pattern" -- . || true)
+  [ -z "$matches" ] || fail "tracked files contain user-specific absolute paths: $matches"
+  pass "repository: tracked files contain no user-specific absolute paths"
+}
+
+make_spawn_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
+state=$(cat "$FM_FAKE_KIMI_STATE" 2>/dev/null || true)
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
+  *"#{cursor_y}"*) printf '0\n'; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
+  send-keys)
+    prev=
+    literal=
+    for arg in "$@"; do
+      if [ "$prev" = -l ]; then literal=$arg; break; fi
+      prev=$arg
+    done
+    if [ -n "$literal" ]; then
+      case "$literal" in
+        *' --auto')
+          printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
+          printf 'launched\n' > "$FM_FAKE_KIMI_STATE"
+          ;;
+        *)
+          printf '%s\n' "$literal" >> "$FM_FAKE_POINTER_LOG"
+          printf 'pointer-typed\n' > "$FM_FAKE_KIMI_STATE"
+          ;;
+      esac
+      exit 0
+    fi
+    case " $* " in
+      *' Enter '*)
+        case "$state" in
+          launched)
+            if [ "${FM_FAKE_KIMI_READY:-yes}" = yes ]; then
+              printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+            fi
+            ;;
+          pointer-typed)
+            if [ "${FM_FAKE_KIMI_DELIVERY:-yes}" = yes ]; then
+              printf 'delivered\n' > "$FM_FAKE_KIMI_STATE"
+            else
+              printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+            fi
+            ;;
+        esac
+        ;;
+    esac
+    exit 0
+    ;;
+  capture-pane)
+    case "$state" in
+      ready)
+        printf 'Welcome to Kimi Code!\ncontext: 0%% (0/256k)\n│ > │\n'
+        ;;
+      pointer-typed)
+        printf 'context: 0%% (0/256k)\n│ > pending │\n'
+        ;;
+      delivered)
+        printf '✨ Read the brief at %s and follow it exactly.\ncontext: 1%% (2k/256k)\n│ > │\n' "$FM_FAKE_BRIEF_REAL"
+        ;;
+      *)
+        printf 'shell starting\n$ \n'
+        ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_exit0 "$fakebin" kimi
+  printf '%s\n' "$fakebin"
+}
+
+make_spawn_case() {
+  local name=$1 id=$2 case_dir home proj wt fakebin
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'brief for kimi\n' > "$home/data/$id/brief.md"
+  printf 'kimi\n' > "$home/config/crew-harness"
+  fm_git_worktree "$proj" "$wt" "wt-$name"
+  touch "$home/state/.last-watcher-beat"
+  : > "$case_dir/launch.log"
+  : > "$case_dir/pointer.log"
+  : > "$case_dir/kimi.state"
+  : > "$case_dir/tmux-calls.log"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
+}
+
+run_spawn() {
+  local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
+  shift 6
+  HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+    FM_FAKE_POINTER_LOG="$case_dir/pointer.log" \
+    FM_FAKE_KIMI_STATE="$case_dir/kimi.state" \
+    FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
+    FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
+    FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
+    PATH="$fakebin:$BASE_PATH" \
+    "$SPAWN" "$id" "$proj" --harness kimi "$@" 2>&1
+}
+
+read_spawn_record() {
+  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
+$1
+EOF
+}
+
+test_kimi_launch_then_send_is_verified() {
+  local id rec out rc launch pointer brief_real meta
+  id=kimi-success-z1
+  rec=$(make_spawn_case success "$id")
+  read_spawn_record "$rec"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model kimi-code/k3 --effort high)
+  rc=$?
+  expect_code 0 "$rc" "verified kimi launch-then-send should succeed"
+  assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
+
+  launch=$(cat "$CASE_DIR/launch.log")
+  [ "$launch" = "'$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
+    || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
+  assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
+  assert_not_contains "$launch" "turn-ended" "kimi launch implied a turn-end marker"
+  assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
+
+  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md"
+  pointer=$(cat "$CASE_DIR/pointer.log")
+  [ "$pointer" = "Read the brief at $brief_real and follow it exactly." ] \
+    || fail "kimi pointer was not the exact absolute-path-only instruction: $pointer"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep 'model=kimi-code/k3' "$meta" "kimi meta lost the requested model"
+  assert_grep 'effort=high' "$meta" "kimi meta did not retain the unsupported effort axis"
+  assert_absent "$HOME_DIR/.kimi-code/config.toml" "kimi spawn wrote a global config file"
+  pass "fm-spawn: kimi launches bare, waits for readiness, sends an absolute brief pointer, and confirms delivery"
+}
+
+test_kimi_falls_back_to_expanded_home_binary() {
+  local id rec out rc launch fallback
+  id=kimi-fallback-z4
+  rec=$(make_spawn_case fallback "$id")
+  read_spawn_record "$rec"
+  rm "$FAKEBIN_DIR/kimi"
+  fallback="$HOME_DIR/.kimi-code/bin/kimi"
+  mkdir -p "$(dirname "$fallback")"
+  fm_fake_exit0 "$(dirname "$fallback")" kimi
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
+  launch=$(cat "$CASE_DIR/launch.log")
+  [ "$launch" = "'$fallback' --auto" ] \
+    || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
+  pass "fm-spawn: Kimi fallback expands the active HOME"
+}
+
+test_kimi_missing_binary_refuses_before_pane_creation() {
+  local id rec out rc fallback
+  id=kimi-missing-z5
+  rec=$(make_spawn_case missing "$id")
+  read_spawn_record "$rec"
+  rm "$FAKEBIN_DIR/kimi"
+  fallback="$HOME_DIR/.kimi-code/bin/kimi"
+  rc=0
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "missing Kimi executable should refuse the spawn"
+  assert_contains "$out" "searched PATH for 'kimi'" "missing Kimi diagnostic omitted PATH"
+  assert_contains "$out" "fallback '$fallback'" "missing Kimi diagnostic omitted expanded fallback"
+  if grep -Eq '(^| )new-(session|window)( |$)' "$CASE_DIR/tmux-calls.log"; then
+    fail "missing Kimi executable created a tmux container or pane"
+  fi
+  pass "fm-spawn: missing Kimi executable refuses before pane creation"
+}
+
+test_kimi_unconfirmed_delivery_fails_loudly() {
+  local id rec out rc
+  id=kimi-drop-z2
+  rec=$(make_spawn_case drop "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_DELIVERY=no run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unconfirmed kimi delivery should fail"
+  assert_contains "$out" "kimi brief pointer delivery was not confirmed" \
+    "unconfirmed kimi delivery lacked a loud diagnostic"
+  assert_grep 'failed: kimi brief pointer delivery was not confirmed' "$HOME_DIR/state/$id.status" \
+    "unconfirmed kimi delivery did not leave a supervisor-visible failure"
+  pass "fm-spawn: kimi treats a silent pointer drop as a failed spawn"
+}
+
+test_kimi_readiness_gate_precedes_pointer() {
+  local id rec out rc
+  id=kimi-not-ready-z3
+  rec=$(make_spawn_case not-ready "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_READY=no run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "kimi spawn without a ready signal should fail"
+  assert_contains "$out" "kimi did not show a verified ready signal" \
+    "kimi readiness failure lacked a loud diagnostic"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "kimi pointer was sent before readiness"
+  pass "fm-spawn: kimi never sends the brief pointer before an observable ready signal"
+}
+
+test_kimi_detection_uses_ancestry_after_markers() {
+  local dir fakebin cfg out
+  dir="$TMP_ROOT/detection"
+  fakebin=$(fm_fakebin "$dir")
+  cfg="$dir/config"
+  mkdir -p "$cfg"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field=
+pid=
+prev=
+for arg in "$@"; do
+  [ "$prev" = -o ] && field=$arg
+  [ "$prev" = -p ] && pid=$arg
+  prev=$arg
+done
+case "$field:$pid" in
+  comm=:4242) printf '/opt/kimi/bin/kimi\n' ;;
+  comm=:*) printf '/bin/bash\n' ;;
+  ppid=:4242) printf '1\n' ;;
+  ppid=:*) printf '4242\n' ;;
+  args=:*) printf 'bash\n' ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = kimi ] || fail "kimi ancestry detection returned '$out'"
+  out=$(CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = claude ] || fail "verified env-marker precedence changed, got '$out'"
+  pass "fm-harness: markerless kimi is detected by ancestry after env-marker precedence"
+}
+
+test_kimi_session_lock_identity() {
+  local home fakebin out
+  home="$TMP_ROOT/session-lock-home"
+  fakebin=$(fm_fakebin "$TMP_ROOT/session-lock-fake")
+  mkdir -p "$home/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' '/opt/kimi/bin/kimi'; exit 0 ;;
+  *"args="*) printf '%s\n' 'kimi'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" \
+    || fail "fm-lock did not acquire from Kimi ancestry"
+  case "$(cat "$home/state/.lock")" in
+    ''|*[!0-9]*) fail "fm-lock did not record the Kimi harness ancestor" ;;
+  esac
+  printf '%s\n' "$$" > "$home/state/.lock"
+  out=$(FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: held by live harness pid" \
+    "fm-lock did not recognize Kimi as a live holder"
+  pass "fm-lock recognizes Kimi ancestry and live lock holders"
+}
+
+test_kimi_busy_signature_is_scoped_to_spinner_lines() {
+  local capture phase kimi_regex_lines
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-tmux-lib.sh"
+  unset FM_BUSY_REGEX
+  capture="$TMP_ROOT/busy-pane"
+  tmux() {
+    case "${1:-}" in
+      capture-pane) cat "$capture" ;;
+      *) return 0 ;;
+    esac
+  }
+  # These fixtures reproduce the observed spinner shape rather than byte-exact
+  # transcriptions. Leading and separator whitespace are deliberately varied.
+  printf ' 🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"\n│ > │\n' > "$capture"
+  fm_pane_is_busy fake kimi || fail "the first real Kimi spinner shape was not recognized as busy"
+  printf '   🌗·Tip: /plugins: manage plugins ...\n│ > │\n' > "$capture"
+  fm_pane_is_busy fake kimi || fail "the tool-execution Kimi spinner shape was not recognized as busy"
+  printf 'ordinary response ending with 🌕\n│ > │\n' > "$capture"
+  if fm_pane_is_busy fake kimi; then
+    fail "a moon outside Kimi's spinner-line shape was misread as busy"
+  fi
+  printf '🌕 Full moon details\n│ > │\n' > "$capture"
+  if fm_pane_is_busy fake kimi; then
+    fail "moon-led Kimi output without the middot separator was misread as busy"
+  fi
+  printf '  🌗 · Tip: /plugins: manage plugins ...\n│ > │\n' > "$capture"
+  if fm_pane_is_busy fake codex; then
+    fail "Kimi's real spinner signature leaked into another harness"
+  fi
+  printf 'tip: ctrl+c: cancel\n│ > │\n' > "$capture"
+  if fm_pane_is_busy fake kimi; then
+    fail "kimi's independently rotating idle tip was misread as busy"
+  fi
+  printf 'Ctrl+c:cancel\n│ > │\n' > "$capture"
+  if fm_pane_is_busy fake kimi; then
+    fail "Grok's exact busy token leaked into Kimi's harness-scoped matcher"
+  fi
+  printf 'auto  K2.7 Coding thinking  /some/path\n│ > │\n' > "$capture"
+  if fm_pane_is_busy fake kimi; then
+    fail "Kimi's idle thinking-effort status label was misread as busy"
+  fi
+  kimi_regex_lines=$(grep 'KIMI_BUSY_REGEX' "$ROOT/bin/fm-tmux-lib.sh" "$ROOT/bin/fm-watch.sh")
+  if printf '%s\n' "$kimi_regex_lines" | grep -qi thinking; then
+    fail "Kimi busy regex still depends on a Thinking or thinking token"
+  fi
+  for phase in 🌑 🌒 🌓 🌔 🌕 🌖 🌗 🌘; do
+    grep -Fq "$phase" "$ROOT/bin/fm-tmux-lib.sh" \
+      || fail "shared Kimi matcher is missing moon phase $phase"
+  done
+  pass "busy detection: real Kimi moon-plus-middot captures require its harness while idle labels stay idle"
+}
+
+test_watcher_scopes_moon_spinner_to_recorded_kimi_task() (
+  local state="$TMP_ROOT/watch-state" busy_capture='  🌑· Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
+  mkdir -p "$state"
+  printf 'window=fake\nharness=kimi\n' > "$state/kimi-watch.meta"
+  unset FM_BUSY_REGEX
+  FM_HOME="$TMP_ROOT/watch-home"
+  FM_STATE_OVERRIDE="$state"
+  export FM_HOME FM_STATE_OVERRIDE
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-watch.sh"
+  # shellcheck disable=SC2329 # Runtime override called by the sourced watcher.
+  fm_backend_busy_state() { printf 'unknown'; }
+  window_is_busy fake "$busy_capture" \
+    || fail "fm-watch did not recognize the real Kimi spinner-line shape"
+  printf 'window=fake\nharness=codex\n' > "$state/kimi-watch.meta"
+  if window_is_busy fake "$busy_capture"; then
+    fail "fm-watch applied Kimi's real spinner signature to a recorded Codex task"
+  fi
+  printf 'window=fake\nharness=kimi\n' > "$state/kimi-watch.meta"
+  if window_is_busy fake 'ordinary response ending with 🌕'; then
+    fail "fm-watch treated an ordinary Kimi moon as a spinner line"
+  fi
+  if window_is_busy fake '🌕 Full moon details'; then
+    fail "fm-watch treated moon-led Kimi output without the middot separator as busy"
+  fi
+  if window_is_busy fake 'auto  K2.7 Coding thinking  /some/path'; then
+    fail "fm-watch treated Kimi's idle thinking-effort status label as busy"
+  fi
+  if window_is_busy fake 'Ctrl+c:cancel'; then
+    fail "fm-watch let Grok's exact busy token classify a recorded Kimi task busy"
+  fi
+  pass "fm-watch: Kimi spinner matching is metadata-scoped and ignores Grok's busy token"
+)
+
+test_kimi_bordered_prompt_needs_no_override() {
+  local out
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-composer-lib.sh"
+  out=$(fm_composer_classify_content 1 '>')
+  [ "$out" = empty ] || fail "kimi's bordered bare > composer should read empty, got '$out'"
+  out=$(fm_composer_classify_content 0 '>')
+  [ "$out" = unknown ] || fail "an unbordered dead-shell > must stay unknown, got '$out'"
+  pass "composer classifier: kimi's existing bordered > shape is already safe without an override"
+}
+
+test_tracked_files_have_no_user_absolute_paths
+test_existing_launch_templates_are_byte_pinned
+test_kimi_launch_then_send_is_verified
+test_kimi_falls_back_to_expanded_home_binary
+test_kimi_missing_binary_refuses_before_pane_creation
+test_kimi_unconfirmed_delivery_fails_loudly
+test_kimi_readiness_gate_precedes_pointer
+test_kimi_detection_uses_ancestry_after_markers
+test_kimi_session_lock_identity
+test_kimi_busy_signature_is_scoped_to_spinner_lines
+test_watcher_scopes_moon_spinner_to_recorded_kimi_task
+test_kimi_bordered_prompt_needs_no_override

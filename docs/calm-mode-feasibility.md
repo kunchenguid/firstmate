@@ -69,7 +69,7 @@ Ordinary user-role near misses remain visible, including quoted current markers,
 
 ## Duplicate-turn regression and semantic boundary
 
-The captain-visible regression reproduced three consecutive times in the persisted Pi session at `/Users/kunchen/.pi/agent/sessions/--Users-kunchen-github-kunchenguid-firstmate--/2026-07-23T16-37-24-672Z_019f8fd6-c440-7641-b2bf-8065dab1622a.jsonl`.
+The captain-visible regression reproduced three consecutive times in a persisted Pi session under `~/.pi/agent/sessions/`.
 Assistant `bb83873b` was followed by hidden custom input `9d087b52` and distinct duplicate assistant `f4232aa3`.
 Assistant `3a388d8c` was followed by adjacent hidden custom inputs `e1914f28` and `cfdefb09` and distinct duplicate assistant `47c81eeb`.
 Distinct provider response identifiers and signatures prove separate model turns rather than duplicate TUI paint.
