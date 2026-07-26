@@ -716,7 +716,11 @@ families_for_changed_path() {
     tests/*)
       printf '%s\n' "__unmapped__:$path"
       ;;
-    README.md|LICENSE|assets/*|docs/*|.gitignore)
+    .gitignore)
+      # The shared ignore rules carry a tested invariant (.env key backups).
+      printf '%s\n' "__script__:gitignore-env-bak.test.sh"
+      ;;
+    README.md|LICENSE|assets/*|docs/*)
       ;;
     *)
       families_for_test_reference "$path" \

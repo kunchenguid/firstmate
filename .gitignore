@@ -8,6 +8,9 @@ data/
 __pycache__/
 *.pyc
 .env
+# Key backups from data/tyokalut/lisaa-avain.sh - never commit secrets.
+.env.bak
+.env.bak-*
 config/crew-harness
 config/crew-dispatch.json
 config/secondmate-harness
