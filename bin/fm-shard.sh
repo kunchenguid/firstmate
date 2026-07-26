@@ -106,15 +106,6 @@ def require_text(obj, key, path):
     return value.strip()
 
 
-def optional_text(obj, key):
-    value = obj.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value.strip():
-        fail(f"{key} must be non-empty text when present")
-    return value.strip()
-
-
 def slugify(text):
     text = text.lower()
     text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
@@ -265,7 +256,7 @@ def validate_plan(plan):
                     errors.append(f"story {sid} depends on unknown story {dep}")
                 if dep == sid:
                     errors.append(f"story {sid} cannot depend on itself")
-    if stories:
+    if stories and all(isinstance(s, dict) and isinstance(s.get("id"), str) for s in stories):
         try:
             topo_stories(stories)
         except ShardError as e:
@@ -480,12 +471,12 @@ def resolve_context(plan):
     return team, project
 
 
-def create_or_update_spec(plan, dry_run=False):
+def create_or_update_spec(plan, context, dry_run=False):
     rendered = render_spec(plan)
     linear = plan["spec"]["linear"]
     if dry_run:
         return {"operation": "dry-run", "type": linear["type"], "id": linear.get("id"), "url": linear.get("url"), "content": rendered}
-    team, project = resolve_context(plan)
+    team, project = context
     if linear["type"] == "document":
         if linear.get("id"):
             data = graphql(
@@ -508,7 +499,7 @@ def create_or_update_spec(plan, dry_run=False):
     return {"type": "issue_description", "id": issue["id"], "identifier": issue["identifier"], "url": issue["url"]}
 
 
-def create_decision_issue(plan, spec_result, captain_user_id=None, dry_run=False):
+def create_decision_issue(plan, spec_result, context, captain_user_id=None, dry_run=False):
     decision = plan.get("approval_decision") or {}
     title = decision.get("title") or f"Approve shard for {plan['initiative']['title']}"
     assignee_id = decision.get("assignee_id") or captain_user_id
@@ -527,7 +518,7 @@ def create_decision_issue(plan, spec_result, captain_user_id=None, dry_run=False
     description = "\n".join(body) + "\n"
     if dry_run:
         return {"operation": "dry-run", "title": title, "assignee_id": assignee_id, "description": description}
-    team, project = resolve_context(plan)
+    team, project = context
     input_obj = {"teamId": team["id"], "projectId": project["id"], "title": title, "description": description}
     if assignee_id:
         input_obj["assigneeId"] = assignee_id
@@ -539,10 +530,10 @@ def create_decision_issue(plan, spec_result, captain_user_id=None, dry_run=False
     return {"id": issue["id"], "identifier": issue["identifier"], "url": issue["url"]}
 
 
-def ensure_milestones(plan, dry_run=False):
+def ensure_milestones(plan, context, dry_run=False):
     if dry_run:
         return {m["id"]: {"operation": "dry-run", "name": m["name"], "id": m.get("linear_milestone_id")} for m in plan["milestones"]}
-    _team, project = resolve_context(plan)
+    _team, project = context
     data = graphql(
         "query($id:String!){ project(id:$id){ projectMilestones(first:100){ nodes { id name } } } }",
         {"id": project["id"]},
@@ -570,12 +561,40 @@ def ensure_milestones(plan, dry_run=False):
     return result
 
 
-def create_or_update_story_issues(plan, milestone_map, spec_url=None, dry_run=False):
+def find_existing_story_issues(project_id, initiative_key, story_ids):
+    wanted = set(story_ids)
+    found = {}
+    after = None
+    initiative_marker = f"- Initiative: `{initiative_key}`"
+    while wanted:
+        data = graphql(
+            "query($id:String!,$after:String){ project(id:$id){ issues(first:100, after:$after){ pageInfo { hasNextPage endCursor } nodes { id identifier url description } } } }",
+            {"id": project_id, "after": after},
+        )
+        conn = data["project"]["issues"]
+        for node in conn["nodes"]:
+            desc = node.get("description") or ""
+            if initiative_marker not in desc:
+                continue
+            for sid in list(wanted):
+                if f"Story id: `{sid}`" in desc:
+                    found[sid] = node
+                    wanted.discard(sid)
+        if not conn["pageInfo"]["hasNextPage"]:
+            break
+        after = conn["pageInfo"]["endCursor"]
+    return found
+
+
+def create_or_update_story_issues(plan, milestone_map, context, spec_url=None, dry_run=False):
     if dry_run:
         return {s["id"]: {"operation": "dry-run", "title": s["title"], "milestone": s["milestone"], "id": s.get("linear_issue_id")} for s in topo_stories(plan["stories"])}
-    team, project = resolve_context(plan)
+    team, project = context
+    stories = topo_stories(plan["stories"])
+    needing_lookup = [s["id"] for s in stories if not s.get("linear_issue_id")]
+    existing = find_existing_story_issues(project["id"], plan["initiative"]["key"], needing_lookup) if needing_lookup else {}
     result = {}
-    for story in topo_stories(plan["stories"]):
+    for story in stories:
         desc = render_story_description(plan, story, spec_url=spec_url)
         input_obj = {
             "teamId": team["id"],
@@ -584,19 +603,21 @@ def create_or_update_story_issues(plan, milestone_map, spec_url=None, dry_run=Fa
             "title": story["title"],
             "description": desc,
         }
-        if story.get("linear_issue_id"):
+        existing_id = story.get("linear_issue_id") or (existing.get(story["id"]) or {}).get("id")
+        if existing_id:
             data = graphql(
                 "mutation($id:String!,$input:IssueUpdateInput!){ issueUpdate(id:$id,input:$input){ success issue { id identifier url } } }",
-                {"id": story["linear_issue_id"], "input": {k: v for k, v in input_obj.items() if k != "teamId"}},
+                {"id": existing_id, "input": {k: v for k, v in input_obj.items() if k != "teamId"}},
             )
             issue = data["issueUpdate"]["issue"]
+            result[story["id"]] = {"id": issue["id"], "identifier": issue["identifier"], "url": issue["url"], "existing": True}
         else:
             data = graphql(
                 "mutation($input:IssueCreateInput!){ issueCreate(input:$input){ success issue { id identifier url } } }",
                 {"input": input_obj},
             )
             issue = data["issueCreate"]["issue"]
-        result[story["id"]] = {"id": issue["id"], "identifier": issue["identifier"], "url": issue["url"]}
+            result[story["id"]] = {"id": issue["id"], "identifier": issue["identifier"], "url": issue["url"], "created": True}
     return result
 
 
@@ -714,8 +735,9 @@ def cmd_render_spec(args):
 def cmd_propose(args):
     plan = load_plan(args.plan)
     validate_plan(plan)
-    spec = create_or_update_spec(plan, dry_run=args.dry_run)
-    decision = create_decision_issue(plan, spec, captain_user_id=args.captain_user_id, dry_run=args.dry_run)
+    context = None if args.dry_run else resolve_context(plan)
+    spec = create_or_update_spec(plan, context, dry_run=args.dry_run)
+    decision = create_decision_issue(plan, spec, context, captain_user_id=args.captain_user_id, dry_run=args.dry_run)
     result = {"spec": spec, "decision_issue": decision}
     if args.write_result:
         write_result(args.write_result, result)
@@ -728,8 +750,9 @@ def cmd_apply(args):
     spec_url = plan.get("spec", {}).get("linear", {}).get("url")
     if not spec_url and plan.get("spec", {}).get("linear", {}).get("id") and plan["spec"]["linear"].get("type") == "issue_description":
         spec_url = plan["spec"]["linear"].get("issue_url")
-    milestones = ensure_milestones(plan, dry_run=args.dry_run)
-    issues = create_or_update_story_issues(plan, milestones, spec_url=spec_url, dry_run=args.dry_run)
+    context = None if args.dry_run else resolve_context(plan)
+    milestones = ensure_milestones(plan, context, dry_run=args.dry_run)
+    issues = create_or_update_story_issues(plan, milestones, context, spec_url=spec_url, dry_run=args.dry_run)
     relations = create_issue_relations(plan, issues, dry_run=args.dry_run)
     backlog = materialize_backlog(plan, issues, spec_url=spec_url, dry_run=args.dry_run)
     result = {"milestones": milestones, "issues": issues, "relations": relations, "backlog": backlog}
