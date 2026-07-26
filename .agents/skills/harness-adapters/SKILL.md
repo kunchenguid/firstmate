@@ -354,7 +354,7 @@ Kimi Code CLI launches from the absolute path resolved from `PATH`, falling back
 | Binary | Executable `kimi` from `PATH`, then executable `$HOME/.kimi-code/bin/kimi`; spawning refuses if neither exists. |
 | Launch | Bare interactive TUI with `--auto`, followed by readiness-gated pointer delivery; positional prompts are rejected. |
 | Models | `kimi-code/kimi-for-coding` (default), `kimi-code/kimi-for-coding-highspeed`, `kimi-code/k3`, and `kimi-code/k3-256k`. |
-| Busy-pane signature | A transient line with optional leading whitespace, a rotating moon-phase glyph, optional whitespace around `·`, and optional trailing content; the line is absent when idle. |
+| Busy-pane signature | A transient line with optional leading whitespace, a rotating moon-phase glyph, required whitespace on both sides of `·`, and optional trailing content; the line is absent when idle. |
 | Exit command | `/exit` |
 | Interrupt | Single Escape, which prints `Interrupted by user`. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; firstmate skills are discovered. |
@@ -371,7 +371,9 @@ Sending before readiness was reproduced as a silent drop with a zero exit status
 The brief path must be absolute because the brief lives outside the task worktree, and Kimi reads it there without `--add-dir`.
 
 Observed live spinner captures included optional leading whitespace, a moon-phase glyph, whitespace around `·`, and rotating tip text, with the same shape observed during tool execution.
-Because those prose examples illustrate the spinner shape rather than define exact bytes, the matcher permits zero whitespace around `·` and does not require trailing tip text.
+Because every captured spinner row had whitespace on both sides of `·`, the matcher requires that whitespace, deliberately does not match the never-observed zero-whitespace form, and does not require trailing tip text.
+The startup input-readiness window is the established cause of Kimi's first-Enter delivery defect: the banner is not the cause, and Grok's cursor-row quirk does not apply.
+No rendering signal is trustworthy for proving that Kimi will accept input during this window, so delivery retries Enter through the shared submit core and retains the existing postcondition verification rather than relaxing readiness or delivery checks.
 Kimi's footer tip rotates independently and can display `ctrl+c: cancel` while completely idle, so tip text is never used as its busy signature without the leading moon-plus-middot spinner structure.
 The idle status bar can contain lowercase `thinking`, which is the model's effort label rather than a busy signal.
 The spinner match covers the full moon-phase glyph set rather than one frame, but it remains locale- and emoji-font-sensitive because Kimi exposes no stable ASCII busy token.
