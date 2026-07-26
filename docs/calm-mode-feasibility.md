@@ -139,7 +139,8 @@ The established leading `[fm-from-firstmate]` plus U+2063 routing carrier remain
 An exact current static envelope remains sufficient provenance without nonce, source-authentication, replay-prevention, secondary-token, blocking, redaction, or private-retrieval machinery.
 Calm classifies only at Pi's transcript-presentation owner through the canonical parser and never replaces, reorders, or weakens those messages.
 
-The session-start nudge and current Pi watcher notifications originate as non-displayed custom messages, so they remain outside transcript presentation while retaining model context; watcher delivery and verification are owned by [`docs/watcher-continuity.md`](watcher-continuity.md).
+The session-start nudge and current Pi watcher notifications originate as non-displayed custom messages, so they remain outside transcript presentation while retaining model context.
+The watcher transport contract is owned by [`docs/watcher-continuity.md`](watcher-continuity.md), and its evidence is owned by [`docs/verification/supervision.md`](verification/supervision.md#watcher-continuity).
 Legacy Calm custom entries and messages remain in existing session artifacts, and their presentation entry still uses the supported zero-height renderer while active.
 Cycling tool expansion and restoring its original value rebuilds controllable rows and leaves final `Ctrl+O` state unchanged.
 Exported and shared HTML retain genuine user prompts, genuine assistant responses, current operational user messages, ordinary tool rendering, and the complete session artifact.
@@ -227,10 +228,11 @@ FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 tests/fm-pi-primary-types.test.sh
 ```
 
-## 2026-07-23 verification record
+## 2026-07-23 Calm verification record
 
 The deterministic provider preserves the complete real Pi TUI rendering path without using credentials.
-The credentialed live regression remains opt-in and was not required because this change does not alter watcher delivery or provider integration.
+This record predates the watcher transport change and therefore does not claim to verify its live delivery.
+Current watcher transport evidence is owned by [`docs/verification/supervision.md`](verification/supervision.md#watcher-continuity).
 
 ```text
 $ pi --version

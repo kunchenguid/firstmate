@@ -58,7 +58,9 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, and exit-2 translation.
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.
 `tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard.
-`tests/fm-watch-triage.test.sh` proves a current run-step-backed validation decision remains absorbed without stale escalation, declared external pauses keep their bounded cadence, a genuinely stopped worker still escalates, and retired status records are ignored.
+`tests/fm-watch-triage.test.sh` proves a current run-step-backed validation decision remains absorbed without wedge escalation while its worker is live, loses suppression after a bounded failed liveness recheck, reclassifies before an existing wedge timer fires, preserves declared external-pause cadence, and ignores retired status records.
+`tests/fm-teardown.test.sh` covers atomic signal and stale queueing against teardown, and `tests/fm-supervision-events.test.sh` covers the same current-identity requirement for native Herdr push transitions, so a retired identity cannot publish a wake.
+`tests/fm-afk-inject-herdr-e2e.test.sh` retains live Herdr supervision coverage with the required current worker metadata.
 `tests/fm-pi-primary-live-e2e.test.sh` proves the credentialed interactive Pi path receives one hidden watcher notification exactly once without rendering its body, private state path, or queue-drain instruction.
 
 ## Active limits and verification

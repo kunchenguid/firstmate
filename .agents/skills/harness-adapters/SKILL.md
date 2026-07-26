@@ -285,7 +285,7 @@ The firstmate PRIMARY's own `.pi/extensions/fm-primary-turnend-guard.ts` listens
 Without `deliverAs: "followUp"`, Pi rejects the send while the agent is still processing.
 Pi's primary watcher protocol also requires the tracked `.pi/extensions/fm-primary-pi-watch.ts` extension, same trust-once discovery as the turn-end guard.
 The model arms through `fm_watch_arm_pi`, never a foreground bash arm; the watcher tool result and clean-exit fallback are owned by `docs/supervision-protocols/pi.md`.
-The hidden watcher-transport contract and Pi 0.81.1 evidence are owned by `docs/watcher-continuity.md`.
+The hidden watcher-transport contract is owned by `docs/watcher-continuity.md`, and its Pi evidence is owned by `docs/verification/supervision.md`.
 `bin/fm-session-start.sh` reports when the live Pi session has not loaded both the turn-end guard and watcher extensions, and points at plain `pi` after project trust as the fix, with `-e` as a trust-free fallback.
 When a secondmate is launched on Pi, `fm-spawn.sh --secondmate` launches Pi with both `-e .pi/extensions/fm-primary-turnend-guard.ts` and `-e .pi/extensions/fm-primary-pi-watch.ts`, both already present in the secondmate home's git worktree.
 

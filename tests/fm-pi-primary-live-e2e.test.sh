@@ -332,6 +332,22 @@ fi
 arm_tool_result_count=$(printf '%s\n' "$pane" | grep -Ec 'watcher: (started|unchanged|not armed|read-only)' || true)
 [ "$arm_tool_result_count" -eq 1 ] || fail "Pi model re-armed from memory instead of the extension (tool-result count $arm_tool_result_count)"
 
+if [ -n "${FM_PI_LIVE_E2E_EVIDENCE:-}" ]; then
+  {
+    printf 'Pi version: %s\n' "$PI_VERSION"
+    printf 'HANDLED transcript lines: %s\n' "$handled_count"
+    printf 'Visible raw watcher prompts: 0\n'
+    printf 'Visible queue-drain instructions: 0\n'
+    printf 'Visible watcher private state paths: 0\n'
+    printf 'Visible turn-end safety alarms: %s\n' "$guard_count"
+    printf 'Visible watcher arm tool results: %s\n' "$arm_tool_result_count"
+    printf '%s\n' '--- captain-visible Pi transcript ---'
+    printf '%s\n' "$pane"
+    printf '%s\n' '--- extension continuity ledger ---'
+    grep 'reason=actionable-signal' "$HOME_DIR/state/.watch-cycle-exits.log"
+  } > "$FM_PI_LIVE_E2E_EVIDENCE"
+fi
+
 pid_file=$(find "$HOME_DIR/state" -maxdepth 3 -type f -name pid | head -1)
 [ -n "$pid_file" ] || fail "re-armed watcher pid was not recorded"
 watcher_pid=$(sed -n '1p' "$pid_file")
