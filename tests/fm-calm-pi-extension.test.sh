@@ -91,10 +91,12 @@ test_captains_call_shortcut_input_contract() {
   printf '%s\n' '---' 'name: bearings' 'description: fixture' '---' '# Bearings fixture' \
     >"$fixture/project/.agents/skills/bearings/SKILL.md"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$fixture/project/.agents/skills/bearings/SKILL.md" "$fixture/project/bearings-symlink.md"
 
   out=$(cd "$fixture/project" && \
     EXT="$fixture/project/.pi/extensions/fm-captains-call-shortcut.ts" \
     SKILL="$fixture/project/.agents/skills/bearings/SKILL.md" \
+    SKILL_SYMLINK="$fixture/project/bearings-symlink.md" \
     node --input-type=module 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
 
@@ -136,28 +138,49 @@ const invoke = (text, source = "interactive", images, streamingBehavior) =>
   inputHandler({ type: "input", text, source, images, streamingBehavior }, ctx);
 
 commands = [validCommand];
-for (const [text, streamingBehavior] of [
-  ["s", undefined],
-  ["S", undefined],
-  [" \t s \n", "steer"],
-  ["\nS\t", "followUp"],
+for (const [text, streamingBehavior, expected] of [
+  ["s", undefined, "/skill:bearings captains-call-only"],
+  ["S", undefined, "/skill:bearings captains-call-only"],
+  [" \t s \n", "steer", "/skill:bearings captains-call-only"],
+  ["\nS\t", "followUp", "/skill:bearings captains-call-only"],
+  ["status?", undefined, "/skill:bearings"],
+  ["Status?", undefined, "/skill:bearings"],
+  ["STATUS?", undefined, "/skill:bearings"],
+  ["sTaTuS?", undefined, "/skill:bearings"],
+  [" \tStAtUs?\n", "steer", "/skill:bearings"],
 ]) {
   const result = await invoke(text, "interactive", undefined, streamingBehavior);
-  if (result?.action !== "transform" || result.text !== "/skill:bearings captains-call-only") {
-    throw new Error(`exact interactive shortcut did not transform: ${JSON.stringify({ text, result })}`);
+  if (result?.action !== "transform" || result.text !== expected) {
+    throw new Error(`exact interactive shortcut did not transform: ${JSON.stringify({ text, expected, result })}`);
   }
 }
+commands = [{ ...validCommand, sourceInfo: { ...validCommand.sourceInfo, path: process.env.SKILL_SYMLINK } }];
+for (const [text, expected] of [["s", "/skill:bearings captains-call-only"], ["status?", "/skill:bearings"]]) {
+  const result = await invoke(text);
+  if (result?.action !== "transform" || result.text !== expected) {
+    throw new Error(`canonical symlink skill path was rejected: ${JSON.stringify({ text, expected, result })}`);
+  }
+}
+commands = [validCommand];
 const readsAfterExact = inventoryReads;
 for (const event of [
   ["", "interactive", undefined],
   ["ss", "interactive", undefined],
   ["status", "interactive", undefined],
+  ["status??", "interactive", undefined],
+  ["status!", "interactive", undefined],
+  ["status ?", "interactive", undefined],
+  ["status? now", "interactive", undefined],
+  ["show status?", "interactive", undefined],
   ["s now", "interactive", undefined],
   ["/s", "interactive", undefined],
   ["ordinary s text", "interactive", undefined],
   ["s", "rpc", undefined],
   ["S", "extension", undefined],
+  ["status?", "rpc", undefined],
+  ["STATUS?", "extension", undefined],
   ["s", "interactive", [{ type: "image", data: "fixture", mimeType: "image/png" }]],
+  ["status?", "interactive", [{ type: "image", data: "fixture", mimeType: "image/png" }]],
 ]) {
   const result = await invoke(...event);
   if (result?.action !== "continue") {
@@ -176,14 +199,16 @@ for (const invalidCommands of [
   [{ ...validCommand, sourceInfo: { ...validCommand.sourceInfo, path: `${process.env.SKILL}.wrong` } }],
 ]) {
   commands = invalidCommands;
-  const before = notifications.length;
-  const result = await invoke("s");
-  if (result?.action !== "handled" || notifications.length !== before + 1) {
-    throw new Error(`missing or invalid Bearings provenance was not rejected once: ${JSON.stringify({ invalidCommands, result, notifications })}`);
-  }
-  const notice = notifications.at(-1);
-  if (notice.level !== "error" || !notice.message.includes("Bearings")) {
-    throw new Error(`missing or invalid Bearings provenance lacked one actionable error: ${JSON.stringify(notice)}`);
+  for (const text of ["s", "status?"]) {
+    const before = notifications.length;
+    const result = await invoke(text);
+    if (result?.action !== "handled" || notifications.length !== before + 1) {
+      throw new Error(`missing or invalid Bearings provenance was not rejected once: ${JSON.stringify({ text, invalidCommands, result, notifications })}`);
+    }
+    const notice = notifications.at(-1);
+    if (notice.level !== "error" || notice.message !== "Firstmate Bearings is unavailable in this project.") {
+      throw new Error(`missing or invalid Bearings provenance changed the visible error: ${JSON.stringify(notice)}`);
+    }
   }
 }
 JS
@@ -191,7 +216,7 @@ JS
   status=$?
   [ "$status" -eq 0 ] || fail "Pi Captain's Call shortcut input contract failed: $out"
   [ -z "$out" ] || fail "Pi Captain's Call shortcut input contract printed output: $out"
-  pass "Pi Captain's Call shortcut transforms only exact image-free interactive s/S input and verifies project skill provenance"
+  pass "Pi input shortcuts transform only exact image-free interactive s/S or status? input and verify project skill provenance"
 }
 
 test_captains_call_shortcut_real_pi_expansion() {

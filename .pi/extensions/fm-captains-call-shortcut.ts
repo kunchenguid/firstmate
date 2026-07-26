@@ -1,4 +1,4 @@
-// Exact interactive s/S shortcut for Firstmate's project-owned Bearings skill.
+// Exact interactive input shortcuts for Firstmate's project-owned Bearings skill.
 import { realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,9 +17,10 @@ function isBearingsSkillPath(path: string): boolean {
 
 export default function (pi: ExtensionAPI): void {
   pi.on("input", (event, ctx) => {
+    const shortcut = event.text.trim();
     if (
       event.source !== "interactive" ||
-      !/^[sS]$/.test(event.text.trim()) ||
+      !/^(s|status\?)$/i.test(shortcut) ||
       (event.images?.length ?? 0) !== 0
     ) {
       return { action: "continue" };
@@ -36,6 +37,11 @@ export default function (pi: ExtensionAPI): void {
       return { action: "handled" };
     }
 
-    return { action: "transform", text: "/skill:bearings captains-call-only" };
+    return {
+      action: "transform",
+      text: shortcut.length === 1
+        ? "/skill:bearings captains-call-only"
+        : "/skill:bearings",
+    };
   });
 }
