@@ -68,6 +68,65 @@ raw <failure> & output
 ```
 MD
 
+RICH_DIR="$HOME_DIR/data/rich-report"
+RICH_SOURCE="$RICH_DIR/report.md"
+OUTSIDE_PNG="$HOME_DIR/data/outside.png"
+mkdir -p "$RICH_DIR/images"
+node -e 'process.stdout.write(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"))' >"$RICH_DIR/images/ramp.png"
+cp "$RICH_DIR/images/ramp.png" "$OUTSIDE_PNG"
+ln -s "$OUTSIDE_PNG" "$RICH_DIR/images/escape.png"
+mkdir -p "$RICH_DIR/https:/example.com"
+cp "$RICH_DIR/images/ramp.png" "$RICH_DIR/https:/example.com/ramp.png"
+cat >"$RICH_DIR/images/safe.svg" <<'SVG'
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 180" role="img" aria-labelledby="title desc">
+<title id="title">Ramp angle</title>
+<desc id="desc">A restrained ramp diagram</desc>
+<rect x="1" y="1" width="318" height="178" rx="12" fill="#f7f6f3" stroke="#315f4b"/>
+<path d="M40 145 L260 65 L260 145 Z" fill="none" stroke="#315f4b" stroke-width="6"/>
+<text x="48" y="130" font-size="18">18 degrees</text>
+</svg>
+SVG
+cat >"$RICH_DIR/images/active.svg" <<'SVG'
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><script>alert(1)</script></svg>
+SVG
+cat >"$RICH_DIR/images/event.svg" <<'SVG'
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" onload="alert(1)"><rect width="10" height="10"/></svg>
+SVG
+cat >"$RICH_DIR/images/external.svg" <<'SVG'
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><image href="https://example.com/pixel.png"/></svg>
+SVG
+cat >"$RICH_DIR/images/foreign.svg" <<'SVG'
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><foreignObject><div>HTML</div></foreignObject></svg>
+SVG
+cat >"$RICH_DIR/images/malformed.svg" <<'SVG'
+<svg xmlns="http://www.w3.org/2000/svg"><g></svg>
+SVG
+printf 'not an image\n' >"$RICH_DIR/images/unsupported.jpg"
+cat >"$RICH_SOURCE" <<MD
+# Rich report
+
+[Trusted docs](https://example.com/products/ramp?q=folding%20ramp)
+[Script link](javascript:evil)
+[Plain HTTP](http://example.com/ramp)
+[Protocol relative](//example.com/ramp)
+[Encoded script](%6A%61%76%61%73%63%72%69%70%74%3Aevil)
+[Malformed HTTPS](https://)
+
+![Ramp overview with <clear> & "useful" detail](images/ramp.png)
+![Ramp angle guide](images/safe.svg)
+![Traversal](../outside.png)
+![Absolute path]($OUTSIDE_PNG)
+![Symlink escape](images/escape.png)
+![Remote image](https://example.com/ramp.png)
+![Unsupported image](images/unsupported.jpg)
+![Missing image](images/missing.png)
+![Active SVG](images/active.svg)
+![Event SVG](images/event.svg)
+![External SVG](images/external.svg)
+![Embedded HTML SVG](images/foreign.svg)
+![Malformed SVG](images/malformed.svg)
+MD
+
 SNAPSHOT="$TMP_ROOT/bearings.json"
 cat >"$SNAPSHOT" <<'JSON'
 {
@@ -125,6 +184,40 @@ test_markdown_html_is_local_escaped_accessible_and_quiet() {
   [ ! -s "$OPEN_LOG" ] || fail "default report rendering opened a browser without an explicit request"
   [ ! -s "$NET_LOG" ] || fail "static report rendering made a network call: $(cat "$NET_LOG")"
   pass "Markdown presentation is escaped, accessible, timestamped, local-only, and does not open unsolicited tabs"
+}
+
+test_markdown_links_and_report_local_images_are_safe_and_self_contained() {
+  local out html body image_count
+  out=$(run_presenter markdown --source "$RICH_SOURCE") || fail "rich Markdown presentation failed: $out"
+  case "$out" in html:*) html=${out#html:} ;; *) fail "rich Markdown presenter did not return an HTML artifact: $out" ;; esac
+  body=$(cat "$html")
+
+  assert_contains "$body" '<a href="https://example.com/products/ramp?q=folding%20ramp" target="_blank" rel="noopener noreferrer">Trusted docs<span class="visually-hidden"> (opens in new tab)</span></a>' "absolute HTTPS link anchor"
+  assert_contains "$body" '<span class="reference">Script link <code>javascript:evil</code></span>' "JavaScript link remains inert and inspectable"
+  assert_contains "$body" '<span class="reference">Plain HTTP <code>http://example.com/ramp</code></span>' "HTTP link remains inert and inspectable"
+  assert_contains "$body" '<span class="reference">Protocol relative <code>//example.com/ramp</code></span>' "protocol-relative link remains inert and inspectable"
+  assert_contains "$body" '<span class="reference">Encoded script <code>%6A%61%76%61%73%63%72%69%70%74%3Aevil</code></span>' "encoded scheme remains inert and inspectable"
+  assert_contains "$body" '<span class="reference">Malformed HTTPS <code>https://</code></span>' "malformed HTTPS link remains inert and inspectable"
+  assert_not_contains "$body" 'href="javascript:' "JavaScript URL must not become navigable"
+  assert_not_contains "$body" 'href="http://' "HTTP URL must not become navigable"
+  assert_not_contains "$body" 'href="//example.com' "protocol-relative URL must not become navigable"
+  assert_not_contains "$body" 'href="%6A' "encoded URL must not become navigable"
+
+  assert_contains "$body" 'src="data:image/png;base64,' "report-local PNG is embedded"
+  assert_contains "$body" 'src="data:image/svg+xml;base64,' "safe report-local SVG is embedded"
+  assert_contains "$body" 'alt="Ramp overview with &lt;clear&gt; &amp; &quot;useful&quot; detail"' "image alt text is escaped and preserved"
+  assert_contains "$body" 'alt="Ramp angle guide"' "SVG alt text is present"
+  image_count=$(grep -Fo '<img class="report-image"' "$html" | wc -l | tr -d ' ')
+  [ "$image_count" -eq 2 ] || fail "unsafe or invalid image references were embedded: expected 2 images, found $image_count"
+  for reference in '../outside.png' "$OUTSIDE_PNG" 'images/escape.png' 'https://example.com/ramp.png' 'images/unsupported.jpg' 'images/missing.png' 'images/active.svg' 'images/event.svg' 'images/external.svg' 'images/foreign.svg' 'images/malformed.svg'; do
+    assert_contains "$body" "<code>$reference</code>" "rejected image remains visibly inspectable: $reference"
+  done
+  assert_not_contains "$body" "$RICH_DIR/images/ramp.png" "embedded PNG must not disclose a local absolute asset path"
+  assert_not_contains "$body" "$RICH_DIR/images/safe.svg" "embedded SVG must not disclose a local absolute asset path"
+  assert_contains "$body" "default-src 'none'; style-src 'unsafe-inline'; img-src data:" "static report CSP remains restrictive"
+  assert_contains "$body" '.report-image{' "responsive report image styling"
+  [ ! -s "$NET_LOG" ] || fail "rich report rendering made a network call: $(cat "$NET_LOG")"
+  pass "Markdown permits only HTTPS links and embeds only safe report-local PNG and SVG assets"
 }
 
 test_bearings_page_has_all_current_rows_once_and_discloses_freshness() {
@@ -197,6 +290,7 @@ test_render_failure_falls_back_without_partial_page() {
 
 assert_present "$PRESENTER" "static report presentation owner is missing"
 test_markdown_html_is_local_escaped_accessible_and_quiet
+test_markdown_links_and_report_local_images_are_safe_and_self_contained
 test_bearings_page_has_all_current_rows_once_and_discloses_freshness
 test_open_is_explicit_and_browser_failure_falls_back_to_markdown
 test_render_failure_falls_back_without_partial_page

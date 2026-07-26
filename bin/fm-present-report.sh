@@ -74,7 +74,8 @@ if ! FM_PRESENT_MODE="$MODE" \
   FM_PRESENT_SNAPSHOT="$SNAPSHOT" \
   FM_PRESENT_NOW_VALUE="$NOW" \
   node --input-type=module >"$TEMP" <<'JS'
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 
 const mode = process.env.FM_PRESENT_MODE;
 const sourcePath = process.env.FM_PRESENT_SOURCE;
@@ -90,12 +91,132 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
-function inlineMarkdown(value) {
+const sourceDirectory = dirname(realpathSync(sourcePath));
+const safeSvgElements = new Set([
+  "svg", "g", "defs", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
+  "text", "tspan", "title", "desc", "clipPath", "mask", "linearGradient", "radialGradient",
+  "stop", "pattern", "marker",
+]);
+
+function inlineText(value) {
   return escapeHtml(value)
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<span class="reference">$1 <code>$2</code></span>')
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+}
+
+function safeHttps(destination) {
+  if (!/^https:\/\//i.test(destination) || /[\s\u0000-\u001f\u007f]/u.test(destination)) return false;
+  try {
+    const parsed = new URL(destination);
+    return parsed.protocol === "https:" && Boolean(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function safeSvgAttributes(source, root) {
+  let remaining = source;
+  let svgNamespace = false;
+  while (remaining) {
+    const attribute = remaining.match(/^\s+([A-Za-z_:][A-Za-z0-9_.:-]*)\s*=\s*(["'])(.*?)\2/s);
+    if (!attribute) return null;
+    const name = attribute[1];
+    const lowerName = name.toLowerCase();
+    const value = attribute[3];
+    remaining = remaining.slice(attribute[0].length);
+    if (/^on/.test(lowerName) || ["href", "xlink:href", "src", "style"].includes(lowerName)) return null;
+    if (name.includes(":") && name !== "xml:space") return null;
+    if (lowerName === "xmlns") {
+      if (!root || value !== "http://www.w3.org/2000/svg") return null;
+      svgNamespace = true;
+      continue;
+    }
+    if (/xmlns|(?:javascript|data|file|https?):|\/\/|@import|expression\s*\(|-moz-binding/i.test(`${name}=${value}`)) return null;
+    const withoutLocalReferences = value.replace(/url\(\s*#[-A-Za-z0-9_.:]+\s*\)/gi, "");
+    if (/url\s*\(/i.test(withoutLocalReferences) || /[\u0000-\u001f\u007f]/u.test(value)) return null;
+  }
+  return { svgNamespace };
+}
+
+function safeSvg(bytes) {
+  let svg;
+  try {
+    svg = new TextDecoder("utf-8", { fatal: true }).decode(bytes).trim();
+  } catch {
+    return false;
+  }
+  if (!svg.startsWith("<svg") || /<!|<\?|<!--/.test(svg)) return false;
+  if (/&(?!(?:amp|lt|gt|quot|apos|#[0-9]+|#x[0-9A-Fa-f]+);)/.test(svg)) return false;
+
+  const stack = [];
+  const tags = svg.matchAll(/<([^<>]+)>/g);
+  let cursor = 0;
+  let rootSeen = false;
+  for (const tag of tags) {
+    if (/[<>]/.test(svg.slice(cursor, tag.index))) return false;
+    cursor = tag.index + tag[0].length;
+    const content = tag[1];
+    if (content.startsWith("/")) {
+      const closing = content.match(/^\/([A-Za-z][A-Za-z0-9-]*)\s*$/);
+      if (!closing || stack.pop() !== closing[1]) return false;
+      continue;
+    }
+
+    const selfClosing = /\/\s*$/.test(content);
+    const opening = content.replace(/\/\s*$/, "").match(/^([A-Za-z][A-Za-z0-9-]*)([\s\S]*)$/);
+    if (!opening || !safeSvgElements.has(opening[1])) return false;
+    const isRoot = !rootSeen;
+    if ((isRoot && opening[1] !== "svg") || (!isRoot && stack.length === 0)) return false;
+    const attributes = safeSvgAttributes(opening[2], isRoot);
+    if (!attributes || (isRoot && !attributes.svgNamespace)) return false;
+    rootSeen = true;
+    if (!selfClosing) stack.push(opening[1]);
+  }
+  return rootSeen && stack.length === 0 && !/[<>]/.test(svg.slice(cursor)) && cursor === svg.length;
+}
+
+function reportImage(destination) {
+  if (!destination || destination !== destination.trim() || isAbsolute(destination) || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(destination) || destination.startsWith("//") || destination.includes("\0")) return null;
+  const extension = extname(destination).toLowerCase();
+  if (extension !== ".png" && extension !== ".svg") return null;
+  try {
+    const assetPath = realpathSync(resolve(sourceDirectory, destination));
+    const localPath = relative(sourceDirectory, assetPath);
+    if (localPath === ".." || localPath.startsWith(`..${sep}`) || isAbsolute(localPath)) return null;
+    const bytes = readFileSync(assetPath);
+    if (extension === ".svg" && !safeSvg(bytes)) return null;
+    const mediaType = extension === ".png" ? "image/png" : "image/svg+xml";
+    return `data:${mediaType};base64,${bytes.toString("base64")}`;
+  } catch {
+    return null;
+  }
+}
+
+function inlineMarkdown(value) {
+  const output = [];
+  const syntax = /!\[([^\]]*)\]\(([^)]+)\)|\[([^\]]+)\]\(([^)]+)\)/g;
+  let cursor = 0;
+  for (const match of value.matchAll(syntax)) {
+    output.push(inlineText(value.slice(cursor, match.index)));
+    if (match[1] !== undefined) {
+      const alt = match[1];
+      const destination = match[2];
+      const dataUri = reportImage(destination);
+      output.push(dataUri
+        ? `<img class="report-image" src="${dataUri}" alt="${escapeHtml(alt)}">`
+        : `<span class="reference image-reference">Image: ${inlineText(alt)} <code>${escapeHtml(destination)}</code></span>`);
+    } else {
+      const label = match[3];
+      const destination = match[4];
+      output.push(safeHttps(destination)
+        ? `<a href="${escapeHtml(destination)}" target="_blank" rel="noopener noreferrer">${inlineText(label)}<span class="visually-hidden"> (opens in new tab)</span></a>`
+        : `<span class="reference">${inlineText(label)} <code>${escapeHtml(destination)}</code></span>`);
+    }
+    cursor = match.index + match[0].length;
+  }
+  output.push(inlineText(value.slice(cursor)));
+  return output.join("");
 }
 
 function renderMarkdown(markdown) {
@@ -174,6 +295,7 @@ html{background:var(--canvas);color:var(--ink);font-family:-apple-system,BlinkMa
 body{margin:0}
 .skip-link{position:absolute;left:1rem;top:-5rem;background:var(--ink);color:#fff;padding:.6rem .9rem;z-index:2}
 .skip-link:focus{top:1rem}
+.visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 :focus-visible{outline:3px solid #245f9a;outline-offset:3px}
 .site-header,main,footer{width:min(76ch,calc(100% - 2rem));margin-inline:auto}
 .site-header{padding:clamp(3rem,8vw,7rem) 0 2rem;border-bottom:1px solid var(--line)}
@@ -183,6 +305,7 @@ h2{font-size:1.2rem;line-height:1.25;margin:3rem 0 1rem}
 h3{font-size:1rem;margin:2rem 0 .5rem}
 p,ul,ol,pre{margin:0 0 1.2rem}a{color:var(--accent)}code{font-family:"SFMono-Regular",Consolas,monospace;background:var(--code);padding:.1em .3em;border-radius:4px;font-size:.9em}
 pre{overflow:auto;background:var(--code);padding:1rem;border:1px solid var(--line);border-radius:8px}pre code{padding:0}
+.report-image{display:block;max-width:100%;height:auto;margin:1.5rem auto;border-radius:8px}
 .report{background:var(--surface);border:1px solid var(--line);padding:clamp(1.25rem,4vw,3rem);margin:2rem auto}
 section{border-top:1px solid var(--line);padding-top:.1rem}.records{list-style:none;padding:0;margin:0}.record{padding:1rem 0;border-bottom:1px solid var(--line);display:grid;grid-template-columns:minmax(9rem,14rem) 1fr;gap:.35rem 1.25rem}.record strong{overflow-wrap:anywhere}.record p{margin:0;color:var(--muted)}
 .captains-call .record{background:var(--call);color:var(--call-ink);margin-inline:-.75rem;padding-inline:.75rem}.empty{color:var(--muted)}
