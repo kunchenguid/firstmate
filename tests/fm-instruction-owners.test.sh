@@ -72,7 +72,7 @@ test_project_management_owner_covers_guarded_operations() {
     'Creating a GitHub repository is outward-facing.' \
     "captain's explicit consent" \
     'Never issue a raw removal command from Firstmate.' \
-    'no-mistakes init && no-mistakes doctor'; do
+    'bin/fm-project-add.sh'; do
     assert_grep "$phrase" "$PROJECT" "project-management owner is missing '$phrase'"
   done
   pass "project-management owns registry, delivery posture, consent, initialization, and removal safety"

@@ -41,7 +41,8 @@ Default it off, and enable it only on the captain's explicit instruction.
 ## Add or clone an existing project
 
 Confirm the source URL, local project name, delivery mode, and autonomy posture.
-Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
+Use `bin/fm-project-add.sh` to clone an existing remote-backed project into the current home or another existing Firstmate home and register it.
+The script's header and `--help` own its exact interface, home targeting, rollback, and initialization mechanics.
 A `no-mistakes` project must have an `origin` remote and must complete the initialization procedure below.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
@@ -51,19 +52,15 @@ A `local-only` project may have no remote and skips no-mistakes initialization.
 Creating a GitHub repository is outward-facing.
 Before making that remote change, propose the repository name, owner or organization, visibility, and delivery mode, defaulting visibility to private and delivery mode to `no-mistakes`, then obtain the captain's explicit consent for those values.
 Use `gh-axi` for the approved GitHub operation and consult its current help rather than relying on remembered flags.
-After remote creation succeeds, clone it locally, add the registry entry, and initialize it according to its delivery mode.
+After remote creation succeeds, use `bin/fm-project-add.sh` with the approved project name, delivery mode, description, and autonomy posture.
 
 For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no GitHub call.
 The captain's request to create that local project authorizes this local initialization, but it does not authorize an unmentioned remote repository.
 
 ## Initialize
 
-Run no-mistakes initialization only for `no-mistakes` projects:
-
-```sh
-cd projects/<name> && no-mistakes init && no-mistakes doctor
-```
-
+Run no-mistakes initialization only for `no-mistakes` projects and only through `bin/fm-project-add.sh`, which owns the `no-mistakes init` and `no-mistakes doctor` sequence for new clones.
+Do not reproduce the helper's clone, directory-change, or initialization internals from the primary shell.
 Initialization configures the local gate and does not vendor a no-mistakes skill into the project.
 Do not create a commit merely because initialization ran.
 If doctor reports an environment, authentication, or daemon problem, resolve that blocker before dispatching work and never restart the shared daemon from a project operation.
