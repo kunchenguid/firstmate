@@ -436,6 +436,66 @@ EOF
   pass "reclaim mutex symlinks are never traversed"
 }
 
+test_generation_symlinks_are_not_followed() {
+  local rec home fakebin outside generation out rc=0
+  rec=$(new_home generation-symlink)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  make_ps_denied "$fakebin"
+  outside="$TMP_ROOT/generation-symlink/outside"
+  mkdir -p "$outside" "$home/state/.lock-reclaim"
+  printf '999999\n' > "$home/state/.lock"
+  printf 'foreign-pid\n' > "$outside/pid"
+  printf 'foreign-started\n' > "$outside/started"
+  if [ "$(uname)" = Darwin ]; then
+    generation=$(stat -f '%d.%i' "$home/state/.lock-reclaim")
+  else
+    generation=$(stat -c '%d.%i' "$home/state/.lock-reclaim")
+  fi
+  ln -s "$outside" "$home/state/.lock-reclaim/.generation-claimed-$generation"
+  touch -t 200001010000 "$home/state/.lock-reclaim"
+
+  out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
+
+  expect_code 11 "$rc" "symlinked generation claim"
+  assert_contains "$out" "LOCK_RESULT=STALE_RECLAIMABLE" "generation symlink hid stale main-lock state"
+  assert_not_contains "$out" "LOCK_RESULT=RECLAIM_BUSY" "generation symlink was mislabeled contention"
+  assert_grep "foreign-pid" "$outside/pid" "generation symlink overwrote foreign pid"
+  assert_grep "foreign-started" "$outside/started" "generation symlink overwrote foreign timestamp"
+  [ -L "$home/state/.lock-reclaim/.generation-claimed-$generation" ] \
+    || fail "generation symlink was unexpectedly replaced"
+
+  rc=0
+  rec=$(new_home generation-metadata-symlink)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  make_ps_denied "$fakebin"
+  outside="$TMP_ROOT/generation-metadata-symlink/outside"
+  mkdir -p "$outside" "$home/state/.lock-reclaim"
+  printf '999999\n' > "$home/state/.lock"
+  printf 'foreign-metadata\n' > "$outside/pid"
+  if [ "$(uname)" = Darwin ]; then
+    generation=$(stat -f '%d.%i' "$home/state/.lock-reclaim")
+  else
+    generation=$(stat -c '%d.%i' "$home/state/.lock-reclaim")
+  fi
+  mkdir "$home/state/.lock-reclaim/.generation-claimed-$generation"
+  ln -s "$outside/pid" "$home/state/.lock-reclaim/.generation-claimed-$generation/pid"
+  touch -t 200001010000 "$home/state/.lock-reclaim"
+
+  out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
+
+  expect_code 11 "$rc" "symlinked generation metadata"
+  assert_contains "$out" "LOCK_RESULT=STALE_RECLAIMABLE" "metadata symlink hid stale main-lock state"
+  assert_not_contains "$out" "LOCK_RESULT=RECLAIM_BUSY" "metadata symlink was mislabeled contention"
+  assert_grep "foreign-metadata" "$outside/pid" "generation metadata symlink was overwritten"
+  pass "generation gate symlinks are classified without traversal"
+}
+
 test_state_path_failure_is_not_reclaim_busy() {
   local rec home fakebin out rc=0
   rec=$(new_home invalid-state-path)
@@ -565,6 +625,7 @@ run_one() {
     live-marker) test_abandonment_marker_does_not_override_live_owner ;;
     typed-failures) test_reclaim_failure_paths_always_emit_lock_result ;;
     mutex-symlink) test_reclaim_mutex_symlink_is_not_followed ;;
+    generation-symlink) test_generation_symlinks_are_not_followed ;;
     invalid-state) test_state_path_failure_is_not_reclaim_busy ;;
     publication-failure) test_reclaim_owner_publication_failure_is_not_busy ;;
     stale-write-failure) test_stale_reclaim_write_failure_stays_stale ;;
@@ -594,6 +655,7 @@ else
   test_abandonment_marker_does_not_override_live_owner
   test_reclaim_failure_paths_always_emit_lock_result
   test_reclaim_mutex_symlink_is_not_followed
+  test_generation_symlinks_are_not_followed
   test_state_path_failure_is_not_reclaim_busy
   test_reclaim_owner_publication_failure_is_not_busy
   test_stale_reclaim_write_failure_stays_stale

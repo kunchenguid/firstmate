@@ -352,10 +352,16 @@ remove_reclaim_mutex() {
   rmdir "$RECLAIM_LOCK" 2>/dev/null
 }
 
+reclaim_generation_dir_is_safe() {
+  local path=$1
+  [ ! -L "$path" ] && [ -d "$path" ] \
+    && [ ! -L "$path/pid" ] && [ ! -L "$path/started" ]
+}
+
 write_reclaim_owner() {
   local generation=$1 gate mypid=${BASHPID:-$$} now back_pid back_started current
   gate="$RECLAIM_LOCK/.generation-$generation"
-  [ -d "$gate" ] || return 1
+  reclaim_generation_dir_is_safe "$gate" || return 1
   current=$(reclaim_mutex_generation 2>/dev/null || true)
   [ "$current" = "$generation" ] || return 1
   now=$(date +%s 2>/dev/null) || return 1
@@ -378,7 +384,8 @@ write_reclaim_owner() {
   back_started=$(cat "$RECLAIM_LOCK/started" 2>/dev/null || true)
   current=$(reclaim_mutex_generation 2>/dev/null || true)
   [ "$back_pid" = "$mypid" ] && [ "$back_started" = "$now" ] \
-    && [ "$current" = "$generation" ] && [ -d "$gate" ]
+    && [ "$current" = "$generation" ] \
+    && reclaim_generation_dir_is_safe "$gate"
 }
 
 release_reclaim_lock() {
@@ -391,7 +398,8 @@ release_reclaim_lock() {
     generation=$(reclaim_mutex_generation 2>/dev/null || true)
     gate="$RECLAIM_LOCK/.generation-$generation"
     claimed="$RECLAIM_LOCK/.generation-claimed-$generation"
-    if [ -n "$generation" ] && [ -d "$gate" ]; then
+    if [ -n "$generation" ] && reclaim_generation_dir_is_safe "$gate" \
+      && [ ! -e "$claimed" ] && [ ! -L "$claimed" ]; then
       perl -e 'exit(rename($ARGV[0], $ARGV[1]) ? 0 : 1)' \
         "$gate" "$claimed" 2>/dev/null || {
         RECLAIM_HELD=0
@@ -411,7 +419,8 @@ detach_abandoned_reclaim_mutex() {
   quarantine="$STATE/.lock-reclaim-retired.${BASHPID:-$$}.$RANDOM.$generation"
   [ ! -e "$quarantine" ] && [ ! -L "$quarantine" ] || return 2
   command -v perl >/dev/null 2>&1 || return 2
-  if [ -d "$claimed" ]; then
+  if [ -e "$claimed" ] || [ -L "$claimed" ]; then
+    reclaim_generation_dir_is_safe "$claimed" || return 2
     claim_pid=$(cat "$claimed/pid" 2>/dev/null || true)
     case "$claim_pid" in
       ''|*[!0-9]*)
@@ -428,9 +437,12 @@ detach_abandoned_reclaim_mutex() {
     esac
     perl -e 'exit(rename($ARGV[0], $ARGV[1]) ? 0 : 1)' \
       "$claimed" "$gate" 2>/dev/null || return 1
-  elif [ ! -d "$gate" ]; then
+  elif [ -e "$gate" ] || [ -L "$gate" ]; then
+    reclaim_generation_dir_is_safe "$gate" || return 2
+  else
     mkdir "$gate" 2>/dev/null || return 1
   fi
+  reclaim_generation_dir_is_safe "$gate" || return 2
   gate_pid=$(cat "$gate/pid" 2>/dev/null || true)
   case "$gate_pid" in
     ''|*[!0-9]*) ;;
@@ -440,6 +452,7 @@ detach_abandoned_reclaim_mutex() {
     "$gate" "$claimed" 2>/dev/null; then
     return 1
   fi
+  reclaim_generation_dir_is_safe "$claimed" || return 2
   now=$(date +%s 2>/dev/null) || return 2
   printf '%s\n' "${BASHPID:-$$}" > "$claimed/pid" || return 2
   printf '%s\n' "$now" > "$claimed/started" || return 2
