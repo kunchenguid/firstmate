@@ -319,11 +319,10 @@ reclaim_mutex_age() {
 # Provably abandoned: live owner PID is never overridden. Missing/invalid PID is
 # treated like wake-lib mid-acquire: only after RECLAIM_MUTEX_STALE_AFTER seconds.
 reclaim_mutex_is_provably_abandoned() {
-  local generation=$1 pid age min_age
+  local generation=$1 current pid age min_age
   [ -d "$RECLAIM_LOCK" ] && [ ! -L "$RECLAIM_LOCK" ] || return 2
-  if [ -d "$RECLAIM_LOCK/.reclaim-abandoned-$generation" ]; then
-    return 0
-  fi
+  current=$(reclaim_mutex_generation 2>/dev/null || true)
+  [ "$current" = "$generation" ] || return 1
   pid=$(cat "$RECLAIM_LOCK/pid" 2>/dev/null || true)
   case "$pid" in
     ''|*[!0-9]*)
@@ -380,28 +379,24 @@ release_reclaim_lock() {
 }
 
 detach_abandoned_reclaim_mutex() {
-  local generation=$1 marker quarantine current
-  marker="$RECLAIM_LOCK/.reclaim-abandoned-$generation"
-  quarantine="$STATE/.lock-reclaim-retired-$generation"
-  mkdir "$marker" 2>/dev/null || [ -d "$marker" ] || return 2
-  current=$(reclaim_mutex_generation 2>/dev/null || true)
-  if [ "$current" != "$generation" ]; then
-    rmdir "$marker" 2>/dev/null || true
-    return 1
-  fi
+  local generation=$1 quarantine abandoned_rc=0
+  quarantine="$STATE/.lock-reclaim-retired.${BASHPID:-$$}.$RANDOM.$generation"
+  [ ! -e "$quarantine" ] && [ ! -L "$quarantine" ] || return 2
+  reclaim_mutex_is_provably_abandoned "$generation" || abandoned_rc=$?
+  [ "$abandoned_rc" -eq 0 ] || return "$abandoned_rc"
   command -v perl >/dev/null 2>&1 || return 2
   if ! perl -e 'exit(rename($ARGV[0], $ARGV[1]) ? 0 : 1)' \
     "$RECLAIM_LOCK" "$quarantine" 2>/dev/null; then
-    [ -e "$quarantine" ] || return 2
-    return 1
+    return 2
   fi
-  rm -f "$quarantine/pid" "$quarantine/started" 2>/dev/null || true
+  rm -rf "$quarantine" 2>/dev/null || return 2
+  [ ! -e "$quarantine" ] && [ ! -L "$quarantine" ] || return 2
   return 0
 }
 
 # Returns 0 held, 1 busy (live or mid-acquire), 2 storage or malformed-state failure.
 acquire_reclaim_lock() {
-  local attempt=0 generation abandoned_rc
+  local attempt=0 generation abandoned_rc detach_rc
   RECLAIM_ACQUIRE_ERROR=
   while [ "$attempt" -lt 2 ]; do
     attempt=$((attempt + 1))
@@ -430,8 +425,13 @@ acquire_reclaim_lock() {
     reclaim_mutex_is_provably_abandoned "$generation" || abandoned_rc=$?
     case "$abandoned_rc" in
       0)
-        if detach_abandoned_reclaim_mutex "$generation"; then
+        detach_rc=0
+        detach_abandoned_reclaim_mutex "$generation" || detach_rc=$?
+        if [ "$detach_rc" -eq 0 ]; then
           continue
+        elif [ "$detach_rc" -eq 2 ]; then
+          RECLAIM_ACQUIRE_ERROR=io
+          return 2
         fi
         ;;
       2)
@@ -556,8 +556,8 @@ reclaim_expected() {
     emit_result RECLAIM_BUSY "another reclaim operation holds state/.lock-reclaim"
     return "$EXIT_RECLAIM_BUSY"
   elif [ "$mutex_rc" -ne 0 ]; then
-    emit_result IDENTITY_UNAVAILABLE "cannot access or publish the reclaim mutex"
-    return "$EXIT_IDENTITY_UNAVAILABLE"
+    emit_classified_lock "reclaim mutex unavailable: cannot access or publish state/.lock-reclaim"
+    return $?
   fi
   if ! read_lock || [ "$LOCK_OWNER" != "$expected" ]; then
     release_reclaim_lock

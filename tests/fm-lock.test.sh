@@ -248,6 +248,8 @@ EOF
   assert_contains "$out" "LOCK_RESULT=OWNED" "orphan mutex blocked stale reclaim permanently"
   assert_grep "codex-thread:current-thread" "$home/state/.lock" "orphan-mutex stale reclaim did not install owner"
   [ ! -e "$home/state/.lock-reclaim" ] || fail "orphan reclaim mutex was left behind after recovery"
+  [ -z "$(find "$home/state" -name '.lock-reclaim-retired*' -print)" ] \
+    || fail "detached reclaim mutex quarantine was not removed"
   pass "orphan reclaim mutex plus stale lock recovers without permanent jam"
 }
 
@@ -337,6 +339,33 @@ EOF
   pass "live reclaim mutex owner is never taken over"
 }
 
+test_abandonment_marker_does_not_override_live_owner() {
+  local rec home fakebin generation out rc=0
+  rec=$(new_home live-owner-with-marker)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  make_ps_denied "$fakebin"
+  printf '999999\n' > "$home/state/.lock"
+  mkdir "$home/state/.lock-reclaim"
+  printf '%s\n' "$$" > "$home/state/.lock-reclaim/pid"
+  printf '1\n' > "$home/state/.lock-reclaim/started"
+  if [ "$(uname)" = Darwin ]; then
+    generation=$(stat -f '%d.%i' "$home/state/.lock-reclaim")
+  else
+    generation=$(stat -c '%d.%i' "$home/state/.lock-reclaim")
+  fi
+  mkdir "$home/state/.lock-reclaim/.reclaim-abandoned-$generation"
+
+  out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
+
+  expect_code 13 "$rc" "live reclaim owner with abandonment marker"
+  assert_contains "$out" "LOCK_RESULT=RECLAIM_BUSY" "marker bypassed the live-owner proof"
+  assert_grep "$$" "$home/state/.lock-reclaim/pid" "marker caused live mutex removal"
+  pass "abandonment markers never replace live-owner proof"
+}
+
 test_reclaim_failure_paths_always_emit_lock_result() {
   local rec home fakebin out rc=0
   rec=$(new_home reclaim-typed-failures)
@@ -398,8 +427,8 @@ EOF
   out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
     FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
 
-  expect_code 12 "$rc" "symlink reclaim mutex"
-  assert_contains "$out" "LOCK_RESULT=IDENTITY_UNAVAILABLE" "symlink mutex was not classified as malformed state"
+  expect_code 11 "$rc" "symlink reclaim mutex"
+  assert_contains "$out" "LOCK_RESULT=STALE_RECLAIMABLE" "symlink mutex I/O hid the stale main lock"
   assert_not_contains "$out" "LOCK_RESULT=RECLAIM_BUSY" "symlink mutex was mislabeled contention"
   assert_grep "$$" "$outside/pid" "symlink mutex traversal removed the foreign pid"
   assert_grep "sentinel" "$outside/started" "symlink mutex traversal removed the foreign timestamp"
@@ -496,6 +525,7 @@ run_one() {
     aged-legacy-mutex) test_aged_legacy_reclaim_mutex_recovers ;;
     orphaned-nested-claim) test_orphaned_nested_claim_does_not_jam_recovery ;;
     live-mutex) test_live_reclaim_mutex_owner_is_not_taken ;;
+    live-marker) test_abandonment_marker_does_not_override_live_owner ;;
     typed-failures) test_reclaim_failure_paths_always_emit_lock_result ;;
     mutex-symlink) test_reclaim_mutex_symlink_is_not_followed ;;
     invalid-state) test_state_path_failure_is_not_reclaim_busy ;;
@@ -522,6 +552,7 @@ else
   test_aged_legacy_reclaim_mutex_recovers
   test_orphaned_nested_claim_does_not_jam_recovery
   test_live_reclaim_mutex_owner_is_not_taken
+  test_abandonment_marker_does_not_override_live_owner
   test_reclaim_failure_paths_always_emit_lock_result
   test_reclaim_mutex_symlink_is_not_followed
   test_state_path_failure_is_not_reclaim_busy
