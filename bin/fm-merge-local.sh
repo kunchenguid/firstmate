@@ -103,6 +103,14 @@ refuse_if_operation_in_progress() {
     "a cherry-pick is in progress here; conclude it with 'git cherry-pick --continue' or abandon it with 'git cherry-pick --abort'"
   refuse_if_in_progress REVERT_HEAD \
     "a revert is in progress here; conclude it with 'git revert --continue' or abandon it with 'git revert --abort'"
+  # A multi-commit cherry-pick or revert keeps its remaining picks in the
+  # sequencer after the conflicted one is resolved and committed, which drops
+  # CHERRY_PICK_HEAD while the sequence is still open. That marker is checked
+  # last of the three so a sequence still carrying its live conflict keeps the
+  # more specific message above. The interactive rebase does not appear here: it
+  # keeps its todo list in rebase-merge, which the next sentinel covers.
+  refuse_if_in_progress sequencer/todo \
+    "a cherry-pick or revert sequence is in progress here; conclude it with 'git cherry-pick --continue' or 'git revert --continue', or abandon it with 'git cherry-pick --abort' or 'git revert --abort'"
   refuse_if_in_progress rebase-merge \
     "a rebase is in progress here; conclude it with 'git rebase --continue' or abandon it with 'git rebase --abort'"
   refuse_if_in_progress rebase-apply/applying \
@@ -188,8 +196,12 @@ while IFS= read -r -d '' entry; do
     ' '|M|T|A|D|R|C) : ;;
     *) refuse_unreadable "unrecognized git status code '$code' at '$path'" ;;
   esac
+  # 'A' on the worktree side is an intent-to-add entry (`git add -N`), which is an
+  # ordinary dirty tracked path; the collision intersection below decides it, the
+  # same as a modification. Every code outside these two sets still refuses,
+  # because a state this cannot classify is not a safe state.
   case "${code:1:1}" in
-    ' '|M|T|D|R|C) : ;;
+    ' '|M|T|A|D|R|C) : ;;
     *) refuse_unreadable "unrecognized git status code '$code' at '$path'" ;;
   esac
   DIRTY_PATHS+=("$path")
@@ -207,7 +219,12 @@ done < "$GUARD_TMP/status"
 # these catch it once its resolutions are staged and it has nothing left to show.
 refuse_if_operation_in_progress
 
-git -C "$PROJ" diff -z --name-status "$DEFAULT" "$BRANCH" > "$GUARD_TMP/incoming" \
+# The trailing `--` is load-bearing: without it git applies its revision/filename
+# ambiguity check to both arguments and dies outright in any project holding a
+# root entry named like its default branch, which would refuse a landing the
+# operator cannot settle. No other git call here takes a pathspec, so none of the
+# others can read a revision as a filename.
+git -C "$PROJ" diff -z --name-status "$DEFAULT" "$BRANCH" -- > "$GUARD_TMP/incoming" \
   || refuse_unreadable "git diff failed between $DEFAULT and $BRANCH in $PROJ"
 
 # Records are "<status>\0<path>\0", and for rename/copy "<status>\0<old>\0<new>\0"

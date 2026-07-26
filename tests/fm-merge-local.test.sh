@@ -20,25 +20,31 @@
 #                old-then-new, the reverse of git status
 #   refuses  (i) the destination of an INCOMING copy, when the project has asked
 #                git for copy detection
-#   refuses  (j) an unresolved merge conflict (state it cannot classify)
-#   refuses  (k) a merge left in progress with its resolution staged, in a linked
+#   refuses  (j) an intent-to-add path the fast-forward also adds
+#   refuses  (k) an unresolved merge conflict (state it cannot classify)
+#   refuses  (l) a merge left in progress with its resolution staged, in a linked
 #                worktree, where the git dir is not <project>/.git
-#   refuses  (l) a cherry-pick left in progress with its resolution staged
-#   refuses  (m) a conflicted rebase, which detaches HEAD, so the named refusal
+#   refuses  (m) a cherry-pick left in progress with its resolution staged
+#   refuses  (n) a multi-commit cherry-pick whose conflicted pick has already been
+#                resolved and committed, so only the sequencer still says it is open
+#   refuses  (o) a conflicted rebase, which detaches HEAD, so the named refusal
 #                has to come before the default-branch check to be reachable
-#   refuses  (n) a conflicted apply-backend rebase, which leaves the same state
+#   refuses  (p) a conflicted apply-backend rebase, which leaves the same state
 #                directory git am uses but without its marker
-#   refuses  (o) a failed git am, which keeps HEAD attached and needs the git am
+#   refuses  (q) a failed git am, which keeps HEAD attached and needs the git am
 #                commands rather than the rebase ones
-#   refuses  (p) an unrecognized git status code
-#   proceeds (q) untracked file at a path the fast-forward never touches
-#   proceeds (r) modified path the fast-forward never touches
-#   proceeds (s) ignored file, even at a path the fast-forward adds
-#   proceeds (t) clean tree
-#   proceeds (u) a staged rename at paths the fast-forward never touches, proving
+#   refuses  (r) an unrecognized git status code
+#   proceeds (s) untracked file at a path the fast-forward never touches
+#   proceeds (t) modified path the fast-forward never touches
+#   proceeds (u) an intent-to-add path the fast-forward never touches
+#   proceeds (v) ignored file, even at a path the fast-forward adds
+#   proceeds (w) clean tree
+#   proceeds (x) a staged rename at paths the fast-forward never touches, proving
 #                the rename's second NUL field is consumed and not misread as the
 #                next record's status code
-#   regression (v) the observed deadlock: two untracked operator files plus one
+#   proceeds (y) a project whose root holds an entry named like its default
+#                branch, which git reads as a filename without a '--' separator
+#   regression (z) the observed deadlock: two untracked operator files plus one
 #                modified tracked pointer that the incoming commit removes from
 #                the index. It must refuse, naming only the pointer, and must
 #                merge once that single path is settled - the cure can no longer
@@ -351,6 +357,31 @@ test_refuses_untracked_file_at_an_incoming_copy_destination() {
   pass "fm-merge-local reads an incoming copy's destination from the incoming diff"
 }
 
+test_refuses_intent_to_add_path_the_merge_adds() {
+  local case_dir proj
+  case_dir=$(make_case refuse-intent-to-add-collision)
+  proj="$case_dir/project"
+  printf 'theirs\n' > "$proj/docs/Knowledge Graphs.pdf"
+  commit_in "$proj" 'add a document'
+  git -C "$proj" checkout -q main
+  # `git add -N` records the path in the index without its contents, so status
+  # reports it as a tracked worktree addition rather than an untracked entry. The
+  # fast-forward creates a file at that exact path, so it is a genuine collision
+  # and the refusal has to name it.
+  printf 'the operators own copy\n' > "$proj/docs/Knowledge Graphs.pdf"
+  git -C "$proj" add -N -- 'docs/Knowledge Graphs.pdf'
+
+  attempt_merge "$case_dir"
+
+  expect_code 1 "$RC" "refuse-intent-to-add-collision: expected a refusal"
+  assert_grep 'docs/Knowledge Graphs.pdf - uncommitted changes here, and this merge adds it' \
+    "$case_dir/stderr" "refuse-intent-to-add-collision: refusal did not name the intent-to-add path"
+  assert_not_merged "$proj" refuse-intent-to-add-collision
+  assert_grep 'the operators own copy' "$proj/docs/Knowledge Graphs.pdf" \
+    "refuse-intent-to-add-collision: the operator's file was overwritten"
+  pass "fm-merge-local refuses an intent-to-add path the fast-forward also adds"
+}
+
 test_refuses_unresolved_conflict() {
   local case_dir proj
   case_dir=$(make_case refuse-unresolved-conflict)
@@ -451,6 +482,52 @@ test_refuses_in_progress_cherry_pick() {
     "refuse-in-progress-cherry-pick: refusal did not name the half-finished cherry-pick"
   assert_not_merged "$proj" refuse-in-progress-cherry-pick
   pass "fm-merge-local refuses a cherry-pick left in progress, not just a merge"
+}
+
+test_refuses_pending_cherry_pick_sequence() {
+  local case_dir proj
+  case_dir=$(make_case refuse-pending-sequence)
+  proj="$case_dir/project"
+  # A real two-commit cherry-pick whose FIRST pick conflicts. Resolving and
+  # committing that pick drops CHERRY_PICK_HEAD while the second pick is still
+  # queued, which is the state git's own status reports as a cherry-pick in
+  # progress and the only one the sequencer sentinel can see.
+  git -C "$proj" checkout -q main
+  git -C "$proj" branch sideline
+  printf 'main side\n' >> "$proj/docs/notes.md"
+  commit_in "$proj" 'main side'
+  git -C "$proj" checkout -q sideline
+  printf 'other side\n' >> "$proj/docs/notes.md"
+  commit_in "$proj" 'other side'
+  printf 'tail\n' > "$proj/sequence-tail.txt"
+  commit_in "$proj" 'sequence tail'
+  git -C "$proj" checkout -q main
+  git -C "$proj" cherry-pick sideline~1 sideline >/dev/null 2>&1 \
+    && fail "refuse-pending-sequence: fixture cherry-pick was expected to conflict"
+  printf 'resolved\n' > "$proj/docs/notes.md"
+  git -C "$proj" add docs/notes.md
+  git -C "$proj" commit -qm 'resolve the conflicted pick'
+  assert_absent "$proj/.git/CHERRY_PICK_HEAD" \
+    "refuse-pending-sequence: fixture still has a live cherry-pick, so it cannot pin the sequencer sentinel"
+  # Rebuild the task branch on top of the advanced main, so the fast-forward
+  # itself stays valid and the pending sequence is the only objection left. The
+  # tree is clean here, so nothing in the status listing can produce a refusal.
+  git -C "$proj" checkout -q -B "$BRANCH" main
+  printf 'incoming\n' > "$proj/tracked.txt"
+  commit_in "$proj" 'change tracked.txt'
+  git -C "$proj" checkout -q main
+
+  attempt_merge "$case_dir"
+
+  expect_code 1 "$RC" "refuse-pending-sequence: expected a refusal"
+  assert_grep 'a cherry-pick or revert sequence is in progress here' "$case_dir/stderr" \
+    "refuse-pending-sequence: refusal did not name the half-finished sequence"
+  assert_grep 'git cherry-pick --abort' "$case_dir/stderr" \
+    "refuse-pending-sequence: refusal was not actionable"
+  assert_no_grep 'has diverged' "$case_dir/stderr" \
+    "refuse-pending-sequence: the pending sequence was reported as ordinary divergence"
+  assert_not_merged "$proj" refuse-pending-sequence
+  pass "fm-merge-local names a cherry-pick sequence still queued after its conflicted pick was committed"
 }
 
 test_refuses_in_progress_rebase() {
@@ -605,6 +682,31 @@ test_proceeds_on_modified_path_the_merge_never_touches() {
   pass "fm-merge-local proceeds past a modified path the fast-forward never touches"
 }
 
+test_proceeds_on_intent_to_add_path_the_merge_never_touches() {
+  local case_dir proj
+  case_dir=$(make_case proceed-intent-to-add)
+  proj="$case_dir/project"
+  printf 'incoming\n' > "$proj/tracked.txt"
+  commit_in "$proj" 'change tracked.txt'
+  git -C "$proj" checkout -q main
+  # `git add -N` is how an operator stages a new file for a partial commit, and
+  # git status spells it with a worktree-side 'A'. git fast-forwards straight past
+  # it when the merge never touches that path, so this guard must too rather than
+  # refusing a code it failed to recognize.
+  printf 'the operators own draft\n' > "$proj/docs/draft notes.md"
+  git -C "$proj" add -N -- 'docs/draft notes.md'
+
+  attempt_merge "$case_dir"
+
+  expect_code 0 "$RC" "proceed-intent-to-add: expected the merge to proceed"
+  assert_no_grep 'unrecognized git status code' "$case_dir/stderr" \
+    "proceed-intent-to-add: an intent-to-add entry was treated as an unclassifiable state"
+  assert_merged "$proj" proceed-intent-to-add
+  assert_grep 'the operators own draft' "$proj/docs/draft notes.md" \
+    "proceed-intent-to-add: the intent-to-add file was disturbed"
+  pass "fm-merge-local proceeds past an intent-to-add path the fast-forward never touches"
+}
+
 test_proceeds_on_ignored_file() {
   local case_dir proj
   case_dir=$(make_case proceed-ignored)
@@ -662,6 +764,34 @@ test_proceeds_past_untouched_staged_rename() {
   pass "fm-merge-local parses a rename's second path field and proceeds when neither endpoint collides"
 }
 
+test_proceeds_when_a_root_entry_is_named_like_the_default_branch() {
+  local case_dir proj
+  case_dir=$(make_case proceed-branch-shaped-path)
+  proj="$case_dir/project"
+  # A tracked directory named `main` is enough to make a bare `git diff <rev>
+  # <rev>` ambiguous: git reads the default branch name as a filename and dies,
+  # which would refuse every landing in this project with nothing the operator
+  # could settle. Landing here proves the incoming diff separates its revisions
+  # from paths.
+  mkdir -p "$proj/main"
+  printf 'an entry named like the default branch\n' > "$proj/main/notes.txt"
+  commit_in "$proj" 'add a directory named like the default branch'
+  git -C "$proj" branch -f main "$BRANCH"
+  printf 'incoming\n' > "$proj/tracked.txt"
+  commit_in "$proj" 'change tracked.txt'
+  git -C "$proj" checkout -q main
+
+  attempt_merge "$case_dir"
+
+  expect_code 0 "$RC" "proceed-branch-shaped-path: expected the merge to proceed"
+  assert_no_grep 'cannot classify the state of' "$case_dir/stderr" \
+    "proceed-branch-shaped-path: a root entry named like the default branch was read as a filename"
+  assert_merged "$proj" proceed-branch-shaped-path
+  assert_present "$proj/main/notes.txt" \
+    "proceed-branch-shaped-path: the branch-shaped entry was disturbed by the merge"
+  pass "fm-merge-local lands in a project whose root holds an entry named like its default branch"
+}
+
 # --- regression -------------------------------------------------------------
 
 test_regression_untracked_documents_plus_removed_pointer() {
@@ -714,16 +844,20 @@ test_refuses_untracked_files_under_a_path_the_merge_turns_into_a_file
 test_refuses_rename_endpoint_the_merge_removes
 test_refuses_both_endpoints_of_an_incoming_rename
 test_refuses_untracked_file_at_an_incoming_copy_destination
+test_refuses_intent_to_add_path_the_merge_adds
 test_refuses_unresolved_conflict
 test_refuses_in_progress_merge_in_a_linked_worktree
 test_refuses_in_progress_cherry_pick
+test_refuses_pending_cherry_pick_sequence
 test_refuses_in_progress_rebase
 test_refuses_in_progress_apply_backend_rebase
 test_refuses_in_progress_patch_application
 test_refuses_unrecognized_status_code
 test_proceeds_on_untracked_file_the_merge_never_touches
 test_proceeds_on_modified_path_the_merge_never_touches
+test_proceeds_on_intent_to_add_path_the_merge_never_touches
 test_proceeds_on_ignored_file
 test_proceeds_on_clean_tree
 test_proceeds_past_untouched_staged_rename
+test_proceeds_when_a_root_entry_is_named_like_the_default_branch
 test_regression_untracked_documents_plus_removed_pointer
