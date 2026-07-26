@@ -297,6 +297,44 @@ window_to_task() {
   t="${w##*:}"; t="${t#fm-}"; printf '%s' "$t"
 }
 
+# One stale wake reason, tagged with the classification branch that produced it.
+# Six paths emit a "stale:" wake - the watcher's surface_nonterminal_stale,
+# handle_paused_stale, wedge_timer_check, terminal-status override and away-mode
+# one-shot, plus the push fast-path in fm-push-transition-lib.sh - and before
+# this tag existed all six rendered the same bare "stale: <window>" opening.
+# Nothing downstream could tell which rule fired, so per-branch wake attribution
+# had to be reconstructed from truncation patterns in state/.watch-triage.log;
+# that method left 44% of stale wakes unattributed across two independent
+# readings of this system, and the wedge and pause regression tests need to
+# assert on the branch rather than on a window string three code paths produce.
+# The tag is PROSE inside the reason, never a parsed protocol field. Read it with
+# a substring match; recover the window with stale_reason_window below, never by
+# stripping the "stale: " prefix alone.
+stale_reason() {  # <branch> <window> [detail]
+  if [ -n "${3:-}" ]; then
+    printf 'stale: %s (%s) [branch=%s]' "$2" "$3" "$1"
+  else
+    printf 'stale: %s [branch=%s]' "$2" "$1"
+  fi
+}
+
+# The window named by a "stale:" wake reason, with trailing decoration removed.
+# A wake reason is PROSE written for firstmate, never a protocol: the watcher
+# already appends details such as "(idle 300s, possible wedge, escalation 2)" or
+# "(paused 3600s, awaiting external ...)", and every stale reason additionally
+# carries a "[branch=<name>]" classification tag. A consumer that needs the
+# window back out of a reason must strip that decoration through this one owner.
+# A bare "${reason#stale: }" yields "<window> (idle 300s, ...)", which matches no
+# recorded window= line, so window_to_task falls through to its suffix heuristic
+# and returns a garbage task id - the reason the decorated wedge and pause
+# reasons were already mis-parsed before the branch tag existed.
+stale_reason_window() {  # <stale-reason-or-window>
+  local s=${1#stale: }
+  s=${s%%" ("*}
+  s=${s%%" ["*}
+  printf '%s' "$s"
+}
+
 # 0 (actionable) if ANY status file listed in a "signal:" wake carries a
 # captain-relevant last line; 1 otherwise. Pass the space-separated file list that
 # follows the "signal:" prefix. Non-.status arguments (e.g. .turn-ended markers,

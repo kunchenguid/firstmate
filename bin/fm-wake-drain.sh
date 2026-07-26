@@ -74,6 +74,28 @@ DRAIN_LOCK_HELD=false
 
 # Raw output and queue deletion are authoritative. Everything below is
 # best-effort and cannot restore, duplicate, hide, or fail the consumed rows.
+
+# Supervision latency and drain depth. Each queue record carries the epoch at
+# which the watcher enqueued it, but nothing recorded when firstmate actually
+# consumed it, so the delay between an event happening and the coordinator
+# acting on it - the most direct expression of coordinator attention cost - had
+# no series at all. Depth is the DEDUPED record count, the number of distinct
+# wakes this turn must handle: the raw queue coalesces repeat records per key,
+# so a raw count reads high against what firstmate is really handed. Latency is
+# the age of the oldest record in that deduped set. Written to the same bounded
+# log the watcher uses, from the same writer, at drain cadence (a few times an
+# hour), strictly after the authoritative consumption boundary above.
+drain_telemetry() {
+  local depth oldest now
+  [ -n "$RAW_ROWS" ] || return 0
+  depth=$(printf '%s\n' "$RAW_ROWS" | grep -c .) || return 0
+  oldest=$(printf '%s\n' "$RAW_ROWS" | cut -f1 | grep -E '^[0-9]+$' | sort -n | head -1)
+  [ -n "$oldest" ] || return 0
+  now=$(date +%s)
+  triage_log "drain: depth=$depth oldest_wait=$(( now - oldest ))s"
+}
+drain_telemetry || true
+
 (fm_wake_print_annotations "$RAW_ROWS") || true
 assert_watcher_liveness
 exit 0

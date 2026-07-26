@@ -301,12 +301,29 @@ watch_output_has_wake() {
   grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$out" 2>/dev/null
 }
 
+# A stale reason carries the classification branch that produced it as a
+# "[branch=<name>]" tag (bin/fm-push-transition-lib.sh's stale_reason). Carrying
+# it into this ledger row is what makes actionable wakes countable per branch
+# from state/.watch-cycle-exits.log, which is the existing telemetry surface -
+# no second collector is introduced for it. An untagged stale reason (an older
+# watcher mid-upgrade, or a hand-written fixture) still classifies as the plain
+# actionable-stale it always did.
+watch_output_stale_branch() {  # <reason-line>
+  local rest=${1#*"[branch="}
+  [ "$rest" != "$1" ] || return 0
+  rest=${rest%%"]"*}
+  case "$rest" in
+    ''|*[!a-z-]*) return 0 ;;
+  esac
+  printf -- '-%s' "$rest"
+}
+
 watch_output_reason_type() {
   local out=$1 line
   line=$(grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$out" 2>/dev/null | head -1 || true)
   case "$line" in
     signal:*) printf 'actionable-signal' ;;
-    stale:*) printf 'actionable-stale' ;;
+    stale:*) printf 'actionable-stale%s' "$(watch_output_stale_branch "$line")" ;;
     check:*) printf 'actionable-check' ;;
     heartbeat*) printf 'actionable-heartbeat' ;;
     *) printf 'none' ;;
@@ -317,6 +334,14 @@ print_watch_output() {
   local out=$1
   [ -s "$out" ] && cat "$out"
 }
+
+# --- Main entry: the runtime below runs only when this file is executed as a
+# script. When sourced (unit tests loading the classifier above), return here
+# before parsing a mode or touching the singleton lock. Same guard, same reason,
+# and the same position relative to the runtime as bin/fm-watch.sh's.
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  return 0
+fi
 
 mode=arm
 case "${1:-}" in

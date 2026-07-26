@@ -417,7 +417,7 @@ test_terminal_stale_surfaced() {
     FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "watcher did not exit for a stale pane on a terminal status"
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the terminal stale wake"
+  grep -Fx "stale: $window [branch=terminal]" "$out" >/dev/null || fail "watcher did not print the terminal stale wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the terminal stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "terminal stale was not queued"
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
@@ -478,6 +478,7 @@ test_stale_terminal_status_overridden_by_active_run() {
   wait_for_exit "$pid" 40 || fail "watcher did not escalate an overridden stale terminal status past the threshold"
   grep -F "stale: $window" "$out" >/dev/null || fail "escalation did not print a stale wake"
   grep -F "possible wedge" "$out" >/dev/null || fail "escalation did not flag a possible wedge"
+  grep -F "[branch=wedge]" "$out" >/dev/null || fail "wedge escalation did not tag its classification branch"
   unset FM_FAKE_CREW_STATE
   pass "a stale terminal-looking status is overridden and absorbed while a run is actively working, then wedge-escalated"
 }
@@ -530,6 +531,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   wait_for_exit "$pid" 40 || fail "watcher did not escalate a provably-working non-terminal stale past the threshold"
   grep -F "stale: $window" "$out" >/dev/null || fail "escalation did not print a stale wake"
   grep -F "possible wedge" "$out" >/dev/null || fail "escalation did not flag a possible wedge"
+  grep -F "[branch=wedge]" "$out" >/dev/null || fail "wedge escalation did not tag its classification branch"
   [ ! -e "$state/.stale-since-$key" ] || fail "stale-since timer was not cleared after escalation"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the wedge escalation failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "wedge escalation was not queued"
@@ -566,7 +568,7 @@ test_nonterminal_stale_not_working_surfaced() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "watcher did not surface a not-provably-working non-terminal stale at once"
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the immediate stale wake"
+  grep -Fx "stale: $window [branch=nonterminal]" "$out" >/dev/null || fail "watcher did not print the immediate stale wake"
   grep -F "possible wedge" "$out" >/dev/null && fail "an immediate stopped-crew stale was mislabeled a wedge"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor was not advanced on surface"
   [ ! -e "$state/.stale-since-$key" ] || fail "stale-since timer should not be set when surfacing immediately"
@@ -636,6 +638,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   wait_for_exit "$pid" 40 || fail "watcher did not re-surface a declared pause past the threshold"
   grep -F "stale: $window" "$out" >/dev/null || fail "re-surface did not print a stale wake"
   grep -F "awaiting external" "$out" >/dev/null || fail "re-surface was not labeled a paused/awaiting-external recheck"
+  grep -F "[branch=pause-resurface]" "$out" >/dev/null || fail "paused re-surface did not tag its classification branch"
   grep -F "possible wedge" "$out" >/dev/null && fail "a declared pause was mislabeled a possible wedge"
   [ -e "$state/.paused-resurfaced-$key" ] || fail "the paused re-surface throttle marker was not recorded"
   [ ! -e "$state/.stale-since-$key" ] || fail "a paused re-surface must not use the wedge timer"
@@ -679,7 +682,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
     round=$((round + 1))
   done
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
-  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w " [branch=nonterminal]" { n++ } END { print n + 0 }' "$state/.wake-queue")
   [ "$wakes" -le 1 ] || fail "dead-agent declared pause flooded $wakes stale wakes across six unchanged polls"
   [ "$bare" -eq 0 ] || fail "dead-agent declared pause surfaced as $bare bare stopped-crew wakes"
   grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
@@ -747,7 +750,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "live external-decision gate retained the wedge timer"; }
   reap "$pid"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
-  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w " [branch=nonterminal]" { n++ } END { print n + 0 }' "$state/.wake-queue")
   [ "$wakes" -eq 1 ] || fail "live external-decision gate should surface once, got $wakes wakes"
   [ "$bare" -eq 1 ] || fail "live external-decision gate lost its immediate bare stale surface"
   pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
@@ -1261,7 +1264,9 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "AFK paused changed pane did not hand off a stale wake"
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "AFK paused stale did not preserve its plain window identity: $(cat "$out")"
+  grep -Fx "stale: $window [branch=afk]" "$out" >/dev/null || fail "AFK paused stale did not preserve its plain window identity: $(cat "$out")"
+  [ "$(stale_reason_window "$(cat "$out")")" = "$window" ] \
+    || fail "AFK handoff reason no longer yields its window through the shared extractor: $(cat "$out")"
   grep -F "awaiting external" "$out" >/dev/null && fail "AFK watcher decorated a stale identity instead of handing it to the daemon"
   [ ! -e "$state/.paused-$key" ] || fail "AFK watcher recorded normal-mode pause tracking instead of handing off"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after AFK paused stale failed"
@@ -1270,6 +1275,65 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+# --- stale wake reasons carry the branch that produced them -------------------
+# Six paths emit a "stale:" wake and all of them used to open with an identical
+# "stale: <window>", so no consumer could tell which rule fired. The tag closes
+# that, but it also decorates reasons that were previously bare, so the window
+# must still be recoverable: bin/fm-supervise-daemon.sh backs a window out of the
+# reason on every away-mode wake and used a bare prefix strip, which was already
+# silently wrong for the decorated wedge and pause reasons and would now be wrong
+# for all six. stale_reason_window is the one owner of that extraction.
+test_stale_reason_branch_tags() {
+  local arm_reason_type out
+  [ "$(stale_reason nonterminal 'test:fm-a')" = 'stale: test:fm-a [branch=nonterminal]' ] \
+    || fail "undecorated stale reason did not render its branch tag"
+  [ "$(stale_reason wedge 'test:fm-a' 'idle 300s, possible wedge, escalation 2')" \
+    = 'stale: test:fm-a (idle 300s, possible wedge, escalation 2) [branch=wedge]' ] \
+    || fail "decorated stale reason did not render detail and branch tag"
+
+  # Extraction: tagged, detailed, both, and the bare legacy form a daemon test or
+  # an older watcher can still produce.
+  [ "$(stale_reason_window 'stale: test:fm-a [branch=nonterminal]')" = 'test:fm-a' ] \
+    || fail "branch tag was not stripped from a stale reason"
+  [ "$(stale_reason_window 'stale: test:fm-a (idle 300s, possible wedge, escalation 2) [branch=wedge]')" = 'test:fm-a' ] \
+    || fail "detail and branch tag were not stripped from a stale reason"
+  [ "$(stale_reason_window 'stale: test:fm-a (paused 3600s, awaiting external - declared pause)')" = 'test:fm-a' ] \
+    || fail "an untagged but detailed stale reason did not yield its window"
+  [ "$(stale_reason_window 'stale: test:fm-a')" = 'test:fm-a' ] \
+    || fail "a bare stale reason did not yield its window"
+  [ "$(stale_reason_window 'test:fm-a')" = 'test:fm-a' ] \
+    || fail "a plain window was not returned unchanged"
+
+  # The arm layer's lifecycle ledger is the only durable per-wake record, so the
+  # branch has to reach it for actionable wakes to be countable per rule. Source
+  # the arm script for its classifier only; its runtime stops at the source guard.
+  out=$(mktemp "$TMP_ROOT/arm-reason.XXXXXX")
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-watch-arm.sh"
+  printf 'stale: test:fm-a (idle 300s, possible wedge, escalation 2) [branch=wedge]\n' > "$out"
+  arm_reason_type=$(watch_output_reason_type "$out")
+  [ "$arm_reason_type" = 'actionable-stale-wedge' ] \
+    || fail "cycle ledger did not record the stale branch: $arm_reason_type"
+  printf 'stale: test:fm-a [branch=pause-resurface]\n' > "$out"
+  [ "$(watch_output_reason_type "$out")" = 'actionable-stale-pause-resurface' ] \
+    || fail "cycle ledger did not record a hyphenated stale branch"
+  # An untagged reason keeps the classification it has always had, so a watcher
+  # and an arm layer at different versions cannot produce an unreadable row.
+  printf 'stale: test:fm-a\n' > "$out"
+  [ "$(watch_output_reason_type "$out")" = 'actionable-stale' ] \
+    || fail "an untagged stale reason lost its ledger classification"
+  # A malformed tag must not leak arbitrary text into a ledger field.
+  printf 'stale: test:fm-a [branch=NOT A BRANCH]\n' > "$out"
+  [ "$(watch_output_reason_type "$out")" = 'actionable-stale' ] \
+    || fail "a malformed branch tag was copied into the ledger"
+  printf 'signal: %s/a.status\n' "$TMP_ROOT" > "$out"
+  [ "$(watch_output_reason_type "$out")" = 'actionable-signal' ] \
+    || fail "signal classification changed"
+  rm -f "$out"
+  pass "stale wake reasons carry, and give back, the classification branch that produced them"
+}
+
+test_stale_reason_branch_tags
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier

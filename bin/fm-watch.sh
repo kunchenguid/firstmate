@@ -140,6 +140,27 @@ PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT
 # 5c trigger 3: proven-unreliable-at-runtime). A watcher restart re-probes
 # capability, so a transient herdr hiccup self-heals on the next cycle chain.
 EVENT_CAP_FAIL_MAX=${FM_EVENT_CAP_FAIL_MAX:-3}
+# Slow-poll telemetry threshold. The only supervision question a per-poll
+# duration answers is "can this loop still hold its cadence" - the saturation
+# signal that would justify a second supervisor process or a supervisor
+# hierarchy. That question needs the measurement ONLY once a poll approaches
+# FM_POLL, so a healthy poll records nothing: stamping every poll would write
+# ~5,700 lines a day into state/.watch-triage.log and evict the absorbed-wake
+# history that log exists for, well inside FM_WATCH_TRIAGE_LOG_MAX_BYTES.
+# Default is two thirds of the poll interval, the same fraction the saturation
+# gate is stated against. Set FM_SLOW_POLL_SECS=0 to record every poll.
+SLOW_POLL_SECS=${FM_SLOW_POLL_SECS:-}
+if [ -z "$SLOW_POLL_SECS" ]; then
+  # FM_POLL may be fractional - tests drive sub-second cadences - so derive the
+  # default only from a whole-second interval and otherwise use the threshold the
+  # saturation gate is stated at directly.
+  case "$POLL" in
+    ''|*[!0-9]*) SLOW_POLL_SECS=10 ;;
+    *) SLOW_POLL_SECS=$(( POLL * 2 / 3 )) ;;
+  esac
+  [ "$SLOW_POLL_SECS" -ge 1 ] || SLOW_POLL_SECS=1
+fi
+case "$SLOW_POLL_SECS" in ''|*[!0-9]*) SLOW_POLL_SECS=10 ;; esac
 # Per-process memo for the push-capability probe (fm_backend_events_capable runs
 # a ~220KB `herdr api schema` read, too heavy to repeat every poll). Keyed by
 # "<backend>:<session>"; re-probed only when that key changes.
@@ -269,9 +290,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
-        reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
+        reason=$(stale_reason wedge "$win" "idle ${age}s, possible wedge, escalation $n")
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+          reason=$(stale_reason wedge "$win" "idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone")
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
@@ -304,7 +325,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   rf="$STATE/.paused-resurfaced-$key"
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
   if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
-    reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
+    reason=$(stale_reason pause-resurface "$win" "paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds")
     fm_wake_append stale "$win" "$reason" || exit 1
     date +%s > "$rf"
     wake "$reason"
@@ -379,9 +400,10 @@ pause_state_class() {  # <window> <task>
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last
+  local win=$1 h=$2 key task last reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
-  fm_wake_append stale "$win" "stale: $win" || exit 1
+  reason=$(stale_reason nonterminal "$win")
+  fm_wake_append stale "$win" "$reason" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
   task=$(window_to_task "$win" "$STATE")
@@ -393,7 +415,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   else
     rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
   fi
-  wake "stale: $win"
+  wake "$reason"
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
@@ -692,6 +714,8 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+  cycle_started=$(date +%s)
+  cycle_windows=0
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery
@@ -829,6 +853,7 @@ EOF
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified).
   while IFS= read -r w; do
+    cycle_windows=$(( cycle_windows + 1 ))
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     key=${w//:/_}
@@ -869,9 +894,10 @@ EOF
         elif afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w" || exit 1
+            reason=$(stale_reason afk "$w")
+            fm_wake_append stale "$w" "$reason" || exit 1
             printf '%s' "$h" > "$sf"
-            wake "stale: $w"
+            wake "$reason"
           fi
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's last line is captain-relevant - but that alone is not
@@ -894,11 +920,12 @@ EOF
               date +%s > "$ssf"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
+              reason=$(stale_reason terminal "$w")
+              fm_wake_append stale "$w" "$reason" || exit 1
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
-              wake "stale: $w"
+              wake "$reason"
             fi
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
@@ -1009,8 +1036,25 @@ EOF
     else
       touch "$STATE/.last-heartbeat"
       echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
-      triage_log "absorbed heartbeat (no captain-relevant change)"
+      # The heartbeat line carries this home's recorded endpoint count. Fleet
+      # size is instantaneously readable at any time by counting state/*.meta,
+      # but it was never RECORDED, so no historical series existed to check the
+      # concurrency thresholds that gate a batch supervisor or a supervisor
+      # hierarchy against. The heartbeat is the right carrier precisely because
+      # it is rare and already backs off on an idle fleet: those thresholds are
+      # stated as sustained levels over days, which coarse periodic sampling
+      # answers, and no separate collector or cadence is introduced for it.
+      triage_log "absorbed heartbeat (no captain-relevant change) fleet=$cycle_windows"
     fi
+  fi
+
+  # Saturation telemetry, recorded only when this poll's classification work
+  # approached the poll interval. A cycle that ends in a wake never reaches here
+  # because wake() exits the process, which is correct: the question is whether
+  # the ABSORBING loop can hold its cadence, not how long a surfaced cycle took.
+  cycle_elapsed=$(( $(date +%s) - cycle_started ))
+  if [ "$cycle_elapsed" -ge "$SLOW_POLL_SECS" ]; then
+    triage_log "slow poll: ${cycle_elapsed}s of ${POLL}s over $cycle_windows recorded endpoint(s)"
   fi
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
