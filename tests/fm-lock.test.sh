@@ -366,6 +366,160 @@ EOF
   pass "unconditional clear is unavailable and preserves the recorded owner"
 }
 
+flock_helper_present() {
+  command -v perl >/dev/null 2>&1
+}
+
+# Hold the flock(2) form of a mutex file from a disposable process; prints
+# nothing, touches $2 once the lock is held, then sleeps until killed.
+write_flock_holder() {
+  local holder=$1
+  cat > "$holder" <<'SH'
+#!/usr/bin/env bash
+exec 9<>"$1" || exit 3
+perl -e '
+use Fcntl qw(:flock);
+open(my $fh, "+<&=", 9) or exit 3;
+flock($fh, LOCK_EX | LOCK_NB) or exit 1;
+' || exit 1
+touch "$2"
+exec sleep 300
+SH
+  chmod +x "$holder"
+}
+
+test_flock_reclaim_mutex_busy_then_released_by_death() {
+  local rec home fakebin out rc=0 marker holder
+  if ! flock_helper_present; then
+    pass "flock helper unavailable here; mkdir fallback tests cover this home"
+    return 0
+  fi
+  rec=$(new_home flock-death-release)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  make_ps_denied "$fakebin"
+  printf '999999\n' > "$home/state/.lock"
+  marker="$TMP_ROOT/flock-death-release/held"
+  holder="$TMP_ROOT/flock-death-release/holder.sh"
+  write_flock_holder "$holder"
+  "$holder" "$home/state/.lock-reclaim" "$marker" &
+  HOLDER_PID=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ -e "$marker" ] && break
+    sleep 0.1
+  done
+  [ -e "$marker" ] || fail "flock holder did not report holding the reclaim mutex"
+
+  out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "reclaim proceeded while a live process held the flock mutex"
+  assert_contains "$out" "LOCK_RESULT=RECLAIM_BUSY" "live flock mutex contention was not typed as RECLAIM_BUSY"
+  assert_grep "999999" "$home/state/.lock" "flock mutex contention overwrote the session lock"
+
+  kill -9 "$HOLDER_PID" 2>/dev/null || true
+  wait "$HOLDER_PID" 2>/dev/null || true
+  HOLDER_PID=
+
+  rc=0
+  out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
+  expect_code 0 "$rc" "reclaim after flock holder death"
+  assert_contains "$out" "LOCK_RESULT=OWNED" "killed flock holder left an orphaned reclaim mutex jam"
+  assert_grep "codex-thread:current-thread" "$home/state/.lock" "post-death reclaim did not install the current owner"
+  [ ! -e "$home/state/.lock-reclaim" ] || fail "reclaim mutex file was left behind after clean release"
+  pass "kernel releases the flock reclaim mutex on holder death; no orphan jam"
+}
+
+test_flock_crash_leftover_files_recover() {
+  local rec home fakebin out rc=0
+  if ! flock_helper_present; then
+    pass "flock helper unavailable here; mkdir fallback tests cover this home"
+    return 0
+  fi
+  rec=$(new_home flock-crash-leftovers)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  make_ps_denied "$fakebin"
+  printf '999999\n' > "$home/state/.lock"
+  # As after kill -9: both mutex files exist on disk but nothing holds them.
+  : > "$home/state/.lock.acquire"
+  : > "$home/state/.lock-reclaim"
+
+  out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
+
+  expect_code 0 "$rc" "acquire over unlocked crash-leftover mutex files"
+  assert_contains "$out" "LOCK_RESULT=OWNED" "crash-leftover mutex files jammed the acquisition"
+  assert_grep "codex-thread:current-thread" "$home/state/.lock" "crash-leftover recovery did not install the owner"
+  [ ! -e "$home/state/.lock.acquire" ] || fail "claim mutex file was left behind after clean release"
+  [ ! -e "$home/state/.lock-reclaim" ] || fail "reclaim mutex file was left behind after clean release"
+  pass "crash-leftover flock mutex files are unlocked and never jam"
+}
+
+test_fallback_without_helper_recovers_and_stays_typed() {
+  local rec home fakebin out rc=0
+  rec=$(new_home fallback-no-flock)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  make_ps_denied "$fakebin"
+  printf '999999\n' > "$home/state/.lock"
+  mkdir "$home/state/.lock-reclaim"
+  printf '888888\n' > "$home/state/.lock-reclaim/pid"
+  printf '1\n' > "$home/state/.lock-reclaim/started"
+
+  out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_LOCK_NO_FLOCK=1 FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
+  expect_code 0 "$rc" "mkdir fallback reclaim without the flock helper"
+  assert_contains "$out" "LOCK_RESULT=OWNED" "mkdir fallback did not reclaim a stale owner"
+  assert_grep "codex-thread:current-thread" "$home/state/.lock" "mkdir fallback did not install the owner"
+  [ ! -e "$home/state/.lock-reclaim" ] || fail "mkdir fallback left the recovered mutex behind"
+
+  # A live directory-form owner still yields the typed busy result.
+  rc=0
+  printf '999999\n' > "$home/state/.lock"
+  mkdir "$home/state/.lock-reclaim"
+  printf '%s\n' "$$" > "$home/state/.lock-reclaim/pid"
+  date +%s > "$home/state/.lock-reclaim/started"
+  out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_LOCK_NO_FLOCK=1 FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "mkdir fallback overrode a live mutex owner"
+  assert_contains "$out" "LOCK_RESULT=RECLAIM_BUSY" "mkdir fallback lost the typed busy result"
+  rm -rf "$home/state/.lock-reclaim"
+  pass "mkdir fallback works without the flock helper and keeps typed results"
+}
+
+test_concurrent_acquisitions_admit_one_winner() {
+  local rec home fakebin outdir i owned rc=0 winner
+  rec=$(new_home concurrent-single-winner)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  make_ps_denied "$fakebin"
+  outdir="$TMP_ROOT/concurrent-single-winner/out"
+  mkdir -p "$outdir"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    (
+      CODEX_THREAD_ID="thread-$i" FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+        "$LOCK" > "$outdir/$i.out" 2>&1
+    ) &
+  done
+  wait
+  owned=$(grep -l 'LOCK_RESULT=OWNED' "$outdir"/*.out | wc -l | tr -d ' ')
+  [ "$owned" = 1 ] || fail "expected exactly one OWNED winner, got $owned"
+  winner=$(cat "$home/state/.lock")
+  case "$winner" in
+    codex-thread:thread-*) ;;
+    *) fail "published owner '$winner' is not one of the contenders" ;;
+  esac
+  rc=0
+  grep -q "LOCK_RESULT=OWNED" "$outdir/${winner#codex-thread:thread-}.out" || rc=$?
+  expect_code 0 "$rc" "published owner matches the OWNED contender"
+  pass "concurrent acquisitions admit exactly one winner"
+}
+
 run_one() {
   case "$1" in
     stale-numeric) test_stale_numeric_owner_with_denied_ps_is_reclaimed ;;
@@ -382,6 +536,10 @@ run_one() {
     orphan-mutex-free) test_orphan_reclaim_mutex_with_free_lock_recovers ;;
     live-mutex) test_live_reclaim_mutex_owner_is_not_taken ;;
     typed-failures) test_reclaim_failure_paths_always_emit_lock_result ;;
+    flock-death-release) test_flock_reclaim_mutex_busy_then_released_by_death ;;
+    flock-crash-leftovers) test_flock_crash_leftover_files_recover ;;
+    fallback-no-flock) test_fallback_without_helper_recovers_and_stays_typed ;;
+    single-winner) test_concurrent_acquisitions_admit_one_winner ;;
     *) fail "unknown test selector: $1" ;;
   esac
 }
@@ -403,4 +561,8 @@ else
   test_orphan_reclaim_mutex_with_free_lock_recovers
   test_live_reclaim_mutex_owner_is_not_taken
   test_reclaim_failure_paths_always_emit_lock_result
+  test_flock_reclaim_mutex_busy_then_released_by_death
+  test_flock_crash_leftover_files_recover
+  test_fallback_without_helper_recovers_and_stays_typed
+  test_concurrent_acquisitions_admit_one_winner
 fi

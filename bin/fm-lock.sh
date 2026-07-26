@@ -16,21 +16,34 @@
 # Every reclaim path emits LOCK_RESULT= before exiting, including refused
 # --expected mismatches and mid-mutex rechecks that reclassify the new state.
 #
-# Mutating commands additionally serialize on state/.lock.acquire (the
-# fm-wake-lib mkdir lock) so concurrent acquisitions admit exactly one winner,
-# probe state/ writability before taking any lock, refuse a lock that is not a
-# regular file, and verify the published owner by reading the lock back after
-# every write.
+# Mutating commands additionally serialize on state/.lock.acquire so
+# concurrent acquisitions admit exactly one winner, probe state/ writability
+# before taking any lock, refuse a lock that is not a regular file, and verify
+# the published owner by reading the lock back after every write.
 #
-# Reclaim mutex (state/.lock-reclaim):
-#   mkdir-based mutex with owner PID and start timestamp written after create.
-#   Only a provably abandoned mutex may be removed and retaken: the recorded
-#   owner PID is dead, or (legacy/no-pid) the directory age meets the mid-
-#   acquire threshold. A live owner is never overridden. No flock (macOS).
-#   Emergency removal (only when the owner is proven dead or missing after age):
+# Short internal mutexes (state/.lock.acquire and state/.lock-reclaim):
+#   Preferred form is a kernel flock(2) on a regular file, taken through a
+#   small perl helper: macOS has flock(2) but ships no flock(1) CLI, and perl
+#   is already a soft dependency of bin/fm-wake-lib.sh. The kernel releases
+#   the lock automatically when the holding process dies, so a crashed holder
+#   can never leave an orphaned mutex; a leftover mutex file is unlocked and
+#   harmless. FM_LOCK_NO_FLOCK=1 forces the fallback below.
+#   Fallback (helper unavailable, or a legacy directory-form mutex already
+#   occupies the path): the original mkdir/symlink locks. state/.lock.acquire
+#   uses the fm-wake-lib lock; state/.lock-reclaim uses a mkdir mutex with
+#   owner PID and start timestamp written after create. Only a provably
+#   abandoned fallback mutex may be removed and retaken: the recorded owner
+#   PID is dead, or (legacy/no-pid) the directory age meets the mid-acquire
+#   threshold. A live owner is never overridden.
+#   Emergency removal of a fallback (directory-form) reclaim mutex, only when
+#   the owner is proven dead or missing after age:
 #     pid=$(cat state/.lock-reclaim/pid 2>/dev/null)
 #     if ! kill -0 "$pid" 2>/dev/null; then rm -rf state/.lock-reclaim; fi
 #   Prefer re-running fm-lock.sh so the same proof runs automatically.
+#
+# The main session lock state/.lock deliberately stays a durable on-disk
+# identity, never flock-based: it must outlive the individual commands that
+# read and write it, which an fd-held kernel lock cannot do.
 #
 # Usage: fm-lock.sh
 #          Acquire a free lock or atomically reclaim a proven-stale lock.
@@ -86,7 +99,94 @@ HOLDER_DETAIL=
 PID_IDENTITY=
 PID_IDENTITY_DETAIL=
 RECLAIM_HELD=0
+RECLAIM_LOCK_MODE=
 CLAIM_LOCK_HELD=0
+CLAIM_LOCK_MODE=
+
+# flock(2) helper for the two short internal mutexes: bash keeps the mutex
+# file open on a dedicated fd (8 = claim, 9 = reclaim) so the kernel holds the
+# lock exactly as long as this process lives; the perl child only performs the
+# flock(2) call on the inherited fd. After acquiring, the helper rechecks that
+# the fd still names the on-disk path (same inode, regular non-symlink file)
+# so an unlink-and-recreate race cannot let two holders share the mutex.
+# Exit: 0 acquired, 1 busy, 2 path identity changed, 3 fd unusable.
+# shellcheck disable=SC2016 # perl source; the $-expressions are perl's own.
+FLOCK_PERL='
+use Fcntl qw(:flock);
+my ($fd, $path) = @ARGV;
+open(my $fh, "+<&=", $fd + 0) or exit 3;
+flock($fh, LOCK_EX | LOCK_NB) or exit 1;
+my @held = stat($fh) or exit 2;
+my @disk = lstat($path) or exit 2;
+exit 2 unless -f _;
+exit 2 unless $held[0] == $disk[0] && $held[1] == $disk[1];
+exit 0;
+'
+
+flock_open_fd() {
+  case "$1" in
+    8) exec 8<> "$2" ;;
+    9) exec 9<> "$2" ;;
+    *) return 1 ;;
+  esac
+} 2>/dev/null
+
+flock_close_fd() {
+  case "$1" in
+    8) exec 8>&- ;;
+    9) exec 9>&- ;;
+  esac
+} 2>/dev/null
+
+# 0 = the perl flock(2) helper provably works here; 1 = use the mkdir
+# fallbacks. Probed once per invocation against a scratch file in state/.
+FLOCK_USABLE=
+flock_available() {
+  local probe
+  if [ -n "$FLOCK_USABLE" ]; then
+    return "$FLOCK_USABLE"
+  fi
+  FLOCK_USABLE=1
+  if [ "${FM_LOCK_NO_FLOCK:-0}" != 1 ] && command -v perl >/dev/null 2>&1; then
+    probe=$(mktemp "$STATE/.lock-flock-probe.XXXXXX" 2>/dev/null) || probe=
+    if [ -n "$probe" ]; then
+      if (flock_open_fd 8 "$probe" && perl -e "$FLOCK_PERL" 8 "$probe") 2>/dev/null; then
+        FLOCK_USABLE=0
+      fi
+      rm -f "$probe" 2>/dev/null || true
+    fi
+  fi
+  return "$FLOCK_USABLE"
+}
+
+# Try the flock(2) mutex at $1 on fd $2.
+# 0 = held; 1 = busy or lost a recreate race (retry); 2 = the path holds a
+# legacy directory-form mutex or cannot be opened (use the mkdir path).
+flock_try() {
+  local path=$1 fd=$2 rc=0
+  if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then
+    return 2
+  fi
+  flock_open_fd "$fd" "$path" || return 2
+  perl -e "$FLOCK_PERL" "$fd" "$path" 2>/dev/null || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
+  flock_close_fd "$fd"
+  if [ "$rc" -eq 3 ]; then
+    return 2
+  fi
+  return 1
+}
+
+# Unlink while still holding the lock, then close: a rival that already opened
+# the removed inode fails its post-flock identity recheck instead of sharing
+# the mutex with the next holder's fresh file.
+flock_release() {
+  local path=$1 fd=$2
+  rm -f "$path" 2>/dev/null || true
+  flock_close_fd "$fd"
+}
 
 usage() {
   cat <<'EOF'
@@ -402,21 +502,49 @@ release_reclaim_lock() {
   if [ "$RECLAIM_HELD" -ne 1 ]; then
     return 0
   fi
-  recorded=$(cat "$RECLAIM_LOCK/pid" 2>/dev/null || true)
-  if [ "$recorded" = "$mypid" ]; then
-    remove_reclaim_mutex
+  if [ "$RECLAIM_LOCK_MODE" = flock ]; then
+    flock_release "$RECLAIM_LOCK" 9
+  else
+    recorded=$(cat "$RECLAIM_LOCK/pid" 2>/dev/null || true)
+    if [ "$recorded" = "$mypid" ]; then
+      remove_reclaim_mutex
+    fi
   fi
   RECLAIM_HELD=0
+  RECLAIM_LOCK_MODE=
 }
 
 # Returns 0 held, 1 busy (live or mid-acquire), after one abandon-and-retry.
+# The flock(2) form is preferred; the mkdir form remains for a missing helper
+# and as the recovery path for a legacy directory-form mutex already on disk.
 acquire_reclaim_lock() {
-  local attempt=0
+  local attempt=0 flock_rc
+  RECLAIM_LOCK_MODE=
   while [ "$attempt" -lt 2 ]; do
     attempt=$((attempt + 1))
+    if flock_available; then
+      flock_rc=0
+      flock_try "$RECLAIM_LOCK" 9 || flock_rc=$?
+      if [ "$flock_rc" -eq 0 ]; then
+        RECLAIM_HELD=1
+        RECLAIM_LOCK_MODE=flock
+        return 0
+      fi
+      if [ "$flock_rc" -eq 1 ]; then
+        return 1
+      fi
+      # Legacy directory-form mutex on disk: recover it through the same
+      # abandoned-owner proof as the fallback, then retry the flock form.
+      if reclaim_mutex_is_provably_abandoned; then
+        remove_reclaim_mutex
+        continue
+      fi
+      return 1
+    fi
     if mkdir "$RECLAIM_LOCK" 2>/dev/null; then
       if write_reclaim_owner; then
         RECLAIM_HELD=1
+        RECLAIM_LOCK_MODE='mkdir'
         return 0
       fi
       remove_reclaim_mutex
@@ -464,16 +592,50 @@ write_owner() {
 
 release_claim_lock() {
   if [ "$CLAIM_LOCK_HELD" -eq 1 ]; then
-    fm_lock_release "$CLAIM_LOCK"
+    if [ "$CLAIM_LOCK_MODE" = flock ]; then
+      flock_release "$CLAIM_LOCK" 8
+    else
+      fm_lock_release "$CLAIM_LOCK"
+    fi
     CLAIM_LOCK_HELD=0
+    CLAIM_LOCK_MODE=
   fi
+}
+
+# Try the acquisition mutex once: preferred flock(2) form, with the
+# fm-wake-lib lock as fallback and as the recovery path for a legacy
+# mkdir/symlink-form lock already occupying the path.
+# 0 = held, 1 = busy (retry), 2 = flock-form mutex file present but the
+# helper is unavailable, so waiting can never resolve it.
+claim_lock_try() {
+  local flock_rc
+  CLAIM_LOCK_MODE=
+  if flock_available; then
+    flock_rc=0
+    flock_try "$CLAIM_LOCK" 8 || flock_rc=$?
+    if [ "$flock_rc" -eq 0 ]; then
+      CLAIM_LOCK_MODE=flock
+      return 0
+    fi
+    if [ "$flock_rc" -eq 1 ]; then
+      return 1
+    fi
+  fi
+  if fm_lock_try_acquire "$CLAIM_LOCK"; then
+    CLAIM_LOCK_MODE='mkdir'
+    return 0
+  fi
+  if ! flock_available && [ ! -L "$CLAIM_LOCK" ] && [ -f "$CLAIM_LOCK" ]; then
+    return 2
+  fi
+  return 1
 }
 
 # Gate every mutating command: prove state/ is writable before taking any lock,
 # then serialize the whole classify-and-write flow on the acquisition lock so
 # concurrent sessions admit exactly one winner.
 prepare_mutation() {
-  local probe
+  local probe claim_rc
   probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
     emit_result IDENTITY_UNAVAILABLE "cannot write session lock; operate read-only until resolved"
     exit "$EXIT_IDENTITY_UNAVAILABLE"
@@ -484,7 +646,18 @@ prepare_mutation() {
   }
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
-  fm_lock_acquire_wait "$CLAIM_LOCK"
+  while :; do
+    claim_rc=0
+    claim_lock_try || claim_rc=$?
+    if [ "$claim_rc" -eq 0 ]; then
+      break
+    fi
+    if [ "$claim_rc" -eq 2 ]; then
+      emit_result IDENTITY_UNAVAILABLE "state/.lock.acquire is a flock-form mutex file but the flock(2) helper is unavailable; operate read-only until resolved"
+      exit "$EXIT_IDENTITY_UNAVAILABLE"
+    fi
+    sleep 0.1
+  done
   CLAIM_LOCK_HELD=1
 }
 
