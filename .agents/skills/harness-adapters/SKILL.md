@@ -223,6 +223,19 @@ The tracked hook anchors to `pwd -P`, verifies that root is firstmate-shaped and
 Codex's primary watcher protocol is `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`, not `bin/fm-watch-arm.sh`.
 The checkpoint is deliberately foreground and bounded so Codex regains control regularly to process user messages and queued wakes.
 
+**GPT-5.6 Code Mode batching (verified 2026-07-25, codex-cli 0.144.4, `gpt-5.6-sol` xhigh).**
+On the interactive Code Mode/Responses Lite path, `gpt-5.6-sol` did not reliably batch independent nested tool calls from a generic parallelization request.
+The baseline probe used `codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox -m gpt-5.6-sol` with a read-only prompt to inspect `README.md`, `CONTRIBUTING.md`, and `.tasks.toml`, and its rollout contained three `custom_tool_call` items named `exec`, each containing one `tools.exec_command` call.
+The same probe with an explicit bounded-stage instruction produced one `exec` cell that built three `tools.exec_command` calls and awaited `Promise.allSettled`, confirming that the nested Code Mode mechanism can batch them:
+
+```text
+In Code Mode, within this bounded stage, run the three independent read-only shell tool calls concurrently in one exec cell using Promise.allSettled or Promise.all, inspect every result, and do not split the batch across outer tool calls. Keep dependent or mutating work sequential.
+```
+
+When dispatching or steering `gpt-5.6-*` on this interactive path, use that bounded-stage guidance for independent read-only calls, inspect every result, and keep dependencies, mutations, approvals, waits/resumes, and adaptive investigations sequential.
+Do not apply this observation to noninteractive `codex exec` without a separate check: the same local `codex-cli 0.144.4` probe used that path and emitted direct `command_execution` items in both the baseline and explicit-`Promise.allSettled` runs.
+This behavior is consistent with [Codex issue #32503](https://github.com/openai/codex/issues/32503), the current [Responses Lite parallel-tool-call guard](https://github.com/openai/codex/blob/main/codex-rs/core/src/client.rs#L3868-L3880), the current [sequential Code Mode exec example](https://github.com/openai/codex/blob/main/codex-rs/code-mode-protocol/src/description.rs#L2239-L2282), and OpenAI's [latest-model guidance](https://developers.openai.com/api/docs/guides/latest-model) to specify bounded stages and safe concurrency explicitly.
+
 ## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.6; 1.18.4 busy-queue re-verified 2026-07-20)
 
 | Fact | Value |
