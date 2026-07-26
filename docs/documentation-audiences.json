@@ -208,6 +208,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/captain-preference-units.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/cd-guard.md",
       "audience": "maintainer-architecture"
     },
@@ -230,6 +234,34 @@
     {
       "path": "docs/documentation-audiences.md",
       "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/examples/captain-preference-units/README.md",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/captain-preference-units/digest.md",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/captain-preference-units/relations/r-fixture-20260726-001.md",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/captain-preference-units/units/d-fixture-20260726-001.md",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/captain-preference-units/units/d-fixture-20260726-002.md",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/captain-preference-units/units/d-fixture-20260726-003.md",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/captain-preference-units/units/d-fixture-20260726-004.md",
+      "audience": "operator-example"
     },
     {
       "path": "docs/examples/crew-dispatch.json",
@@ -304,11 +336,11 @@
       "audience": "operator-current"
     },
     {
-      "path": "docs/verification/runtime-backends.md",
+      "path": "docs/verification/harness-builds.md",
       "audience": "maintainer-verification"
     },
     {
-      "path": "docs/verification/harness-builds.md",
+      "path": "docs/verification/runtime-backends.md",
       "audience": "maintainer-verification"
     },
     {

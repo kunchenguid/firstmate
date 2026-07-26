@@ -128,6 +128,10 @@ Before changing it, inspect the current file and rewrite or prune the matching b
 Shared captain preferences that apply across secondmate domains live only in the primary home's optional `data/captain-shared.md`.
 `secondmate-provisioning` owns its propagation contract, including the required header, read-only secondmate copies, quarantine diagnostics, and the rollout rule that existing homes trim `data/captain.md` by hand after first propagation rather than deleting private content automatically.
 
+A per-unit recording form for domain-local preferences is available and uses the agent-harness decision unit form unchanged (a preference is a decision whose retrigger is indefinite).
+The generator, home layout under `data/captain-units/`, and forward-only adoption rules are owned by [captain-preference-units.md](captain-preference-units.md).
+Session start still reads `data/captain.md` only; switching that read path is a separate cutover and is not part of the unit-form adoption.
+
 ## Operational learnings (data/learnings.md)
 
 Fleet-local operational facts and gotchas live locally in `data/learnings.md`; it is gitignored and printed after the captain-preference files in the session-start context digest.
