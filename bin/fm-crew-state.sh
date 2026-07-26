@@ -63,8 +63,17 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 
-ID=${1:-}
-[ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
+ID=""
+MODE=state
+for arg in "$@"; do
+  case "$arg" in
+    --progress) MODE=progress ;;
+    -*) echo "usage: fm-crew-state.sh <id> [--progress]" >&2; exit 2 ;;
+    *) [ -n "$ID" ] && { echo "usage: fm-crew-state.sh <id> [--progress]" >&2; exit 2; }
+       ID=$arg ;;
+  esac
+done
+[ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id> [--progress]" >&2; exit 2; }
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
@@ -86,9 +95,19 @@ emit() {  # <state> <source> [detail]
   exit 0
 }
 
+# In --progress mode every exit prints a progress fingerprint (see
+# crew_progress_fingerprint below), never a state line. The two bail-outs here
+# fire before a worktree is even resolved, so there is no evidence of progress to
+# report at all: an empty fingerprint compares equal to itself, which leaves the
+# caller's wedge escalation behaving exactly as it does today.
+progress_bail() { printf '////\n'; exit 0; }
+
 # --- meta resolution --------------------------------------------------------
 
-[ -f "$META" ] || emit unknown none "no metadata for $ID"
+if [ ! -f "$META" ]; then
+  [ "$MODE" = progress ] && progress_bail
+  emit unknown none "no metadata for $ID"
+fi
 
 meta_value() {  # <key>
   grep "^$1=" "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true
@@ -101,6 +120,7 @@ HARNESS=$(meta_value harness)
 
 # A torn-down (or never-created) worktree has no current state to read.
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
+  [ "$MODE" = progress ] && progress_bail
   emit unknown none "worktree gone (torn down?)"
 fi
 
@@ -206,6 +226,91 @@ strip_quotes() {
     \"*\") s=${s#\"}; s=${s%\"} ;;
   esac
   trim "$s"
+}
+
+# --- progress fingerprint (--progress) --------------------------------------
+#
+# A wedge escalation asks "has this worker stopped making progress". Progress is
+# a DIFFERENCE, and nothing in this system stored a previous value, so that
+# health verdict was structurally stateless: the escalation could only measure
+# elapsed wall-clock against an unchanged pane. A healthy worker driving a
+# no-mistakes run produces exactly that by construction, because the pipeline
+# owns the branch and renders nothing to the worker's own pane. The fingerprint
+# below is the missing previous value: a short token that is CONSTANT while
+# nothing advances and CHANGES when something does, so a caller holding two
+# reads can turn a stateless verdict into a transition.
+#
+# ONLY fields that are stable under no change may appear in it. The fields that
+# look most informative in `axi status` are precisely the ones that must not:
+#
+#   active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
+#     ci,running,2h3m,"quiet 1h25m ago: log: all CI checks passed - still monitoring
+#     until merged or closed","",starting
+#
+#   - active_for ("2h3m") and last_activity ("quiet 1h25m ago: ...") each embed a
+#     ticking elapsed counter, so they differ on EVERY read of an unchanged run.
+#     A fingerprint containing either differs every time it is compared, the
+#     caller's reset fires unconditionally, and a genuinely frozen worker then
+#     never escalates again. That is a false negative on the one signal that
+#     catches a frozen worker - strictly worse than the false positive it would
+#     be replacing, and invisible, because nothing reports an escalation that
+#     did not happen. Do not add them here however much more legible they look.
+#     They may be carried in human-facing detail text; they may not be compared.
+#   - agent_pid is empty on a live, healthy, running step, so its presence proves
+#     nothing about liveness.
+#   - round is the non-numeric token "starting" here, so it is compared as an
+#     opaque string and never parsed as an integer.
+#
+# What remains: the completed-step count (monotonic), the active step's name and
+# status, the opaque round token, and the worktree head. The head sha is what
+# covers scouts and pre-validation ship work, which have no attributed run at
+# all - for them a new commit is the only available evidence of progress.
+#
+# tests/fm-crew-state.test.sh asserts that two reads of an unchanged run produce
+# byte-identical output. That assertion is the direct guard against a ticking
+# field being reintroduced here, and it must not be dropped.
+
+# Number of completed rows in the steps[] table. Anchored at the row's own step
+# name so a comma inside a later quoted free-text column cannot match.
+nm_completed_step_count() {
+  printf '%s\n' "$RUN_OUT" | grep -cE '^[[:space:]]+[A-Za-z0-9_.-]+,[[:space:]]*"?completed"?[[:space:]]*,' || true
+}
+
+# The first active_steps[] row, or empty. A TOON table's rows are indented
+# deeper than their header, so the block ends at the first line indented no
+# further than the header - which is what keeps this from running on into
+# whatever key follows the table.
+nm_active_step_row() {
+  printf '%s\n' "$RUN_OUT" | awk '
+    /^[[:space:]]*active_steps\[/ { match($0, /^[[:space:]]*/); hdr = RLENGTH; inblk = 1; next }
+    inblk {
+      if ($0 ~ /^[[:space:]]*$/) { exit }
+      match($0, /^[[:space:]]*/)
+      if (RLENGTH <= hdr) { exit }
+      print
+      exit
+    }
+  '
+}
+
+crew_progress_fingerprint() {
+  local completed='' step='' status='' round='' head='' row rest
+  if [ "${HAVE_RUN:-0}" = 1 ] && [ "${RUN_SOURCE:-}" = full ]; then
+    completed=$(nm_completed_step_count | tr -d '[:space:]')
+    case "$completed" in ''|*[!0-9]*) completed='' ;; esac
+    row=$(trim "$(nm_active_step_row)")
+    if [ -n "$row" ]; then
+      step=$(strip_quotes "${row%%,*}")
+      rest=${row#*,}
+      status=$(strip_quotes "$(trim "${rest%%,*}")")
+      # round is the LAST column. last_activity is a quoted free-text column that
+      # can contain commas, so index the round token from the right; counting
+      # columns from the left would silently read part of that prose instead.
+      round=$(strip_quotes "${row##*,}")
+    fi
+  fi
+  head=$(git -C "$WT" rev-parse --short HEAD 2>/dev/null || true)
+  printf '%s/%s/%s/%s/%s\n' "$completed" "$step" "$status" "$round" "$head"
 }
 
 # Bounded no-mistakes call in the worktree; stdout only, never fails the script.
@@ -476,6 +581,16 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       fi
     fi
   fi
+fi
+
+# Attribution is everything the fingerprint needs, so --progress answers here
+# rather than falling through the state machine below. That skips the ci-step
+# log read, which is the one genuinely expensive call in this script and has no
+# bearing on whether the run advanced.
+if [ "$MODE" = progress ]; then
+  # shellcheck disable=SC2119 # No arguments: the fingerprint reads resolved globals.
+  crew_progress_fingerprint
+  exit 0
 fi
 
 # --- run-step authoritative path -------------------------------------------

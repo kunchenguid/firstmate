@@ -394,6 +394,30 @@ crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
 }
 
+# The crew's progress fingerprint - a token that is constant while nothing
+# advances and changes when something does. bin/fm-crew-state.sh's --progress
+# block is the single owner of what may and may not appear in it; read that
+# before touching this, because the obvious fields are the wrong ones.
+#
+# Empty on any failure, and empty compares equal to empty, so an unreadable
+# fingerprint leaves a caller's wedge escalation behaving exactly as it did
+# before this existed. That is the safe direction: treating "could not tell" as
+# progress would silence the escalation on a genuinely frozen worker, which is
+# the one failure this whole mechanism exists to keep detectable.
+#
+# NOT a pure read - it makes the same bounded no-mistakes call crew_absorb_class
+# does, minus the ci-log read - so callers use it only where the alternative is
+# spending a coordinator turn, never on every poll. FM_CREW_STATE_BIN lets tests
+# stub the answer; a stub or an older reader that does not know --progress
+# returns its ordinary state line instead, which is itself stable under no
+# change, so version skew degrades to a coarser signal rather than a wrong one.
+crew_progress_fingerprint() {  # <id>
+  local id=$1 out
+  [ -n "$id" ] || return 0
+  out=$("$FM_CREW_STATE_BIN" "$id" --progress 2>/dev/null) || true
+  printf '%s' "$out" | head -1 | tr -d '\r'
+}
+
 # 0 if crew <id>'s authoritative current state is a declared external-wait pause.
 # The stale path absorbs such a crew (on a long re-surface cadence) instead of
 # escalating a possible wedge.

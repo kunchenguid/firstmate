@@ -272,13 +272,47 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
-# both places a hash can be absorbed this way: the plain non-terminal path,
-# and the stale_is_terminal-overridden path (a captain-relevant status-log
-# line that an active run/busy pane outranked).
+# escalates once STALE_ESCALATE_SECS have elapsed. Shared by both places a hash
+# can be absorbed this way: the plain non-terminal path, and the
+# stale_is_terminal-overridden path (a captain-relevant status-log line that an
+# active run/busy pane outranked).
+#
+# The timer's own reset conditions are a pane-hash change and a busy signature -
+# precisely the two things a healthy worker driving a no-mistakes run cannot
+# produce, because the pipeline owns the branch and renders nothing to that
+# worker's pane. So the escalation fired on healthy validating workers, over and
+# over, on the same unchanged hash: 28 of 61 stale wakes across one measured
+# 22.5-hour window, concentrated on three panes, every inter-wake interval at or
+# above STALE_ESCALATE_SECS plus one coordinator turn.
+#
+# The fix is a third reset condition that a validating worker CAN produce:
+# forward progress in its pipeline. Progress is a difference, so it needs a
+# previous value; state/.progress-<key> is that value. See
+# crew_progress_fingerprint (bin/fm-classify-lib.sh) and bin/fm-crew-state.sh's
+# --progress block.
+#
+# Three properties of the comparison matter, and all three are deliberate:
+#   - It runs ONLY on the escalation branch, so the one bounded no-mistakes call
+#     it costs is spent at the exact moment the alternative is spending a whole
+#     coordinator turn. The repeat-poll path still re-reads nothing.
+#   - With no stored baseline it escalates, exactly as before. The first
+#     escalation of a chain is preserved on purpose: with nothing to compare
+#     against, absence of evidence is not evidence of progress, and suppressing
+#     it would trade this false positive for a false negative on a frozen worker.
+#     What the fingerprint suppresses is the REPEAT escalations, each backed by
+#     positive evidence that the run moved.
+#   - An empty or unreadable fingerprint compares equal and escalates.
+#
+# Known and accepted narrowing: a worker that freezes while its pipeline keeps
+# advancing is absorbed here. That shape is real, because the pipeline spawns its
+# own agents. It is accepted because the alternative today is escalating every
+# healthy validating worker, and because a run that reaches a gate and gets no
+# response is separately surfaced by the park scan. If evidence ever shows
+# workers freezing under advancing pipelines, the fix is one more deterministic
+# term in the fingerprint, not a supervisor above this one.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
+  local progress_file fp prev_fp
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -288,6 +322,17 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        progress_file="$STATE/.progress-$(printf '%s' "$win" | tr ':/.' '___')"
+        fp=$(crew_progress_fingerprint "$(window_to_task "$win" "$STATE")")
+        prev_fp=$(cat "$progress_file" 2>/dev/null || true)
+        if [ -n "$fp" ] && [ -n "$prev_fp" ] && [ "$fp" != "$prev_fp" ]; then
+          printf '%s' "$fp" > "$progress_file"
+          date +%s > "$since_file"
+          rm -f "$escalation_file"
+          triage_log "absorbed $label (advanced since the last check): $win"
+          return 0
+        fi
+        [ -n "$fp" ] && printf '%s' "$fp" > "$progress_file"
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
         reason=$(stale_reason wedge "$win" "idle ${age}s, possible wedge, escalation $n")
@@ -317,7 +362,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.progress-$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
@@ -347,7 +392,7 @@ clear_pause_tracking() {  # <window>
   key=${key//\//_}
   key=${key//./_}
   clear_pause_state "$win"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.progress-$key"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -874,6 +919,7 @@ EOF
     sf="$STATE/.stale-$key"
     ssf="$STATE/.stale-since-$key"
     ewf="$STATE/.wedge-escalations-$key"
+    pgf="$STATE/.progress-$key"   # last progress fingerprint seen for this key (wedge_timer_check)
     pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
     prev=$(cat "$hf" 2>/dev/null || true)
     if [ "$h" = "$prev" ]; then
@@ -986,7 +1032,7 @@ EOF
         fi
       else
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping.
-        rm -f "$ssf" "$ewf"
+        rm -f "$ssf" "$ewf" "$pgf"
         if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
           clear_pause_tracking "$w"
         fi
@@ -994,7 +1040,7 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      rm -f "$ssf" "$ewf"
+      rm -f "$ssf" "$ewf" "$pgf"
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && ! window_is_busy "$w" "$tail40"; then
         case "$(pause_state_class "$w" "$task")" in

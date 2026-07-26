@@ -1058,6 +1058,125 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
   pass "a pane becoming active again resets the consecutive wedge-escalation counter"
 }
 
+# --- the wedge escalation resets when the PIPELINE advances -------------------
+#
+# The escalation's only reset conditions were a pane-hash change and a busy
+# signature, and a healthy worker driving a no-mistakes run produces neither: the
+# pipeline owns the branch and renders nothing to the worker's pane. So a healthy
+# validating worker escalated on the same unchanged hash every threshold, forever
+# - 28 of 61 stale wakes across one measured 22.5-hour window.
+#
+# The pair below pins both directions, because getting only the first is exactly
+# how this fix turns into a worse defect than the one it replaces:
+#   forward   - a moved fingerprint absorbs the escalation and restarts the timer
+#   frozen    - an unchanged fingerprint escalates on the ordinary schedule
+# The frozen direction is also covered by every pre-existing wedge test in this
+# file, all of which run against a fixed fake fingerprint.
+test_wedge_escalation_resets_when_the_pipeline_advances() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case wedge-progress-reset); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-validating"
+  printf 'idle, pipeline owns the branch' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/validating.meta"
+  printf 'working: handed to validation\n' > "$state/validating.status"
+  sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$state/.seen-validating_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, pipeline owns the branch")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  export FM_FAKE_CREW_PROGRESS
+
+  # Round 1: no stored baseline. With nothing to compare against there is no
+  # evidence of progress, so this escalates exactly as it always did - absence of
+  # evidence must never be read as progress, or a frozen worker goes silent.
+  FM_FAKE_CREW_PROGRESS='3/ci/running/starting/aaaaaaa'
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "the first wedge round did not escalate without a progress baseline"
+  grep -F "[branch=wedge]" "$out" >/dev/null || fail "the first wedge round did not escalate"
+  [ "$(cat "$state/.progress-$key" 2>/dev/null || true)" = '3/ci/running/starting/aaaaaaa' ] \
+    || fail "the first escalation did not record a progress baseline for the next round"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] || fail "escalation count did not advance"
+
+  # Round 2: the pane is still byte-identical and the status log is unchanged,
+  # but the pipeline completed a step. That is positive evidence the worker is
+  # healthy, so the escalation is absorbed, the timer restarts, and the
+  # consecutive-escalation count clears.
+  : > "$out"; : > "$state/.wake-queue"
+  FM_FAKE_CREW_PROGRESS='4/ci/running/starting/aaaaaaa'
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an advancing pipeline still wedge-escalated: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "an advancing pipeline printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "an advancing pipeline enqueued a wake"
+  [ "$(cat "$state/.progress-$key" 2>/dev/null || true)" = '4/ci/running/starting/aaaaaaa' ] \
+    || fail "the progress baseline was not advanced on reset"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "forward progress did not clear the consecutive-escalation count"
+  [ -s "$state/.stale-since-$key" ] || fail "forward progress did not restart the wedge timer"
+  reap "$pid"
+
+  # Round 3: the pipeline stops moving. The same unchanged fingerprint is now
+  # evidence, not absence of it, so the escalation fires again on the ordinary
+  # schedule. This is the assertion that keeps the fix from becoming a permanent
+  # blind spot.
+  : > "$out"; : > "$state/.wake-queue"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a frozen pipeline stopped escalating after a progress reset"
+  grep -F "possible wedge" "$out" >/dev/null || fail "a frozen pipeline did not re-escalate: $(cat "$out")"
+  unset FM_FAKE_CREW_PROGRESS FM_FAKE_CREW_STATE
+  pass "the wedge escalation resets on pipeline progress and still fires on a frozen pipeline"
+}
+
+# An unreadable progress fingerprint must escalate, not absorb. The reset is only
+# ever taken on POSITIVE evidence that the run moved; "could not tell" has to
+# behave like the code did before the fingerprint existed, because the opposite
+# choice silences the escalation for every worker whose state cannot be read.
+test_wedge_escalation_unreadable_progress_still_escalates() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case wedge-progress-unreadable); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-unreadable"
+  printf 'idle building output' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/unreadable.meta"
+  printf 'working: still compiling\n' > "$state/unreadable.status"
+  sig=$(seen_sig "$state/unreadable.status"); printf '%s' "$sig" > "$state/.seen-unreadable_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  # A stored baseline exists, and the reader now answers with nothing at all.
+  printf '3/ci/running/starting/aaaaaaa' > "$state/.progress-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  export FM_FAKE_CREW_PROGRESS=''
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "an unreadable progress fingerprint suppressed the wedge escalation"
+  grep -F "possible wedge" "$out" >/dev/null || fail "an unreadable fingerprint did not escalate: $(cat "$out")"
+  [ "$(cat "$state/.progress-$key" 2>/dev/null || true)" = '3/ci/running/starting/aaaaaaa' ] \
+    || fail "an unreadable fingerprint overwrote the stored baseline with nothing"
+  unset FM_FAKE_CREW_PROGRESS FM_FAKE_CREW_STATE
+  pass "an unreadable progress fingerprint escalates and preserves the stored baseline"
+}
+
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case nonterminal-stale-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1352,6 +1471,8 @@ test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
+test_wedge_escalation_resets_when_the_pipeline_advances
+test_wedge_escalation_unreadable_progress_still_escalates
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces

@@ -1047,6 +1047,128 @@ SH
 }
 
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
+# --- --progress: the wedge escalation's missing previous value ---------------
+#
+# The fingerprint exists so a caller holding two reads can tell "this worker has
+# advanced" from "this worker is frozen". Everything it is allowed to contain
+# follows from one property: it must be BYTE-IDENTICAL across two reads of a run
+# that has not changed. The live `axi status` shape carries two fields that look
+# ideal and violate exactly that property - active_for and last_activity both
+# embed a ticking elapsed counter - and a fingerprint built from either differs
+# on every comparison, resets the escalation unconditionally, and leaves a
+# genuinely frozen worker unable to escalate ever again. That failure is silent,
+# because nothing reports an escalation that did not happen, so it has to be
+# caught here. This fixture reproduces the real shape verbatim, including the
+# empty agent_pid and the non-numeric "starting" round token observed live.
+run_ci_with_active_steps() {  # <branch> <active_for> <last_activity_age> [round] [ci-status] [completed]
+  local completed=${6:-3}
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/2"
+  findings: none
+  steps[4]{step,status,findings,duration_ms}:
+    intent,completed,0,4
+    review,completed,0,317805
+$( [ "$completed" -ge 3 ] && printf '    push,completed,0,2474\n' || printf '    push,running,0,0\n' )
+    ci,${5:-running},0,0
+  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
+    ci,${5:-running},$2,"quiet $3 ago: log: all CI checks passed - still monitoring until merged or closed","",${4:-starting}
+EOF
+}
+
+run_progress() {  # <case-dir> <id>
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2" --progress
+}
+
+test_progress_fingerprint_is_stable_under_no_change() {
+  reset_fakes
+  local d first second; d=$(new_case progress-stable)
+  make_repo_on_branch "$d/wt" fm/prog-a
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/prog-a.meta" "window=fm:fm-prog-a" "worktree=$d/wt" "kind=ship"
+
+  FM_FAKE_AXI_STATUS="$(run_ci_with_active_steps fm/prog-a 1h22m 43m56s)"
+  first=$(run_progress "$d" prog-a)
+  # Only the two ticking fields move. Nothing about the run has advanced.
+  FM_FAKE_AXI_STATUS="$(run_ci_with_active_steps fm/prog-a 2h3m 1h25m)"
+  second=$(run_progress "$d" prog-a)
+  [ "$first" = "$second" ] \
+    || fail "a ticking elapsed field reached the fingerprint: '$first' then '$second' - the wedge escalation would now reset on every poll and never fire again"
+  assert_contains "$first" "ci" "fingerprint lost the active step name"
+  case "$first" in
+    *1h22m*|*43m56s*|*2h3m*|*1h25m*) fail "fingerprint embedded an elapsed counter: $first" ;;
+  esac
+  pass "--progress is byte-identical across two reads of an unchanged run (ticking fields excluded)"
+}
+
+test_progress_fingerprint_moves_on_real_progress() {
+  reset_fakes
+  local d base advanced; d=$(new_case progress-advances)
+  make_repo_on_branch "$d/wt" fm/prog-b
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/prog-b.meta" "window=fm:fm-prog-b" "worktree=$d/wt" "kind=ship"
+
+  FM_FAKE_AXI_STATUS="$(run_ci_with_active_steps fm/prog-b 10m 1m starting running 2)"
+  base=$(run_progress "$d" prog-b)
+  # A step completed: the monotonic completed-step count moves even though the
+  # active step, its status and its round are all unchanged.
+  FM_FAKE_AXI_STATUS="$(run_ci_with_active_steps fm/prog-b 10m 1m starting running 3)"
+  advanced=$(run_progress "$d" prog-b)
+  [ "$base" != "$advanced" ] || fail "a completed step did not move the fingerprint: $base"
+  # The active step's status moved.
+  FM_FAKE_AXI_STATUS="$(run_ci_with_active_steps fm/prog-b 10m 1m starting fixing 3)"
+  [ "$(run_progress "$d" prog-b)" != "$advanced" ] || fail "an active-step status change did not move the fingerprint"
+  # The round token moved. It is an opaque string here, never parsed as an int.
+  FM_FAKE_AXI_STATUS="$(run_ci_with_active_steps fm/prog-b 10m 1m 2 running 3)"
+  [ "$(run_progress "$d" prog-b)" != "$advanced" ] || fail "a round-token change did not move the fingerprint"
+  pass "--progress moves when a step completes, an active step changes status, or the round advances"
+}
+
+test_progress_fingerprint_without_a_run_tracks_commits() {
+  reset_fakes
+  local d before after same; d=$(new_case progress-no-run)
+  make_repo_on_branch "$d/wt" fm/prog-c
+  make_fakebin "$d" >/dev/null
+  # kind=scout never drives a run of its own, so the head sha is the only
+  # available evidence of forward progress. Same for a ship task that has not
+  # started validating yet.
+  fm_write_meta "$d/state/prog-c.meta" "window=fm:fm-prog-c" "worktree=$d/wt" "kind=scout"
+  before=$(run_progress "$d" prog-c)
+  same=$(run_progress "$d" prog-c)
+  [ "$before" = "$same" ] || fail "no-run fingerprint was unstable: '$before' then '$same'"
+  git -C "$d/wt" commit -q --allow-empty -m "scout progress"
+  after=$(run_progress "$d" prog-c)
+  [ "$before" != "$after" ] || fail "a new commit did not move the no-run fingerprint: $before"
+  pass "--progress with no attributed run is stable, and moves on a new commit"
+}
+
+test_progress_fingerprint_degrades_gracefully() {
+  reset_fakes
+  local d out; d=$(new_case progress-degraded)
+  make_repo_on_branch "$d/wt" fm/prog-d
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/prog-d.meta" "window=fm:fm-prog-d" "worktree=$d/wt" "kind=ship"
+  # A run with no active_steps[] table at all: the run-derived terms are empty
+  # and the fingerprint still compares equal to itself, so the caller's
+  # escalation behaves exactly as it did before this existed.
+  FM_FAKE_AXI_STATUS="$(run_running fm/prog-d)"
+  out=$(run_progress "$d" prog-d)
+  [ "$out" = "$(run_progress "$d" prog-d)" ] || fail "a run without active_steps[] produced an unstable fingerprint"
+
+  # Torn-down worktree and missing metadata report no evidence rather than a
+  # state line, and exit 0 so a caller can compare the result unconditionally.
+  fm_write_meta "$d/state/gone-d.meta" "window=fm:fm-gone-d" "worktree=$d/no-such-worktree" "kind=ship"
+  out=$(run_progress "$d" gone-d) || fail "--progress on a torn-down worktree did not exit 0"
+  [ "$out" = "////" ] || fail "--progress on a torn-down worktree did not report empty evidence: $out"
+  out=$(run_progress "$d" never-existed) || fail "--progress on missing metadata did not exit 0"
+  [ "$out" = "////" ] || fail "--progress on missing metadata did not report empty evidence: $out"
+  pass "--progress degrades to empty evidence rather than to a false reset"
+}
+
 test_scout_skips_run_lookup() {
   reset_fakes
   local d; d=$(new_case scout)
@@ -1269,6 +1391,10 @@ test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
+test_progress_fingerprint_is_stable_under_no_change
+test_progress_fingerprint_moves_on_real_progress
+test_progress_fingerprint_without_a_run_tracks_commits
+test_progress_fingerprint_degrades_gracefully
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta

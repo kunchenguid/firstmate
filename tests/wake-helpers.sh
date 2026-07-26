@@ -100,13 +100,39 @@ SH
 # A per-id override FM_FAKE_CREW_STATE_<sanitized-id> wins; otherwise the shared
 # FM_FAKE_CREW_STATE; otherwise an unknown verdict (NOT provably working), the
 # safe default so a test that forgets to set one surfaces rather than absorbs.
+# The fake also answers `--progress` with FM_FAKE_CREW_PROGRESS (per-id override
+# FM_FAKE_CREW_PROGRESS_<sanitized-id>), the progress fingerprint the wedge
+# escalation compares across checks. Its default is a FIXED string, not the state
+# line and not anything derived from the clock: an unchanging fingerprint means
+# "no evidence of progress", which is the behaviour every pre-existing wedge test
+# was written against, so those tests keep asserting what they always did.
 make_fake_crew_state() {  # <fakebin>
   local fakebin=$1
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
-id=${1:-}
+id=""
+mode=state
+for a in "$@"; do
+  case "$a" in
+    --progress) mode=progress ;;
+    -*) ;;
+    *) [ -n "$id" ] || id=$a ;;
+  esac
+done
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
+if [ "$mode" = progress ]; then
+  # Set-but-empty is meaningful here and must not fall through to the default:
+  # it is how a test drives the unreadable-fingerprint case, which has to keep
+  # escalating rather than absorb.
+  var="FM_FAKE_CREW_PROGRESS_$key"
+  if [ -n "${!var+set}" ]; then val=${!var}
+  elif [ -n "${FM_FAKE_CREW_PROGRESS+set}" ]; then val=${FM_FAKE_CREW_PROGRESS}
+  else val='0/fake/fake/fake/fake'
+  fi
+  printf '%s\n' "$val"
+  exit 0
+fi
 var="FM_FAKE_CREW_STATE_$key"
 val=${!var:-${FM_FAKE_CREW_STATE:-}}
 printf '%s\n' "${val:-state: unknown · source: none · fake default}"
