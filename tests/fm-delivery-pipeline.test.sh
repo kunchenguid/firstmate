@@ -60,8 +60,8 @@ test_same_repo_serialization() {
     "delivery-pipeline lost the banked-approval hold"
   assert_grep 'held - waiting on <repo> #<n> to merge' "$SKILL" \
     "delivery-pipeline lost the hold-reason shape naming the blocking task"
-  assert_grep 'Two implementation tasks never run in the same repo at once:' "$AGENTS" \
-    "AGENTS.md lost the same-repo serialization rule"
+  assert_grep 'Two implementation tasks do not run in the same repo at once, save for the carve-out `delivery-pipeline` owns:' "$AGENTS" \
+    "AGENTS.md lost the same-repo serialization rule or its deferral to the skill"
   assert_grep 'a reason naming the blocking task' "$AGENTS" \
     "AGENTS.md hold rule lost the blocking-task reason"
   pass "same-repo serialization holds overflow with a reason naming the blocker"
@@ -86,13 +86,37 @@ test_planner_satisfies_scout_deliverable() {
     "delivery-pipeline no longer states the planner's brief shape"
   assert_grep '`--plan` applies only to ship briefs' "$SKILL" \
     "delivery-pipeline lost the ship-only --plan constraint"
-  assert_grep 'and a `data/<planner-id>/report.md` that stands alone' "$SKILL" \
+  assert_grep 'and the `data/<planner-id>/report.md` the generated brief already names' "$SKILL" \
     "planner brief no longer satisfies the scout report deliverable"
   pass "planner is briefed as a scout that leaves the report teardown requires"
 }
 
+test_planner_plan_path_is_absolute() {
+  # A planner is a scout in a scratch worktree, so a relative plan path lands in
+  # the worktree teardown discards.
+  assert_grep 'the plan at `<this-firstmate-home>/data/<planner-id>/plan.html`' "$SKILL" \
+    "the planner's plan artifact path is not stated in absolute form"
+  assert_grep 'Name the plan path in absolute form every time you hand it to a planner' "$SKILL" \
+    "delivery-pipeline lost the absolute-plan-path rule for planners"
+  assert_grep 'The plan is one live artifact per task at `<this-firstmate-home>/data/<planner-id>/plan.html`' "$SKILL" \
+    "the canonical plan location is no longer absolute"
+  pass "the planner's plan path is absolute at every mention"
+}
+
+test_plan_sections_depend_on_intake_shape() {
+  assert_grep 'Every plan artifact, whatever the intake shape, must contain at minimum:' "$SKILL" \
+    "delivery-pipeline lost the shape-independent plan minimum"
+  assert_grep 'An implementation plan must also contain:' "$SKILL" \
+    "the implementation-only plan sections are no longer marked implementation-only"
+  assert_grep 'A research or design plan writes no code and never reaches stage 5, so it omits those four as inapplicable and must instead contain:' "$SKILL" \
+    "a research plan is still forced to carry an implementer's files table"
+  assert_grep '- **Report outline** - the sections `data/<scout-id>/report.md` must carry.' "$SKILL" \
+    "the research plan shape lost its report outline"
+  pass "plan minimums are conditional on the intake shape"
+}
+
 test_plan_is_copied_to_the_ship_task() {
-  assert_grep "Copy the approved plan from the planner's \`data/<planner-id>/plan.html\` to the ship task's \`data/<ship-id>/plan.html\`" "$SKILL" \
+  assert_grep "Copy the approved plan from the planner's \`<this-firstmate-home>/data/<planner-id>/plan.html\` to the ship task's \`data/<ship-id>/plan.html\`" "$SKILL" \
     "delivery-pipeline no longer copies the approved plan into the ship task's data dir"
   assert_grep 'bin/fm-brief.sh <ship-id> <repo> --plan data/<ship-id>/plan.html' "$SKILL" \
     "delivery-pipeline lost the disambiguated ship-task brief invocation"
@@ -102,10 +126,18 @@ test_plan_is_copied_to_the_ship_task() {
 }
 
 test_hold_is_durable_and_bounded() {
-  assert_grep 'tasks-axi hold <ship-id> --reason "held - waiting on <repo> #<n> to merge" --kind captain' "$SKILL" \
-    "a held task is not recorded durably on the backlog"
-  assert_grep 'once it has been held 24 hours, surface it to the captain' "$SKILL" \
-    "delivery-pipeline lost the queue-age bound on holds"
+  # tasks-axi hold fails NOT_FOUND on an id the backlog does not carry, so the
+  # work item must be filed before the hold.
+  assert_grep 'File the work item on the backlog first and hold it only then' "$SKILL" \
+    "the hold is still recorded before the backlog item it targets exists"
+  assert_grep 'tasks-axi hold <ship-id> --reason "held - waiting on <repo> #<n> to merge" --kind load' "$SKILL" \
+    "a held task is not recorded durably on the backlog with the capacity hold kind"
+  assert_no_grep 'to merge" --kind captain' "$SKILL" \
+    "a slot wait is still recorded as a captain decision hold"
+  assert_grep 'the durable re-evaluation of queued work after every teardown and heartbeat enforces the bound' "$SKILL" \
+    "delivery-pipeline lost the queue-age bound on holds or its durable mechanism"
+  assert_grep 'when it finds a held item older than 24 hours it surfaces it to the captain with the blocking PR' "$SKILL" \
+    "delivery-pipeline lost the 24-hour escalation of an aged hold"
   assert_grep 'escalate it as a plan deviation for re-approval rather than starting silently on a stale plan.' "$SKILL" \
     "delivery-pipeline lost the banked-plan re-validation before auto-start"
   pass "holds are durable, age-bounded, and re-validated before auto-start"
@@ -161,6 +193,8 @@ test_universal_plan_gate
 test_same_repo_serialization
 test_research_produces_no_pr
 test_planner_satisfies_scout_deliverable
+test_planner_plan_path_is_absolute
+test_plan_sections_depend_on_intake_shape
 test_plan_is_copied_to_the_ship_task
 test_hold_is_durable_and_bounded
 test_p0_serialization_override

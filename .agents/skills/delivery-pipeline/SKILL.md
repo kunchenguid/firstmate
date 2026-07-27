@@ -54,23 +54,33 @@ Run planning on the dispatch profile that matches planning and scout work, per A
 
 A planner is a scout, scaffolded with `bin/fm-brief.sh <planner-id> <repo> --scout`.
 `--plan` applies only to ship briefs, so a planner or scout brief names any plan path in its task text instead of passing the flag.
-The generated scout definition of done is unchanged, so brief the planner for both artifacts: the plan at `data/<planner-id>/plan.html`, and a `data/<planner-id>/report.md` that stands alone - what it read, what it recommends, and the plan's path.
+The generated scout definition of done is unchanged, so brief the planner for both artifacts: the plan at `<this-firstmate-home>/data/<planner-id>/plan.html`, and the `data/<planner-id>/report.md` the generated brief already names, standing alone with what it read, what it recommends, and the plan's path.
+Name the plan path in absolute form every time you hand it to a planner: its worktree is scratch that teardown discards, and the generated brief absolutizes only the report, so a relative plan path lands in the discarded worktree and leaves stage 4 nothing to copy.
 Without that report, `bin/fm-teardown.sh` refuses the planner's teardown and the decision-hold completion gate never passes.
 
-The plan is one live artifact per task at `data/<planner-id>/plan.html`, presented for review with `lavish-axi` (load the `lavish` skill for its mechanics).
+The plan is one live artifact per task at `<this-firstmate-home>/data/<planner-id>/plan.html`, presented for review with `lavish-axi` (load the `lavish` skill for its mechanics).
 It is overwritten in place across revisions, with a rev counter incremented on each revision; no revision history is kept.
 One task per artifact, at full depth - never fold multiple work items into one plan.
 
-Each plan artifact must contain, at minimum:
+Every plan artifact, whatever the intake shape, must contain at minimum:
 
 - **Why this work** - the outcome shipping it delivers.
+- **Success criteria** - mapped one-to-one to the acceptance criteria.
+- **Risks and gotchas** - what could go wrong and the mitigation.
+- **Approval control** - the surface the captain uses to approve.
+
+An implementation plan must also contain:
+
 - **Files table** - each file marked CREATE or MODIFY with its role.
 - **What's in each file** - the concrete change per file.
 - **Key code** - the load-bearing snippets the implementer will write.
-- **Success criteria** - mapped one-to-one to the acceptance criteria.
-- **Risks and gotchas** - what could go wrong and the mitigation.
 - **Deviation threshold** - the exact statement from stage 5 so the implementer inherits it.
-- **Approval control** - the surface the captain uses to approve.
+
+A research or design plan writes no code and never reaches stage 5, so it omits those four as inapplicable and must instead contain:
+
+- **Question** - the exact question the report has to answer.
+- **Sources and method** - what the scout reads, runs, and reproduces to answer it.
+- **Report outline** - the sections `data/<scout-id>/report.md` must carry.
 
 On the captain's verdict:
 
@@ -98,10 +108,11 @@ Everything else - how many repos run in parallel, research alongside code - stay
 
 - **Slot busy** - the task is held with its approval already banked, so it is not re-approved when it starts.
   Every hold states its reason naming the blocking task, in the shape `held - waiting on <repo> #<n> to merge`.
-  Record the hold durably before moving on, with `tasks-axi hold <ship-id> --reason "held - waiting on <repo> #<n> to merge" --kind captain`, so it survives a restart and the post-teardown queue pass finds it.
-  No hold sits silently: once it has been held 24 hours, surface it to the captain with the blocking PR's full URL and ask for a merge, a re-scope, or an explicit P0 override, then re-set that bound.
+  File the work item on the backlog first and hold it only then, the order `bin/fm-decision-hold.sh` uses, because `tasks-axi hold` fails `NOT_FOUND` on an id the backlog does not carry yet.
+  Record the hold durably with `tasks-axi hold <ship-id> --reason "held - waiting on <repo> #<n> to merge" --kind load`, the capacity kind for a slot wait; `--kind captain` belongs to the decision-hold lifecycle and would misread as a pending captain decision.
+  No hold sits silently, and no agent has to remember elapsed time: the durable re-evaluation of queued work after every teardown and heartbeat enforces the bound, and when it finds a held item older than 24 hours it surfaces it to the captain with the blocking PR's full URL and asks for a merge, a re-scope, or an explicit P0 override.
 - **Slot free** - dispatch exactly one implementation crewmate:
-  1. Copy the approved plan from the planner's `data/<planner-id>/plan.html` to the ship task's `data/<ship-id>/plan.html` under the active home, creating that directory first if it does not exist.
+  1. Copy the approved plan from the planner's `<this-firstmate-home>/data/<planner-id>/plan.html` to the ship task's `data/<ship-id>/plan.html` under the active home, creating that directory first if it does not exist.
      `fm-brief.sh` fails hard with `--plan file not found` when the copy is skipped, so it happens before the brief is scaffolded.
   2. Scaffold the brief with `bin/fm-brief.sh <ship-id> <repo> --plan data/<ship-id>/plan.html`, then replace `{TASK}` with the task description, acceptance criteria, and context per AGENTS.md section 11.
      fm-brief resolves a relative `--plan` path against the current working directory, so pass the plan's absolute path when invoking from any directory other than the active firstmate home.

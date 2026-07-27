@@ -228,7 +228,7 @@ Load `diagnostic-reasoning` before scoping a reported bug and before acting on a
 When work arrives in any shape for a named repo - an open issue, a reported bug, a research or design question, or a feature request - load `delivery-pipeline`; the skill owns the universal five-stage pipeline and the plan gate.
 No implementation crewmate is ever spawned, for any intake shape, before the captain approves a plan on record.
 
-Two implementation tasks never run in the same repo at once: dispatch when the repo's implementation slot is free, and otherwise hold the approved overflow with its approval banked and a reason naming the blocking task.
+Two implementation tasks do not run in the same repo at once, save for the carve-out `delivery-pipeline` owns: dispatch when the repo's implementation slot is free, and otherwise hold the approved overflow with its approval banked and a reason naming the blocking task.
 Planners and research read only and are uncapped; record blockers durably and re-evaluate a held task when its blocking PR merges.
 Write the task-specific brief under section 11 before spawning.
 
