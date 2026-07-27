@@ -46,7 +46,7 @@ fm_verified_harness_ancestry_pid() {
 # thread can keep using it and SessionEnd can release it deterministically.
 fm_session_lock_owner() {
   local pid
-  if [ -n "${CODEX_THREAD_ID:-}" ]; then
+  if [ "${GROK_AGENT:-}" != "1" ] && [ -n "${CODEX_THREAD_ID:-}" ]; then
     if pid=$(fm_verified_harness_ancestry_pid); then
       printf '%s|codex:%s|harness\n' "$pid" "$CODEX_THREAD_ID"
     else

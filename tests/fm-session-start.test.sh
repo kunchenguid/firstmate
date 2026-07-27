@@ -455,11 +455,24 @@ SH
 }
 
 test_grok_marker_precedes_inherited_codex_marker() {
-  local out
+  local rec root home fakebin out owner
   out=$(env -u CLAUDECODE -u PI_CODING_AGENT GROK_AGENT=1 CODEX_THREAD_ID=inherited-codex-thread \
     FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-harness.sh")
   [ "$out" = grok ] || fail "Grok marker should override an inherited Codex marker, got: $out"
-  pass "Grok marker takes precedence over an inherited Codex marker"
+
+  rec=$(new_world grok-inherited-codex-marker)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_ps_harness "$fakebin" grok
+  env -u CLAUDECODE -u PI_CODING_AGENT GROK_AGENT=1 CODEX_THREAD_ID=inherited-codex-thread \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS=grok \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" >/dev/null
+  owner=$(cat "$home/state/.lock")
+  case "$owner" in
+    ''|*[!0-9]*) fail "Grok lock owner should be a harness PID, got: $owner" ;;
+  esac
+  pass "Grok marker takes precedence over an inherited Codex marker in detection and lock ownership"
 }
 
 # prepare_session_start_secondmate <name>: a throwaway main home and Pi
