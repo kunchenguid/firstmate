@@ -218,6 +218,48 @@ test_docs_record_proof_owner() {
   pass "docs archive the isolation-proof owner and posture"
 }
 
+test_docs_match_archived_proof() {
+  python3 - "$PROOF_DOC" "$PROOF_JSON" <<'PY' \
+    || fail "proof Markdown must match the archived proof JSON"
+import json
+import re
+import sys
+
+markdown = open(sys.argv[1], encoding="utf-8").read()
+with open(sys.argv[2], encoding="utf-8") as stream:
+    proof = json.load(stream)
+
+summary = proof["summary"]
+posture = [
+    f'| `run_id` | `{proof["run_id"]}` |',
+    f'| `started_at` | `{proof["started_at"]}` |',
+    f'| `finished_at` | `{proof["finished_at"]}` |',
+    f'| concurrency | **{proof["concurrency"]}** |',
+    f'| candidates | **{summary["total"]}** |',
+    f'| failed | **{summary["failed"]}** |',
+    f'| wall duration_ms | **{summary["duration_ms"]}** (~{summary["duration_ms"] / 1000:.1f}s) |',
+    f'| `production_sharding_enabled` | `{str(proof["production_sharding_enabled"]).capitalize()}` |',
+    f'| `fm_test_run_jobs_enabled` | `{str(proof["fm_test_run_jobs_enabled"]).capitalize()}` |',
+    f'| host proof date | {proof["finished_at"][:10]} (UTC day of archive write) |',
+]
+assert all(line in markdown for line in posture)
+section = markdown.split("## Per-candidate durations (concurrent run)", 1)[1]
+section = section.split("## Audit notes (why this set)", 1)[0]
+actual = [
+    (int(duration), int(exit_code), int(worker), path)
+    for duration, exit_code, worker, path in re.findall(
+        r"^\| (\d+) \| (\d+) \| (\d+) \| `([^`]+)` \|$", section, re.MULTILINE
+    )
+]
+expected = [
+    (row["duration_ms"], row["exit"], row["worker"], row["path"])
+    for row in sorted(proof["scripts"], key=lambda row: row["duration_ms"], reverse=True)
+]
+assert actual == expected
+PY
+  pass "proof Markdown matches archived JSON posture and durations"
+}
+
 test_list_candidates_nonempty_and_stable
 test_candidates_exclude_serial_classes
 test_candidates_match_archived_proof
@@ -227,3 +269,4 @@ test_family_map_labels_this_contract
 test_aggregate_failure_under_concurrency
 test_phase4_consumes_proven_set_only
 test_docs_record_proof_owner
+test_docs_match_archived_proof

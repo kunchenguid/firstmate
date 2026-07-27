@@ -284,7 +284,7 @@ test_backend_detect_cmux_fallback_ancestry_pid_match() {
   # $$ is this test script's own pid - the walk starts there. The cmux app
   # pid (66666) is matched via the lsappinfo bundle-id resolution, with a
   # deliberately non-standard install path so only the pid can match.
-  printf '%s\t77777\t/bin/zsh\n77777\t66666\t/usr/bin/login\n66666\t1\t/Users/x/Custom.app/Contents/MacOS/custom\n' "$$" > "$table"
+  printf '%s\t77777\t/bin/zsh\n77777\t66666\t/usr/bin/login\n66666\t1\t/home/x/Custom.app/Contents/MacOS/custom\n' "$$" > "$table"
 
   (
     unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier
@@ -304,7 +304,7 @@ test_backend_detect_cmux_fallback_ancestry_comm_match() {
   # lsappinfo resolves nothing (empty output, like the real one for a
   # non-running or non-GUI-visible app); the bundle-shaped comm path is the
   # remaining match, at a non-/Applications install location on purpose.
-  printf '%s\t77777\t/bin/zsh\n77777\t66666\t/usr/bin/login\n66666\t1\t/Users/x/Applications/cmux.app/Contents/MacOS/cmux\n' "$$" > "$table"
+  printf '%s\t77777\t/bin/zsh\n77777\t66666\t/usr/bin/login\n66666\t1\t/home/x/Applications/cmux.app/Contents/MacOS/cmux\n' "$$" > "$table"
 
   (
     unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier FM_FAKE_LSAPPINFO_OUT
@@ -618,9 +618,23 @@ set -u
 case "${1:-}" in
   send-keys) exit 0 ;;
   display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
+    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '\xe2\x94\x82 \xe2\x94\x82\n'; exit 0 ;;
+  capture-pane)
+    start= end=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -S) start=$2; shift 2 ;;
+        -E) end=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ "$start" = 1 ] && [ "$end" = 1 ]; then
+      printf '│    │\n'
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
+    exit 0 ;;
   list-windows) exit 0 ;;
 esac
 exit 0
@@ -762,7 +776,7 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  fm_fake_treehouse "$fb" "$wt"
   printf '%s\n' "$fb"
 }
 
@@ -832,7 +846,7 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  fm_fake_treehouse "$fb" "$wt"
   printf '%s\n' "$fb"
 }
 

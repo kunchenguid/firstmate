@@ -32,6 +32,7 @@ Do not sweep another home's endpoints or infer ownership from a matching window 
 Before relaunch, prove that no live agent still owns the recorded task and that the existing worktree remains available.
 Preserve its uncommitted changes and commits, keep the same task identity, and resume or relaunch the recorded harness in that existing worktree with the same brief plus a concise progress note.
 Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
+Relaunching the same task id through `bin/fm-spawn.sh` enforces that boundary itself: it re-enters the recorded worktree only when the record proves the task is free, and otherwise refuses with every record and worktree left intact.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
 
 ## Live-endpoint escalation
@@ -47,3 +48,4 @@ Escalate in order:
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
    The worktree and commits persist, so relaunch is cheap.
 5. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.
+Before relaunching a legacy copy with no provable durable protection, adopt it through `bin/fm-adopt-worktree.sh`; that script's header owns the mechanics.

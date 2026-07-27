@@ -29,15 +29,19 @@ zsh
 
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Claude, Codex, OpenCode, and Grok were observed under their own process names.
+Kimi Code CLI 0.29.1 was observed under `kimi` on 2026-07-25.
 Pi remained a generic `node` process and is intentionally inconclusive.
 
-The OpenCode 1.18.4 busy-queue behavior and the tmux fallback are pinned by:
+The structural multi-row composer reader, Kimi pointer-delivery path, and OpenCode 1.18.4 busy-queue behavior are pinned by:
 
 ```sh
+tests/fm-composer-ghost.test.sh
+tests/fm-kimi-harness.test.sh
 tests/fm-tmux-submit-busy.test.sh
 ```
 
-Expected matrix: pending plus busy is accepted as queued; pending plus idle remains pending; a cleared composer succeeds in either state.
+Expected structural matrix: real text on any content row is pending; all-empty complete boxes are empty; unreadable, incomplete, or unsafe boxes are unknown; and non-bordered panes retain cursor-row compatibility.
+Expected submit matrix: proven pending plus busy is accepted as queued; proven pending plus idle remains pending; ambiguous pending is never converted by the busy exception; and only a proven empty composer succeeds directly.
 
 ## Herdr
 

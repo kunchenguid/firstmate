@@ -383,13 +383,13 @@ fm_backend_zellij_target_ready() {  # <target> [expected-label]
 
 # fm_backend_zellij_current_path: the live pane's cwd, or empty on any error.
 # Mirrors tmux's pane_current_path poll used for worktree-path discovery after
-# `treehouse get`.
+# the pane is sent into its task worktree.
 #
 # Verified pitfall (docs/zellij-backend.md "Worktree-path discovery: pane_cwd
 # does not track a subshell"): `list-panes --json`'s `pane_cwd` DOES reflect a
 # `cd` run directly in the pane's own top-level shell, but stays FROZEN at
-# whatever directory the pane's shell was in when it launched `treehouse get`
-# as a foreground command - it never follows that command's own internal `cd`
+# whatever directory the pane's shell was in when it launched a foreground
+# subshell such as legacy `treehouse get` - it never follows that command's internal `cd`
 # into the acquired worktree, even after the subshell is fully interactive and
 # a `pwd` typed into it prints the correct live path on screen. Zellij's CLI
 # exposes no per-pane pid and no live-process cwd field to read instead
@@ -462,8 +462,8 @@ fm_backend_zellij_send_key() {  # <target> <key> [expected-label]
 
 # fm_backend_zellij_send_text_line: send one line of TEXT then submit,
 # ATOMICALLY - mirrors tmux's `send-keys -t T text Enter` / herdr's `pane
-# run`. Used for the fixed spawn-time commands (treehouse get, the GOTMPDIR
-# export). Zellij has no single-call atomic "run and submit" action, so this
+# run`. Used for fixed spawn-time shell commands (worktree entry and the
+# GOTMPDIR export). Zellij has no single-call atomic "run and submit" action, so this
 # composes paste (literal) + send-keys Enter, exactly like send_literal +
 # send_key are composed elsewhere - the two-step form is the ONLY form for
 # this adapter, unlike tmux/herdr which have a genuinely atomic primitive.
@@ -501,8 +501,8 @@ fm_backend_zellij_capture() {  # <target> <lines> [expected-label]
 # also the load-bearing defense against the
 # unconditional-exit-0 CLI quirk documented in the file header: a truly dead
 # target never shows a change, so it correctly reports pending/unknown rather
-# than a false "sent". Echoes empty|pending|unknown|send-failed, the SAME
-# vocabulary fm-send.sh already branches on for tmux and herdr.
+# than a false "sent". Echoes empty|pending|unknown|send-failed, a subset of the
+# proof-carrying submit vocabulary.
 fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} typed after i=0
   fm_backend_zellij_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }

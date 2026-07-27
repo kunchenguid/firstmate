@@ -67,7 +67,7 @@ A pane can still disappear between verification and the operation; downstream su
 Every pane operation passes an explicit `--pane-id` because a new session can focus its release-notes plugin pane, whose numeric plugin id is in a separate namespace from terminal pane ids.
 
 `pane_cwd` follows a top-level shell `cd` but not the foreground subshell opened by `treehouse get`.
-Worktree discovery therefore sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
+Worktree discovery sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines so the same probe remains reliable for direct entry and legacy subshell-held worktrees.
 This active probe is scoped to spawn-time worktree discovery and is not advertised as a general live-cwd API.
 
 `new-tab` has no no-focus flag and temporarily focuses the created tab in attached clients.
@@ -77,7 +77,7 @@ There is a narrow visible race between those calls that no current Zellij flag c
 Literal send uses bracketed paste followed by a separate explicit Enter.
 The adapter supports `Enter`, `Esc`, and the one-argument key expression `Ctrl c` through the shared key vocabulary.
 Zellij exposes no cursor-row, ANSI composer style, or native agent-state signal, so submit acknowledgement remains content-delta based.
-This can distinguish no change from a changed screen but is less precise than tmux's cursor row or Herdr's native state plus structural classifier.
+This can distinguish no change from a changed screen but is less precise than tmux's structural box reader or Herdr's native state plus structural classifier.
 
 Viewport capture has no line-bound option.
 Routine reads use `dump-screen` and larger peeks use `dump-screen --full`, followed by local trimming.

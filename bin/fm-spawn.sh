@@ -59,7 +59,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|kimi)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -84,6 +84,29 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   A fresh ship/scout worktree is acquired as a DURABLE TREEHOUSE LEASE held by
+#   fm-<task-id>, and the pane is sent into it with cd. The interactive
+#   `treehouse get` subshell is deliberately not used: its lifetime ends with the
+#   subshell a pane falls back to when an agent exits normally, and its
+#   clean-and-return prompt defaults to yes, so one stray Enter would recycle the
+#   worktree and delete every untracked file in it. A lease survives with no live
+#   process, is never handed out by a later get or removed by prune, and is
+#   released only by teardown's explicit treehouse return. A failed lease is
+#   terminal for the spawn; there is no fallback to the interactive form. This
+#   spawn releases a lease it just acquired only when it aborts before recording
+#   the task AND the worktree holds no uncommitted or untracked content.
+#   A ship/scout spawn for a task id that already has state/<id>.meta is treated
+#   as a RELAUNCH of that recorded task, never as a fresh allocation. It re-enters
+#   the recorded worktree - preserving its uncommitted edits and unpushed commits -
+#   only when ownership is provable: the record is a readable regular file, its
+#   backend and kind match this spawn, its recorded endpoint is recovery-grade
+#   dead or missing, and its worktree entry is unambiguous and still an isolated
+#   worktree root. Otherwise the spawn refuses and leaves every record and
+#   worktree intact; use bin/fm-promote.sh, not a relaunch, to change a recorded
+#   scout into a ship.
+#   Backends without a recovery-grade endpoint classifier (zellij, orca, cmux)
+#   therefore never relaunch onto an existing record. A task id with no record
+#   takes the fresh-allocation path.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -101,7 +124,9 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
-# Per-harness turn-end hooks are installed automatically; some live outside the worktree.
+# Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
+# Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
+# a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
@@ -112,7 +137,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,109p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -138,6 +163,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-worktree-lease-lib.sh
+. "$SCRIPT_DIR/fm-worktree-lease-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -230,6 +257,8 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+WT_LEASED=
+TREEHOUSE_LEASE_ABORT_CLEANUP=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -297,6 +326,10 @@ spawn_abort_cleanup() {
         fi
       fi
     fi
+  fi
+  if [ "$TREEHOUSE_LEASE_ABORT_CLEANUP" = 1 ]; then
+    TREEHOUSE_LEASE_ABORT_CLEANUP=0
+    release_leased_task_worktree "${WT_LEASED:-}" || true
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
@@ -386,7 +419,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|kimi)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -447,6 +480,11 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # Kimi Code rejects a positional prompt, so it launches bare and receives
+    # only an absolute brief pointer after the TUI readiness gate below.
+    # Its turn-end signal is a globally configured Stop hook plus a guarded
+    # per-task worktree token, so no launch placeholder belongs here.
+    kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
     *) return 1 ;;
   esac
 }
@@ -530,11 +568,35 @@ shell_quote() {
   printf "'"
 }
 
+resolve_kimi_binary() {
+  local candidate dir fallback
+  candidate=$(command -v kimi 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  fallback="${HOME:-}/.kimi-code/bin/kimi"
+  if [ -n "${HOME:-}" ] && [ -x "$fallback" ]; then
+    printf '%s\n' "$fallback"
+    return 0
+  fi
+  echo "error: kimi executable not found; searched PATH for 'kimi' and fallback '$fallback'" >&2
+  return 1
+}
+
 model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    claude|codex|opencode|pi|grok|kimi)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -576,8 +638,23 @@ effort_flag_for_harness() {
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
+    # kimi likewise has no reasoning-effort flag; the requested axis stays in
+    # task metadata but never reaches the launch command.
   esac
 }
+
+case "$LAUNCH" in
+  *__KIMIBIN__*)
+    KIMI_BIN=$(resolve_kimi_binary) || exit 1
+    LAUNCH=${LAUNCH//__KIMIBIN__/$(shell_quote "$KIMI_BIN")}
+    if [ "$KIND" != secondmate ]; then
+      "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" install || {
+        echo "error: refusing Kimi spawn because the global turn-end hook could not be installed safely" >&2
+        exit 1
+      }
+    fi
+    ;;
+esac
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -754,6 +831,8 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
+BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
@@ -877,6 +956,118 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
       ;;
   esac
 }
+
+# --- recovery-relaunch ownership guard --------------------------------------
+#
+# A ship/scout spawn for a task id that ALREADY has state/<id>.meta is a
+# relaunch of an interrupted task, not a fresh dispatch. Without this guard the
+# relaunch runs the fresh-allocation path unchanged: `treehouse get` hands out
+# another free worktree and the meta write below truncates the record, so the
+# recorded worktree - which can hold uncommitted edits and unpushed commits -
+# is left with no durable owner, and if the recorded agent is in fact still
+# live the task ends up split across two copies. The backends' own duplicate
+# refusals do not cover this: tmux only refuses while the task WINDOW still
+# exists, which is exactly what an interrupted task no longer has, and
+# treehouse has no task identity at all.
+#
+# So an existing record is authoritative here. Reuse the recorded worktree when
+# - and only when - ownership is provable: the record is intact, its backend
+# matches this spawn, its endpoint is recovery-grade dead or missing
+# (fm_backend_agent_state), and the recorded path is still a real isolated
+# worktree. Anything else refuses and preserves every existing record and
+# worktree for reconciliation (stuck-crewmate-recovery). Backends with no
+# recovery-grade classifier (zellij, orca, cmux) therefore never relaunch onto
+# an existing record: their ownership cannot be proven, so they refuse.
+# A task id with no record continues through the fresh-allocation path.
+SPAWN_RECORDED_WT=
+SPAWN_RECORDED_LEASE_HOLDER=
+
+spawn_meta_field_exact() {  # <meta> <key>
+  local meta=$1 key=$2 count
+  count=$(grep -c "^${key}=" "$meta" 2>/dev/null || true)
+  [ "$count" = 1 ] || return 1
+  grep "^${key}=" "$meta" 2>/dev/null | cut -d= -f2-
+}
+
+spawn_relaunch_refuse() {  # <detail>
+  echo "error: task $ID already has a recorded worker: $1; refusing to allocate a fresh worktree or overwrite its record. Reconcile the recorded worktree first (see stuck-crewmate-recovery), then relaunch or tear the task down." >&2
+  exit 1
+}
+
+resolve_recorded_task_worktree() {
+  local meta="$STATE/$ID.meta" adoption="$STATE/$ID.worktree-adoption" expected_holder="fm-$ID"
+  local old_backend old_kind old_project old_project_real old_target old_state recorded recorded_real recorded_top recorded_top_real recorded_holder
+  { [ -e "$meta" ] || [ -L "$meta" ]; } || return 0
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] \
+    || spawn_relaunch_refuse "its record at $meta is not a readable regular file"
+  old_backend=$(fm_backend_of_meta "$meta")
+  [ "$old_backend" = "$BACKEND" ] \
+    || spawn_relaunch_refuse "its record was written by the $old_backend runtime, not the $BACKEND runtime selected here"
+  old_kind=$(spawn_meta_field_exact "$meta" kind) \
+    || spawn_relaunch_refuse "its record has no single kind entry"
+  # A relaunch never rewrites the contract: flipping a recorded ship to scout
+  # would drop teardown's unlanded-work protection from a task that has some
+  # (fm-teardown.sh), and the scout-to-ship direction is bin/fm-promote.sh's.
+  [ "$old_kind" = "$KIND" ] \
+    || spawn_relaunch_refuse "its record is a $old_kind task, not the $KIND task this spawn would record"
+  old_project=$(spawn_meta_field_exact "$meta" project) \
+    || spawn_relaunch_refuse "its record has no single project entry"
+  [ -n "$old_project" ] \
+    || spawn_relaunch_refuse "its record has an empty project entry"
+  old_project_real=$(cd "$old_project" 2>/dev/null && pwd -P) \
+    || spawn_relaunch_refuse "its recorded project $old_project cannot be inspected"
+  [ "$old_project_real" = "$PROJ_ABS_REAL" ] \
+    || spawn_relaunch_refuse "its recorded project $old_project does not match the requested project $PROJ_ABS"
+  old_target=$(fm_backend_target_of_meta "$meta")
+  [ -n "$old_target" ] || spawn_relaunch_refuse "its record has no endpoint to inspect"
+  old_state=$(fm_backend_agent_state "$old_backend" "$old_target")
+  case "$old_state" in
+    dead|missing) ;;
+    *) spawn_relaunch_refuse "its recorded endpoint $old_target is $old_state, so no live worker can be ruled out" ;;
+  esac
+  recorded=$(spawn_meta_field_exact "$meta" worktree) \
+    || spawn_relaunch_refuse "its record has no single worktree entry"
+  [ -n "$recorded" ] || spawn_relaunch_refuse "its record has an empty worktree entry"
+  recorded_real=$(cd "$recorded" 2>/dev/null && pwd -P) \
+    || spawn_relaunch_refuse "its recorded worktree $recorded cannot be inspected"
+  recorded_top=$(git -C "$recorded_real" rev-parse --show-toplevel 2>/dev/null || true)
+  recorded_top_real=$(cd "$recorded_top" 2>/dev/null && pwd -P) || recorded_top_real=
+  { [ -n "$recorded_top_real" ] && [ "$recorded_top_real" = "$recorded_real" ]; } \
+    || spawn_relaunch_refuse "its recorded worktree $recorded is no longer an isolated worktree root"
+  [ "$recorded_real" != "$PROJ_ABS_REAL" ] \
+    || spawn_relaunch_refuse "its recorded worktree $recorded resolves to the primary checkout"
+  recorded_holder=$(spawn_meta_field_exact "$meta" lease_holder 2>/dev/null || true)
+  if fm_worktree_proven_lease "$PROJ_ABS_REAL" "$recorded_real" "$expected_holder"; then
+    SPAWN_RECORDED_LEASE_HOLDER=$expected_holder
+  elif fm_worktree_adoption_proves "$adoption" "$ID" "$recorded_real" "$PROJ_ABS_REAL" "$expected_holder"; then
+    fm_worktree_pool_lookup "$PROJ_ABS_REAL" "$recorded_real" \
+      || spawn_relaunch_refuse "durable protection for $recorded_real is not provable because its current treehouse pool state is unreadable; run bin/fm-adopt-worktree.sh $ID after verifying the worker is gone"
+    [ "$FM_WORKTREE_POOL_RESULT" = present ] \
+      || spawn_relaunch_refuse "durable protection for $recorded_real is not provable because it is absent from the current treehouse pool; run bin/fm-adopt-worktree.sh $ID after verifying the worker is gone"
+    case "$FM_WORKTREE_POOL_STATUS:$FM_WORKTREE_POOL_HOLDER" in
+      in-use:|in_use:|dirty:) ;;
+      "leased:$expected_holder") SPAWN_RECORDED_LEASE_HOLDER=$expected_holder ;;
+      available:*)
+        spawn_relaunch_refuse "durable protection for $recorded_real is not provable because its current treehouse pool status is available; run bin/fm-adopt-worktree.sh $ID after verifying the worker is gone"
+        ;;
+      leased:*)
+        spawn_relaunch_refuse "durable protection for $recorded_real is not provable because its current treehouse lease holder is ${FM_WORKTREE_POOL_HOLDER:-unknown}, not $expected_holder; run bin/fm-adopt-worktree.sh $ID after verifying the worker is gone"
+        ;;
+      *)
+        spawn_relaunch_refuse "durable protection for $recorded_real is not provable because its current treehouse pool status is $FM_WORKTREE_POOL_STATUS with holder ${FM_WORKTREE_POOL_HOLDER:-none}; run bin/fm-adopt-worktree.sh $ID after verifying the worker is gone"
+        ;;
+    esac
+  else
+    fm_worktree_pool_lookup "$PROJ_ABS_REAL" "$recorded_real" >/dev/null 2>&1 || true
+    spawn_relaunch_refuse "durable protection for $recorded_real is not provable (pool=${FM_WORKTREE_POOL_RESULT:-unreadable}, status=${FM_WORKTREE_POOL_STATUS:-unknown}, holder=${FM_WORKTREE_POOL_HOLDER:-none}, recorded-holder=${recorded_holder:-none}, or adoption manifest missing/mismatched); run bin/fm-adopt-worktree.sh $ID after verifying the worker is gone"
+  fi
+  SPAWN_RECORDED_WT=$recorded_real
+  echo "notice: relaunching $ID into its recorded worktree $SPAWN_RECORDED_WT (existing work preserved)" >&2
+}
+
+if [ "$KIND" != secondmate ]; then
+  resolve_recorded_task_worktree
+fi
 
 W="fm-$ID"
 case "$BACKEND" in
@@ -1125,10 +1316,129 @@ spawn_send_key() {  # <target> <key>
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
 }
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+kimi_capture() {
+  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+}
+
+kimi_capture_has_empty_composer() {  # <plain-pane-capture>
+  printf '%s\n' "$1" \
+    | grep -Eq '^[[:space:]]*(│|┃|\|)[[:space:]]*>[[:space:]]*(│|┃|\|)[[:space:]]*$'
+}
+
+kimi_wait_for_ready() {
+  local pane i=0 max=${FM_KIMI_READY_POLLS:-60} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(kimi_capture)
+    if printf '%s\n' "$pane" | grep -Fq 'Welcome to Kimi Code!' \
+       || kimi_capture_has_empty_composer "$pane"; then
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+kimi_delivery_is_confirmed() {  # <plain-pane-capture>
+  local pane=$1
+  kimi_capture_has_empty_composer "$pane" || return 1
+  if { printf '%s\n' "$pane" | grep -Fq '✨' \
+       && printf '%s\n' "$pane" | grep -Fq 'Read the brief at'; } \
+     || printf '%s\n' "$pane" \
+       | grep -qiE 'context:[[:space:]]*(0\.[0-9]*[1-9][0-9]*|[1-9][0-9]*([.][0-9]+)?)[[:space:]]*%'; then
+    return 0
+  fi
+  return 1
+}
+
+kimi_wait_for_delivery() {
+  local pane i=0 max=${FM_KIMI_DELIVERY_POLLS:-40} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(kimi_capture)
+    kimi_delivery_is_confirmed "$pane" && return 0
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+kimi_spawn_fail() {  # <detail>
+  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+}
+
+# --- durable task-worktree acquisition ---------------------------------------
+#
+# Task worktrees are DURABLY LEASED, never held only by an interactive
+# `treehouse get` subshell. The interactive form ties the worktree's lifetime to
+# that subshell: when it exits - which is what a pane falls back to the moment a
+# non-Claude agent exits normally - treehouse offers to clean and return the
+# worktree with an AFFIRMATIVE default, so one stray Enter recycles the pool slot
+# and deletes every untracked file in it (a handoff note, a scratch repro, an
+# unstaged fix). Nothing in the agent's own exit is abnormal, and firstmate's
+# record still claims the worktree, so the loss is silent.
+#
+# A lease is recorded in treehouse's own persistent state instead: it survives
+# with no live process, is never handed out by a later get or removed by prune,
+# and is released only by an explicit `treehouse return`. That is the same
+# durability firstmate already relies on for secondmate homes
+# (bin/fm-home-seed.sh's acquire_treehouse_home), and it removes the
+# agent-exit-to-auto-return path entirely rather than trying to survive it.
+# `treehouse get --lease` support is already a bootstrap requirement for every
+# treehouse-using backend (bin/fm-bootstrap.sh), so a failure here is terminal:
+# never fall back to the interactive form.
+acquire_leased_task_worktree() {
+  local wt
+  wt=$( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "fm-$ID" ) || {
+    echo "error: treehouse get --lease failed to lease a worktree for $ID in $PROJ_ABS" >&2
+    return 1
+  }
+  [ -n "$wt" ] || {
+    echo "error: treehouse get --lease did not report a worktree for $ID in $PROJ_ABS" >&2
+    return 1
+  }
+  printf '%s\n' "$wt"
+}
+
+# Release a lease this spawn just acquired, and only that one. Guarded twice: the
+# lease holder must still be this task, and the worktree must hold no untracked
+# or uncommitted content - an automatic return must never delete work, which is
+# the whole point of leasing in the first place. Anything unprovable is left
+# leased and reported, because a leaked pool slot is recoverable and deleted work
+# is not.
+release_leased_task_worktree() {  # <worktree>
+  local wt=$1 dirty
+  [ -n "$wt" ] || return 0
+  dirty=$(git -C "$wt" status --porcelain 2>/dev/null) || {
+    echo "warning: could not inspect leased worktree $wt for $ID; leaving it leased" >&2
+    return 0
+  }
+  if [ -n "$dirty" ]; then
+    echo "warning: leased worktree $wt for $ID holds uncommitted or untracked content; leaving it leased" >&2
+    return 0
+  fi
+  ( cd "$PROJ_ABS" && treehouse return --force --if-lease-holder "fm-$ID" "$wt" ) >/dev/null 2>&1 || {
+    echo "warning: could not release the leased worktree $wt for $ID; it stays leased" >&2
+    return 0
+  }
+}
+
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  # A proven relaunch (resolve_recorded_task_worktree above) re-enters the
+  # RECORDED worktree instead of asking treehouse for another one, so the
+  # task's uncommitted edits and unpushed commits stay with the same task id.
+  if [ -n "$SPAWN_RECORDED_WT" ]; then
+    spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$SPAWN_RECORDED_WT")"
+    WT_SOURCE="recorded worktree re-entry"
+  else
+    WT_LEASED=$(acquire_leased_task_worktree) || exit 1
+    TREEHOUSE_LEASE_ABORT_CLEANUP=1
+    spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$WT_LEASED")"
+    WT_SOURCE="leased worktree entry"
+  fi
+
+  # Wait for the pane's top-level shell to enter the task worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
@@ -1140,7 +1450,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # A single read that already differs from PROJ_ABS_REAL is not proof the pane
   # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
   # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
+  # checkout entirely) before the shell catches up with the requested cd. That
   # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
   # below (it resolves to a real, distinct worktree top-level too), so accepting it
   # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
@@ -1168,11 +1478,28 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: $WT_SOURCE did not enter a worktree within 60s; inspect window $T" >&2
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  validate_spawn_worktree "$WT_SOURCE" "$T"
+  # Fail closed on a relaunch that landed anywhere but the recorded worktree:
+  # accepting it would record a second copy of the same task.
+  if [ -n "$SPAWN_RECORDED_WT" ]; then
+    WT_REAL=$(cd "$WT" 2>/dev/null && pwd -P) || WT_REAL=
+    [ "$WT_REAL" = "$SPAWN_RECORDED_WT" ] \
+      || spawn_relaunch_refuse "the relaunched worker settled in ${WT_REAL:-an uninspectable path} instead of its recorded worktree $SPAWN_RECORDED_WT"
+  fi
+  # The pane must be in the worktree this spawn actually leased; recording any
+  # other path would leave the lease unowned and the work unprotected.
+  if [ -n "$WT_LEASED" ]; then
+    WT_REAL=$(cd "$WT" 2>/dev/null && pwd -P) || WT_REAL=
+    WT_LEASED_REAL=$(cd "$WT_LEASED" 2>/dev/null && pwd -P) || WT_LEASED_REAL=$WT_LEASED
+    if [ "$WT_REAL" != "$WT_LEASED_REAL" ]; then
+      echo "error: $ID settled in ${WT_REAL:-an uninspectable path} instead of its leased worktree $WT_LEASED; refusing to launch. Inspect target $T" >&2
+      exit 1
+    fi
+  fi
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -1183,9 +1510,10 @@ fi
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
 
-# Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
-# agent finishes a turn. Worktree-resident hooks are kept out of git's view so
-# they never block teardown's dirty check or leak into a commit.
+# Per-harness turn-end hook where enabled: a file that touches
+# state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
+# and token pointers stay out of git's view so they never block teardown's dirty
+# check or leak into a commit.
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
@@ -1283,6 +1611,21 @@ EOF
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
       ;;
+    kimi*)
+      # Kimi's Stop hook is global, but it is inert unless cwd contains this
+      # task's token pointer and the token resolves through Firstmate's private
+      # registry. The installer above owns the format-preserving config edit and
+      # the always-zero, silent hook script.
+      KIMI_AUTH_DIR="$HOME/.kimi-code/fm-turn-end.d"
+      old_umask=$(umask)
+      umask 077
+      auth_file=$(mktemp "$KIMI_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      printf '%s\n' "$TURNEND" > "$auth_file"
+      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.kimi-turnend-token"
+      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
+      exclude_path '.fm-kimi-turnend'
+      ;;
   esac
 fi
 
@@ -1319,6 +1662,11 @@ META_WINDOW=$T
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -n "${WT_LEASED:-}" ]; then
+    echo "lease_holder=fm-$ID"
+  elif [ -n "$SPAWN_RECORDED_LEASE_HOLDER" ]; then
+    echo "lease_holder=$SPAWN_RECORDED_LEASE_HOLDER"
+  fi
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
@@ -1344,6 +1692,8 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+# The record now owns the lease: teardown releases it, this spawn never does.
+TREEHOUSE_LEASE_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
@@ -1377,6 +1727,30 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$HARNESS" = kimi ]; then
+  if ! kimi_wait_for_ready; then
+    kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
+    exit 1
+  fi
+  KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
+  KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
+  KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
+  KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
+    "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
+    "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W") || {
+    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    exit 1
+  }
+  if [ "$KIMI_SUBMIT_VERDICT" = send-failed ]; then
+    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    exit 1
+  fi
+  if ! kimi_wait_for_delivery; then
+    kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
+    exit 1
+  fi
+fi
 if [ "$KIND" = secondmate ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
     if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
