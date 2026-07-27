@@ -8,7 +8,7 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-calm-pi-extension)
 EXT="$ROOT/.pi/extensions/fm-calm.ts"
 SHORTCUT_EXT="$ROOT/.pi/extensions/fm-captains-call-shortcut.ts"
-CLAUDE_SHORTCUT="$ROOT/bin/fm-claude-captains-call-shortcut.sh"
+CLAUDE_SHORTCUT="$ROOT/bin/fm-claude-captains-call-shortcut.mjs"
 ASSISTANT_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
 OPERATIONAL_USER_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
 COMPATIBILITY="$ROOT/.pi/extensions/lib/fm-calm-compatibility.ts"
@@ -224,9 +224,9 @@ JS
 }
 
 test_claude_shortcut_hook_contract() {
-  local fixture project payload out context text entrypoint field settings command
-  if ! command -v jq >/dev/null 2>&1; then
-    echo "skip: jq not found for Claude Captain's Call shortcut test"
+  local fixture project out status
+  if ! command -v node >/dev/null 2>&1; then
+    echo "skip: node not found for Claude Captain's Call shortcut test"
     return 0
   fi
 
@@ -235,121 +235,169 @@ test_claude_shortcut_hook_contract() {
   mkdir -p \
     "$project/bin" \
     "$project/.agents/skills/bearings" \
-    "$project/.claude"
-  cp "$CLAUDE_SHORTCUT" "$project/bin/fm-claude-captains-call-shortcut.sh"
-  chmod +x "$project/bin/fm-claude-captains-call-shortcut.sh"
+    "$project/.claude" \
+    "$fixture/other-skills/bearings"
+  cp "$CLAUDE_SHORTCUT" "$project/bin/fm-claude-captains-call-shortcut.mjs"
   printf '%s\n' '---' 'name: bearings' 'description: fixture' '---' '# Bearings fixture' \
     >"$project/.agents/skills/bearings/SKILL.md"
+  printf '%s\n' '# Different Bearings skill' >"$fixture/other-skills/bearings/SKILL.md"
   ln -s ../.agents/skills "$project/.claude/skills"
   ln -s "$project" "$fixture/project-link"
 
-  for text in "s" "S" " s " $'\tS\n'; do
-    payload=$(jq -cn --arg prompt "$text" \
-      '{hook_event_name:"UserPromptSubmit", prompt:$prompt}')
-    out=$(printf '%s' "$payload" | \
-      CLAUDE_PROJECT_DIR="$project" CLAUDE_CODE_ENTRYPOINT=cli \
-      "$project/bin/fm-claude-captains-call-shortcut.sh") \
-      || fail "Claude exact s shortcut hook failed"
-    jq -e '
-      .hookSpecificOutput.hookEventName == "UserPromptSubmit" and
-      (.hookSpecificOutput.additionalContext | contains("`captains-call-only`")) and
-      (.hookSpecificOutput.additionalContext | contains("no image attachments")) and
-      (.hookSpecificOutput.additionalContext | contains("sole classification and report owner"))
-    ' >/dev/null <<<"$out" || fail "Claude exact s shortcut emitted the wrong hook context: $out"
-  done
+  out=$(CLAUDE_SHORTCUT="$project/bin/fm-claude-captains-call-shortcut.mjs" \
+    CLAUDE_PROJECT="$project" \
+    CLAUDE_PROJECT_LINK="$fixture/project-link" \
+    CLAUDE_FIXTURE="$fixture" \
+    CLAUDE_SETTINGS="$ROOT/.claude/settings.json" \
+    node --input-type=module 2>&1 <<'JS'
+import { readFileSync, symlinkSync, unlinkSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
-  for text in "status?" "Status?" "STATUS?" $'\t sTaTuS? \n'; do
-    payload=$(jq -cn --arg prompt "$text" \
-      '{hook_event_name:"UserPromptSubmit", prompt:$prompt}')
-    out=$(printf '%s' "$payload" | \
-      CLAUDE_PROJECT_DIR="$project" CLAUDE_CODE_ENTRYPOINT=cli \
-      "$project/bin/fm-claude-captains-call-shortcut.sh") \
-      || fail "Claude exact status? shortcut hook failed"
-    context=$(jq -er '.hookSpecificOutput.additionalContext' <<<"$out") \
-      || fail "Claude exact status? shortcut omitted hook context: $out"
-    assert_contains "$context" "full four-section workflow" "Claude status? full Bearings mapping"
-    assert_contains "$context" "no image attachments" "Claude status? image guard"
-    assert_contains "$context" "sole classification and report owner" "Claude status? Bearings owner"
-    assert_not_contains "$context" "captains-call-only" "Claude status? Captain's Call-only argument"
-  done
+const shortcut = process.env.CLAUDE_SHORTCUT;
+const project = process.env.CLAUDE_PROJECT;
+const projectLink = process.env.CLAUDE_PROJECT_LINK;
+const fixture = process.env.CLAUDE_FIXTURE;
 
-  payload=$(jq -cn --arg prompt "s" \
-    '{hook_event_name:"UserPromptSubmit", prompt:$prompt}')
-  out=$(printf '%s' "$payload" | \
-    CLAUDE_PROJECT_DIR="$fixture/project-link" CLAUDE_CODE_ENTRYPOINT=cli \
-    "$fixture/project-link/bin/fm-claude-captains-call-shortcut.sh") \
-    || fail "Claude canonical trusted-project shortcut hook failed"
-  [ -n "$out" ] || fail "Claude shortcut rejected the canonical trusted-project symlink"
+function invokeRaw(input, options = {}) {
+  const result = spawnSync(process.execPath, [options.script || shortcut], {
+    encoding: "utf8",
+    input,
+    env: {
+      ...process.env,
+      CLAUDE_PROJECT_DIR: options.project || project,
+      CLAUDE_CODE_ENTRYPOINT: options.entrypoint ?? "cli",
+    },
+  });
+  if (result.status !== 0 || result.stderr) {
+    throw new Error(`Claude shortcut hook failed: ${JSON.stringify(result)}`);
+  }
+  return result.stdout;
+}
 
-  for text in "" "ss" "status" "status??" "status!" "status ?" \
-    "status? now" "show status?" "s now" "/s" "ordinary s text"
-  do
-    payload=$(jq -cn --arg prompt "$text" \
-      '{hook_event_name:"UserPromptSubmit", prompt:$prompt}')
-    out=$(printf '%s' "$payload" | \
-      CLAUDE_PROJECT_DIR="$project" CLAUDE_CODE_ENTRYPOINT=cli \
-      "$project/bin/fm-claude-captains-call-shortcut.sh") \
-      || fail "Claude near-match pass-through hook failed"
-    [ -z "$out" ] || fail "Claude near-match or unrelated prompt changed: $text -> $out"
-  done
+function invoke(payload, options) {
+  return invokeRaw(JSON.stringify(payload), options);
+}
 
-  payload=$(jq -cn '{hook_event_name:"UserPromptSubmit", prompt:"s"}')
-  for entrypoint in sdk-cli claude-vscode remote local-agent ""; do
-    out=$(printf '%s' "$payload" | \
-      CLAUDE_PROJECT_DIR="$project" CLAUDE_CODE_ENTRYPOINT="$entrypoint" \
-      "$project/bin/fm-claude-captains-call-shortcut.sh") \
-      || fail "Claude noninteractive or non-CLI pass-through hook failed"
-    [ -z "$out" ] || fail "Claude noninteractive or non-CLI entrypoint changed: $entrypoint -> $out"
-  done
+function contextFor(prompt, extra = {}) {
+  const output = invoke({ hook_event_name: "UserPromptSubmit", prompt, ...extra });
+  if (!output) throw new Error(`Claude exact shortcut produced no context: ${JSON.stringify(prompt)}`);
+  const parsed = JSON.parse(output);
+  if (parsed?.hookSpecificOutput?.hookEventName !== "UserPromptSubmit") {
+    throw new Error(`Claude shortcut emitted the wrong hook event: ${output}`);
+  }
+  return parsed.hookSpecificOutput.additionalContext;
+}
 
-  for field in images attachments file_attachments fileAttachments pasted_contents; do
-    payload=$(jq -cn --arg field "$field" \
-      '{hook_event_name:"UserPromptSubmit", prompt:"s"} + {($field):[{type:"image"}]}')
-    out=$(printf '%s' "$payload" | \
-      CLAUDE_PROJECT_DIR="$project" CLAUDE_CODE_ENTRYPOINT=cli \
-      "$project/bin/fm-claude-captains-call-shortcut.sh") \
-      || fail "Claude image pass-through hook failed"
-    [ -z "$out" ] || fail "Claude image-bearing prompt changed through $field: $out"
-  done
+for (const prompt of ["s", "S", " s ", "\tS\n"]) {
+  const context = contextFor(prompt);
+  if (!context.includes("`captains-call-only`") ||
+      !context.includes("does not expose attachment metadata") ||
+      !context.includes("sole classification and report owner")) {
+    throw new Error(`Claude exact s shortcut emitted the wrong context: ${context}`);
+  }
+}
 
-  payload=$(jq -cn '{hook_event_name:"UserPromptSubmit", prompt:"s"}')
-  out=$(printf '%s' "$payload" | \
-    CLAUDE_PROJECT_DIR="$fixture" CLAUDE_CODE_ENTRYPOINT=cli \
-    "$project/bin/fm-claude-captains-call-shortcut.sh") \
-    || fail "Claude mismatched-project pass-through hook failed"
-  [ -z "$out" ] || fail "Claude shortcut accepted a mismatched project root: $out"
-  out=$(printf '%s' '{"hook_event_name":"Stop","prompt":"s"}' | \
-    CLAUDE_PROJECT_DIR="$project" CLAUDE_CODE_ENTRYPOINT=cli \
-    "$project/bin/fm-claude-captains-call-shortcut.sh") \
-    || fail "Claude non-prompt-event pass-through hook failed"
-  [ -z "$out" ] || fail "Claude shortcut accepted a non-prompt hook event: $out"
-  out=$(printf '%s' 'not-json' | \
-    CLAUDE_PROJECT_DIR="$project" CLAUDE_CODE_ENTRYPOINT=cli \
-    "$project/bin/fm-claude-captains-call-shortcut.sh") \
-    || fail "Claude malformed-input pass-through hook failed"
-  [ -z "$out" ] || fail "Claude shortcut changed malformed hook input: $out"
+for (const prompt of ["status?", "Status?", "STATUS?", "\t sTaTuS? \n"]) {
+  const context = contextFor(prompt);
+  if (!context.includes("full four-section workflow") ||
+      !context.includes("does not expose attachment metadata") ||
+      !context.includes("sole classification and report owner") ||
+      context.includes("captains-call-only")) {
+    throw new Error(`Claude exact status? shortcut emitted the wrong context: ${context}`);
+  }
+}
 
-  mkdir -p "$fixture/other-skills/bearings"
-  printf '%s\n' '# Different Bearings skill' >"$fixture/other-skills/bearings/SKILL.md"
-  rm "$project/.claude/skills"
-  ln -s "$fixture/other-skills" "$project/.claude/skills"
-  out=$(printf '%s' "$payload" | \
-    CLAUDE_PROJECT_DIR="$project" CLAUDE_CODE_ENTRYPOINT=cli \
-    "$project/bin/fm-claude-captains-call-shortcut.sh") \
-    || fail "Claude non-project Bearings pass-through hook failed"
-  [ -z "$out" ] || fail "Claude shortcut accepted a non-project Bearings skill: $out"
+const linkedOutput = invoke(
+  { hook_event_name: "UserPromptSubmit", prompt: "s" },
+  {
+    project: projectLink,
+    script: `${projectLink}/bin/fm-claude-captains-call-shortcut.mjs`,
+  },
+);
+if (!linkedOutput) throw new Error("Claude shortcut rejected the canonical trusted-project symlink");
 
-  settings="$ROOT/.claude/settings.json"
-  jq -e '
-    [.hooks.UserPromptSubmit[]?.hooks[]? |
-      select(
-        .type == "command" and
-        .command == "\"$CLAUDE_PROJECT_DIR\"/bin/fm-claude-captains-call-shortcut.sh"
-      )
-    ] | length == 1
-  ' "$settings" >/dev/null || fail "Claude UserPromptSubmit shortcut hook is not registered exactly once"
-  command=$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' "$settings")
-  assert_contains "$command" 'CLAUDE_PROJECT_DIR' "Claude shortcut trust anchor"
+for (const prompt of [
+  "",
+  "ss",
+  "status",
+  "status??",
+  "status!",
+  "status ?",
+  "status? now",
+  "show status?",
+  "s now",
+  "/s",
+  "ordinary s text",
+  "[Image #1]\ns",
+  "s\n[Image #1]",
+  "status?\n[Image #1]",
+]) {
+  const output = invoke({ hook_event_name: "UserPromptSubmit", prompt });
+  if (output) throw new Error(`Claude near-match or unrelated prompt changed: ${JSON.stringify({ prompt, output })}`);
+}
+
+for (const entrypoint of ["sdk-cli", "claude-vscode", "remote", "local-agent", ""]) {
+  const output = invoke(
+    { hook_event_name: "UserPromptSubmit", prompt: "s" },
+    { entrypoint },
+  );
+  if (output) throw new Error(`Claude noninteractive or non-CLI entrypoint changed: ${JSON.stringify({ entrypoint, output })}`);
+}
+
+for (const field of ["images", "attachments", "file_attachments", "fileAttachments", "pasted_contents"]) {
+  for (const prompt of ["s", "status?"]) {
+    const context = contextFor(prompt, { [field]: [{ type: "image" }] });
+    if (!context.includes("also applies when an image accompanies the token")) {
+      throw new Error(`Claude image-metadata limitation changed through ${field}: ${context}`);
+    }
+  }
+  for (const prompt of ["describe this image", "s now", "status? now"]) {
+    const output = invoke({
+      hook_event_name: "UserPromptSubmit",
+      prompt,
+      [field]: [{ type: "image" }],
+    });
+    if (output) {
+      throw new Error(`Claude ordinary image-bearing prompt changed: ${JSON.stringify({ field, prompt, output })}`);
+    }
+  }
+}
+
+if (invoke(
+  { hook_event_name: "UserPromptSubmit", prompt: "s" },
+  { project: fixture },
+)) {
+  throw new Error("Claude shortcut accepted a mismatched project root");
+}
+if (invoke({ hook_event_name: "Stop", prompt: "s" })) {
+  throw new Error("Claude shortcut accepted a non-prompt hook event");
+}
+if (invokeRaw("not-json")) {
+  throw new Error("Claude shortcut changed malformed hook input");
+}
+
+unlinkSync(`${project}/.claude/skills`);
+symlinkSync(`${fixture}/other-skills`, `${project}/.claude/skills`);
+if (invoke({ hook_event_name: "UserPromptSubmit", prompt: "s" })) {
+  throw new Error("Claude shortcut accepted a non-project Bearings skill");
+}
+
+const settings = JSON.parse(readFileSync(process.env.CLAUDE_SETTINGS, "utf8"));
+const registrations = (settings.hooks?.UserPromptSubmit || [])
+  .flatMap((entry) => entry.hooks || [])
+  .filter((hook) =>
+    hook.type === "command" &&
+    hook.command === 'node "$CLAUDE_PROJECT_DIR"/bin/fm-claude-captains-call-shortcut.mjs'
+  );
+if (registrations.length !== 1) {
+  throw new Error("Claude UserPromptSubmit shortcut hook is not registered exactly once");
+}
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Claude Captain's Call shortcut contract failed: $out"
+  [ -z "$out" ] || fail "Claude Captain's Call shortcut contract printed output: $out"
+
   assert_not_contains "$(cat "$ROOT/.codex/hooks.json")" "fm-claude-captains-call-shortcut" \
     "Codex config must not register the Claude shortcut"
   assert_not_contains "$(cat "$ROOT/.grok/hooks/fm-primary-sessionstart-nudge.json")" \
@@ -359,7 +407,7 @@ test_claude_shortcut_hook_contract() {
     fail "a non-Claude harness registered the Claude shortcut"
   fi
 
-  pass "Claude CLI hook maps only exact trusted interactive image-free shortcuts to the Bearings owner"
+  pass "Claude CLI hook maps exact trusted interactive shortcuts and preserves its bounded image-metadata exception"
 }
 
 test_captains_call_shortcut_real_pi_expansion() {

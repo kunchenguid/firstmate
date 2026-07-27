@@ -210,7 +210,8 @@ Only Pi's Calm presentation implementation changed; every producer and non-Pi tr
 
 `tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers, verifies all seven built-ins plus `fm_watch_arm_pi`, exercises redraw of already-rendered tool, thinking, current operational-user, and legacy synthetic rows, and covers every policy class.
 The same focused test exercises both Pi Bearings shortcuts, project-skill provenance, noninteractive text and JSON pass-through, and the Captain's Call-only no-report/no-browser boundary through the real Pi TUI.
-It also exercises Claude CLI exact-match, image, headless, unrelated-prompt, and trusted-project pass-through boundaries while leaving Bearings classification and reporting with the project skill.
+It also exercises Claude CLI exact-match, headless, unrelated-prompt, and trusted-project pass-through boundaries while leaving Bearings classification and reporting with the project skill.
+Claude Code's `UserPromptSubmit` payload omits attachment metadata, so the regression preserves the accepted Claude-only behavior where an image accompanied by exact `s` or `status?` still triggers the shortcut while image-bearing near-matches remain ordinary.
 It covers persisted preference restoration across every session-start reason and a real restart, proves Pi's native `Working...` row through a delayed deterministic provider, asserts no Calm status row, verifies operational messages remain exact ordinary user-role session entries and complete exports, and drives genuine 100 by 44, 160 by 36, and 180 by 44 terminal fixtures.
 A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool-result blocks, asserts that the collapsed skill-to-final gap equals the two-row visible-only baseline, expands and re-collapses original thinking, restores Calm-off rendering, verifies persisted hidden history, and repeats the geometry assertion after restart with `terminal.clearOnShrink` explicitly off.
 The operational provider path covers Calm loaded on, loaded off, default preference, extension absent, exact watcher delivery, narrow bare-marker legacy input, persisted restart replay, a genuine captain prompt, and adjacent notifications coalesced into one intended processing turn.
@@ -297,7 +298,7 @@ $ pi --version
 
 $ FM_PI_PACKAGE_DIR="$HOME/.local/lib/node_modules/@earendil-works/pi-coding-agent" tests/fm-calm-pi-extension.test.sh
 ok - Pi input shortcuts transform only exact image-free interactive s/S or status? input and verify project skill provenance
-ok - Claude CLI hook maps only exact trusted interactive image-free shortcuts to the Bearings owner
+ok - Claude CLI hook maps exact trusted interactive shortcuts and preserves its bounded image-metadata exception
 ok - real Pi 0.82.1 text and JSON modes pass through while TUI expands only Captain's Call without report or browser writes
 ok - Pi calm extension is presentation-only with one persisted visibility choice, no Calm status row, native working visibility, supported redraw controls, and the Firstmate watcher-tool integration
 ok - Pi calm resolves its persistent home independently of Pi's launch directory
