@@ -8,6 +8,8 @@ set -u
 INSTALL="$ROOT/bin/fm-devenv-install.sh"
 TMP_ROOT=$(fm_test_tmproot fm-devenv-install)
 BASE_PATH=$PATH
+REAL_GIT=$(command -v git)
+export FM_TEST_REAL_GIT="$REAL_GIT"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
@@ -53,6 +55,26 @@ esac
 SH
   chmod +x "$fakebin/ssh" "$fakebin/mv"
   printf '%s\n' "$fakebin"
+}
+
+make_racing_git() {  # <fakebin>
+  local fakebin=$1
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [ -n "${FM_TEST_SYMBOLIC_HEAD:-}" ] && [ "${1-}" = -C ] && [ "${3-}" = rev-parse ] && [ "${4-}" = HEAD ]; then
+  cat "$FM_TEST_SYMBOLIC_HEAD"
+  printf '%s\n' "$FM_TEST_NEXT_HEAD" > "$FM_TEST_SYMBOLIC_HEAD"
+  exit 0
+fi
+if [ -n "${FM_TEST_SYMBOLIC_HEAD:-}" ] && [ "${1-}" = -C ] && [ "${3-}" = archive ]; then
+  revision=$4
+  [ "$revision" != HEAD ] || revision=$(cat "$FM_TEST_SYMBOLIC_HEAD")
+  exec "$FM_TEST_REAL_GIT" -C "$2" archive "$revision" "${@:5}"
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
 }
 
 mode_of() {
@@ -136,6 +158,40 @@ test_missing_environment_reports_usage() {
   pass "devenv install: missing environment reports the command contract"
 }
 
+test_archive_stays_bound_to_the_captured_commit() {
+  local fakebin captured next release expected
+  rm -rf "$TMP_ROOT/ssh-log" "$TMP_ROOT/remote-home"
+  mkdir -p "$TMP_ROOT/ssh-log" "$TMP_ROOT/remote-home"
+  write_registry
+  fakebin=$(make_fake_ssh)
+  make_racing_git "$fakebin"
+  captured=$("$REAL_GIT" -C "$ROOT" rev-parse HEAD)
+  next=$("$REAL_GIT" -C "$ROOT" rev-parse HEAD^)
+  printf '%s\n' "$captured" > "$TMP_ROOT/symbolic-head"
+  expected="$TMP_ROOT/expected-installer"
+  "$REAL_GIT" -C "$ROOT" show "$captured:bin/fm-devenv-install.sh" > "$expected"
+
+  FM_DEVENV_REGISTRY="$TMP_ROOT/registry.json" \
+    FM_TEST_SSH_LOG="$TMP_ROOT/ssh-log" \
+    FM_TEST_REMOTE_HOME="$TMP_ROOT/remote-home" \
+    FM_TEST_SYMBOLIC_HEAD="$TMP_ROOT/symbolic-head" \
+    FM_TEST_NEXT_HEAD="$next" \
+    FM_TEST_REAL_GIT="$REAL_GIT" \
+    PATH="$fakebin:$BASE_PATH" \
+    "$INSTALL" alpha >/dev/null
+
+  [ "$(cat "$TMP_ROOT/symbolic-head")" = "$next" ] \
+    || fail "racing Git fixture did not change symbolic HEAD after commit capture"
+  release="$TMP_ROOT/remote-home/.local/share/firstmate-expanly/releases/$captured"
+  [ -f "$release/bin/fm-devenv-install.sh" ] \
+    || fail "archive followed changed symbolic HEAD instead of the captured commit"
+  cmp -s "$expected" "$release/bin/fm-devenv-install.sh" \
+    || fail "archive bytes did not come from the captured commit"
+  [ "$(cat "$release/.firstmate-runtime-commit")" = "$captured" ] \
+    || fail "race fixture did not retain the captured commit marker"
+  pass "devenv install: archive remains bound to the captured commit when symbolic HEAD changes"
+}
+
 test_unknown_environment_is_rejected_before_ssh() {
   local fakebin output rc
   rm -rf "$TMP_ROOT/ssh-log" "$TMP_ROOT/remote-home"
@@ -201,5 +257,6 @@ test_verify_compares_only_and_never_repairs() {
 
 test_install_streams_only_the_pinned_tracked_runtime
 test_missing_environment_reports_usage
+test_archive_stays_bound_to_the_captured_commit
 test_unknown_environment_is_rejected_before_ssh
 test_verify_compares_only_and_never_repairs

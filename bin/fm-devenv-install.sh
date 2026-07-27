@@ -90,7 +90,7 @@ fi
 
 {
   printf '%s\n%s\n' "$environment" "$commit"
-  git -C "$FM_ROOT" archive HEAD -- \
+  git -C "$FM_ROOT" archive "$commit" -- \
     AGENTS.md CLAUDE.md bin .agents/skills .claude/skills skills
 } | ssh "$host" "$REMOTE_INSTALL_COMMAND"
 
