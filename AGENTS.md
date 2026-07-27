@@ -168,6 +168,7 @@ When that section reports its checks still in progress it names exactly what is 
 Bootstrap detects first, asks for consent, and installs only after the captain approves in the current session.
 Do not dispatch until the required tools are present and GitHub authentication is good.
 Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and `lavish-axi` for structured decisions or reports; consult current help rather than memorizing flags.
+Always pass `-R <owner>/<repo>` on every `gh-axi pr` call that names a bare PR number when the PR belongs to a project rather than this home: without it `gh-axi` resolves against the home repository, and a same-numbered PR there can report a stale `merged` with an unrelated title and a months-old merge date. Confirm the returned title matches the intended PR before believing a merge result.
 A silent bootstrap section needs no action; for any printed actionable diagnostic line, load `bootstrap-diagnostics` and follow its owner procedure.
 `BOOTSTRAP_INFO:` lines are completed no-action facts and do not require loading a skill.
 `secondmate-provisioning` owns startup secondmate sync, liveness, and inherited local-material convergence.
@@ -417,6 +418,8 @@ The skill owns the daemon procedure; these safety facts remain inline:
 ### Stuck-worker trigger
 
 Load `stuck-crewmate-recovery` after a stale wake, looping or confused pane, answered-by-brief question, unresponsive worker, or failed steer.
+
+A repeatedly wedge-escalating pane is not proof of a dead worker. A worker that announces a long command and then ends its turn without running it stalls at the turn boundary: the pane text freezes mid-sentence with an unchanged context percentage and no child process for the announced command, while the agent process itself stays present and the backend agent-state classifier still reports it alive. A plain nudge resumes it with no work lost, so establish the classifier state and on-disk progress (file mtimes, commits, dirty count) before considering a replacement launch. Matching on a bare process name is a real trap here: a `ps` pattern that misses the harness's own short process name reads a live worker as dead and invites a duplicate launch against it.
 
 ## 9. Escalation and captain etiquette
 
