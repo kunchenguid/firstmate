@@ -27,7 +27,7 @@ Load this skill when:
 Collect every pending captain decision that is waiting for a choice.
 Sources:
 
-- `tasks-axi` captain-kind items whose status is not Done: run `tasks-axi list --kind captain --status open` and read each item's full body with `tasks-axi show <id> --full`.
+- `tasks-axi` captain-kind items whose status is not Done: run `tasks-axi list --kind captain --state held` and read each item's full body with `tasks-axi show <id> --full`.
 - Any ask-user findings from an active no-mistakes validation that have surfaced with `needs-decision:` and are logged in the relevant task's status file.
 
 Each decision needs these fields for the input JSON:

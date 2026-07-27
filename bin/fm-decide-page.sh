@@ -42,7 +42,8 @@
 #   - Server shuts down after one valid complete submission or when timeout elapses.
 #   - state/decide-<run-id>/ is removed only when firstmate marks it processed;
 #     the script itself does not delete run state on exit.
-#   - No secret, credential, or absolute path is embedded in the page.
+#   - The page carries the run secret as an anti-CSRF token in a hidden field;
+#     no absolute path and no external resource is embedded in the page.
 #
 # Environment:
 #   FM_HOME            Firstmate home root (default: repo root from script location)
@@ -75,9 +76,6 @@ while [ "$#" -gt 0 ]; do
     --timeout)
       [ "$#" -ge 2 ] || fail "--timeout requires a value"
       TIMEOUT=$2
-      case "$TIMEOUT" in
-        ''|*[!0-9]*) fail "--timeout must be a positive integer: $TIMEOUT" ;;
-      esac
       shift 2
       ;;
     --help|-h)
@@ -94,6 +92,11 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+case "$TIMEOUT" in
+  ''|*[!0-9]*) fail "timeout must be a positive integer: $TIMEOUT" ;;
+esac
+[ "$TIMEOUT" -gt 0 ] || fail "timeout must be a positive integer: $TIMEOUT"
 
 [ -n "$INPUT_JSON" ] || { usage; exit 1; }
 [ -f "$INPUT_JSON" ] || fail "decisions file not found: $INPUT_JSON"
@@ -186,13 +189,15 @@ print(f'decide-{ts}-{rand}')
 SECRET=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 
 RUN_DIR="$STATE/$RUN_ID"
-mkdir -p "$RUN_DIR/responses"
+(umask 077 && mkdir -p "$RUN_DIR/responses")
 
 # Write the watcher check script.
 # This file is always identical across invocations; re-writing and re-registering
 # is idempotent because fm-check-register.sh overwrites the trust file atomically.
 CHECK_SH="$STATE/decide.check.sh"
-cat > "$CHECK_SH" <<'CHECKEOF'
+CHECK_TMP=$(umask 077 && mktemp "$STATE/.decide.check.sh.XXXXXX") || fail "cannot create check temp file"
+trap 'rm -f -- "$CHECK_TMP"' EXIT HUP INT TERM
+cat > "$CHECK_TMP" <<'CHECKEOF'
 #!/usr/bin/env bash
 # Watcher check: prints one line when a decide run has unread responses.
 # Prints nothing otherwise. Exits after the first match.
@@ -206,14 +211,16 @@ for ready in "$FM_HOME/state"/decide-*/ready; do
   break
 done
 CHECKEOF
-chmod 0700 "$CHECK_SH"
+chmod 0700 "$CHECK_TMP"
+mv -f -- "$CHECK_TMP" "$CHECK_SH" || fail "cannot install $CHECK_SH"
+trap - EXIT HUP INT TERM
 
 # Bind check bytes before the watcher can execute it.
 "$SCRIPT_DIR/fm-check-register.sh" decide || fail "failed to register decide check"
 
 # Write the embedded Python HTTP server to the run directory.
 SERVER_PY="$RUN_DIR/server.py"
-cat > "$SERVER_PY" <<PYEOF
+cat > "$SERVER_PY" <<'PYEOF'
 #!/usr/bin/env python3
 """Firstmate decide-page server.
 Serves a self-contained decision page at GET /, accepts one batch POST at
@@ -221,13 +228,18 @@ Serves a self-contained decision page at GET /, accepts one batch POST at
 """
 import json, os, re, signal, sys, threading, time
 from datetime import datetime, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+
+os.umask(0o077)
 
 STATE_DIR = sys.argv[1]
 RUN_ID    = sys.argv[2]
-SECRET    = sys.argv[3]
-INPUT_JSON= sys.argv[4]
-TIMEOUT   = int(sys.argv[5])
+INPUT_JSON= sys.argv[3]
+TIMEOUT   = int(sys.argv[4])
+SECRET    = os.environ.pop("FM_DECIDE_SECRET", "")
+if not SECRET:
+    print("fm-decide-page: FM_DECIDE_SECRET is required", file=sys.stderr)
+    sys.exit(1)
 
 with open(INPUT_JSON) as fh:
     DECISIONS = json.load(fh)["decisions"]
@@ -239,6 +251,7 @@ os.makedirs(RESPONSES_DIR, exist_ok=True)
 
 _server_ref = None
 _submitted  = False
+_submit_lock = threading.Lock()
 
 HTML_PAGE = r"""<!doctype html>
 <html lang="pt-BR">
@@ -431,7 +444,7 @@ h1 { font-size: 1.3rem; margin: 0 0 0.25rem; }
     })
     .then(function () {
       form.style.display = "none";
-      notice.style.display = "";
+      notice.style.display = "block";
       banner.style.display = "none";
     })
     .catch(function (err) {
@@ -487,6 +500,8 @@ def _build_page():
 _PAGE_CACHE = _build_page()
 
 class Handler(BaseHTTPRequestHandler):
+    timeout = 30
+
     def do_GET(self):
         if self.path == "/" and not _submitted:
             body = _PAGE_CACHE.encode()
@@ -507,19 +522,34 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
-        global _submitted
         if self.path != "/submit":
             self.send_error(404)
             return
+        with _submit_lock:
+            self._do_submit()
+
+    def _do_submit(self):
+        global _submitted
         if _submitted:
             self._json_error(409, "already submitted")
             return
-        length = int(self.headers.get("Content-Length", 0))
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self._json_error(400, "invalid Content-Length")
+            return
+        if length < 0:
+            self._json_error(400, "invalid Content-Length")
+            return
         if length > 512 * 1024:
             self._json_error(413, "payload too large")
             return
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            self._json_error(400, "incomplete request body")
+            return
         try:
-            body = json.loads(self.rfile.read(length))
+            body = json.loads(raw)
         except (json.JSONDecodeError, UnicodeDecodeError):
             self._json_error(400, "invalid JSON")
             return
@@ -612,7 +642,7 @@ def _shutdown():
 
 def main():
     global _server_ref
-    srv = HTTPServer(("127.0.0.1", 0), Handler)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     _server_ref = srv
     port = srv.server_address[1]
     port_path = os.path.join(RUN_DIR, "port")
@@ -635,7 +665,7 @@ PYEOF
 
 # Start the Python server in the background.
 INPUT_ABS=$(cd "$(dirname "$INPUT_JSON")" && pwd)/$(basename "$INPUT_JSON")
-python3 "$SERVER_PY" "$STATE" "$RUN_ID" "$SECRET" "$INPUT_ABS" "$TIMEOUT" >/dev/null 2>&1 &
+FM_DECIDE_SECRET="$SECRET" python3 "$SERVER_PY" "$STATE" "$RUN_ID" "$INPUT_ABS" "$TIMEOUT" >/dev/null 2>&1 &
 
 # Wait for port file (up to 5 seconds).
 TRIES=0

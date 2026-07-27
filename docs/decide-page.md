@@ -94,7 +94,9 @@ Re-running `fm-decide-page.sh` re-writes the same bytes and re-registers idempot
 - A per-run one-time secret is required in every submission; submissions without it receive a 403.
 - Only decision keys declared in the input JSON are accepted; unknown keys receive a 400.
 - The server self-terminates after one valid complete submission or when the timeout elapses (default 1800 seconds, overridden by `FM_DECIDE_TIMEOUT` or `--timeout`).
-- The page embeds no credential, no absolute path, and no external resource; all CSS and JavaScript are inline.
+- The page carries the run secret as an anti-CSRF token in a hidden form field; it is served only to `127.0.0.1` clients and is discarded when the server exits.
+- The secret is passed to the server process through the `FM_DECIDE_SECRET` environment variable, never as a command-line argument, so it is not visible in `ps`.
+- The page embeds no absolute path and no external resource; all CSS and JavaScript are inline.
 
 ## Run state layout
 
@@ -103,7 +105,7 @@ state/
   decide.check.sh          house-level watcher check (always same bytes)
   decide.check-trust       registration binding for the check
   decide-<run-id>/
-    port                   TCP port the server is listening on (removed after server exits)
+    port                   TCP port the server is listening on (kept until firstmate removes the run directory)
     server.py              embedded Python server for this run
     ready                  written when submission is accepted; ISO-8601 timestamp
     processed              written by firstmate after routing choices
