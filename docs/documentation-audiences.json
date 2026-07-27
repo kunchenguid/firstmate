@@ -164,6 +164,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/status/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/stow/SKILL.md",
       "audience": "agent-runtime"
     },
