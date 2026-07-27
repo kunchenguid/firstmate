@@ -103,8 +103,9 @@ pi
 ```
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
-For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
-In Pi, the exact image-free inputs `s` and `status?` are case-insensitive shortcuts: `s` shows only the current Captain's Call without creating a report or opening a browser, while `status?` runs the full Bearings workflow; additional text remains an ordinary prompt.
+For Claude Code and Pi, approve the project trust prompt once per clone on first launch so the tracked project hook or `.pi/extensions/*.ts` files load.
+In interactive Claude Code and Pi sessions, the exact image-free inputs `s` and `status?` are case-insensitive shortcuts: `s` shows only the current Captain's Call without creating a report or opening a browser, while `status?` runs the full Bearings workflow.
+Noninteractive input, images, missing question marks, additional text, and every other prompt remain ordinary input.
 On certified Pi versions, Calm defaults on when no preference exists; `/calm on`, `/calm off`, and `/calm status` manage the home-local choice, while bare `/calm` still toggles it.
 Collapsed successful known-tool rows occupy zero lines, `Ctrl+O` restores their complete stock evidence, and collapsed failures retain one concise reveal hint.
 Calm also hides supported transcript chrome, including canonically classified Firstmate operational user rows, while retaining native working activity and all model context and session data.

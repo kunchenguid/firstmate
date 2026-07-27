@@ -19,6 +19,7 @@ export default function (pi: ExtensionAPI): void {
   pi.on("input", (event, ctx) => {
     const shortcut = event.text.trim();
     if (
+      ctx.mode !== "tui" ||
       event.source !== "interactive" ||
       !/^(s|status\?)$/i.test(shortcut) ||
       (event.images?.length ?? 0) !== 0

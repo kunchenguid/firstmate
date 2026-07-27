@@ -209,7 +209,8 @@ Only Pi's Calm presentation implementation changed; every producer and non-Pi tr
 ## Regression coverage
 
 `tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers, verifies all seven built-ins plus `fm_watch_arm_pi`, exercises redraw of already-rendered tool, thinking, current operational-user, and legacy synthetic rows, and covers every policy class.
-The same focused test exercises both Pi Bearings shortcuts, project-skill provenance, and the Captain's Call-only no-report/no-browser boundary through real Pi print and TUI paths.
+The same focused test exercises both Pi Bearings shortcuts, project-skill provenance, noninteractive text and JSON pass-through, and the Captain's Call-only no-report/no-browser boundary through the real Pi TUI.
+It also exercises Claude CLI exact-match, image, headless, unrelated-prompt, and trusted-project pass-through boundaries while leaving Bearings classification and reporting with the project skill.
 It covers persisted preference restoration across every session-start reason and a real restart, proves Pi's native `Working...` row through a delayed deterministic provider, asserts no Calm status row, verifies operational messages remain exact ordinary user-role session entries and complete exports, and drives genuine 100 by 44, 160 by 36, and 180 by 44 terminal fixtures.
 A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool-result blocks, asserts that the collapsed skill-to-final gap equals the two-row visible-only baseline, expands and re-collapses original thinking, restores Calm-off rendering, verifies persisted hidden history, and repeats the geometry assertion after restart with `terminal.clearOnShrink` explicitly off.
 The operational provider path covers Calm loaded on, loaded off, default preference, extension absent, exact watcher delivery, narrow bare-marker legacy input, persisted restart replay, a genuine captain prompt, and adjacent notifications coalesced into one intended processing turn.
@@ -279,7 +280,7 @@ $ tests/fm-pi-primary-types.test.sh
 ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.81.1
 ```
 
-## 2026-07-26 Pi 0.82.1 and 2026-07-27 static presentation verification
+## 2026-07-26 Pi 0.82.1 and 2026-07-27 shortcut and static presentation verification
 
 Pi 0.82.1 preserved the two version-bounded layout seams, all seven built-in renderer slots, watcher rendering, expansion redraw, native working activity, operational-input semantics, and stock export evidence.
 The compatibility review read the installed Pi 0.82.1 README plus `docs/extensions.md`, `docs/tui.md`, `docs/themes.md`, `docs/settings.md`, `docs/keybindings.md`, `docs/session-format.md`, and `docs/packages.md` completely, then inspected the directly relevant built-in renderer, minimal-mode, message, entry, working-indicator, hidden-thinking, question, todo, override, and theme examples.
@@ -288,12 +289,16 @@ The deterministic native TUI run covered 80, 100, and 160 columns, absent-defaul
 The focused component run additionally covered collapsed built-in and watcher errors, each with one text failure message and reveal-key hint before complete stock expansion.
 
 ```text
+$ claude --version
+2.1.220 (Claude Code)
+
 $ pi --version
 0.82.1
 
 $ FM_PI_PACKAGE_DIR="$HOME/.local/lib/node_modules/@earendil-works/pi-coding-agent" tests/fm-calm-pi-extension.test.sh
 ok - Pi input shortcuts transform only exact image-free interactive s/S or status? input and verify project skill provenance
-ok - real Pi 0.82.1 print and TUI paths expand the shortcut argument and render only Captain's Call without report or browser writes
+ok - Claude CLI hook maps only exact trusted interactive image-free shortcuts to the Bearings owner
+ok - real Pi 0.82.1 text and JSON modes pass through while TUI expands only Captain's Call without report or browser writes
 ok - Pi calm extension is presentation-only with one persisted visibility choice, no Calm status row, native working visibility, supported redraw controls, and the Firstmate watcher-tool integration
 ok - Pi calm resolves its persistent home independently of Pi's launch directory
 ok - Pi 0.82.1 is explicitly certified and unsupported or missing renderer surfaces fall back atomically to stock rendering

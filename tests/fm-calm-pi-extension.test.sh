@@ -8,6 +8,7 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-calm-pi-extension)
 EXT="$ROOT/.pi/extensions/fm-calm.ts"
 SHORTCUT_EXT="$ROOT/.pi/extensions/fm-captains-call-shortcut.ts"
+CLAUDE_SHORTCUT="$ROOT/bin/fm-claude-captains-call-shortcut.sh"
 ASSISTANT_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
 OPERATIONAL_USER_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
 COMPATIBILITY="$ROOT/.pi/extensions/lib/fm-calm-compatibility.ts"
@@ -134,8 +135,8 @@ const ctx = {
     },
   },
 };
-const invoke = (text, source = "interactive", images, streamingBehavior) =>
-  inputHandler({ type: "input", text, source, images, streamingBehavior }, ctx);
+const invoke = (text, source = "interactive", images, streamingBehavior, mode = "tui") =>
+  inputHandler({ type: "input", text, source, images, streamingBehavior }, { ...ctx, mode });
 
 commands = [validCommand];
 for (const [text, streamingBehavior, expected] of [
@@ -179,6 +180,9 @@ for (const event of [
   ["S", "extension", undefined],
   ["status?", "rpc", undefined],
   ["STATUS?", "extension", undefined],
+  ["s", "interactive", undefined, undefined, "text"],
+  ["status?", "interactive", undefined, undefined, "json"],
+  ["S", "interactive", undefined, undefined, "rpc"],
   ["s", "interactive", [{ type: "image", data: "fixture", mimeType: "image/png" }]],
   ["status?", "interactive", [{ type: "image", data: "fixture", mimeType: "image/png" }]],
 ]) {
@@ -219,8 +223,147 @@ JS
   pass "Pi input shortcuts transform only exact image-free interactive s/S or status? input and verify project skill provenance"
 }
 
+test_claude_shortcut_hook_contract() {
+  local fixture project payload out context text entrypoint field settings command
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "skip: jq not found for Claude Captain's Call shortcut test"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/claude-captains-call-shortcut"
+  project="$fixture/project"
+  mkdir -p \
+    "$project/bin" \
+    "$project/.agents/skills/bearings" \
+    "$project/.claude"
+  cp "$CLAUDE_SHORTCUT" "$project/bin/fm-claude-captains-call-shortcut.sh"
+  chmod +x "$project/bin/fm-claude-captains-call-shortcut.sh"
+  printf '%s\n' '---' 'name: bearings' 'description: fixture' '---' '# Bearings fixture' \
+    >"$project/.agents/skills/bearings/SKILL.md"
+  ln -s ../.agents/skills "$project/.claude/skills"
+  ln -s "$project" "$fixture/project-link"
+
+  for text in "s" "S" " s " $'\tS\n'; do
+    payload=$(jq -cn --arg prompt "$text" \
+      '{hook_event_name:"UserPromptSubmit", prompt:$prompt}')
+    out=$(printf '%s' "$payload" | \
+      CLAUDE_PROJECT_DIR="$project" CLAUDE_CODE_ENTRYPOINT=cli \
+      "$project/bin/fm-claude-captains-call-shortcut.sh") \
+      || fail "Claude exact s shortcut hook failed"
+    jq -e '
+      .hookSpecificOutput.hookEventName == "UserPromptSubmit" and
+      (.hookSpecificOutput.additionalContext | contains("`captains-call-only`")) and
+      (.hookSpecificOutput.additionalContext | contains("no image attachments")) and
+      (.hookSpecificOutput.additionalContext | contains("sole classification and report owner"))
+    ' >/dev/null <<<"$out" || fail "Claude exact s shortcut emitted the wrong hook context: $out"
+  done
+
+  for text in "status?" "Status?" "STATUS?" $'\t sTaTuS? \n'; do
+    payload=$(jq -cn --arg prompt "$text" \
+      '{hook_event_name:"UserPromptSubmit", prompt:$prompt}')
+    out=$(printf '%s' "$payload" | \
+      CLAUDE_PROJECT_DIR="$project" CLAUDE_CODE_ENTRYPOINT=cli \
+      "$project/bin/fm-claude-captains-call-shortcut.sh") \
+      || fail "Claude exact status? shortcut hook failed"
+    context=$(jq -er '.hookSpecificOutput.additionalContext' <<<"$out") \
+      || fail "Claude exact status? shortcut omitted hook context: $out"
+    assert_contains "$context" "full four-section workflow" "Claude status? full Bearings mapping"
+    assert_contains "$context" "no image attachments" "Claude status? image guard"
+    assert_contains "$context" "sole classification and report owner" "Claude status? Bearings owner"
+    assert_not_contains "$context" "captains-call-only" "Claude status? Captain's Call-only argument"
+  done
+
+  payload=$(jq -cn --arg prompt "s" \
+    '{hook_event_name:"UserPromptSubmit", prompt:$prompt}')
+  out=$(printf '%s' "$payload" | \
+    CLAUDE_PROJECT_DIR="$fixture/project-link" CLAUDE_CODE_ENTRYPOINT=cli \
+    "$fixture/project-link/bin/fm-claude-captains-call-shortcut.sh") \
+    || fail "Claude canonical trusted-project shortcut hook failed"
+  [ -n "$out" ] || fail "Claude shortcut rejected the canonical trusted-project symlink"
+
+  for text in "" "ss" "status" "status??" "status!" "status ?" \
+    "status? now" "show status?" "s now" "/s" "ordinary s text"
+  do
+    payload=$(jq -cn --arg prompt "$text" \
+      '{hook_event_name:"UserPromptSubmit", prompt:$prompt}')
+    out=$(printf '%s' "$payload" | \
+      CLAUDE_PROJECT_DIR="$project" CLAUDE_CODE_ENTRYPOINT=cli \
+      "$project/bin/fm-claude-captains-call-shortcut.sh") \
+      || fail "Claude near-match pass-through hook failed"
+    [ -z "$out" ] || fail "Claude near-match or unrelated prompt changed: $text -> $out"
+  done
+
+  payload=$(jq -cn '{hook_event_name:"UserPromptSubmit", prompt:"s"}')
+  for entrypoint in sdk-cli claude-vscode remote local-agent ""; do
+    out=$(printf '%s' "$payload" | \
+      CLAUDE_PROJECT_DIR="$project" CLAUDE_CODE_ENTRYPOINT="$entrypoint" \
+      "$project/bin/fm-claude-captains-call-shortcut.sh") \
+      || fail "Claude noninteractive or non-CLI pass-through hook failed"
+    [ -z "$out" ] || fail "Claude noninteractive or non-CLI entrypoint changed: $entrypoint -> $out"
+  done
+
+  for field in images attachments file_attachments fileAttachments pasted_contents; do
+    payload=$(jq -cn --arg field "$field" \
+      '{hook_event_name:"UserPromptSubmit", prompt:"s"} + {($field):[{type:"image"}]}')
+    out=$(printf '%s' "$payload" | \
+      CLAUDE_PROJECT_DIR="$project" CLAUDE_CODE_ENTRYPOINT=cli \
+      "$project/bin/fm-claude-captains-call-shortcut.sh") \
+      || fail "Claude image pass-through hook failed"
+    [ -z "$out" ] || fail "Claude image-bearing prompt changed through $field: $out"
+  done
+
+  payload=$(jq -cn '{hook_event_name:"UserPromptSubmit", prompt:"s"}')
+  out=$(printf '%s' "$payload" | \
+    CLAUDE_PROJECT_DIR="$fixture" CLAUDE_CODE_ENTRYPOINT=cli \
+    "$project/bin/fm-claude-captains-call-shortcut.sh") \
+    || fail "Claude mismatched-project pass-through hook failed"
+  [ -z "$out" ] || fail "Claude shortcut accepted a mismatched project root: $out"
+  out=$(printf '%s' '{"hook_event_name":"Stop","prompt":"s"}' | \
+    CLAUDE_PROJECT_DIR="$project" CLAUDE_CODE_ENTRYPOINT=cli \
+    "$project/bin/fm-claude-captains-call-shortcut.sh") \
+    || fail "Claude non-prompt-event pass-through hook failed"
+  [ -z "$out" ] || fail "Claude shortcut accepted a non-prompt hook event: $out"
+  out=$(printf '%s' 'not-json' | \
+    CLAUDE_PROJECT_DIR="$project" CLAUDE_CODE_ENTRYPOINT=cli \
+    "$project/bin/fm-claude-captains-call-shortcut.sh") \
+    || fail "Claude malformed-input pass-through hook failed"
+  [ -z "$out" ] || fail "Claude shortcut changed malformed hook input: $out"
+
+  mkdir -p "$fixture/other-skills/bearings"
+  printf '%s\n' '# Different Bearings skill' >"$fixture/other-skills/bearings/SKILL.md"
+  rm "$project/.claude/skills"
+  ln -s "$fixture/other-skills" "$project/.claude/skills"
+  out=$(printf '%s' "$payload" | \
+    CLAUDE_PROJECT_DIR="$project" CLAUDE_CODE_ENTRYPOINT=cli \
+    "$project/bin/fm-claude-captains-call-shortcut.sh") \
+    || fail "Claude non-project Bearings pass-through hook failed"
+  [ -z "$out" ] || fail "Claude shortcut accepted a non-project Bearings skill: $out"
+
+  settings="$ROOT/.claude/settings.json"
+  jq -e '
+    [.hooks.UserPromptSubmit[]?.hooks[]? |
+      select(
+        .type == "command" and
+        .command == "\"$CLAUDE_PROJECT_DIR\"/bin/fm-claude-captains-call-shortcut.sh"
+      )
+    ] | length == 1
+  ' "$settings" >/dev/null || fail "Claude UserPromptSubmit shortcut hook is not registered exactly once"
+  command=$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' "$settings")
+  assert_contains "$command" 'CLAUDE_PROJECT_DIR' "Claude shortcut trust anchor"
+  assert_not_contains "$(cat "$ROOT/.codex/hooks.json")" "fm-claude-captains-call-shortcut" \
+    "Codex config must not register the Claude shortcut"
+  assert_not_contains "$(cat "$ROOT/.grok/hooks/fm-primary-sessionstart-nudge.json")" \
+    "fm-claude-captains-call-shortcut" "Grok config must not register the Claude shortcut"
+  if grep -R -Fq "fm-claude-captains-call-shortcut" \
+    "$ROOT/.pi" "$ROOT/.opencode" "$ROOT/.grok" "$ROOT/.codex"; then
+    fail "a non-Claude harness registered the Claude shortcut"
+  fi
+
+  pass "Claude CLI hook maps only exact trusted interactive image-free shortcuts to the Bearings owner"
+}
+
 test_captains_call_shortcut_real_pi_expansion() {
-  local project config home prompt commands_file out status version mode heading_count pane i
+  local project config home prompt commands_file out status version output_mode shortcut prompt_text pane i
   if ! command -v pi >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
     echo "skip: pi or node not found for real Pi Captain's Call shortcut expansion test"
     return 0
@@ -311,31 +454,27 @@ export default function (pi: ExtensionAPI): void {
 }
 TS
 
-  for mode in empty actionable; do
-    out=$(cd "$project" && \
-      env FM_HOME="$home" PI_CODING_AGENT_DIR="$config" PI_OFFLINE=1 \
-        PROBE_PROMPT="$prompt" PROBE_COMMANDS="$commands_file" PROBE_MODE="$mode" \
-        pi --approve --no-session --no-context-files --no-prompt-templates --no-tools \
-          -e ./probe-provider.ts --provider captains-call-probe --model deterministic \
-          --thinking off -p '  S  ' 2>&1)
-    status=$?
-    [ "$status" -eq 0 ] || fail "real Pi Captain's Call $mode expansion failed: $out"
-    [ -f "$prompt" ] \
-      || fail "real Pi did not start the transformed turn; commands: $(cat "$commands_file" 2>/dev/null || printf unavailable)"
-    assert_contains "$(cat "$prompt")" '<skill name="bearings"' "real Pi expanded the Bearings skill"
-    tail -c 64 "$prompt" | grep -Fq $'</skill>\n\ncaptains-call-only' \
-      || fail "real Pi did not append the exact captains-call-only argument: $(tail -c 160 "$prompt")"
-    heading_count=$(printf '%s\n' "$out" | grep -c '^## ' || true)
-    [ "$heading_count" -eq 1 ] || fail "Captain's Call-only $mode output rendered $heading_count sections: $out"
-    assert_contains "$out" "## Captain's Call" "Captain's Call-only $mode heading"
-    assert_not_contains "$out" "## Recently Landed" "Captain's Call-only $mode output included Recently Landed"
-    assert_not_contains "$out" "## Underway" "Captain's Call-only $mode output included Underway"
-    assert_not_contains "$out" "## Charted Next" "Captain's Call-only $mode output included Charted Next"
-    if [ "$mode" = empty ]; then
-      assert_contains "$out" "Nothing needs your action right now." "Captain's Call-only empty state"
-    else
-      assert_contains "$out" "Choose the release route." "Captain's Call-only actionable row"
-    fi
+  for output_mode in text json; do
+    for shortcut in "  S  " "  Status?  "; do
+      rm -f "$prompt" "$commands_file"
+      out=$(cd "$project" && \
+        env FM_HOME="$home" PI_CODING_AGENT_DIR="$config" PI_OFFLINE=1 \
+          PROBE_PROMPT="$prompt" PROBE_COMMANDS="$commands_file" PROBE_MODE=empty \
+          pi --approve --no-session --no-context-files --no-prompt-templates --no-tools \
+            -e ./probe-provider.ts --provider captains-call-probe --model deterministic \
+            --thinking off --mode "$output_mode" -p "$shortcut" 2>&1)
+      status=$?
+      [ "$status" -eq 0 ] || fail "real Pi noninteractive $output_mode pass-through failed: $out"
+      [ -f "$prompt" ] \
+        || fail "real Pi noninteractive $output_mode turn did not reach the provider"
+      prompt_text=$(cat "$prompt")
+      [ "$prompt_text" = "$shortcut" ] \
+        || fail "real Pi noninteractive $output_mode shortcut changed: $prompt_text"
+      assert_not_contains "$prompt_text" '<skill name="bearings"' \
+        "real Pi noninteractive $output_mode prompt"
+      assert_not_contains "$prompt_text" 'captains-call-only' \
+        "real Pi noninteractive $output_mode Captain's Call-only argument"
+    done
   done
 
   if command -v tmux >/dev/null 2>&1; then
@@ -383,7 +522,7 @@ TS
   if [ -d "$home/.lavish" ] && find "$home/.lavish" -type f -print | grep -q .; then
     fail "Captain's Call-only expansion created a browser artifact"
   fi
-  pass "real Pi 0.82.1 print and TUI paths expand the shortcut argument and render only Captain's Call without report or browser writes"
+  pass "real Pi 0.82.1 text and JSON modes pass through while TUI expands only Captain's Call without report or browser writes"
 }
 
 test_static_contract() {
@@ -2570,6 +2709,7 @@ JS
 }
 
 test_captains_call_shortcut_input_contract
+test_claude_shortcut_hook_contract
 test_captains_call_shortcut_real_pi_expansion
 test_static_contract
 test_home_resolution
