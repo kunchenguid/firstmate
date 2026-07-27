@@ -50,6 +50,7 @@ write_manifest_record() {
     echo "project=$PROJECT_REAL"
     echo "pool_status=leased"
     echo "expected_holder=$EXPECTED"
+    echo "allocation_evidence=$EXPECTED_STATE_EVIDENCE"
     echo "manifest_digest=$FM_WORKTREE_MANIFEST_DIGEST"
     echo "manifest_body_begin"
     [ -z "$FM_WORKTREE_MANIFEST_BODY" ] || printf '%s\n' "$FM_WORKTREE_MANIFEST_BODY"
@@ -87,6 +88,14 @@ fm_worktree_state_evidence "$WORKTREE_REAL" || refuse "treehouse allocation evid
 EXPECTED_STATE_EVIDENCE=$FM_WORKTREE_STATE_EVIDENCE
 fm_worktree_pool_lookup "$PROJECT_REAL" "$WORKTREE_REAL" || refuse "treehouse pool state is unreadable"
 [ "$FM_WORKTREE_POOL_RESULT" = present ] || refuse "worktree is absent from the treehouse pool"
+if [ -e "$PENDING" ]; then
+  [ "$(grep -c '^allocation_evidence=' "$PENDING" 2>/dev/null || true)" = 1 ] \
+    || refuse "partial adoption evidence has no single allocation digest"
+  STORED_STATE_EVIDENCE=$(grep '^allocation_evidence=' "$PENDING" | cut -d= -f2-)
+  [ "$STORED_STATE_EVIDENCE" = "$EXPECTED_STATE_EVIDENCE" ] \
+    || refuse "partial adoption evidence is quarantined because allocation ownership changed"
+  EXPECTED_STATE_EVIDENCE=$STORED_STATE_EVIDENCE
+fi
 if [ "$FM_WORKTREE_POOL_STATUS" = leased ]; then
   [ "$FM_WORKTREE_POOL_HOLDER" = "$EXPECTED" ] \
     || refuse "worktree is leased to ${FM_WORKTREE_POOL_HOLDER:-an unknown holder}, not $EXPECTED"
