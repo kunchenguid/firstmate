@@ -49,8 +49,10 @@ test_owner_and_always_loaded_boundary() {
   assert_grep 'user-invocable: false' "$OWNER" "ask-user authority skill must be agent-only"
   assert_grep 'single owner of the decision procedure for ask-user findings' "$OWNER" \
     "ask-user authority skill does not declare ownership"
-  assert_grep 'With `yolo` off, every ask-user finding belongs to the captain' "$OWNER" \
-    "detailed procedure permits autonomous ask-user decisions with yolo off"
+  assert_grep 'Classify the finding by substance before any tool label or `yolo` posture' "$OWNER" \
+    "detailed procedure no longer classifies a finding by substance before yolo"
+  assert_grep 'With `yolo` off, this remaining category belongs to the captain' "$OWNER" \
+    "detailed procedure escalates every finding to the captain with yolo off instead of only the remaining category"
   trigger_count=$(grep -Fc -- '- `ask-user-authority` -' "$AGENTS")
   [ "$trigger_count" -eq 1 ] || fail "ask-user-authority must have exactly one section 13 trigger, found $trigger_count"
   assert_no_grep 'Hi Bit' "$AGENTS" "AGENTS.md encoded an incident-specific authority rule"
@@ -61,9 +63,21 @@ test_owner_and_always_loaded_boundary() {
 test_concrete_required_defect_stays_autonomous() {
   assert_grep 'genuinely necessary to satisfy the accepted contract' "$OWNER" \
     "required concrete corrections no longer stay within standing authority"
-  assert_grep 'Fixing a concrete defect that violates an original acceptance criterion stays within `yolo` authority' "$OWNER" \
+  assert_grep 'A copy or implementation defect that directly contradicts accepted criteria is supervisor-owned regardless of `yolo`' "$OWNER" \
     "concrete acceptance-criterion defect scenario is missing"
-  pass "required concrete defect correction stays within yolo authority"
+  pass "required concrete defect correction stays supervisor-owned regardless of yolo"
+}
+
+test_routine_delivery_steps_stay_supervisor_owned() {
+  local contract
+  contract=$(approval_contract)
+  assert_contains "$contract" 'feature-branch pushes, PR or MR creation and updates, CI, and reversible proof experiments required by the accepted criteria' \
+    "standing contract no longer authorizes routine delivery-path steps"
+  assert_contains "$contract" 'clears these even when `yolo` is off' \
+    "standing contract no longer clears routine gates when yolo is off"
+  assert_grep 'Pushing an authorized feature branch, opening or updating the selected PR or MR, or running CI proof required by the accepted criteria is supervisor-owned regardless of `yolo`' "$OWNER" \
+    "routine delivery-step scenario is missing from the detailed procedure"
+  pass "routine feature-branch, PR/MR, and CI steps required by accepted criteria stay supervisor-owned regardless of yolo"
 }
 
 test_continuous_monitoring_expansion_escalates() {
@@ -152,6 +166,7 @@ test_primary_and_secondmate_instruction_generation() {
 
 test_owner_and_always_loaded_boundary
 test_concrete_required_defect_stays_autonomous
+test_routine_delivery_steps_stay_supervisor_owned
 test_continuous_monitoring_expansion_escalates
 test_repeated_same_theme_escalates_before_another_round
 test_stronger_security_boundary_survives

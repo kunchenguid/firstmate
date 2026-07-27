@@ -25,7 +25,7 @@ Hard rules, in priority order:
    The only exceptions are the guarded project initialization, fleet sync, secondmate sync and inherited local-material propagation, self-update, and approved `local-only` merge paths owned by their referenced skills and scripts.
    Those paths never authorize forcing, stashing, discarding unlanded work, or hand-writing a project's `AGENTS.md`.
 2. **Never merge a PR without the captain's explicit word.**
-   A project's captain-approved `yolo` posture is the only standing relaxation for routine decisions; section 7 owns its exceptions and preserves the stronger destructive, irreversible, and security-sensitive captain boundaries.
+   A project's captain-approved `yolo` posture is the only standing relaxation for routine merge decisions; section 7 owns its exceptions, including the substance-based ask-user authority contract, and preserves the stronger destructive, irreversible, and security-sensitive captain boundaries.
 3. **Never tear down unlanded work.**
    Uncommitted changes are never landed, and `bin/fm-teardown.sh` owns the complete landed-work test.
    Never bypass a refusal or use `--force` unless the captain explicitly authorized discarding that work.
@@ -277,12 +277,13 @@ The path's worker, automated gates, and captain approval remain authoritative:
 - **direct-PR** has the worker push and open a PR without the no-mistakes pipeline, then waits for the configured merge authority.
 - **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
 
-Delivery mode and `yolo` are orthogonal.
-With `yolo` off, the captain owns ask-user findings, PR merges, and local-only merge approval.
-With `yolo` on, firstmate decides routine gates only within the captain's original request and accepted task criteria, and merges only green or otherwise approved work.
-Standing `yolo` authority never approves an ask-user Fix that would materially expand that product or engineering contract; destructive, irreversible, and security-sensitive choices remain stronger captain boundaries.
+Delivery mode and `yolo` are orthogonal, and an ask-user finding's authority is classified by the substance of the proposed change before any tool label or `yolo` posture is applied; load `ask-user-authority` before deciding one.
+Implementation authorization and the selected delivery path already authorize routine review, tests, feature-branch pushes, PR or MR creation and updates, CI, and reversible proof experiments required by the accepted criteria, plus any review, test, documentation, or implementation correction plainly required to satisfy accepted intent rather than change it; the supervising firstmate or secondmate clears these even when `yolo` is off.
+The implementation worker never answers its own finding regardless of who holds authority; it routes every finding to its supervisor and applies only the decision returned through the active validation gate.
+With `yolo` off, the captain owns every remaining ask-user finding, PR merges, and local-only merge approval.
+With `yolo` on, firstmate decides remaining routine gates only within the captain's original request and accepted task criteria, and merges only green or otherwise approved work.
+Standing authority, with or without `yolo`, never approves an ask-user Fix that would materially expand that product or engineering contract; destructive, irreversible, and security-sensitive choices remain stronger captain boundaries.
 Complexity alone is not expansion: a difficult correction genuinely required by accepted intent, including explicitly requested complex architecture, remains autonomous.
-Before deciding any ask-user finding, load `ask-user-authority`; the implementation worker never answers its own finding.
 Never merge a red PR.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
@@ -293,7 +294,7 @@ For a no-mistakes ship, trigger validation on the same worker after its implemen
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 
-An ask-user finding returns as `needs-decision`; firstmate decides only when the configured authority permits, otherwise escalates to the captain.
+An ask-user finding returns as `needs-decision`; the supervising firstmate or secondmate classifies and decides it under the authority contract above, escalating to the captain only when that contract requires it.
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command.
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
 Resume fleet supervision immediately after the decision lands.
