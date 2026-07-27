@@ -980,6 +980,7 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 # an existing record: their ownership cannot be proven, so they refuse.
 # A task id with no record is untouched - the fresh-allocation path is unchanged.
 SPAWN_RECORDED_WT=
+SPAWN_RECORDED_LEASE_HOLDER=
 
 spawn_meta_field_exact() {  # <meta> <key>
   local meta=$1 key=$2 count
@@ -1038,9 +1039,25 @@ resolve_recorded_task_worktree() {
   recorded_holder=$(spawn_meta_field_exact "$meta" lease_holder 2>/dev/null || true)
   if [ "$recorded_holder" = "$expected_holder" ] \
     && fm_worktree_proven_lease "$PROJ_ABS_REAL" "$recorded_real" "$expected_holder"; then
-    :
+    SPAWN_RECORDED_LEASE_HOLDER=$expected_holder
   elif fm_worktree_adoption_proves "$adoption" "$ID" "$recorded_real" "$PROJ_ABS_REAL" "$expected_holder"; then
-    :
+    fm_worktree_pool_lookup "$PROJ_ABS_REAL" "$recorded_real" \
+      || spawn_relaunch_refuse "durable protection for $recorded_real is not provable because its current treehouse pool state is unreadable; run bin/fm-adopt-worktree.sh $ID after verifying the worker is gone"
+    [ "$FM_WORKTREE_POOL_RESULT" = present ] \
+      || spawn_relaunch_refuse "durable protection for $recorded_real is not provable because it is absent from the current treehouse pool; run bin/fm-adopt-worktree.sh $ID after verifying the worker is gone"
+    case "$FM_WORKTREE_POOL_STATUS:$FM_WORKTREE_POOL_HOLDER" in
+      in-use:|in_use:|dirty:) ;;
+      "leased:$expected_holder") SPAWN_RECORDED_LEASE_HOLDER=$expected_holder ;;
+      available:*)
+        spawn_relaunch_refuse "durable protection for $recorded_real is not provable because its current treehouse pool status is available; run bin/fm-adopt-worktree.sh $ID after verifying the worker is gone"
+        ;;
+      leased:*)
+        spawn_relaunch_refuse "durable protection for $recorded_real is not provable because its current treehouse lease holder is ${FM_WORKTREE_POOL_HOLDER:-unknown}, not $expected_holder; run bin/fm-adopt-worktree.sh $ID after verifying the worker is gone"
+        ;;
+      *)
+        spawn_relaunch_refuse "durable protection for $recorded_real is not provable because its current treehouse pool status is $FM_WORKTREE_POOL_STATUS with holder ${FM_WORKTREE_POOL_HOLDER:-none}; run bin/fm-adopt-worktree.sh $ID after verifying the worker is gone"
+        ;;
+    esac
   else
     fm_worktree_pool_lookup "$PROJ_ABS_REAL" "$recorded_real" >/dev/null 2>&1 || true
     spawn_relaunch_refuse "durable protection for $recorded_real is not provable (pool=${FM_WORKTREE_POOL_RESULT:-unreadable}, status=${FM_WORKTREE_POOL_STATUS:-unknown}, holder=${FM_WORKTREE_POOL_HOLDER:-none}, recorded-holder=${recorded_holder:-none}, or adoption manifest missing/mismatched); run bin/fm-adopt-worktree.sh $ID after verifying the worker is gone"
@@ -1648,6 +1665,8 @@ META_WINDOW=$T
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
   if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -n "${WT_LEASED:-}" ]; then
     echo "lease_holder=fm-$ID"
+  elif [ -n "$SPAWN_RECORDED_LEASE_HOLDER" ]; then
+    echo "lease_holder=$SPAWN_RECORDED_LEASE_HOLDER"
   fi
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"

@@ -120,7 +120,7 @@ run_spawn() {
     FM_FAKE_SENT_FILE="$CASE_SENT_FILE" FM_FAKE_LEASE_PATH="$pane_path" \
     FM_FAKE_POOL_PATH="${FM_FAKE_POOL_PATH:-$CASE_WT_A}" \
     FM_FAKE_POOL_STATUS="${FM_FAKE_POOL_STATUS:-leased}" \
-    FM_FAKE_LEASE_HOLDER="${FM_FAKE_LEASE_HOLDER:-fm-$id}" \
+    FM_FAKE_LEASE_HOLDER="${FM_FAKE_LEASE_HOLDER-fm-$id}" \
     FM_FAKE_TREEHOUSE_LOG="$CASE_TREEHOUSE_LOG" \
     FM_FAKE_WINDOWS="${FM_FAKE_WINDOWS:-}" FM_FAKE_PANE_COMMAND="${FM_FAKE_PANE_COMMAND:-bash}" \
     PATH="$CASE_FAKEBIN:$PATH" \
@@ -178,7 +178,19 @@ test_relaunch_reuses_recorded_worktree() {
   assert_present "$CASE_WT_A/scratch.txt" "relaunch lost the recorded worktree's uncommitted edit"
   assert_contains "$(git -C "$CASE_WT_A" log --oneline -1)" 'unlanded work' \
     "relaunch lost the recorded worktree's unpushed commit"
-  pass "a provable relaunch re-enters the recorded worktree instead of allocating a fresh one"
+  assert_grep "lease_holder=fm-$id" "$CASE_HOME/state/$id.meta" \
+    "relaunch dropped the verified native lease holder"
+
+  : > "$CASE_CWD_FILE"
+  : > "$CASE_SENT_FILE"
+  out=$(run_spawn "$id" "$CASE_WT_B")
+  status=$?
+  expect_code 0 "$status" "second relaunch of the native lease should succeed: $out"
+  assert_grep "lease_holder=fm-$id" "$CASE_HOME/state/$id.meta" \
+    "second relaunch did not preserve the verified native lease holder"
+  assert_grep "cd '$CASE_WT_A'" "$CASE_SENT_FILE" \
+    "second relaunch did not re-enter the natively leased worktree"
+  pass "consecutive relaunches preserve and reuse the verified native lease"
 }
 
 # A recorded endpoint that still reports a live agent must refuse: two workers
@@ -334,6 +346,23 @@ test_legacy_copy_requires_adoption_and_manifest_stays_current() {
 
   out=$(FM_FAKE_POOL_STATUS=in-use FM_FAKE_LEASE_HOLDER= run_adopt "$id")
   expect_code 0 "$?" "guarded legacy adoption should succeed: $out"
+
+  out=$(FM_FAKE_POOL_STATUS=available FM_FAKE_LEASE_HOLDER= run_spawn "$id" "$CASE_WT_B")
+  status=$?
+  expect_code 1 "$status" "adopted copy that became available should refuse"
+  assert_contains "$out" 'current treehouse pool status is available' \
+    "available refusal did not report the current pool state"
+  assert_grep 'preserve exactly' "$CASE_WT_A/handoff.md" \
+    "available-state refusal changed adopted content"
+
+  out=$(FM_FAKE_POOL_STATUS=leased FM_FAKE_LEASE_HOLDER=foreign-holder run_spawn "$id" "$CASE_WT_B")
+  status=$?
+  expect_code 1 "$status" "adopted copy with a foreign lease should refuse"
+  assert_contains "$out" 'current treehouse lease holder is foreign-holder' \
+    "foreign-lease refusal did not report the current holder"
+  assert_grep 'preserve exactly' "$CASE_WT_A/handoff.md" \
+    "foreign-lease refusal changed adopted content"
+
   out=$(FM_FAKE_POOL_STATUS=in-use FM_FAKE_LEASE_HOLDER= run_spawn "$id" "$CASE_WT_B")
   expect_code 0 "$?" "relaunch with matching adoption proof should succeed: $out"
   assert_grep "cd '$CASE_WT_A'" "$CASE_SENT_FILE" "adopted relaunch did not enter the legacy copy"
