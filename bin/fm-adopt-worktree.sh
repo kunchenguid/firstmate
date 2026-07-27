@@ -24,6 +24,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 META="$STATE/$ID.meta"
 ADOPTION="$STATE/$ID.worktree-adoption"
+PENDING="$STATE/$ID.worktree-adoption-pending"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -38,6 +39,24 @@ field() {
 refuse() {
   echo "error: cannot adopt worktree for $ID: $1" >&2
   exit 1
+}
+
+write_manifest_record() {
+  local destination=$1 temporary="$1.tmp.$$"
+  trap 'rm -f "$temporary"' EXIT HUP INT TERM
+  {
+    echo "task_id=$ID"
+    echo "worktree=$WORKTREE_REAL"
+    echo "project=$PROJECT_REAL"
+    echo "pool_status=leased"
+    echo "expected_holder=$EXPECTED"
+    echo "manifest_digest=$FM_WORKTREE_MANIFEST_DIGEST"
+    echo "manifest_body_begin"
+    [ -z "$FM_WORKTREE_MANIFEST_BODY" ] || printf '%s\n' "$FM_WORKTREE_MANIFEST_BODY"
+    echo "manifest_body_end"
+  } > "$temporary"
+  mv "$temporary" "$destination"
+  trap - EXIT HUP INT TERM
 }
 
 [ -f "$META" ] && [ ! -L "$META" ] && [ -r "$META" ] || refuse "task record is not a readable regular file"
@@ -71,15 +90,27 @@ fm_worktree_pool_lookup "$PROJECT_REAL" "$WORKTREE_REAL" || refuse "treehouse po
 if [ "$FM_WORKTREE_POOL_STATUS" = leased ]; then
   [ "$FM_WORKTREE_POOL_HOLDER" = "$EXPECTED" ] \
     || refuse "worktree is leased to ${FM_WORKTREE_POOL_HOLDER:-an unknown holder}, not $EXPECTED"
+  if [ -e "$PENDING" ]; then
+    fm_worktree_adoption_proves "$PENDING" "$ID" "$WORKTREE_REAL" "$PROJECT_REAL" "$EXPECTED" \
+      || refuse "partial adoption evidence is quarantined because its original manifest no longer matches"
+  fi
 else
   case "$FM_WORKTREE_POOL_STATUS" in
     in-use|in_use|dirty) ;;
     available) refuse "worktree is available and may already have been recycled" ;;
     *) refuse "pool status $FM_WORKTREE_POOL_STATUS is not an adoptable legacy state" ;;
   esac
-  fm_worktree_content_manifest "$WORKTREE_REAL" || refuse "content manifest could not be captured"
-  BEFORE_DIGEST=$FM_WORKTREE_MANIFEST_DIGEST
-  BEFORE_BODY=$FM_WORKTREE_MANIFEST_BODY
+  if [ -e "$PENDING" ]; then
+    fm_worktree_adoption_proves "$PENDING" "$ID" "$WORKTREE_REAL" "$PROJECT_REAL" "$EXPECTED" \
+      || refuse "partial adoption evidence is quarantined because its original manifest no longer matches"
+  else
+    fm_worktree_content_manifest "$WORKTREE_REAL" || refuse "content manifest could not be captured"
+    write_manifest_record "$PENDING"
+    fm_worktree_adoption_proves "$PENDING" "$ID" "$WORKTREE_REAL" "$PROJECT_REAL" "$EXPECTED" \
+      || refuse "pre-acquisition manifest record could not be verified"
+  fi
+  BEFORE_DIGEST=$(grep '^manifest_digest=' "$PENDING" | cut -d= -f2-)
+  BEFORE_BODY=$(sed -n '/^manifest_body_begin$/,/^manifest_body_end$/p' "$PENDING" | sed '1d;$d')
   fm_worktree_acquire_existing_lease \
     "$WORKTREE_REAL" "$EXPECTED" "$EXPECTED_STATE_EVIDENCE" "$FM_WORKTREE_POOL_STATUS" \
     || refuse "durable lease acquisition failed"
@@ -92,21 +123,13 @@ else
 fi
 
 fm_worktree_content_manifest "$WORKTREE_REAL" || refuse "content manifest could not be captured"
-TMP="$ADOPTION.tmp.$$"
-trap 'rm -f "$TMP"' EXIT HUP INT TERM
-{
-  echo "task_id=$ID"
-  echo "worktree=$WORKTREE_REAL"
-  echo "project=$PROJECT_REAL"
-  echo "pool_status=leased"
-  echo "expected_holder=$EXPECTED"
-  echo "manifest_digest=$FM_WORKTREE_MANIFEST_DIGEST"
-  echo "manifest_body_begin"
-  [ -z "$FM_WORKTREE_MANIFEST_BODY" ] || printf '%s\n' "$FM_WORKTREE_MANIFEST_BODY"
-  echo "manifest_body_end"
-} > "$TMP"
-mv "$TMP" "$ADOPTION"
-trap - EXIT HUP INT TERM
+if [ -e "$PENDING" ]; then
+  fm_worktree_adoption_proves "$PENDING" "$ID" "$WORKTREE_REAL" "$PROJECT_REAL" "$EXPECTED" \
+    || refuse "partial adoption evidence is quarantined because its original manifest no longer matches"
+  mv "$PENDING" "$ADOPTION"
+else
+  write_manifest_record "$ADOPTION"
+fi
 fm_worktree_adoption_proves "$ADOPTION" "$ID" "$WORKTREE_REAL" "$PROJECT_REAL" "$EXPECTED" \
   || refuse "published adoption proof could not be verified"
 echo "verified: adopted $WORKTREE_REAL under durable lease $EXPECTED"

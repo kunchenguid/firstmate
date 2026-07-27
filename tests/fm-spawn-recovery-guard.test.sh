@@ -135,6 +135,9 @@ run_adopt() {
     FM_FAKE_POOL_STATUS="${FM_FAKE_POOL_STATUS:-in-use}" \
     FM_FAKE_LEASE_HOLDER="${FM_FAKE_LEASE_HOLDER:-}" \
     FM_FAKE_TREEHOUSE_STATE_FILE="${FM_FAKE_TREEHOUSE_STATE_FILE:-}" \
+    FM_FAKE_STATUS_MUTATE_FILE="${FM_FAKE_STATUS_MUTATE_FILE:-}" \
+    FM_FAKE_STATUS_MUTATE_MARKER="${FM_FAKE_STATUS_MUTATE_MARKER:-}" \
+    FM_FAKE_STATUS_MUTATE_TEXT="${FM_FAKE_STATUS_MUTATE_TEXT:-}" \
     FM_FAKE_WINDOWS="" PATH="$CASE_FAKEBIN:$PATH" \
     "$ROOT/bin/fm-adopt-worktree.sh" "$id" 2>&1
 }
@@ -435,6 +438,44 @@ test_holderless_record_uses_current_native_lease_proof() {
   pass "holder-less records trust only an exact matching current native lease"
 }
 
+test_quarantined_adoption_refuses_relaunch() {
+  local id state marker out status changed_hash
+  id=recovery-quarantine-a9
+  make_case quarantine "$id"
+  out=$(run_spawn "$id" "$CASE_WT_A")
+  expect_code 0 "$?" "first spawn should succeed"
+  sed '/^lease_holder=/d' "$CASE_HOME/state/$id.meta" > "$CASE_HOME/state/$id.meta.new"
+  mv "$CASE_HOME/state/$id.meta.new" "$CASE_HOME/state/$id.meta"
+  printf 'original handoff\n' > "$CASE_WT_A/handoff.md"
+  state="$(dirname "$(dirname "$CASE_WT_A")")/treehouse-state.json"
+  printf '{"worktrees":[{"name":"1","path":"%s","test_status":"in-use","owner_pid":999999,"owner_started_at":1},{"name":"2","path":"%s","test_status":"available"}]}\n' \
+    "$CASE_WT_A" "$CASE_WT_B" > "$state"
+  marker="$TMP_ROOT/quarantine-mutated"
+
+  out=$(FM_FAKE_TREEHOUSE_STATE_FILE="$state" \
+    FM_FAKE_STATUS_MUTATE_FILE="$CASE_WT_A/handoff.md" \
+    FM_FAKE_STATUS_MUTATE_MARKER="$marker" \
+    FM_FAKE_STATUS_MUTATE_TEXT='concurrent handoff' run_adopt "$id")
+  status=$?
+  expect_code 1 "$status" "concurrent mutation should quarantine adoption"
+  changed_hash=$(sha256sum "$CASE_WT_A/handoff.md")
+
+  out=$(FM_FAKE_TREEHOUSE_STATE_FILE="$state" run_adopt "$id")
+  status=$?
+  expect_code 1 "$status" "quarantined adoption retry should refuse"
+  assert_absent "$CASE_HOME/state/$id.worktree-adoption" "retry published adoption proof"
+
+  : > "$CASE_CWD_FILE"
+  out=$(FM_FAKE_TREEHOUSE_STATE_FILE="$state" run_spawn "$id" "$CASE_WT_B")
+  status=$?
+  expect_code 1 "$status" "quarantined adoption should refuse relaunch"
+  assert_contains "$out" 'adoption manifest missing/mismatched' \
+    "relaunch did not identify quarantined adoption proof"
+  [ "$changed_hash" = "$(sha256sum "$CASE_WT_A/handoff.md")" ] \
+    || fail "quarantined retry or relaunch changed handoff content"
+  pass "quarantined adoption refuses retry and relaunch without changing content"
+}
+
 test_relaunch_reuses_recorded_worktree
 test_live_recorded_endpoint_refuses
 test_kind_change_refuses
@@ -443,5 +484,6 @@ test_unresolvable_recorded_worktree_refuses
 test_fresh_task_still_allocates
 test_legacy_copy_requires_durable_lease
 test_holderless_record_uses_current_native_lease_proof
+test_quarantined_adoption_refuses_relaunch
 
 echo "# all fm-spawn-recovery-guard tests passed"

@@ -42,6 +42,9 @@ run_adopt() {
     FM_FAKE_POOL_STATUS="${FM_FAKE_POOL_STATUS:-in-use}" \
     FM_FAKE_LEASE_HOLDER="${FM_FAKE_LEASE_HOLDER:-}" \
     FM_FAKE_TREEHOUSE_STATE_FILE="${FM_FAKE_TREEHOUSE_STATE_FILE:-}" \
+    FM_FAKE_STATUS_MUTATE_FILE="${FM_FAKE_STATUS_MUTATE_FILE:-}" \
+    FM_FAKE_STATUS_MUTATE_MARKER="${FM_FAKE_STATUS_MUTATE_MARKER:-}" \
+    FM_FAKE_STATUS_MUTATE_TEXT="${FM_FAKE_STATUS_MUTATE_TEXT:-}" \
     FM_FAKE_WINDOWS="${FM_FAKE_WINDOWS:-}" FM_FAKE_PANE_COMMAND="${FM_FAKE_PANE_COMMAND:-bash}" \
     PATH="$CASE_FAKEBIN:$PATH" "$ROOT/bin/fm-adopt-worktree.sh" "$id" 2>&1
 }
@@ -121,8 +124,40 @@ PY
   pass "lease acquisition refuses changed ownership evidence without mutation"
 }
 
+test_changed_manifest_quarantines_retries() {
+  local id state marker out status changed_hash
+  id=adopt-manifest-a4
+  make_case manifest "$id"
+  state="$(dirname "$(dirname "$CASE_WORKTREE")")/treehouse-state.json"
+  marker="$TMP_ROOT/manifest-mutated"
+  out=$(FM_FAKE_TREEHOUSE_STATE_FILE="$state" \
+    FM_FAKE_STATUS_MUTATE_FILE="$CASE_WORKTREE/handoff.md" \
+    FM_FAKE_STATUS_MUTATE_MARKER="$marker" \
+    FM_FAKE_STATUS_MUTATE_TEXT='concurrent content' run_adopt "$id")
+  status=$?
+  expect_code 1 "$status" "post-lease content mutation should refuse adoption"
+  assert_present "$CASE_HOME/state/$id.worktree-adoption-pending" \
+    "failed manifest verification did not retain quarantine evidence"
+  assert_absent "$CASE_HOME/state/$id.worktree-adoption" \
+    "failed manifest verification published adoption proof"
+  assert_grep 'concurrent content' "$CASE_WORKTREE/handoff.md" \
+    "failed verification removed concurrent content"
+  changed_hash=$(sha256sum "$CASE_WORKTREE/handoff.md")
+
+  out=$(FM_FAKE_TREEHOUSE_STATE_FILE="$state" run_adopt "$id")
+  status=$?
+  expect_code 1 "$status" "retry after manifest mismatch should remain quarantined"
+  assert_contains "$out" 'quarantined' "retry did not report quarantine evidence"
+  assert_absent "$CASE_HOME/state/$id.worktree-adoption" \
+    "retry blessed changed content"
+  [ "$changed_hash" = "$(sha256sum "$CASE_WORKTREE/handoff.md")" ] \
+    || fail "retry changed quarantined content"
+  pass "manifest mismatch remains quarantined across retries"
+}
+
 test_unleased_copy_is_atomically_leased_unchanged
 test_refusals_and_native_lease_noop
 test_changed_owner_refuses_without_mutation
+test_changed_manifest_quarantines_retries
 
 echo "# all fm-adopt-worktree tests passed"

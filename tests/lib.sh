@@ -148,6 +148,14 @@ PY
     printf '%s\n' "${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-$FM_FAKE_TREEHOUSE_DEFAULT}}"
   fi
 elif [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
+  if [ -n "${FM_FAKE_STATUS_MUTATE_FILE:-}" ] \
+     && { [ -z "${FM_FAKE_TREEHOUSE_STATE_FILE:-}" ] \
+          || grep -Fq '"leased": true' "$FM_FAKE_TREEHOUSE_STATE_FILE"; } \
+     && [ ! -e "${FM_FAKE_STATUS_MUTATE_MARKER:-/nonexistent}" ]; then
+    printf '%s\n' "${FM_FAKE_STATUS_MUTATE_TEXT:-changed during verification}" \
+      >> "$FM_FAKE_STATUS_MUTATE_FILE"
+    : > "$FM_FAKE_STATUS_MUTATE_MARKER"
+  fi
   if [ -n "${FM_FAKE_TREEHOUSE_STATE_FILE:-}" ]; then
     python3 - "$FM_FAKE_TREEHOUSE_STATE_FILE" <<'PY'
 import json, sys

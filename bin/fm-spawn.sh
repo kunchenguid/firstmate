@@ -995,7 +995,7 @@ spawn_relaunch_refuse() {  # <detail>
 }
 
 resolve_recorded_task_worktree() {
-  local meta="$STATE/$ID.meta" adoption="$STATE/$ID.worktree-adoption" expected_holder="fm-$ID"
+  local meta="$STATE/$ID.meta" adoption="$STATE/$ID.worktree-adoption" pending="$STATE/$ID.worktree-adoption-pending" expected_holder="fm-$ID"
   local old_backend old_kind old_project old_project_real old_target old_state recorded recorded_real recorded_top recorded_top_real recorded_holder
   { [ -e "$meta" ] || [ -L "$meta" ]; } || return 0
   [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] \
@@ -1038,6 +1038,7 @@ resolve_recorded_task_worktree() {
     || spawn_relaunch_refuse "its recorded worktree $recorded resolves to the primary checkout"
   recorded_holder=$(spawn_meta_field_exact "$meta" lease_holder 2>/dev/null || true)
   if fm_worktree_proven_lease "$PROJ_ABS_REAL" "$recorded_real" "$expected_holder" \
+     && [ ! -e "$pending" ] \
      && { [ ! -e "$adoption" ] \
           || fm_worktree_adoption_proves "$adoption" "$ID" "$recorded_real" "$PROJ_ABS_REAL" "$expected_holder"; }; then
     SPAWN_RECORDED_LEASE_HOLDER=$expected_holder
