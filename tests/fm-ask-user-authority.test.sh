@@ -131,7 +131,7 @@ test_primary_and_secondmate_instruction_generation() {
     "generated implementation brief lets the worker own an ask-user decision"
   assert_grep "Firstmate applies the authority contract in its \`AGENTS.md\`" "$ship" \
     "generated implementation brief bypasses the primary authority owner"
-  assert_grep "silently bypass firstmate's authority check and any required captain escalation" "$ship" \
+  assert_grep "silently bypass the Firstmate authority check and any required captain escalation" "$ship" \
     "generated implementation brief permits silent ask-user auto-resolution"
   assert_no_grep 'the captain, not you, owns the ask-user decisions' "$ship" \
     "generated implementation brief retained conflicting captain-only wording"

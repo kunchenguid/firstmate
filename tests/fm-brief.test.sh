@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-brief.sh.
 #
-# Regression coverage for the heredoc-in-command-substitution parse bug (issue
-# #166): each ship-mode branch builds its Definition-of-done text with
-# `VAR=$(cat <<EOF ... EOF)`. Bash's lexer tracks quote state through the
-# heredoc body while it scans for the matching `)` of the command
-# substitution, so a single unescaped apostrophe anywhere in that body breaks
-# parsing of the *entire rest of the script* - `bash -n` fails, not just the
-# generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
-# is unaffected, so the secondmate charter block does not need this guard.
+# Regression coverage for the macOS Bash 3.2
+# heredoc-in-command-substitution parse bug (issue #166).
+# Each ship-mode branch builds its Definition-of-done text with
+# `VAR=$(cat <<EOF ... EOF)`.
+# Stock macOS Bash tracks quote state through the heredoc body while scanning
+# for the matching `)` of the command substitution, so one apostrophe in that
+# body breaks parsing of the rest of the script.
+# Linux Bash accepts the same source, so the portable source inspection below
+# carries the macOS-only regression guard in Linux CI.
+# A plain `cat > file <<EOF ... EOF` outside `$(...)` is unaffected, so the
+# secondmate charter block does not need this guard.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -18,15 +21,28 @@ TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
-# The script itself must always parse. This is the direct regression test for
-# issue #166: a stray apostrophe in any of the three DOD heredoc bodies
-# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
+# The script itself must parse under the Bash running the test.
+# On stock macOS Bash this directly catches issue #166; Linux CI relies on the
+# portable source guard below for apostrophes in the three DOD heredoc bodies.
 test_script_parses() {
   local out rc
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
   expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
   [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
   pass "fm-brief.sh: bash -n succeeds"
+}
+
+# Source-level tripwire for issue #166 so Linux CI catches the macOS-only
+# failure before the script can run under Bash 3.2.
+test_dod_heredocs_avoid_apostrophes() {
+  local out
+  out=$(awk '
+    /DOD=\$\(cat <<EOF/ { in_dod = 1 }
+    in_dod && index($0, sprintf("%c", 39)) { print NR ":" $0 }
+    in_dod && /^EOF$/ { in_dod = 0 }
+  ' "$ROOT/bin/fm-brief.sh")
+  [ -z "$out" ] || fail "DOD heredoc contains an apostrophe that breaks macOS Bash 3.2: $out"
+  pass "fm-brief.sh: DOD heredocs avoid macOS Bash 3.2 apostrophe parsing"
 }
 
 test_help_includes_entire_header() {
@@ -383,6 +399,7 @@ test_scout_and_secondmate_scaffold() {
 }
 
 test_script_parses
+test_dod_heredocs_avoid_apostrophes
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
