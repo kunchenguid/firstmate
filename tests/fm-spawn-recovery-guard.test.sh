@@ -337,17 +337,17 @@ test_legacy_copy_requires_adoption_and_manifest_stays_current() {
   : > "$CASE_CWD_FILE"
   : > "$CASE_TREEHOUSE_LOG"
 
-  out=$(FM_FAKE_POOL_STATUS=in-use FM_FAKE_LEASE_HOLDER= run_spawn "$id" "$CASE_WT_B")
+  out=$(FM_FAKE_POOL_STATUS=in-use FM_FAKE_LEASE_HOLDER='' run_spawn "$id" "$CASE_WT_B")
   status=$?
   expect_code 1 "$status" "legacy relaunch without durable proof should refuse"
   assert_contains "$out" 'fm-adopt-worktree.sh' "refusal did not point to guarded adoption"
   [ "$before" = "$(cat "$CASE_HOME/state/$id.meta")" ] || fail "refusal changed the legacy record"
   assert_grep 'preserve exactly' "$CASE_WT_A/handoff.md" "refusal changed legacy content"
 
-  out=$(FM_FAKE_POOL_STATUS=in-use FM_FAKE_LEASE_HOLDER= run_adopt "$id")
+  out=$(FM_FAKE_POOL_STATUS=in-use FM_FAKE_LEASE_HOLDER='' run_adopt "$id")
   expect_code 0 "$?" "guarded legacy adoption should succeed: $out"
 
-  out=$(FM_FAKE_POOL_STATUS=available FM_FAKE_LEASE_HOLDER= run_spawn "$id" "$CASE_WT_B")
+  out=$(FM_FAKE_POOL_STATUS=available FM_FAKE_LEASE_HOLDER='' run_spawn "$id" "$CASE_WT_B")
   status=$?
   expect_code 1 "$status" "adopted copy that became available should refuse"
   assert_contains "$out" 'current treehouse pool status is available' \
@@ -363,13 +363,13 @@ test_legacy_copy_requires_adoption_and_manifest_stays_current() {
   assert_grep 'preserve exactly' "$CASE_WT_A/handoff.md" \
     "foreign-lease refusal changed adopted content"
 
-  out=$(FM_FAKE_POOL_STATUS=in-use FM_FAKE_LEASE_HOLDER= run_spawn "$id" "$CASE_WT_B")
+  out=$(FM_FAKE_POOL_STATUS=in-use FM_FAKE_LEASE_HOLDER='' run_spawn "$id" "$CASE_WT_B")
   expect_code 0 "$?" "relaunch with matching adoption proof should succeed: $out"
   assert_grep "cd '$CASE_WT_A'" "$CASE_SENT_FILE" "adopted relaunch did not enter the legacy copy"
 
   printf 'changed after adoption\n' >> "$CASE_WT_A/handoff.md"
   : > "$CASE_CWD_FILE"
-  out=$(FM_FAKE_POOL_STATUS=in-use FM_FAKE_LEASE_HOLDER= run_spawn "$id" "$CASE_WT_B")
+  out=$(FM_FAKE_POOL_STATUS=in-use FM_FAKE_LEASE_HOLDER='' run_spawn "$id" "$CASE_WT_B")
   status=$?
   expect_code 1 "$status" "relaunch after adopted content changes should refuse"
   assert_contains "$out" 'manifest missing/mismatched' "refusal did not identify stale adoption proof"

@@ -73,7 +73,7 @@ test_real_treehouse_exit_paths() {
 }
 
 test_real_treehouse_adopts_unleased_copy_without_writing_it() {
-  local repo fifo transcript holder_pid wt id home fakebin before out i
+  local repo fifo transcript holder_pid wt id home fakebin before out
   if ! command -v treehouse >/dev/null 2>&1 || ! command -v script >/dev/null 2>&1; then
     echo "skip: treehouse or script not found (real legacy adoption)"
     return 0
@@ -101,7 +101,7 @@ SH
   holder_pid=$!
   printf 'printf "legacy bytes\\n" > handoff.md\n' >&9
   wt=
-  for i in $(seq 1 30); do
+  for _ in $(seq 1 30); do
     wt=$(cd "$repo" && treehouse status --json | jq -r '.[] | select(.status == "in-use") | .path' 2>/dev/null | head -n 1)
     [ -z "$wt" ] || break
     sleep 0.1
@@ -111,7 +111,7 @@ SH
     exec 9>&-
     fail "real treehouse did not expose an in-use legacy worktree"
   fi
-  for i in $(seq 1 30); do
+  for _ in $(seq 1 30); do
     [ -f "$wt/handoff.md" ] && break
     sleep 0.1
   done
