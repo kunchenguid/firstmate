@@ -203,6 +203,10 @@ Kimi continues to use the captain's normal Kimi home, including the existing con
 The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config.toml`, `python3` with `tomllib`, and `jq`; it validates but never serializes the captain's TOML and refuses before writing when the config is missing, malformed, or surprising or when either tool requirement is unavailable.
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
+For a delegated Pi or pi-signed ship or scout whose project resolves to `+yolo`, `fm-spawn.sh` sets `PI_PERMISSION_SYSTEM_YOLO=1` only on that selected Pi process.
+A compatible `@gotgenes/pi-permission-system` release interprets the variable as a process-scoped yolo override: `ask` results are approved while explicit `deny` rules remain enforced, and no global or project permission file is changed.
+Pi tasks with yolo off, secondmate launches, non-Pi harnesses, and Pi sessions started outside Firstmate do not receive the variable.
+An older or absent permission-system package ignores the variable and retains its normal permission handling, so the minimum compatible version is the first published package release that documents `PI_PERMISSION_SYSTEM_YOLO`.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
