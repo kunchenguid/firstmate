@@ -67,6 +67,13 @@ set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
+# Suite-wide floor for the brain-event bridge: no selected script may auto-
+# discover and call a developer's real brain-event installation. tests/lib.sh
+# and tests/herdr-test-safety.sh repeat this for direct invocation; setting it
+# here covers every script the runner drives, including future ones that source
+# neither helper. Individual bridge tests still override it per command.
+export FM_BRAIN_EVENT_COMMAND=/usr/bin/true
+
 MODE=
 LIST_ONLY=0
 LIST_FAMILIES=0

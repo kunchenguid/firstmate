@@ -43,6 +43,11 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 
 export FM_GATE_REFUSE_BYPASS=1
 
+# This suite keeps the host PATH so fm-spawn.sh can auto-detect a real backend,
+# which would also let the brain-event bridge find the developer's real
+# installation and emit durable events for fixture task ids (see tests/lib.sh).
+export FM_BRAIN_EVENT_COMMAND=/usr/bin/true
+
 # TMP_ROOT is physically resolved (mktemp -d "$(pwd -P)"-relative) to keep this
 # real-herdr smoke fixture free of unrelated OS symlink noise.
 # The old fm-spawn bug that originally motivated this fixture shape was fixed in
