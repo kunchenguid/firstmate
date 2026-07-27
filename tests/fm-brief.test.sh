@@ -282,34 +282,60 @@ test_ship_project_memory_wording() {
 }
 
 test_herdr_lab_contract_is_explicit_and_complete() {
-  local home id brief
+  local home kind id brief status
   home="$TMP_ROOT/herdr-lab-home"
   mkdir -p "$home/data"
-  id="brief-herdr-lab-d1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --herdr-lab >/dev/null 2>&1
-  brief="$home/data/$id/brief.md"
-  assert_present "$brief" "Herdr lab brief was not scaffolded"
-  assert_grep "# Herdr isolation - HARD SAFETY CONTRACT" "$brief" \
-    "Herdr lab brief missing its hard safety contract"
-  assert_grep "HERDR_LAB_HELPER='$ROOT/bin/fm-herdr-lab.sh'" "$brief" \
-    "Herdr lab brief must bind the absolute Firstmate helper path"
-  assert_grep "HERDR_LAB_SESSION=\$(\"\$HERDR_LAB_HELPER\" name $id)" "$brief" \
-    "Herdr lab brief missing helper-owned session naming"
-  assert_grep "\"\$HERDR_LAB_HELPER\" provision \"\$HERDR_LAB_SESSION\"" "$brief" \
-    "Herdr lab brief missing helper-owned provisioning"
-  assert_grep "\"\$HERDR_LAB_HELPER\" teardown \"\$HERDR_LAB_SESSION\"" "$brief" \
-    "Herdr lab brief missing helper-owned teardown"
-  assert_grep "required trailing \`--session \"\$HERDR_LAB_SESSION\"\`" "$brief" \
-    "Herdr lab brief missing the per-call trailing session contract"
-  assert_grep "direct \`herdr server stop\`" "$brief" \
-    "Herdr lab brief missing the forbidden server-global command list"
-  assert_grep "records the live default session before provisioning" "$brief" \
-    "Herdr lab brief missing the before tripwire"
-  assert_grep "verifies the identical fleet state after teardown" "$brief" \
-    "Herdr lab brief missing the after tripwire"
-  assert_no_grep "Herdr lifecycle declaration - NOT ENABLED" "$brief" \
-    "Herdr lab brief retained the unguarded declaration"
-  pass "fm-brief.sh: --herdr-lab emits the complete hard safety contract"
+
+  for kind in ship scout; do
+    id="brief-herdr-$kind-d1"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --herdr-lab >/dev/null 2>&1; status=$?
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --herdr-lab >/dev/null 2>&1; status=$?
+    fi
+    expect_code 0 "$status" "$kind --herdr-lab scaffold should exit 0"
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind Herdr lab brief was not scaffolded"
+    assert_grep "# Herdr isolation - HARD SAFETY CONTRACT" "$brief" \
+      "$kind Herdr lab brief missing its hard safety contract"
+    assert_grep "HERDR_LAB_HELPER='$ROOT/bin/fm-herdr-lab.sh'" "$brief" \
+      "$kind Herdr lab brief must bind the quoted absolute Firstmate helper path"
+    assert_grep "HERDR_LAB_SESSION=\$(\"\$HERDR_LAB_HELPER\" name $id)" "$brief" \
+      "$kind Herdr lab brief missing literal task-derived session naming"
+    assert_no_grep "HERDR_LAB_SESSION=\$(\"\$HERDR_LAB_HELPER\" name default)" "$brief" \
+      "$kind Herdr lab brief allowed the default session name"
+    assert_grep "trap '\"\$HERDR_LAB_HELPER\" teardown \"\$HERDR_LAB_SESSION\"' EXIT" "$brief" \
+      "$kind Herdr lab brief missing the guarded teardown trap"
+    assert_grep "\"\$HERDR_LAB_HELPER\" provision \"\$HERDR_LAB_SESSION\"" "$brief" \
+      "$kind Herdr lab brief missing helper-owned provisioning"
+    assert_grep "\"\$HERDR_LAB_HELPER\" run \"\$HERDR_LAB_SESSION\" <arguments...>" "$brief" \
+      "$kind Herdr lab brief missing helper-owned command execution"
+    assert_grep "\"\$HERDR_LAB_HELPER\" stop \"\$HERDR_LAB_SESSION\"" "$brief" \
+      "$kind Herdr lab brief missing helper-owned mid-run stop"
+    assert_grep "\"\$HERDR_LAB_HELPER\" teardown \"\$HERDR_LAB_SESSION\"" "$brief" \
+      "$kind Herdr lab brief missing helper-owned teardown"
+    assert_grep "required trailing \`--session \"\$HERDR_LAB_SESSION\"\`" "$brief" \
+      "$kind Herdr lab brief missing the per-call trailing session contract"
+    assert_grep "direct \`herdr server stop\`" "$brief" \
+      "$kind Herdr lab brief missing the direct server-stop warning"
+    assert_grep "server-global operation such as \`herdr server live-handoff\` or reload/update operations" "$brief" \
+      "$kind Herdr lab brief missing the other server-global warning"
+    assert_grep "direct \`herdr session stop\`" "$brief" \
+      "$kind Herdr lab brief missing the direct session-stop warning"
+    assert_grep "direct \`herdr session delete\`" "$brief" \
+      "$kind Herdr lab brief missing the direct session-delete warning"
+    assert_grep "scoped only by ambient or inline \`HERDR_SESSION\`" "$brief" \
+      "$kind Herdr lab brief missing the ambient-session warning"
+    assert_grep "records the live default session before provisioning" "$brief" \
+      "$kind Herdr lab brief missing the before tripwire"
+    assert_grep "verifies the identical fleet state after teardown" "$brief" \
+      "$kind Herdr lab brief missing the after tripwire"
+    assert_grep "Never bypass the helper, even for a read-only lifecycle probe" "$brief" \
+      "$kind Herdr lab brief missing the read-only lifecycle warning"
+    assert_no_grep "Herdr lifecycle declaration - NOT ENABLED" "$brief" \
+      "$kind Herdr lab brief retained the unguarded declaration"
+  done
+  pass "fm-brief.sh: ship and scout --herdr-lab scaffolds emit the complete hard safety contract"
 }
 
 test_herdr_lab_contract_quotes_foreign_firstmate_path() {
