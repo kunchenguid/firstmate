@@ -18,3 +18,7 @@ config/x-mode.env
 config/cmux-socket-password
 config/wedge-alarm
 config/herdr-presentation-spaces
+config/gitea-token
+config/gitea-username
+config/gitea-host
+config/fm-gitea-credential.sh

@@ -72,6 +72,9 @@ config/calm     Pi Calm presentation preference; LOCAL, gitignored, and not inhe
 config/herdr-presentation-spaces  optional presence flag for Herdr's default-off disposable single-task visual projection; LOCAL, gitignored; inherited by secondmate homes; see docs/herdr-backend.md "Optional presentation spaces"
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
+config/gitea-token  private Gitea HTTPS token (single line); LOCAL, gitignored mode 600; consumed by bin/fm-gitea-credential.sh so project remotes never embed userinfo (docs/configuration.md "Gitea HTTPS auth")
+config/gitea-username  Gitea username for the credential helper; LOCAL, gitignored; default written by bin/fm-gitea-auth-setup.sh
+config/gitea-host  Gitea HTTPS host gate for the credential helper; LOCAL, gitignored; default private-git.ocin.cloud
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history

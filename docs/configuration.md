@@ -113,6 +113,15 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Gitea HTTPS auth (config/gitea-token)
+
+Private Gitea HTTPS access uses a home-local token file plus a git credential helper so project remote URLs never embed userinfo.
+`config/gitea-token` holds one token line at mode `600`; `config/gitea-username` and optional `config/gitea-host` (default `private-git.ocin.cloud`) select the account and host gate.
+`bin/fm-gitea-credential.sh` is the tracked credential helper; `bin/fm-gitea-auth-setup.sh` copies it to gitignored `config/fm-gitea-credential.sh`, installs that stable path host-scoped in global git config, and strips embedded credentials from every clone under `projects/`.
+`bin/fm-fleet-sync.sh` re-runs that strip before each fetch so a reintroduced embedded token cannot keep spreading through worktrees.
+These files are local and gitignored; never commit them.
+Token rotation requires a password/session login on the Gitea Applications page - a bearer token alone cannot mint or revoke tokens on this host; `fm-gitea-auth-setup.sh --check-rotate` prints the exact steps.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.

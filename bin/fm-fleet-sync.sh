@@ -35,6 +35,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-git-remote-sanitize-lib.sh
+. "$SCRIPT_DIR/fm-git-remote-sanitize-lib.sh"
 FM_LOCK_LOG_PREFIX=fleet-sync
 "$FM_ROOT/bin/fm-guard.sh" || true
 
@@ -311,6 +313,14 @@ sync_project() {
     echo "$label: skipped: no origin remote"
     return 0
   fi
+
+  # Drop embedded userinfo from every remote before fetch so a compromised-at-rest
+  # token in .git/config cannot keep spreading via treehouse worktrees. Best-effort;
+  # failures never block the sync.
+  while IFS= read -r _san_line || [ -n "${_san_line:-}" ]; do
+    [ -n "${_san_line:-}" ] || continue
+    echo "$label: $_san_line"
+  done < <(fm_git_remote_sanitize_repo "$PROJ")
 
   if ! fetch_with_packed_refs_lock_guard; then
     reason="fetch failed"
