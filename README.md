@@ -104,7 +104,7 @@ pi
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Claude Code and Pi, approve the project trust prompt once per clone on first launch so the tracked project hook or `.pi/extensions/*.ts` files load.
-In interactive Claude Code and Pi sessions, the exact trimmed inputs `s` and `status?` are case-insensitive shortcuts: `s` shows only the current Captain's Call without creating a report or opening a browser, while `status?` runs the full Bearings workflow.
+In interactive Claude Code and Pi sessions, the exact trimmed inputs `s` and `status?` are case-insensitive shortcuts: `s` shows only the current Captain's Call without creating a report or opening a browser, while `status?` runs the full four-section Bearings workflow.
 Pi applies them only to image-free TUI input, so noninteractive input, images, missing question marks, additional text, and every other prompt remain ordinary input.
 Claude Code applies them only through its interactive CLI entrypoint, but its `UserPromptSubmit` hook omits attachment metadata, so an image accompanied by exact `s` or `status?` also triggers the shortcut; noninteractive input, image-bearing near-matches, missing question marks, additional text, and every other prompt remain ordinary input.
 On certified Pi versions, Calm defaults on when no preference exists; `/calm on`, `/calm off`, and `/calm status` manage the home-local choice, while bare `/calm` still toggles it.
