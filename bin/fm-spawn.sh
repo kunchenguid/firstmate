@@ -1037,8 +1037,7 @@ resolve_recorded_task_worktree() {
   [ "$recorded_real" != "$PROJ_ABS_REAL" ] \
     || spawn_relaunch_refuse "its recorded worktree $recorded resolves to the primary checkout"
   recorded_holder=$(spawn_meta_field_exact "$meta" lease_holder 2>/dev/null || true)
-  if [ "$recorded_holder" = "$expected_holder" ] \
-    && fm_worktree_proven_lease "$PROJ_ABS_REAL" "$recorded_real" "$expected_holder"; then
+  if fm_worktree_proven_lease "$PROJ_ABS_REAL" "$recorded_real" "$expected_holder"; then
     SPAWN_RECORDED_LEASE_HOLDER=$expected_holder
   elif fm_worktree_adoption_proves "$adoption" "$ID" "$recorded_real" "$PROJ_ABS_REAL" "$expected_holder"; then
     fm_worktree_pool_lookup "$PROJ_ABS_REAL" "$recorded_real" \

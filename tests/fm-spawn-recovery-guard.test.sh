@@ -377,6 +377,38 @@ test_legacy_copy_requires_adoption_and_manifest_stays_current() {
   pass "legacy relaunch requires current adoption proof and preserves the copy"
 }
 
+test_holderless_record_uses_current_native_lease_proof() {
+  local id out status before
+  id=recovery-holderless-a8
+  make_case holderless "$id"
+  out=$(run_spawn "$id" "$CASE_WT_A")
+  expect_code 0 "$?" "first spawn should succeed"
+  sed '/^lease_holder=/d' "$CASE_HOME/state/$id.meta" > "$CASE_HOME/state/$id.meta.new"
+  mv "$CASE_HOME/state/$id.meta.new" "$CASE_HOME/state/$id.meta"
+  : > "$CASE_CWD_FILE"
+  : > "$CASE_SENT_FILE"
+
+  out=$(FM_FAKE_POOL_STATUS=leased FM_FAKE_LEASE_HOLDER="fm-$id" run_spawn "$id" "$CASE_WT_B")
+  status=$?
+  expect_code 0 "$status" "holder-less record with a matching current lease should relaunch: $out"
+  assert_grep "lease_holder=fm-$id" "$CASE_HOME/state/$id.meta" \
+    "matching current lease did not make the rewritten record self-describing"
+  assert_grep "cd '$CASE_WT_A'" "$CASE_SENT_FILE" \
+    "matching current lease did not re-enter the recorded worktree"
+
+  sed '/^lease_holder=/d' "$CASE_HOME/state/$id.meta" > "$CASE_HOME/state/$id.meta.new"
+  mv "$CASE_HOME/state/$id.meta.new" "$CASE_HOME/state/$id.meta"
+  before=$(cat "$CASE_HOME/state/$id.meta")
+  : > "$CASE_CWD_FILE"
+  out=$(FM_FAKE_POOL_STATUS=leased FM_FAKE_LEASE_HOLDER=foreign-holder run_spawn "$id" "$CASE_WT_B")
+  status=$?
+  expect_code 1 "$status" "holder-less record with a foreign current lease should refuse"
+  assert_contains "$out" 'holder=foreign-holder' "foreign-holder refusal did not report current ownership"
+  [ "$before" = "$(cat "$CASE_HOME/state/$id.meta")" ] \
+    || fail "foreign-holder refusal changed the holder-less record"
+  pass "holder-less records trust only an exact matching current native lease"
+}
+
 test_relaunch_reuses_recorded_worktree
 test_live_recorded_endpoint_refuses
 test_kind_change_refuses
@@ -384,5 +416,6 @@ test_project_change_refuses
 test_unresolvable_recorded_worktree_refuses
 test_fresh_task_still_allocates
 test_legacy_copy_requires_adoption_and_manifest_stays_current
+test_holderless_record_uses_current_native_lease_proof
 
 echo "# all fm-spawn-recovery-guard tests passed"
