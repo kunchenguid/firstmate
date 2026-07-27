@@ -33,24 +33,9 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
-# Ship and scout scaffolds share one browser rule: web work must reproduce and
-# verify user-visible behavior by driving the browser as a real user, with
-# chrome-devtools-axi for interactive rendered state and the project's
-# Playwright/e2e harness for a scripted repeatable flow that becomes the
-# regression test once a fix is authorized, recorded where that task's
-# deliverable lives - on the branch for a ship task, in the report for a scout.
-# The gate is the nature of the task, not the current state of the project: a
-# task that genuinely involves user-visible web behavior may add the e2e tooling
-# it needs, and a task with no user-visible web behavior is untouched by the
-# rule, including its fallback and its escalation. It stays
-# environment-agnostic: on such a task, when a bundled interactive browser
-# cannot launch, Playwright drives the system browser instead of the worker
-# falling back to code reading, and a worker who cannot drive a browser by any
-# available means reports that as blocked and stops rather than silently
-# skipping the check.
-# Both scaffolds' rule 2 carries a matching narrow exemption for the profile
-# and cache directories a browser or its driver manages for itself, with the
-# rest of each variant's own outside-the-worktree wording unchanged.
+# Ship and scout scaffolds share one browser rule and its matching rule 2
+# exemption; the BROWSER_RULE and BROWSER_PATH_EXEMPTION heredocs in this
+# script own that text and its scope.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
@@ -248,7 +233,7 @@ fi
 # exemption driving a real browser needs has a single owner, while each variant
 # keeps its own distinct outside-the-worktree wording ahead of it.
 BROWSER_PATH_EXEMPTION=$(cat <<'EOF'
-   One narrow exemption: the profile and cache directories a browser or its driver creates and manages for itself. No other path a browser or driver touches is exempt - not project paths, not repository paths - and this changes nothing else in this rule.
+   One narrow exemption: the profile and cache directories a browser or its driver creates and manages for itself. Outside this worktree, no other path a browser or driver touches is exempt - not project or repository paths elsewhere on disk - and this changes nothing else in this rule.
 EOF
 )
 

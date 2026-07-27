@@ -419,8 +419,10 @@ test_browser_as_user_rule_reaches_ship_and_scout() {
       "$kind brief still forbids the e2e harness adoption the browser rule can require"
     assert_grep "the profile and cache directories a browser or its driver creates and manages for itself" "$brief" \
       "$kind brief lost the rule 2 browser profile and cache carve-out"
-    assert_grep "No other path a browser or driver touches is exempt" "$brief" \
-      "$kind brief no longer bounds the rule 2 carve-out to browser paths"
+    assert_grep "Outside this worktree, no other path a browser or driver touches is exempt" "$brief" \
+      "$kind brief no longer bounds the rule 2 carve-out to browser paths outside the worktree"
+    assert_no_grep "not project paths, not repository paths" "$brief" \
+      "$kind brief carve-out again reads as forbidding the in-worktree writes the browser rule requires"
     assert_grep "this changes nothing else in this rule" "$brief" \
       "$kind brief carve-out no longer leaves the rest of rule 2 intact"
     assert_no_grep "Nothing else outside this worktree is exempt" "$brief" \
