@@ -240,9 +240,9 @@ SH
 
 test_source_graph_boundaries_keep_every_owner() {
   local adapter file production_context_tests=""
-  [ "$(grep -Fc '# shellcheck source=/dev/null' "$ROOT/bin/fm-backend.sh")" -eq 5 ] \
-    || fail "the dispatcher must stop static source following at all five dynamic adapters"
-  for adapter in tmux herdr zellij orca cmux; do
+  [ "$(grep -Fc '# shellcheck source=/dev/null' "$ROOT/bin/fm-backend.sh")" -eq 6 ] \
+    || fail "the dispatcher must stop static source following at all six dynamic adapters"
+  for adapter in tmux herdr zellij orca cmux devenv; do
     assert_present "$ROOT/bin/backends/$adapter.sh" "canonical adapter root is missing: $adapter"
   done
   assert_present "$ROOT/bin/fm-push-transition-lib.sh" "narrow push-transition owner is missing"
@@ -253,7 +253,7 @@ test_source_graph_boundaries_keep_every_owner() {
     grep -q '^[[:space:]]*# shellcheck source=bin/' "$file" || continue
     production_context_tests="${production_context_tests}$(basename "$file")|"
   done
-  [ "$production_context_tests" = 'fm-backend-herdr.test.sh|fm-daemon.test.sh|fm-pending-reply.test.sh|fm-secondmate-sync.test.sh|' ] \
+  [ "$production_context_tests" = 'fm-backend-devenv.test.sh|fm-backend-herdr.test.sh|fm-daemon.test.sh|fm-pending-reply.test.sh|fm-secondmate-sync.test.sh|' ] \
     || fail "only callback/variable interop tests may retain production source context: $production_context_tests"
   pass "dispatcher, adapters, production owner, and tests have explicit lint boundaries"
 }
