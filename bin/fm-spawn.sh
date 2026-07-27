@@ -425,7 +425,19 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    #
+    # env -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID
+    # -u CLAUDE_JOB_DIR drops an inherited parent Claude session identity that would
+    # otherwise reach a firstmate-launched ordinary worker or secondmate. Claude Code
+    # sets those variables for its own intentional child sessions; when a primary
+    # (or ancestor) still carries them, an unsanitized launch shows
+    # "Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker" and
+    # writes no resumable transcript. Clearing the identity pack makes an independent
+    # top-level Claude session. CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 also re-enables
+    # saving while leaving child-session semantics in place, so it is not the chosen
+    # firstmate contract. Scoped to this launch line only; non-Claude harnesses and the
+    # captain's shell are untouched.
+    claude) printf '%s' 'env -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID -u CLAUDE_JOB_DIR CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'

@@ -126,8 +126,37 @@ tests/fm-pi-watch-extension.test.sh
 tests/fm-watcher-lock.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
+tests/fm-claude-session-env.test.sh
 tests/fm-turnend-guard.test.sh
 ```
+
+## Claude launch session-identity sanitize
+
+Verified on 2026-07-27 with Claude Code 2.1.220.
+`bin/fm-spawn.sh`'s Claude launch template is the single owner: every firstmate-launched ordinary Claude worker and Claude secondmate runs under
+
+```sh
+env -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID -u CLAUDE_JOB_DIR \
+  CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false \
+  claude --dangerously-skip-permissions ...
+```
+
+Comparison under a polluted parent identity (`CLAUDE_CODE_CHILD_SESSION=1`, parent `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID`, `CLAUDE_JOB_DIR`):
+
+| Launch environment | Transcript-saving warning | Saved independent transcript | Notes |
+| --- | --- | --- | --- |
+| Inherited child marker pack (pre-fix template only set prompt-suggestion) | Yes: `Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker` | No | Reproduces the inherited-marker defect. |
+| CLI-suggested `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` with child marker kept | No | Yes, new session id | Re-enables saving while leaving child-session semantics. |
+| Unset `CLAUDE_CODE_CHILD_SESSION` only | No | Yes, new session id | Root cause clear. |
+| Chosen contract: unset child + session id + `CLAUDE_PID` + `CLAUDE_JOB_DIR` | No | Yes, new session id | Independent top-level session; parent transcript not written. |
+
+Resume proof under the chosen contract (polluted outer env, sanitized launch): create turned the warning off, wrote a non-parent session transcript, and `claude --resume <new-id>` reloaded prior context with the warning still off.
+No transcript contents or credentials are recorded here.
+
+Deterministic regression: `tests/fm-claude-session-env.test.sh` pins the launch line for ship and secondmate spawns and evaluates the prefix against a fake `claude` that asserts the markers are unset while unrelated environment is preserved.
+
+Runtime backends: tmux, herdr, zellij, orca, and cmux all type the shared `launch_template` command into the worker shell, so the sanitize rides every spawn-capable backend without per-backend copies.
+Non-Claude harnesses are unchanged.
 
 ## Wedge-alarm channels
 
