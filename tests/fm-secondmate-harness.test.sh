@@ -159,7 +159,15 @@ SH
   chmod +x "$fakebin/ps"
 
   got=$(PATH="$fakebin:$BASE_PATH" PI_CODING_AGENT=true "$ROOT/bin/fm-harness.sh")
-  [ "$got" = pi-signed ] || fail "exact signed wrapper ancestry resolved '$got', expected pi-signed"
+  [ "$got" = pi ] || fail "unmarked shared signed-wrapper ancestry resolved '$got', expected pi"
+  got=$(PATH="$fakebin:$BASE_PATH" PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed "$ROOT/bin/fm-harness.sh")
+  [ "$got" = pi-signed ] || fail "selected signed wrapper resolved '$got', expected pi-signed"
+  got=$(PATH="$fakebin:$BASE_PATH" PI_CODING_AGENT=true FM_PI_HARNESS=pi "$ROOT/bin/fm-harness.sh")
+  [ "$got" = pi ] || fail "selected plain Pi resolved '$got', expected pi"
+  got=$(PATH="$fakebin:$BASE_PATH" PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed-helper "$ROOT/bin/fm-harness.sh")
+  [ "$got" = pi ] || fail "inexact signed selection marker resolved '$got', expected pi"
+  got=$(PATH="$fakebin:$BASE_PATH" FM_PI_HARNESS=pi-signed "$ROOT/bin/fm-harness.sh")
+  [ "$got" = pi ] || fail "signed selection marker without Pi's family marker resolved '$got', expected pi"
   got=$(PATH="$fakebin:$BASE_PATH" PI_CODING_AGENT=true FM_TEST_SIGNED_SHAPE=plain "$ROOT/bin/fm-harness.sh")
   [ "$got" = pi ] || fail "plain Pi marker resolved '$got', expected pi"
   got=$(PATH="$fakebin:$BASE_PATH" PI_CODING_AGENT=true FM_TEST_SIGNED_SHAPE=helper "$ROOT/bin/fm-harness.sh")
@@ -176,7 +184,7 @@ SH
     fail "session-lock liveness accepted unrelated pi-signed-helper"
   fi
 
-  pass "pi-signed identity: exact ancestry wins over Pi's shared marker without broad process matching"
+  pass "pi-signed identity: authoritative launch selection distinguishes shared wrapper ancestry"
 }
 
 # ===========================================================================

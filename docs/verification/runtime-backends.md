@@ -69,7 +69,8 @@ state: done ...
 Both launches executed a submitted tool instruction and touched the generated `turn_end` marker.
 The pi-signed launch retained `harness=pi-signed`, while the plain comparison retained `harness=pi`.
 The exact wrapper ancestry was `pi-signed` parent to Pi engine child, and the plain Pi Launcher path also traversed the signed wrapper on this installation.
-That shared plain-Pi path is retained as disconfirming evidence against treating the liveness behavior as wrapper-only.
+That shared plain-Pi path is retained as disconfirming evidence against using ancestry as runtime-selection authority.
+Firstmate therefore sets the exact `FM_PI_HARNESS` selection marker on both worker launch paths, while an unmarked Pi-family process remains `pi`.
 Both recorded runtime identities now classify the exact `pi-launcher` foreground command as `alive`.
 
 Backend applicability was reviewed across every spawn adapter.

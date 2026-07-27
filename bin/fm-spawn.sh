@@ -495,6 +495,10 @@ case "$ARG3" in
     ;;
 esac
 
+case "$HARNESS" in
+  pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
+esac
+
 # pi-signed is an explicitly selected executable identity, not an alias that may
 # silently fall back to pi. Resolve it from PATH before creating an endpoint and
 # retain the literal name in the launch command and task metadata.

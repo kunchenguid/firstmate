@@ -38,6 +38,7 @@ If the captain asks for a new harness, propose verifying it first: spawn a trivi
 ## Detection
 
 `bin/fm-harness.sh` prints firstmate's own harness, using verified env markers first and then process ancestry.
+Within the Pi family, only the exact launch-boundary marker `FM_PI_HARNESS=pi-signed` alongside `PI_CODING_AGENT=true` selects the signed identity; unmarked shared launcher ancestry remains `pi`.
 `bin/fm-harness.sh crew` resolves the effective crewmate harness from `config/crew-harness` (absent or `default` -> own).
 `bin/fm-harness.sh secondmate` resolves the secondmate-launch harness through the chain `config/secondmate-harness` -> `config/crew-harness` -> own, so an unset `config/secondmate-harness` matches the crew harness.
 `bin/fm-spawn.sh` uses `crew` mode for a crewmate/scout launch and `secondmate` mode for a `--secondmate` launch, re-resolving on every spawn so the split is durable across respawns; an explicit per-spawn harness arg overrides either.
@@ -272,7 +273,8 @@ Pi has no permission system, so crewmates are always autonomous.
 `pi-signed` is the signed wrapper identity verified on version 0.82.0 and exposes the same CLI and TUI behavior as Pi.
 Firstmate launches the selected executable name from `PATH`, records `pi-signed` without normalization, and refuses rather than falling back to `pi` when that wrapper is unavailable.
 The observed signed process tree is an exact `pi-signed` wrapper parent with the Pi application as its child, while tmux reports the foreground command as the exact `pi-launcher` name for both selected executables.
-Pi's shared `PI_CODING_AGENT=true` child marker is therefore disambiguated only by an exact `pi-signed` process in bounded ancestry; names such as `pi-signed-helper` remain unrelated.
+The installed plain `pi` command also execs that signed launcher, so `FM_PI_HARNESS=pi-signed` is the authoritative selection marker and shared unmarked ancestry remains `pi`.
+Firstmate sets `FM_PI_HARNESS` explicitly for both worker launch identities, and a signed primary uses the README launch command to establish the same boundary.
 Keep the brief as one positional argument.
 Multiple positional args become separate queued messages; `fm-spawn`'s template already does this correctly.
 
