@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Non-executing migration for watcher PR checks created by older Firstmate
 # versions. Legacy check files are never run, sourced, or parsed by Bash.
-# Canonical polls are rebuilt from validated metadata, provenance-bound polls
-# and registered custom checks remain armed, and every other task poll is
+# Pending validated merged-poll retirements finish first. Canonical polls are
+# then rebuilt from validated metadata, remaining provenance-bound polls and
+# registered custom checks remain armed, and every other task poll is
 # quarantined for private review. A current X-mode shim is preserved by exact
 # content, while the recognized older byte-static shim is refreshed in place.
 # Usage: fm-pr-check-migrate.sh [--checks-safe]
@@ -333,6 +334,10 @@ if [ ! -d "$STATE" ] || [ -L "$STATE" ]; then
 fi
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ -n "$STATE_DEVICE" ] || exit 1
+if ! fm_pr_poll_retirement_recover_all "$STATE" "$TEMPLATE"; then
+  echo "PR_CHECK_MIGRATION: pending PR poll retirement could not be validated:$FM_PR_POLL_RETIREMENT_REJECTED" >&2
+  exit 1
+fi
 refresh_v1_x_shim() {
   local shim="$STATE/x-watch.check.sh"
   fmx_poll_shim_v1_valid "$shim" "$FM_HOME" "$FM_ROOT" "$STATE_DEVICE" || return 0

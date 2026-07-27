@@ -1314,7 +1314,15 @@ case "${1:-} ${2:-}" in
   "status --json")
     printf '%s\n' '{"server":{"running":true}}'
     ;;
+  "session list")
+    printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}'
+    ;;
   "pane close")
+    if [ -n "${FM_FAKE_HERDR_EXPECT_LOCK:-}" ] \
+      && [ ! -e "$FM_FAKE_HERDR_EXPECT_LOCK" ] \
+      && [ ! -L "$FM_FAKE_HERDR_EXPECT_LOCK" ]; then
+      exit 91
+    fi
     if [ "${FM_FAKE_HERDR_CLOSE_FAIL:-0}" = 1 ]; then
       exit 1
     fi
@@ -1358,14 +1366,36 @@ SH
   chmod +x "$case_dir/fakebin/herdr"
 }
 
+herdr_projection_session_lock_path() {
+  local case_dir=$1 home=$2
+  FM_HOME="$home" \
+  FM_FAKE_HERDR_LOG="$case_dir/herdr.log" \
+  FM_FAKE_HERDR_CLOSED="$case_dir/closed" \
+  FM_FAKE_HERDR_RESTORED="$case_dir/restored" \
+  PATH="$case_dir/fakebin:$PATH" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT"
+}
+
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close() {
-  local case_dir log closed restored
+  local case_dir log closed restored home_a home_b lock_a lock_b
   case_dir=$(make_case herdr-projection-confirmed-close)
   write_meta "$case_dir" local-only ship
   configure_herdr_projection_teardown_case "$case_dir"
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  home_a="$case_dir/home-a"; home_b="$case_dir/home-b"
+  mkdir -p "$home_a/state" "$home_b/state"
+  lock_a=$(herdr_projection_session_lock_path "$case_dir" "$home_a") \
+    || fail "herdr-projection-confirmed-close: home A could not resolve the shared session lock"
+  lock_b=$(herdr_projection_session_lock_path "$case_dir" "$home_b") \
+    || fail "herdr-projection-confirmed-close: home B could not resolve the shared session lock"
+  [ "$lock_a" = "$lock_b" ] \
+    || fail "herdr-projection-confirmed-close: homes sharing a session resolved different locks"
+  case "$lock_a" in
+    "$case_dir"/*/state/*) fail "herdr-projection-confirmed-close: session lock remained home-local" ;;
+  esac
 
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+  FM_FAKE_HERDR_EXPECT_LOCK="$lock_a" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-projection-confirmed-close: forced teardown failed"
   [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
@@ -1436,15 +1466,18 @@ test_herdr_projection_teardown_uses_single_absence_confirmation() {
 }
 
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
-  local case_dir log closed restored rc
+  local case_dir log closed restored lock rc
   case_dir=$(make_case herdr-projection-unconfirmed-close)
   write_meta "$case_dir" local-only ship
   configure_herdr_projection_teardown_case "$case_dir"
   printf '%s\n' 'working: endpoint still owned' > "$case_dir/state/task-x1.status"
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  lock=$(herdr_projection_session_lock_path "$case_dir" "$case_dir") \
+    || fail "herdr-projection-unconfirmed-close: could not resolve the shared session lock"
 
   set +e
-  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" FM_FAKE_HERDR_CLOSE_FAIL=1 \
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+  FM_FAKE_HERDR_EXPECT_LOCK="$lock" FM_FAKE_HERDR_CLOSE_FAIL=1 \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e

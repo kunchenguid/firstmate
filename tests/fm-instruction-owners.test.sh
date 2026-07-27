@@ -16,6 +16,7 @@ SECONDMATE="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
 CONFIG="$ROOT/docs/configuration.md"
 AGENTS="$ROOT/AGENTS.md"
 BRIEF="$ROOT/bin/fm-brief.sh"
+BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
 
 test_new_skill_metadata_and_triggers() {
   local skill name count
@@ -100,6 +101,43 @@ test_generic_effort_fallback_respects_precedence() {
     fail "generic effort fallback must not contain Sol-specific policy"
   fi
   pass "generic effort fallback applies only below captain and standing configuration"
+}
+
+test_agent_owned_quota_array_dispatch_contract() {
+  local phrase
+  for phrase in \
+    'Firstmate alone resolves a matched profile array' \
+    'run `quota-axi --json` at that intake' \
+    'evaluate every configured candidate against that current output' \
+    'choose the candidate with the most real headroom' \
+    'if any harness/model/provider relationship, applicable quota data, or interpretation cannot be established, stop and report that candidate' \
+    'instead of omitting it, guessing, falling back, or calling the result quota-informed' \
+    'Preserve malformed profile configuration as an actionable error' \
+    "preserve the captain's strongest-reasoning class rather than silently downgrading it" \
+    'Break genuine headroom ties without array-order or harness bias' \
+    '`quota-axi` owns how model or product windows relate to bounding account windows'; do
+    assert_grep "$phrase" "$AGENTS" "array-dispatch contract lost '$phrase'"
+  done
+
+  for phrase in \
+    '| claude | Open the current interactive session' \
+    '| codex | Open the current interactive session' \
+    '| opencode | Run `opencode models [provider]`' \
+    '| pi | Run `pi --list-models [search]`' \
+    '| grok | Run `grok models`' \
+    "For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing" \
+    'If those sources do not establish the relationship needed for dispatch, fail loudly and report the unresolved candidate.'; do
+    assert_grep "$phrase" "$HARNESS" "model discovery guidance lost '$phrase'"
+  done
+  assert_grep 'not as a permanent namespace or provider mapping' "$HARNESS" \
+    "model discovery guidance permits a fixed provider table"
+  assert_grep '`AGENTS.md` section 4 owns the dispatch and array-selection procedure.' "$CONFIG" \
+    "configuration docs do not point to the agent-owned array procedure"
+  assert_grep 'quota-axi is required for the' "$BOOTSTRAP" \
+    "bootstrap docs lost the quota-axi dependency pointer"
+  assert_grep 'agent-owned dispatch-profile array procedure in AGENTS.md section 4.' "$BOOTSTRAP" \
+    "bootstrap docs do not point to the agent-owned array procedure"
+  pass "firstmate directly compares every quota candidate with authoritative model discovery"
 }
 
 test_shared_authoring_requirements_are_owned() {
@@ -192,6 +230,33 @@ test_compressed_agents_owner_map() {
   pass "compressed AGENTS.md records the approved one-owner map"
 }
 
+test_intake_reuses_evidence_and_parallelizes_safe_work() {
+  for phrase in \
+    'consult existing reports and established evidence' \
+    'remaining bounded research inside it' \
+    'unresolved uncertainty could materially change whether or what to build' \
+    'relay it without a design-only scout' \
+    'ask one concise implementation question when useful' \
+    'Never both present a likely-enough solution' \
+    'overlap as a risk signal rather than an automatic reason to wait' \
+    'independently implemented and validated' \
+    'selected delivery path can reconcile ordinary rebases or conflicts' \
+    'Serialize only for a true semantic dependency' \
+    'shared mutable external state' \
+    'incompatible concurrent migration' \
+    'same-file editing alone is insufficient' \
+    'genuine blockers remain durable'; do
+    assert_grep "$phrase" "$AGENTS" "intake contract lost '$phrase'"
+  done
+  assert_grep 'dispatch isolated work immediately with no concurrency cap' "$AGENTS" \
+    "intake contract lost unbounded safe parallel dispatch"
+  assert_grep 'captain explicitly requests a separate knowledge or design deliverable' "$AGENTS" \
+    "intake contract lost captain-requested separate scouts"
+  assert_grep 'When implementation is separately authorized, promote the existing scout' "$AGENTS" \
+    "intake contract lost genuine scout promotion"
+  pass "intake reuses evidence, reserves scouts for uncertainty, and parallelizes safe work"
+}
+
 test_compressed_agents_retains_authority_and_supervision_safety() {
   for phrase in \
     'A lock-refused session must not spawn, steer, merge, drain the wake queue' \
@@ -225,8 +290,10 @@ test_new_skill_metadata_and_triggers
 test_diagnostic_owner_covers_causal_procedure
 test_project_management_owner_covers_guarded_operations
 test_generic_effort_fallback_respects_precedence
+test_agent_owned_quota_array_dispatch_contract
 test_shared_authoring_requirements_are_owned
 test_secondmate_registry_contract_stays_concise
 test_state_startup_and_ordinary_recovery_placement
 test_compressed_agents_owner_map
+test_intake_reuses_evidence_and_parallelizes_safe_work
 test_compressed_agents_retains_authority_and_supervision_safety

@@ -1,0 +1,327 @@
+{
+  "version": 1,
+  "scope": {
+    "trackedPatterns": [
+      "*.md",
+      "*.mdx",
+      "*.rst",
+      "*.txt",
+      "docs/examples/*"
+    ],
+    "description": "Tracked Markdown-like prose, including symlinked aliases, plus copyable documentation examples. Script headers, executable configuration, generated JSON evidence, and legal text keep their existing code/config/legal owners."
+  },
+  "allowedAudiences": [
+    "public-product",
+    "operator-current",
+    "operator-example",
+    "maintainer-architecture",
+    "maintainer-verification",
+    "agent-runtime"
+  ],
+  "setupAudiences": [
+    "public-product",
+    "operator-current",
+    "operator-example"
+  ],
+  "readmeSetupTargets": [
+    "docs/configuration.md",
+    "docs/wedge-alarm.md",
+    "docs/tmux-backend.md",
+    "docs/herdr-backend.md",
+    "docs/zellij-backend.md",
+    "docs/orca-backend.md",
+    "docs/cmux-backend.md"
+  ],
+  "requiredOwnerPointers": [
+    {
+      "source": ".agents/skills/firstmate-coding-guidelines/SKILL.md",
+      "target": "docs/documentation-audiences.md"
+    },
+    {
+      "source": ".no-mistakes.yaml",
+      "target": "docs/documentation-audiences.md"
+    },
+    {
+      "source": "CONTRIBUTING.md",
+      "target": "docs/documentation-audiences.md"
+    },
+    {
+      "source": "README.md",
+      "target": "docs/documentation-audiences.md"
+    },
+    {
+      "source": "docs/documentation-audiences.md",
+      "target": "docs/documentation-audiences.json"
+    },
+    {
+      "source": "docs/calm.md",
+      "target": "docs/calm-mode-feasibility.md"
+    },
+    {
+      "source": "docs/calm-mode-feasibility.md",
+      "target": "docs/calm.md"
+    },
+    {
+      "source": "docs/sessionstart-nudge.md",
+      "target": "docs/verification/supervision.md"
+    },
+    {
+      "source": "docs/turnend-guard.md",
+      "target": "docs/verification/supervision.md"
+    },
+    {
+      "source": "docs/watcher-continuity.md",
+      "target": "docs/verification/supervision.md"
+    },
+    {
+      "source": "docs/wedge-alarm.md",
+      "target": "docs/verification/supervision.md"
+    },
+    {
+      "source": "docs/tmux-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/herdr-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/zellij-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/orca-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/cmux-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/codex-app-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    }
+  ],
+  "surfaces": [
+    {
+      "path": ".agents/skills/afk/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/ahoy/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/ask-user-authority/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/bearings/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/bootstrap-diagnostics/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/diagnostic-reasoning/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/firstmate-codexapp/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/firstmate-coding-guidelines/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/firstmate-orca/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/fmx-respond/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/project-management/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/secondmate-provisioning/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/stow/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/stuck-crewmate-recovery/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/updatefirstmate/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "AGENTS.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "CLAUDE.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "README.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "docs/architecture.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/arm-pretool-check.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/calm-mode-feasibility.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/calm.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/cd-guard.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/cmux-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/codex-app-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/configuration.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/decision-hold-lifecycle.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/documentation-audiences.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/examples/crew-dispatch.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/wedge-alarm",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/fm-test-isolation-proof.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/fm-test-portable-shards.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/gitlab-merge-watch.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/herdr-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/orca-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/scripts.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/sessionstart-nudge.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/subagent-guard.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/supervision-protocols/claude.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/supervision-protocols/codex.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/supervision-protocols/grok.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/supervision-protocols/opencode.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/supervision-protocols/pi.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/supervision-protocols/unknown.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/tmux-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/turnend-guard.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/verification/runtime-backends.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/supervision.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/watcher-continuity.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/wedge-alarm.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/zellij-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "skills/stow/SKILL.md",
+      "audience": "public-product"
+    }
+  ]
+}

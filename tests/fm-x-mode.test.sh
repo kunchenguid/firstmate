@@ -1043,7 +1043,7 @@ test_reply_dry_run_outbox_private_publication_rejects_unsafe_paths() {
 }
 
 test_split_thread_lib() {
-  # shellcheck source=bin/fm-x-lib.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-x-lib.sh"
   local out n last rejoin maxlen txt
   # A reply that fits one tweet stays a single, UNNUMBERED chunk.
@@ -1605,7 +1605,7 @@ test_poll_records_context_registry_from_relay_platform() {
 
 test_context_registry_private_publication_rejects_unsafe_paths() {
   local home rc dest hardlink target out
-  # shellcheck source=bin/fm-x-lib.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-x-lib.sh"
 
   home="$TMP_ROOT/context-linked-dir"; mkdir -p "$home/state" "$home/external"
@@ -1670,7 +1670,7 @@ test_context_registry_private_publication_rejects_unsafe_paths() {
 
 test_context_registry_rejects_unsafe_reads() {
   local home out target dest hardlink
-  # shellcheck source=bin/fm-x-lib.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-x-lib.sh"
 
   home="$TMP_ROOT/context-read-linked-dir"; mkdir -p "$home/state" "$home/external-context"
