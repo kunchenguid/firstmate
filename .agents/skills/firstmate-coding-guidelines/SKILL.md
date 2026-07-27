@@ -95,6 +95,7 @@ Run `bin/fm-doc-audience-check.sh`; it enforces classification, README setup rou
 - Plain dash `-`, never an em dash.
 - Never add an agent name as a commit co-author.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
+- Assign heredoc text to variables with `IFS= read -r -d '' VAR <<EOF ... EOF || true`, never `VAR=$(cat <<EOF`: bash 3.2 (the macOS system `/bin/bash`) mis-scans a heredoc nested in `$(...)` whenever its body gains an apostrophe, backtick, or paren, and `tests/fm-brief.test.sh` enforces this by sweeping `/bin/bash -n` over every bin script.
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
 - A maintainer-verification record under `docs/verification/` records active empirical facts, not assumptions or task chronology.
