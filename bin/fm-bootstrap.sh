@@ -47,7 +47,10 @@
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
-#          1.31.2.
+#          1.31.2, or when the live binary lacks the OMP agent (upstream
+#          release / plain go-install clobber). The omp-missing case prints a
+#          distinct install path to bin/fm-install-no-mistakes-omp.sh rather than
+#          the upstream install.sh URL.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). tasks-axi is also version and feature gated (0.1.1+
 #          with update --archive-body and mv [<id>...]); an installed but
@@ -485,7 +488,7 @@ install_cmd() {
     tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
-    no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
+    no-mistakes) no_mistakes_install_cmd ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
     *) return 1 ;;
@@ -546,6 +549,61 @@ no_mistakes_compatible() {
   [ "$minor" -gt "$NO_MISTAKES_MIN_MINOR" ] && return 0
   [ "$minor" -eq "$NO_MISTAKES_MIN_MINOR" ] || return 1
   [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
+}
+
+# Prefer the local OMP-agent fork reinstall when that checkout is present; only
+# fall back to the upstream install script when the fork source is unavailable.
+# Callers that need the omp-specific path without a PATH probe use
+# no_mistakes_omp_install_cmd directly.
+no_mistakes_omp_install_cmd() {
+  # Always the tracked helper next to this script - never FM_ROOT_OVERRIDE, which
+  # session-start and tests point at a home/checkout that does not carry bin/.
+  printf '%s\n' "$SCRIPT_DIR/fm-install-no-mistakes-omp.sh"
+}
+
+no_mistakes_fork_src() {
+  local src
+  src=${FM_NO_MISTAKES_OMP_SRC:-}
+  if [ -z "$src" ] && [ -n "${HOME:-}" ]; then
+    src="$HOME/Dev/no-mistakes"
+  fi
+  printf '%s\n' "$src"
+}
+
+no_mistakes_install_cmd() {
+  local src
+  src=$(no_mistakes_fork_src)
+  if [ -n "$src" ] && [ -f "$src/internal/agent/omp.go" ]; then
+    no_mistakes_omp_install_cmd
+    return 0
+  fi
+  printf '%s\n' "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh"
+}
+
+# True when the live no-mistakes binary embeds the OMP agent (fork build).
+# Upstream release / plain go-install binaries lack the "omp start:" marker.
+# Grep the resolved binary bytes - do not trust --version alone (a tagged fork
+# build can still be clean semver, and a clean upstream release is always clean).
+no_mistakes_has_omp_agent() {
+  local bin
+  command -v no-mistakes >/dev/null 2>&1 || return 1
+  bin=$(command -v no-mistakes 2>/dev/null) || return 1
+  # Follow one symlink hop when present (mise shims). Avoid GNU-only readlink -f
+  # so macOS / BSD stay portable.
+  if [ -L "$bin" ]; then
+    if command -v realpath >/dev/null 2>&1; then
+      bin=$(realpath "$bin" 2>/dev/null || printf '%s\n' "$bin")
+    else
+      bin=$(readlink "$bin" 2>/dev/null || printf '%s\n' "$bin")
+      # Relative symlink targets resolve against the shim's directory.
+      case "$bin" in
+        /*) ;;
+        *) bin="$(cd "$(dirname "$(command -v no-mistakes)")" && pwd)/$bin" ;;
+      esac
+    fi
+  fi
+  [ -f "$bin" ] || return 1
+  grep -aFq 'omp start:' "$bin" 2>/dev/null
 }
 
 x_mode_write_if_changed() {
@@ -840,6 +898,10 @@ if fm_backend_list_contains "$TOOLS" treehouse \
 fi
 if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
   echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+elif command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_has_omp_agent; then
+  # Distinct from the version-floor MISSING line: always points at the fork
+  # reinstall helper, never the upstream install.sh (which is the clobber source).
+  echo "MISSING: no-mistakes (install: $(no_mistakes_omp_install_cmd))"
 fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
   echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"

@@ -62,6 +62,10 @@ SH
   chmod +x "$fakebin/treehouse"
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
+# Default GREEN stand-in embeds the fork marker so no_mistakes_has_omp_agent
+# passes. Set FM_FAKE_NO_MISTAKES_OMP=0 before make_fake_toolchain to strip it
+# for upstream-without-omp RED cases.
+# omp start: marker-for-tests
 if [ "${1:-}" = --version ]; then
   printf '%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-no-mistakes version v1.31.2 (fake) 2026-06-27T00:02:18Z}"
   exit 0
@@ -69,6 +73,11 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
+  if [ "${FM_FAKE_NO_MISTAKES_OMP:-1}" = 0 ]; then
+    grep -v 'omp start:' "$fakebin/no-mistakes" > "$fakebin/no-mistakes.tmp"
+    mv "$fakebin/no-mistakes.tmp" "$fakebin/no-mistakes"
+    chmod +x "$fakebin/no-mistakes"
+  fi
   add_tasks_axi "$fakebin" "0.1.1"
   add_quota_axi "$fakebin"
   printf '%s\n' "$fakebin"
@@ -293,6 +302,8 @@ ROWS
 
 test_no_mistakes_min_version() {
   local label version mode case_dir fakebin out missing n
+  # Isolate from the captain's real ~/Dev/no-mistakes so install_cmd falls
+  # through to the upstream URL for the version-floor path under test here.
   missing='MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)'
   n=0
   while IFS='^' read -r label version mode; do
@@ -304,8 +315,11 @@ test_no_mistakes_min_version() {
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     fakebin=$(make_fake_toolchain "$case_dir")
     add_tasks_axi "$fakebin" "0.1.1"
-    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
+    out=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/no-home" \
+      FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_NO_MISTAKES_OMP_SRC="" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_VERSION="$version" \
+      "$ROOT/bin/fm-bootstrap.sh")
     case "$mode" in
       empty)
         [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
@@ -320,6 +334,65 @@ older no-mistakes patch reports an upgrade^no-mistakes version v1.31.1 (fake)^mi
 unparseable no-mistakes version reports an upgrade^no-mistakes development build^missing
 ROWS
   pass "bootstrap enforces no-mistakes minimum version"
+}
+
+test_no_mistakes_omp_agent_required() {
+  local case_dir fakebin out missing_omp
+  missing_omp="MISSING: no-mistakes (install: $ROOT/bin/fm-install-no-mistakes-omp.sh)"
+
+  # RED: version-floor-compatible upstream binary lacks the omp agent marker.
+  case_dir="$TMP_ROOT/no-mistakes-omp-missing"
+  mkdir -p "$case_dir/home/config" "$case_dir/forksrc/internal/agent"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  : > "$case_dir/forksrc/internal/agent/omp.go"
+  fakebin=$(FM_FAKE_NO_MISTAKES_OMP=0 make_fake_toolchain "$case_dir")
+  add_tasks_axi "$fakebin" "0.1.1"
+  # Prove the stand-in really lacks the marker (non-vacuous setup).
+  grep -aFq 'omp start:' "$fakebin/no-mistakes" \
+    && fail "RED setup: fake binary still contains omp start: marker"
+  out=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/no-home" \
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_ROOT="$ROOT" FM_NO_MISTAKES_OMP_SRC="$case_dir/forksrc" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_FAKE_NO_MISTAKES_VERSION='no-mistakes version v1.39.0 (unknown) unknown' \
+    "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "$missing_omp" ] \
+    || fail "upstream-without-omp: expected '$missing_omp', got: $out"
+  case "$out" in
+    *'kunchenguid/no-mistakes/main/docs/install.sh'*)
+      fail "upstream-without-omp must not recommend upstream install.sh: $out" ;;
+  esac
+
+  # GREEN: same version string with omp marker present -> silent.
+  case_dir="$TMP_ROOT/no-mistakes-omp-present"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(FM_FAKE_NO_MISTAKES_OMP=1 make_fake_toolchain "$case_dir")
+  add_tasks_axi "$fakebin" "0.1.1"
+  grep -aFq 'omp start:' "$fakebin/no-mistakes" \
+    || fail "GREEN setup: fake binary missing omp start: marker"
+  out=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/no-home" \
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_ROOT="$ROOT" FM_NO_MISTAKES_OMP_SRC="" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_FAKE_NO_MISTAKES_VERSION='no-mistakes version v1.39.0 (fake)' \
+    "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "fork-with-omp: expected silence, got: $out"
+
+  # Non-vacuity: strip the marker from the green fake and re-run -> RED.
+  grep -v 'omp start:' "$fakebin/no-mistakes" > "$fakebin/no-mistakes.neutered"
+  mv "$fakebin/no-mistakes.neutered" "$fakebin/no-mistakes"
+  chmod +x "$fakebin/no-mistakes"
+  out=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/no-home" \
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_ROOT="$ROOT" FM_NO_MISTAKES_OMP_SRC="" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_FAKE_NO_MISTAKES_VERSION='no-mistakes version v1.39.0 (fake)' \
+    "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "$missing_omp" ] \
+    || fail "neutered-omp marker: expected '$missing_omp', got: $out"
+
+  pass "bootstrap requires omp-capable no-mistakes and points at fork reinstall"
 }
 
 test_git_is_required_with_supported_install_instruction() {
@@ -804,6 +877,7 @@ ROWS
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
+test_no_mistakes_omp_agent_required
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux
