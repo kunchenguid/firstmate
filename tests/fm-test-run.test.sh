@@ -516,17 +516,23 @@ test_jobs_requires_proven_isolated() {
 }
 
 test_jobs_parallel_scheduler_and_failure_propagation() {
-  local tmp repo runner evidence fake_bin a b c d rc begin_n end_n
+  local tmp repo runner evidence fake_bin slow_ready_fifo slow_release_fifo
+  local a b c d rc begin_n end_n
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs-sched.XXXXXX")
   repo="$tmp/repo"
   runner="$repo/bin/fm-test-run.sh"
   evidence="$tmp/evidence"
   fake_bin="$tmp/fake-bin"
+  slow_ready_fifo="$tmp/slow-ready.fifo"
+  slow_release_fifo="$tmp/slow-release.fifo"
   a=tests/fm-no-mistakes-ownership.test.sh
   b=tests/fm-stow-contract.test.sh
   c=tests/fm-lint.test.sh
   d=tests/fm-supervision-instructions.test.sh
   mkdir -p "$repo/bin" "$repo/tests" "$evidence" "$fake_bin"
+  mkfifo "$slow_ready_fifo" "$slow_release_fifo"
+  exec 7<>"$slow_ready_fifo"
+  exec 8<>"$slow_release_fifo"
   cp "$RUNNER" "$runner"
   cat >"$fake_bin/stat" <<'SH'
 #!/usr/bin/env bash
@@ -542,13 +548,30 @@ exit 1
 SH
   cat >"$repo/$a" <<'SH'
 #!/usr/bin/env bash
-sleep 0.5
+printf 'ready\n' >&7
+signal=
+IFS= read -r -t 5 signal <&8 || {
+  echo "not ok - replacement worker did not release slow fixture"
+  exit 1
+}
+[ "$signal" = release ] || {
+  echo "not ok - unexpected slow-fixture release signal: $signal"
+  exit 1
+}
 touch "$SCHED_EVIDENCE/slow-done"
 echo "ok - slow fixture"
 SH
   cat >"$repo/$b" <<'SH'
 #!/usr/bin/env bash
-sleep 0.05
+signal=
+IFS= read -r -t 5 signal <&7 || {
+  echo "not ok - slow fixture did not reach its barrier"
+  exit 1
+}
+[ "$signal" = ready ] || {
+  echo "not ok - unexpected slow-fixture barrier signal: $signal"
+  exit 1
+}
 echo "ok - fast fixture"
 SH
   cat >"$repo/$c" <<'SH'
@@ -557,6 +580,7 @@ if [ -e "$SCHED_EVIDENCE/slow-done" ]; then
   echo "not ok - scheduler waited for oldest worker"
   exit 1
 fi
+printf 'release\n' >&8
 echo "ok - replacement fixture started before slow fixture finished"
 SH
   chmod +x "$runner" "$repo/$a" "$repo/$b" "$repo/$c" "$fake_bin/stat"
@@ -566,6 +590,8 @@ SH
     "$a" "$b" "$c" >"$tmp/out" 2>"$tmp/err"
   rc=$?
   set -e
+  exec 7>&-
+  exec 8>&-
   [ "$rc" -eq 0 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "jobs=2 must refill the first completed slot"; }
   begin_n=$(grep -c '^FM_TEST_BEGIN ' "$tmp/out" || true)
   end_n=$(grep -c '^FM_TEST_END ' "$tmp/out" || true)
@@ -595,6 +621,11 @@ SH
   [ "$rc" -eq 2 ] || fail "jobs with non-proven fail fixture must refuse before run, got $rc"
 
   # Parallel failure propagation stays inside the private runner fixture.
+  cat >"$repo/$a" <<'SH'
+#!/usr/bin/env bash
+echo "ok - deliberate proven-set pass"
+exit 0
+SH
   cat >"$repo/$b" <<'SH'
 #!/usr/bin/env bash
 echo "not ok - deliberate proven-set fail"
