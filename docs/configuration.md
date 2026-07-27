@@ -204,11 +204,13 @@ The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 For a delegated Pi or pi-signed ship or scout whose project resolves to `+yolo`, `fm-spawn.sh` sets `PI_PERMISSION_SYSTEM_YOLO=1` only on that selected Pi process.
-A compatible `@gotgenes/pi-permission-system` release interprets the variable as a process-scoped yolo override: `ask` results are approved while explicit `deny` rules remain enforced, and no global or project permission file is changed.
+The permission system's [launcher-scoped yolo reference](https://github.com/gotgenes/pi-packages/blob/79829ffd/packages/pi-permission-system/docs/configuration.md#launcher-scoped-yolo-override) owns the compatibility API, including deny-preserving evaluation, configuration reload behavior, effective-status reporting, and the prohibition on persisting the override.
+Its safety boundary is worth reinforcing here: compatible releases approve effective `ask` results, preserve explicit `deny` rules, and leave global and project permission files unchanged.
 Pi tasks with yolo off, secondmate launches, non-Pi harnesses, and Pi sessions started outside Firstmate do not receive the variable.
-The package-side implementation is [gotgenes/pi-packages PR #671](https://github.com/gotgenes/pi-packages/pull/671), specifically commit [`79829ffd`](https://github.com/gotgenes/pi-packages/commit/79829ffd), and no compatible npm release exists yet.
-The first `@gotgenes/pi-permission-system` release containing commit `79829ffd` is the minimum compatible released version.
+Compatibility starts with package commit [`79829ffd`](https://github.com/gotgenes/pi-packages/commit/79829ffd) from [gotgenes/pi-packages PR #671](https://github.com/gotgenes/pi-packages/pull/671); as of 2026-07-27, no npm release contains it.
+The first published `@gotgenes/pi-permission-system` release containing that commit will be the minimum compatible version.
 Until that package change is installed, an older permission-system package ignores the variable, and an absent package leaves Pi's normal permission handling in place.
+[`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh) pins Firstmate's eligible and unchanged launch contexts.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
