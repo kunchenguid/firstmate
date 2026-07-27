@@ -362,6 +362,18 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# Rule 3 in full: everything from its own first line up to rule 4.
+browser_rule_block() {
+  awk '/^4\. Report status/{exit} /^3\. Use gh-axi/{inside=1} inside' "$1"
+}
+
+# The rule 2 carve-out in full: everything after the variant's own last rule 2
+# line and before rule 3, so each variant's distinct rule 2 wording is excluded
+# while the whole shared block is compared.
+browser_carve_out_block() {
+  awk '/^3\. Use gh-axi/{printf "%s", buf; exit} /^2\. /{buf=""; next} {buf = buf $0 "\n"}' "$1"
+}
+
 # The browser-as-a-user rule has a single owner shared by the ship and scout
 # scaffolds, so it must render identically in both rather than drifting into
 # two divergent copies.
@@ -374,6 +386,8 @@ test_browser_as_user_rule_reaches_ship_and_scout() {
   for kind in ship scout; do
     brief="$home/data/brief-browser-$kind/brief.md"
     assert_present "$brief" "$kind brief was not scaffolded"
+    assert_grep "Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations." "$brief" \
+      "$kind brief lost the unconditional browser-operations tool clause"
     assert_grep "driving the browser AS A REAL USER" "$brief" \
       "$kind brief lost the drive-the-browser-as-a-user instruction"
     assert_grep "never proves what a page actually rendered" "$brief" \
@@ -385,14 +399,16 @@ test_browser_as_user_rule_reaches_ship_and_scout() {
       "$kind brief lost the scripted repeatable reproduction path"
     assert_grep "drive the system browser with Playwright instead of falling back to code reading" "$brief" \
       "$kind brief lost the environment-agnostic system-browser fallback"
-    assert_grep "If no browser driver at all is available, append" "$brief" \
-      "$kind brief lost the no-browser-driver escalation"
+    assert_grep "adding it is part of that work" "$brief" \
+      "$kind brief no longer allows a web task to add the e2e tooling it needs"
+    assert_grep "If you cannot successfully drive a browser by any available means, append" "$brief" \
+      "$kind brief lost the outcome-keyed cannot-drive-a-browser escalation"
     assert_grep "never silently skip the browser check and report success" "$brief" \
       "$kind brief no longer makes an omitted browser check visible"
-    assert_grep "Where the project already has an e2e harness, that reproduction becomes the regression test" "$brief" \
-      "$kind brief lost the conditional reproduction-becomes-the-regression-test rule"
-    assert_grep "do not introduce a harness for it" "$brief" \
-      "$kind brief no longer disclaims e2e harness adoption for projects without one"
+    assert_grep "That reproduction becomes the regression test once a fix is authorized." "$brief" \
+      "$kind brief lost the reproduction-becomes-the-regression-test rule"
+    assert_no_grep "do not introduce a harness for it" "$brief" \
+      "$kind brief still forbids the e2e harness adoption the browser rule can require"
     assert_grep "the profile and cache directories a browser or its driver creates and manages for itself" "$brief" \
       "$kind brief lost the rule 2 browser profile and cache carve-out"
     assert_grep "not project paths, not repository paths, not any other location" "$brief" \
@@ -404,10 +420,17 @@ test_browser_as_user_rule_reaches_ship_and_scout() {
   assert_grep "the only files you may write outside it are the report and the status file" \
     "$home/data/brief-browser-scout/brief.md" \
     "scout rule 2 lost its own outside-the-worktree wording"
-  diff <(sed -n '/^3\. Use gh-axi/,/do not introduce a harness for it\.$/p' "$home/data/brief-browser-ship/brief.md") \
-       <(sed -n '/^3\. Use gh-axi/,/do not introduce a harness for it\.$/p' "$home/data/brief-browser-scout/brief.md") \
+  # Both shared blocks are extracted by their surrounding rule boundaries, not
+  # by their own current wording, so a divergent per-variant line added anywhere
+  # inside either block is caught rather than falling outside the range.
+  diff <(browser_rule_block "$home/data/brief-browser-ship/brief.md") \
+       <(browser_rule_block "$home/data/brief-browser-scout/brief.md") \
     >/dev/null 2>&1 \
     || fail "ship and scout browser rules diverged; they must share one owner"
+  diff <(browser_carve_out_block "$home/data/brief-browser-ship/brief.md") \
+       <(browser_carve_out_block "$home/data/brief-browser-scout/brief.md") \
+    >/dev/null 2>&1 \
+    || fail "ship and scout rule 2 browser carve-outs diverged; they must share one owner"
   pass "fm-brief.sh: ship and scout share one browser-as-a-user rule"
 }
 

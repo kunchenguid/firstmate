@@ -37,12 +37,14 @@
 # verify user-visible behavior by driving the browser as a real user, with
 # chrome-devtools-axi for interactive rendered state and the project's
 # Playwright/e2e harness for a scripted repeatable flow that becomes the
-# regression test once a fix is authorized, where such a harness already
-# exists - the rule never asks a project to adopt one. It stays
+# regression test once a fix is authorized. The gate is the nature of the task,
+# not the current state of the project: a task that genuinely involves
+# user-visible web behavior may add the e2e tooling it needs, and a task with no
+# user-visible web behavior is untouched by the rule. It stays
 # environment-agnostic: when a bundled interactive browser cannot launch,
 # Playwright drives the system browser instead of the worker falling back to
-# code reading, and when no browser driver at all is available the worker
-# reports that gap as blocked rather than silently skipping the check.
+# code reading, and a worker who cannot drive a browser by any available means
+# reports that as blocked and stops rather than silently skipping the check.
 # Both scaffolds' rule 2 carries a matching narrow exemption for the profile
 # and cache directories a browser or its driver manages for itself, with the
 # rest of each variant's own outside-the-worktree wording unchanged.
@@ -250,12 +252,12 @@ EOF
 # Rule 3 is shared by the ship and scout scaffolds so the browser-as-a-user
 # contract has one owner and cannot drift between the two variants.
 BROWSER_RULE=$(cat <<'EOF'
-3. Use gh-axi for GitHub operations.
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
    When the task involves user-visible web behavior, reproduce and verify it by driving the browser AS A REAL USER; reading code, API responses, or database rows never proves what a page actually rendered.
-   Use `chrome-devtools-axi` to drive a real browser interactively and inspect live rendered state, and the project's Playwright/e2e harness for a scripted, repeatable run of the same user flow.
+   Use `chrome-devtools-axi` to drive a real browser interactively and inspect live rendered state, and the project's Playwright/e2e harness for a scripted, repeatable run of the same user flow; when such a task needs e2e tooling this project does not have yet, adding it is part of that work.
    If a bundled interactive browser cannot launch in this environment, drive the system browser with Playwright instead of falling back to code reading.
-   If no browser driver at all is available, append `blocked: no browser driver available to verify {the behavior}` and stop - never silently skip the browser check and report success on rendered behavior you never saw.
-   Where the project already has an e2e harness, that reproduction becomes the regression test once a fix is authorized; a project without one gains no obligation here, so do not introduce a harness for it.
+   If you cannot successfully drive a browser by any available means, append `blocked: cannot drive a browser to verify {the behavior}` and stop - never silently skip the browser check and report success on rendered behavior you never saw.
+   That reproduction becomes the regression test once a fix is authorized.
 EOF
 )
 
