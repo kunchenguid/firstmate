@@ -120,7 +120,7 @@ Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi share that backend cleanu
 ## Herdr
 
 The compatibility floor is protocol 14.
-The latest active verification uses Herdr 0.7.5 protocol 17 on macOS aarch64, with earlier 0.7.5 protocol-16, 0.7.4, protocol-14, and 0.7.3 evidence retained where they define current behavior or fallbacks.
+The latest active event-gate verification uses Herdr 0.7.5 client/server protocol 17/17 on macOS aarch64, with earlier 0.7.5 protocol-16, 0.7.4, protocol-14, and 0.7.3 evidence retained where they define current behavior or fallbacks.
 Protocol 17 keeps every protocol-16 feature gate satisfied; the event and workspace-move floors remain 16.
 
 Core read-only probes:
