@@ -76,6 +76,7 @@ both absent -> own (backward-compat)^-^-^claude^claude
 crew set, secondmate absent -> crew (backward-compat)^codex^-^codex^codex
 crew set, secondmate set -> secondmate wins, crew untouched^codex^grok^grok^codex
 crew absent, secondmate set -> secondmate value, crew own^-^grok^grok^claude
+signed Pi wrapper remains a distinct secondmate value^codex^pi-signed^pi-signed^codex
 secondmate=default defers to crew^codex^default^codex^codex
 crew=default resolves to own, secondmate follows^default^-^claude^claude
 secondmate=default with crew absent -> own^-^default^claude^claude
@@ -113,11 +114,77 @@ absent file -> own harness, empty model/effort^ABSENT^claude^^
 bare harness only -> empty model/effort (backward-compat)^claude^claude^^
 harness + model -> model only^claude opus^claude^opus^
 harness + model + effort -> both^claude opus high^claude^opus^high
+signed Pi wrapper + model + effort preserves every token^pi-signed openai-codex/gpt-5.6-sol max^pi-signed^openai-codex/gpt-5.6-sol^max
 default harness token -> falls back to crew, empty model/effort^default^claude^^
 extra whitespace between tokens is tolerated^grok   grok-4    xhigh^grok^grok-4^xhigh
 leading/trailing blank lines and a comment are skipped^# a comment\n\nclaude opus low\n^claude^opus^low
 ROWS
   pass "C1 fm-harness.sh secondmate-model/secondmate-effort resolve the optional tokens; bare harness stays empty (backward-compat)"
+}
+
+# ===========================================================================
+# A/C) pi-signed process identity and shared Pi marker behavior
+# ===========================================================================
+test_pi_signed_detection_and_session_lock_identity() {
+  local dir fakebin got
+  dir="$TMP_ROOT/pi-signed-identity"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_SIGNED_SHAPE:-exact}" in
+  100:comm=:*) printf '%s\n' '/test/Pi.app/bin/pi' ;;
+  100:args=:*) printf '%s\n' 'Pi' ;;
+  100:ppid=:*) printf '%s\n' 200 ;;
+  200:comm=:exact) printf '%s\n' '/opt/test/bin/pi-signed' ;;
+  200:args=:exact) printf '%s\n' 'pi-signed --model test/model' ;;
+  200:comm=:helper) printf '%s\n' '/opt/test/bin/pi-signed-helper' ;;
+  200:args=:helper) printf '%s\n' 'pi-signed-helper' ;;
+  200:comm=:plain) printf '%s\n' '/bin/zsh' ;;
+  200:args=:plain) printf '%s\n' 'zsh' ;;
+  200:ppid=:*) printf '%s\n' 1 ;;
+  *:comm=:*) printf '%s\n' bash ;;
+  *:args=:*) printf '%s\n' bash ;;
+  *:ppid=:*) printf '%s\n' 100 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  got=$(PATH="$fakebin:$BASE_PATH" PI_CODING_AGENT=true "$ROOT/bin/fm-harness.sh")
+  [ "$got" = pi ] || fail "unmarked shared signed-wrapper ancestry resolved '$got', expected pi"
+  got=$(PATH="$fakebin:$BASE_PATH" PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed "$ROOT/bin/fm-harness.sh")
+  [ "$got" = pi-signed ] || fail "selected signed wrapper resolved '$got', expected pi-signed"
+  got=$(PATH="$fakebin:$BASE_PATH" PI_CODING_AGENT=true FM_PI_HARNESS=pi "$ROOT/bin/fm-harness.sh")
+  [ "$got" = pi ] || fail "selected plain Pi resolved '$got', expected pi"
+  got=$(PATH="$fakebin:$BASE_PATH" PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed-helper "$ROOT/bin/fm-harness.sh")
+  [ "$got" = pi ] || fail "inexact signed selection marker resolved '$got', expected pi"
+  got=$(PATH="$fakebin:$BASE_PATH" FM_PI_HARNESS=pi-signed "$ROOT/bin/fm-harness.sh")
+  [ "$got" = pi ] || fail "signed selection marker without Pi's family marker resolved '$got', expected pi"
+  got=$(PATH="$fakebin:$BASE_PATH" PI_CODING_AGENT=true FM_TEST_SIGNED_SHAPE=plain "$ROOT/bin/fm-harness.sh")
+  [ "$got" = pi ] || fail "plain Pi marker resolved '$got', expected pi"
+  got=$(PATH="$fakebin:$BASE_PATH" PI_CODING_AGENT=true FM_TEST_SIGNED_SHAPE=helper "$ROOT/bin/fm-harness.sh")
+  [ "$got" = pi ] || fail "unrelated pi-signed-helper ancestry resolved '$got', expected pi"
+
+  got=$(PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
+  [ "$got" = 100 ] || fail "session-lock ancestry selected '$got', expected the inner Pi engine pid 100"
+  PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 200' "$ROOT" \
+    || fail "session-lock liveness rejected exact pi-signed holder"
+  if PATH="$fakebin:$BASE_PATH" FM_TEST_SIGNED_SHAPE=helper bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 200' "$ROOT"; then
+    fail "session-lock liveness accepted unrelated pi-signed-helper"
+  fi
+
+  pass "pi-signed identity: authoritative launch selection distinguishes shared wrapper ancestry"
 }
 
 # ===========================================================================
@@ -2050,6 +2117,7 @@ SH
 
 test_harness_resolution
 test_secondmate_model_effort_tokens
+test_pi_signed_detection_and_session_lock_identity
 test_propagate_lib
 test_spawn_split_and_inherit
 test_spawn_backward_compat_crew_fallback

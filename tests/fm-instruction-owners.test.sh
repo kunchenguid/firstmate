@@ -123,7 +123,7 @@ test_agent_owned_quota_array_dispatch_contract() {
     '| claude | Open the current interactive session' \
     '| codex | Open the current interactive session' \
     '| opencode | Run `opencode models [provider]`' \
-    '| pi | Run `pi --list-models [search]`' \
+    '| pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`' \
     '| grok | Run `grok models`' \
     "For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing" \
     'If those sources do not establish the relationship needed for dispatch, fail loudly and report the unresolved candidate.'; do
