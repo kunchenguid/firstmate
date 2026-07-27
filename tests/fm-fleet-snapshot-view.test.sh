@@ -755,6 +755,53 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# Decorated section headings must still classify. Exact-match section_state
+# dropped "## Done (LIVE + verified)" so done counts stayed 0, bearings landed
+# empty, and blocked-by never resolved against Done ids.
+test_decorated_section_headings_classify() {
+  local home out
+  home=$(make_home decorated-headings)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight (active work)
+- [ ] live-a - Live A (repo: alpha) (kind: ship) (since 2026-07-07)
+
+## Queued — next up
+- [ ] q-a - Queued A blocked-by: done-a (repo: alpha) (kind: ship)
+- [ ] captain-go - Run go blocked-by: done-a (repo: alpha) (kind: captain) (hold: captain runs go) (hold-kind: captain)
+
+## Done (LIVE + verified)
+- [x] done-a - Done A https://github.com/kunchenguid/firstmate/pull/7 (repo: alpha) (kind: ship) (merged 2026-07-06)
+EOF
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    ([.backlog.records[] | select(.state == "done")] | length) == 1
+      and ([.backlog.records[] | select(.state == "queued")] | length) == 2
+      and ([.backlog.records[] | select(.state == "in_flight")] | length) == 1
+  ' >/dev/null || fail "decorated headings must still classify In flight/Queued/Done: $out"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "done-a")
+    | .state == "done"
+      and .pr_url == "https://github.com/kunchenguid/firstmate/pull/7"
+      and .completion == {verb:"merged",date:"2026-07-06"}
+  ' >/dev/null || fail "decorated Done heading dropped done-a: $out"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "q-a")
+    | .state == "queued"
+      and .blocked_by_ids == ["done-a"]
+      and .unresolved_blocker_ids == []
+  ' >/dev/null || fail "Done id under decorated heading must resolve blocked-by: $out"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "captain-go")
+    | .captain_actionable == true
+      and .unresolved_blocker_ids == []
+  ' >/dev/null || fail "captain hold blocked only by decorated Done must be actionable: $out"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "live-a")
+    | .state == "in_flight" and .current_role == "worker"
+  ' >/dev/null || fail "decorated In flight heading dropped live-a: $out"
+  pass "decorated In flight/Queued/Done headings classify and resolve blockers"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
@@ -770,3 +817,4 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_decorated_section_headings_classify

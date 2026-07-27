@@ -258,9 +258,13 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   jq -Rn --arg path "$backlog" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def section_state:
-      if . == "In flight" then "in_flight"
-      elif . == "Queued" then "queued"
-      elif . == "Done" then "done"
+      # Prefix match so decorated headings still classify
+      # (e.g. "## Done (LIVE + verified)", "## Queued — next").
+      # Exact equality dropped those rows and broke Done counts,
+      # bearings landed, and blocked-by resolution.
+      if test("^In flight(\\b|[[:space:]]|$)") then "in_flight"
+      elif test("^Queued(\\b|[[:space:]]|$)") then "queued"
+      elif test("^Done(\\b|[[:space:]]|$)") then "done"
       else null end;
     def cap($rest; $re):
       (((($rest | capture($re)?) // {}) | .v) // null) as $v
