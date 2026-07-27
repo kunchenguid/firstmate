@@ -578,6 +578,108 @@ EOF
   pass "Pi coalesces actionable closes until a real drain and preserves later events"
 }
 
+test_pi_failed_send_restores_coalesced_wake_delivery() {
+  local repo home plugin log release stop out status
+  repo="$TMP_ROOT/pi-failed-send-root"
+  home="$TMP_ROOT/pi-failed-send-home"
+  log="$TMP_ROOT/pi-failed-send.log"
+  release="$TMP_ROOT/pi-failed-send.release"
+  stop="$TMP_ROOT/pi-failed-send.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  : > "$home/state/.wake-queue"
+  mkdir "$home/state/.wake-queue.lock"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$count" -eq 1 ]; then
+  printf 'signal: first wake\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.02; done
+  printf 'signal: second wake\n'
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let tool = null;
+const prompts = [];
+let rejectSend = () => {};
+const pi = {
+  events: { on() {} },
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: (message) => {
+    prompts.push(message);
+    if (prompts.length <= 2) {
+      return new Promise((_, reject) => {
+        rejectSend = reject;
+      });
+    }
+    return Promise.resolve();
+  },
+};
+process.on("unhandledRejection", (error) => {
+  console.error(`unhandled wake send rejection: ${error}`);
+  process.exit(1);
+});
+const waitFor = async (predicate, message) => {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+};
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-failed-send", {}, undefined, undefined, {});
+await waitFor(() => prompts.length === 1 && armRows().length === 2, "first Pi wake prompt or successor missing");
+writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+await waitFor(() => armRows().length === 3, "second actionable close did not start its successor");
+await new Promise((resolve) => setTimeout(resolve, 150));
+if (prompts.length !== 1) throw new Error(`coalesced close scheduled ${prompts.length} Pi prompts behind a blocked send`);
+rejectSend(new Error("synthetic send failure"));
+await new Promise((resolve) => setTimeout(resolve, 50));
+await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+await waitFor(() => prompts.length === 2, "failed Pi send did not restore a deliverable actionable reason");
+if (!prompts[1].includes("signal: second wake")) throw new Error(`failed Pi send clobbered the newer actionable reason: ${prompts[1]}`);
+if (prompts[1].includes("signal: first wake")) throw new Error(`failed Pi send replayed the stale actionable reason: ${prompts[1]}`);
+rejectSend(new Error("synthetic send failure two"));
+await new Promise((resolve) => setTimeout(resolve, 50));
+await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+await waitFor(() => prompts.length === 3, "failed Pi send dropped the undelivered wake");
+if (!prompts[2].includes("signal: second wake")) throw new Error(`redelivered Pi prompt lost its reason: ${prompts[2]}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi failed send must restore wake delivery without an unhandled rejection"
+  [ -z "$out" ] || fail "Pi failed-send test printed output: $out"
+  pass "Pi failed send restores coalesced wake delivery without an unhandled rejection"
+}
+
 # This runs the real Pi TUI and extension event loop with a deterministic provider.
 # The isolated fake arm child controls close timing, so detector classification remains covered by the watcher suites.
 test_pi_native_delivery_coalesces_through_real_drain() {
@@ -2115,6 +2217,105 @@ EOF
   pass "OpenCode releases the wake prompt latch when the outstanding session is deleted or errors"
 }
 
+test_opencode_stale_rejected_send_cannot_release_newer_latch() {
+  local plugin repo home log release_two release_three stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-stale-rejection-root"
+  home="$TMP_ROOT/opencode-stale-rejection-home"
+  log="$TMP_ROOT/opencode-stale-rejection.log"
+  release_two="$TMP_ROOT/opencode-stale-rejection-two.release"
+  release_three="$TMP_ROOT/opencode-stale-rejection-three.release"
+  stop="$TMP_ROOT/opencode-stale-rejection.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  : > "$home/state/.wake-queue"
+  mkdir "$home/state/.wake-queue.lock"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$count" -eq 1 ]; then
+  printf 'signal: first wake\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  while [ ! -e "$FM_RELEASE_TWO" ]; do sleep 0.02; done
+  printf 'signal: second wake\n'
+  exit 0
+fi
+if [ "$count" -eq 3 ]; then
+  while [ ! -e "$FM_RELEASE_THREE" ]; do sleep 0.02; done
+  printf 'signal: third wake\n'
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_TWO="$release_two" FM_RELEASE_THREE="$release_three" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const prompts = [];
+let rejectFirstSend = () => {};
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompts.push({ session: request.path.id, text: request.body.parts[0].text });
+      if (prompts.length === 1) {
+        await new Promise((_, reject) => {
+          rejectFirstSend = reject;
+        });
+      }
+    },
+  },
+};
+const waitFor = async (predicate, message) => {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+};
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-a" } } });
+await waitFor(() => prompts.length === 1 && armRows().length === 2, "first wake prompt or successor missing");
+await hooks.event({ event: { type: "session.deleted", properties: { info: { id: "session-a" } } } });
+writeFileSync(process.env.FM_RELEASE_TWO, "release\n");
+await waitFor(() => prompts.length === 2 && armRows().length === 3, "post-deletion close did not latch a new prompt with its successor");
+if (!prompts[1].text.includes("signal: second wake")) throw new Error(`wrong post-deletion prompt: ${prompts[1].text}`);
+rejectFirstSend(new Error("synthetic send failure"));
+await new Promise((resolve) => setTimeout(resolve, 50));
+writeFileSync(process.env.FM_RELEASE_THREE, "release\n");
+await waitFor(() => armRows().length === 4, "third actionable close did not start its successor");
+await new Promise((resolve) => setTimeout(resolve, 150));
+if (prompts.length !== 2) throw new Error(`stale rejected send released the newer wake prompt latch: ${prompts.length} prompts`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-a" } } });
+await waitFor(() => prompts.length === 3, "owned latch release did not deliver the coalesced wake");
+if (!prompts[2].text.includes("signal: third wake")) throw new Error(`wrong coalesced prompt after the handling turn: ${prompts[2].text}`);
+if (prompts[2].text.includes("signal: first wake")) throw new Error(`stale rejected send replayed its reason over the newer wake: ${prompts[2].text}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "OpenCode stale rejected send must not release a newer wake prompt latch"
+  [ -z "$out" ] || fail "OpenCode stale-rejection test printed output: $out"
+  pass "OpenCode stale rejected send cannot release a newer wake prompt latch"
+}
+
 test_opencode_pre_ready_actionable_close_preserves_its_successor() {
   local plugin repo home log release retired stop out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -2776,6 +2977,7 @@ test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
 test_pi_coalesces_actionable_closes_until_real_drain
+test_pi_failed_send_restores_coalesced_wake_delivery
 test_pi_native_delivery_coalesces_through_real_drain
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
@@ -2797,6 +2999,7 @@ test_opencode_coalesces_actionable_closes_until_real_drain
 test_opencode_failed_send_preserves_newer_actionable_reason
 test_opencode_failed_send_merges_undelivered_failure_reasons
 test_opencode_session_end_releases_wake_prompt_latch
+test_opencode_stale_rejected_send_cannot_release_newer_latch
 test_opencode_pre_ready_actionable_close_preserves_its_successor
 test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry

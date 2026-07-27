@@ -20,6 +20,7 @@ let armClose = new WeakMap();
 let armReadiness = new WeakMap();
 let wakePromptOutstanding = false;
 let wakePromptSessionID = "";
+let wakePromptEpoch = 0;
 let pendingActionableReason = "";
 let pendingFailureReason = "";
 
@@ -244,11 +245,14 @@ async function flushWakePrompt(paths, client, sessionID) {
   if (!message) return;
   wakePromptOutstanding = true;
   wakePromptSessionID = sessionID;
+  const send = ++wakePromptEpoch;
   try {
     await sendPrompt(paths, client, sessionID, wakePrompt(message));
   } catch {
-    wakePromptOutstanding = false;
-    wakePromptSessionID = "";
+    if (wakePromptEpoch === send) {
+      wakePromptOutstanding = false;
+      wakePromptSessionID = "";
+    }
     if (actionable && !pendingActionableReason) pendingActionableReason = actionable;
     if (failure) pendingFailureReason = pendingFailureReason ? `${failure}\n\n${pendingFailureReason}` : failure;
   }

@@ -193,6 +193,7 @@ export default function (pi: ExtensionAPI) {
   process.once("exit", cleanupOnProcessExit);
 
   let wakePromptOutstanding = false;
+  let wakePromptEpoch = 0;
   let pendingActionableReason = "";
   let pendingFailureReason = "";
 
@@ -215,12 +216,12 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function sendWake(message: string): void {
+  async function sendWake(message: string): Promise<void> {
     const content = encodeFirstmateOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
-    pi.sendUserMessage(content, { deliverAs: "followUp" });
+    await pi.sendUserMessage(content, { deliverAs: "followUp" });
   }
 
   function flushWakePrompt(): void {
@@ -250,13 +251,12 @@ export default function (pi: ExtensionAPI) {
     }
     if (!message) return;
     wakePromptOutstanding = true;
-    try {
-      sendWake(message);
-    } catch {
-      wakePromptOutstanding = false;
-      if (actionable) pendingActionableReason = actionable;
-      if (failure) pendingFailureReason = failure;
-    }
+    const send = ++wakePromptEpoch;
+    void sendWake(message).catch(() => {
+      if (wakePromptEpoch === send) wakePromptOutstanding = false;
+      if (actionable && !pendingActionableReason) pendingActionableReason = actionable;
+      if (failure) pendingFailureReason = pendingFailureReason ? `${failure}\n\n${pendingFailureReason}` : failure;
+    });
   }
 
   function requestActionableWake(message: string): void {
