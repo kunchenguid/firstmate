@@ -8,6 +8,12 @@ Wave 1 ships the server lifecycle, the snapshot API, and the phone-first UI shel
 Later waves attach side sources (quota, PRs, trains, production) and write-back.
 See the design scout report for the full plan; this page owns current operator setup.
 
+## Requirements
+
+- A Rust toolchain with `cargo` on `PATH` (edition 2021).
+  The first `start` or `run` builds the release binary when it is absent.
+- No Python (or other scripting language) is required for the server or lifecycle script.
+
 ## Run
 
 ```sh
@@ -23,6 +29,20 @@ The command refuses to start when the home is missing or not shaped that way.
 
 Default URL shape after start: `http://<bind-ip>:<port>/` (default port `8391`).
 
+### Server binary
+
+The HTTP server is a small Rust crate at `dashboard/` in the tracked repo.
+`bin/fm-dashboard.sh` invokes:
+
+```sh
+cargo build --release
+```
+
+in that crate when `dashboard/target/release/fm-dashboard-server` is missing.
+Dependencies are intentionally minimal: `tiny_http` (sync HTTP) and `serde_json` (snapshot JSON).
+There is no async runtime and no heavyweight web framework.
+Rebuild after source changes by removing the binary or running `cargo build --release` in `dashboard/` yourself.
+
 ## Bind selection
 
 The server binds only to a concrete address.
@@ -30,7 +50,7 @@ The server binds only to a concrete address.
 1. If `config/dashboard-bind` exists under `FM_HOME`, its first line is used as `IP` or `IP:PORT`.
 2. Otherwise the script runs `tailscale ip -4` and binds that address on port `8391`.
 
-`0.0.0.0`, `::`, and other wildcards are refused at lifecycle resolve time and again inside the Python server.
+`0.0.0.0`, `::`, and other wildcards are refused at lifecycle resolve time and again inside the Rust server.
 For local tests, write `127.0.0.1:8391` (or another free port) into `config/dashboard-bind`.
 
 ## Auth
@@ -79,7 +99,7 @@ This host class may not have systemd.
 `bin/fm-dashboard.sh start` therefore daemonizes a portable supervisor loop:
 
 1. Validate home and resolve bind + token.
-2. Background a loop that runs `bin/fm-dashboard-server.py`.
+2. Background a loop that runs the Rust binary `dashboard/target/release/fm-dashboard-server`.
 3. If the server process exits without a stop request, the loop waits one second and starts it again (well under the ten-second restart budget).
 4. PID and log files live under `state/dashboard/` (`supervisor.pid`, `server.pid`, `server.log`, `supervisor.log`).
 5. `stop` writes a stop flag, signals the server, then stops the supervisor.
@@ -116,8 +136,8 @@ The supported default path in this repo is `bin/fm-dashboard.sh start` with the 
 
 | Path | Role |
 | --- | --- |
-| `bin/fm-dashboard.sh` | Lifecycle: start / stop / status / run |
-| `bin/fm-dashboard-server.py` | HTTP server (stdlib only) |
+| `bin/fm-dashboard.sh` | Lifecycle: start / stop / status / run; cargo-builds the server when absent |
+| `dashboard/` | Rust crate producing `fm-dashboard-server` |
 | `bin/fm-dashboard-static/` | Phone-first UI assets |
 | `bin/fm-fleet-snapshot.sh` | Canonical fleet read model used by the snapshot API |
 

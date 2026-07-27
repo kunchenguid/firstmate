@@ -20,3 +20,6 @@ config/wedge-alarm
 config/herdr-presentation-spaces
 config/dashboard-bind
 config/dashboard-token
+
+# Rust dashboard crate build output
+dashboard/target/

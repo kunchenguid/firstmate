@@ -3,8 +3,9 @@
 #
 # A long-running, read-only HTTP board over firstmate state. Independent of the
 # firstmate session lock and of firstmate start/stop. This script owns start,
-# stop, status, and foreground run. The HTTP implementation lives in
-# bin/fm-dashboard-server.py (Python 3 stdlib only).
+# stop, status, and foreground run. The HTTP server is a Rust binary built from
+# dashboard/ (cargo project; tiny_http + serde_json, no async framework).
+# When the release binary is absent, this script runs `cargo build --release`.
 #
 # On hosts without systemd (e.g. Gentoo OpenRC), `start` daemonizes a portable
 # supervisor loop that restarts the server within 10s if it dies. An optional
@@ -38,7 +39,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 DEFAULT_PORT=8391
-SERVER_PY="$SCRIPT_DIR/fm-dashboard-server.py"
+DASH_CRATE_DIR="$FM_ROOT/dashboard"
+SERVER_BIN="$DASH_CRATE_DIR/target/release/fm-dashboard-server"
 STATIC_DIR="$SCRIPT_DIR/fm-dashboard-static"
 
 usage() {
@@ -190,11 +192,16 @@ ensure_token() {
   fi
   if command -v openssl >/dev/null 2>&1; then
     token=$(openssl rand -hex 32)
+  elif [ -r /dev/urandom ]; then
+    # Portable fallback without openssl or any scripting language.
+    token=$(od -An -N32 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
   else
-    token=$(python3 -c 'import secrets; print(secrets.token_hex(32))') || {
-      printf 'fm-dashboard: cannot generate token (need openssl or python3)\n' >&2
-      return 1
-    }
+    printf 'fm-dashboard: cannot generate token (need openssl or /dev/urandom)\n' >&2
+    return 1
+  fi
+  if [ -z "$token" ] || [ "${#token}" -lt 32 ]; then
+    printf 'fm-dashboard: token generation produced an empty or short secret\n' >&2
+    return 1
   fi
   umask 077
   printf '%s\n' "$token" >"$token_file" || {
@@ -234,13 +241,44 @@ server_running() {
   pid_alive "$pid"
 }
 
+# Build the Rust release binary when absent. Documents cargo as a requirement.
+ensure_server_binary() {
+  if [ -x "$SERVER_BIN" ]; then
+    return 0
+  fi
+  command -v cargo >/dev/null 2>&1 ||
+    die "cargo not found; install a Rust toolchain to build the dashboard server (see docs/dashboard.md)"
+  [ -f "$DASH_CRATE_DIR/Cargo.toml" ] ||
+    die "missing dashboard crate: $DASH_CRATE_DIR/Cargo.toml"
+  printf 'fm-dashboard: building release binary (cargo build --release)...\n' >&2
+  if ! (
+    cd "$DASH_CRATE_DIR" || exit 1
+    cargo build --release
+  ); then
+    die "cargo build --release failed in $DASH_CRATE_DIR"
+  fi
+  [ -x "$SERVER_BIN" ] || die "build finished but binary missing: $SERVER_BIN"
+}
+
 prepare_runtime() {
   require_home
-  [ -f "$SERVER_PY" ] || die "missing server: $SERVER_PY"
   [ -d "$STATIC_DIR" ] || die "missing static UI: $STATIC_DIR"
+  ensure_server_binary
   mkdir -p "$DASH_DIR" || die "cannot create $DASH_DIR"
   # Dashboard may write only under state/dashboard/ (and create config for
   # token/bind). Never touch other state or data files.
+}
+
+# TCP readiness without scripting languages.
+port_open() {
+  local host=$1 port=$2
+  if command -v curl >/dev/null 2>&1; then
+    curl -sS -o /dev/null --connect-timeout 0.2 --max-time 0.5 \
+      "http://${host}:${port}/healthz" 2>/dev/null
+    return $?
+  fi
+  # bash /dev/tcp when available
+  (echo >/dev/tcp/"$host"/"$port") >/dev/null 2>&1
 }
 
 # Export server env in the current shell; set DASH_BIND.
@@ -274,7 +312,7 @@ cmd_run() {
   assign_server_env || exit 1
   printf 'fm-dashboard: running in foreground on http://%s (FM_HOME=%s)\n' "$DASH_BIND" "$FM_HOME" >&2
   # Foreground: no supervisor loop. Ctrl-C stops the server.
-  exec python3 "$SERVER_PY"
+  exec "$SERVER_BIN"
 }
 
 supervisor_loop() {
@@ -287,8 +325,7 @@ supervisor_loop() {
     if [ -f "$STOP_FLAG" ]; then
       break
     fi
-    # shellcheck disable=SC2086 # intentional single argv
-    python3 "$SERVER_PY" >>"$SERVER_LOG" 2>&1 &
+    "$SERVER_BIN" >>"$SERVER_LOG" 2>&1 &
     printf '%s\n' "$!" >"$SERVER_PID_FILE"
     wait "$!" || rc=$?
     rc=${rc:-0}
@@ -341,20 +378,7 @@ cmd_start() {
       break
     fi
     # Also accept a listening port as ready even if pid write races.
-    if python3 - "$FM_DASHBOARD_BIND_HOST" "$FM_DASHBOARD_BIND_PORT" <<'PY' 2>/dev/null
-import socket, sys
-host, port = sys.argv[1], int(sys.argv[2])
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.settimeout(0.2)
-try:
-    s.connect((host, port))
-except OSError:
-    sys.exit(1)
-else:
-    s.close()
-    sys.exit(0)
-PY
-    then
+    if port_open "$FM_DASHBOARD_BIND_HOST" "$FM_DASHBOARD_BIND_PORT"; then
       break
     fi
     i=$((i + 1))

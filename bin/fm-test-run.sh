@@ -674,7 +674,7 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       ;;
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh|\
-    bin/fm-dashboard.sh|bin/fm-dashboard-server.py|bin/fm-dashboard-static/*)
+    bin/fm-dashboard.sh|bin/fm-dashboard-static/*|dashboard/*|dashboard/src/*)
       printf '%s\n' snapshot-bearings
       ;;
     bin/fm-install-herdr.sh|bin/fm-install-treehouse.sh|bin/fm-herdr-ci-cleanup.sh)

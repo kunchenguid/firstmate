@@ -33,7 +33,8 @@ Optional local files under `config/` for the session-independent HTTP board:
 - `config/dashboard-token` - bearer token, mode `0600`, created on first start when missing.
 
 Runtime files for the portable supervisor live under `state/dashboard/`.
-[`docs/dashboard.md`](dashboard.md) owns lifecycle, auth, the snapshot API, and the no-systemd supervisor design.
+The HTTP server is the Rust binary from the tracked `dashboard/` crate (built via cargo on first start).
+[`docs/dashboard.md`](dashboard.md) owns lifecycle, auth, the snapshot API, the Rust toolchain requirement, and the no-systemd supervisor design.
 
 ## Pi Calm preference (config/calm)
 

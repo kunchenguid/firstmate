@@ -1,0 +1,17 @@
+[package]
+name = "fm-dashboard-server"
+version = "0.1.0"
+edition = "2021"
+description = "Read-only live fleet dashboard HTTP server for firstmate"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "fm-dashboard-server"
+path = "src/main.rs"
+
+[dependencies]
+# Sync, minimal HTTP server - no async runtime.
+tiny_http = "0.12"
+# JSON for snapshot composition and fleet-snapshot tool output.
+serde_json = "1"

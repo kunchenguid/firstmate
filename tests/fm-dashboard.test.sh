@@ -286,18 +286,26 @@ test_static_ui_present() {
 }
 
 test_server_refuses_wildcard_env() {
-  local out status
+  local out status bin home
+  home=$(make_home env-wild)
+  # Ensure the release binary exists (build once if needed).
+  FM_HOME="$home" "$DASH" status >/dev/null 2>&1 || true
+  bin="$ROOT/dashboard/target/release/fm-dashboard-server"
+  if [ ! -x "$bin" ]; then
+    (cd "$ROOT/dashboard" && cargo build --release) >/dev/null 2>&1 ||
+      fail "could not build fm-dashboard-server for wildcard env test"
+  fi
   out=$(
-    FM_HOME=$(make_home env-wild) \
+    FM_HOME="$home" \
     FM_DASHBOARD_BIND_HOST=0.0.0.0 \
     FM_DASHBOARD_BIND_PORT=$(next_port) \
     FM_DASHBOARD_TOKEN=testtoken \
     FM_DASHBOARD_STATIC="$ROOT/bin/fm-dashboard-static" \
-    python3 "$ROOT/bin/fm-dashboard-server.py" 2>&1
+    "$bin" 2>&1
   ) && status=0 || status=$?
   [ "$status" -ne 0 ] || fail "server should refuse 0.0.0.0 env bind"
   assert_contains "$out" "wildcard" "server wildcard message"
-  pass "Python server refuses wildcard bind host from env"
+  pass "Rust server refuses wildcard bind host from env"
 }
 
 # --- run -------------------------------------------------------------------
