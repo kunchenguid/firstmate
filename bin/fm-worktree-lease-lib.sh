@@ -62,12 +62,43 @@ fm_worktree_proven_lease() {  # <project> <absolute-worktree> <expected-holder>
     && [ "$FM_WORKTREE_POOL_HOLDER" = "$3" ]
 }
 
-fm_worktree_acquire_existing_lease() {  # <absolute-worktree> <holder>
-  local worktree=$1 holder=$2
+fm_worktree_state_evidence() {  # <absolute-worktree>
+  local worktree=$1
   command -v python3 >/dev/null 2>&1 || return 1
-  python3 - "$worktree" "$holder" <<'PY'
+  FM_WORKTREE_STATE_EVIDENCE=$(python3 - "$worktree" <<'PY'
+import hashlib
+import json
+import os
+import sys
+
+worktree = os.path.realpath(sys.argv[1])
+state_path = os.path.join(
+    os.path.dirname(os.path.dirname(worktree)), "treehouse-state.json"
+)
+with open(state_path, "rb") as handle:
+    state = json.load(handle)
+matches = [
+    entry for entry in state.get("worktrees", [])
+    if os.path.realpath(entry.get("path", "")) == worktree
+]
+if len(matches) != 1:
+    raise SystemExit(1)
+encoded = json.dumps(
+    matches[0], sort_keys=True, separators=(",", ":")
+).encode()
+print(hashlib.sha256(encoded).hexdigest())
+PY
+) || return 1
+  [ -n "$FM_WORKTREE_STATE_EVIDENCE" ]
+}
+
+fm_worktree_acquire_existing_lease() {  # <absolute-worktree> <holder> <state-evidence> <pool-status>
+  local worktree=$1 holder=$2 evidence=$3 status=$4
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$worktree" "$holder" "$evidence" "$status" <<'PY'
 import datetime
 import fcntl
+import hashlib
 import json
 import os
 import secrets
@@ -76,6 +107,8 @@ import tempfile
 
 worktree = os.path.realpath(sys.argv[1])
 holder = sys.argv[2]
+evidence = sys.argv[3]
+status = sys.argv[4]
 pool = os.path.dirname(os.path.dirname(worktree))
 state_path = os.path.join(pool, "treehouse-state.json")
 lock_path = os.path.join(pool, "treehouse-state.lock")
@@ -92,7 +125,21 @@ try:
     if len(matches) != 1:
         raise SystemExit(1)
     entry = matches[0]
-    if entry.get("destroying") or entry.get("leased"):
+    encoded_entry = json.dumps(
+        entry, sort_keys=True, separators=(",", ":")
+    ).encode()
+    current_evidence = hashlib.sha256(encoded_entry).hexdigest()
+    if current_evidence != evidence:
+        raise SystemExit(1)
+    if status not in ("in-use", "in_use", "dirty"):
+        raise SystemExit(1)
+    if (
+        entry.get("destroying")
+        or entry.get("leased")
+        or entry.get("lease_id")
+        or entry.get("lease_holder")
+        or entry.get("leased_at")
+    ):
         raise SystemExit(1)
     entry["leased"] = True
     entry["lease_id"] = secrets.token_hex(16)

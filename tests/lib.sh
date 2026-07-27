@@ -106,7 +106,47 @@ if [ -n "${FM_FAKE_TREEHOUSE_LOG:-}" ]; then
 fi
 if [ "${1:-}" = get ]; then
   [ "${FM_FAKE_TREEHOUSE_FAIL:-0}" = 1 ] && exit 1
-  printf '%s\n' "${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-$FM_FAKE_TREEHOUSE_DEFAULT}}"
+  if [ -n "${FM_FAKE_TREEHOUSE_STATE_FILE:-}" ]; then
+    holder=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --lease-holder) shift; holder=${1:-} ;;
+        --lease-holder=*) holder=${1#--lease-holder=} ;;
+      esac
+      shift
+    done
+    python3 - "$FM_FAKE_TREEHOUSE_STATE_FILE" "$holder" <<'PY'
+import datetime, json, os, secrets, sys, tempfile
+path, holder = sys.argv[1:]
+with open(path) as handle:
+    state = json.load(handle)
+selected = None
+for entry in state["worktrees"]:
+    if (
+        not entry.get("leased")
+        and not entry.get("destroying")
+        and not entry.get("owner_pid")
+        and entry.get("test_status", "available") == "available"
+    ):
+        selected = entry
+        break
+if selected is None:
+    raise SystemExit(1)
+selected["leased"] = True
+selected["lease_id"] = secrets.token_hex(16)
+selected["lease_holder"] = holder
+selected["leased_at"] = datetime.datetime.now(
+    datetime.timezone.utc
+).isoformat().replace("+00:00", "Z")
+fd, temporary = tempfile.mkstemp(prefix="treehouse-state.json.tmp-", dir=os.path.dirname(path))
+with os.fdopen(fd, "w") as handle:
+    json.dump(state, handle, indent=2)
+os.replace(temporary, path)
+print(selected["path"])
+PY
+  else
+    printf '%s\n' "${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-$FM_FAKE_TREEHOUSE_DEFAULT}}"
+  fi
 elif [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
   if [ -n "${FM_FAKE_TREEHOUSE_STATE_FILE:-}" ]; then
     python3 - "$FM_FAKE_TREEHOUSE_STATE_FILE" <<'PY'

@@ -4,6 +4,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-worktree-lease-lib.sh
+. "$ROOT/bin/fm-worktree-lease-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-adopt-worktree)
 
@@ -17,6 +19,8 @@ make_case() {
   mkdir -p "$CASE_HOME/state" "$CASE_HOME/config"
   fm_git_worktree "$CASE_PROJECT" "$CASE_WORKTREE" "$name"
   printf 'legacy handoff\n' > "$CASE_WORKTREE/handoff.md"
+  printf '{"worktrees":[{"name":"1","path":"%s","test_status":"in-use","owner_pid":999999,"owner_started_at":1}]}\n' \
+    "$CASE_WORKTREE" > "$(dirname "$(dirname "$CASE_WORKTREE")")/treehouse-state.json"
   fm_write_meta "$CASE_HOME/state/$id.meta" \
     "window=firstmate:fm-$id" "worktree=$CASE_WORKTREE" \
     "project=$CASE_PROJECT" "kind=ship" "harness=codex"
@@ -93,7 +97,32 @@ test_refusals_and_native_lease_noop() {
   pass "adoption refuses unsafe states and accepts an existing native lease"
 }
 
+test_changed_owner_refuses_without_mutation() {
+  local id state evidence status
+  id=adopt-race-a3
+  make_case race "$id"
+  state="$(dirname "$(dirname "$CASE_WORKTREE")")/treehouse-state.json"
+  fm_worktree_state_evidence "$CASE_WORKTREE" || fail "could not capture allocation evidence"
+  evidence=$FM_WORKTREE_STATE_EVIDENCE
+  python3 - "$state" <<'PY'
+import json, sys
+with open(sys.argv[1]) as handle:
+    state = json.load(handle)
+state["worktrees"][0]["owner_pid"] = 424242
+state["worktrees"][0]["owner_started_at"] = 987654321
+with open(sys.argv[1], "w") as handle:
+    json.dump(state, handle)
+PY
+  fm_worktree_acquire_existing_lease "$CASE_WORKTREE" "fm-$id" "$evidence" in-use
+  status=$?
+  expect_code 1 "$status" "changed allocation evidence should refuse lease acquisition"
+  assert_grep '"owner_pid": 424242' "$state" "refusal replaced the new owner"
+  assert_no_grep '"leased": true' "$state" "refusal leased the newly owned worktree"
+  pass "lease acquisition refuses changed ownership evidence without mutation"
+}
+
 test_unleased_copy_is_atomically_leased_unchanged
 test_refusals_and_native_lease_noop
+test_changed_owner_refuses_without_mutation
 
 echo "# all fm-adopt-worktree tests passed"

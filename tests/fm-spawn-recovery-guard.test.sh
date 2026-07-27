@@ -380,11 +380,23 @@ test_legacy_copy_requires_durable_lease() {
   : > "$CASE_CWD_FILE"
   : > "$CASE_SENT_FILE"
   : > "$CASE_TREEHOUSE_LOG"
-  FM_FAKE_TREEHOUSE_LOG="$CASE_TREEHOUSE_LOG" FM_FAKE_LEASE_PATH="$CASE_WT_B" \
+  allocated=$(FM_FAKE_TREEHOUSE_LOG="$CASE_TREEHOUSE_LOG" \
     FM_FAKE_TREEHOUSE_STATE_FILE="$state" \
-    "$CASE_FAKEBIN/treehouse" get --lease --lease-holder another-task >/dev/null
+    "$CASE_FAKEBIN/treehouse" get --lease --lease-holder another-task)
+  [ "$allocated" = "$CASE_WT_B" ] \
+    || fail "post-exit allocation selected ${allocated:-nothing} instead of the available copy"
   assert_grep "get --lease --lease-holder another-task" "$CASE_TREEHOUSE_LOG" \
     "post-exit allocation was not exercised"
+  assert_grep '"lease_holder": "another-task"' "$state" \
+    "post-exit allocation did not mark the available copy"
+  [ "$(python3 - "$state" "$CASE_WT_A" <<'PY'
+import json, sys
+with open(sys.argv[1]) as handle:
+    state = json.load(handle)
+entry = next(item for item in state["worktrees"] if item["path"] == sys.argv[2])
+print(entry.get("lease_holder", ""))
+PY
+)" = "fm-$id" ] || fail "post-exit allocation replaced the adopted copy's lease"
   assert_present "$CASE_WT_A/handoff.md" "post-exit allocation recycled the recovered copy"
   [ "$handoff_hash" = "$(sha256sum "$CASE_WT_A/handoff.md")" ] \
     || fail "post-exit allocation changed the recovered handoff"

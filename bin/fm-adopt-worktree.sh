@@ -64,6 +64,8 @@ AGENT_STATE=$(fm_backend_agent_state "$BACKEND" "$TARGET")
 case "$AGENT_STATE" in dead|missing) ;; *) refuse "recorded endpoint $TARGET is $AGENT_STATE" ;; esac
 
 EXPECTED="fm-$ID"
+fm_worktree_state_evidence "$WORKTREE_REAL" || refuse "treehouse allocation evidence is unreadable"
+EXPECTED_STATE_EVIDENCE=$FM_WORKTREE_STATE_EVIDENCE
 fm_worktree_pool_lookup "$PROJECT_REAL" "$WORKTREE_REAL" || refuse "treehouse pool state is unreadable"
 [ "$FM_WORKTREE_POOL_RESULT" = present ] || refuse "worktree is absent from the treehouse pool"
 if [ "$FM_WORKTREE_POOL_STATUS" = leased ]; then
@@ -78,7 +80,8 @@ else
   fm_worktree_content_manifest "$WORKTREE_REAL" || refuse "content manifest could not be captured"
   BEFORE_DIGEST=$FM_WORKTREE_MANIFEST_DIGEST
   BEFORE_BODY=$FM_WORKTREE_MANIFEST_BODY
-  fm_worktree_acquire_existing_lease "$WORKTREE_REAL" "$EXPECTED" \
+  fm_worktree_acquire_existing_lease \
+    "$WORKTREE_REAL" "$EXPECTED" "$EXPECTED_STATE_EVIDENCE" "$FM_WORKTREE_POOL_STATUS" \
     || refuse "durable lease acquisition failed"
   fm_worktree_proven_lease "$PROJECT_REAL" "$WORKTREE_REAL" "$EXPECTED" \
     || refuse "acquired lease could not be verified"
