@@ -50,8 +50,8 @@ The file format is unchanged in both modes; tasks-axi and manual edits produce t
 ## Managed Graphify context (data/graphify)
 
 Bootstrap requires the pinned local `graphifyy==0.9.28` environment and reports `MISSING: graphify` with the consent-gated installer when it is absent or incompatible.
-The installer creates `data/graphify/venv` under the effective `FM_HOME`, so an ambient `graphify` command is never trusted.
-`bin/fm-graphify.sh status <project>`, `rebuild <project>`, `schedule <project> <reason> [invalidate]`, `refresh <project> <reason> [invalidate]`, `query <project> <question>`, `mark-stale <project> <reason>`, and `cleanup <project>` are the supported management interface.
+The installer needs `python3` and creates `data/graphify/venv` under the effective `FM_HOME`, so an ambient `graphify` command is never trusted.
+`bin/fm-graphify.sh status <project>`, `rebuild <project>`, `schedule <project> <reason> [invalidate]`, `refresh <project> <reason> [invalidate]`, `query <project> <question>`, `mark-stale <project> <reason>`, and `cleanup <project>` are the supported management interface; bootstrap uses `available` and `install`, and `bin/fm-brief.sh` uses `intake <project> <question>`.
 Every command accepts a registered project name only, resolves the clone from `data/projects.md`, and stores derived output outside the clone under `data/graphify/projects/<project>/`.
 Rebuilds are local structural extraction only, exclude secret and dependency material, ignore symlinks, build into a private generation, and preserve the previous published graph if validation or publication fails.
 Freshness fingerprints the selected files, project Git revision, Graphify pin, and managed limits, and a graph is reported fresh only after a generation was published and recorded, so an interrupted rebuild reports stale rather than fresh.
@@ -270,9 +270,9 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
 It installs automatically supported tools only after you say go; manual-only tools remain for you to install from the printed instructions.
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
-The universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi, compatible tasks-axi per "Backlog backend" above, and quota-axi.
+The universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi, compatible tasks-axi per "Backlog backend" above, quota-axi, and the managed Graphify environment per "Managed Graphify context" above.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
-In that list, no-mistakes runs the validation pipeline, gh-axi, chrome-devtools-axi, and lavish-axi cover GitHub, browser, and rich-review operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
+In that list, no-mistakes runs the validation pipeline, gh-axi, chrome-devtools-axi, and lavish-axi cover GitHub, browser, and rich-review operations, tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch, and Graphify backs bounded local project context.
 The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
 That delta is owned in code by `fm_backend_required_tools` in `bin/fm-backend.sh`: the resolved backend's own session-provider CLI (`tmux`, `herdr`, `zellij`, `orca`, or `cmux`), `jq` for the JSON-emitting experimental adapters (`herdr`, `zellij`, `cmux`) whose spawn and liveness paths parse the backend's JSON output, and the `treehouse` worktree provider for every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`).
 Backend tool availability uses the adapter's own executable resolver, so bootstrap and spawn agree on supported non-`PATH` locations such as cmux's bundled CLI.
@@ -281,7 +281,7 @@ Orca provides both the task worktree and terminal endpoint (see "Runtime backend
 A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
-`tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
+`tasks-axi`, `quota-axi`, and Graphify are required bootstrap tools in every profile, the same class as `lavish-axi`.
 An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap stays silent and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until installation is approved and completed.
 An absent `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array until current quota output is available for every candidate.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
@@ -381,7 +381,8 @@ These paths need `jq` to build the JSON payload, but they run before token and n
 
 ## Environment variables
 
-Runtime tuning via environment variables (defaults shown):
+Runtime tuning via environment variables (defaults shown).
+Graphify's `FM_GRAPHIFY_*` selection limits, timeouts, and scheduling bounds are deliberately left out of this list; `bin/fm-graphify.sh` owns them with their defaults, per "Managed Graphify context" above.
 
 ```sh
 FM_HOME=                 # optional operational home for most scripts, unset means this repo root; fm-send requires it explicitly
