@@ -246,6 +246,8 @@ test_cursor_abort_cleanup_owns_lock_and_auth_immediately() {
   : > "$auth_file"
   mkdir "$home/.cursor/hooks/.fm-turn-end.lock"
   function_source=$(sed -n '/^spawn_abort_cleanup()/,/^trap spawn_abort_cleanup EXIT/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
+  # The eval-loaded cleanup function reads the setup variables in this subshell.
+  # shellcheck disable=SC2034
   (
     # shellcheck source=bin/fm-cursor-lib.sh
     . "$ROOT/bin/fm-cursor-lib.sh"
