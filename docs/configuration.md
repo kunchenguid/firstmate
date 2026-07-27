@@ -25,7 +25,7 @@ Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, whil
 
 ## Live fleet dashboard (config/dashboard-bind, config/dashboard-token)
 
-Optional local files under `config/` for the session-independent HTTP board:
+Optional gitignored files under `config/` for the session-independent HTTP board:
 
 - `config/dashboard-bind` - first line is `IP` or `IP:PORT` (default port `8391`).
   When absent, `bin/fm-dashboard.sh` uses `tailscale ip -4`.

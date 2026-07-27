@@ -6,7 +6,7 @@ Firstmate session start or stop does not start or stop the dashboard.
 
 Wave 1 ships the server lifecycle, the snapshot API, and the phone-first UI shell.
 Later waves attach side sources (quota, PRs, trains, production) and write-back.
-See the design scout report for the full plan; this page owns current operator setup.
+This page owns current operator setup for what ships today.
 
 ## Requirements
 
@@ -81,6 +81,8 @@ HTTP on the tailnet is acceptable for v1; do not expose this service on the publ
 `GET /api/v1/snapshot` (auth required) returns JSON with schema `fm-dashboard-snapshot.v1`.
 
 - Primary fleet payload comes from `bin/fm-fleet-snapshot.sh --json` when present and executable.
+- When that tool is absent or fails, the server composes a reduced `fm-fleet-snapshot.v1` payload itself from `state/<id>.meta`, the last line of each `state/<id>.status`, scout reports under `data/`, and `tasks-axi list --json`.
+  That response carries `"composed_fallback": true` inside `fleet` and a `fleet-compose-fallback` entry in `sources[]`, so the board never silently presents a degraded read as the real snapshot.
 - Every child process is bounded (60s for the snapshot tool, 20s for `tasks-axi`). On expiry the child's whole process group is killed and its `sources[]` entry is marked `"timed_out": true` with an `error`, so a wedged probe degrades the board instead of hanging it.
 - Soft cache is about four seconds so phone multi-fetch stays cheap.
 - Each response includes `generated`, nested `fleet` (the snapshot contract), `decisions` (stable keys for captain holds), `sources[]` metadata, and honest null/empty placeholders for wave-2 surfaces.
@@ -105,9 +107,11 @@ Wave 1 therefore stamps a stable `data-key` (and `data-key-kind`) on every secti
 | section | `section:<slug>` | `section:your-call` |
 | decision | `decision:<hold-id>` | `decision:demo-decision` |
 | task | `task:<id>` | `task:ship-a` |
-| event / pr / train / meter | `<kind>:<id>` | `pr:466` |
+| event / pr / train / meter / production | `<kind>:<id>` | `pr:466` |
 | empty placeholder | `empty:<section-slug>` | `empty:trains` |
+| container (board, list, meta strip) | `surface:<slug>` | `surface:freshness` |
 
+The snapshot mirrors the section anchors in a top-level `sections[]` array, and every fleet task carries its `task:<id>` key.
 Decision cards also keep `data-decision-key` / `hold_id` as the raw backlog id for write-back routing.
 No write path ships in wave 1; the keys only prepare the board for wave 3.
 

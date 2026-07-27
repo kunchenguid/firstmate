@@ -5,10 +5,7 @@
  * Wave 3 lavish-style feedback (tick / dismiss / snooze / free-text annotation)
  * anchors on stable data-key attributes present on EVERY section and card/row.
  * Wave 1 is read-only; keys are architectural only.
- *
- * Key convention:
- *   section:<slug> | decision:<hold-id> | task:<id> | event:<id>
- *   | pr:<id> | train:<id> | meter:<id> | production:<id> | empty:<section>
+ * docs/dashboard.md ("Stable keys") owns the key convention.
  */
 (function () {
   "use strict";

@@ -4,6 +4,8 @@
 # kill, stop/status without a Rust toolchain, FM_HOME shape refusal, bind safety
 # (no 0.0.0.0 and no IPv4-mapped wildcard; honors override), bearer auth,
 # malformed unlock bodies, open /healthz, and snapshot JSON shape + stable keys.
+# It also runs the crate's own `cargo test --release`, which owns the bounded-child
+# coverage (deadline kill, process-group reap, pipe drain) no shell test can reach.
 set -u
 
 # shellcheck source=tests/lib.sh

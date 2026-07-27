@@ -32,7 +32,8 @@
 #                            and port 8391). Never 0.0.0.0 / ::.
 #   config/dashboard-token   Bearer token, mode 0600, auto-created on first start.
 #
-# Runtime files under state/dashboard/ (only writable location for this tool):
+# Runtime files under state/dashboard/ (the only runtime writes besides creating
+# config/dashboard-token on first start):
 #   supervisor.pid  server.pid  stop  server.log  supervisor.log
 set -u
 
