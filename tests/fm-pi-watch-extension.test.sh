@@ -973,6 +973,130 @@ EOF
   pass "Pi process-exit cleanup listener has a bounded lifecycle"
 }
 
+test_pi_cached_module_rebind_resets_arm_state() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-session-rebind-root"
+  home="$TMP_ROOT/pi-session-rebind-home"
+  log="$TMP_ROOT/pi-session-rebind.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+trap 'exit 0' TERM INT
+while :; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+function createBinding() {
+  const handlers = new Map();
+  let armCommand = null;
+  return {
+    handlers,
+    get armCommand() {
+      return armCommand;
+    },
+    pi: {
+      on(event, handler) {
+        handlers.set(event, handler);
+      },
+      registerCommand(name, options) {
+        if (name === "fm-watch-arm-pi") armCommand = options.handler;
+      },
+      registerTool() {},
+      sendUserMessage: async () => {},
+    },
+  };
+}
+
+async function waitForArmCount(expected) {
+  for (let i = 0; i < 250; i += 1) {
+    const rows = existsSync(process.env.FM_ARM_LOG)
+      ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+      : [];
+    if (rows.length >= expected) return Number(rows[expected - 1].split("=")[1]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`watcher arm ${expected} did not start`);
+}
+
+async function waitForExit(pid) {
+  for (let i = 0; i < 250; i += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`watcher arm ${pid} survived session shutdown`);
+}
+
+async function arm(binding, expected) {
+  let notification = "";
+  await binding.armCommand("", {
+    ui: {
+      notify(message) {
+        notification = message;
+      },
+    },
+  });
+  if (!notification.includes("started Pi extension arm child")) {
+    throw new Error(`session ${expected} did not arm: ${notification}`);
+  }
+  return waitForArmCount(expected);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const before = process.listenerCount("exit");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+
+const first = createBinding();
+mod.default(first.pi);
+if (process.listenerCount("exit") !== before + 1) {
+  throw new Error("first binding did not install its process-exit cleanup");
+}
+const firstPid = await arm(first, 1);
+await first.handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
+await waitForExit(firstPid);
+if (process.listenerCount("exit") !== before) {
+  throw new Error("first binding did not retire its process-exit cleanup");
+}
+
+const second = createBinding();
+mod.default(second.pi);
+if (process.listenerCount("exit") !== before + 1) {
+  throw new Error("cached-module rebind did not install one process-exit cleanup");
+}
+const secondPid = await arm(second, 2);
+await second.handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
+await waitForExit(secondPid);
+if (process.listenerCount("exit") !== before) {
+  throw new Error("second binding did not retire its process-exit cleanup");
+}
+
+await second.handlers.get("session_start")?.({ type: "session_start" }, {});
+if (process.listenerCount("exit") !== before + 1) {
+  throw new Error("same-binding session restart did not restore process-exit cleanup");
+}
+const thirdPid = await arm(second, 3);
+await second.handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
+await waitForExit(thirdPid);
+if (process.listenerCount("exit") !== before) {
+  throw new Error("same-binding shutdown leaked process-exit cleanup");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi cached-module and same-binding session reuse must reset stopped watcher state"
+  [ -z "$out" ] || fail "Pi cached-module session-rebind test printed output: $out"
+  pass "Pi cached-module and same-binding session reuse reset watcher state and cleanup ownership"
+}
+
 test_pi_process_exit_cleanup_stops_arm_child() {
   local repo home plugin cleanup_log pid_file out status pid i
   repo="$TMP_ROOT/pi-process-exit-root"
@@ -2013,6 +2137,7 @@ test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
 test_pi_process_exit_cleanup_listener_lifecycle
+test_pi_cached_module_rebind_resets_arm_state
 test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_primary_watch_plugin_static_wiring
 test_opencode_plugin_package_boundary_is_explicit_esm

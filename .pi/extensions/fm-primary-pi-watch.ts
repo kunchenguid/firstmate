@@ -82,6 +82,17 @@ let restoring = false;
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 
+function resetArmStateForSession(): void {
+  stopping = false;
+  restoring = false;
+  retryFailures = 0;
+  if (retryTimer) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+  child = null;
+}
+
 function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   if (!Number.isFinite(value) || value <= 0) return fallback;
@@ -163,6 +174,10 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
 }
 
 export default function (pi: ExtensionAPI) {
+  // Pi caches extension modules across session bindings, so a prior
+  // session_shutdown must not leave the next binding permanently stopped.
+  resetArmStateForSession();
+
   let calmPresentation: CalmPresentationState = {
     active: false,
     stockExportRendering: false,
@@ -190,7 +205,11 @@ export default function (pi: ExtensionAPI) {
   const cleanupOnProcessExit = () => {
     stopArm();
   };
-  process.once("exit", cleanupOnProcessExit);
+  const installProcessExitCleanup = (): void => {
+    process.off("exit", cleanupOnProcessExit);
+    process.once("exit", cleanupOnProcessExit);
+  };
+  installProcessExitCleanup();
 
   async function sendWake(message: string): Promise<void> {
     const content = encodeFirstmateOperationalInput(
@@ -407,6 +426,8 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on?.("session_start", () => {
+    resetArmStateForSession();
+    installProcessExitCleanup();
     markLoaded();
   });
   pi.on?.("session_shutdown", () => {

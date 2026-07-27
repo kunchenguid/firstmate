@@ -207,6 +207,13 @@ if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARG
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
 fi
 
+# Slash commands are harness-local: they must reach the TUI verbatim because a
+# from-firstmate carrier would turn them into ordinary prompt text. They also
+# produce no routed reply, so do not create a pending-reply expectation.
+case "$*" in
+  /*) MARK_FROM_FIRSTMATE=0 ;;
+esac
+
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
 # scope the codex `$<skill>` popup-settle below. A task selector carries
 # meta; an explicit backend-target escape hatch has none, so its harness is

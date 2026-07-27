@@ -14,6 +14,7 @@
 #   4. The --key path never carries the marker.
 #   5. Direct captain text stays unmarked, and already-marked text is idempotent.
 #   6. The marker is the label plus terminal-safe U+2063 INVISIBLE SEPARATOR.
+#   7. Slash commands reach secondmate TUIs verbatim and create no reply record.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -200,6 +201,24 @@ test_key_path_is_not_marked() {
   pass "fm-send: the --key path carries no marker (no literal text is typed)"
 }
 
+test_secondmate_slash_command_is_verbatim() {
+  local dir fb log home rc got
+  dir="$TMP_ROOT/sm-slash"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home sm-slash)
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  run_send "$fb" "$home" "$log" "domain" "/no-mistakes"; rc=$?
+  expect_code 0 "$rc" "slash command to a secondmate should succeed"
+  got=$(cat "$log")
+  [ "$got" = "/no-mistakes" ] \
+    || fail "secondmate slash command was not delivered verbatim"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -tx1)"
+  if [ -d "$home/state/pending-replies" ] \
+    && find "$home/state/pending-replies" -type f -print -quit | grep -q .; then
+    fail "secondmate slash command created a pending-reply record"
+  fi
+  pass "fm-send: a secondmate slash command stays verbatim and creates no pending reply"
+}
+
 test_marker_is_label_plus_invisible_separator() {
   local separator hex
   separator=$(printf '\342\201\243')
@@ -258,6 +277,7 @@ test_exact_secondmate_task_id_is_marked
 test_crewmate_target_is_not_marked
 test_explicit_window_is_not_marked
 test_key_path_is_not_marked
+test_secondmate_slash_command_is_verbatim
 test_marker_is_label_plus_invisible_separator
 test_marker_transformation_is_idempotent
 test_marked_send_preserves_trailing_newlines

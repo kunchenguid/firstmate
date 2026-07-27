@@ -267,6 +267,9 @@ test_compressed_agents_retains_authority_and_supervision_safety() {
     'A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.' \
     'If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.' \
     '**local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority' \
+    'Never exit, kill, or tear down a live worker merely to silence a stale idle alert or because an intermediate milestone appears complete.' \
+    'Keep the worker and its endpoint live until the selected delivery path finishes and the captain explicitly authorizes cleanup.' \
+    'Waiting for merge or cleanup confirmation is parked live work, while a crash may be recovered into the recorded worktree under section 5 and never counts as success.' \
     'A status line is a wake event, not current state' \
     'keep exactly one live supervision cycle' \
     'Never broadly kill watchers' \
