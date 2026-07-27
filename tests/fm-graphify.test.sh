@@ -38,6 +38,11 @@ graph_sha() {
   sha256sum "$GRAPH_JSON" | awk '{print $1}'
 }
 
+# Records a pending invalidation the way a PR merge's schedule call would.
+raise_invalidation() {
+  { git -C "$PROJECT" rev-parse HEAD; printf '%s\n' "$1"; } > "$GRAPH_DIR/.refresh.invalidate"
+}
+
 # Moves the fixture's HEAD the way a guarded merge or fast-forward would.
 commit_project() {
   printf '%s\n' "$1" >> "$PROJECT/app.py"
@@ -214,16 +219,67 @@ test_coalesced_invalidate_survives() {
   commit_project 'def coalesced(): pass' >/dev/null
   run_graph rebuild demo >/dev/null
   before=$(graph_sha)
-  printf '%s\n' 'project PR merged: coalesced fixture' > "$GRAPH_DIR/.refresh.invalidate"
+  raise_invalidation 'project PR merged: coalesced fixture'
   : > "$GRAPH_DIR/.refresh.request"
   run_graph refresh-worker demo 'project refreshed aaa..bbb' \
     || fail "the worker must not fail its caller"
   [ "$before" = "$(graph_sha)" ] || fail "a coalesced invalidate rebuilt an unchanged project"
   assert_contains "$(run_graph status demo)" '"state": "stale"' \
     "a coalesced invalidate was downgraded to the running worker's own request"
-  assert_absent "$GRAPH_DIR/.refresh.invalidate" "the worker did not consume the pending invalidation"
+  assert_contains "$(run_graph status demo)" 'coalesced fixture' \
+    "the coalesced request lost the reason it was raised with"
+  assert_absent "$GRAPH_DIR/.refresh.invalidate" "the worker did not discharge the pending invalidation"
   run_graph rebuild demo >/dev/null
   pass "fm-graphify: coalescing keeps the strongest pending request"
+}
+
+# A pending invalidation must outlive every path that returns without acting on
+# it; otherwise a graph the lifecycle already ruled out is offered as fresh.
+test_pending_invalidation_survives_a_busy_rebuild() {
+  local holder before
+  commit_project 'def busy(): pass' >/dev/null
+  run_graph rebuild demo >/dev/null
+  before=$(graph_sha)
+  sleep 30 &
+  holder=$!
+  mkdir -p "$LOCK_DIR"
+  printf '%s\n' "$holder" > "$LOCK_DIR/pid"
+  raise_invalidation 'project PR merged: busy fixture'
+  : > "$GRAPH_DIR/.refresh.request"
+  run_graph refresh-worker demo 'project refreshed aaa..bbb' \
+    || fail "the worker must not fail its caller"
+  assert_present "$GRAPH_DIR/.refresh.invalidate" \
+    "a generation already in flight consumed the pending invalidation without applying it"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  rm -rf "$LOCK_DIR"
+  : > "$GRAPH_DIR/.refresh.request"
+  run_graph refresh-worker demo 'project refreshed bbb..ccc' \
+    || fail "the worker must not fail its caller"
+  [ "$before" = "$(graph_sha)" ] || fail "the deferred invalidation rebuilt an unchanged project"
+  assert_contains "$(run_graph status demo)" '"state": "stale"' \
+    "the deferred invalidation was never applied"
+  assert_contains "$(run_graph status demo)" 'busy fixture' \
+    "the deferred invalidation lost the reason it was raised with"
+  assert_absent "$GRAPH_DIR/.refresh.invalidate" "the applied invalidation was not discharged"
+  run_graph rebuild demo >/dev/null
+  pass "fm-graphify: a pending invalidation is discharged only once it is applied"
+}
+
+# The clone advancing past the revision an invalidation was raised for makes it
+# obsolete, so a generation rebuilt for the newer revision stays offerable.
+test_advanced_clone_discharges_stale_invalidation() {
+  run_graph rebuild demo >/dev/null
+  raise_invalidation 'project PR merged: superseded fixture'
+  commit_project 'def advanced(): pass' >/dev/null
+  : > "$GRAPH_DIR/.refresh.request"
+  run_graph refresh-worker demo 'project refreshed ccc..ddd' \
+    || fail "the worker must not fail its caller"
+  assert_absent "$GRAPH_DIR/.refresh.invalidate" \
+    "an invalidation the clone advanced past was kept"
+  assert_contains "$(run_graph status demo)" '"state": "fresh"' \
+    "an obsolete invalidation held back a graph rebuilt for the newer revision"
+  pass "fm-graphify: an invalidation the clone advanced past is discharged, not applied"
 }
 
 # The worker body is driven directly so coalescing and the home-wide rebuild cap
@@ -306,6 +362,8 @@ test_build_lock_liveness
 test_lifecycle_refresh_owner
 test_unchanged_refresh_does_not_reread_source
 test_coalesced_invalidate_survives
+test_pending_invalidation_survives_a_busy_rebuild
+test_advanced_clone_discharges_stale_invalidation
 test_scheduling_owner_coalesces_and_bounds
 test_schedule_returns_without_waiting
 test_cleanup

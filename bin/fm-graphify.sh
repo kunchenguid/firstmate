@@ -28,8 +28,11 @@
 # one project into the in-flight refresh, and bounds the whole home to
 # FM_GRAPHIFY_MAX_CONCURRENT_REBUILDS generations at once. The optional
 # invalidate token additionally records the graph stale even when nothing moved,
-# which is what a remote merge needs while the local clone still lags; it is
-# recorded in the project's pending request, so coalescing cannot downgrade it.
+# which is what a remote merge needs while the local clone still lags. It is
+# recorded in the project's pending request together with the revision it was
+# raised for, so coalescing cannot downgrade it and no path that returns without
+# acting can drop it; it is discharged only by recording the graph stale or by
+# the clone advancing past that revision.
 # refresh applies that policy once and synchronously: it builds a missing graph,
 # rebuilds only when the revision or graph configuration actually changed, never
 # installs Graphify, never fails its caller, and keeps the last valid graph
@@ -80,13 +83,14 @@ GRAPH_FILE=''
 STATE_FILE=''
 STAGE_DIR=''
 REBUILD_SLOT=''
+GRAPHIFY_READY=''
 HELD_MARKERS=()
 # Derived from the process id rather than mktemp, so a helper that runs inside a
 # command substitution resolves the same directory as its parent shell instead
 # of creating one in a fork that no exit handler would ever clean up.
 SCRATCH_DIR="$GRAPH_HOME/tmp.$$"
 
-usage() { sed -n '2,47p' "$0" | sed 's/^# \?//'; }
+usage() { sed -n '2,50p' "$0" | sed 's/^# \?//'; }
 die() { printf 'fm-graphify: %s\n' "$*" >&2; exit 1; }
 
 # Diagnostics carry third-party output (tracebacks, quotes, backslashes,
@@ -177,7 +181,7 @@ resolve_project() {
   STATE_FILE="$GRAPH_DIR/state.json"
 }
 
-graphify_available() {
+graphify_probe() {
   [ -x "$PYTHON" ] || return 1
   "$PYTHON" - "$GRAPHIFY_VERSION" <<'PY' >/dev/null 2>&1
 import sys
@@ -186,11 +190,21 @@ sys.exit(0 if version("graphifyy") == sys.argv[1] else 1)
 PY
 }
 
+# Every scheduled event asks this several times, and the answer cannot change
+# within one process, so the interpreter starts at most once per run.
+graphify_available() {
+  if [ -z "$GRAPHIFY_READY" ]; then
+    if graphify_probe; then GRAPHIFY_READY=0; else GRAPHIFY_READY=1; fi
+  fi
+  return "$GRAPHIFY_READY"
+}
+
 install() {
   command -v python3 >/dev/null 2>&1 || die "python3 is required to install Graphify"
   mkdir -p "$GRAPH_HOME"
   if [ ! -x "$PYTHON" ]; then python3 -m venv "$VENV"; fi
   "$PYTHON" -m pip install --disable-pip-version-check --upgrade "$GRAPHIFY_DIST"
+  GRAPHIFY_READY=''
   graphify_available || die "installed Graphify did not satisfy $GRAPHIFY_DIST"
   printf 'Graphify %s installed at %s\n' "$GRAPHIFY_VERSION" "$VENV"
 }
@@ -495,7 +509,27 @@ mark_stale() {  # <reason> [already-measured fingerprint]
     fi
   fi
   write_state stale "${reason:0:1000}" "$current"
+  rm -f -- "$GRAPH_DIR/.refresh.invalidate"
   printf '{"state":"stale","diagnostic":"%s"}\n' "$(json_escape "${reason:0:1000}")"
+}
+
+# A pending invalidation records the revision it was raised for, so it survives
+# every path that returns without acting on it and is discharged in exactly two
+# ways: recording the graph stale, or the clone advancing past that revision,
+# which makes the invalidation obsolete. Nothing else may drop it.
+settle_pending_invalidation() {
+  local flag="$GRAPH_DIR/.refresh.invalidate" raised head reason
+  [ -f "$flag" ] || return 0
+  raised=$(head -n 1 "$flag" 2>/dev/null || true)
+  head=$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || true)
+  if [ -n "$raised" ] && [ -n "$head" ] && [ "$raised" != "$head" ]; then
+    rm -f -- "$flag"
+    return 0
+  fi
+  reason=$(sed -n '2p' "$flag" 2>/dev/null || true)
+  [ -n "$reason" ] || reason='the project changed outside this clone'
+  mark_stale "$reason" >/dev/null 2>&1 || true
+  return 0
 }
 
 # One application of the lifecycle policy: never install, build a graph that is
@@ -539,6 +573,7 @@ refresh() {
   # A separate process so the rebuild owns its own lock, stage, and exit trap
   # and can never abort the lifecycle operation that asked for the refresh.
   "$SELF" rebuild "$PROJECT_NAME" >/dev/null 2>&1 || true
+  settle_pending_invalidation
   return 0
 }
 
@@ -549,11 +584,16 @@ schedule() {
   local reason=$1 invalidate=${2:-0}
   graphify_available || return 0
   mkdir -p "$GRAPH_DIR"
-  # An invalidating event records its intent in the project's own pending state,
-  # never only in the spawned worker's arguments. Creating the marker is
-  # idempotent, so a repeat that is coalesced into a running worker still raises
-  # the pending request to invalidate instead of being silently downgraded.
-  if [ "$invalidate" = 1 ]; then printf '%s\n' "${reason:0:1000}" > "$GRAPH_DIR/.refresh.invalidate"; fi
+  # An invalidating event records its intent, and the revision it was raised for,
+  # in the project's own pending state rather than only in the spawned worker's
+  # arguments. Creating the marker is idempotent, so a repeat that is coalesced
+  # into a running worker still raises the pending request to invalidate instead
+  # of being silently downgraded.
+  if [ "$invalidate" = 1 ]; then
+    { git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || printf '\n'
+      printf '%s\n' "${reason:0:1000}"
+    } > "$GRAPH_DIR/.refresh.invalidate"
+  fi
   : > "$GRAPH_DIR/.refresh.request"
   ( "$SELF" refresh-worker "$PROJECT_NAME" "$reason" "$invalidate" >/dev/null 2>&1 & ) || true
   return 0
@@ -579,9 +619,8 @@ refresh_worker() {
     invalidate=0
     if [ -f "$flag" ]; then
       pass_invalidate=1
-      pass_reason=$(head -n 1 "$flag" 2>/dev/null || true)
+      pass_reason=$(sed -n '2p' "$flag" 2>/dev/null || true)
       [ -n "$pass_reason" ] || pass_reason=$reason
-      rm -f -- "$flag"
     fi
     refresh "$pass_reason" "$pass_invalidate"
   done
