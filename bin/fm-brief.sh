@@ -44,6 +44,13 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Ship and scout briefs both carry a cost-discipline rule: capped tool output, a codex
+# shell-output budget pragma, a ban on reading rollout/agent-session JSONL directly, and a
+# wait pattern split by runtime (log-backed capped checks for codex/Pi/other 30s-clamped
+# runtimes; long blocking calls or background wakes for Claude Code and similar runtimes).
+# Every PR-producing delivery mode (no-mistakes, direct-PR) requires a whole, self-contained
+# PR description written fresh rather than as a delta; local-only and scout produce no PR
+# and skip it.
 # Refuses to overwrite an existing brief.
 set -eu
 
