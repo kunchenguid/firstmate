@@ -82,6 +82,19 @@ test_bad_viewport_is_usage_error() {
   pass "fm-playwright-scaffold.sh: malformed viewport is a usage error and writes nothing"
 }
 
+test_non_positive_viewport_is_usage_error() {
+  local dir="$TMP_ROOT/non-positive" out rc size
+  mkdir -p "$dir"
+  for size in 0x900 900x0; do
+    out=$("$SCAFFOLD" --dir "$dir" --viewports "invalid:$size" 2>&1)
+    rc=$?
+    expect_code 2 "$rc" "non-positive viewport $size"
+    assert_contains "$out" "must be positive" "non-positive viewport error did not explain the constraint"
+    assert_absent "$dir/playwright.config.ts" "non-positive viewport still wrote a config"
+  done
+  pass "fm-playwright-scaffold.sh: non-positive viewport dimensions are rejected"
+}
+
 test_unknown_flag_is_usage_error() {
   local out rc
   out=$("$SCAFFOLD" --dir "$TMP_ROOT" --nope 2>&1)
@@ -105,5 +118,6 @@ test_custom_viewports
 test_idempotent_keep_by_default
 test_force_overwrites
 test_bad_viewport_is_usage_error
+test_non_positive_viewport_is_usage_error
 test_unknown_flag_is_usage_error
 test_missing_dir_errors

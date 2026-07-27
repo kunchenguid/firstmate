@@ -104,9 +104,25 @@ for entry in $VIEWPORTS; do
       exit 2
       ;;
   esac
+  case "$width" in
+    0*[^0]*|[1-9]*) : ;;
+    *)
+      echo "error: viewport dimensions must be positive: '$size'" >&2
+      echo "help: size is WIDTHxHEIGHT in pixels, e.g. 1440x900" >&2
+      exit 2
+      ;;
+  esac
   case "$height" in
     ''|*[!0-9]*)
       echo "error: bad viewport size: '$size' in '$entry'" >&2
+      echo "help: size is WIDTHxHEIGHT in pixels, e.g. 1440x900" >&2
+      exit 2
+      ;;
+  esac
+  case "$height" in
+    0*[^0]*|[1-9]*) : ;;
+    *)
+      echo "error: viewport dimensions must be positive: '$size'" >&2
       echo "help: size is WIDTHxHEIGHT in pixels, e.g. 1440x900" >&2
       exit 2
       ;;
