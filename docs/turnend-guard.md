@@ -19,6 +19,7 @@ The guard remains a backstop; [`watcher-continuity.md`](watcher-continuity.md) o
 ## Shared predicate
 
 The guard first calls the shared primary scope.
+A declared task worker is never in scope, whatever root and state directory it was handed, so an agent that inherited or was restored into a primary's home cannot fire that home's hooks; [`worker-isolation.md`](worker-isolation.md) owns that declaration.
 A secondmate home runs its own primary Firstmate session, so a genuine `.fm-secondmate-home` marker includes it whether the home is a linked worktree or plain clone.
 The marker must be a regular non-symlink file whose whitespace-stripped first line is a non-empty identifier containing only letters, digits, dots, underscores, and dashes.
 An unmarked checkout or invalid marker falls through to the git-dir check.
