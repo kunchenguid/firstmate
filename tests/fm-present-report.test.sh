@@ -78,7 +78,7 @@ run_presenter() {
 SOURCE="$HOME_DIR/data/sample-report.md"
 mkdir -p "$(dirname "$SOURCE")"
 cat >"$SOURCE" <<'MD'
-# Danger & calm <script>alert("bad")</script>
+# DangerXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX & calm <script>alert("bad")</script>
 
 A complete **outcome** with `code & evidence`.
 
@@ -235,6 +235,8 @@ test_markdown_html_is_local_escaped_accessible_and_quiet() {
   assert_contains "$body" 'Content-Security-Policy' "static report local-only content policy"
   assert_contains "$body" '<a class="skip-link" href="#content">Skip to report</a>' "static report skip link"
   assert_contains "$body" '<main id="content"' "static report main landmark"
+  assert_contains "$body" '<h1>DangerXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX &amp; calm &lt;script&gt;alert(&quot;bad&quot;)&lt;/script&gt;</h1>' "long canonical Markdown title"
+  assert_contains "$body" '.site-header,main,footer{width:min(76ch,calc(100% - 2rem));margin-inline:auto;overflow-wrap:anywhere}' "shared report shell narrow-view wrapping"
   assert_contains "$body" ':focus-visible' "static report keyboard focus treatment"
   assert_contains "$body" 'prefers-reduced-motion' "static report reduced-motion treatment"
   assert_contains "$body" '&lt;script&gt;alert(&quot;bad&quot;)&lt;/script&gt;' "Markdown content must be escaped"

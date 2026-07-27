@@ -299,7 +299,7 @@ body{margin:0}
 .skip-link:focus{top:1rem}
 .visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 :focus-visible{outline:3px solid #245f9a;outline-offset:3px}
-.site-header,main,footer{width:min(76ch,calc(100% - 2rem));margin-inline:auto}
+.site-header,main,footer{width:min(76ch,calc(100% - 2rem));margin-inline:auto;overflow-wrap:anywhere}
 .site-header{padding:clamp(3rem,8vw,7rem) 0 2rem;border-bottom:1px solid var(--line)}
 .eyebrow{font-size:.78rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:700}
 h1{font-family:Georgia,"Times New Roman",serif;font-size:clamp(2.2rem,7vw,4.6rem);line-height:1.04;letter-spacing:-.035em;margin:.5rem 0 1rem;text-wrap:balance}
