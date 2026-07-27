@@ -16,16 +16,22 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::Read;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 const SCHEMA_SNAPSHOT: &str = "fm-dashboard-snapshot.v1";
 const CACHE_TTL: Duration = Duration::from_secs(4);
 const COOKIE_NAME: &str = "fm_dash";
+// A wedged snapshot tool must never wedge the board: bound every child.
+const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(60);
+const TASKS_AXI_TIMEOUT: Duration = Duration::from_secs(20);
+const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 fn main() {
     if let Err(err) = run() {
@@ -45,7 +51,7 @@ fn run() -> Result<(), String> {
         .parse()
         .map_err(|e| format!("bad bind address: {e}"))?;
 
-    if addr.ip().is_unspecified() {
+    if is_wildcard_ip(addr.ip()) {
         return Err(format!("refusing wildcard bind host {}", cfg.bind_host));
     }
 
@@ -133,14 +139,33 @@ fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+// Any spelling of the unspecified address is a wildcard bind, including the
+// IPv4-mapped forms (::ffff:0.0.0.0, 0:0:0:0:0:ffff:0:0) which are an
+// INADDR_ANY bind on a dual-stack host.
+fn is_wildcard_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_unspecified(),
+        IpAddr::V6(v6) => {
+            v6.is_unspecified() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_unspecified())
+        }
+    }
+}
+
 fn assert_bind_host(host: &str) -> Result<(), String> {
     let h = host.trim();
-    match h {
-        "" | "0.0.0.0" | "::" | "[::]" | "*" | "[::0]" | "::0" => {
-            Err(format!("refusing wildcard bind host {h:?}"))
-        }
-        _ if h.starts_with("0.0.0.0") => Err(format!("refusing wildcard bind host {h:?}")),
-        _ => Ok(()),
+    if h.is_empty() || h == "*" {
+        return Err(format!("refusing wildcard bind host {h:?}"));
+    }
+    let bare = h
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(h);
+    match bare.parse::<IpAddr>() {
+        Ok(ip) if is_wildcard_ip(ip) => Err(format!("refusing wildcard bind host {h:?}")),
+        Ok(_) => Ok(()),
+        // Not an IP literal (hostname): keep the conservative textual guard.
+        Err(_) if bare.starts_with("0.0.0.0") => Err(format!("refusing wildcard bind host {h:?}")),
+        Err(_) => Ok(()),
     }
 }
 
@@ -182,9 +207,12 @@ fn handle_request(state: &AppState, request: Request) -> Result<(), String> {
 
     match (&method, path.as_str()) {
         (Method::Get | Method::Head, "/healthz") => {
+            // pid identifies this instance so fm-dashboard.sh can prove that the
+            // server answering on the bind address is the one it just started.
             let body = json!({
                 "ok": true,
-                "uptime_s": state.started.elapsed().as_secs()
+                "uptime_s": state.started.elapsed().as_secs(),
+                "pid": std::process::id()
             });
             send_json(request, StatusCode(200), &body, head)
         }
@@ -372,6 +400,18 @@ fn form_value(body: &str, key: &str) -> Option<String> {
     None
 }
 
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+// Decodes over bytes only. Never slices the &str: a `%` followed by part of a
+// multi-byte character would otherwise cut a char boundary and panic, and this
+// runs on the unauthenticated /unlock body.
 fn urlencoding_decode(s: &str) -> String {
     let mut out = Vec::new();
     let bytes = s.as_bytes();
@@ -383,13 +423,15 @@ fn urlencoding_decode(s: &str) -> String {
                 i += 1;
             }
             b'%' if i + 2 < bytes.len() => {
-                let hex = &s[i + 1..i + 3];
-                if let Ok(b) = u8::from_str_radix(hex, 16) {
-                    out.push(b);
-                    i += 3;
-                } else {
-                    out.push(bytes[i]);
-                    i += 1;
+                match (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
+                    (Some(hi), Some(lo)) => {
+                        out.push((hi << 4) | lo);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
                 }
             }
             b => {
@@ -480,12 +522,7 @@ fn send_json_with_cookie(
     cookie: &str,
 ) -> Result<(), String> {
     let body = serde_json::to_vec(value).map_err(|e| format!("json: {e}"))?;
-    let mut response = if true {
-        Response::from_data(body)
-    } else {
-        unreachable!()
-    }
-    .with_status_code(status);
+    let mut response = Response::from_data(body).with_status_code(status);
     add_std_headers(&mut response, "application/json; charset=utf-8")?;
     response.add_header(header("Set-Cookie", cookie)?);
     request
@@ -561,6 +598,112 @@ fn add_std_headers<R: Read>(
 
 fn header(name: &str, value: &str) -> Result<Header, String> {
     Header::from_bytes(name.as_bytes(), value.as_bytes()).map_err(|_| "bad header".to_string())
+}
+
+// --- Bounded child execution ------------------------------------------------
+
+struct BoundedOutput {
+    status: Option<std::process::ExitStatus>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    timed_out: bool,
+}
+
+impl BoundedOutput {
+    fn success(&self) -> bool {
+        self.status.map(|s| s.success()).unwrap_or(false)
+    }
+    fn code(&self) -> i32 {
+        self.status.and_then(|s| s.code()).unwrap_or(1)
+    }
+}
+
+#[cfg(unix)]
+fn kill_tree(pgid: u32) {
+    // The child leads its own process group, so this reaps the whole tree.
+    // A killed shell alone would leave its probes running and holding the pipes.
+    for sig in ["-TERM", "-KILL"] {
+        let _ = Command::new("kill")
+            .arg(sig)
+            .arg(format!("-{pgid}"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_tree(_pgid: u32) {}
+
+// Runs a child to completion or kills it at the deadline. Requests are served
+// on one thread, so an unbounded child would take the whole board down with it.
+fn run_bounded(cmd: &mut Command, limit: Duration) -> std::io::Result<BoundedOutput> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn()?;
+    let pid = child.id();
+
+    let (tx, rx) = mpsc::channel::<(bool, Vec<u8>)>();
+    if let Some(mut out) = child.stdout.take() {
+        let tx = tx.clone();
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = out.read_to_end(&mut buf);
+            let _ = tx.send((false, buf));
+        });
+    }
+    if let Some(mut err) = child.stderr.take() {
+        let tx = tx.clone();
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = err.read_to_end(&mut buf);
+            let _ = tx.send((true, buf));
+        });
+    }
+    drop(tx);
+
+    let deadline = Instant::now() + limit;
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait()? {
+            Some(st) => break Some(st),
+            None => {
+                if Instant::now() >= deadline {
+                    timed_out = true;
+                    let _ = child.kill();
+                    kill_tree(pid);
+                    let _ = child.wait();
+                    break None;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+        }
+    };
+
+    // Never block on the readers: a surviving grandchild can hold a pipe open.
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    for _ in 0..2 {
+        match rx.recv_timeout(PIPE_DRAIN_GRACE) {
+            Ok((true, buf)) => stderr = buf,
+            Ok((false, buf)) => stdout = buf,
+            Err(_) => break,
+        }
+    }
+    Ok(BoundedOutput {
+        status,
+        stdout,
+        stderr,
+        timed_out,
+    })
 }
 
 // --- Snapshot ---------------------------------------------------------------
@@ -701,22 +844,43 @@ fn load_fleet(state: &AppState, generated: &str, sources: &mut Vec<Value>) -> (V
 
     if tool.is_file() {
         let t0 = Instant::now();
-        let output = Command::new(tool)
-            .arg("--json")
-            .current_dir(&state.cfg.fm_home)
-            .env("FM_HOME", &state.cfg.fm_home)
-            .output();
+        let output = run_bounded(
+            Command::new(tool)
+                .arg("--json")
+                .current_dir(&state.cfg.fm_home)
+                .env("FM_HOME", &state.cfg.fm_home)
+                // The bearer token has no business in the snapshot tool or any
+                // probe it spawns (readable via /proc/<pid>/environ).
+                .env_remove("FM_DASHBOARD_TOKEN"),
+            SNAPSHOT_TIMEOUT,
+        );
         let duration_ms = t0.elapsed().as_millis() as u64;
         src.as_object_mut()
             .unwrap()
             .insert("duration_ms".into(), json!(duration_ms));
         match output {
+            Ok(out) if out.timed_out => {
+                src.as_object_mut()
+                    .unwrap()
+                    .insert("timed_out".into(), json!(true));
+                src.as_object_mut().unwrap().insert(
+                    "error".into(),
+                    json!(format!(
+                        "timed out after {}s; child killed",
+                        SNAPSHOT_TIMEOUT.as_secs()
+                    )),
+                );
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                src.as_object_mut()
+                    .unwrap()
+                    .insert("stderr_tail".into(), json!(tail_str(&stderr, 400)));
+            }
             Ok(out) => {
-                let code = out.status.code().unwrap_or(1);
+                let code = out.code();
                 src.as_object_mut()
                     .unwrap()
                     .insert("exit_code".into(), json!(code));
-                if out.status.success() {
+                if out.success() {
                     match serde_json::from_slice::<Value>(&out.stdout) {
                         Ok(v) => {
                             src.as_object_mut().unwrap().insert("ok".into(), json!(true));
@@ -857,21 +1021,38 @@ fn compose_minimal(state: &AppState, generated: &str, sources: &mut Vec<Value>) 
         "age_s": 0,
         "stale": false
     });
-    match Command::new("tasks-axi")
-        .args(["list", "--json"])
-        .current_dir(&state.cfg.fm_home)
-        .env("FM_HOME", &state.cfg.fm_home)
-        .output()
-    {
+    match run_bounded(
+        Command::new("tasks-axi")
+            .args(["list", "--json"])
+            .current_dir(&state.cfg.fm_home)
+            .env("FM_HOME", &state.cfg.fm_home)
+            .env_remove("FM_DASHBOARD_TOKEN"),
+        TASKS_AXI_TIMEOUT,
+    ) {
+        Ok(out) if out.timed_out => {
+            src.as_object_mut()
+                .unwrap()
+                .insert("duration_ms".into(), json!(t0.elapsed().as_millis() as u64));
+            src.as_object_mut()
+                .unwrap()
+                .insert("timed_out".into(), json!(true));
+            src.as_object_mut().unwrap().insert(
+                "error".into(),
+                json!(format!(
+                    "timed out after {}s; child killed",
+                    TASKS_AXI_TIMEOUT.as_secs()
+                )),
+            );
+        }
         Ok(out) => {
-            let code = out.status.code().unwrap_or(1);
+            let code = out.code();
             src.as_object_mut()
                 .unwrap()
                 .insert("duration_ms".into(), json!(t0.elapsed().as_millis() as u64));
             src.as_object_mut()
                 .unwrap()
                 .insert("exit_code".into(), json!(code));
-            if out.status.success() {
+            if out.success() {
                 if let Ok(parsed) = serde_json::from_slice::<Value>(&out.stdout) {
                     if parsed.is_array() {
                         backlog_records = parsed;
@@ -1070,3 +1251,93 @@ const UNLOCK_HTML: &str = r#"<!DOCTYPE html>
 </body>
 </html>
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_handles_hostile_percent_escapes() {
+        // Reached from the unauthenticated /unlock body; must never panic.
+        assert_eq!(urlencoding_decode("%41%42"), "AB");
+        assert_eq!(urlencoding_decode("a+b"), "a b");
+        assert_eq!(urlencoding_decode("plain"), "plain");
+        assert_eq!(urlencoding_decode("%zz"), "%zz");
+        assert_eq!(urlencoding_decode("%4"), "%4");
+        assert_eq!(urlencoding_decode("%"), "%");
+        // `%` immediately before a multi-byte char used to slice a char boundary.
+        assert_eq!(urlencoding_decode("%\u{20AC}"), "%\u{20AC}");
+        assert_eq!(urlencoding_decode("a%\u{1F600}b"), "a%\u{1F600}b");
+        // U+FFFD is what from_utf8_lossy makes of raw invalid bytes.
+        assert_eq!(urlencoding_decode("%\u{FFFD}"), "%\u{FFFD}");
+    }
+
+    #[test]
+    fn wildcard_binds_are_refused_in_every_spelling() {
+        for host in [
+            "",
+            "*",
+            "0.0.0.0",
+            "::",
+            "[::]",
+            "::0",
+            "[::0]",
+            "0:0:0:0:0:0:0:0",
+            // IPv4-mapped: an INADDR_ANY bind on a dual-stack host.
+            "[::ffff:0.0.0.0]",
+            "::ffff:0.0.0.0",
+            "[0:0:0:0:0:ffff:0:0]",
+            "[::ffff:0:0]",
+        ] {
+            assert!(
+                assert_bind_host(host).is_err(),
+                "should refuse wildcard host {host:?}"
+            );
+        }
+        for host in ["127.0.0.1", "100.64.0.7", "[::1]", "::1", "[fd7a::1]"] {
+            assert!(
+                assert_bind_host(host).is_ok(),
+                "should accept concrete host {host:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_child_returns_output_when_it_finishes() {
+        let out = run_bounded(
+            Command::new("sh").arg("-c").arg("printf hello; exit 0"),
+            Duration::from_secs(10),
+        )
+        .expect("spawn");
+        assert!(!out.timed_out);
+        assert!(out.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
+    }
+
+    #[test]
+    fn bounded_child_is_killed_at_the_deadline() {
+        let t0 = Instant::now();
+        let out = run_bounded(
+            Command::new("sh").arg("-c").arg("sleep 30"),
+            Duration::from_secs(1),
+        )
+        .expect("spawn");
+        assert!(out.timed_out, "expected the child to be killed");
+        assert!(!out.success());
+        assert!(t0.elapsed() < Duration::from_secs(10), "returned too late");
+    }
+
+    #[test]
+    fn bounded_child_does_not_wait_on_a_surviving_grandchild() {
+        // A hung probe under the snapshot shell holds the stdout pipe open. The
+        // request thread must still come back, or the whole board wedges.
+        let t0 = Instant::now();
+        let out = run_bounded(
+            Command::new("sh").arg("-c").arg("sleep 30 & wait"),
+            Duration::from_secs(1),
+        )
+        .expect("spawn");
+        assert!(out.timed_out);
+        assert!(t0.elapsed() < Duration::from_secs(10), "returned too late");
+    }
+}

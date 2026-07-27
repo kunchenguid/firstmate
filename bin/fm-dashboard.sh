@@ -41,7 +41,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 DEFAULT_PORT=8391
 DASH_CRATE_DIR="$FM_ROOT/dashboard"
 SERVER_BIN="$DASH_CRATE_DIR/target/release/fm-dashboard-server"
-STATIC_DIR="$SCRIPT_DIR/fm-dashboard-static"
+STATIC_DIR="$FM_ROOT/bin/fm-dashboard-static"
 
 usage() {
   cat <<'EOF'
@@ -108,6 +108,31 @@ require_home() {
   SUPERVISOR_LOG="$DASH_DIR/supervisor.log"
 }
 
+# True when the address is any spelling of the unspecified address: 0.0.0.0,
+# ::, bracketed forms, and the IPv4-mapped forms (::ffff:0.0.0.0,
+# 0:0:0:0:0:ffff:0:0) which are an INADDR_ANY bind on a dual-stack host.
+is_wildcard_addr() {
+  local a=$1
+  a=${a#"["}
+  a=${a%"]"}
+  a=$(printf '%s' "$a" | tr '[:upper:]' '[:lower:]')
+  [ -n "$a" ] || return 0
+  if [ "$a" = '*' ]; then
+    return 0
+  fi
+  # Collapse an IPv4-mapped prefix so ::ffff:0.0.0.0 reduces to 0.0.0.0.
+  case "$a" in
+    ::ffff:*) a=${a#::ffff:} ;;
+    0:0:0:0:0:ffff:*) a=${a#0:0:0:0:0:ffff:} ;;
+    0000:0000:0000:0000:0000:ffff:*) a=${a#0000:0000:0000:0000:0000:ffff:} ;;
+  esac
+  # Only zeros and separators left means the unspecified address.
+  case "$a" in
+    *[!0.:]*) return 1 ;;
+  esac
+  return 0
+}
+
 # Bind address safety: never wildcard.
 # On success sets DASH_BIND=ip:port and returns 0.
 # On failure prints to stderr and returns 1 (never call die from a subshell).
@@ -135,13 +160,11 @@ resolve_bind() {
     fi
     raw="${ts_ip}:${DEFAULT_PORT}"
   fi
-  # Reject wildcards before splitting so bare :: and 0.0.0.0:* never parse oddly.
-  case "$raw" in
-    0.0.0.0|0.0.0.0:*|::|::*|\[::\]|\[::\]:*|\*|\[::0\]|\[::0\]:*)
-      printf 'fm-dashboard: refusing wildcard bind address %s (use a Tailscale IP or 127.0.0.1 for dev)\n' "$raw" >&2
-      return 1
-      ;;
-  esac
+  # Reject portless wildcards before splitting so bare :: never parses oddly.
+  if is_wildcard_addr "$raw"; then
+    printf 'fm-dashboard: refusing wildcard bind address %s (use a Tailscale IP or 127.0.0.1 for dev)\n' "$raw" >&2
+    return 1
+  fi
   case "$raw" in
     *:*)
       ip=${raw%:*}
@@ -152,12 +175,10 @@ resolve_bind() {
       port=$DEFAULT_PORT
       ;;
   esac
-  case "$ip" in
-    ''|0.0.0.0|::|\[::\]|\*|\[::0\])
-      printf 'fm-dashboard: refusing wildcard bind address %s (use a Tailscale IP or 127.0.0.1 for dev)\n' "$ip" >&2
-      return 1
-      ;;
-  esac
+  if is_wildcard_addr "$ip"; then
+    printf 'fm-dashboard: refusing wildcard bind address %s (use a Tailscale IP or 127.0.0.1 for dev)\n' "$ip" >&2
+    return 1
+  fi
   case "$port" in
     ''|*[!0-9]*)
       printf 'fm-dashboard: invalid port in dashboard-bind: %s\n' "$raw" >&2
@@ -260,10 +281,11 @@ ensure_server_binary() {
   [ -x "$SERVER_BIN" ] || die "build finished but binary missing: $SERVER_BIN"
 }
 
+# Shared by every command. Deliberately does not build the server binary: stop
+# and status must work on a host with no cargo and no build tree.
 prepare_runtime() {
   require_home
   [ -d "$STATIC_DIR" ] || die "missing static UI: $STATIC_DIR"
-  ensure_server_binary
   mkdir -p "$DASH_DIR" || die "cannot create $DASH_DIR"
   # Dashboard may write only under state/dashboard/ (and create config for
   # token/bind). Never touch other state or data files.
@@ -279,6 +301,31 @@ port_open() {
   fi
   # bash /dev/tcp when available
   (echo >/dev/tcp/"$host"/"$port") >/dev/null 2>&1
+}
+
+# pid reported by whatever server answers /healthz on the bind address.
+healthz_pid() {
+  local host=$1 port=$2
+  command -v curl >/dev/null 2>&1 || return 1
+  curl -sS --connect-timeout 0.3 --max-time 1 "http://${host}:${port}/healthz" 2>/dev/null |
+    sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' | head -n 1
+}
+
+# True only when the server this supervisor started is the one answering. A bare
+# port probe would accept another home's server already holding the port, and
+# report a permanently failing bind as started.
+server_confirmed() {
+  local host=$1 port=$2 want got
+  want=$(read_pid "$SERVER_PID_FILE")
+  pid_alive "$want" || return 1
+  if command -v curl >/dev/null 2>&1; then
+    got=$(healthz_pid "$host" "$port")
+    [ -n "$got" ] && [ "$got" = "$want" ]
+    return $?
+  fi
+  # No curl: the live pid from our own pid file plus an open port is the most
+  # this host can prove.
+  port_open "$host" "$port"
 }
 
 # Export server env in the current shell; set DASH_BIND.
@@ -309,40 +356,63 @@ assign_server_env() {
 
 cmd_run() {
   prepare_runtime
+  ensure_server_binary
   assign_server_env || exit 1
   printf 'fm-dashboard: running in foreground on http://%s (FM_HOME=%s)\n' "$DASH_BIND" "$FM_HOME" >&2
   # Foreground: no supervisor loop. Ctrl-C stops the server.
   exec "$SERVER_BIN"
 }
 
+SUPERVISOR_FAST_EXIT_S=5
+SUPERVISOR_MAX_FAST_EXITS=10
+SUPERVISOR_MAX_BACKOFF_S=30
+
 supervisor_loop() {
-  # Runs as the daemonized supervisor. Restarts the server quickly on exit
-  # unless the stop flag is present.
-  local rc
-  : >"$STOP_FLAG.tmp"
+  # Runs as the daemonized supervisor. Restarts the server within 1s on a
+  # healthy crash. A server that keeps dying immediately (permanent bind
+  # failure, missing config) backs off and finally gives up, so the loop never
+  # respawns forever or grows server.log without bound.
+  local rc ran started delay fast=0
   rm -f "$STOP_FLAG"
   while true; do
     if [ -f "$STOP_FLAG" ]; then
       break
     fi
+    started=$SECONDS
     "$SERVER_BIN" >>"$SERVER_LOG" 2>&1 &
     printf '%s\n' "$!" >"$SERVER_PID_FILE"
+    rc=0
     wait "$!" || rc=$?
-    rc=${rc:-0}
+    ran=$((SECONDS - started))
     if [ -f "$STOP_FLAG" ]; then
       break
     fi
-    {
-      printf '%s supervisor: server exited rc=%s; restarting within 1s\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc"
-    } >>"$SUPERVISOR_LOG"
-    sleep 1
+    if [ "$ran" -lt "$SUPERVISOR_FAST_EXIT_S" ]; then
+      fast=$((fast + 1))
+    else
+      fast=0
+    fi
+    if [ "$fast" -ge "$SUPERVISOR_MAX_FAST_EXITS" ]; then
+      printf '%s supervisor: server exited rc=%s after %ss; giving up after %s consecutive fast exits (see %s)\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" "$ran" "$fast" "$SERVER_LOG" >>"$SUPERVISOR_LOG"
+      break
+    fi
+    # 1s for the first fast exit, then doubling up to the cap.
+    delay=1
+    if [ "$fast" -gt 1 ]; then
+      delay=$((1 << (fast - 1)))
+      [ "$delay" -gt "$SUPERVISOR_MAX_BACKOFF_S" ] && delay=$SUPERVISOR_MAX_BACKOFF_S
+    fi
+    printf '%s supervisor: server exited rc=%s after %ss; restarting in %ss\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" "$ran" "$delay" >>"$SUPERVISOR_LOG"
+    sleep "$delay"
   done
   rm -f "$SERVER_PID_FILE"
 }
 
 cmd_start() {
   prepare_runtime
+  ensure_server_binary
   if supervisor_running; then
     if ! assign_server_env; then
       # Still report already-running even if bind file is now broken.
@@ -371,21 +441,26 @@ cmd_start() {
     supervisor_loop
   ) &
   printf '%s\n' "$!" >"$SUPERVISOR_PID_FILE"
-  # Brief readiness wait so status/tests see a live server.
-  local i=0
-  while [ "$i" -lt 50 ]; do
-    if server_running; then
+  # Readiness: our own server process must answer on the bind address. Anything
+  # weaker reports success when another home already owns the port and this
+  # server can never bind.
+  local i=0 ready=0
+  while [ "$i" -lt 100 ]; do
+    if server_confirmed "$FM_DASHBOARD_BIND_HOST" "$FM_DASHBOARD_BIND_PORT"; then
+      ready=1
       break
     fi
-    # Also accept a listening port as ready even if pid write races.
-    if port_open "$FM_DASHBOARD_BIND_HOST" "$FM_DASHBOARD_BIND_PORT"; then
+    if ! supervisor_running; then
       break
     fi
     i=$((i + 1))
     sleep 0.1
   done
-  if ! supervisor_running; then
-    die "supervisor failed to stay up; see $SUPERVISOR_LOG"
+  if [ "$ready" -ne 1 ]; then
+    stop_runtime
+    printf 'fm-dashboard: server did not come up on %s; last log lines:\n' "$DASH_BIND" >&2
+    tail -n 5 "$SERVER_LOG" >&2 2>/dev/null || true
+    die "start failed; see $SERVER_LOG and $SUPERVISOR_LOG"
   fi
   printf 'fm-dashboard: started on http://%s (supervisor pid %s, FM_HOME=%s)\n' \
     "$DASH_BIND" "$(read_pid "$SUPERVISOR_PID_FILE")" "$FM_HOME"
@@ -393,9 +468,8 @@ cmd_start() {
     "$CONFIG"
 }
 
-cmd_stop() {
+stop_runtime() {
   local spid spid2
-  prepare_runtime
   # Signal the loop first so a death does not restart the server.
   : >"$STOP_FLAG"
   if server_running; then
@@ -420,6 +494,11 @@ cmd_stop() {
     kill -9 "$spid2" 2>/dev/null || true
   fi
   rm -f "$SUPERVISOR_PID_FILE" "$SERVER_PID_FILE" "$STOP_FLAG"
+}
+
+cmd_stop() {
+  prepare_runtime
+  stop_runtime
   printf 'fm-dashboard: stopped\n'
 }
 
@@ -439,6 +518,13 @@ cmd_status() {
       printf '  server_pid: %s\n' "$(read_pid "$SERVER_PID_FILE")"
     else
       printf '  server_pid: (restarting or not yet written)\n'
+    fi
+    if [ "$bind" != "(unresolved)" ]; then
+      if server_confirmed "${bind%:*}" "${bind##*:}"; then
+        printf '  health: ok\n'
+      else
+        printf '  health: not answering (supervisor is retrying; see %s)\n' "$SERVER_LOG"
+      fi
     fi
     printf '  bind: %s\n' "$bind"
     printf '  fm_home: %s\n' "$FM_HOME"

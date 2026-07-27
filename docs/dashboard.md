@@ -51,6 +51,7 @@ The server binds only to a concrete address.
 2. Otherwise the script runs `tailscale ip -4` and binds that address on port `8391`.
 
 `0.0.0.0`, `::`, and other wildcards are refused at lifecycle resolve time and again inside the Rust server.
+That includes the IPv4-mapped spellings (`[::ffff:0.0.0.0]`, `[0:0:0:0:0:ffff:0:0]`), which are an INADDR_ANY bind on a dual-stack host.
 For local tests, write `127.0.0.1:8391` (or another free port) into `config/dashboard-bind`.
 
 ## Auth
@@ -68,10 +69,11 @@ API callers without credentials receive JSON `401`.
 `GET /healthz` stays open on the bound interface and returns only process liveness:
 
 ```json
-{"ok":true,"uptime_s":12}
+{"ok":true,"pid":4123,"uptime_s":12}
 ```
 
 It never includes fleet data.
+`pid` identifies the answering process so `start` can prove that the server it just launched is the one on the bind address, rather than another home's server already holding the port.
 HTTP on the tailnet is acceptable for v1; do not expose this service on the public internet or Tailscale Funnel without TLS and stronger auth.
 
 ## Snapshot API
@@ -79,6 +81,7 @@ HTTP on the tailnet is acceptable for v1; do not expose this service on the publ
 `GET /api/v1/snapshot` (auth required) returns JSON with schema `fm-dashboard-snapshot.v1`.
 
 - Primary fleet payload comes from `bin/fm-fleet-snapshot.sh --json` when present and executable.
+- Every child process is bounded (60s for the snapshot tool, 20s for `tasks-axi`). On expiry the child's whole process group is killed and its `sources[]` entry is marked `"timed_out": true` with an `error`, so a wedged probe degrades the board instead of hanging it.
 - Soft cache is about four seconds so phone multi-fetch stays cheap.
 - Each response includes `generated`, nested `fleet` (the snapshot contract), `decisions` (stable keys for captain holds), `sources[]` metadata, and honest null/empty placeholders for wave-2 surfaces.
 - The server is strictly read-only over `state/` and `data/`.
@@ -120,6 +123,13 @@ This host class may not have systemd.
 5. `stop` writes a stop flag, signals the server, then stops the supervisor.
 
 Killing only the server process with `SIGKILL` should produce a new server within about one second while the supervisor stays up.
+
+A server that cannot run at all (port already owned by another home, bad config) is not retried forever: consecutive exits inside five seconds back off from one second up to thirty, and after ten of them the supervisor logs the reason and stops instead of respawning once a second and growing `server.log` without bound.
+
+`start` reports success only once the server process it launched answers `/healthz` with its own pid.
+If that never happens it tears the supervisor down, prints the tail of `server.log`, and exits non-zero.
+`stop` and `status` never build anything, so they still work on a host with no Rust toolchain or a cleaned `target/`.
+
 The dashboard never takes the firstmate session lock.
 
 ### Optional systemd unit (other hosts only)
@@ -151,7 +161,7 @@ The supported default path in this repo is `bin/fm-dashboard.sh start` with the 
 
 | Path | Role |
 | --- | --- |
-| `bin/fm-dashboard.sh` | Lifecycle: start / stop / status / run; cargo-builds the server when absent |
+| `bin/fm-dashboard.sh` | Lifecycle: start / stop / status / run; `start` and `run` cargo-build the server when absent |
 | `dashboard/` | Rust crate producing `fm-dashboard-server` |
 | `bin/fm-dashboard-static/` | Phone-first UI assets |
 | `bin/fm-fleet-snapshot.sh` | Canonical fleet read model used by the snapshot API |
@@ -162,4 +172,4 @@ The supported default path in this repo is `bin/fm-dashboard.sh start` with the 
 bin/fm-test-run.sh tests/fm-dashboard.test.sh
 ```
 
-Coverage includes lifecycle, FM_HOME refusal, bind safety, auth, healthz, and snapshot shape.
+Coverage includes lifecycle, FM_HOME refusal, bind safety (including IPv4-mapped wildcards), auth, healthz, malformed unlock bodies, toolchain-free stop/status, and snapshot shape with stable keys.

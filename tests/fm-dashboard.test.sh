@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Behavior tests for the live fleet dashboard (wave 1: D1 lifecycle, D2 snapshot
 # API, D4 shell presence). Covers start/stop/status, supervisor restart after
-# kill, FM_HOME shape refusal, bind safety (no 0.0.0.0; honors override),
-# bearer auth, open /healthz, and snapshot JSON shape.
+# kill, stop/status without a Rust toolchain, FM_HOME shape refusal, bind safety
+# (no 0.0.0.0 and no IPv4-mapped wildcard; honors override), bearer auth,
+# malformed unlock bodies, open /healthz, and snapshot JSON shape + stable keys.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -23,8 +24,13 @@ next_port() {
 make_home() {  # <name>
   local home=$TMP_ROOT/$1
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
-  # firstmate-shaped marker
-  printf '# backlog\n\n## In flight\n\n## Queued\n\n## Done\n' >"$home/data/backlog.md"
+  # firstmate-shaped marker, with one captain-actionable hold so the decision
+  # half of the stable-key contract is actually exercised.
+  {
+    printf '# backlog\n\n## In flight\n\n## Queued\n\n'
+    printf -- '- [ ] demo-decision - Choose the demo route (repo: firstmate) (kind: captain) (hold: captain choice pending) (hold-kind: captain)\n'
+    printf '\n## Done\n'
+  } >"$home/data/backlog.md"
   printf '# Firstmate fixture\n' >"$home/AGENTS.md"
   printf '%s\n' "$home"
 }
@@ -123,6 +129,22 @@ test_refuses_ipv6_any_bind() {
   pass "start refuses :: bind"
 }
 
+# An IPv4-mapped unspecified address is an INADDR_ANY bind on a dual-stack host,
+# so it must be refused as hard as a bare 0.0.0.0.
+test_refuses_ipv4_mapped_wildcard_bind() {
+  local home out status port addr
+  home=$(make_home bind-mapped)
+  port=$(next_port)
+  for addr in "[::ffff:0.0.0.0]:$port" "[0:0:0:0:0:ffff:0:0]:$port" "[::ffff:0:0]:$port"; do
+    printf '%s\n' "$addr" >"$home/config/dashboard-bind"
+    out=$(FM_HOME="$home" "$DASH" start 2>&1) && status=0 || status=$?
+    [ "$status" -ne 0 ] || fail "start should refuse IPv4-mapped wildcard $addr"
+    assert_contains "$out" "wildcard" "IPv4-mapped wildcard refuse message for $addr"
+    cleanup_dash "$home"
+  done
+  pass "start refuses IPv4-mapped wildcard binds"
+}
+
 test_honors_bind_override() {
   local home port out status code token body
   home=$(make_home bind-ok)
@@ -197,10 +219,15 @@ assert all(s.get("key","").startswith("section:") for s in d["sections"])
 # tasks carry stable keys when present
 for t in (d.get("fleet") or {}).get("tasks") or []:
     assert t.get("key","").startswith("task:"), t
+# the seeded captain hold must reach the board whenever the backlog was parsed
+primary = next((s for s in d["sources"] if s.get("id") == "fleet-snapshot"), None)
+if primary and primary.get("ok"):
+    assert d["decisions"], "seeded captain hold produced no decision"
+    assert any(dec.get("hold_id") == "demo-decision" for dec in d["decisions"]), d["decisions"]
 # decisions carry board key + hold_id
 for dec in d.get("decisions") or []:
     assert dec.get("key","").startswith("decision:"), dec
-    assert dec.get("hold_id") or dec.get("key")
+    assert dec.get("key") == "decision:" + dec.get("hold_id",""), dec
 # side sources deferred honestly
 ids={s.get("id") for s in d["sources"]}
 assert "quota" in ids or any(s.get("deferred") for s in d["sources"])
@@ -307,27 +334,101 @@ test_static_ui_present() {
   pass "UI shell has required sections, themes, and universal data-key architecture"
 }
 
-test_server_refuses_wildcard_env() {
-  local out status bin home
-  home=$(make_home env-wild)
-  # Ensure the release binary exists (build once if needed).
-  FM_HOME="$home" "$DASH" status >/dev/null 2>&1 || true
-  bin="$ROOT/dashboard/target/release/fm-dashboard-server"
+server_bin() {
+  local bin="$ROOT/dashboard/target/release/fm-dashboard-server"
   if [ ! -x "$bin" ]; then
     (cd "$ROOT/dashboard" && cargo build --release) >/dev/null 2>&1 ||
-      fail "could not build fm-dashboard-server for wildcard env test"
+      return 1
   fi
-  out=$(
-    FM_HOME="$home" \
-    FM_DASHBOARD_BIND_HOST=0.0.0.0 \
-    FM_DASHBOARD_BIND_PORT=$(next_port) \
-    FM_DASHBOARD_TOKEN=testtoken \
-    FM_DASHBOARD_STATIC="$ROOT/bin/fm-dashboard-static" \
-    "$bin" 2>&1
-  ) && status=0 || status=$?
-  [ "$status" -ne 0 ] || fail "server should refuse 0.0.0.0 env bind"
-  assert_contains "$out" "wildcard" "server wildcard message"
-  pass "Rust server refuses wildcard bind host from env"
+  printf '%s\n' "$bin"
+}
+
+test_server_refuses_wildcard_env() {
+  local out status bin home host
+  home=$(make_home env-wild)
+  bin=$(server_bin) || fail "could not build fm-dashboard-server for wildcard env test"
+  for host in 0.0.0.0 :: '[::]' '[::ffff:0.0.0.0]' '[0:0:0:0:0:ffff:0:0]'; do
+    out=$(
+      FM_HOME="$home" \
+      FM_DASHBOARD_BIND_HOST="$host" \
+      FM_DASHBOARD_BIND_PORT=$(next_port) \
+      FM_DASHBOARD_TOKEN=testtoken \
+      FM_DASHBOARD_STATIC="$ROOT/bin/fm-dashboard-static" \
+      "$bin" 2>&1
+    ) && status=0 || status=$?
+    [ "$status" -ne 0 ] || fail "server should refuse env bind host $host"
+    assert_contains "$out" "wildcard" "server wildcard message for $host"
+  done
+  pass "Rust server refuses wildcard bind hosts from env (including IPv4-mapped)"
+}
+
+# The unlock form is unauthenticated: a malformed percent escape must not be
+# able to take the server process down.
+test_unlock_survives_malformed_form_body() {
+  local home port pid_before pid_after code
+  home=$(make_home unlock-fuzz)
+  port=$(next_port)
+  printf '127.0.0.1:%s\n' "$port" >"$home/config/dashboard-bind"
+  FM_HOME="$home" "$DASH" start >/dev/null || fail "start failed"
+  wait_http "http://127.0.0.1:$port/healthz" 5 || fail "not ready"
+  pid_before=$(tr -d '[:space:]' <"$home/state/dashboard/server.pid")
+
+  # % followed by a multi-byte character, a truncated escape, and raw invalid
+  # UTF-8 - each one used to slice across a char boundary.
+  for body in 'token=%€' 'token=%e2%82' 'token=%' 'token=a%zz%' "$(printf 'token=%%\xff\xfe')"; do
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 1 --max-time 5 \
+      -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
+      --data-raw "$body" "http://127.0.0.1:$port/unlock" 2>/dev/null)
+    [ -n "$code" ] || fail "no response to malformed unlock body: $body"
+  done
+
+  code=$(http_code "http://127.0.0.1:$port/healthz")
+  [ "$code" = "200" ] || fail "healthz after malformed unlock expected 200 got $code"
+  pid_after=$(tr -d '[:space:]' <"$home/state/dashboard/server.pid")
+  [ "$pid_before" = "$pid_after" ] ||
+    fail "server restarted after malformed unlock body (old=$pid_before new=$pid_after)"
+
+  cleanup_dash "$home"
+  pass "malformed /unlock bodies do not crash the server"
+}
+
+# stop and status are recovery paths: they must not need a Rust toolchain or a
+# build tree just to report or tear down a running daemon.
+test_stop_status_without_server_binary() {
+  local home port out status fakeroot
+  home=$(make_home no-cargo)
+  port=$(next_port)
+  printf '127.0.0.1:%s\n' "$port" >"$home/config/dashboard-bind"
+  FM_HOME="$home" "$DASH" start >/dev/null || fail "start failed"
+  wait_http "http://127.0.0.1:$port/healthz" 5 || fail "not ready"
+
+  # A code root with the static UI and the crate but a cleaned target/, plus a
+  # cargo on PATH that fails loudly if anything tries to build.
+  fakeroot=$TMP_ROOT/no-cargo-root
+  mkdir -p "$fakeroot/bin" "$fakeroot/stub" "$fakeroot/dashboard"
+  ln -sf "$ROOT/bin/fm-dashboard-static" "$fakeroot/bin/fm-dashboard-static"
+  printf '[package]\nname = "stub"\n' >"$fakeroot/dashboard/Cargo.toml"
+  printf '#!/bin/sh\necho STUB-CARGO-RAN >&2\nexit 1\n' >"$fakeroot/stub/cargo"
+  chmod +x "$fakeroot/stub/cargo"
+
+  out=$(PATH="$fakeroot/stub:$PATH" FM_ROOT_OVERRIDE="$fakeroot" FM_HOME="$home" \
+    "$DASH" status 2>&1) && status=0 || status=$?
+  [ "$status" -eq 0 ] || fail "status should work without a server binary: $out"
+  assert_contains "$out" "running" "status without a server binary"
+  assert_not_contains "$out" "STUB-CARGO-RAN" "status must not trigger a build"
+
+  out=$(PATH="$fakeroot/stub:$PATH" FM_ROOT_OVERRIDE="$fakeroot" FM_HOME="$home" \
+    "$DASH" stop 2>&1) && status=0 || status=$?
+  [ "$status" -eq 0 ] || fail "stop should work without a server binary: $out"
+  assert_contains "$out" "stopped" "stop without a server binary"
+  assert_not_contains "$out" "STUB-CARGO-RAN" "stop must not trigger a build"
+  if wait_http "http://127.0.0.1:$port/healthz" 1; then
+    sleep 0.5
+    curl -sS -o /dev/null --connect-timeout 0.2 --max-time 0.5 \
+      "http://127.0.0.1:$port/healthz" 2>/dev/null &&
+      fail "stop without a server binary left the server listening"
+  fi
+  pass "stop and status work without a build tree or Rust toolchain"
 }
 
 # --- run -------------------------------------------------------------------
@@ -336,8 +437,11 @@ test_refuses_missing_home_shape
 test_refuses_unset_home_when_root_not_home
 test_refuses_wildcard_bind
 test_refuses_ipv6_any_bind
+test_refuses_ipv4_mapped_wildcard_bind
 test_honors_bind_override
 test_auth_and_snapshot_shape
+test_unlock_survives_malformed_form_body
+test_stop_status_without_server_binary
 test_lifecycle_start_stop_status_restart
 test_static_ui_present
 test_server_refuses_wildcard_env
