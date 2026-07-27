@@ -59,7 +59,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 ### Requirements
 
 - A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Codex, or OpenCode.
-- Git and the GitHub CLI, authenticated through `gh auth login`.
+- Git and the GitHub CLI, authenticated through `gh auth login -h github.com`.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
 The first mate detects and offers to install supported missing tools after you approve.
@@ -77,7 +77,7 @@ Codex and OpenCode are also verified and supported as primary harnesses; Codex u
 ### Install and launch
 
 ```sh
-gh auth login
+gh auth login -h github.com
 git clone https://github.com/kunchenguid/firstmate
 cd firstmate
 ```
