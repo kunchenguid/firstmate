@@ -115,6 +115,22 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   pass "renderer preserves every harness ordinary-continuation and missing-cycle repair path"
 }
 
+test_pi_signed_preserves_identity_with_pi_supervision_protocol() {
+  local out ordinary
+  out=$("$RENDER" --harness pi-signed)
+  assert_contains "$out" "primary harness: pi-signed" \
+    "pi-signed supervision normalized the visible runtime identity to pi"
+  assert_contains "$out" "Mode: Pi extension background wake." \
+    "pi-signed did not reuse Pi's authoritative supervision protocol"
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "Pi extension already owns watcher continuity" \
+    "pi-signed ordinary-wake semantics diverged from Pi"
+  out=$("$RENDER" --harness pi-signed --repair-line)
+  assert_contains "$out" "Pi tool fm_watch_arm_pi" \
+    "pi-signed repair semantics diverged from Pi"
+  pass "pi-signed keeps its identity while sharing Pi's supervision protocol"
+}
+
 test_grok_is_background_notify() {
   local out
   out=$("$RENDER" --harness grok)
@@ -160,6 +176,7 @@ test_unknown_fallback
 test_conditional_stanzas
 test_repair_lines
 test_cross_harness_ordinary_continuation_and_repair_matrix
+test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path
