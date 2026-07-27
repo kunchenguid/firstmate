@@ -67,8 +67,7 @@ git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
 PROJECT_NAME=$(basename "$PROJ")
-# The merge just moved this clone's default branch, so hand the change to the
-# single managed-graph scheduling owner after the merge result is already
-# reported. It returns immediately, so a generation can never delay or hide the
-# merge outcome, and it never installs Graphify.
+# The merge just moved this clone's default branch, so hand the change to
+# fm-graphify.sh's single scheduling owner - after the merge result is already
+# reported, so nothing about the graph can delay, hide, or change that result.
 "$FM_ROOT/bin/fm-graphify.sh" schedule "$PROJECT_NAME" "local project merge $before..$after" >/dev/null 2>&1 || true

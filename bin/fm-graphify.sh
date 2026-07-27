@@ -20,13 +20,14 @@
 #        fm-graphify.sh available
 #
 # status returns one JSON object with state missing|building|fresh|stale|failed.
-# A published graph is reported fresh only after a generation completed and was
-# recorded; an interrupted or unrecorded generation reports stale, never fresh.
+# Only a completed and recorded generation is fresh; an interrupted one is stale.
 # schedule is the single lifecycle owner every guarded fleet sync and merge
 # calls. It returns immediately, so a rebuild's delay or failure can never hide
 # or change the lifecycle operation's own outcome, coalesces repeated events for
 # one project into the in-flight refresh, and bounds the whole home to
-# FM_GRAPHIFY_MAX_CONCURRENT_REBUILDS generations at once. The optional
+# FM_GRAPHIFY_MAX_CONCURRENT_REBUILDS generations at once, waiting up to
+# FM_GRAPHIFY_SCHEDULE_WAIT seconds for a slot and otherwise leaving the work
+# outstanding for the next event rather than dropping it. The optional
 # invalidate token additionally records the graph stale even when nothing moved,
 # which is what a remote merge needs while the local clone still lags. It is
 # recorded in the project's pending request together with the revision it was
@@ -37,9 +38,8 @@
 # rebuilds only when the revision or graph configuration actually changed, never
 # installs Graphify, never fails its caller, and keeps the last valid graph
 # byte-for-byte on failure. A generation already recorded fresh for the current
-# revision under the current pin and limits settles without re-reading source, so
-# the unchanged case costs one Git call; status, query, and intake keep the full
-# content comparison.
+# revision, pin, and limits settles with one Git call instead of re-reading
+# source; status, query, and intake keep the full content comparison.
 # Every lock and scheduling marker records its holder. One whose holder process
 # is gone is broken inside an exclusive recovery region that re-proves it
 # abandoned, so a hard kill or reboot can neither wedge a project nor let two

@@ -82,12 +82,12 @@ if ! caller_has_merge_method "$@"; then
 fi
 
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
-# A successful remote merge changes the project's next guarded refresh input.
-# The single managed-graph scheduling owner keeps the last valid local graph but
-# stops it being injected into a later brief as though it already represented
-# the merged project; the local clone only moves at the next guarded sync, so it
-# rebuilds there rather than here. Scheduling returns immediately, so nothing
-# about the graph can delay or hide this merge's own outcome.
+# A successful remote merge leaves the local clone behind, so the local graph no
+# longer represents the merged project even though nothing here moved. Hence the
+# invalidate token: the graph must stop being injected into a later brief, while
+# the actual rebuild happens at the next guarded sync that moves the clone.
+# Scheduling runs after the merge result is already reported, so nothing about
+# the graph can delay, hide, or change this merge's own outcome.
 PROJ=$(sed -n 's/^project=//p' "$META" | head -n 1)
 if [ -n "$PROJ" ]; then
   "$FM_ROOT/bin/fm-graphify.sh" schedule "$(basename "$PROJ")" "project PR merged: $URL" invalidate >/dev/null 2>&1 || true

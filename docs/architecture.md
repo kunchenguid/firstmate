@@ -11,8 +11,9 @@ firstmate's always-loaded operating contract and routing index for conditional p
 `bin/fm-graphify.sh` is the one owner of deterministic Graphify path resolution, source containment, generation state, lock, fingerprint, transactional publication, query limits, and cleanup mechanics.
 It resolves names through the private project registry and keeps the managed Python environment and all graph generations under the effective home's `data/graphify/`, so Firstmate does not modify project clones.
 Natural-language intake selects the question and decides how to use the bounded answer, while the script supplies only fresh local structural context with file provenance.
-Fleet sync and merge owners report their own result first and then hand the guarded project revision change to that script's single `schedule` lifecycle owner, which returns immediately, coalesces repeats per project, bounds how many generations run at once, and eagerly rebuilds only when the fingerprint really moved.
-The current operator workflow and limits are in [`configuration.md`](configuration.md#managed-graphify-context-datagraphify).
+Fleet sync and merge owners report their own result first and then hand the guarded project revision change to that script's single `schedule` lifecycle owner, so derived context is never on the critical path of a sync or merge and can never change its outcome.
+Because that owner is single, its scheduling, coalescing, concurrency, and invalidation rules live in the script header rather than in each caller.
+The operator workflow, state vocabulary, and commands are in [`configuration.md`](configuration.md#managed-graphify-context-datagraphify).
 
 ## Event-driven supervision
 

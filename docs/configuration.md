@@ -49,24 +49,29 @@ The file format is unchanged in both modes; tasks-axi and manual edits produce t
 
 ## Managed Graphify context (data/graphify)
 
-Bootstrap requires the pinned local `graphifyy==0.9.28` environment and reports `MISSING: graphify` with the consent-gated installer when it is absent or incompatible.
-The installer needs `python3` and creates `data/graphify/venv` under the effective `FM_HOME`, so an ambient `graphify` command is never trusted.
-`bin/fm-graphify.sh status <project>`, `rebuild <project>`, `schedule <project> <reason> [invalidate]`, `refresh <project> <reason> [invalidate]`, `query <project> <question>`, `mark-stale <project> <reason>`, and `cleanup <project>` are the supported management interface; bootstrap uses `available` and `install`, and `bin/fm-brief.sh` uses `intake <project> <question>`.
-Every command accepts a registered project name only, resolves the clone from `data/projects.md`, and stores derived output outside the clone under `data/graphify/projects/<project>/`.
-Rebuilds are local structural extraction only, exclude secret and dependency material, ignore symlinks, build into a private generation, and preserve the previous published graph if validation or publication fails.
-Freshness fingerprints the selected files, project Git revision, Graphify pin, and managed limits, and a graph is reported fresh only after a generation was published and recorded, so an interrupted rebuild reports stale rather than fresh.
-`schedule` is the single scheduling owner of that state and the only call the guarded fleet sync, the local merge, and the PR merge make, always after they have already reported their own result.
-It returns immediately, so a generation can never delay, hide, or change a merge or sync outcome; it coalesces repeated events for one project into the pending refresh; and it bounds the whole home to `FM_GRAPHIFY_MAX_CONCURRENT_REBUILDS` generations at once, waiting up to `FM_GRAPHIFY_SCHEDULE_WAIT` seconds for a slot and otherwise leaving the work outstanding for the next event rather than dropping it.
-Its `invalidate` token additionally records an unchanged graph stale, which is what a remote PR merge needs while the local clone still lags; the token is recorded in the project's own pending request together with the revision it was raised for, so coalescing a repeat into a running refresh cannot downgrade it and a refresh that could not act (a generation already in flight, for instance) cannot drop it - it is discharged only by recording the graph stale or by the clone advancing past that revision.
-`refresh` applies that same policy once and synchronously: it builds a graph that is missing, rebuilds only when the fingerprint actually moved, never installs Graphify without the bootstrap consent step, never fails its caller, and leaves the last valid graph byte-for-byte intact when a rebuild cannot run or fails.
-Because it runs for every project on every guarded sync, a generation already recorded fresh for the clone's current revision under the current pin and limits settles with one Git call instead of re-reading source; `status`, `query`, and `intake` keep the full content comparison, so nothing an out-of-band edit touched is ever reported fresh or injected.
-A guarded sync therefore builds the first graph for a registered project even when its default branch did not move, and a project-removal owner must call `cleanup` after its guarded clone removal.
-Every generation lock and scheduling marker records its holder, and one whose holder process is gone is broken inside an exclusive recovery region that re-proves it abandoned, so a hard kill, OOM kill, or reboot during a rebuild needs no operator recovery step and cannot produce two holders at once.
-`rebuild` remains available to force a generation by hand.
+Firstmate keeps one bounded local structural graph per registered project and injects it into crewmate briefs, so a crewmate starts with real project context instead of a blind scaffold.
+
+Bootstrap requires the pinned managed Graphify environment and reports `MISSING: graphify` with the consent-gated `bin/fm-graphify.sh install` command when it is absent or incompatible.
+That installer needs `python3` and provisions Firstmate's own environment and derived generations under `data/graphify/`; an ambient `graphify` command is never trusted, and no project clone is ever written to.
+No Graphify semantic backend, cloud model, or external source is enabled, and secret and dependency material is never copied out of a clone.
+
+A project's graph is in exactly one state: `missing`, `building`, `fresh`, `stale`, or `failed`.
+It counts as `fresh` only after a generation was published and recorded, so an interrupted rebuild reports `stale` rather than `fresh`, and a `stale`, `failed`, or `missing` graph is never queried or injected - dispatch continues normally without project context.
+
+The operator commands, each taking a registered project name:
+
+- `bin/fm-graphify.sh status <project>` - report the current state as one JSON object.
+- `bin/fm-graphify.sh query <project> <question>` - ask a bounded question against a fresh graph.
+- `bin/fm-graphify.sh rebuild <project>` - force a generation by hand.
+- `bin/fm-graphify.sh mark-stale <project> <reason>` - record the graph stale.
+- `bin/fm-graphify.sh cleanup <project>` - drop a project's derived generations; a project-removal owner must call this after its guarded clone removal.
+
 Use `FM_BRIEF_TASK='<task text>' bin/fm-brief.sh <id> <project>` when composing a brief to add fresh Graphify context automatically.
-The context renderer is bounded and provenance-rich, and silently omits unavailable, failed, or stale graphs so dispatch continues normally.
-No Graphify semantic backend, cloud model, or external source is enabled.
-The script header owns exact limits, state fields, and command mechanics.
+Everything else is automatic: the guarded fleet sync, the local merge, and the PR merge keep graphs current themselves after they have reported their own result, a rebuild can never delay, hide, or change their outcome, and a hard kill, OOM kill, or reboot during a rebuild needs no operator recovery step.
+The remaining verbs (`schedule`, `refresh`, `intake`, `available`, `install`) belong to those callers rather than to operators.
+
+[`architecture.md`](architecture.md#managed-project-context) owns the lifecycle boundary and its rationale.
+The `bin/fm-graphify.sh` header owns the exact commands, paths, limits, `FM_GRAPHIFY_*` tuning, scheduling, invalidation, fingerprint, state fields, and lock-recovery mechanics.
 
 ## Runtime backend (config/backend / FM_BACKEND)
 

@@ -386,9 +386,8 @@ sync_project() {
     else
       echo "$label: already current"
     fi
-    # An unchanged clone still needs a first managed graph. The scheduling owner
-    # builds one only when it is missing, and once a generation is recorded for
-    # this revision it settles on the recorded revision without re-reading source.
+    # An unchanged clone still needs a first managed graph, so schedule here too;
+    # fm-graphify.sh owns when that costs a generation and when it settles cheaply.
     "$FM_ROOT/bin/fm-graphify.sh" schedule "$label" "project already current at $local_rev" >/dev/null 2>&1 || true
     return 0
   fi
@@ -418,11 +417,10 @@ sync_project() {
   else
     echo "$label: synced $before..$after"
   fi
-  # A managed graph is derived state outside the clone. The guarded refresh is
-  # the only point that changes this checkout here, so hand the single graph
-  # scheduling owner the revision change after the sync result is already
-  # reported. It returns immediately, coalesces repeats, bounds how many
-  # generations run at once, never installs, and preserves the last valid graph.
+  # A managed graph is derived state outside the clone, and the guarded refresh is
+  # the only point that changes this checkout here, so hand the revision change to
+  # fm-graphify.sh's single scheduling owner - after the sync result is already
+  # reported, so nothing about the graph can delay, hide, or change that result.
   "$FM_ROOT/bin/fm-graphify.sh" schedule "$label" "project refreshed $before..$after" >/dev/null 2>&1 || true
   return 0
 }
