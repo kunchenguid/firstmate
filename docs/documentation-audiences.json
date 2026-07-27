@@ -124,6 +124,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/decide/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -217,6 +221,10 @@
     },
     {
       "path": "docs/configuration.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/decide-page.md",
       "audience": "operator-current"
     },
     {
