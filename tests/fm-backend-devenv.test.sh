@@ -11,12 +11,44 @@ ADAPTER="$ROOT/bin/backends/devenv.sh"
 TMP_ROOT=$(fm_test_tmproot fm-backend-devenv)
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 SSH_LOG="$TMP_ROOT/ssh"
+COMMAND_LOG="$TMP_ROOT/external-command-argv"
 REQUEST_ID=0123456789abcdef0123456789abcdef
 # shellcheck disable=SC2088
 REMOTE_HELPER='~/.local/share/firstmate-expanly/current/bin/fm-devenv-remote.sh'
 BASE_PATH=$PATH
+FM_TEST_REAL_HEAD=$(command -v head)
+FM_TEST_REAL_JQ=$(command -v jq)
+FM_TEST_REAL_MKTEMP=$(command -v mktemp)
+FM_TEST_REAL_RM=$(command -v rm)
+FM_TEST_REAL_TR=$(command -v tr)
+FM_TEST_REAL_WC=$(command -v wc)
+export FM_TEST_REAL_HEAD FM_TEST_REAL_JQ FM_TEST_REAL_MKTEMP FM_TEST_REAL_RM FM_TEST_REAL_TR FM_TEST_REAL_WC
+
+# shellcheck source=bin/backends/devenv.sh
+. "$ADAPTER"
 
 mkdir -p "$SSH_LOG"
+cat > "$FAKEBIN/fm-log-command" <<'SH'
+#!/usr/bin/env bash
+set -eu
+name=${0##*/}
+for arg in "$@"; do
+  hex=$(printf '%s' "$arg" | /usr/bin/od -An -v -tx1 | /usr/bin/tr -d ' \n')
+  printf '%s\t%s\n' "$name" "$hex" >> "$FM_TEST_COMMAND_LOG"
+done
+case "$name" in
+  head) exec "$FM_TEST_REAL_HEAD" "$@" ;;
+  jq) exec "$FM_TEST_REAL_JQ" "$@" ;;
+  mktemp) exec "$FM_TEST_REAL_MKTEMP" "$@" ;;
+  rm) exec "$FM_TEST_REAL_RM" "$@" ;;
+  tr) exec "$FM_TEST_REAL_TR" "$@" ;;
+  wc) exec "$FM_TEST_REAL_WC" "$@" ;;
+  *) exit 127 ;;
+esac
+SH
+for command in head jq mktemp rm tr wc; do
+  ln -s fm-log-command "$FAKEBIN/$command"
+done
 cat > "$FAKEBIN/ssh" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -24,17 +56,19 @@ mkdir -p "$FM_TEST_SSH_LOG"
 printf '%s\n' "$#" > "$FM_TEST_SSH_LOG/argc"
 : > "$FM_TEST_SSH_LOG/argv"
 for arg in "$@"; do
+  hex=$(printf '%s' "$arg" | /usr/bin/od -An -v -tx1 | /usr/bin/tr -d ' \n')
+  printf 'ssh\t%s\n' "$hex" >> "$FM_TEST_COMMAND_LOG"
   printf '%s\n' "$arg" >> "$FM_TEST_SSH_LOG/argv"
 done
 cat > "$FM_TEST_SSH_LOG/stdin"
-request_id=$(jq -r '.request_id' "$FM_TEST_SSH_LOG/stdin")
+request_id=$($FM_TEST_REAL_JQ -r '.request_id' "$FM_TEST_SSH_LOG/stdin")
 if [ -n "${FM_TEST_SSH_RESPONSE:-}" ]; then
   printf '%s' "$FM_TEST_SSH_RESPONSE"
 else
-  jq -cn --arg request_id "$request_id" '{schema:"firstmate.devenv.v1",request_id:$request_id,ok:true,result:{},error:null}'
+  "$FM_TEST_REAL_JQ" -cn --arg request_id "$request_id" '{schema:"firstmate.devenv.v1",request_id:$request_id,ok:true,result:{},error:null}'
 fi
 SH
-chmod +x "$FAKEBIN/ssh"
+chmod +x "$FAKEBIN/fm-log-command" "$FAKEBIN/ssh"
 
 request_json() {
   jq -cn \
@@ -52,17 +86,21 @@ request_json() {
 }
 
 call_adapter() {
-  FM_TEST_SSH_LOG="$SSH_LOG" PATH="$FAKEBIN:$BASE_PATH" \
-    bash -c '. "$1"; fm_backend_devenv_request "$2" "$3"' \
-    _ "$ADAPTER" "$1" "$2"
+  FM_TEST_COMMAND_LOG="$COMMAND_LOG" FM_TEST_SSH_LOG="$SSH_LOG" PATH="$FAKEBIN:$BASE_PATH" \
+    fm_backend_devenv_request "$1" "$2"
+}
+
+hex_of() {
+  printf '%s' "$1" | /usr/bin/od -An -v -tx1 | /usr/bin/tr -d ' \n'
 }
 
 test_fixed_remote_argv_and_stdin_only_payload() {
-  local attack payload request response host_line command_line argv
+  local attack payload request response host_line command_line argv marker marker_hex
   # shellcheck disable=SC2016
   attack=$'quotes '\''"\n$() `backticks`; semicolon;\n--leading-dashes'
   payload=$(jq -cn --arg value "$attack" '{probe:$value}')
   request=$(request_json "$payload")
+  : > "$COMMAND_LOG"
 
   response=$(call_adapter expanly-reviews "$request") \
     || fail "valid request did not cross the fake SSH transport"
@@ -84,7 +122,13 @@ test_fixed_remote_argv_and_stdin_only_payload() {
   [ "$(cat "$SSH_LOG/stdin")" = "$request" ] || fail "request bytes were not passed only through stdin"
   # shellcheck disable=SC2016
   assert_contains "$(cat "$SSH_LOG/stdin")" '$()' "adversarial payload was missing from stdin"
-  pass "devenv backend: payload bytes stay on stdin and SSH runs only one fixed remote helper"
+  # shellcheck disable=SC2016
+  for marker in "quotes '\"" $'\n$()' '$()' '`backticks`' '; semicolon;' '--leading-dashes'; do
+    marker_hex=$(hex_of "$marker")
+    assert_no_grep "$marker_hex" "$COMMAND_LOG" \
+      "adversarial payload bytes entered an external command argv: $marker"
+  done
+  pass "devenv backend: payload bytes stay byte-identical on stdin and out of every external command argv"
 }
 
 test_invalid_host_is_refused_before_ssh() {

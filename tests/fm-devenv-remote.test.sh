@@ -187,5 +187,32 @@ test_protocol_refusal_table() {
   pass "devenv remote: malformed envelopes, identity mismatches, and invalid lease authority are refused"
 }
 
+test_inspect_refuses_local_marker_identity_mismatch() {
+  local field value request response snapshot
+  request=$(request_json inspect null)
+  snapshot="$TMP_ROOT/identity-marker.snapshot"
+
+  for field in environment vm; do
+    case "$field" in
+      environment) value=other ;;
+      vm) value=expanly-other ;;
+    esac
+    lease_json "$TOKEN" | jq --arg field "$field" --arg value "$value" \
+      '.[$field] = $value' > "$MARKER"
+    cp "$MARKER" "$snapshot"
+
+    response=$(printf '%s\n' "$request" | run_remote) \
+      || fail "inspect $field mismatch did not return a structured response"
+    assert_response_shape "$response" false
+    printf '%s\n' "$response" | jq -e \
+      '.ok == false and .result == null and .error.code == "identity_mismatch"' >/dev/null \
+      || fail "inspect $field mismatch did not return identity_mismatch without a success result"
+    cmp -s "$snapshot" "$MARKER" \
+      || fail "inspect $field mismatch changed the local marker bytes"
+  done
+  pass "devenv remote: inspect refuses mismatched marker environment and VM without mutation"
+}
+
 test_operation_table
 test_protocol_refusal_table
+test_inspect_refuses_local_marker_identity_mismatch

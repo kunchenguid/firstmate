@@ -169,6 +169,10 @@ case "$operation" in
     current=$(fm_devenv_lease_read "$marker" 2>/dev/null) || read_status=$?
     case "$read_status" in
       0)
+        current_environment=$(printf '%s\n' "$current" | jq -r '.environment')
+        current_vm=$(printf '%s\n' "$current" | jq -r '.vm')
+        [ "$current_environment" = "$environment" ] && [ "$current_vm" = "$vm" ] \
+          || remote_error identity_mismatch 'local lease identity does not match request'
         lease_summary=$(remote_lease_summary "$current") \
           || remote_error invalid_local_state 'local lease marker exceeds response limits'
         ;;
