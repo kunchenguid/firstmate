@@ -206,7 +206,9 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 For a delegated Pi or pi-signed ship or scout whose project resolves to `+yolo`, `fm-spawn.sh` sets `PI_PERMISSION_SYSTEM_YOLO=1` only on that selected Pi process.
 A compatible `@gotgenes/pi-permission-system` release interprets the variable as a process-scoped yolo override: `ask` results are approved while explicit `deny` rules remain enforced, and no global or project permission file is changed.
 Pi tasks with yolo off, secondmate launches, non-Pi harnesses, and Pi sessions started outside Firstmate do not receive the variable.
-An older or absent permission-system package ignores the variable and retains its normal permission handling, so the minimum compatible version is the first published package release that documents `PI_PERMISSION_SYSTEM_YOLO`.
+The package-side implementation is [gotgenes/pi-packages PR #671](https://github.com/gotgenes/pi-packages/pull/671), specifically commit [`79829ffd`](https://github.com/gotgenes/pi-packages/commit/79829ffd), and no compatible npm release exists yet.
+The first `@gotgenes/pi-permission-system` release containing commit `79829ffd` is the minimum compatible released version.
+Until that package change is installed, an older permission-system package ignores the variable, and an absent package leaves Pi's normal permission handling in place.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
