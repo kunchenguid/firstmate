@@ -11,7 +11,7 @@ Changing persisted context to remove hidden content, filtering provider context,
 
 ## Pi 0.81.1 end-to-end reproduction
 
-The current installed and regression-supported Pi version was verified on 2026-07-22.
+Pi 0.81.1 was the installed regression target verified on 2026-07-22.
 
 ```text
 $ pi --version
@@ -209,13 +209,14 @@ Only Pi's Calm presentation implementation changed; every producer and non-Pi tr
 ## Regression coverage
 
 `tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers, verifies all seven built-ins plus `fm_watch_arm_pi`, exercises redraw of already-rendered tool, thinking, current operational-user, and legacy synthetic rows, and covers every policy class.
+The same focused test exercises both Pi Bearings shortcuts, project-skill provenance, and the Captain's Call-only no-report/no-browser boundary through real Pi print and TUI paths.
 It covers persisted preference restoration across every session-start reason and a real restart, proves Pi's native `Working...` row through a delayed deterministic provider, asserts no Calm status row, verifies operational messages remain exact ordinary user-role session entries and complete exports, and drives genuine 100 by 44, 160 by 36, and 180 by 44 terminal fixtures.
 A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool-result blocks, asserts that the collapsed skill-to-final gap equals the two-row visible-only baseline, expands and re-collapses original thinking, restores Calm-off rendering, verifies persisted hidden history, and repeats the geometry assertion after restart with `terminal.clearOnShrink` explicitly off.
 The operational provider path covers Calm loaded on, loaded off, default preference, extension absent, exact watcher delivery, narrow bare-marker legacy input, persisted restart replay, a genuine captain prompt, and adjacent notifications coalesced into one intended processing turn.
 It asserts one persisted and rendered captain answer, exact user-role operational envelopes in order, no replacement custom messages, one processing result, zero operational transcript rows, and the two-row neighboring-assistant geometry for live, adjacent, and restart paths.
 Quoted current markers, ASCII-only labels, ordinary text before a marker, unrelated U+2063 placement, and image-bearing input remain visible in component and native transcript checks.
 `tests/fm-pi-primary-live-e2e.test.sh` also proves the unchanged built-in `Working...` row while Calm is active on the credentialed provider path before continuing its ordinary watcher lifecycle.
-`tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against the installed Pi declarations, currently package version 0.81.1.
+`tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against the installed Pi declarations; the latest verification record below covers package version 0.82.1.
 
 The relevant commands are:
 
@@ -278,7 +279,7 @@ $ tests/fm-pi-primary-types.test.sh
 ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.81.1
 ```
 
-## 2026-07-26 Pi 0.82.1 and static presentation verification
+## 2026-07-26 Pi 0.82.1 and 2026-07-27 static presentation verification
 
 Pi 0.82.1 preserved the two version-bounded layout seams, all seven built-in renderer slots, watcher rendering, expansion redraw, native working activity, operational-input semantics, and stock export evidence.
 The compatibility review read the installed Pi 0.82.1 README plus `docs/extensions.md`, `docs/tui.md`, `docs/themes.md`, `docs/settings.md`, `docs/keybindings.md`, `docs/session-format.md`, and `docs/packages.md` completely, then inspected the directly relevant built-in renderer, minimal-mode, message, entry, working-indicator, hidden-thinking, question, todo, override, and theme examples.
@@ -291,6 +292,8 @@ $ pi --version
 0.82.1
 
 $ FM_PI_PACKAGE_DIR="$HOME/.local/lib/node_modules/@earendil-works/pi-coding-agent" tests/fm-calm-pi-extension.test.sh
+ok - Pi input shortcuts transform only exact image-free interactive s/S or status? input and verify project skill provenance
+ok - real Pi 0.82.1 print and TUI paths expand the shortcut argument and render only Captain's Call without report or browser writes
 ok - Pi calm extension is presentation-only with one persisted visibility choice, no Calm status row, native working visibility, supported redraw controls, and the Firstmate watcher-tool integration
 ok - Pi calm resolves its persistent home independently of Pi's launch directory
 ok - Pi 0.82.1 is explicitly certified and unsupported or missing renderer surfaces fall back atomically to stock rendering
