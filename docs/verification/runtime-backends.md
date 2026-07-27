@@ -6,6 +6,33 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Devenv
+
+The control-plane-only backend was verified on 2026-07-27 against FirstMate commit `5c83c947a4652410170126dc5382df0303c16fe7` on the `feature-dev` OrbStack VM.
+The Mac-side session provider was Herdr 0.7.5 with protocol 17.
+The commit-pinned remote runtime was installed and verified before the protocol run.
+
+```sh
+FM_DEVENV_SMOKE_ENV=feature-dev \
+FM_DEVENV_SMOKE_SESSION=fm-devenv-protocol-lab \
+bin/fm-test-run.sh tests/fm-backend-devenv-smoke.test.sh
+```
+
+The run completed from `2026-07-27T11:08:34Z` through `2026-07-27T11:08:39Z`.
+The live generation token is redacted from the retained output because token continuity, not the token value, is the maintained guarantee.
+
+```text
+ok - devenv smoke: live lease [generation token redacted] survived a fresh SSH request and released cleanly
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=4499
+```
+
+The VM checkout was clean and the remote lease marker was absent before the run.
+The claim survived the end of its SSH request, and status through a fresh SSH request accepted the same unreported generation token.
+Release succeeded, and final inspect confirmed the lease marker was absent, the same checkout branch remained clean, and both remote agent indicators remained false.
+The dedicated `fm-devenv-protocol-lab` snapshot and the ambient `default` snapshot were byte-identical before and after the round trip.
+The run issued no checkout, Docker, database, Herdr-session, or agent mutation command.
+The fake and live paths remain pinned by `tests/fm-backend-devenv-smoke.test.sh`.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.

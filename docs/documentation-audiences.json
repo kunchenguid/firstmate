@@ -30,7 +30,8 @@
     "docs/herdr-backend.md",
     "docs/zellij-backend.md",
     "docs/orca-backend.md",
-    "docs/cmux-backend.md"
+    "docs/cmux-backend.md",
+    "docs/devenv-backend.md"
   ],
   "requiredOwnerPointers": [
     {
@@ -98,6 +99,10 @@
       "target": "docs/verification/runtime-backends.md"
     },
     {
+      "source": "docs/devenv-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
       "source": "docs/codex-app-backend.md",
       "target": "docs/verification/runtime-backends.md"
     }
@@ -125,6 +130,10 @@
     },
     {
       "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/devenv-orchestration/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -217,6 +226,10 @@
     },
     {
       "path": "docs/configuration.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/devenv-backend.md",
       "audience": "operator-current"
     },
     {

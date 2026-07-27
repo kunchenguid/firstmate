@@ -253,7 +253,7 @@ test_source_graph_boundaries_keep_every_owner() {
     grep -q '^[[:space:]]*# shellcheck source=bin/' "$file" || continue
     production_context_tests="${production_context_tests}$(basename "$file")|"
   done
-  [ "$production_context_tests" = 'fm-backend-devenv.test.sh|fm-backend-herdr.test.sh|fm-daemon.test.sh|fm-pending-reply.test.sh|fm-secondmate-sync.test.sh|' ] \
+  [ "$production_context_tests" = 'fm-backend-devenv-smoke.test.sh|fm-backend-devenv.test.sh|fm-backend-herdr.test.sh|fm-daemon.test.sh|fm-pending-reply.test.sh|fm-secondmate-sync.test.sh|' ] \
     || fail "only callback/variable interop tests may retain production source context: $production_context_tests"
   pass "dispatcher, adapters, production owner, and tests have explicit lint boundaries"
 }
