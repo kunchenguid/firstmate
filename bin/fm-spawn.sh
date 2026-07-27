@@ -84,6 +84,18 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   A ship/scout spawn for a task id that already has state/<id>.meta is treated
+#   as a RELAUNCH of that recorded task, never as a fresh allocation. It re-enters
+#   the recorded worktree - preserving its uncommitted edits and unpushed commits -
+#   only when ownership is provable: the record is a readable regular file, its
+#   backend and kind match this spawn, its recorded endpoint is recovery-grade
+#   dead or missing, and its worktree entry is unambiguous and still an isolated
+#   worktree root. Otherwise the spawn refuses and leaves every record and
+#   worktree intact; use bin/fm-promote.sh, not a relaunch, to change a recorded
+#   scout into a ship.
+#   Backends without a recovery-grade endpoint classifier (zellij, orca, cmux)
+#   therefore never relaunch onto an existing record. A task id with no record
+#   takes the unchanged fresh-allocation path.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -114,7 +126,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,98p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -926,6 +938,83 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
+# --- recovery-relaunch ownership guard --------------------------------------
+#
+# A ship/scout spawn for a task id that ALREADY has state/<id>.meta is a
+# relaunch of an interrupted task, not a fresh dispatch. Without this guard the
+# relaunch runs the fresh-allocation path unchanged: `treehouse get` hands out
+# another free worktree and the meta write below truncates the record, so the
+# recorded worktree - which can hold uncommitted edits and unpushed commits -
+# is left with no durable owner, and if the recorded agent is in fact still
+# live the task ends up split across two copies. The backends' own duplicate
+# refusals do not cover this: tmux only refuses while the task WINDOW still
+# exists, which is exactly what an interrupted task no longer has, and
+# treehouse has no task identity at all.
+#
+# So an existing record is authoritative here. Reuse the recorded worktree when
+# - and only when - ownership is provable: the record is intact, its backend
+# matches this spawn, its endpoint is recovery-grade dead or missing
+# (fm_backend_agent_state), and the recorded path is still a real isolated
+# worktree. Anything else refuses and preserves every existing record and
+# worktree for reconciliation (stuck-crewmate-recovery). Backends with no
+# recovery-grade classifier (zellij, orca, cmux) therefore never relaunch onto
+# an existing record: their ownership cannot be proven, so they refuse.
+# A task id with no record is untouched - the fresh-allocation path is unchanged.
+SPAWN_RECORDED_WT=
+
+spawn_meta_field_exact() {  # <meta> <key>
+  local meta=$1 key=$2 count
+  count=$(grep -c "^${key}=" "$meta" 2>/dev/null || true)
+  [ "$count" = 1 ] || return 1
+  grep "^${key}=" "$meta" 2>/dev/null | cut -d= -f2-
+}
+
+spawn_relaunch_refuse() {  # <detail>
+  echo "error: task $ID already has a recorded worker: $1; refusing to allocate a fresh worktree or overwrite its record. Reconcile the recorded worktree first (see stuck-crewmate-recovery), then relaunch or tear the task down." >&2
+  exit 1
+}
+
+resolve_recorded_task_worktree() {
+  local meta="$STATE/$ID.meta" old_backend old_kind old_target old_state recorded recorded_real recorded_top recorded_top_real
+  { [ -e "$meta" ] || [ -L "$meta" ]; } || return 0
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] \
+    || spawn_relaunch_refuse "its record at $meta is not a readable regular file"
+  old_backend=$(fm_backend_of_meta "$meta")
+  [ "$old_backend" = "$BACKEND" ] \
+    || spawn_relaunch_refuse "its record was written by the $old_backend runtime, not the $BACKEND runtime selected here"
+  old_kind=$(spawn_meta_field_exact "$meta" kind) \
+    || spawn_relaunch_refuse "its record has no single kind entry"
+  # A relaunch never rewrites the contract: flipping a recorded ship to scout
+  # would drop teardown's unlanded-work protection from a task that has some
+  # (fm-teardown.sh), and the scout-to-ship direction is bin/fm-promote.sh's.
+  [ "$old_kind" = "$KIND" ] \
+    || spawn_relaunch_refuse "its record is a $old_kind task, not the $KIND task this spawn would record"
+  old_target=$(fm_backend_target_of_meta "$meta")
+  [ -n "$old_target" ] || spawn_relaunch_refuse "its record has no endpoint to inspect"
+  old_state=$(fm_backend_agent_state "$old_backend" "$old_target")
+  case "$old_state" in
+    dead|missing) ;;
+    *) spawn_relaunch_refuse "its recorded endpoint $old_target is $old_state, so no live worker can be ruled out" ;;
+  esac
+  recorded=$(spawn_meta_field_exact "$meta" worktree) \
+    || spawn_relaunch_refuse "its record has no single worktree entry"
+  [ -n "$recorded" ] || spawn_relaunch_refuse "its record has an empty worktree entry"
+  recorded_real=$(cd "$recorded" 2>/dev/null && pwd -P) \
+    || spawn_relaunch_refuse "its recorded worktree $recorded cannot be inspected"
+  recorded_top=$(git -C "$recorded_real" rev-parse --show-toplevel 2>/dev/null || true)
+  recorded_top_real=$(cd "$recorded_top" 2>/dev/null && pwd -P) || recorded_top_real=
+  { [ -n "$recorded_top_real" ] && [ "$recorded_top_real" = "$recorded_real" ]; } \
+    || spawn_relaunch_refuse "its recorded worktree $recorded is no longer an isolated worktree root"
+  [ "$recorded_real" != "$PROJ_ABS_REAL" ] \
+    || spawn_relaunch_refuse "its recorded worktree $recorded resolves to the primary checkout"
+  SPAWN_RECORDED_WT=$recorded_real
+  echo "notice: relaunching $ID into its recorded worktree $SPAWN_RECORDED_WT (existing work preserved)" >&2
+}
+
+if [ "$KIND" != secondmate ]; then
+  resolve_recorded_task_worktree
+fi
+
 W="fm-$ID"
 case "$BACKEND" in
   tmux)
@@ -1226,7 +1315,16 @@ kimi_spawn_fail() {  # <detail>
 }
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # A proven relaunch (resolve_recorded_task_worktree above) re-enters the
+  # RECORDED worktree instead of asking treehouse for another one, so the
+  # task's uncommitted edits and unpushed commits stay with the same task id.
+  if [ -n "$SPAWN_RECORDED_WT" ]; then
+    spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$SPAWN_RECORDED_WT")"
+    WT_SOURCE="recorded worktree re-entry"
+  else
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+    WT_SOURCE="treehouse get"
+  fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -1268,11 +1366,18 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: $WT_SOURCE did not enter a worktree within 60s; inspect window $T" >&2
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  validate_spawn_worktree "$WT_SOURCE" "$T"
+  # Fail closed on a relaunch that landed anywhere but the recorded worktree:
+  # accepting it would record a second copy of the same task.
+  if [ -n "$SPAWN_RECORDED_WT" ]; then
+    WT_REAL=$(cd "$WT" 2>/dev/null && pwd -P) || WT_REAL=
+    [ "$WT_REAL" = "$SPAWN_RECORDED_WT" ] \
+      || spawn_relaunch_refuse "the relaunched worker settled in ${WT_REAL:-an uninspectable path} instead of its recorded worktree $SPAWN_RECORDED_WT"
+  fi
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
