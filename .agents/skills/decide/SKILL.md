@@ -104,7 +104,7 @@ When this arrives:
 
 Routing depends on the decision's origin:
 
-- **ask-user finding in an active no-mistakes validation**: feed the decision to the gate with `no-mistakes axi respond` exactly as section 7 describes; send the worker the decision key, action, and response command.
+- **ask-user finding in an active no-mistakes validation**: send the same worker one exact decision naming the decision key, step, action, affected finding IDs, and exact response command, exactly as section 7 describes; firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 - **captain-kind backlog hold**: use `fm-decision-hold.sh resolve` with the choice and the routed task IDs; section 7 owns the exact command.
 - **in-progress task requiring a choice**: steer the worker with `fm-send` carrying the decision.
 
@@ -137,5 +137,5 @@ Do not expose internal run IDs or file paths in captain-facing chat (section 9 t
   In the next supervision turn, tell the captain the page has expired and ask whether to open a new one.
 - **Input JSON is invalid**: `fm-decide-page.sh` exits with an error before starting the server.
   Fix the input and retry.
-- **jq/python3 not found**: `fm-decide-page.sh` reports the missing tool; install it and retry.
+- **python3 not found**: `fm-decide-page.sh` reports the missing tool; install it and retry.
 - **A decision key cannot be matched after routing**: report the unmatched key to the captain with its choice and note, and ask where to send it.

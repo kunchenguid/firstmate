@@ -53,6 +53,7 @@ Field constraints:
 The captain submits all choices in a single POST.
 Each choice is validated against the declared options for that decision key.
 Unknown keys and missing keys are rejected with a 400 response.
+A second submission after a valid one is rejected with 409, and a body over 512 KiB with 413.
 
 Per-choice response record written to `state/decide-<run-id>/responses/<key>.json`:
 
