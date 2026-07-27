@@ -403,16 +403,18 @@ test_browser_as_user_rule_reaches_ship_and_scout() {
       "$kind brief lost the interactive browser tool"
     assert_grep "Playwright/e2e harness for a scripted, repeatable run" "$brief" \
       "$kind brief lost the scripted repeatable reproduction path"
-    assert_grep "drive the system browser with Playwright instead of falling back to code reading" "$brief" \
-      "$kind brief lost the environment-agnostic system-browser fallback"
+    assert_grep "On such a task, if a bundled interactive browser cannot launch in this environment, drive the system browser with Playwright instead of falling back to code reading" "$brief" \
+      "$kind brief lost the environment-agnostic system-browser fallback, or stopped scoping it to a web task"
     assert_grep "adding it is part of that work" "$brief" \
       "$kind brief no longer allows a web task to add the e2e tooling it needs"
-    assert_grep "If you cannot successfully drive a browser by any available means, append" "$brief" \
-      "$kind brief lost the outcome-keyed cannot-drive-a-browser escalation"
+    assert_grep "On such a task, if you cannot successfully drive a browser by any available means, append" "$brief" \
+      "$kind brief lost the outcome-keyed cannot-drive-a-browser escalation, or stopped scoping it to a web task"
     assert_grep "never silently skip the browser check and report success" "$brief" \
       "$kind brief no longer makes an omitted browser check visible"
-    assert_grep "That reproduction becomes the regression test once a fix is authorized." "$brief" \
+    assert_grep "That reproduction becomes the regression test once a fix is authorized;" "$brief" \
       "$kind brief lost the reproduction-becomes-the-regression-test rule"
+    assert_grep "record it, and any e2e tooling it needed, where this task's deliverable lives - on the branch for a ship task, in the report for a scout." "$brief" \
+      "$kind brief no longer preserves the reproduction with the task's deliverable"
     assert_no_grep "do not introduce a harness for it" "$brief" \
       "$kind brief still forbids the e2e harness adoption the browser rule can require"
     assert_grep "the profile and cache directories a browser or its driver creates and manages for itself" "$brief" \
@@ -450,6 +452,19 @@ test_browser_as_user_rule_reaches_ship_and_scout() {
     || fail "ship and scout browser rules diverged; they must share one owner"
   [ "$ship_carve_out" = "$scout_carve_out" ] \
     || fail "ship and scout rule 2 browser carve-outs diverged; they must share one owner"
+  # The secondmate charter supervises rather than doing web work and has no rule
+  # 3 at all, so its exclusion from both shared blocks is pinned like the
+  # ship/scout inclusion is.
+  local charter
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='browser rule exclusion' \
+    FM_SECONDMATE_SCOPE='supervision only' \
+    "$ROOT/bin/fm-brief.sh" brief-browser-secondmate --secondmate --no-projects >/dev/null 2>&1
+  charter="$home/data/brief-browser-secondmate/brief.md"
+  assert_present "$charter" "secondmate charter was not scaffolded"
+  assert_no_grep "driving the browser AS A REAL USER" "$charter" \
+    "secondmate charter picked up the ship/scout browser rule it deliberately excludes"
+  assert_no_grep "the profile and cache directories a browser or its driver creates and manages for itself" "$charter" \
+    "secondmate charter picked up the ship/scout rule 2 browser carve-out it deliberately excludes"
   pass "fm-brief.sh: ship and scout share one browser-as-a-user rule"
 }
 
