@@ -28,14 +28,19 @@
 # one project into the in-flight refresh, and bounds the whole home to
 # FM_GRAPHIFY_MAX_CONCURRENT_REBUILDS generations at once. The optional
 # invalidate token additionally records the graph stale even when nothing moved,
-# which is what a remote merge needs while the local clone still lags.
+# which is what a remote merge needs while the local clone still lags; it is
+# recorded in the project's pending request, so coalescing cannot downgrade it.
 # refresh applies that policy once and synchronously: it builds a missing graph,
-# rebuilds only when the revision or graph configuration actually changed, is a
-# cheap no-op for a fresh unchanged project, never installs Graphify, never fails
-# its caller, and keeps the last valid graph byte-for-byte on failure.
-# Every lock and scheduling marker records its holder, and one whose holder
-# process is gone is recovered by an atomic rename, so a hard kill or reboot can
-# neither wedge a project nor let two holders run at once.
+# rebuilds only when the revision or graph configuration actually changed, never
+# installs Graphify, never fails its caller, and keeps the last valid graph
+# byte-for-byte on failure. A generation already recorded fresh for the current
+# revision under the current pin and limits settles without re-reading source, so
+# the unchanged case costs one Git call; status, query, and intake keep the full
+# content comparison.
+# Every lock and scheduling marker records its holder. One whose holder process
+# is gone is broken inside an exclusive recovery region that re-proves it
+# abandoned, so a hard kill or reboot can neither wedge a project nor let two
+# holders run at once.
 # query and intake refuse stale graphs; intake is a bounded, provenance-rich
 # worker-context rendering and returns success without output when unavailable.
 # Limits and the private state format are owned here. Operators should use the
@@ -74,13 +79,14 @@ GRAPH_DIR=''
 GRAPH_FILE=''
 STATE_FILE=''
 STAGE_DIR=''
+REBUILD_SLOT=''
 HELD_MARKERS=()
 # Derived from the process id rather than mktemp, so a helper that runs inside a
 # command substitution resolves the same directory as its parent shell instead
 # of creating one in a fork that no exit handler would ever clean up.
 SCRATCH_DIR="$GRAPH_HOME/tmp.$$"
 
-usage() { sed -n '2,42p' "$0" | sed 's/^# \?//'; }
+usage() { sed -n '2,47p' "$0" | sed 's/^# \?//'; }
 die() { printf 'fm-graphify: %s\n' "$*" >&2; exit 1; }
 
 # Diagnostics carry third-party output (tracebacks, quotes, backslashes,
@@ -103,13 +109,24 @@ release_marker() {  # <marker-dir>
   rmdir -- "$1" 2>/dev/null || true
 }
 
+# Releasing a marker advertises that this process is finished with the project,
+# so every trace of it must already be gone before any marker is dropped.
+release_held_marker() {  # <marker-dir>
+  local target=$1 kept=() marker
+  for marker in "${HELD_MARKERS[@]+"${HELD_MARKERS[@]}"}"; do
+    [ "$marker" = "$target" ] || kept+=("$marker")
+  done
+  HELD_MARKERS=("${kept[@]+"${kept[@]}"}")
+  release_marker "$target"
+}
+
 on_exit() {
   local marker
   [ -z "$STAGE_DIR" ] || rm -rf -- "$STAGE_DIR"
+  rm -rf -- "$SCRATCH_DIR"
   for marker in "${HELD_MARKERS[@]+"${HELD_MARKERS[@]}"}"; do
     release_marker "$marker"
   done
-  rm -rf -- "$SCRATCH_DIR"
   return 0
 }
 trap on_exit EXIT
@@ -179,12 +196,12 @@ install() {
 }
 
 write_state() {
-  local state=$1 diagnostic=${2:-} fingerprint=${3:-}
+  local state=$1 diagnostic=${2:-} fingerprint=${3:-} revision=${4:-}
   mkdir -p "$GRAPH_DIR"
-  "$PYTHON" - "$STATE_FILE" "$state" "$diagnostic" "$fingerprint" "$GRAPHIFY_VERSION" "$CONFIG_VERSION" <<'PY'
+  "$PYTHON" - "$STATE_FILE" "$state" "$diagnostic" "$fingerprint" "$GRAPHIFY_VERSION" "$CONFIG_VERSION" "$revision" <<'PY'
 import json, os, sys, tempfile, time
-p, state, diagnostic, fingerprint, version, config = sys.argv[1:]
-value={"schema":1,"state":state,"diagnostic":diagnostic,"fingerprint":fingerprint,"graphify_version":version,"config":config,"updated_at":int(time.time())}
+p, state, diagnostic, fingerprint, version, config, revision = sys.argv[1:]
+value={"schema":1,"state":state,"diagnostic":diagnostic,"fingerprint":fingerprint,"graphify_version":version,"config":config,"revision":revision,"updated_at":int(time.time())}
 fd,tmp=tempfile.mkstemp(prefix='.state.', dir=os.path.dirname(p))
 with os.fdopen(fd,'w',encoding='utf-8') as f:
     json.dump(value,f,sort_keys=True,separators=(',',':')); f.flush(); os.fsync(f.fileno())
@@ -266,22 +283,40 @@ marker_state() {  # <marker-dir>
   if [ "$(dir_age_seconds "$marker")" -ge "$BUILD_TIMEOUT" ]; then printf 'abandoned\n'; else printf 'live\n'; fi
 }
 
-# Recovery renames the abandoned marker to a private name first, so only the
-# renaming process can proceed, and the claim is confirmed by reading back the
-# recorded holder: a racing recovery that moved this marker aside is detected
-# instead of producing two holders that both believe they own it.
-claim_marker() {  # <marker-dir>
-  local marker=$1 aside
-  if ! mkdir "$marker" 2>/dev/null; then
-    [ "$(marker_state "$marker")" = abandoned ] || return 1
-    aside="$marker.abandoned.$$"
-    mv -- "$marker" "$aside" 2>/dev/null || return 1
-    rm -rf -- "$aside"
-    mkdir "$marker" 2>/dev/null || return 1
+take_marker() {  # <marker-dir>; the uncontended atomic claim
+  mkdir "$1" 2>/dev/null || return 1
+  printf '%s\n' "$$" > "$1/pid"
+  HELD_MARKERS+=("$1")
+}
+
+# Breaking an abandoned marker is check-then-act, so it runs inside its own
+# mkdir-exclusive recovery region and re-proves abandonment there. A process that
+# decided to recover before someone else already did then observes the new live
+# holder and backs off, so recovery cannot produce two holders. The region only
+# spans a few filesystem calls, so one older than a whole build window is itself
+# provably dead and is broken by age.
+recover_marker() {  # <marker-dir>
+  local marker=$1 claimed=1
+  local recover="$marker.recovery"
+  if ! mkdir "$recover" 2>/dev/null; then
+    [ "$(dir_age_seconds "$recover")" -ge "$BUILD_TIMEOUT" ] || return 1
+    rm -rf -- "$recover"
+    mkdir "$recover" 2>/dev/null || return 1
   fi
-  printf '%s\n' "$$" > "$marker/pid"
-  [ "$(head -n 1 "$marker/pid" 2>/dev/null || true)" = "$$" ] || return 1
-  HELD_MARKERS+=("$marker")
+  if [ "$(marker_state "$marker")" = abandoned ]; then
+    rm -rf -- "$marker"
+    if take_marker "$marker"; then claimed=0; fi
+  fi
+  rmdir -- "$recover" 2>/dev/null || true
+  return "$claimed"
+}
+
+claim_marker() {  # <marker-dir> [recover-abandoned 0|1, default 1]
+  local marker=$1 recover=${2:-1}
+  if take_marker "$marker"; then return 0; fi
+  [ "$recover" = 1 ] || return 1
+  [ "$(marker_state "$marker")" = abandoned ] || return 1
+  recover_marker "$marker"
 }
 
 build_lock_state() { marker_state "$GRAPH_DIR/.build.lock"; }
@@ -290,18 +325,28 @@ acquire_build_lock() { claim_marker "$GRAPH_DIR/.build.lock"; }
 
 # One home-wide pool bounds how many project generations run at once, so a fleet
 # sync that advances many projects cannot turn into an unbounded rebuild storm.
+# Each round first probes every slot with a bare mkdir, which forks nothing, and
+# only proves a slot abandoned once all of them are occupied. Waiting then backs
+# off, so a worker parked behind a full pool costs a handful of syscalls a minute
+# instead of tens of forks a second.
 acquire_rebuild_slot() {
-  local waited=0 n
+  local waited=0 delay=1 recover n
   mkdir -p "$SCHEDULER_DIR"
   while :; do
-    n=1
-    while [ "$n" -le "$MAX_CONCURRENT_REBUILDS" ]; do
-      if claim_marker "$SCHEDULER_DIR/slot.$n"; then return 0; fi
-      n=$((n + 1))
+    for recover in 0 1; do
+      n=1
+      while [ "$n" -le "$MAX_CONCURRENT_REBUILDS" ]; do
+        if claim_marker "$SCHEDULER_DIR/slot.$n" "$recover"; then
+          REBUILD_SLOT="$SCHEDULER_DIR/slot.$n"
+          return 0
+        fi
+        n=$((n + 1))
+      done
     done
     [ "$waited" -lt "$SCHEDULE_WAIT" ] || return 1
-    sleep 1
-    waited=$((waited + 1))
+    sleep "$delay"
+    waited=$((waited + delay))
+    [ "$delay" -ge 30 ] || delay=$((delay * 2))
   done
 }
 
@@ -350,12 +395,13 @@ rebuild() {
   graphify_available || die "Graphify $GRAPHIFY_DIST is unavailable; request bootstrap install consent"
   mkdir -p "$GRAPH_DIR"
   acquire_build_lock || { json_error building "a rebuild is already running"; return 0; }
-  local fpf afterf fp out published
+  local fpf afterf fp rev out published
   ensure_scratch_dir
   fpf="$SCRATCH_DIR/fingerprint.json"
   fingerprint_to "$fpf" || { write_state failed "cannot enumerate source scope"; die "cannot enumerate source scope"; }
   fp=$(json_file_field "$fpf" fingerprint)
-  write_state building "generation is building" "$fp"
+  rev=$(json_file_field "$fpf" revision)
+  write_state building "generation is building" "$fp" "$rev"
   STAGE_DIR=$(mktemp -d "$GRAPH_DIR/.generation.XXXXXX")
   if ! out=$(bounded_run "$BUILD_TIMEOUT" "$PYTHON" - "$PROJECT_ROOT" "$STAGE_DIR" "$fpf" "$MAX_GRAPH_BYTES" "$GRAPHIFY_VERSION" <<'PY' 2>&1
 import hashlib,json,os,shutil,sys
@@ -387,13 +433,13 @@ out.write_bytes(payload)
 (stage/'result.json').write_text(json.dumps({'nodes':graph.number_of_nodes(),'edges':graph.number_of_edges(),'sha256':hashlib.sha256(payload).hexdigest()},separators=(',',':')),encoding='utf-8')
 PY
 ); then
-    write_state failed "${out:0:1000}" "$fp"
+    write_state failed "${out:0:1000}" "$fp" "$rev"
     die "rebuild failed: ${out:0:1000}"
   fi
   afterf="$SCRATCH_DIR/fingerprint.after.json"
   fingerprint_to "$afterf" || { write_state failed "cannot re-enumerate source scope after generation"; die "source scope changed during generation"; }
   [ "$(json_file_field "$afterf" fingerprint)" = "$fp" ] || {
-    write_state stale "source scope changed during generation" "$(json_file_field "$afterf" fingerprint)"
+    write_state stale "source scope changed during generation" "$(json_file_field "$afterf" fingerprint)" "$(json_file_field "$afterf" revision)"
     die "source scope changed during generation; prior graph was preserved"
   }
   # Publication is the last step that can fail, so it records a failed outcome
@@ -407,11 +453,34 @@ os.replace(stage,canonical)
 print(json.dumps({'state':'fresh','revision':fp['revision'],'fingerprint':fp['fingerprint'],**result},separators=(',',':')))
 PY
   ); then
-    write_state failed "publication failed: ${published:0:1000}" "$fp"
+    write_state failed "publication failed: ${published:0:1000}" "$fp" "$rev"
     die "publication failed: ${published:0:1000}"
   fi
-  write_state fresh "" "$fp"
+  write_state fresh "" "$fp" "$rev"
   printf '%s\n' "$published"
+}
+
+# Echoes the recorded fingerprint when a published generation is recorded fresh
+# for exactly this Git revision under this pin and these limits, and fails
+# otherwise. Deliberately does not re-read source contents.
+recorded_generation_for_head() {
+  local head recorded
+  [ -f "$STATE_FILE" ] || return 1
+  [ -f "$GRAPH_FILE" ] && [ ! -L "$GRAPH_FILE" ] || return 1
+  head=$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null) || return 1
+  [ -n "$head" ] || return 1
+  recorded=$("$PYTHON" - "$STATE_FILE" "$head" "$CONFIG_VERSION" "$GRAPHIFY_VERSION" <<'PY' 2>/dev/null
+import json,sys
+p,head,config,version=sys.argv[1:]
+try: s=json.load(open(p,encoding='utf-8'))
+except Exception: raise SystemExit(1)
+if s.get('state')!='fresh' or not s.get('revision') or s.get('revision')!=head: raise SystemExit(1)
+if s.get('config')!=config or s.get('graphify_version')!=version: raise SystemExit(1)
+print(s.get('fingerprint',''))
+PY
+) || return 1
+  [ -n "$recorded" ] || return 1
+  printf '%s' "$recorded"
 }
 
 mark_stale() {  # <reason> [already-measured fingerprint]
@@ -435,9 +504,17 @@ mark_stale() {  # <reason> [already-measured fingerprint]
 # fails. With the invalidate token an unchanged graph is additionally recorded
 # stale, which is what a remote merge needs while the local clone still lags.
 refresh() {
-  local reason=$1 invalidate=${2:-0} st state current persisted
+  local reason=$1 invalidate=${2:-0} st state current persisted recorded
   graphify_available || return 0
   if [ "$(build_lock_state)" = live ]; then return 0; fi
+  # The lifecycle owner runs on every guarded sync of every project, so the
+  # unchanged case must not cost a full-tree content hash. The recorded revision
+  # plus the pin and limit identity settles it with one git call. status, query,
+  # and intake keep the full content comparison and are untouched by this.
+  if recorded=$(recorded_generation_for_head); then
+    if [ "$invalidate" = 1 ]; then mark_stale "$reason" "$recorded" >/dev/null 2>&1 || true; fi
+    return 0
+  fi
   st=$(status_json 0) || return 0
   state=$(json_text_field "$st" state) || return 0
   current=$(json_text_field "$st" fingerprint)
@@ -472,6 +549,11 @@ schedule() {
   local reason=$1 invalidate=${2:-0}
   graphify_available || return 0
   mkdir -p "$GRAPH_DIR"
+  # An invalidating event records its intent in the project's own pending state,
+  # never only in the spawned worker's arguments. Creating the marker is
+  # idempotent, so a repeat that is coalesced into a running worker still raises
+  # the pending request to invalidate instead of being silently downgraded.
+  if [ "$invalidate" = 1 ]; then printf '%s\n' "${reason:0:1000}" > "$GRAPH_DIR/.refresh.invalidate"; fi
   : > "$GRAPH_DIR/.refresh.request"
   ( "$SELF" refresh-worker "$PROJECT_NAME" "$reason" "$invalidate" >/dev/null 2>&1 & ) || true
   return 0
@@ -479,19 +561,42 @@ schedule() {
 
 # Exactly one worker per project runs at a time; a repeated event for a project
 # whose worker is still pending is coalesced into it, because the worker re-reads
-# the request marker after each pass and re-measures the project from scratch.
+# the pending request before each pass and re-measures the project from scratch.
 refresh_worker() {
-  local reason=$1 invalidate=${2:-0}
+  local reason=$1 invalidate=${2:-0} request flag pass_reason pass_invalidate
   graphify_available || return 0
   mkdir -p "$GRAPH_DIR"
+  request="$GRAPH_DIR/.refresh.request"
+  flag="$GRAPH_DIR/.refresh.invalidate"
   claim_marker "$GRAPH_DIR/.refresh.worker" || return 0
   # The request is deliberately left in place when no slot frees up in time, so
   # the next lifecycle event still finds outstanding work rather than losing it.
   acquire_rebuild_slot || return 0
-  while [ -f "$GRAPH_DIR/.refresh.request" ]; do
-    rm -f -- "$GRAPH_DIR/.refresh.request"
-    refresh "$reason" "$invalidate"
+  while [ -f "$request" ]; do
+    rm -f -- "$request"
+    pass_reason=$reason
+    pass_invalidate=$invalidate
+    invalidate=0
+    if [ -f "$flag" ]; then
+      pass_invalidate=1
+      pass_reason=$(head -n 1 "$flag" 2>/dev/null || true)
+      [ -n "$pass_reason" ] || pass_reason=$reason
+      rm -f -- "$flag"
+    fi
+    refresh "$pass_reason" "$pass_invalidate"
   done
+  rm -rf -- "$SCRATCH_DIR"
+  if [ -n "$REBUILD_SLOT" ]; then
+    release_held_marker "$REBUILD_SLOT"
+    REBUILD_SLOT=''
+  fi
+  release_held_marker "$GRAPH_DIR/.refresh.worker"
+  # An event that arrived between the loop test and the release above would find
+  # a live worker and stand down, so hand any such request to a fresh worker
+  # rather than leaving it for the next lifecycle event.
+  if [ -f "$request" ]; then
+    ( "$SELF" refresh-worker "$PROJECT_NAME" "$reason" 0 >/dev/null 2>&1 & ) || true
+  fi
   return 0
 }
 

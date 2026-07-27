@@ -38,6 +38,14 @@ graph_sha() {
   sha256sum "$GRAPH_JSON" | awk '{print $1}'
 }
 
+# Moves the fixture's HEAD the way a guarded merge or fast-forward would.
+commit_project() {
+  printf '%s\n' "$1" >> "$PROJECT/app.py"
+  git -C "$PROJECT" add app.py
+  git -C "$PROJECT" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "fixture revision"
+}
+
 # One dead pid: the child has already been reaped, so kill -0 provably fails.
 dead_pid() {
   local p
@@ -144,14 +152,14 @@ test_build_lock_liveness() {
   assert_not_contains "$status" '"state":"building"' "an abandoned lock kept reporting building"
   run_graph rebuild demo >/dev/null
   assert_absent "$LOCK_DIR" "rebuild did not release the lock it broke and retook"
-  [ -z "$(find "$GRAPH_DIR" -maxdepth 1 -name '.build.lock.abandoned.*' -print -quit)" ] \
-    || fail "abandoned-lock recovery left its renamed marker behind"
+  assert_absent "$LOCK_DIR.recovery" "abandoned-lock recovery left its exclusion region behind"
   assert_contains "$(run_graph status demo)" '"state": "fresh"' "rebuild after a broken lock did not publish"
   pass "fm-graphify: live locks serialize while abandoned locks are recovered"
 }
 
 test_lifecycle_refresh_owner() {
   local before after
+  commit_project 'def committed(): pass' >/dev/null
   run_graph rebuild demo >/dev/null
   before=$(graph_sha)
   # No revision or configuration change: a fresh project stays a cheap no-op.
@@ -165,16 +173,57 @@ test_lifecycle_refresh_owner() {
     || fail "refresh must never fail its lifecycle caller"
   [ "$before" = "$(graph_sha)" ] || fail "invalidating refresh rebuilt an unchanged project"
   assert_contains "$(run_graph status demo)" '"state": "stale"' "refresh did not record the lifecycle event"
-  # A real source change is the only trigger for an eager rebuild.
-  printf '%s\n' 'def refreshed(): pass' >> "$PROJECT/app.py"
+  # A real project revision is the only trigger for an eager rebuild.
+  commit_project 'def refreshed(): pass' >/dev/null
   run_graph refresh demo 'project refreshed aaa..bbb' >/dev/null \
     || fail "refresh must never fail its lifecycle caller"
   after=$(graph_sha)
-  [ "$before" != "$after" ] || fail "refresh did not rebuild after the source changed"
+  [ "$before" != "$after" ] || fail "refresh did not rebuild after the revision moved"
   assert_contains "$(run_graph status demo)" '"state": "fresh"' "eager refresh did not publish a fresh graph"
   assert_contains "$(run_graph intake demo 'where is refreshed?')" 'Provenance:' \
     "refreshed graph was not available to bounded intake"
   pass "fm-graphify: one lifecycle owner rebuilds only on real change and never fails its caller"
+}
+
+# The lifecycle owner runs for every project on every guarded sync, so settling
+# an unchanged project must not re-read the source. What status and intake report
+# must be unaffected by that shortcut.
+test_unchanged_refresh_does_not_reread_source() {
+  local before
+  commit_project 'def settled(): pass' >/dev/null
+  run_graph rebuild demo >/dev/null
+  before=$(graph_sha)
+  printf '%s\n' 'def uncommitted(): pass' >> "$PROJECT/app.py"
+  run_graph refresh demo 'project already current at aaa' >/dev/null \
+    || fail "refresh must never fail its lifecycle caller"
+  [ "$before" = "$(graph_sha)" ] || fail "refresh re-read source for an unchanged revision"
+  assert_contains "$(run_graph status demo)" '"state": "stale"' \
+    "the revision shortcut weakened what status reports"
+  [ -z "$(run_graph intake demo 'where is settled?')" ] \
+    || fail "the revision shortcut let intake offer a graph status calls stale"
+  commit_project 'def settled_again(): pass' >/dev/null
+  run_graph rebuild demo >/dev/null
+  pass "fm-graphify: settling an unchanged revision skips the content hash without weakening status"
+}
+
+# A repeat that is coalesced into a running worker leaves its intent in the
+# project's pending request, so the worker must honour an invalidation it was not
+# itself started for.
+test_coalesced_invalidate_survives() {
+  local before
+  commit_project 'def coalesced(): pass' >/dev/null
+  run_graph rebuild demo >/dev/null
+  before=$(graph_sha)
+  printf '%s\n' 'project PR merged: coalesced fixture' > "$GRAPH_DIR/.refresh.invalidate"
+  : > "$GRAPH_DIR/.refresh.request"
+  run_graph refresh-worker demo 'project refreshed aaa..bbb' \
+    || fail "the worker must not fail its caller"
+  [ "$before" = "$(graph_sha)" ] || fail "a coalesced invalidate rebuilt an unchanged project"
+  assert_contains "$(run_graph status demo)" '"state": "stale"' \
+    "a coalesced invalidate was downgraded to the running worker's own request"
+  assert_absent "$GRAPH_DIR/.refresh.invalidate" "the worker did not consume the pending invalidation"
+  run_graph rebuild demo >/dev/null
+  pass "fm-graphify: coalescing keeps the strongest pending request"
 }
 
 # The worker body is driven directly so coalescing and the home-wide rebuild cap
@@ -255,6 +304,8 @@ test_real_e2e_and_scope
 test_interrupted_generation_is_never_fresh
 test_build_lock_liveness
 test_lifecycle_refresh_owner
+test_unchanged_refresh_does_not_reread_source
+test_coalesced_invalidate_survives
 test_scheduling_owner_coalesces_and_bounds
 test_schedule_returns_without_waiting
 test_cleanup

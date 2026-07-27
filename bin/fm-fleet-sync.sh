@@ -387,7 +387,8 @@ sync_project() {
       echo "$label: already current"
     fi
     # An unchanged clone still needs a first managed graph. The scheduling owner
-    # builds one only when it is missing and is a cheap no-op once it is fresh.
+    # builds one only when it is missing, and once a generation is recorded for
+    # this revision it settles on the recorded revision without re-reading source.
     "$FM_ROOT/bin/fm-graphify.sh" schedule "$label" "project already current at $local_rev" >/dev/null 2>&1 || true
     return 0
   fi
