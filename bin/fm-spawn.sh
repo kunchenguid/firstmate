@@ -445,7 +445,7 @@ fi
 # (busy signature, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
   local harness=$1 kind=${2:-ship}
-  # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
+  # shellcheck disable=SC2016  # single quotes are deliberate: $(...) expands in the crewmate pane, not here
   case "$harness" in
     # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
     # predicted-next-prompt ghost text, which renders as dim/faint text inside an
@@ -467,10 +467,12 @@ launch_template() {
     cursor)
       # --approve-mcps keeps a project-configured MCP server's trust prompt from
       # wedging an unattended worker; --force already grants command execution.
+      # Brief delivery uses the same operational-input encoder as the other
+      # verified harnesses so Cursor receives a typed launch-brief marker.
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'cursor-agent --force --approve-mcps --workspace __WORKSPACE__ __MODELFLAG__"$(cat __BRIEF__)"'
+        printf '%s' 'cursor-agent --force --approve-mcps --workspace __WORKSPACE__ __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'cursor-agent --force --approve-mcps --plugin-dir __CURSORPLUGIN__ --workspace __WORKSPACE__ __MODELFLAG__"$(cat __BRIEF__)"'
+        printf '%s' 'cursor-agent --force --approve-mcps --plugin-dir __CURSORPLUGIN__ --workspace __WORKSPACE__ __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;

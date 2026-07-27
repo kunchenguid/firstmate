@@ -343,6 +343,8 @@ test_cursor_threads_model_and_omits_effort_axis() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "cursor-agent --force --approve-mcps --plugin-dir '$HOME_DIR/state/$id.cursor-plugin' --workspace '$WT_DIR' --model 'gpt-5.6-sol-high'" \
     "cursor launch did not thread force, approve-mcps, plugin, workspace, and model flags"
+  assert_contains "$launch" "\"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\"" \
+    "cursor launch must encode the brief through the operational-input protocol"
   assert_not_contains "$launch" "--effort" "cursor launch must not invent a standalone effort flag"
   assert_not_contains "$launch" "--reasoning-effort" "cursor launch must not pass another harness's reasoning flag"
   assert_grep '"hooks":"hooks/hooks.json"' "$HOME_DIR/state/$id.cursor-plugin/.cursor-plugin/plugin.json" \
