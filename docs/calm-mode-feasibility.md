@@ -314,3 +314,27 @@ ok - artifact publication failures emit one actionable Markdown fallback warning
 The corrected Bearings projection renders the canonical Markdown inside `article[aria-label="Canonical Bearings report"]`, while the JSON snapshot supplies only its schema and observation timestamp.
 The focused presenter run verifies the canonical title and four headings, candidate and recorded PR content, the report pointer, gate ownership, and exclusion of snapshot-only endpoint reclassification.
 It also verifies the local-only content policy, skip link and main landmarks, keyboard focus and reduced-motion styles, no scripts or refresh metadata, no network access or unsolicited browser opening, and one actionable warning across renderer and artifact-publication failures.
+
+The current static-page browser pass used `chrome-devtools-axi` against the corrected direct `file://` Bearings page at a requested 375 by 812 narrow viewport, keyboard-only focus traversal, and CSS zoom 2.
+The browser bridge enforced a 500-pixel minimum inner width; at that width and zoom 2, the page reported zero document overflow, one H1, one canonical article, four section headings, one main-content link, no script elements, no refresh metadata, and only the single local file request.
+Keyboard traversal focused the visible skip link first and the canonical HTTPS PR link second, with a solid focus outline on both.
+
+```text
+$ chrome-devtools-axi eval '() => ({title:document.title,canonicalArticle:!!document.querySelector("article[aria-label=\"Canonical Bearings report\"]"),observed:document.querySelector("time")?.dateTime,headings:[...document.querySelectorAll("h1,h2")].map(node=>node.textContent),overflowPixels:document.documentElement.scrollWidth-document.documentElement.clientWidth,scripts:document.scripts.length,refresh:!!document.querySelector("meta[http-equiv=\"refresh\"]")})'
+{"title":"Bearings - Monday 2026-07-27","canonicalArticle":true,"observed":"2026-07-27T04:00:00Z","headings":["Bearings - Monday 2026-07-27","Captain's Call","Recently Landed","Underway","Charted Next"],"overflowPixels":0,"scripts":0,"refresh":false}
+
+$ chrome-devtools-axi press Tab
+$ chrome-devtools-axi eval '() => ({tag:document.activeElement?.tagName,text:document.activeElement?.textContent?.trim(),href:document.activeElement?.getAttribute("href"),focusOutline:getComputedStyle(document.activeElement).outlineStyle,skipTop:getComputedStyle(document.querySelector(".skip-link")).top})'
+{"tag":"A","text":"Skip to report","href":"#content","focusOutline":"solid","skipTop":"16px"}
+
+$ chrome-devtools-axi press Tab
+$ chrome-devtools-axi eval '() => ({tag:document.activeElement?.tagName,text:document.activeElement?.textContent?.trim(),href:document.activeElement?.href,target:document.activeElement?.target,rel:document.activeElement?.rel,focusOutline:getComputedStyle(document.activeElement).outlineStyle})'
+{"tag":"A","text":"review and merge (opens in new tab)","href":"https://example.com/pulls/42","target":"_blank","rel":"noopener noreferrer","focusOutline":"solid"}
+
+$ chrome-devtools-axi resize 375 812
+$ chrome-devtools-axi eval '() => { document.body.style.zoom="2"; return {requestedViewport:"375x812",innerViewport:`${innerWidth}x${innerHeight}`,h1:document.querySelectorAll("h1").length,canonicalArticle:document.querySelectorAll("article[aria-label=\"Canonical Bearings report\"]").length,headings:document.querySelectorAll("h2").length,links:document.querySelectorAll("main a").length,overflowPixels:document.documentElement.scrollWidth-document.documentElement.clientWidth,zoom:getComputedStyle(document.body).zoom,refresh:!!document.querySelector("meta[http-equiv=\"refresh\"]"),scripts:document.scripts.length}; }'
+{"requestedViewport":"375x812","innerViewport":"500x812","h1":1,"canonicalArticle":1,"headings":4,"links":1,"overflowPixels":0,"zoom":"2","refresh":false,"scripts":0}
+
+$ chrome-devtools-axi network
+GET file:///.../.lavish/bearings-20260727T040500Z.html [200]
+```

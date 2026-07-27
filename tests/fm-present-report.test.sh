@@ -307,6 +307,7 @@ test_bearings_page_renders_authoritative_four_section_report() {
   assert_contains "$body" '<time datetime="2026-07-26T14:19:00Z">' "Bearings source observation timestamp"
   assert_contains "$body" '<a href="https://example.com/pulls/42"' "canonical candidate PR link"
   assert_contains "$body" '<code>data/worker-alpha/report.md</code>' "canonical report pointer"
+  assert_contains "$body" 'margin:2rem auto;overflow-wrap:anywhere}' "canonical report narrow-view wrapping"
   assert_contains "$body" 'Run <code>/bearings</code> again to refresh.' "Bearings honest refresh instruction"
   assert_contains "$body" 'fm-bearings.v1' "Bearings source schema disclosure"
   assert_not_contains "$body" 'Snapshot-only endpoint classification' "snapshot data must not override canonical section classification"

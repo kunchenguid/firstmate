@@ -308,7 +308,7 @@ h3{font-size:1rem;margin:2rem 0 .5rem}
 p,ul,ol,pre{margin:0 0 1.2rem}a{color:var(--accent)}code{font-family:"SFMono-Regular",Consolas,monospace;background:var(--code);padding:.1em .3em;border-radius:4px;font-size:.9em}
 pre{overflow:auto;background:var(--code);padding:1rem;border:1px solid var(--line);border-radius:8px}pre code{padding:0}
 .report-image{display:block;max-width:100%;height:auto;margin:1.5rem auto;border-radius:8px}
-.report{background:var(--surface);border:1px solid var(--line);padding:clamp(1.25rem,4vw,3rem);margin:2rem auto}
+.report{background:var(--surface);border:1px solid var(--line);padding:clamp(1.25rem,4vw,3rem);margin:2rem auto;overflow-wrap:anywhere}
 section{border-top:1px solid var(--line);padding-top:.1rem}.records{list-style:none;padding:0;margin:0}.record{padding:1rem 0;border-bottom:1px solid var(--line);display:grid;grid-template-columns:minmax(9rem,14rem) 1fr;gap:.35rem 1.25rem}.record strong{overflow-wrap:anywhere}.record p{margin:0;color:var(--muted)}
 .captains-call .record{background:var(--call);color:var(--call-ink);margin-inline:-.75rem;padding-inline:.75rem}.empty{color:var(--muted)}
 details{border-top:1px solid var(--line);padding:1rem 0}summary{cursor:pointer;font-weight:700}footer{padding:1rem 0 4rem;color:var(--muted);font-size:.9rem;overflow-wrap:anywhere}
