@@ -2,13 +2,18 @@
 # Behavior tests for bin/fm-brief.sh.
 #
 # Regression coverage for the heredoc-in-command-substitution parse bug (issue
-# #166): each ship-mode branch builds its Definition-of-done text with
-# `VAR=$(cat <<EOF ... EOF)`. Bash's lexer tracks quote state through the
-# heredoc body while it scans for the matching `)` of the command
-# substitution, so a single unescaped apostrophe anywhere in that body breaks
-# parsing of the *entire rest of the script* - `bash -n` fails, not just the
-# generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
-# is unaffected, so the secondmate charter block does not need this guard.
+# #166, and its bash 3.2 recurrence): a heredoc nested in `VAR=$(cat <<EOF`
+# forces bash's lexer to track quote state through the heredoc body while it
+# scans for the matching `)`, so a single unescaped apostrophe anywhere in
+# that body breaks parsing of the *entire rest of the script* - `bash -n`
+# fails, not just the generated brief. Modern bash only trips on a truly
+# unbalanced body, but bash 3.2 (the macOS system /bin/bash, and what
+# `/usr/bin/env bash` resolves to on a stock mac) has a naive $(...)-scanner
+# that broke on the ship-mode DOD wording even though modern bash accepted
+# it. fm-brief.sh therefore assigns block texts with the `read -r -d ''`
+# heredoc idiom instead, and this suite guards syntax under both the dev bash
+# and the system /bin/bash. A plain `cat > file <<EOF ... EOF` (not wrapped
+# in `$(...)`) is unaffected, so the secondmate charter block needs no guard.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -26,7 +31,26 @@ test_script_parses() {
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
   expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
   [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
-  pass "fm-brief.sh: bash -n succeeds"
+  # On macOS the system /bin/bash is 3.2 and is what `/usr/bin/env bash`
+  # resolves to on a stock host, so its stricter $(...) heredoc scanner must
+  # also accept the script or every ship scaffold fails there.
+  out=$(/bin/bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
+  expect_code 0 "$rc" "/bin/bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
+  pass "fm-brief.sh: bash -n succeeds under the dev bash and the system /bin/bash"
+}
+
+# The bash 3.2 recurrence class is any `VAR=$(cat <<EOF` whose heredoc body
+# grows an apostrophe, so guard every tracked shell script, not just the file
+# the bug was found in. On macOS runners /bin/bash is 3.2 and this is the real
+# regression gate; on Linux runners /bin/bash is modern and the sweep is a
+# cheap plain syntax check.
+test_bin_scripts_parse_under_system_bash() {
+  local f out rc
+  for f in "$ROOT"/bin/*.sh "$ROOT"/bin/backends/*.sh; do
+    out=$(/bin/bash -n "$f" 2>&1); rc=$?
+    expect_code 0 "$rc" "/bin/bash -n ${f#"$ROOT"/} must parse cleanly (got: $out)"
+  done
+  pass "fm-brief.sh: every bin script parses under the system /bin/bash"
 }
 
 test_help_includes_entire_header() {
@@ -64,7 +88,19 @@ test_ship_modes_generate_clean_briefs() {
     expect_code 0 "$status" "fm-brief.sh $id $proj should exit 0"
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
+    [ -s "$brief" ] || fail "$id: scaffolded brief is empty"
     assert_grep "# Definition of done" "$brief" "$id: brief missing Definition of done section"
+    case "$proj" in
+      direct-proj)
+        assert_grep "This project ships **direct-PR**" "$brief" \
+          "$id: brief missing the direct-PR definition-of-done marker" ;;
+      local-proj)
+        assert_grep "This project ships **local-only**" "$brief" \
+          "$id: brief missing the local-only definition-of-done marker" ;;
+      *)
+        assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+          "$id: brief missing the no-mistakes definition-of-done marker" ;;
+    esac
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
@@ -383,6 +419,7 @@ test_scout_and_secondmate_scaffold() {
 }
 
 test_script_parses
+test_bin_scripts_parse_under_system_bash
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
