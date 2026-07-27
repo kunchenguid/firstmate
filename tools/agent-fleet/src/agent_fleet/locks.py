@@ -454,8 +454,24 @@ def provider_selection_refresh_lock(
     *,
     timeout: float = 10.0,
 ) -> DirectoryLock:
-    return DirectoryLock(
-        state_dir / "locks" / f"provider-enrollment-{provider}.lock",
+    path = state_dir / "locks" / f"provider-enrollment-{provider}.lock"
+
+    class SelectionRefreshLock(DirectoryLock):
+        def acquire(self) -> None:
+            while True:
+                try:
+                    super().acquire()
+                    return
+                except TimeoutError:
+                    owner = self._owner()
+                    if owner is not None and owner.get("purpose") == "selection-refresh":
+                        continue
+                    if not self.path.exists():
+                        continue
+                    raise
+
+    return SelectionRefreshLock(
+        path,
         stale_seconds=stale_seconds,
         timeout=timeout,
         purpose="selection-refresh",

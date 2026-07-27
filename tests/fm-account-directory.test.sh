@@ -733,12 +733,13 @@ test_direct_recovery_tracks_retained_replacement_endpoint() {
   : > "$TMP_ROOT/agent-fleet.log"
   set_remaining 1 90,85
   set_remaining 2 20,15
-  id=direct-retained-endpoint-z7
+  id="direct-retained-endpoint-z7-$$"
   record=$(make_spawn_case direct-retained-endpoint codex "$id")
   read_spawn_case "$record"
 
   run_direct_spawn "$SPAWN_HOME" "$SPAWN_WORKTREE" "$SPAWN_LAUNCH_LOG" \
-    "$id" "$SPAWN_PROJECT" --account-pool legacy-codex-pool >/dev/null 2>&1
+    "$id" "$SPAWN_PROJECT" --account-pool legacy-codex-pool >/dev/null 2>&1 \
+    || fail "retained-endpoint fixture could not create its initial managed spawn"
   meta="$SPAWN_HOME/state/$id.meta"
   set_remaining 1 20,15
   set_remaining 2 95,90

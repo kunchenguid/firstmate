@@ -29,7 +29,12 @@
 # them when the selection-specific override is unset. Other control calls keep
 # the 10s FM_ACCOUNT_CONTROL_TIMEOUT default.
 
-FM_ACCOUNT_ROUTING_LIB_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
+case "${BASH_SOURCE[0]}" in
+  */*) FM_ACCOUNT_ROUTING_LIB_SOURCE_DIR=${BASH_SOURCE[0]%/*} ;;
+  *) FM_ACCOUNT_ROUTING_LIB_SOURCE_DIR=. ;;
+esac
+FM_ACCOUNT_ROUTING_LIB_DIR="$(cd "$FM_ACCOUNT_ROUTING_LIB_SOURCE_DIR" && pwd)"
+unset FM_ACCOUNT_ROUTING_LIB_SOURCE_DIR
 # shellcheck source=bin/fm-checkout-lock-lib.sh
 . "$FM_ACCOUNT_ROUTING_LIB_DIR/fm-checkout-lock-lib.sh"
 
@@ -247,7 +252,7 @@ fm_account_path_uid() {
 fm_account_path_mode() {
   [ -n "$FM_ACCOUNT_SYSTEM_UNAME_BIN" ] && [ -n "$FM_ACCOUNT_SYSTEM_STAT_BIN" ] || return 1
   if [ "$(fm_account_system_exec "$FM_ACCOUNT_SYSTEM_UNAME_BIN")" = Darwin ]; then
-    fm_account_system_exec "$FM_ACCOUNT_SYSTEM_STAT_BIN" -f %Lp "$1" 2>/dev/null
+    fm_account_system_exec "$FM_ACCOUNT_SYSTEM_STAT_BIN" -f %Mp%Lp "$1" 2>/dev/null
   else
     fm_account_system_exec "$FM_ACCOUNT_SYSTEM_STAT_BIN" -c %a "$1" 2>/dev/null
   fi
@@ -939,6 +944,14 @@ fm_account_lock_acquire() {  # <state-dir> <task> <name> <label> <wait-seconds>
     fi
     if fm_account_meta_lock_reclaim "$lock" "$ownerless_grace"; then
       continue
+    fi
+    if [ "${FM_ACCOUNT_ROUTING_TEST_LAB:-}" = firstmate-account-routing-test-lab-v1 ] \
+      && [ "${FM_ACCOUNT_TEST_HOOKS:-}" = firstmate-account-tests-v1 ] \
+      && [ -n "${FM_ACCOUNT_LOCK_WAIT_TEST_OBSERVED:-}" ]; then
+      printf '%s\n' "$lock" > "$FM_ACCOUNT_LOCK_WAIT_TEST_OBSERVED" || {
+        fm_account_system_exec "$FM_ACCOUNT_SYSTEM_RM_BIN" -f "$owner_tmp"
+        return 1
+      }
     fi
     now=$(fm_account_system_exec "$FM_ACCOUNT_SYSTEM_DATE_BIN" +%s)
     [ "$now" -lt "$deadline" ] || {
