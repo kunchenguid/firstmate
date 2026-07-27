@@ -19,6 +19,8 @@ FM_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 # shellcheck source=bin/fm-devenv-lib.sh
 . "$SCRIPT_DIR/fm-devenv-lib.sh"
 
+# These commands must remain client-side constants for SSH.
+# shellcheck disable=SC2016
 REMOTE_INSTALL_COMMAND='set -eu
 umask 077
 IFS= read -r environment
@@ -49,6 +51,7 @@ ln -s "releases/$commit" "$next"
 mv -Tf "$next" "$share/current"
 trap - EXIT HUP INT TERM'
 
+# shellcheck disable=SC2016
 REMOTE_VERIFY_COMMAND='cat "$HOME/.local/share/firstmate-expanly/current/.firstmate-runtime-commit"'
 
 usage() {
@@ -69,6 +72,8 @@ case "$#:${1-}" in
 esac
 
 fm_devenv_name_valid "$environment" || die "invalid environment: $environment"
+# The registry path resolver intentionally accepts no arguments.
+# shellcheck disable=SC2119
 registry=$(fm_devenv_registry_path) || die 'could not resolve registry path'
 row=$(fm_devenv_registry_get "$registry" "$environment") \
   || die "unknown environment: $environment"
@@ -80,6 +85,8 @@ case "$commit" in
 esac
 
 if [ "$mode" = verify ]; then
+  # The fixed remote command variable intentionally expands on the client.
+  # shellcheck disable=SC2029
   remote_commit=$(ssh "$host" "$REMOTE_VERIFY_COMMAND") \
     || die "could not read remote runtime marker for: $environment"
   [ "$remote_commit" = "$commit" ] \
@@ -88,6 +95,8 @@ if [ "$mode" = verify ]; then
   exit 0
 fi
 
+# The fixed remote command variable intentionally expands on the client.
+# shellcheck disable=SC2029
 {
   printf '%s\n%s\n' "$environment" "$commit"
   git -C "$FM_ROOT" archive "$commit" -- \
