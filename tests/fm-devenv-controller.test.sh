@@ -270,6 +270,8 @@ fm_devenv_new_token() {
 
 make() {
   printf '%s\n' "$*" >> "$START_LOG"
+  # Real make narrates on stdout; the claim result must stay machine-readable.
+  printf 'make: entering directory and running %s\n' "$*"
   [ "${FM_TEST_START_FAIL:-0}" != 1 ]
 }
 
@@ -542,6 +544,54 @@ test_concurrent_claims_serialize_after_queue_head_validation() {
   pass "devenv controller: concurrent queue-head claims serialize before remote mutation and preserve one lease per task"
 }
 
+test_enqueue_proceeds_while_a_claim_boots_a_stopped_vm() {
+  local stopped running start_ready_fifo start_release_fifo claim_pid signal queue
+  reset_controller_state
+  stopped=$(inspection_json alpha stopped)
+  running=$(inspection_json alpha running)
+  TEST_OBSERVATIONS=("$stopped" "$stopped" "$running")
+  fm_devenv_enqueue_json "$(task_json fm-booting 0 "$ISSUED_AT")" || fail "boot fixture enqueue failed"
+  start_ready_fifo="$TMP_ROOT/start-ready.fifo"
+  start_release_fifo="$TMP_ROOT/start-release.fifo"
+  rm -f "$start_ready_fifo" "$start_release_fifo"
+  mkfifo "$start_ready_fifo" "$start_release_fifo"
+  exec 4<> "$start_ready_fifo"
+  exec 5<> "$start_release_fifo"
+
+  (
+    # shellcheck disable=SC2329
+    make() {
+      local released
+      printf '%s\n' "$*" >> "$START_LOG"
+      printf 'make: entering directory and running %s\n' "$*"
+      printf 'starting\n' > "$start_ready_fifo"
+      IFS= read -r -t 10 released < "$start_release_fifo" || return 1
+      [ "$released" = release ]
+    }
+    fm_devenv_claim_next fm-booting fm/fm-booting "$ISSUED_AT" > "$TMP_ROOT/boot-result" 2> "$TMP_ROOT/boot-error"
+    printf '%s\n' "$?" > "$TMP_ROOT/boot-rc"
+  ) &
+  claim_pid=$!
+
+  IFS= read -r -t 10 signal <&4 || fail "the claim never reached its stopped-VM start"
+  [ "$signal" = starting ] || fail "the claim emitted an unexpected start signal"
+  FM_DEVENV_LEASE_LOCK_TIMEOUT=5 fm_devenv_enqueue_json "$(task_json fm-parallel 9 2026-07-27T12:05:00Z)" \
+    || fail "enqueue could not finish within its lock timeout while a claim was booting a VM"
+  printf 'release\n' >&5
+  wait "$claim_pid"
+  exec 4>&-
+  exec 5>&-
+
+  [ "$(cat "$TMP_ROOT/boot-rc")" = 0 ] || fail "the booting claim failed: $(cat "$TMP_ROOT/boot-error")"
+  jq -e --arg token "$TOKEN" '.claimed == true and .environment == "alpha" and .generation_token == $token' \
+    "$TMP_ROOT/boot-result" >/dev/null \
+    || fail "VM start output polluted the claim result: $(cat "$TMP_ROOT/boot-result")"
+  queue=$(fm_devenv_queue_json) || fail "queue became unreadable after the parallel enqueue"
+  [ "$(printf '%s\n' "$queue" | jq -r '[.[].task_id] | join(",")')" = fm-parallel ] \
+    || fail "the admitted claim did not dequeue exactly its own task: $queue"
+  pass "devenv controller: enqueue completes while a claim boots a VM, and the admitted claim still dequeues its own task"
+}
+
 test_claim_enforces_durable_queue_head() {
   local running rc queue
   reset_controller_state
@@ -566,7 +616,7 @@ test_stopped_start_failure_keeps_task_queued() {
   stopped=$(inspection_json alpha stopped)
   TEST_OBSERVATIONS=("$stopped")
   seed_one_task || fail "start-failure fixture enqueue failed"
-  FM_TEST_START_FAIL=1 fm_devenv_claim_next fm-example fm/fm-example "$ISSUED_AT" >/dev/null
+  FM_TEST_START_FAIL=1 fm_devenv_claim_next fm-example fm/fm-example "$ISSUED_AT" >/dev/null 2>&1
   rc=$?
   [ "$rc" -ne 0 ] || fail "stopped VM start failure was accepted"
   [ "$(fm_devenv_queue_json | jq -r '.[0].task_id')" = fm-example ] || fail "start failure removed queued task"
@@ -583,10 +633,11 @@ test_claim_reinspects_under_lock_and_publishes_matching_state() {
   running=$(inspection_json alpha running)
   TEST_OBSERVATIONS=("$stopped" "$stopped" "$running")
   seed_one_task || fail "claim fixture enqueue failed"
-  result=$(fm_devenv_claim_next fm-example fm/fm-example "$ISSUED_AT") || fail "safe stopped environment could not be claimed"
+  result=$(fm_devenv_claim_next fm-example fm/fm-example "$ISSUED_AT" 2>/dev/null) \
+    || fail "safe stopped environment could not be claimed"
   marker="$STATE_ROOT/environments/alpha.json"
   printf '%s\n' "$result" | jq -e --arg token "$TOKEN" '.claimed == true and .environment == "alpha" and .generation_token == $token' \
-    >/dev/null || fail "claim result did not name the token-bound environment"
+    >/dev/null || fail "claim result was not one machine-readable claim object: $result"
   jq -e --arg token "$TOKEN" '
     keys == ["branch","environment","generation_token","issued_at","lease_state","phase","schema","task_id","vm"]
     and .schema == "firstmate.devenv.controller-lease.v1"
@@ -803,6 +854,7 @@ test_selection_order_and_no_preemption
 test_every_unsafe_or_unreadable_observation_queues
 test_unsafe_explicit_preference_does_not_fall_back
 test_claim_enforces_durable_queue_head
+test_enqueue_proceeds_while_a_claim_boots_a_stopped_vm
 test_stopped_start_failure_keeps_task_queued
 test_claim_reinspects_under_lock_and_publishes_matching_state
 test_release_requires_matching_local_and_remote_tokens

@@ -117,6 +117,10 @@ remote_lease_summary() {
   ' 2>/dev/null
 }
 
+# herdr_session_present is scoped to the explicit firstmate-expanly-<environment>
+# session. agent_present stays null because that one session cannot prove the
+# absence of a human or agent working in any other session; the resident process
+# classifier supplies that fact later.
 remote_result() {
   local lease_summary=$1 branch='' clean=null sessions session_present=null
   if git -C "$HOME/expanly-platform" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -152,7 +156,7 @@ remote_result() {
       runtime_version:(if $runtime_version == "" then null else $runtime_version end),
       lease:$lease,
       git:{branch:(if $branch == "" then null else $branch end),clean:$clean},
-      agent_present:$session_present,
+      agent_present:null,
       herdr_session_present:$session_present
     }'
 }

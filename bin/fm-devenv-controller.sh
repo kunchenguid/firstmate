@@ -9,6 +9,10 @@
 #   release <environment> <generation-token>
 #   status --json
 #
+# Claims serialize on claim.lock for their whole dispatch, including a VM start.
+# queue.lock only covers one atomic queue read or write, so enqueue never waits
+# behind a claim that is booting a stopped VM.
+#
 # The normalized observation object consumed by fm_devenv_select has exactly:
 # name, vm, lifecycle, reachable, git.clean, local_lease, remote_lease,
 # takeover, quarantined, pipeline_active, interactive_attachment,
@@ -26,6 +30,7 @@ FM_DEVENV_CONTROLLER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_DEVENV_STATE_ROOT="${FM_DEVENV_STATE_ROOT:-${FM_HOME:-$FM_DEVENV_CONTROLLER_DIR/..}/state/devenv}"
 FM_DEVENV_QUEUE="$FM_DEVENV_STATE_ROOT/queue.json"
 FM_DEVENV_QUEUE_LOCK="$FM_DEVENV_STATE_ROOT/queue.lock"
+FM_DEVENV_CLAIM_LOCK="$FM_DEVENV_STATE_ROOT/claim.lock"
 FM_DEVENV_ENVIRONMENTS="$FM_DEVENV_STATE_ROOT/environments"
 FM_DEVENV_TASKS="$FM_DEVENV_STATE_ROOT/tasks"
 FM_DEVENV_LOCKS="$FM_DEVENV_STATE_ROOT/locks"
@@ -97,6 +102,11 @@ fm_devenv_queue_lock_acquire() {
   fm_devenv_lease_lock_acquire "$FM_DEVENV_QUEUE_LOCK"
 }
 
+fm_devenv_claim_lock_acquire() {
+  mkdir -p "$FM_DEVENV_STATE_ROOT" || return 1
+  fm_devenv_lease_lock_acquire "$FM_DEVENV_CLAIM_LOCK"
+}
+
 fm_devenv_enqueue_json() (
   [ "$#" -eq 1 ] || return 2
   local task=$1 queue updated lock_held=
@@ -105,36 +115,48 @@ fm_devenv_enqueue_json() (
       type == "object"
       and keys == ["enqueued_at","packet_path","preferred_environment","previous_environment","priority","task_id"]
     ) then . else error("invalid task") end
-  ' 2>/dev/null) || return 1
-  printf '[%s]\n' "$task" | fm_devenv_queue_validate >/dev/null || return 1
+  ' 2>/dev/null) || { fm_devenv_controller_error 'enqueue requires the exact task record schema'; return 1; }
+  printf '[%s]\n' "$task" | fm_devenv_queue_validate >/dev/null \
+    || { fm_devenv_controller_error 'enqueue rejected an invalid task field; do not retry unchanged'; return 1; }
   trap '[ -z "$lock_held" ] || fm_lock_release "$FM_DEVENV_QUEUE_LOCK"' EXIT
-  fm_devenv_queue_lock_acquire || return 1
+  fm_devenv_queue_lock_acquire \
+    || { fm_devenv_controller_error 'queue lock is busy; retry the enqueue'; return 1; }
   lock_held=1
-  queue=$(fm_devenv_queue_json) || return 1
+  queue=$(fm_devenv_queue_json) \
+    || { fm_devenv_controller_error "queue is unreadable or invalid; repair $FM_DEVENV_QUEUE"; return 1; }
   updated=$(printf '%s\n' "$queue" | jq -ce --argjson task "$task" '
     if any(.[]; .task_id == $task.task_id) then error("duplicate task") else . + [$task] end
-  ' 2>/dev/null) || return 1
-  updated=$(printf '%s\n' "$updated" | fm_devenv_queue_validate) || return 1
-  fm_devenv_atomic_write "$FM_DEVENV_QUEUE" "$updated"
+  ' 2>/dev/null) \
+    || { fm_devenv_controller_error "task id is already queued; do not retry: $(printf '%s\n' "$task" | jq -r '.task_id')"; return 1; }
+  updated=$(printf '%s\n' "$updated" | fm_devenv_queue_validate) \
+    || { fm_devenv_controller_error 'enqueue would produce an invalid queue; repair the queue'; return 1; }
+  fm_devenv_atomic_write "$FM_DEVENV_QUEUE" "$updated" \
+    || { fm_devenv_controller_error "queue publication failed; repair $FM_DEVENV_QUEUE"; return 1; }
 )
 
 fm_devenv_queue_remove() (
   [ "$#" -eq 1 ] || return 2
   local task_id=$1 lock_held=
   trap '[ -z "$lock_held" ] || fm_lock_release "$FM_DEVENV_QUEUE_LOCK"' EXIT
-  fm_devenv_queue_lock_acquire || return 1
+  fm_devenv_queue_lock_acquire \
+    || { fm_devenv_controller_error 'queue lock is busy; retry the queue removal'; return 1; }
   lock_held=1
   fm_devenv_queue_remove_unlocked "$task_id"
 )
 
+# Removes the exact claimed task. Queue order is enforced when a claim is
+# admitted, so a task that was the head at admission stays removable even when a
+# higher-priority task is enqueued while its environment boots.
 fm_devenv_queue_remove_unlocked() {
   [ "$#" -eq 1 ] || return 2
   local task_id=$1 queue updated
-  queue=$(fm_devenv_queue_json) || return 1
+  queue=$(fm_devenv_queue_json) \
+    || { fm_devenv_controller_error "queue is unreadable or invalid; repair $FM_DEVENV_QUEUE"; return 1; }
   updated=$(printf '%s\n' "$queue" | jq -ce --arg task_id "$task_id" '
-    if .[0].task_id == $task_id then .[1:] else error("task is not queue head") end
-  ' 2>/dev/null) || return 1
-  fm_devenv_atomic_write "$FM_DEVENV_QUEUE" "$updated"
+    if any(.[]; .task_id == $task_id) then map(select(.task_id != $task_id)) else error("task is not queued") end
+  ' 2>/dev/null) || { fm_devenv_controller_error "task is not queued: $task_id"; return 1; }
+  fm_devenv_atomic_write "$FM_DEVENV_QUEUE" "$updated" \
+    || { fm_devenv_controller_error "queue publication failed; repair $FM_DEVENV_QUEUE"; return 1; }
 }
 
 fm_devenv_select() {
@@ -515,24 +537,31 @@ fm_devenv_claim_environment() (
   local request response local_lease task_id task_claim claimed_record
   environment=$(printf '%s\n' "$row" | jq -er '.name') || return 1
   vm=$(printf '%s\n' "$row" | jq -er '.vm') || return 1
-  fm_devenv_name_valid "$environment" || return 1
-  fm_devenv_vm_valid "$vm" || return 1
+  fm_devenv_name_valid "$environment" || { fm_devenv_controller_error "invalid environment name: $environment"; return 1; }
+  fm_devenv_vm_valid "$vm" || { fm_devenv_controller_error "invalid VM name: $vm"; return 1; }
   mkdir -p "$FM_DEVENV_LOCKS" || return 1
   lock="$FM_DEVENV_LOCKS/$environment.lock"
   trap '[ -z "$lock_held" ] || fm_lock_release "$lock"' EXIT
-  fm_devenv_lease_lock_acquire "$lock" || return 1
+  fm_devenv_lease_lock_acquire "$lock" \
+    || { fm_devenv_controller_error "environment lock is busy; retry: $environment"; return 1; }
   lock_held=1
 
-  observation=$(fm_devenv_observe_environment "$row") || return 1
-  lifecycle=$(printf '%s\n' "$observation" | jq -er '.lifecycle') || return 1
+  observation=$(fm_devenv_observe_environment "$row") \
+    || { fm_devenv_controller_error "could not observe environment: $environment"; return 1; }
+  lifecycle=$(printf '%s\n' "$observation" | jq -er '.lifecycle') \
+    || { fm_devenv_controller_error "environment lifecycle is unreadable: $environment"; return 1; }
   if [ "$lifecycle" = stopped ]; then
-    fm_devenv_inspection_selects_environment "$row" "$observation" "$task" || return 1
+    fm_devenv_inspection_selects_environment "$row" "$observation" "$task" \
+      || { fm_devenv_controller_error "environment became ineligible under its lock: $environment"; return 1; }
     checkout=${FM_DEVENV_EXPANLY_CHECKOUT:-}
-    [ -n "$checkout" ] && [ "${checkout#/}" != "$checkout" ] || return 1
-    make -C "$checkout" devenv-start "NAME=$environment" || return 1
+    [ -n "$checkout" ] && [ "${checkout#/}" != "$checkout" ] \
+      || { fm_devenv_controller_error 'FM_DEVENV_EXPANLY_CHECKOUT must be an absolute path to start a stopped VM'; return 1; }
+    # Start output is diagnostic, so it must not reach the machine-readable claim result.
+    make -C "$checkout" devenv-start "NAME=$environment" >&2 \
+      || { fm_devenv_controller_error "devenv-start failed for $environment; see the start output above"; return 1; }
     attempts=${FM_DEVENV_START_ATTEMPTS:-12}
     case "$attempts" in
-      ''|*[!0-9]*|0) return 1 ;;
+      ''|*[!0-9]*|0) fm_devenv_controller_error "invalid FM_DEVENV_START_ATTEMPTS: $attempts"; return 1 ;;
     esac
     while [ "$attempts" -gt 0 ]; do
       observation=$(fm_devenv_observe_environment "$row") || observation=
@@ -542,12 +571,17 @@ fm_devenv_claim_environment() (
         break
       fi
       attempts=$((attempts - 1))
-      [ "$attempts" -gt 0 ] || return 1
+      if [ "$attempts" -le 0 ]; then
+        fm_devenv_controller_error "$environment did not become safely running within the start budget"
+        return 1
+      fi
       sleep "${FM_DEVENV_START_INTERVAL:-5}"
     done
   else
-    [ "$lifecycle" = running ] || return 1
-    fm_devenv_inspection_selects_environment "$row" "$observation" "$task" || return 1
+    [ "$lifecycle" = running ] \
+      || { fm_devenv_controller_error "environment is neither running nor stopped: $environment"; return 1; }
+    fm_devenv_inspection_selects_environment "$row" "$observation" "$task" \
+      || { fm_devenv_controller_error "environment became ineligible under its lock: $environment"; return 1; }
   fi
 
   token=$(fm_devenv_new_token) || return 1
@@ -564,23 +598,28 @@ fm_devenv_claim_environment() (
   printf '%s\n' "$local_lease" | fm_devenv_controller_lease_validate >/dev/null || return 1
   task_claim=$(fm_devenv_task_claim_json \
     "$token" "$environment" "$vm" "$task_id" "$branch" "$issued_at" claiming '') || return 1
-  fm_devenv_publish_task_claim "$task_id" "$task_claim" || return 1
+  fm_devenv_publish_task_claim "$task_id" "$task_claim" \
+    || { fm_devenv_controller_error "could not publish the task claim fence for $task_id; no remote claim was issued"; return 1; }
   remote_lease=$(printf '%s\n' "$local_lease" | jq -c 'del(.phase) | .schema = "firstmate.devenv.lease.v1"') \
     || return 1
   request=$(fm_devenv_protocol_request "$row" claim "$remote_lease" '{}') || {
     fm_devenv_claim_recovery "$environment" "$task_id" "$local_lease" remote_claim_outcome_unknown || true
+    fm_devenv_controller_error "could not build the remote claim for $environment; $task_id needs recovery"
     return 1
   }
   response=$(fm_backend_devenv_request "$vm" "$request") || {
     fm_devenv_claim_recovery "$environment" "$task_id" "$local_lease" remote_claim_outcome_unknown || true
+    fm_devenv_controller_error "remote claim outcome is unknown for $environment; $task_id needs recovery"
     return 1
   }
   if ! printf '%s\n' "$response" | jq -e '.ok == true' >/dev/null 2>&1; then
     fm_devenv_claim_recovery "$environment" "$task_id" "$local_lease" remote_claim_outcome_unknown || true
+    fm_devenv_controller_error "remote refused the claim for $environment; $task_id needs recovery"
     return 1
   fi
   if ! fm_devenv_publish_local_lease "$environment" "$local_lease"; then
     fm_devenv_claim_recovery "$environment" "$task_id" "$local_lease" mac_publication_failed_after_remote_claim || true
+    fm_devenv_controller_error "the remote lease for $environment survived a failed Mac publication; $task_id needs recovery"
     return 1
   fi
   claimed_record=$(printf '%s\n' "$task_claim" | jq -ce '.claim_state = "claimed"') || return 1
@@ -592,24 +631,36 @@ fm_devenv_claim_environment() (
 fm_devenv_claim_next() (
   [ "$#" -ge 2 ] && [ "$#" -le 3 ] || return 2
   local task_id=$1 branch=$2 issued_at=${3:-} registry queue task inspections selection environment row
-  local queue_lock_held='' claim_result
-  fm_devenv_name_valid "$task_id" || return 1
-  [ -n "$branch" ] && [ "${#branch}" -le 256 ] || return 1
+  local claim_lock_held='' queue_lock_held='' claim_result
+  fm_devenv_name_valid "$task_id" || { fm_devenv_controller_error "invalid task id: $task_id"; return 1; }
+  [ -n "$branch" ] && [ "${#branch}" -le 256 ] \
+    || { fm_devenv_controller_error 'branch must be between 1 and 256 characters'; return 1; }
   if [ -z "$issued_at" ]; then
     issued_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || return 1
   fi
-  trap '[ -z "$queue_lock_held" ] || fm_lock_release "$FM_DEVENV_QUEUE_LOCK"' EXIT
-  fm_devenv_queue_lock_acquire || return 1
+  trap '[ -z "$queue_lock_held" ] || fm_lock_release "$FM_DEVENV_QUEUE_LOCK"; [ -z "$claim_lock_held" ] || fm_lock_release "$FM_DEVENV_CLAIM_LOCK"' EXIT
+  fm_devenv_claim_lock_acquire \
+    || { fm_devenv_controller_error 'another claim holds the dispatch lock; retry once it finishes'; return 1; }
+  claim_lock_held=1
+  fm_devenv_queue_lock_acquire \
+    || { fm_devenv_controller_error 'queue lock is busy; retry the claim'; return 1; }
   queue_lock_held=1
-  queue=$(fm_devenv_queue_json) || return 1
+  queue=$(fm_devenv_queue_json) \
+    || { fm_devenv_controller_error "queue is unreadable or invalid; repair $FM_DEVENV_QUEUE"; return 1; }
   task=$(printf '%s\n' "$queue" | jq -ce --arg task_id "$task_id" '
     if length > 0 and .[0].task_id == $task_id then .[0] else error("task is not queue head") end
-  ' 2>/dev/null) || return 1
-  ! fm_devenv_task_has_local_fence "$task_id" || return 1
+  ' 2>/dev/null) || { fm_devenv_controller_error "task is not the durable queue head: $task_id"; return 1; }
+  fm_lock_release "$FM_DEVENV_QUEUE_LOCK"
+  queue_lock_held=''
+  ! fm_devenv_task_has_local_fence "$task_id" \
+    || { fm_devenv_controller_error "task already has a local claim fence and needs recovery: $task_id"; return 1; }
   # shellcheck disable=SC2119
-  registry=$(fm_devenv_registry_json "$(fm_devenv_registry_path)") || return 1
-  inspections=$(fm_devenv_inspect_all "$registry") || return 1
-  selection=$(fm_devenv_select "$registry" "$inspections" "$task") || return 1
+  registry=$(fm_devenv_registry_json "$(fm_devenv_registry_path)") \
+    || { fm_devenv_controller_error "environment registry is unreadable or invalid: $(fm_devenv_registry_path)"; return 1; }
+  inspections=$(fm_devenv_inspect_all "$registry") \
+    || { fm_devenv_controller_error 'fleet inspection failed; no environment was claimed'; return 1; }
+  selection=$(fm_devenv_select "$registry" "$inspections" "$task") \
+    || { fm_devenv_controller_error 'environment selection failed'; return 1; }
   environment=$(printf '%s\n' "$selection" | jq -r '.environment // ""') || return 1
   if [ -z "$environment" ]; then
     printf '%s\n' "$selection"
@@ -618,8 +669,9 @@ fm_devenv_claim_next() (
   row=$(printf '%s\n' "$registry" | jq -ce --arg environment "$environment" '.[] | select(.name == $environment)') \
     || return 1
   claim_result=$(fm_devenv_claim_environment "$row" "$task" "$branch" "$issued_at") || return 1
-  if ! fm_devenv_queue_remove_unlocked "$task_id"; then
+  if ! fm_devenv_queue_remove "$task_id"; then
     fm_devenv_task_recovery "$task_id" queue_removal_failed_after_claim || true
+    fm_devenv_controller_error "$environment is claimed but $task_id could not be dequeued; it needs recovery"
     return 1
   fi
   printf '%s\n' "$claim_result"
@@ -628,25 +680,31 @@ fm_devenv_claim_next() (
 fm_devenv_release_environment() (
   [ "$#" -eq 2 ] || return 2
   local environment=$1 token=$2 registry row marker task_marker task_record='' lock lock_held='' before current request response
-  fm_devenv_name_valid "$environment" || return 1
-  printf '%s\n' "$token" | grep -Eq '^[0-9a-f]{64}$' || return 1
+  fm_devenv_name_valid "$environment" || { fm_devenv_controller_error "invalid environment name: $environment"; return 1; }
+  printf '%s\n' "$token" | grep -Eq '^[0-9a-f]{64}$' \
+    || { fm_devenv_controller_error 'release requires one 64-character hexadecimal generation token'; return 1; }
   # shellcheck disable=SC2119
-  registry=$(fm_devenv_registry_json "$(fm_devenv_registry_path)") || return 1
+  registry=$(fm_devenv_registry_json "$(fm_devenv_registry_path)") \
+    || { fm_devenv_controller_error "environment registry is unreadable or invalid: $(fm_devenv_registry_path)"; return 1; }
   row=$(printf '%s\n' "$registry" | jq -ce --arg environment "$environment" '.[] | select(.name == $environment)') \
-    || return 1
+    || { fm_devenv_controller_error "environment is not registered: $environment"; return 1; }
   marker="$FM_DEVENV_ENVIRONMENTS/$environment.json"
   mkdir -p "$FM_DEVENV_LOCKS" || return 1
   lock="$FM_DEVENV_LOCKS/$environment.lock"
   trap '[ -z "$lock_held" ] || fm_lock_release "$lock"' EXIT
-  fm_devenv_lease_lock_acquire "$lock" || return 1
+  fm_devenv_lease_lock_acquire "$lock" \
+    || { fm_devenv_controller_error "environment lock is busy; retry: $environment"; return 1; }
   lock_held=1
-  before=$(cat "$marker" 2>/dev/null | fm_devenv_controller_lease_validate) || return 1
+  before=$(cat "$marker" 2>/dev/null | fm_devenv_controller_lease_validate) \
+    || { fm_devenv_controller_error "no valid Mac lease to release for $environment"; return 1; }
   printf '%s\n' "$before" | jq -e --arg token "$token" --arg environment "$environment" \
     '.generation_token == $token and .phase == "control-plane-test" and .environment == $environment' \
-    >/dev/null 2>&1 || return 1
+    >/dev/null 2>&1 \
+    || { fm_devenv_controller_error "the Mac lease for $environment is not a control-plane-test lease held by this token"; return 1; }
   task_marker="$FM_DEVENV_TASKS/$(printf '%s\n' "$before" | jq -r '.task_id').json"
   if [ -e "$task_marker" ] || [ -L "$task_marker" ]; then
-    task_record=$(fm_devenv_task_claim_validate < "$task_marker") || return 1
+    task_record=$(fm_devenv_task_claim_validate < "$task_marker") \
+      || { fm_devenv_controller_error "the task claim fence for $environment is unreadable or invalid"; return 1; }
     printf '%s\n' "$task_record" | jq -e --argjson local "$before" '
       .generation_token == $local.generation_token
       and .environment == $local.environment
@@ -655,11 +713,13 @@ fm_devenv_release_environment() (
       and .branch == $local.branch
       and .issued_at == $local.issued_at
       and .claim_state == "claimed"
-    ' >/dev/null 2>&1 || return 1
+    ' >/dev/null 2>&1 \
+      || { fm_devenv_controller_error "the task claim fence does not match the Mac lease for $environment"; return 1; }
   fi
   request=$(fm_devenv_protocol_request "$row" status "$(jq -cn --arg token "$token" '{generation_token:$token}')" '{}') \
     || return 1
-  response=$(fm_backend_devenv_request "$(printf '%s\n' "$row" | jq -r '.vm')" "$request") || return 1
+  response=$(fm_backend_devenv_request "$(printf '%s\n' "$row" | jq -r '.vm')" "$request") \
+    || { fm_devenv_controller_error "could not read remote lease status for $environment; nothing was released"; return 1; }
   printf '%s\n' "$response" | jq -e --argjson local "$before" '
     .ok == true
     and (.result | type == "object")
@@ -671,16 +731,22 @@ fm_devenv_release_environment() (
     and .result.lease.branch == $local.branch
     and .result.lease.issued_at == $local.issued_at
     and .result.lease.lease_state == "leased"
-  ' >/dev/null 2>&1 || return 1
+  ' >/dev/null 2>&1 \
+    || { fm_devenv_controller_error "the remote lease for $environment does not match this Mac lease; nothing was released"; return 1; }
   current=$(cat "$marker" 2>/dev/null | fm_devenv_controller_lease_validate) || return 1
-  [ "$current" = "$before" ] || return 1
+  [ "$current" = "$before" ] \
+    || { fm_devenv_controller_error "the Mac lease for $environment changed during release"; return 1; }
   request=$(fm_devenv_protocol_request "$row" release "$(jq -cn --arg token "$token" '{generation_token:$token}')" '{}') \
     || return 1
-  response=$(fm_backend_devenv_request "$(printf '%s\n' "$row" | jq -r '.vm')" "$request") || return 1
-  printf '%s\n' "$response" | jq -e '.ok == true' >/dev/null 2>&1 || return 1
-  [ "$(cat "$marker" 2>/dev/null)" = "$before" ] || return 1
+  response=$(fm_backend_devenv_request "$(printf '%s\n' "$row" | jq -r '.vm')" "$request") \
+    || { fm_devenv_controller_error "remote release outcome is unknown for $environment; re-run release with the same token"; return 1; }
+  printf '%s\n' "$response" | jq -e '.ok == true' >/dev/null 2>&1 \
+    || { fm_devenv_controller_error "remote refused the release for $environment"; return 1; }
+  [ "$(cat "$marker" 2>/dev/null)" = "$before" ] \
+    || { fm_devenv_controller_error "the Mac lease for $environment changed after the remote release"; return 1; }
   if [ -n "$task_record" ]; then
-    [ "$(cat "$task_marker" 2>/dev/null)" = "$task_record" ] || return 1
+    [ "$(cat "$task_marker" 2>/dev/null)" = "$task_record" ] \
+      || { fm_devenv_controller_error "the task claim fence for $environment changed after the remote release"; return 1; }
     rm -f -- "$task_marker" || return 1
   fi
   rm -f -- "$marker" || return 1

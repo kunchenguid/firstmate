@@ -48,7 +48,8 @@ Claims create only a lease marker, and status or release requires the matching 6
 Release checks the same token again before deleting the marker.
 The control plane does not mutate the checkout, Docker, databases, Herdr sessions, or agent processes.
 Unknown, contradictory, or unreadable observations make an environment ineligible, so the controller leaves work queued instead of guessing.
-The current control plane cannot prove pipeline or unknown-checkout-process absence, which means ordinary automatic claims remain safely unavailable until resident observation is implemented.
+The current control plane cannot prove pipeline, interactive-agent, or unknown-checkout-process absence, which means ordinary automatic claims remain safely unavailable until resident observation is implemented.
+A running `firstmate-expanly-<environment>` Herdr session is reported as a session fact only; it cannot prove that no human or agent is working in another session, so agent presence stays unpublished until the resident classifier supplies it.
 
 ## Status and diagnostics
 
@@ -69,6 +70,10 @@ Read the combined queue, inspection, lease, and quarantine view:
 ```sh
 bin/fm-devenv-controller.sh status --json
 ```
+
+Every `enqueue`, `claim`, and `release` failure prints one `fm-devenv-controller:` reason on standard error, which distinguishes a busy lock that can be retried from a duplicate task, an out-of-order claim, a corrupt queue, or a fenced task that needs recovery.
+Standard output stays machine-readable, so VM start narration during a claim is diagnostic output on standard error.
+Claims serialize on their own dispatch lock, so an `enqueue` never waits behind a claim that is booting a stopped VM.
 
 A runtime mismatch is repaired by rerunning the installer for that feature environment and then rerunning `--verify`.
 An unreadable or contradictory inspection is a reason to inspect the VM directly before retrying, not a reason to bypass the controller or select another backend silently.

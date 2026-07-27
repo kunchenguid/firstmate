@@ -97,7 +97,7 @@ fm_devenv_smoke_assert_clean_inspect() {
       and .git.clean == true
       and (.git.branch | type == "string" and length > 0)
       and ($branch == "" or .git.branch == $branch)
-      and .agent_present == false
+      and .agent_present == null
       and .herdr_session_present == false
     ' >/dev/null 2>&1
 }
@@ -107,7 +107,7 @@ fm_devenv_smoke_assert_lease() {
   printf '%s\n' "$1" | jq -e --argjson lease "$2" '
     .lease == ($lease | del(.schema, .generation_token))
     and .git.clean == true
-    and .agent_present == false
+    and .agent_present == null
     and .herdr_session_present == false
   ' >/dev/null 2>&1
 }
@@ -232,13 +232,13 @@ fm_devenv_smoke_use_fakes() {
     case "$operation" in
       inspect)
         jq -cn --arg runtime "$(printf '%040d' 1)" \
-          '{runtime_version:$runtime,lease:null,git:{branch:"feature/reviews",clean:true},agent_present:false,herdr_session_present:false}'
+          '{runtime_version:$runtime,lease:null,git:{branch:"feature/reviews",clean:true},agent_present:null,herdr_session_present:false}'
         ;;
       claim|status)
-        jq -cn '{runtime_version:null,lease:{environment:"reviews",vm:"expanly-reviews",task_id:"control-plane-test",branch:"feature/reviews",lease_state:"leased",issued_at:"2026-07-27T12:00:00Z"},git:{branch:"feature/reviews",clean:true},agent_present:false,herdr_session_present:false}'
+        jq -cn '{runtime_version:null,lease:{environment:"reviews",vm:"expanly-reviews",task_id:"control-plane-test",branch:"feature/reviews",lease_state:"leased",issued_at:"2026-07-27T12:00:00Z"},git:{branch:"feature/reviews",clean:true},agent_present:null,herdr_session_present:false}'
         ;;
       release)
-        jq -cn '{runtime_version:null,lease:null,git:{branch:"feature/reviews",clean:true},agent_present:false,herdr_session_present:false}'
+        jq -cn '{runtime_version:null,lease:null,git:{branch:"feature/reviews",clean:true},agent_present:null,herdr_session_present:false}'
         ;;
     esac
   }
@@ -367,4 +367,7 @@ command -v ssh >/dev/null 2>&1 || fail "the live devenv smoke requires ssh"
 ambient_session=${HERDR_SESSION:-default}
 live_token=$(fm_devenv_smoke_round_trip "$smoke_environment" "$smoke_session" "$ambient_session") \
   || fail "the live devenv lease round trip failed"
-pass "devenv smoke: live lease $live_token survived a fresh SSH request and released cleanly"
+# Token continuity is the guarantee; the value itself must never reach a retained log.
+printf '%s\n' "$live_token" | grep -Eq '^[0-9a-f]{64}$' \
+  || fail "the live devenv round trip did not return one generation token"
+pass "devenv smoke: live lease [generation token redacted] survived a fresh SSH request and released cleanly"

@@ -132,8 +132,8 @@ test_operation_table() {
     assert_response_shape "$response" true
     assert_bounded_result "$response"
     printf '%s\n' "$response" | jq -e \
-      '.result.herdr_session_present == true and .result.agent_present == true' >/dev/null \
-      || fail "$operation did not report the dedicated Herdr session as known agent presence"
+      '.result.herdr_session_present == true and .result.agent_present == null' >/dev/null \
+      || fail "$operation did not scope the session fact to Herdr and leave agent presence unproven"
     case "$operation" in
       inspect) [ ! -e "$MARKER" ] || fail "inspect created a lease marker" ;;
       claim|status)
@@ -213,6 +213,29 @@ test_inspect_refuses_local_marker_identity_mismatch() {
   pass "devenv remote: inspect refuses mismatched marker environment and VM without mutation"
 }
 
+test_absent_firstmate_session_never_proves_agent_absence() {
+  local response
+  rm -f "$MARKER"
+  cat > "$FAKEBIN/herdr" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = "session list --json" ]; then
+  printf '%s\n' '{"sessions":[{"name":"default","running":true}]}'
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$FAKEBIN/herdr"
+  response=$(request_json inspect null | run_remote) \
+    || fail "inspect without the dedicated session did not return a structured response"
+  assert_response_shape "$response" true
+  assert_bounded_result "$response"
+  printf '%s\n' "$response" | jq -e \
+    '.result.herdr_session_present == false and .result.agent_present == null' >/dev/null \
+    || fail "a missing FirstMate session was published as proven agent absence: $response"
+  pass "devenv remote: a missing FirstMate session never proves agent absence in another session"
+}
+
 test_operation_table
 test_protocol_refusal_table
 test_inspect_refuses_local_marker_identity_mismatch
+test_absent_firstmate_session_never_proves_agent_absence
