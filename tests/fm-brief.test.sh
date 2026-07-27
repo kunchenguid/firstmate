@@ -264,6 +264,70 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+# Four crewmates in a row (2026-07-26/27) reported `done:` as soon as their
+# implementation was committed with green project tests, never starting the
+# pipeline. They were following this section: it named the commit as the
+# completion condition and offered a `done:` gate there, deferring the pipeline
+# to a later firstmate steer fourteen lines below. A worker that stops reading
+# at its first stop condition stops at the commit. Pin the inverted order - the
+# PR with green checks is the first and only stop condition named, the commit is
+# explicitly intermediate - and pin that no earlier `done:` gate reappears.
+test_no_mistakes_dod_names_the_pr_gate_before_the_commit() {
+  local home id brief gate_line commit_line
+  home="$TMP_ROOT/dod-order-home"
+  write_registry "$home"
+  id="brief-dod-order-b2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  gate_line=$(grep -nF 'The task is complete only when /no-mistakes has opened a PR and reported CI green' "$brief" | head -1 | cut -d: -f1)
+  [ -n "$gate_line" ] || fail "no-mistakes DOD must open with the PR-with-green-checks completion condition"
+  commit_line=$(grep -nF 'Committing on your branch is an intermediate step' "$brief" | head -1 | cut -d: -f1)
+  [ -n "$commit_line" ] || fail "no-mistakes DOD must mark the commit as an intermediate step"
+  [ "$gate_line" -lt "$commit_line" ] || \
+    fail "no-mistakes DOD regressed: the commit is named before the PR gate (gate line $gate_line, commit line $commit_line)"
+
+  assert_grep 'start /no-mistakes yourself once it is committed' "$brief" \
+    "no-mistakes DOD must have the worker start the pipeline itself"
+  assert_grep 'do not keep monitoring the run until merge' "$brief" \
+    "no-mistakes DOD lost the CI-ready return point"
+
+  # The exact defect: a second, earlier stop condition at the commit.
+  assert_no_grep 'The task is complete only when committed on your branch.' "$brief" \
+    "no-mistakes DOD regressed to naming the commit as the completion condition"
+  # shellcheck disable=SC2016  # literal backticks and braces must stay unexpanded
+  assert_no_grep 'append `done: {summary}`' "$brief" \
+    "no-mistakes DOD regressed to a premature done gate after the commit"
+  assert_no_grep 'Firstmate will then instruct you to run /no-mistakes' "$brief" \
+    "no-mistakes DOD regressed to deferring the pipeline to a firstmate steer"
+
+  # Safety wording the reordering must never disturb.
+  assert_grep 'ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.' "$brief" \
+    "no-mistakes DOD lost the ask-user escalation rule"
+  # shellcheck disable=SC2016  # literal backticks must stay unexpanded
+  assert_grep 'Avoid `--yes`: it would silently bypass' "$brief" \
+    "no-mistakes DOD lost the --yes prohibition"
+  # shellcheck disable=SC2016  # literal backticks must stay unexpanded
+  assert_grep 'Never stop, restart, or update the shared `no-mistakes` daemon' "$brief" \
+    "ship brief lost the shared-daemon prohibition"
+  assert_grep '**Verify isolation before anything else.**' "$brief" \
+    "ship brief lost the worktree-isolation assertion"
+
+  # The inversion is scoped to no-mistakes: direct-PR and local-only genuinely
+  # do complete at the commit, so their completion condition must stay put.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-dod-order-direct direct-proj >/dev/null 2>&1
+  assert_grep 'The task is complete only when committed on your branch.' \
+    "$home/data/brief-dod-order-direct/brief.md" \
+    "direct-PR DOD must keep the commit as its completion condition"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-dod-order-local local-proj >/dev/null 2>&1
+  # shellcheck disable=SC2016  # literal backticks must stay unexpanded
+  assert_grep 'The task is complete only when committed on your branch `fm/brief-dod-order-local`.' \
+    "$home/data/brief-dod-order-local/brief.md" \
+    "local-only DOD must keep the commit as its completion condition"
+  pass "fm-brief.sh: no-mistakes DOD names the PR gate first and the commit as intermediate"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -624,6 +688,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_mistakes_dod_names_the_pr_gate_before_the_commit
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
