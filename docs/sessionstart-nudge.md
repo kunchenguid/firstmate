@@ -1,7 +1,7 @@
 # Native session-start nudge
 
 AGENTS.md section 3 is the authoritative behavioral contract for session start.
-The tracked native adapters inject one instruction and never run the digest, acquire the lock, perform bootstrap work, drain notifications, or arm supervision themselves.
+The tracked native nudge adapters inject one instruction and never run the digest, acquire the lock, perform bootstrap work, drain notifications, or arm supervision themselves.
 The payload starts with U+2063 and the stable `FIRSTMATE_OP: ` label, carries the current `session-start` protocol kind, and retains exactly ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.`` as its body.
 The Ahoy skill owns the rule that this marked operational input is never a captain-authored session boundary, including its narrow legacy compatibility cases.
 
@@ -26,6 +26,10 @@ Every path exits 0, including malformed state and adapter errors, because a Clau
 | Pi / pi-signed | `.pi/extensions/fm-primary-turnend-guard.ts` handles `session_start` reasons `startup`, `new`, and `resume`, then injects the wrapper output with `pi.sendMessage`. | The custom message reaches model context without racing an initial positional prompt. |
 | Grok | `.grok/hooks/fm-primary-sessionstart-nudge.json` registers a project `SessionStart` hook and invokes the wrapper through inline-defaulted `${GROK_WORKSPACE_ROOT:-}`. | The project hook runs when the checkout is trusted, but Grok currently discards hook stdout from model context, so this path is intentionally fail-open. |
 
+Codex also registers a separate `SessionStart` and `SessionEnd` lifecycle adapter in `.codex/hooks.json` for the per-home lock.
+The start records the stable Codex thread marker and retains a verified harness PID when ancestry is visible, while PID-isolated tools preserve the same owner rather than replacing it with a transient PID.
+The end releases only a regular lock with the exact matching thread marker on clean `/quit` or `/exit`; other threads, malformed records, symlinks, and ambiguous release races remain fail-closed.
+
 The OpenCode nudge runs only on `session.created`.
 The watcher-arm and turn-end plugins run later on `session.idle`, and the guard lets the watcher coordinator act first, so the plugins do not race for one lifecycle event.
 
@@ -37,6 +41,8 @@ That alternative expands trust and writes outside this repository, so Firstmate 
 `tests/fm-sessionstart-nudge.test.sh` proves wrapper silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock.
 It proves exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output for a plain primary and a marked linked secondmate primary.
 It also verifies every tracked transport registration listed above.
+`tests/fm-codex-session-lock.test.sh` proves Codex lifecycle registration, same-thread preservation, verified stale recovery, live-session exclusion, PID-isolated fail-closed behavior, and exact-marker release.
+`FM_CODEX_LOCK_LIVE_E2E=1 tests/fm-codex-session-lock-live-e2e.test.sh` verifies that a real Codex `/quit` fires `SessionEnd` and releases the per-home lock without a provider request.
 `tests/fm-captain-translation-contract.test.sh` proves Ahoy's current marker rule, narrow legacy compatibility exclusions, genuine captain-message near misses, and the shared marker on supported user-role operational injections.
 `tests/fm-pi-primary-live-e2e.test.sh` and `tests/fm-opencode-primary-live-e2e.test.sh` exercise native startup paths with first-message and later-message Ahoy regressions.
 `tests/fm-turnend-guard.test.sh`, `tests/fm-pi-watch-extension.test.sh`, and `tests/fm-daemon.test.sh` cover marked guard, monitoring, and away-mode delivery.
