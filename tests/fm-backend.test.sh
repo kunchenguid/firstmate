@@ -910,7 +910,25 @@ set -u
 { printf 'treehouse'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
 exit 0
 SH
-  chmod +x "$fb/tmux" "$fb/treehouse"
+  cat > "$fb/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  '--version ')
+    printf '%s\n' '0.2.2'
+    ;;
+  'update --help')
+    printf '%s\n' 'usage: tasks-axi update <id> --archive-body'
+    ;;
+  'mv --help')
+    printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
+    ;;
+  'hold --help')
+    printf '%s\n' 'usage: tasks-axi hold <id> --kind captain'
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux" "$fb/treehouse" "$fb/tasks-axi"
   printf '%s\n' "$fb"
 }
 
