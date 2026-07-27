@@ -279,6 +279,7 @@ SH
 
 test_darwin_stat_bypasses_path_shadow() {
   local home mate fakebin canonical stat_log stderr_log
+  [ "$(/usr/bin/uname -s)" = Darwin ] || return 0
   home=$(make_home darwin-stat-parent)
   mate="$TMP_ROOT/darwin-stat-home"
   write_domain_alpha_fixture "$home" "$mate"
