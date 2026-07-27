@@ -56,6 +56,10 @@
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+# After a task worktree has been returned/removed, teardown also garbage-collects
+# the Xcode DerivedData folder that belonged to it; that cleanup is best-effort
+# (its failures warn, never fail the teardown) and bin/fm-derived-data-gc.sh
+# owns the matching and safety rules.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -2180,6 +2184,15 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
+fi
+
+# Best-effort Xcode DerivedData garbage collection for the removed task
+# worktree. Runs only after the worktree path no longer exists, so the GC
+# helper's still-existing-workspace guard can never fire against live work, and
+# a GC failure warns without ever failing teardown of landed work.
+# bin/fm-derived-data-gc.sh owns the matching and safety rules.
+if [ "$KIND" != secondmate ] && [ -n "$WT" ] && [ ! -e "$WT" ] && [ -x "$SCRIPT_DIR/fm-derived-data-gc.sh" ]; then
+  "$SCRIPT_DIR/fm-derived-data-gc.sh" --worktree "$WT" || echo "warning: DerivedData GC failed for $WT (non-fatal)" >&2
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"

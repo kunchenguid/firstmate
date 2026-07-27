@@ -653,6 +653,70 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+# Write a minimal Xcode DerivedData info.plist with a WorkspacePath key.
+# Args: <DerivedData dir> <workspace path>
+write_dd_plist() {
+  cat > "$1/info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>WorkspacePath</key>
+	<string>$2</string>
+</dict>
+</plist>
+EOF
+}
+
+# Teardown integration for bin/fm-derived-data-gc.sh: after the worktree is
+# returned, teardown garbage-collects the Xcode DerivedData dir whose
+# WorkspacePath lived under that worktree, while protected caches and dirs for
+# live workspaces survive. Needs plutil to read the fixture plist; without it
+# the helper itself deletes nothing, so there is nothing to assert.
+test_teardown_runs_derived_data_gc_after_worktree_return() {
+  if ! command -v plutil >/dev/null 2>&1; then
+    pass "teardown DerivedData GC integration (not run: plutil unavailable)"
+    return 0
+  fi
+  local case_dir rc dd
+  case_dir=$(make_case dd-gc)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  # Push the task branch to origin and fetch so the worktree sees it.
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  # The default treehouse mock leaves the worktree in place; replace it with
+  # one that removes the worktree, as the real `treehouse return` does.
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    return|--force) shift ;;
+    *) rm -rf "$1"; shift ;;
+  esac
+done
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  # Fixture DerivedData root: one dir belonging to the removed worktree, one
+  # protected cache, and one dir belonging to a different live workspace.
+  dd="$case_dir/DerivedData"
+  mkdir -p "$dd/App-aaa" "$dd/ModuleCache.noindex" "$dd/Other-bbb" "$case_dir/live/Other.xcodeproj"
+  write_dd_plist "$dd/App-aaa" "$case_dir/wt/App.xcodeproj"
+  write_dd_plist "$dd/Other-bbb" "$case_dir/live/Other.xcodeproj"
+
+  set +e
+  FM_DERIVED_DATA_ROOT="$dd" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "dd-gc: teardown should succeed when HEAD is on origin"
+  assert_absent "$dd/App-aaa" "dd-gc: DerivedData dir for the removed worktree was not collected"
+  assert_present "$dd/ModuleCache.noindex" "dd-gc: protected cache was removed"
+  assert_present "$dd/Other-bbb" "dd-gc: DerivedData dir for a live workspace was removed"
+  pass "teardown garbage-collects the removed worktree's DerivedData (caches and live workspaces kept)"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -2477,6 +2541,7 @@ EOF
 
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
+test_teardown_runs_derived_data_gc_after_worktree_return
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
