@@ -52,7 +52,7 @@ test_status_uses_fresh_bearings_snapshot_owner() {
     "status does not delegate secondmates and captain-held decisions to Bearings provenance"
   assert_contains "$body" 'Do not infer current work from raw status-event tails or from the visible conversation history.' \
     "status may infer stale current state"
-  count=$(grep -F 'fm-bearings-snapshot.sh' "$STATUS" | wc -l | tr -d ' ')
+  count=$(grep -cF 'fm-bearings-snapshot.sh' "$STATUS")
   [ "$count" = 1 ] || fail "status should reference the bearings snapshot owner exactly once, found $count"
   assert_no_grep 'fm-fleet-snapshot.sh' "$STATUS" "status creates a second canonical snapshot path"
   assert_no_grep 'fm-crew-state.sh' "$STATUS" "status creates an extra current-state reader"
