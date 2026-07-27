@@ -90,6 +90,8 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# shellcheck source=bin/fm-git-transport-lib.sh
+. "$SCRIPT_DIR/fm-git-transport-lib.sh"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -319,7 +321,7 @@ ensure_commit_object() {
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   n=$(pr_number_from_target "$target") || return 1
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  fm_git_fetch_with_fallback "$WT" origin --quiet "refs/pull/$n/head" >/dev/null 2>&1 || return 1
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
@@ -394,7 +396,7 @@ content_in_default() {
   local name ref default_tree merged_tree
   name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+    fm_git_fetch_with_fallback "$WT" origin --quiet "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
   elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"

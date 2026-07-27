@@ -39,6 +39,9 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 
+# shellcheck source=bin/fm-git-transport-lib.sh
+. "$SCRIPT_DIR/fm-git-transport-lib.sh"
+
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
   echo "       fm-home-seed.sh validate" >&2
@@ -558,7 +561,10 @@ EOF
     return 0
   fi
   url=$(source_origin_url "$project" "$mode" "$src") || return 1
-  git clone --quiet "$url" "$dst"
+  if ! fm_git_clone_with_fallback "$url" "$dst" --quiet; then
+    echo "error: git clone failed for $project: ${FM_GIT_LAST_OUTPUT:-unknown}" >&2
+    return 1
+  fi
 }
 
 validate_seed_project() {

@@ -26,6 +26,18 @@
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 
+# Transport fallback for origin fetches (dead ssh-agent -> HTTPS).
+# shellcheck source=bin/fm-git-transport-lib.sh
+if [ -n "${FM_ROOT-}" ] && [ -f "$FM_ROOT/bin/fm-git-transport-lib.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$FM_ROOT/bin/fm-git-transport-lib.sh"
+elif [ -n "${BASH_SOURCE[0]-}" ]; then
+  _fm_ff_lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  # shellcheck disable=SC1091
+  . "$_fm_ff_lib_dir/fm-git-transport-lib.sh"
+  unset _fm_ff_lib_dir
+fi
+
 # --- helpers ---------------------------------------------------------------
 
 first_line() {
@@ -200,7 +212,7 @@ fetch_once() {
       *" $common "*) return 0 ;;
     esac
   fi
-  if git -C "$dir" fetch origin --prune --quiet 2>/dev/null; then
+  if fm_git_fetch_with_fallback "$dir" origin --prune --quiet; then
     [ -n "$common" ] && FETCHED="$FETCHED $common"
     return 0
   fi
