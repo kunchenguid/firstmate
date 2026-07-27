@@ -268,6 +268,14 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/superpowers/plans/2026-07-27-firstmate-pi-yolo-propagation.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-27-pi-yolo-permission-propagation-design.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/supervision-protocols/claude.md",
       "audience": "agent-runtime"
     },
