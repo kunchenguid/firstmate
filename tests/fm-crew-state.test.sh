@@ -12,7 +12,8 @@
 #   (a) active run-step is authoritative                          -> run-step
 #   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
 #   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step
-#   (d) terminal run-step (passed/failed) is authoritative        -> run-step
+#   (d) terminal run-step is authoritative, while passed PR state is verified
+#       against GitHub rather than inferred from the run outcome  -> run-step
 #   (e) cross-branch attribution: this branch's own run found via list lookup
 #   (f) no run + busy pane                                        -> pane
 #   (g) no run + idle pane falls to the status-log verb           -> status-log
@@ -90,6 +91,21 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  cat > "$fb/gh-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${FM_FAKE_GH_AXI_FAIL:-0}" = 0 ] || exit 1
+[ "${1:-}" = pr ] || exit 2
+[ "${2:-}" = view ] || exit 2
+[ "${3:-}" = 1 ] || exit 2
+[ "${4:-}" = --repo ] || exit 2
+[ "${5:-}" = o/r ] || exit 2
+cat <<EOF
+pull_request:
+  number: 1
+  state: ${FM_FAKE_PR_STATE:-merged}
+EOF
+SH
   cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -134,7 +150,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr"
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh-axi" "$fb/herdr"
   printf '%s\n' "$fb"
 }
 
@@ -176,8 +192,11 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_PR_STATE=merged
+  FM_FAKE_GH_AXI_FAIL=0
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_PR_STATE FM_FAKE_GH_AXI_FAIL
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -663,8 +682,9 @@ test_top_level_fixing_done_log_stays_working() {
   pass "top-level fixing is not overridden by a stale done log"
 }
 
-# (d) terminal run-step is authoritative
-test_terminal_passed() {
+# (d) terminal run-step is authoritative, but a passed outcome does not prove
+# GitHub merged or closed the PR.
+test_terminal_passed_verifies_merged_pr() {
   reset_fakes
   local d; d=$(new_case passed)
   make_repo_on_branch "$d/wt" fm/feat-d
@@ -674,7 +694,79 @@ test_terminal_passed() {
   local out; out=$(run_crew_state "$d" feat-d)
   assert_contains "$out" "state: done" "passed run -> done"
   assert_contains "$out" "source: run-step" "passed -> run-step source"
-  pass "terminal passed run is authoritative"
+  assert_contains "$out" "PR merged (verified)" "passed run reports verified merged PR state"
+  pass "terminal passed run reports a verified merged PR"
+}
+
+test_terminal_passed_does_not_claim_open_pr_merged() {
+  reset_fakes
+  local d; d=$(new_case passed-open)
+  make_repo_on_branch "$d/wt" fm/feat-do
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-do.meta" "window=fm:fm-feat-do" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-do)"
+  FM_FAKE_PR_STATE=open
+  local out; out=$(run_crew_state "$d" feat-do)
+  assert_contains "$out" "state: done" "passed run with open PR remains terminal"
+  assert_contains "$out" "PR open (not merged)" "open PR is reported from GitHub state"
+  assert_not_contains "$out" "PR merged/closed" "open PR must not inherit merged/closed from outcome"
+  pass "terminal passed run does not claim an open PR merged or closed"
+}
+
+test_terminal_passed_reports_closed_without_merge() {
+  reset_fakes
+  local d; d=$(new_case passed-closed)
+  make_repo_on_branch "$d/wt" fm/feat-dc
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dc.meta" "window=fm:fm-feat-dc" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-dc)"
+  FM_FAKE_PR_STATE=closed
+  local out; out=$(run_crew_state "$d" feat-dc)
+  assert_contains "$out" "PR closed without merge (verified)" "closed PR is distinguished from merged"
+  pass "terminal passed run distinguishes a closed unmerged PR"
+}
+
+test_terminal_passed_fails_closed_when_pr_state_unavailable() {
+  reset_fakes
+  local d; d=$(new_case passed-unavailable)
+  make_repo_on_branch "$d/wt" fm/feat-du
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-du.meta" "window=fm:fm-feat-du" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-du)"
+  FM_FAKE_GH_AXI_FAIL=1
+  local out; out=$(run_crew_state "$d" feat-du)
+  assert_contains "$out" "PR state unavailable (not verified)" "failed GitHub query is explicit"
+  assert_not_contains "$out" "PR merged/closed" "unknown PR state must not inherit merged/closed from outcome"
+  pass "terminal passed run fails closed when GitHub state is unavailable"
+}
+
+test_terminal_passed_clamps_invalid_gh_timeouts_and_fails_closed() {
+  reset_fakes
+  local d timeout_args out value
+  d=$(new_case passed-zero-timeout)
+  make_repo_on_branch "$d/wt" fm/feat-dz
+  make_fakebin "$d" >/dev/null
+  cat > "$d/fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+if [ "${2:-}" = gh-axi ]; then
+  printf '%s\n' "$1" > "$FM_FAKE_TIMEOUT_ARGS"
+  exit 124
+fi
+shift
+exec "$@"
+SH
+  chmod +x "$d/fakebin/timeout"
+  timeout_args="$d/timeout-args"
+  fm_write_meta "$d/state/feat-dz.meta" "window=fm:fm-feat-dz" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-dz)"
+  for value in 0 00 000 0.0 +0 -1 ' 0 ' ' ' invalid; do
+    out=$(FM_FAKE_TIMEOUT_ARGS="$timeout_args" FM_CREW_STATE_GH_TIMEOUT="$value" run_crew_state "$d" feat-dz)
+    [ "$(cat "$timeout_args")" = 10 ] || fail "GitHub timeout '$value' did not clamp to ten seconds"
+    assert_contains "$out" "state: done" "timed-out query preserves terminal state"
+    assert_contains "$out" "PR state unavailable (not verified)" "timed-out query fails closed"
+    assert_not_contains "$out" "PR merged/closed" "timed-out query never uses pipeline-inferred PR state"
+  done
+  pass "invalid GitHub timeouts clamp and timed-out queries fail closed"
 }
 
 test_terminal_failed() {
@@ -1170,7 +1262,11 @@ test_ci_ready_done_log_relapse_stays_working
 test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
-test_terminal_passed
+test_terminal_passed_verifies_merged_pr
+test_terminal_passed_does_not_claim_open_pr_merged
+test_terminal_passed_reports_closed_without_merge
+test_terminal_passed_fails_closed_when_pr_state_unavailable
+test_terminal_passed_clamps_invalid_gh_timeouts_and_fails_closed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row

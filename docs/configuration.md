@@ -523,6 +523,7 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (merge polls or the X-mode
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
+FM_CREW_STATE_GH_TIMEOUT=10   # seconds allowed for the passed-run GitHub PR-state query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes runs rows scanned when cross-branch attribution falls back from axi status
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
@@ -592,6 +593,8 @@ FM_CRASH_NORMAL_SLEEP=5            # seconds to wait after an isolated watcher c
 FM_LOG_MAX_BYTES=1048576           # daemon log size that triggers trimming
 FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
 ```
+
+`FM_CREW_STATE_GH_TIMEOUT` accepts only strictly positive whole seconds, defaults to 10 seconds, and clamps every numerically zero, negative, whitespace-padded, or unparseable value to that same 10-second default because an indefinitely hung supervision state reader would stall wedge detection.
 
 [`permission-stall-detection.md`](permission-stall-detection.md) records why the watcher uses direct harness-prompt matching but a timeout heuristic for macOS system dialogs.
 
