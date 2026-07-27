@@ -139,6 +139,33 @@ herdr 0.7.5
 ["pane.output_matched","pane.agent_status_changed","pane.scroll_changed"]
 ```
 
+The Herdr events capability gate was reverified on 2026-07-27 against the live schema with Herdr 0.7.5 and client/server protocol 17/17.
+The patched gate returned success with empty stderr.
+For contrast, the upstream form using `printf '%s' "$schema" | grep -Fq` and an early-exit grep stand-in returned success but emitted two broken-pipe diagnostics under Bash 3.2 against the same schema.
+This confirms that the change removes SIGPIPE noise without changing the capability result.
+
+```sh
+herdr --version
+herdr status --json | jq -c '{client:.client.protocol,server:.server.protocol}'
+herdr api schema --json | jq -c '.schemas.subscription_event["$defs"].SubscriptionEventKind.enum'
+. bin/backends/herdr.sh
+fm_backend_herdr_events_capable default 2>patched.stderr
+```
+
+Observed output:
+
+```text
+herdr 0.7.5
+{"client":17,"server":17}
+["pane.output_matched","pane.agent_status_changed","pane.scroll_changed"]
+patched_rc=0
+patched_stderr_bytes=0
+unpatched_rc=0
+unpatched_stderr:
+printf: write error: Broken pipe
+printf: write error: Broken pipe
+```
+
 The CLI matrix was checked directly:
 
 | Guarantee | Command shape | Result |
