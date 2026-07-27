@@ -557,7 +557,12 @@ fm_backend_herdr_projection_focus_restore() {  # <session> <snapshot> <operation
     return 1
   }
   after=$(fm_backend_herdr_projection_focus_snapshot "$session") || after=
-  [ "$after" != "$before" ] || return 0
+  # Herdr can acknowledge a last-pane close before its resulting workspace
+  # focus change is observable. Callers at that boundary can request an
+  # ordered exact-tab restoration instead of accepting the transient snapshot.
+  if [ "$operation" != "pane close ordered" ] && [ "$after" = "$before" ]; then
+    return 0
+  fi
   workspace=${before%%$'\t'*}
   tab=${before#*$'\t'}
   info=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || {
@@ -587,8 +592,8 @@ fm_backend_herdr_projection_focus_restore() {  # <session> <snapshot> <operation
 # anywhere else.
 # If the target belongs to the active tab, exact tab preservation is
 # impossible, so cleanup refuses instead of changing focus.
-fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state]
-  local session=$1 pane_id=$2 required_agent_state=${3:-}
+fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state] [ordered-restore]
+  local session=$1 pane_id=$2 required_agent_state=${3:-} restore_mode=${4:-}
   local before active_tab info target_pane target_tab close_status state
   FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
   [ -n "$pane_id" ] || return 0
@@ -621,7 +626,8 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
   else
     close_status=$?
   fi
-  fm_backend_herdr_projection_focus_restore "$session" "$before" "pane close" || return 2
+  fm_backend_herdr_projection_focus_restore \
+    "$session" "$before" "pane close${restore_mode:+ $restore_mode}" || return 2
   [ "$close_status" -eq 0 ]
 }
 

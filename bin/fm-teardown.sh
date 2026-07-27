@@ -1195,7 +1195,7 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   fi
   if [ "$HERDR_PRESENTATION_FOCUS_LOCK_HELD" = 1 ]; then
     fm_backend_herdr_projection_close_pane_focus_preserving \
-      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" 2>/dev/null || true
+      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" "" ordered 2>/dev/null || true
     HERDR_PRESENTATION_FOCUS_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_FOCUS_LOCK" || true
   else
