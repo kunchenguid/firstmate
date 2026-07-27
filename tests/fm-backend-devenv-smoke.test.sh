@@ -48,6 +48,25 @@ fm_devenv_smoke_snapshot() {
   herdr --session "$1" api snapshot
 }
 
+# A running agent animates one leading spinner frame into both terminal title
+# fields, so that prefix alone is volatile. Everything else, including the rest
+# of each title, stays byte-exact so a real ambient change still fails closed.
+fm_devenv_smoke_normalize_snapshot() {
+  [ "$#" -eq 1 ] || return 2
+  printf '%s\n' "$1" | jq -ce '
+    def unspin: if type == "string" then sub("^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏][ \t]+"; "") else . end;
+    def unspin_key($key): if has($key) then .[$key] |= unspin else . end;
+    walk(if type == "object" then unspin_key("terminal_title") | unspin_key("terminal_title_stripped") else . end)
+  '
+}
+
+fm_devenv_smoke_stable_snapshot() {
+  [ "$#" -eq 1 ] || return 2
+  local raw
+  raw=$(fm_devenv_smoke_snapshot "$1") || return 1
+  fm_devenv_smoke_normalize_snapshot "$raw"
+}
+
 fm_devenv_smoke_runtime_verify() {
   [ "$#" -eq 1 ] || return 2
   "$INSTALLER" --verify "$1" >/dev/null
@@ -136,11 +155,11 @@ fm_devenv_smoke_round_trip() (
     return 1
   }
   vm=$(printf '%s\n' "$row" | jq -er '.vm') || return 1
-  before_session=$(fm_devenv_smoke_snapshot "$session") || {
+  before_session=$(fm_devenv_smoke_stable_snapshot "$session") || {
     fm_devenv_smoke_error "could not snapshot dedicated Herdr session: $session"
     return 1
   }
-  before_ambient=$(fm_devenv_smoke_snapshot "$ambient") || {
+  before_ambient=$(fm_devenv_smoke_stable_snapshot "$ambient") || {
     fm_devenv_smoke_error "could not snapshot ambient Herdr session: $ambient"
     return 1
   }
@@ -188,8 +207,8 @@ fm_devenv_smoke_round_trip() (
     fm_devenv_smoke_error 'final inspection did not prove the marker absent and checkout unchanged'
     return 1
   }
-  after_session=$(fm_devenv_smoke_snapshot "$session") || return 1
-  after_ambient=$(fm_devenv_smoke_snapshot "$ambient") || return 1
+  after_session=$(fm_devenv_smoke_stable_snapshot "$session") || return 1
+  after_ambient=$(fm_devenv_smoke_stable_snapshot "$ambient") || return 1
   [ "$before_session" = "$after_session" ] || {
     fm_devenv_smoke_error "dedicated Herdr session changed during the lease round trip: $session"
     return 1
@@ -204,16 +223,20 @@ fm_devenv_smoke_round_trip() (
 
 fm_devenv_smoke_use_fakes() {
   fm_devenv_smoke_snapshot() {
-    local session=$1 counter count
+    local session=$1 counter count revision=1 title='expanly-platform'
+    local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
     [ -z "${FM_TEST_SMOKE_LOG:-}" ] || printf 'snapshot:%s\n' "$session" >> "$FM_TEST_SMOKE_LOG"
     if [ "$session" = "${FM_TEST_SMOKE_MUTATE_SESSION:-}" ]; then
       counter="$FM_TEST_SMOKE_COUNTER/$session"
       printf '%s\n' "$session" >> "$counter"
       count=$(wc -l < "$counter" | tr -d '[:space:]')
-      printf '%s\n' "{\"session\":\"$session\",\"revision\":$count}"
-    else
-      printf '%s\n' "{\"session\":\"$session\",\"revision\":1}"
+      case "${FM_TEST_SMOKE_MUTATE_KIND:-structure}" in
+        spinner) title="${frames[$(( (count - 1) % ${#frames[@]} ))]} $title" ;;
+        title) title="$title-$count" ;;
+        *) revision=$count ;;
+      esac
     fi
+    printf '%s\n' "{\"session\":\"$session\",\"revision\":$revision,\"panes\":[{\"terminal_title\":\"$title\",\"terminal_title_stripped\":\"$title\"}]}"
   }
   fm_devenv_smoke_runtime_verify() {
     [ -z "${FM_TEST_SMOKE_LOG:-}" ] || printf 'verify:%s\n' "$1" >> "$FM_TEST_SMOKE_LOG"
@@ -345,12 +368,50 @@ test_fake_snapshot_mutation_is_refused() {
   pass "devenv smoke: dedicated and ambient Herdr snapshot changes are refused"
 }
 
+test_fake_spinner_only_title_drift_is_accepted() {
+  local changed
+  for changed in fm-devenv-protocol-lab default; do
+    (
+      FM_TEST_SMOKE_COUNTER=$(mktemp -d "${TMPDIR:-/tmp}/fm-devenv-smoke-spinner.XXXXXX") || exit 1
+      trap 'rm -rf -- "$FM_TEST_SMOKE_COUNTER"' EXIT
+      FM_TEST_SMOKE_TOKEN=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+      FM_TEST_SMOKE_MUTATE_SESSION=$changed
+      FM_TEST_SMOKE_MUTATE_KIND=spinner
+      fm_devenv_smoke_use_fakes
+
+      fm_devenv_smoke_round_trip reviews fm-devenv-protocol-lab default >/dev/null \
+        || fail "an animated terminal-title spinner frame was treated as a Herdr session change for $changed"
+    ) || return 1
+  done
+  pass "devenv smoke: an animated terminal-title spinner frame is not a session change"
+}
+
+test_fake_substantive_title_drift_is_refused() {
+  local changed
+  for changed in fm-devenv-protocol-lab default; do
+    (
+      FM_TEST_SMOKE_COUNTER=$(mktemp -d "${TMPDIR:-/tmp}/fm-devenv-smoke-title.XXXXXX") || exit 1
+      trap 'rm -rf -- "$FM_TEST_SMOKE_COUNTER"' EXIT
+      FM_TEST_SMOKE_TOKEN=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+      FM_TEST_SMOKE_MUTATE_SESSION=$changed
+      FM_TEST_SMOKE_MUTATE_KIND=title
+      fm_devenv_smoke_use_fakes
+
+      ! fm_devenv_smoke_round_trip reviews fm-devenv-protocol-lab default >/dev/null 2>&1 \
+        || fail "a substantive terminal-title change was accepted for $changed"
+    ) || return 1
+  done
+  pass "devenv smoke: a substantive terminal-title change is refused"
+}
+
 test_live_opt_in_refusals
 test_default_and_partial_opt_in_gate
 test_snapshot_uses_global_named_session_option || exit 1
 test_fake_round_trip_order_and_token_continuity || exit 1
 test_fake_failure_attempts_token_guarded_cleanup || exit 1
 test_fake_snapshot_mutation_is_refused || exit 1
+test_fake_spinner_only_title_drift_is_accepted || exit 1
+test_fake_substantive_title_drift_is_refused || exit 1
 
 smoke_environment=${FM_DEVENV_SMOKE_ENV:-}
 smoke_session=${FM_DEVENV_SMOKE_SESSION:-}

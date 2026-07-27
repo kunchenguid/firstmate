@@ -30,7 +30,7 @@ The VM checkout was clean and the remote lease marker was absent before the run.
 The claim survived the end of its SSH request, and status through a fresh SSH request accepted the same unreported generation token.
 Release succeeded, and final inspect confirmed the lease marker was absent, the same checkout branch remained clean, and the dedicated Herdr session indicator remained false.
 That run predates the current fact contract, under which `herdr_session_present` remains the measured session fact and `agent_present` is published as null until the resident process classifier can prove agent absence across every Herdr session.
-The dedicated `fm-devenv-protocol-lab` snapshot and the ambient `default` snapshot were byte-identical before and after the round trip.
+The dedicated `fm-devenv-protocol-lab` snapshot and the ambient `default` snapshot were identical before and after the round trip once the leading animated spinner frame was removed from `terminal_title` and `terminal_title_stripped`, which is the only difference the tripwire tolerates.
 The run issued no checkout, Docker, database, Herdr-session, or agent mutation command.
 The fake and live paths remain pinned by `tests/fm-backend-devenv-smoke.test.sh`.
 

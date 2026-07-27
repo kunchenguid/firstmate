@@ -83,7 +83,9 @@ Selecting `devenv` for a generic task spawn reports that task spawning is not su
 ## One-VM verification
 
 The opt-in smoke test requires an explicitly clean feature environment and an already-running dedicated Herdr session that is neither `default` nor the current ambient session.
-It snapshots both the dedicated and ambient Herdr sessions, verifies the pinned runtime, inspects the VM, claims one `control-plane-test` lease, performs status through a fresh SSH request with the same token, releases, verifies the marker is absent, and requires both snapshots to remain byte-identical.
+It also requires the ambient session to be otherwise idle: an agent that is still producing output advances pane fields such as `revision` on its own, and the tripwire reports that as a session change.
+It snapshots both the dedicated and ambient Herdr sessions, verifies the pinned runtime, inspects the VM, claims one `control-plane-test` lease, performs status through a fresh SSH request with the same token, releases, verifies the marker is absent, and requires both snapshots to remain identical.
+The single tolerated difference is the leading animated spinner frame a running agent writes into `terminal_title` and `terminal_title_stripped`, which is removed from both snapshots before they are compared; every other session, workspace, tab, pane, agent, and title byte must still match exactly.
 
 ```sh
 FM_DEVENV_SMOKE_ENV=<clean-feature-environment> \
