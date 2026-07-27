@@ -13,6 +13,7 @@ HOME_DIR="$TMP_ROOT/home"
 STATE_ROOT="$HOME_DIR/state/devenv"
 REGISTRY_FILE="$TMP_ROOT/registry.json"
 REMOTE_LOG="$TMP_ROOT/remote.log"
+REMOTE_PERSISTED="$TMP_ROOT/remote-persisted"
 OBSERVE_COUNT="$TMP_ROOT/observe.count"
 START_LOG="$TMP_ROOT/start.log"
 TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -90,8 +91,11 @@ reset_controller_state() {
   rm -rf "$STATE_ROOT"
   mkdir -p "$HOME_DIR/state"
   : > "$REMOTE_LOG"
+  rm -f "$REMOTE_PERSISTED"
   : > "$START_LOG"
   printf '0\n' > "$OBSERVE_COUNT"
+  TEST_REGISTRY='[{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":""}]'
+  unset FM_TEST_CLAIM_TRANSPORT_FAIL FM_TEST_REMOTE_STALE FM_TEST_STATUS_LEASE_JSON FM_TEST_STATUS_LEASE_MISSING
 }
 
 test_controller_contract_exists() {
@@ -126,6 +130,13 @@ test_priority_fifo_and_exact_queue_schema() {
   [ -f "$STATE_ROOT/queue.json" ] || fail "queue was not published durably"
   [ -z "$(find "$STATE_ROOT" -name '.queue.json.tmp.*' -print -quit)" ] \
     || fail "queue publication leaked a temporary file"
+
+  reset_controller_state
+  fm_devenv_enqueue_json "$(task_json z-first 4 2026-07-27T12:00:00Z)" || fail "first tie enqueue failed"
+  fm_devenv_enqueue_json "$(task_json a-second 4 2026-07-27T12:00:00Z)" || fail "second tie enqueue failed"
+  queue=$(fm_devenv_queue_json) || fail "tied queue could not be read"
+  [ "$(printf '%s\n' "$queue" | jq -r '[.[].task_id] | join(",")')" = z-first,a-second ] \
+    || fail "identical priority and timestamp reordered insertion FIFO: $queue"
   pass "devenv controller: queue is durable and orders explicit priority before FIFO ties"
 }
 
@@ -208,9 +219,10 @@ test_unsafe_explicit_preference_does_not_fall_back() {
 }
 
 TEST_OBSERVATIONS=()
+TEST_REGISTRY='[{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":""}]'
 
 fm_devenv_registry_json() {
-  jq -cn '[{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":""}]'
+  printf '%s\n' "$TEST_REGISTRY"
 }
 
 fm_devenv_observe_environment() {
@@ -225,17 +237,31 @@ fm_devenv_observe_environment() {
 }
 
 fm_backend_devenv_request() {
-  local host=$1 request=$2 operation token
+  local host=$1 request=$2 operation token request_id status_lease
   operation=$(printf '%s\n' "$request" | jq -r '.operation')
   token=$(printf '%s\n' "$request" | jq -r '.lease.generation_token // ""')
+  request_id=$(printf '%s\n' "$request" | jq -r '.request_id')
   printf '%s|%s|%s\n' "$host" "$operation" "$token" >> "$REMOTE_LOG"
+  if [ "$operation" = claim ] && [ "${FM_TEST_CLAIM_TRANSPORT_FAIL:-0}" = 1 ]; then
+    printf '%s\n' "$token" > "$REMOTE_PERSISTED"
+    return 1
+  fi
   if [ "$operation" = status ] && [ "${FM_TEST_REMOTE_STALE:-0}" = 1 ]; then
-    jq -cn --arg request_id "$(printf '%s\n' "$request" | jq -r '.request_id')" \
+    jq -cn --arg request_id "$request_id" \
       '{schema:"firstmate.devenv.v1",request_id:$request_id,ok:false,result:null,error:{code:"stale_token",message:"generation token does not match current lease"}}'
     return 0
   fi
-  jq -cn --arg request_id "$(printf '%s\n' "$request" | jq -r '.request_id')" \
-    '{schema:"firstmate.devenv.v1",request_id:$request_id,ok:true,result:{lease:null,git:{branch:"fm/fm-example",clean:true},runtime_version:"0123456789012345678901234567890123456789",agent_present:false,herdr_session_present:false},error:null}'
+  status_lease=${FM_TEST_STATUS_LEASE_JSON:-'{"environment":"alpha","vm":"expanly-alpha","task_id":"fm-example","branch":"fm/fm-example","lease_state":"leased","issued_at":"2026-07-27T12:00:00Z"}'}
+  if [ "$operation" = status ] && [ "${FM_TEST_STATUS_LEASE_MISSING:-0}" = 1 ]; then
+    jq -cn --arg request_id "$request_id" \
+      '{schema:"firstmate.devenv.v1",request_id:$request_id,ok:true,result:{git:{branch:"fm/fm-example",clean:true},runtime_version:null,agent_present:false,herdr_session_present:false},error:null}'
+    return 0
+  fi
+  if [ "$operation" != status ]; then
+    status_lease=null
+  fi
+  jq -cn --arg request_id "$request_id" --argjson lease "$status_lease" \
+    '{schema:"firstmate.devenv.v1",request_id:$request_id,ok:true,result:{lease:$lease,git:{branch:"fm/fm-example",clean:true},runtime_version:"0123456789012345678901234567890123456789",agent_present:false,herdr_session_present:false},error:null}'
 }
 
 fm_devenv_new_token() {
@@ -253,6 +279,34 @@ sleep() {
 
 seed_one_task() {
   fm_devenv_enqueue_json "$(task_json fm-example 0 "$ISSUED_AT")"
+}
+
+seed_local_lease() {
+  mkdir -p "$STATE_ROOT/environments" "$STATE_ROOT/tasks"
+  jq -cn --arg token "$TOKEN" --arg issued_at "$ISSUED_AT" \
+    '{schema:"firstmate.devenv.controller-lease.v1",generation_token:$token,environment:"alpha",vm:"expanly-alpha",task_id:"fm-example",branch:"fm/fm-example",lease_state:"leased",phase:"control-plane-test",issued_at:$issued_at}' \
+    > "$STATE_ROOT/environments/alpha.json"
+  jq -cn --arg token "$TOKEN" --arg issued_at "$ISSUED_AT" \
+    '{schema:"firstmate.devenv.controller-task.v1",generation_token:$token,environment:"alpha",vm:"expanly-alpha",task_id:"fm-example",branch:"fm/fm-example",claim_state:"claimed",reason:null,issued_at:$issued_at}' \
+    > "$STATE_ROOT/tasks/fm-example.json"
+}
+
+test_claim_enforces_durable_queue_head() {
+  local running rc queue
+  reset_controller_state
+  running=$(inspection_json alpha running)
+  TEST_OBSERVATIONS=("$running" "$running")
+  fm_devenv_enqueue_json "$(task_json fm-low 0 2026-07-27T12:00:00Z)" || fail "low-priority fixture enqueue failed"
+  fm_devenv_enqueue_json "$(task_json fm-high 10 2026-07-27T12:01:00Z)" || fail "high-priority fixture enqueue failed"
+  fm_devenv_claim_next fm-low fm/fm-low "$ISSUED_AT" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "direct low-priority claim bypassed the durable queue head"
+  [ ! -s "$REMOTE_LOG" ] || fail "out-of-order claim reached remote mutation"
+  [ ! -e "$STATE_ROOT/environments/alpha.json" ] || fail "out-of-order claim published a local lease"
+  queue=$(fm_devenv_queue_json) || fail "queue became unreadable after out-of-order claim"
+  [ "$(printf '%s\n' "$queue" | jq -r '[.[].task_id] | join(",")')" = fm-high,fm-low ] \
+    || fail "out-of-order claim changed the durable queue"
+  pass "devenv controller: only the durable priority/FIFO queue head may claim capacity"
 }
 
 test_stopped_start_failure_keeps_task_queued() {
@@ -303,9 +357,8 @@ test_claim_reinspects_under_lock_and_publishes_matching_state() {
 test_release_requires_matching_local_and_remote_tokens() {
   local marker before rc
   reset_controller_state
-  mkdir -p "$STATE_ROOT/environments"
   marker="$STATE_ROOT/environments/alpha.json"
-  jq -cn --arg token "$TOKEN" --arg issued_at "$ISSUED_AT" '{schema:"firstmate.devenv.controller-lease.v1",generation_token:$token,environment:"alpha",vm:"expanly-alpha",task_id:"fm-example",branch:"fm/fm-example",lease_state:"leased",phase:"control-plane-test",issued_at:$issued_at}' > "$marker"
+  seed_local_lease
   before=$(cat "$marker")
 
   fm_devenv_release_environment alpha "$STALE_TOKEN" >/dev/null 2>&1
@@ -324,9 +377,43 @@ test_release_requires_matching_local_and_remote_tokens() {
   : > "$REMOTE_LOG"
   fm_devenv_release_environment alpha "$TOKEN" || fail "matching local and remote tokens could not release control-plane lease"
   [ ! -e "$marker" ] || fail "successful release left the Mac lease"
+  [ ! -e "$STATE_ROOT/tasks/fm-example.json" ] || fail "successful release left the task claim fence"
   [ "$(cut -d'|' -f2 "$REMOTE_LOG" | paste -sd, -)" = status,release ] \
     || fail "release did not verify remote token before mutation"
   pass "devenv controller: release requires matching Mac and remote tokens for control-plane leases"
+}
+
+test_release_requires_exact_remote_lease_identity() {
+  local marker before rc label lease
+  while IFS='|' read -r label lease; do
+    reset_controller_state
+    seed_local_lease
+    marker="$STATE_ROOT/environments/alpha.json"
+    before=$(cat "$marker")
+    if [ "$label" = missing ]; then
+      FM_TEST_STATUS_LEASE_MISSING=1 fm_devenv_release_environment alpha "$TOKEN" >/dev/null 2>&1
+    else
+      FM_TEST_STATUS_LEASE_JSON="$lease" fm_devenv_release_environment alpha "$TOKEN" >/dev/null 2>&1
+    fi
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "$label remote status lease was accepted for release"
+    [ "$(cat "$marker")" = "$before" ] || fail "$label remote status changed the local lease"
+    [ "$(awk -F'|' '$2 == "release" {count++} END {print count + 0}' "$REMOTE_LOG")" = 0 ] \
+      || fail "$label remote status reached release mutation"
+  done <<'CASES'
+missing|unused
+null|null
+malformed|{"environment":"alpha"}
+environment|{"environment":"beta","vm":"expanly-alpha","task_id":"fm-example","branch":"fm/fm-example","lease_state":"leased","issued_at":"2026-07-27T12:00:00Z"}
+vm|{"environment":"alpha","vm":"expanly-beta","task_id":"fm-example","branch":"fm/fm-example","lease_state":"leased","issued_at":"2026-07-27T12:00:00Z"}
+task|{"environment":"alpha","vm":"expanly-alpha","task_id":"fm-other","branch":"fm/fm-example","lease_state":"leased","issued_at":"2026-07-27T12:00:00Z"}
+branch|{"environment":"alpha","vm":"expanly-alpha","task_id":"fm-example","branch":"fm/other","lease_state":"leased","issued_at":"2026-07-27T12:00:00Z"}
+issued-at|{"environment":"alpha","vm":"expanly-alpha","task_id":"fm-example","branch":"fm/fm-example","lease_state":"leased","issued_at":"2026-07-27T12:00:01Z"}
+takeover|{"environment":"alpha","vm":"expanly-alpha","task_id":"fm-example","branch":"fm/fm-example","lease_state":"takeover","issued_at":"2026-07-27T12:00:00Z"}
+quarantined|{"environment":"alpha","vm":"expanly-alpha","task_id":"fm-example","branch":"fm/fm-example","lease_state":"quarantined","issued_at":"2026-07-27T12:00:00Z"}
+cooling|{"environment":"alpha","vm":"expanly-alpha","task_id":"fm-example","branch":"fm/fm-example","lease_state":"cooling","issued_at":"2026-07-27T12:00:00Z"}
+CASES
+  pass "devenv controller: release refuses null, malformed, mismatched, and non-leased remote status"
 }
 
 test_task_phase_is_not_releasable_in_control_plane() {
@@ -343,14 +430,97 @@ test_task_phase_is_not_releasable_in_control_plane() {
   pass "devenv controller: only control-plane-test leases are releasable in this plan"
 }
 
-test_publication_failure_retains_remote_lease_and_quarantines() {
-  local running rc quarantine
+test_claim_scans_orphaned_local_task_fences() {
+  local directory marker alpha_blocked beta_running gamma_blocked rc
+  for directory in environments quarantine; do
+    reset_controller_state
+    TEST_REGISTRY=$(registry_json)
+    mkdir -p "$STATE_ROOT/$directory"
+    marker="$STATE_ROOT/$directory/alpha.json"
+    jq -cn --arg token "$TOKEN" --arg issued_at "$ISSUED_AT" \
+      --arg schema "firstmate.devenv.controller-${directory}.v1" \
+      '{schema:$schema,generation_token:$token,environment:"alpha",vm:"expanly-alpha",task_id:"fm-example",branch:"fm/fm-example",lease_state:"leased",phase:"control-plane-test",issued_at:$issued_at}' \
+      > "$marker"
+    alpha_blocked=$(inspection_json alpha running | jq -c '.local_lease = {task_id:"fm-example"}')
+    beta_running=$(inspection_json beta running)
+    gamma_blocked=$(inspection_json gamma running | jq -c '.pipeline_active = true')
+    TEST_OBSERVATIONS=("$alpha_blocked" "$beta_running" "$gamma_blocked" "$beta_running")
+    seed_one_task || fail "$directory orphan-fence fixture enqueue failed"
+    fm_devenv_claim_next fm-example fm/fm-example "$ISSUED_AT" >/dev/null 2>&1
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "orphaned $directory task fence allowed another claim"
+    [ ! -s "$REMOTE_LOG" ] || fail "orphaned $directory task fence reached remote mutation"
+  done
+  pass "devenv controller: orphaned local leases and quarantines fence the same task before routing"
+}
+
+test_ambiguous_remote_claim_fences_task_and_environment() {
+  local running rc task_fence quarantine claims
   reset_controller_state
+  TEST_REGISTRY=$(registry_json)
   running=$(inspection_json alpha running)
-  TEST_OBSERVATIONS=("$running" "$running")
-  seed_one_task || fail "publication-failure fixture enqueue failed"
-  fm_devenv_publish_local_lease() { return 1; }
+  TEST_OBSERVATIONS=("$running" "$(inspection_json beta running)" "$(inspection_json gamma running)" "$running")
+  seed_one_task || fail "ambiguous-claim fixture enqueue failed"
+  FM_TEST_CLAIM_TRANSPORT_FAIL=1 fm_devenv_claim_next fm-example fm/fm-example "$ISSUED_AT" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "ambiguous remote claim reported success"
+  [ "$(cat "$REMOTE_PERSISTED")" = "$TOKEN" ] || fail "remote ambiguity fixture did not persist the issued token"
+  task_fence="$STATE_ROOT/tasks/fm-example.json"
+  quarantine="$STATE_ROOT/quarantine/alpha.json"
+  jq -e --arg token "$TOKEN" '.task_id == "fm-example" and .environment == "alpha" and .generation_token == $token and .claim_state == "recovery_required" and .reason == "remote_claim_outcome_unknown"' \
+    "$task_fence" >/dev/null || fail "ambiguous claim did not atomically fence the task with its token"
+  jq -e --arg token "$TOKEN" '.task_id == "fm-example" and .environment == "alpha" and .generation_token == $token and .lease_state == "quarantined"' \
+    "$quarantine" >/dev/null || fail "ambiguous claim did not quarantine the environment with its token"
+  claims=$(awk -F'|' '$2 == "claim" {count++} END {print count + 0}' "$REMOTE_LOG")
+  TEST_OBSERVATIONS=("$(inspection_json beta running)" "$(inspection_json beta running)")
   fm_devenv_claim_next fm-example fm/fm-example "$ISSUED_AT" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "fenced ambiguous task claimed another environment"
+  [ "$(awk -F'|' '$2 == "claim" {count++} END {print count + 0}' "$REMOTE_LOG")" = "$claims" ] \
+    || fail "fenced ambiguous task issued a second remote claim"
+  [ "$(awk -F'|' '$2 == "release" {count++} END {print count + 0}' "$REMOTE_LOG")" = 0 ] \
+    || fail "ambiguous claim attempted tokenless cleanup"
+  pass "devenv controller: ambiguous remote outcome fences task and environment with the issued token"
+}
+
+test_queue_removal_failure_leaves_claim_fenced() {
+  local running rc claims task_fence
+  reset_controller_state
+  TEST_REGISTRY=$(registry_json)
+  running=$(inspection_json alpha running)
+  TEST_OBSERVATIONS=("$running" "$(inspection_json beta running)" "$(inspection_json gamma running)" "$running")
+  seed_one_task || fail "queue-removal fixture enqueue failed"
+  (
+    # shellcheck disable=SC2329
+    fm_devenv_queue_remove_unlocked() { return 1; }
+    fm_devenv_claim_next fm-example fm/fm-example "$ISSUED_AT" >/dev/null 2>&1
+  )
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "queue-removal failure reported a safely completed claim"
+  task_fence="$STATE_ROOT/tasks/fm-example.json"
+  jq -e --arg token "$TOKEN" '.claim_state == "recovery_required" and .generation_token == $token and .reason == "queue_removal_failed_after_claim"' \
+    "$task_fence" >/dev/null || fail "queue-removal failure did not fence the claimed task"
+  claims=$(awk -F'|' '$2 == "claim" {count++} END {print count + 0}' "$REMOTE_LOG")
+  fm_devenv_claim_next fm-example fm/fm-example "$ISSUED_AT" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "queue-removal-fenced task was safely retryable"
+  [ "$(awk -F'|' '$2 == "claim" {count++} END {print count + 0}' "$REMOTE_LOG")" = "$claims" ] \
+    || fail "queue-removal-fenced task issued a second remote claim"
+  pass "devenv controller: queue-removal failure leaves the claimed task fenced against retry"
+}
+
+test_publication_failure_retains_remote_lease_and_quarantines() {
+  local running rc quarantine claims task_fence
+  reset_controller_state
+  TEST_REGISTRY=$(registry_json)
+  running=$(inspection_json alpha running)
+  TEST_OBSERVATIONS=("$running" "$(inspection_json beta running)" "$(inspection_json gamma running)" "$running")
+  seed_one_task || fail "publication-failure fixture enqueue failed"
+  (
+    # shellcheck disable=SC2329
+    fm_devenv_publish_local_lease() { return 1; }
+    fm_devenv_claim_next fm-example fm/fm-example "$ISSUED_AT" >/dev/null 2>&1
+  )
   rc=$?
   [ "$rc" -ne 0 ] || fail "Mac publication failure reported a successful claim"
   [ "$(awk -F'|' '$2 == "claim" {count++} END {print count + 0}' "$REMOTE_LOG")" = 1 ] \
@@ -360,7 +530,16 @@ test_publication_failure_retains_remote_lease_and_quarantines() {
   quarantine="$STATE_ROOT/quarantine/alpha.json"
   jq -e --arg token "$TOKEN" '.lease_state == "quarantined" and .generation_token == $token and .reason == "mac_publication_failed_after_remote_claim"' \
     "$quarantine" >/dev/null || fail "publication failure did not emit a token-bound quarantine record"
+  task_fence="$STATE_ROOT/tasks/fm-example.json"
+  jq -e --arg token "$TOKEN" '.claim_state == "recovery_required" and .generation_token == $token and .reason == "mac_publication_failed_after_remote_claim"' \
+    "$task_fence" >/dev/null || fail "publication failure did not fence the task with its known token"
   [ "$(fm_devenv_queue_json | jq -r '.[0].task_id')" = fm-example ] || fail "publication failure removed the queued task"
+  claims=$(awk -F'|' '$2 == "claim" {count++} END {print count + 0}' "$REMOTE_LOG")
+  fm_devenv_claim_next fm-example fm/fm-example "$ISSUED_AT" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "publication-fenced task claimed another environment"
+  [ "$(awk -F'|' '$2 == "claim" {count++} END {print count + 0}' "$REMOTE_LOG")" = "$claims" ] \
+    || fail "publication-fenced task issued a second remote claim"
   pass "devenv controller: Mac publication failure retains remote authority and emits token-bound quarantine"
 }
 
@@ -369,8 +548,13 @@ test_priority_fifo_and_exact_queue_schema
 test_selection_order_and_no_preemption
 test_every_unsafe_or_unreadable_observation_queues
 test_unsafe_explicit_preference_does_not_fall_back
+test_claim_enforces_durable_queue_head
 test_stopped_start_failure_keeps_task_queued
 test_claim_reinspects_under_lock_and_publishes_matching_state
 test_release_requires_matching_local_and_remote_tokens
+test_release_requires_exact_remote_lease_identity
 test_task_phase_is_not_releasable_in_control_plane
+test_claim_scans_orphaned_local_task_fences
+test_ambiguous_remote_claim_fences_task_and_environment
+test_queue_removal_failure_leaves_claim_fenced
 test_publication_failure_retains_remote_lease_and_quarantines

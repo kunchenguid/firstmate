@@ -27,6 +27,7 @@ FM_DEVENV_STATE_ROOT="${FM_DEVENV_STATE_ROOT:-${FM_HOME:-$FM_DEVENV_CONTROLLER_D
 FM_DEVENV_QUEUE="$FM_DEVENV_STATE_ROOT/queue.json"
 FM_DEVENV_QUEUE_LOCK="$FM_DEVENV_STATE_ROOT/queue.lock"
 FM_DEVENV_ENVIRONMENTS="$FM_DEVENV_STATE_ROOT/environments"
+FM_DEVENV_TASKS="$FM_DEVENV_STATE_ROOT/tasks"
 FM_DEVENV_LOCKS="$FM_DEVENV_STATE_ROOT/locks"
 FM_DEVENV_QUARANTINE="$FM_DEVENV_STATE_ROOT/quarantine"
 
@@ -65,7 +66,11 @@ fm_devenv_queue_validate() {
         and (.packet_path | type == "string" and length > 0 and length <= 1024)
       )
       and ([.[].task_id] | length == (unique | length))
-    ) then sort_by([-.priority, .enqueued_at, .task_id]) else error("invalid queue") end
+    ) then
+      to_entries
+      | sort_by([-.value.priority, .value.enqueued_at, .key])
+      | map(.value)
+    else error("invalid queue") end
   ' 2>/dev/null
 }
 
@@ -109,15 +114,22 @@ fm_devenv_enqueue_json() (
 
 fm_devenv_queue_remove() (
   [ "$#" -eq 1 ] || return 2
-  local task_id=$1 queue updated lock_held=
+  local task_id=$1 lock_held=
   trap '[ -z "$lock_held" ] || fm_lock_release "$FM_DEVENV_QUEUE_LOCK"' EXIT
   fm_devenv_queue_lock_acquire || return 1
   lock_held=1
-  queue=$(fm_devenv_queue_json) || return 1
-  updated=$(printf '%s\n' "$queue" | jq -ce --arg task_id "$task_id" 'map(select(.task_id != $task_id))') \
-    || return 1
-  fm_devenv_atomic_write "$FM_DEVENV_QUEUE" "$updated"
+  fm_devenv_queue_remove_unlocked "$task_id"
 )
+
+fm_devenv_queue_remove_unlocked() {
+  [ "$#" -eq 1 ] || return 2
+  local task_id=$1 queue updated
+  queue=$(fm_devenv_queue_json) || return 1
+  updated=$(printf '%s\n' "$queue" | jq -ce --arg task_id "$task_id" '
+    if .[0].task_id == $task_id then .[1:] else error("task is not queue head") end
+  ' 2>/dev/null) || return 1
+  fm_devenv_atomic_write "$FM_DEVENV_QUEUE" "$updated"
+}
 
 fm_devenv_select() {
   [ "$#" -eq 3 ] || return 2
@@ -232,11 +244,122 @@ fm_devenv_protocol_request() {
     '{schema:"firstmate.devenv.v1",request_id:$request_id,operation:$operation,environment:$environment,vm:$vm,lease:$lease,payload:$payload}'
 }
 
+fm_devenv_task_claim_validate() {
+  jq -ce '
+    if (
+      type == "object"
+      and keys == ["branch","claim_state","environment","generation_token","issued_at","reason","schema","task_id","vm"]
+      and .schema == "firstmate.devenv.controller-task.v1"
+      and (.generation_token | type == "string" and test("^[0-9a-f]{64}$"))
+      and (.environment | type == "string" and test("^[A-Za-z0-9_-]+$"))
+      and (.vm | type == "string" and test("^expanly-[A-Za-z0-9_-]+$"))
+      and (.task_id | type == "string" and test("^[A-Za-z0-9_-]+$"))
+      and (.branch | type == "string" and length > 0 and length <= 256)
+      and (.claim_state == "claiming" or .claim_state == "claimed" or .claim_state == "recovery_required")
+      and (.reason == null or (.reason | type == "string" and length > 0 and length <= 160))
+      and (.issued_at | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+    ) then . else error("invalid task claim") end
+  ' 2>/dev/null
+}
+
+fm_devenv_task_claim_json() {
+  [ "$#" -eq 8 ] || return 2
+  jq -cn \
+    --arg token "$1" \
+    --arg environment "$2" \
+    --arg vm "$3" \
+    --arg task_id "$4" \
+    --arg branch "$5" \
+    --arg issued_at "$6" \
+    --arg claim_state "$7" \
+    --arg reason "$8" \
+    '{
+      schema:"firstmate.devenv.controller-task.v1",
+      generation_token:$token,
+      environment:$environment,
+      vm:$vm,
+      task_id:$task_id,
+      branch:$branch,
+      claim_state:$claim_state,
+      reason:(if $reason == "" then null else $reason end),
+      issued_at:$issued_at
+    }'
+}
+
+fm_devenv_publish_task_claim() {
+  [ "$#" -eq 2 ] || return 2
+  local task_id=$1 record=$2
+  printf '%s\n' "$record" | fm_devenv_task_claim_validate >/dev/null || return 1
+  fm_devenv_atomic_write "$FM_DEVENV_TASKS/$task_id.json" "$record"
+}
+
+fm_devenv_task_fence_read() {
+  [ "$#" -eq 1 ] || return 2
+  local marker="$FM_DEVENV_TASKS/$1.json"
+  if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+    return 3
+  fi
+  [ -f "$marker" ] && [ -r "$marker" ] || return 4
+  fm_devenv_task_claim_validate < "$marker" || return 4
+}
+
+fm_devenv_task_has_local_fence() {
+  [ "$#" -eq 1 ] || return 2
+  local task_id=$1 status=0 directory marker record
+  fm_devenv_task_fence_read "$task_id" >/dev/null 2>&1 || status=$?
+  case "$status" in
+    0|4) return 0 ;;
+    3) ;;
+    *) return 0 ;;
+  esac
+  for directory in "$FM_DEVENV_ENVIRONMENTS" "$FM_DEVENV_QUARANTINE"; do
+    [ -d "$directory" ] || continue
+    for marker in "$directory"/*.json; do
+      [ -e "$marker" ] || continue
+      record=$(jq -ce '
+        if type == "object" and (.task_id | type == "string") then . else error("invalid local fence") end
+      ' "$marker" 2>/dev/null) || return 0
+      [ "$(printf '%s\n' "$record" | jq -r '.task_id')" = "$task_id" ] && return 0
+    done
+  done
+  return 1
+}
+
+fm_devenv_task_recovery() {
+  [ "$#" -eq 2 ] || return 2
+  local task_id=$1 reason=$2 current updated
+  current=$(fm_devenv_task_fence_read "$task_id") || return 1
+  updated=$(printf '%s\n' "$current" | jq -ce --arg reason "$reason" \
+    '.claim_state = "recovery_required" | .reason = $reason') || return 1
+  fm_devenv_publish_task_claim "$task_id" "$updated"
+}
+
+fm_devenv_environment_task_fence() {
+  [ "$#" -eq 1 ] || return 2
+  local environment=$1 marker record
+  [ -d "$FM_DEVENV_TASKS" ] || return 3
+  for marker in "$FM_DEVENV_TASKS"/*.json; do
+    [ -e "$marker" ] || continue
+    record=$(fm_devenv_task_claim_validate < "$marker") || {
+      printf '{"invalid":true}\n'
+      return 0
+    }
+    if [ "$(printf '%s\n' "$record" | jq -r '.environment')" = "$environment" ]; then
+      printf '%s\n' "$record"
+      return 0
+    fi
+  done
+  return 3
+}
+
 fm_devenv_local_record() {
   [ "$#" -eq 1 ] || return 2
   local environment=$1 marker
   marker="$FM_DEVENV_ENVIRONMENTS/$environment.json"
   if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+    if fm_devenv_environment_task_fence "$environment"; then
+      return 0
+    fi
     printf 'null\n'
     return 0
   fi
@@ -362,6 +485,16 @@ fm_devenv_publish_quarantine() {
   fm_devenv_atomic_write "$FM_DEVENV_QUARANTINE/$environment.json" "$record"
 }
 
+fm_devenv_claim_recovery() {
+  [ "$#" -eq 4 ] || return 2
+  local environment=$1 task_id=$2 lease=$3 reason=$4 status=0
+  fm_devenv_task_recovery "$task_id" "$reason" || status=1
+  fm_devenv_publish_quarantine "$environment" "$lease" "$reason" || status=1
+  [ "$status" -eq 0 ] || printf '%s\n' "$lease" | jq -c \
+    --arg reason "$reason" '. + {lease_state:"quarantined",reason:$reason}' >&2
+  return "$status"
+}
+
 fm_devenv_inspection_selects_environment() {
   [ "$#" -eq 3 ] || return 2
   local row=$1 observation=$2 task=$3 result
@@ -373,7 +506,7 @@ fm_devenv_claim_environment() (
   [ "$#" -eq 4 ] || return 2
   local row=$1 task=$2 branch=$3 issued_at=$4
   local environment vm lock lock_held='' observation lifecycle attempts checkout token remote_lease
-  local request response local_lease
+  local request response local_lease task_id task_claim claimed_record
   environment=$(printf '%s\n' "$row" | jq -er '.name') || return 1
   vm=$(printf '%s\n' "$row" | jq -er '.vm') || return 1
   fm_devenv_name_valid "$environment" || return 1
@@ -412,45 +545,63 @@ fm_devenv_claim_environment() (
   fi
 
   token=$(fm_devenv_new_token) || return 1
+  task_id=$(printf '%s\n' "$task" | jq -r '.task_id') || return 1
   local_lease=$(jq -cn \
     --arg token "$token" \
     --arg environment "$environment" \
     --arg vm "$vm" \
-    --arg task_id "$(printf '%s\n' "$task" | jq -r '.task_id')" \
+    --arg task_id "$task_id" \
     --arg branch "$branch" \
     --arg issued_at "$issued_at" \
     '{schema:"firstmate.devenv.controller-lease.v1",generation_token:$token,environment:$environment,vm:$vm,task_id:$task_id,branch:$branch,lease_state:"leased",phase:"control-plane-test",issued_at:$issued_at}') \
     || return 1
   printf '%s\n' "$local_lease" | fm_devenv_controller_lease_validate >/dev/null || return 1
+  task_claim=$(fm_devenv_task_claim_json \
+    "$token" "$environment" "$vm" "$task_id" "$branch" "$issued_at" claiming '') || return 1
+  fm_devenv_publish_task_claim "$task_id" "$task_claim" || return 1
   remote_lease=$(printf '%s\n' "$local_lease" | jq -c 'del(.phase) | .schema = "firstmate.devenv.lease.v1"') \
     || return 1
-  request=$(fm_devenv_protocol_request "$row" claim "$remote_lease" '{}') || return 1
-  response=$(fm_backend_devenv_request "$vm" "$request") || return 1
-  printf '%s\n' "$response" | jq -e '.ok == true' >/dev/null 2>&1 || return 1
-  if ! fm_devenv_publish_local_lease "$environment" "$local_lease"; then
-    fm_devenv_publish_quarantine "$environment" "$local_lease" mac_publication_failed_after_remote_claim \
-      || printf '%s\n' "$local_lease" | jq -c '. + {lease_state:"quarantined",reason:"mac_publication_failed_after_remote_claim"}' >&2
+  request=$(fm_devenv_protocol_request "$row" claim "$remote_lease" '{}') || {
+    fm_devenv_claim_recovery "$environment" "$task_id" "$local_lease" remote_claim_outcome_unknown || true
+    return 1
+  }
+  response=$(fm_backend_devenv_request "$vm" "$request") || {
+    fm_devenv_claim_recovery "$environment" "$task_id" "$local_lease" remote_claim_outcome_unknown || true
+    return 1
+  }
+  if ! printf '%s\n' "$response" | jq -e '.ok == true' >/dev/null 2>&1; then
+    fm_devenv_claim_recovery "$environment" "$task_id" "$local_lease" remote_claim_outcome_unknown || true
     return 1
   fi
-  fm_devenv_queue_remove "$(printf '%s\n' "$task" | jq -r '.task_id')" || return 1
+  if ! fm_devenv_publish_local_lease "$environment" "$local_lease"; then
+    fm_devenv_claim_recovery "$environment" "$task_id" "$local_lease" mac_publication_failed_after_remote_claim || true
+    return 1
+  fi
+  claimed_record=$(printf '%s\n' "$task_claim" | jq -ce '.claim_state = "claimed"') || return 1
+  fm_devenv_publish_task_claim "$task_id" "$claimed_record" || return 1
   jq -cn --arg environment "$environment" --arg token "$token" \
     '{claimed:true,environment:$environment,generation_token:$token}'
 )
 
-fm_devenv_claim_next() {
+fm_devenv_claim_next() (
   [ "$#" -ge 2 ] && [ "$#" -le 3 ] || return 2
   local task_id=$1 branch=$2 issued_at=${3:-} registry queue task inspections selection environment row
+  local queue_lock_held='' claim_result
   fm_devenv_name_valid "$task_id" || return 1
   [ -n "$branch" ] && [ "${#branch}" -le 256 ] || return 1
   if [ -z "$issued_at" ]; then
     issued_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || return 1
   fi
-  # shellcheck disable=SC2119
-  registry=$(fm_devenv_registry_json "$(fm_devenv_registry_path)") || return 1
+  trap '[ -z "$queue_lock_held" ] || fm_lock_release "$FM_DEVENV_QUEUE_LOCK"' EXIT
+  fm_devenv_queue_lock_acquire || return 1
+  queue_lock_held=1
   queue=$(fm_devenv_queue_json) || return 1
   task=$(printf '%s\n' "$queue" | jq -ce --arg task_id "$task_id" '
-    [.[] | select(.task_id == $task_id)] | if length == 1 then .[0] else error("unknown task") end
+    if length > 0 and .[0].task_id == $task_id then .[0] else error("task is not queue head") end
   ' 2>/dev/null) || return 1
+  ! fm_devenv_task_has_local_fence "$task_id" || return 1
+  # shellcheck disable=SC2119
+  registry=$(fm_devenv_registry_json "$(fm_devenv_registry_path)") || return 1
   inspections=$(fm_devenv_inspect_all "$registry") || return 1
   selection=$(fm_devenv_select "$registry" "$inspections" "$task") || return 1
   environment=$(printf '%s\n' "$selection" | jq -r '.environment // ""') || return 1
@@ -460,12 +611,17 @@ fm_devenv_claim_next() {
   fi
   row=$(printf '%s\n' "$registry" | jq -ce --arg environment "$environment" '.[] | select(.name == $environment)') \
     || return 1
-  fm_devenv_claim_environment "$row" "$task" "$branch" "$issued_at"
-}
+  claim_result=$(fm_devenv_claim_environment "$row" "$task" "$branch" "$issued_at") || return 1
+  if ! fm_devenv_queue_remove_unlocked "$task_id"; then
+    fm_devenv_task_recovery "$task_id" queue_removal_failed_after_claim || true
+    return 1
+  fi
+  printf '%s\n' "$claim_result"
+)
 
 fm_devenv_release_environment() (
   [ "$#" -eq 2 ] || return 2
-  local environment=$1 token=$2 registry row marker lock lock_held='' before current request response
+  local environment=$1 token=$2 registry row marker task_marker task_record='' lock lock_held='' before current request response
   fm_devenv_name_valid "$environment" || return 1
   printf '%s\n' "$token" | grep -Eq '^[0-9a-f]{64}$' || return 1
   # shellcheck disable=SC2119
@@ -482,10 +638,34 @@ fm_devenv_release_environment() (
   printf '%s\n' "$before" | jq -e --arg token "$token" --arg environment "$environment" \
     '.generation_token == $token and .phase == "control-plane-test" and .environment == $environment' \
     >/dev/null 2>&1 || return 1
+  task_marker="$FM_DEVENV_TASKS/$(printf '%s\n' "$before" | jq -r '.task_id').json"
+  if [ -e "$task_marker" ] || [ -L "$task_marker" ]; then
+    task_record=$(fm_devenv_task_claim_validate < "$task_marker") || return 1
+    printf '%s\n' "$task_record" | jq -e --argjson local "$before" '
+      .generation_token == $local.generation_token
+      and .environment == $local.environment
+      and .vm == $local.vm
+      and .task_id == $local.task_id
+      and .branch == $local.branch
+      and .issued_at == $local.issued_at
+      and .claim_state == "claimed"
+    ' >/dev/null 2>&1 || return 1
+  fi
   request=$(fm_devenv_protocol_request "$row" status "$(jq -cn --arg token "$token" '{generation_token:$token}')" '{}') \
     || return 1
   response=$(fm_backend_devenv_request "$(printf '%s\n' "$row" | jq -r '.vm')" "$request") || return 1
-  printf '%s\n' "$response" | jq -e '.ok == true' >/dev/null 2>&1 || return 1
+  printf '%s\n' "$response" | jq -e --argjson local "$before" '
+    .ok == true
+    and (.result | type == "object")
+    and (.result.lease | type == "object")
+    and (.result.lease | keys == ["branch","environment","issued_at","lease_state","task_id","vm"])
+    and .result.lease.environment == $local.environment
+    and .result.lease.vm == $local.vm
+    and .result.lease.task_id == $local.task_id
+    and .result.lease.branch == $local.branch
+    and .result.lease.issued_at == $local.issued_at
+    and .result.lease.lease_state == "leased"
+  ' >/dev/null 2>&1 || return 1
   current=$(cat "$marker" 2>/dev/null | fm_devenv_controller_lease_validate) || return 1
   [ "$current" = "$before" ] || return 1
   request=$(fm_devenv_protocol_request "$row" release "$(jq -cn --arg token "$token" '{generation_token:$token}')" '{}') \
@@ -493,6 +673,10 @@ fm_devenv_release_environment() (
   response=$(fm_backend_devenv_request "$(printf '%s\n' "$row" | jq -r '.vm')" "$request") || return 1
   printf '%s\n' "$response" | jq -e '.ok == true' >/dev/null 2>&1 || return 1
   [ "$(cat "$marker" 2>/dev/null)" = "$before" ] || return 1
+  if [ -n "$task_record" ]; then
+    [ "$(cat "$task_marker" 2>/dev/null)" = "$task_record" ] || return 1
+    rm -f -- "$task_marker" || return 1
+  fi
   rm -f -- "$marker" || return 1
   [ ! -e "$marker" ] && [ ! -L "$marker" ]
 )
