@@ -811,6 +811,93 @@ test_queue_removal_failure_leaves_claim_fenced() {
   pass "devenv controller: queue-removal failure leaves the claimed task fenced against retry"
 }
 
+test_post_claim_dequeue_waits_out_a_busy_queue_lock() {
+  local running admitted_fifo resume_fifo waiting_fifo claim_pid signal task_fence
+  reset_controller_state
+  running=$(inspection_json alpha running)
+  TEST_OBSERVATIONS=("$running" "$running")
+  seed_one_task || fail "busy-queue-lock fixture enqueue failed"
+  admitted_fifo="$TMP_ROOT/admitted.fifo"
+  resume_fifo="$TMP_ROOT/resume.fifo"
+  waiting_fifo="$TMP_ROOT/dequeue-waiting.fifo"
+  rm -f "$admitted_fifo" "$resume_fifo" "$waiting_fifo"
+  mkfifo "$admitted_fifo" "$resume_fifo" "$waiting_fifo"
+  exec 4<> "$admitted_fifo"
+  exec 5<> "$resume_fifo"
+  exec 6<> "$waiting_fifo"
+
+  (
+    # shellcheck disable=SC2329
+    fm_devenv_task_has_local_fence() {
+      local resumed
+      printf 'admitted\n' > "$admitted_fifo"
+      IFS= read -r -t 10 resumed < "$resume_fifo" || return 0
+      [ "$resumed" = resume ] || return 0
+      return 1
+    }
+    # shellcheck disable=SC2329
+    sleep() {
+      if [ ! -e "$TMP_ROOT/dequeue-wait-notified" ]; then
+        : > "$TMP_ROOT/dequeue-wait-notified"
+        printf 'waiting\n' > "$waiting_fifo"
+      fi
+      /bin/sleep "$1"
+    }
+    FM_DEVENV_LEASE_LOCK_TIMEOUT=0 fm_devenv_claim_next fm-example fm/fm-example "$ISSUED_AT" \
+      > "$TMP_ROOT/busy-result" 2> "$TMP_ROOT/busy-error"
+    printf '%s\n' "$?" > "$TMP_ROOT/busy-rc"
+  ) &
+  claim_pid=$!
+
+  IFS= read -r -t 10 signal <&4 || fail "the claim never passed queue-head admission"
+  [ "$signal" = admitted ] || fail "the claim emitted an unexpected admission signal"
+  fm_devenv_queue_lock_acquire || fail "the test could not hold the queue lock against the claim"
+  printf 'resume\n' >&5
+  IFS= read -r -t 10 signal <&6 || fail "the post-claim dequeue did not wait for the busy queue lock"
+  [ "$signal" = waiting ] || fail "the post-claim dequeue emitted an unexpected wait signal"
+  [ "$(awk -F'|' '$2 == "claim" {count++} END {print count + 0}' "$REMOTE_LOG")" = 1 ] \
+    || fail "the dequeue waited before its remote claim succeeded"
+  fm_lock_release "$FM_DEVENV_QUEUE_LOCK"
+  wait "$claim_pid"
+  exec 4>&-
+  exec 5>&-
+  exec 6>&-
+
+  [ "$(cat "$TMP_ROOT/busy-rc")" = 0 ] \
+    || fail "queue-lock contention poisoned a claim that already held its lease: $(cat "$TMP_ROOT/busy-error")"
+  jq -e --arg token "$TOKEN" '.claimed == true and .environment == "alpha" and .generation_token == $token' \
+    "$TMP_ROOT/busy-result" >/dev/null || fail "the waiting claim did not report its lease: $(cat "$TMP_ROOT/busy-result")"
+  task_fence="$STATE_ROOT/tasks/fm-example.json"
+  jq -e '.claim_state == "claimed"' "$task_fence" >/dev/null \
+    || fail "queue-lock contention fenced a successful claim for recovery: $(cat "$task_fence")"
+  [ "$(fm_devenv_queue_json | jq 'length')" = 0 ] || fail "the waiting claim left its task queued"
+  [ -f "$STATE_ROOT/environments/alpha.json" ] || fail "the waiting claim lost its published Mac lease"
+  pass "devenv controller: only a real queue fault, never queue-lock contention, poisons a completed claim"
+}
+
+test_read_only_commands_report_an_unreadable_queue() {
+  local command rc errors
+  for command in queue status; do
+    reset_controller_state
+    TEST_OBSERVATIONS=("$(inspection_json alpha running)")
+    mkdir -p "$STATE_ROOT"
+    printf '%s\n' '{"truncated":' > "$STATE_ROOT/queue.json"
+    errors="$TMP_ROOT/$command-error"
+    if [ "$command" = queue ]; then
+      fm_devenv_controller_main queue >/dev/null 2> "$errors"
+    else
+      fm_devenv_controller_main status --json >/dev/null 2> "$errors"
+    fi
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "$command reported success for an unreadable queue"
+    assert_contains "$(cat "$errors")" "queue is unreadable or invalid" \
+      "$command did not name the unreadable queue on standard error"
+    assert_contains "$(cat "$errors")" "$STATE_ROOT/queue.json" \
+      "$command did not name the queue path an operator must repair"
+  done
+  pass "devenv controller: read-only queue and status name an unreadable queue on standard error"
+}
+
 test_publication_failure_retains_remote_lease_and_quarantines() {
   local running rc quarantine claims task_fence
   reset_controller_state
@@ -863,5 +950,7 @@ test_task_phase_is_not_releasable_in_control_plane
 test_claim_scans_orphaned_local_task_fences
 test_ambiguous_remote_claim_fences_task_and_environment
 test_queue_removal_failure_leaves_claim_fenced
+test_post_claim_dequeue_waits_out_a_busy_queue_lock
+test_read_only_commands_report_an_unreadable_queue
 test_publication_failure_retains_remote_lease_and_quarantines
 test_concurrent_claims_serialize_after_queue_head_validation

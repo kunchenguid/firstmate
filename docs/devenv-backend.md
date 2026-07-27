@@ -71,9 +71,10 @@ Read the combined queue, inspection, lease, and quarantine view:
 bin/fm-devenv-controller.sh status --json
 ```
 
-Every `enqueue`, `claim`, and `release` failure prints one `fm-devenv-controller:` reason on standard error, which distinguishes a busy lock that can be retried from a duplicate task, an out-of-order claim, a corrupt queue, or a fenced task that needs recovery.
+Every command failure prints one `fm-devenv-controller:` reason on standard error, including the read-only `queue`, `inspect`, and `status --json`, which distinguishes a busy lock that can be retried from a duplicate task, an out-of-order claim, a corrupt queue, or a fenced task that needs recovery.
 Standard output stays machine-readable, so VM start narration during a claim is diagnostic output on standard error.
 Claims serialize on their own dispatch lock, so an `enqueue` never waits behind a claim that is booting a stopped VM.
+A claim that already holds its remote and Mac lease waits for the queue lock rather than timing out, so lock contention never leaves a live lease behind a task that needs manual recovery.
 
 A runtime mismatch is repaired by rerunning the installer for that feature environment and then rerunning `--verify`.
 An unreadable or contradictory inspection is a reason to inspect the VM directly before retrying, not a reason to bypass the controller or select another backend silently.

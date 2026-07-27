@@ -11,7 +11,9 @@
 #
 # Claims serialize on claim.lock for their whole dispatch, including a VM start.
 # queue.lock only covers one atomic queue read or write, so enqueue never waits
-# behind a claim that is booting a stopped VM.
+# behind a claim that is booting a stopped VM. Because every queue.lock holder is
+# that short, and a dead holder is reclaimed, the post-claim dequeue waits for the
+# lock instead of timing out: only a real queue fault may strand a live lease.
 #
 # The normalized observation object consumed by fm_devenv_select has exactly:
 # name, vm, lifecycle, reachable, git.clean, local_lease, remote_lease,
@@ -137,9 +139,9 @@ fm_devenv_enqueue_json() (
 fm_devenv_queue_remove() (
   [ "$#" -eq 1 ] || return 2
   local task_id=$1 lock_held=
+  mkdir -p "$FM_DEVENV_STATE_ROOT" || return 1
   trap '[ -z "$lock_held" ] || fm_lock_release "$FM_DEVENV_QUEUE_LOCK"' EXIT
-  fm_devenv_queue_lock_acquire \
-    || { fm_devenv_controller_error 'queue lock is busy; retry the queue removal'; return 1; }
+  fm_lock_acquire_wait "$FM_DEVENV_QUEUE_LOCK"
   lock_held=1
   fm_devenv_queue_remove_unlocked "$task_id"
 )
@@ -756,9 +758,12 @@ fm_devenv_release_environment() (
 fm_devenv_status_json() {
   local registry inspections queue environment_records quarantine_records
   # shellcheck disable=SC2119
-  registry=$(fm_devenv_registry_json "$(fm_devenv_registry_path)") || return 1
-  inspections=$(fm_devenv_inspect_all "$registry") || return 1
-  queue=$(fm_devenv_queue_json) || return 1
+  registry=$(fm_devenv_registry_json "$(fm_devenv_registry_path)") \
+    || { fm_devenv_controller_error "environment registry is unreadable or invalid: $(fm_devenv_registry_path)"; return 1; }
+  inspections=$(fm_devenv_inspect_all "$registry") \
+    || { fm_devenv_controller_error 'fleet inspection failed; status is incomplete'; return 1; }
+  queue=$(fm_devenv_queue_json) \
+    || { fm_devenv_controller_error "queue is unreadable or invalid; repair $FM_DEVENV_QUEUE"; return 1; }
   environment_records=$(find "$FM_DEVENV_ENVIRONMENTS" -maxdepth 1 -type f -name '*.json' -exec jq -c . {} \; 2>/dev/null | jq -sc '.') \
     || environment_records='[]'
   quarantine_records=$(find "$FM_DEVENV_QUARANTINE" -maxdepth 1 -type f -name '*.json' -exec jq -c . {} \; 2>/dev/null | jq -sc '.') \
@@ -805,13 +810,16 @@ fm_devenv_controller_main() {
       ;;
     queue)
       [ "$#" -eq 0 ] || { fm_devenv_controller_usage; return $?; }
-      fm_devenv_queue_json
+      fm_devenv_queue_json \
+        || { fm_devenv_controller_error "queue is unreadable or invalid; repair $FM_DEVENV_QUEUE"; return 1; }
       ;;
     inspect)
       [ "$#" -eq 0 ] || { fm_devenv_controller_usage; return $?; }
       # shellcheck disable=SC2119
-      registry=$(fm_devenv_registry_json "$(fm_devenv_registry_path)") || return 1
-      fm_devenv_inspect_all "$registry"
+      registry=$(fm_devenv_registry_json "$(fm_devenv_registry_path)") \
+        || { fm_devenv_controller_error "environment registry is unreadable or invalid: $(fm_devenv_registry_path)"; return 1; }
+      fm_devenv_inspect_all "$registry" \
+        || { fm_devenv_controller_error 'fleet inspection failed'; return 1; }
       ;;
     claim)
       [ "$#" -ge 2 ] && [ "$#" -le 3 ] || { fm_devenv_controller_usage; return $?; }
