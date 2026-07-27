@@ -69,26 +69,49 @@ fm_wake_append_stale_for_recorded_window() {  # <window> <reason>
 
 # Act on a fresh actionable transition from a push-capable backend.
 handle_push_transition() {  # <backend> <session> <record>
-  local backend=$1 session=$2 record=$3 pane_id to window task reason status
+  local backend=$1 session=$2 record=$3 pane_id to window task reason meta status
   pane_id=$(fm_transition_pane_id "$record")
   to=$(fm_transition_to_status "$record")
   [ -n "$pane_id" ] || { sleep 1; return; }
   window="$session:$pane_id"
-  task=$(window_to_task "$window" "$STATE")
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  WAKE_QUEUE_LOCK_HELD=1
+  meta=$(fm_backend_meta_for_window "$window" "$STATE" 2>/dev/null || true)
+  if [ -z "$meta" ]; then
+    WAKE_QUEUE_LOCK_HELD=0
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return
+  fi
+  task=$(basename "$meta")
+  task=${task%.meta}
   if status_is_paused "$(last_status_line "$STATE/$task.status")"; then
     triage_log "absorbed push $to (declared pause, awaiting external): $window"
-    fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
+    if ! fm_backend_commit_transition "$backend" "$STATE" "$session" "$record"; then
+      WAKE_QUEUE_LOCK_HELD=0
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      exit 1
+    fi
+    WAKE_QUEUE_LOCK_HELD=0
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return
   fi
   reason="stale: $window (herdr: agent $to - waiting on human, escalated immediately, not via wedge timer)"
-  if fm_wake_append_stale_for_recorded_window "$window" "$reason"; then
-    :
-  else
-    status=$?
-    [ "$status" -eq 3 ] && return
+  if ! fm_wake_append_locked stale "$window" "$reason"; then
+    WAKE_QUEUE_LOCK_HELD=0
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     exit 1
   fi
-  fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
+  if ! fm_backend_commit_transition "$backend" "$STATE" "$session" "$record"; then
+    WAKE_QUEUE_LOCK_HELD=0
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    exit 1
+  fi
   mark_surfaced "$STATE/$task.status"
-  wake "$reason"
+  status=0
+  wake "$reason" || status=$?
+  WAKE_QUEUE_LOCK_HELD=0
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  if [ "$status" -ne 0 ]; then
+    exit 1
+  fi
 }

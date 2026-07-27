@@ -1223,7 +1223,6 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 remove_kimi_turnend_auth "$STATE" "$ID"
-fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
@@ -1232,6 +1231,7 @@ TRACKING_KEY=$(printf '%s' "$T" | tr ':/.' '___')
 TASK_TRACKING_KEY=$(printf '%s' "$ID" | tr ':/.' '___')
 SIGNAL_TRACKING_KEY=$(printf '%s' "$ID" | tr '.' '_')
 fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" \

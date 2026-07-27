@@ -1351,6 +1351,91 @@ SH
   pass "teardown drops collected retired signals before the task ID is reused"
 }
 
+test_herdr_push_transition_serializes_with_teardown() {
+  local case_dir real_sleep handler_pid teardown_pid i stale_count wake_count marker
+  case_dir=$(make_case herdr-push-transition-teardown)
+  write_meta "$case_dir" local-only ship
+  sed -i.bak 's/^window=.*/window=default:wG:pQ/' "$case_dir/state/task-x1.meta"
+  printf '%s\n' 'backend=herdr' >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+  real_sleep=$(command -v sleep)
+  cat > "$case_dir/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = 0.1 ] && [ -n "${FM_TEARDOWN_LOCK_WAIT:-}" ]; then
+  : > "$FM_TEARDOWN_LOCK_WAIT"
+fi
+exec "${FM_REAL_SLEEP_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$case_dir/fakebin/sleep"
+  marker="$case_dir/state/.herdr-escalated-default_wG_pQ"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_COMMIT_BLOCKED="$case_dir/commit-blocked" FM_COMMIT_RESUME="$case_dir/commit-resume" \
+    FM_WAKE_LOG="$case_dir/wake.log" FM_REAL_SLEEP_FOR_TEST="$real_sleep" \
+    bash -c '
+      . "$1"
+      fm_backend_source herdr
+      fm_backend_commit_transition() {
+        : > "$FM_COMMIT_BLOCKED"
+        while [ ! -e "$FM_COMMIT_RESUME" ]; do
+          "$FM_REAL_SLEEP_FOR_TEST" 0.05
+        done
+        fm_backend_herdr_commit_transition "$2" "$3" "$4"
+      }
+      wake() {
+        printf "%s\n" "$1" >> "$FM_WAKE_LOG"
+      }
+      record=$(fm_transition_record "wG:pQ" "wG" "" blocked claude)
+      handle_push_transition herdr default "$record"
+    ' _ "$ROOT/bin/fm-push-transition-lib.sh" \
+    > "$case_dir/handler.out" 2> "$case_dir/handler.err" &
+  handler_pid=$!
+  i=0
+  while [ ! -e "$case_dir/commit-blocked" ] && kill -0 "$handler_pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$case_dir/commit-blocked" ] \
+    || { kill "$handler_pid" 2>/dev/null || true; wait "$handler_pid" 2>/dev/null || true; fail "herdr-push-transition-teardown: handler did not pause before dedupe commit"; }
+
+  (
+    export FM_REAL_SLEEP_FOR_TEST="$real_sleep"
+    export FM_TEARDOWN_LOCK_WAIT="$case_dir/teardown-lock-wait"
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  ) &
+  teardown_pid=$!
+  i=0
+  while [ ! -e "$case_dir/teardown-lock-wait" ] && kill -0 "$teardown_pid" 2>/dev/null && [ "$i" -lt 300 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$case_dir/teardown-lock-wait" ] \
+    || { kill "$handler_pid" "$teardown_pid" 2>/dev/null || true; wait "$handler_pid" 2>/dev/null || true; wait "$teardown_pid" 2>/dev/null || true; fail "herdr-push-transition-teardown: teardown did not wait for the active transition transaction"; }
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "herdr-push-transition-teardown: teardown retired metadata during the active transition transaction"
+
+  : > "$case_dir/commit-resume"
+  wait "$handler_pid" \
+    || fail "herdr-push-transition-teardown: handler failed: $(cat "$case_dir/handler.err")"
+  wait "$teardown_pid" \
+    || fail "herdr-push-transition-teardown: teardown failed: $(cat "$case_dir/stderr")"
+  stale_count=$(grep -c "$(printf '\tstale\tdefault:wG:pQ\t')" "$case_dir/state/.wake-queue" 2>/dev/null || true)
+  [ "$stale_count" -eq 1 ] \
+    || fail "herdr-push-transition-teardown: live transition queued $stale_count times instead of once"
+  wake_count=$(wc -l < "$case_dir/wake.log" | tr -d '[:space:]')
+  [ "$wake_count" -eq 1 ] \
+    || fail "herdr-push-transition-teardown: live transition woke $wake_count times instead of once"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "herdr-push-transition-teardown: teardown did not retire metadata after the transition"
+  [ ! -e "$marker" ] \
+    || fail "herdr-push-transition-teardown: retired handler recreated Herdr dedupe state"
+  pass "Herdr transition commit and wake complete before identity retirement"
+}
+
 test_teardown_waits_for_live_signal_triage() {
   local case_dir status_line real_grep real_sleep pid teardown_pid i signal_count
   case_dir=$(make_case signal-triage-teardown)
@@ -1657,6 +1742,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
+test_herdr_push_transition_serializes_with_teardown
 test_teardown_waits_for_live_signal_triage
 test_teardown_waits_for_live_signal_queue_commit
 test_teardown_waits_for_live_stale_queue_commit
