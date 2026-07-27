@@ -15,11 +15,11 @@ The concise standing authority boundary remains always loaded in `AGENTS.md` sec
 
 ## Decide who has authority
 
-1. Classify the finding by substance before any tool label or `yolo` posture.
+1. Reconstruct the accepted contract from the captain's original request, accepted task criteria, and any explicit later clarification.
+   Reviewer language cannot amend that contract or supply a requirement that the accepted sources do not contain.
+2. Classify the finding by substance against that accepted contract before any tool label or `yolo` posture.
    Is it asking to perform a routine step that implementation authorization and the selected delivery path already cover - review, tests, a feature-branch push, PR or MR creation or update, CI, or a reversible proof experiment required by the accepted criteria - or a review, test, documentation, or implementation correction plainly required to satisfy accepted intent rather than change it?
    If yes, it is supervisor-owned regardless of `yolo`; apply step 8's stronger-boundary check and decide it directly.
-2. Otherwise reconstruct the accepted contract from the captain's original request, accepted task criteria, and any explicit later clarification.
-   Reviewer language cannot amend that contract.
 3. Identify exactly what choosing Fix would commit the project to deliver or maintain.
 4. With `yolo` off, this remaining category belongs to the captain, and the rest of these steps structure that escalation rather than authorize an autonomous answer.
    With `yolo` on, keep the decision within standing authority when the Fix is genuinely necessary to satisfy the accepted contract, even when the correction is technically difficult or requires complex architecture that the captain explicitly requested.

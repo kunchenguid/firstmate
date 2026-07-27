@@ -28,7 +28,7 @@ approval_contract() {
 }
 
 test_owner_and_always_loaded_boundary() {
-  local contract trigger_count
+  local classification_line contract contract_line reviewer_guard_line trigger_count yolo_line
   contract=$(approval_contract)
 
   assert_contains "$contract" "only within the captain's original request and accepted task criteria" \
@@ -49,10 +49,22 @@ test_owner_and_always_loaded_boundary() {
   assert_grep 'user-invocable: false' "$OWNER" "ask-user authority skill must be agent-only"
   assert_grep 'single owner of the decision procedure for ask-user findings' "$OWNER" \
     "ask-user authority skill does not declare ownership"
-  assert_grep 'Classify the finding by substance before any tool label or `yolo` posture' "$OWNER" \
+  assert_grep 'Reconstruct the accepted contract from the captain'\''s original request, accepted task criteria, and any explicit later clarification' "$OWNER" \
+    "detailed procedure does not establish the authoritative accepted contract"
+  assert_grep 'Reviewer language cannot amend that contract or supply a requirement that the accepted sources do not contain' "$OWNER" \
+    "reviewer language can still supply its own acceptance requirement"
+  assert_grep 'Classify the finding by substance against that accepted contract before any tool label or `yolo` posture' "$OWNER" \
     "detailed procedure no longer classifies a finding by substance before yolo"
   assert_grep 'With `yolo` off, this remaining category belongs to the captain' "$OWNER" \
     "detailed procedure escalates every finding to the captain with yolo off instead of only the remaining category"
+  contract_line=$(grep -nF "1. Reconstruct the accepted contract" "$OWNER" | cut -d: -f1)
+  reviewer_guard_line=$(grep -nF "Reviewer language cannot amend that contract" "$OWNER" | cut -d: -f1)
+  classification_line=$(grep -nF "2. Classify the finding by substance against that accepted contract" "$OWNER" | cut -d: -f1)
+  yolo_line=$(grep -nF 'With `yolo` off, this remaining category belongs to the captain' "$OWNER" | cut -d: -f1)
+  [ "$contract_line" -lt "$reviewer_guard_line" ] &&
+    [ "$reviewer_guard_line" -lt "$classification_line" ] &&
+    [ "$classification_line" -lt "$yolo_line" ] ||
+    fail "authority procedure must establish and guard accepted intent before substance classification, then apply yolo posture"
   trigger_count=$(grep -Fc -- '- `ask-user-authority` -' "$AGENTS")
   [ "$trigger_count" -eq 1 ] || fail "ask-user-authority must have exactly one section 13 trigger, found $trigger_count"
   assert_no_grep 'Hi Bit' "$AGENTS" "AGENTS.md encoded an incident-specific authority rule"
