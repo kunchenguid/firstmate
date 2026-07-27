@@ -118,6 +118,16 @@ test_stronger_security_boundary_survives() {
   pass "genuinely security-sensitive action still escalates"
 }
 
+test_pr_merge_authority_stays_with_captain() {
+  local contract
+  contract=$(approval_contract)
+  assert_contains "$contract" 'PR merges always require the captain regardless of `yolo`' \
+    "yolo gained PR merge authority contrary to the accepted contract"
+  assert_grep 'PR merges always require the captain' "$OWNER" \
+    "detailed authority procedure lets a routine-delivery classification bypass captain-owned PR merges"
+  pass "PR merge authority stays with the captain regardless of yolo"
+}
+
 test_explicit_complex_architecture_stays_in_scope() {
   assert_grep 'complex architecture that the captain explicitly requested' "$OWNER" \
     "explicitly requested complex architecture is not protected from complexity-only escalation"
@@ -184,6 +194,7 @@ test_routine_delivery_steps_stay_supervisor_owned
 test_continuous_monitoring_expansion_escalates
 test_repeated_same_theme_escalates_before_another_round
 test_stronger_security_boundary_survives
+test_pr_merge_authority_stays_with_captain
 test_explicit_complex_architecture_stays_in_scope
 test_reviewer_labels_are_evidence_not_authority
 test_captain_escalation_is_decision_ready

@@ -25,7 +25,7 @@ Hard rules, in priority order:
    The only exceptions are the guarded project initialization, fleet sync, secondmate sync and inherited local-material propagation, self-update, and approved `local-only` merge paths owned by their referenced skills and scripts.
    Those paths never authorize forcing, stashing, discarding unlanded work, or hand-writing a project's `AGENTS.md`.
 2. **Never merge a PR without the captain's explicit word.**
-   A project's captain-approved `yolo` posture is the only standing relaxation for routine merge decisions; section 7 owns its exceptions, including the substance-based ask-user authority contract, and preserves the stronger destructive, irreversible, and security-sensitive captain boundaries.
+   A project's captain-approved `yolo` posture is a standing relaxation only for routine non-merge decisions; section 7 owns its exceptions, including the substance-based ask-user authority contract, and preserves the stronger destructive, irreversible, and security-sensitive captain boundaries.
 3. **Never tear down unlanded work.**
    Uncommitted changes are never landed, and `bin/fm-teardown.sh` owns the complete landed-work test.
    Never bypass a refusal or use `--force` unless the captain explicitly authorized discarding that work.
@@ -280,13 +280,14 @@ The path's worker, automated gates, and captain approval remain authoritative:
 Delivery mode and `yolo` are orthogonal, and an ask-user finding's authority is classified by the substance of the proposed change before any tool label or `yolo` posture is applied; load `ask-user-authority` before deciding one.
 Implementation authorization and the selected delivery path already authorize routine review, tests, feature-branch pushes, PR or MR creation and updates, CI, and reversible proof experiments required by the accepted criteria, plus any review, test, documentation, or implementation correction plainly required to satisfy accepted intent rather than change it; the supervising firstmate or secondmate clears these even when `yolo` is off.
 The implementation worker never answers its own finding regardless of who holds authority; it routes every finding to its supervisor and applies only the decision returned through the active validation gate.
-With `yolo` off, the captain owns every remaining ask-user finding, PR merges, and local-only merge approval.
-With `yolo` on, firstmate decides remaining routine gates only within the captain's original request and accepted task criteria, and merges only green or otherwise approved work.
+PR merges always require the captain regardless of `yolo`.
+With `yolo` off, the captain owns every remaining ask-user finding and local-only merge approval.
+With `yolo` on, firstmate decides remaining routine non-merge gates only within the captain's original request and accepted task criteria.
 Standing authority, with or without `yolo`, never approves an ask-user Fix that would materially expand that product or engineering contract; destructive, irreversible, and security-sensitive choices remain stronger captain boundaries.
 Complexity alone is not expansion: a difficult correction genuinely required by accepted intent, including explicitly requested complex architecture, remains autonomous.
 Never merge a red PR.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
-After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
+After an autonomous local-only merge, give the captain a one-line local-main outcome.
 
 ### Validate
 
@@ -309,7 +310,7 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
-A captain instruction to merge is explicit authority; `yolo` is the only standing routine authority.
+A captain instruction to merge a PR is the only PR merge authority; `yolo` never grants it.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 
 Tear down a ship task only after landing is confirmed.
