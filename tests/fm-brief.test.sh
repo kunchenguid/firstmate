@@ -413,7 +413,7 @@ assert_keyed_status_protocol_guidance() {
 }
 
 test_keyed_status_protocol_guidance_all_scaffolds() {
-  local home brief
+  local home brief actual
   home="$TMP_ROOT/keyed-status-home"
   mkdir -p "$home/data"
   write_registry "$home"
@@ -452,15 +452,21 @@ test_keyed_status_protocol_guidance_all_scaffolds() {
     "secondmate charter still teaches the ambiguous keyed-with parenthetical"
 
   # Parser contract reinforcement: trailing prose key must not become structured key.
-  # shellcheck source=bin/fm-classify-lib.sh
-  . "$ROOT/bin/fm-classify-lib.sh"
-  [ "$(_fm_decision_key 'needs-decision: summary [key=route]')" = default ] \
+  actual=$(bash -c '. "$1"; _fm_decision_key "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" 'needs-decision: summary [key=route]')
+  [ "$actual" = default ] \
     || fail "trailing prose key was parsed as a structured key"
-  [ "$(_fm_decision_key 'needs-decision [key=route]: summary')" = route ] \
+  actual=$(bash -c '. "$1"; _fm_decision_key "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" 'needs-decision [key=route]: summary')
+  [ "$actual" = route ] \
     || fail "between-verb-and-colon key was not parsed as the structured key"
-  [ "$(_fm_decision_key 'resolved: how [key=route]')" = default ] \
+  actual=$(bash -c '. "$1"; _fm_decision_key "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" 'resolved: how [key=route]')
+  [ "$actual" = default ] \
     || fail "trailing prose key on resolved was parsed as a structured key"
-  [ "$(_fm_decision_key 'resolved [key=route]: how')" = route ] \
+  actual=$(bash -c '. "$1"; _fm_decision_key "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" 'resolved [key=route]: how')
+  [ "$actual" = route ] \
     || fail "between-verb-and-colon resolved key was not parsed"
 
   pass "fm-brief.sh: every scaffold teaches exact keyed status syntax"
