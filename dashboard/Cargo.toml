@@ -2,6 +2,7 @@
 name = "fm-dashboard-server"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.70"
 description = "Read-only live fleet dashboard HTTP server for firstmate"
 license = "MIT"
 publish = false

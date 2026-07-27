@@ -166,10 +166,36 @@ resolve_bind() {
     printf 'fm-dashboard: refusing wildcard bind address %s (use a Tailscale IP or 127.0.0.1 for dev)\n' "$raw" >&2
     return 1
   fi
+  # Parse IP:PORT carefully so bare IPv6 (multiple colons) is not split on the
+  # last colon into a garbage host and a fake port.
   case "$raw" in
+    \[*)
+      # Bracketed form: [addr] or [addr]:port
+      if printf '%s' "$raw" | grep -q '\]:'; then
+        ip=${raw#\[}
+        ip=${ip%%\]*}
+        port=${raw##*\]:}
+      elif printf '%s' "$raw" | grep -q '\]$'; then
+        ip=${raw#\[}
+        ip=${ip%\]}
+        port=$DEFAULT_PORT
+      else
+        printf 'fm-dashboard: invalid bracketed bind address: %s\n' "$raw" >&2
+        return 1
+      fi
+      ;;
     *:*)
-      ip=${raw%:*}
-      port=${raw##*:}
+      # Count colons without spawning: strip non-colons and measure remainder.
+      colons=${raw//[^:]/}
+      if [ "${#colons}" -eq 1 ]; then
+        # Exactly one colon: host:port (IPv4 or hostname).
+        ip=${raw%:*}
+        port=${raw##*:}
+      else
+        # Two or more colons: bare IPv6 address, default port.
+        ip=$raw
+        port=$DEFAULT_PORT
+      fi
       ;;
     *)
       ip=$raw
@@ -190,7 +216,15 @@ resolve_bind() {
     printf 'fm-dashboard: port out of range in dashboard-bind: %s\n' "$port" >&2
     return 1
   fi
-  DASH_BIND="${ip}:${port}"
+  # Preserve brackets for IPv6 literals when writing bind strings that embed :port.
+  case "$ip" in
+    *:*)
+      DASH_BIND="[${ip}]:${port}"
+      ;;
+    *)
+      DASH_BIND="${ip}:${port}"
+      ;;
+  esac
   return 0
 }
 
@@ -336,14 +370,30 @@ server_confirmed() {
   port_open "$host" "$port"
 }
 
+# Split DASH_BIND (ip:port or [ipv6]:port) into host + port for the server env.
+# Host is without brackets (the Rust SocketAddr parser accepts bare IPv6).
+split_dash_bind() {
+  local bind=$1
+  case "$bind" in
+    \[*\])
+      FM_DASHBOARD_BIND_HOST=${bind#\[}
+      FM_DASHBOARD_BIND_HOST=${FM_DASHBOARD_BIND_HOST%%\]*}
+      FM_DASHBOARD_BIND_PORT=${bind##*\]:}
+      ;;
+    *)
+      FM_DASHBOARD_BIND_HOST=${bind%:*}
+      FM_DASHBOARD_BIND_PORT=${bind##*:}
+      ;;
+  esac
+}
+
 # Export server env in the current shell; set DASH_BIND.
 # Returns non-zero on bind/token failure (messages already on stderr).
 assign_server_env() {
   local token
   resolve_bind || return 1
   token=$(ensure_token) || return 1
-  FM_DASHBOARD_BIND_HOST=${DASH_BIND%:*}
-  FM_DASHBOARD_BIND_PORT=${DASH_BIND##*:}
+  split_dash_bind "$DASH_BIND"
   FM_DASHBOARD_TOKEN=$token
   FM_DASHBOARD_STATIC=$STATIC_DIR
   FM_DASHBOARD_SNAPSHOT=$FM_ROOT/bin/fm-fleet-snapshot.sh

@@ -68,10 +68,15 @@ fn run() -> Result<(), String> {
         cache: Mutex::new(SnapshotCache::default()),
     });
 
+    // One thread per request so a stalled peer (or a long snapshot) cannot
+    // wedge open routes such as /healthz. No async runtime.
     for request in server.incoming_requests() {
-        if let Err(err) = handle_request(&state, request) {
-            eprintln!("fm-dashboard-server: request error: {err}");
-        }
+        let state = Arc::clone(&state);
+        thread::spawn(move || {
+            if let Err(err) = handle_request(&state, request) {
+                eprintln!("fm-dashboard-server: request error: {err}");
+            }
+        });
     }
     Ok(())
 }
@@ -203,7 +208,7 @@ fn handle_request(state: &AppState, request: Request) -> Result<(), String> {
     let method = request.method().clone();
     let url = request.url().to_string();
     let (path, _query) = split_url(&url);
-    let head = method == Method::Head;
+    // tiny_http suppresses bodies for HEAD; no separate head plumbing needed.
 
     match (&method, path.as_str()) {
         (Method::Get | Method::Head, "/healthz") => {
@@ -214,17 +219,17 @@ fn handle_request(state: &AppState, request: Request) -> Result<(), String> {
                 "uptime_s": state.started.elapsed().as_secs(),
                 "pid": std::process::id()
             });
-            send_json(request, StatusCode(200), &body, head)
+            send_json(request, StatusCode(200), &body)
         }
         (Method::Get | Method::Head, "/unlock") => {
-            send_html(request, StatusCode(200), UNLOCK_HTML.as_bytes(), head)
+            send_html(request, StatusCode(200), UNLOCK_HTML.as_bytes())
         }
         (Method::Post, "/unlock") => handle_unlock(state, request),
         (Method::Get | Method::Head, "/") | (Method::Get | Method::Head, "/index.html") => {
             if !authorized(state, &request) {
-                return send_html(request, StatusCode(401), UNLOCK_HTML.as_bytes(), head);
+                return send_html(request, StatusCode(401), UNLOCK_HTML.as_bytes());
             }
-            serve_static(state, request, "index.html", head)
+            serve_static(state, request, "index.html")
         }
         (Method::Get | Method::Head, "/api/v1/snapshot") => {
             if !authorized(state, &request) {
@@ -232,7 +237,6 @@ fn handle_request(state: &AppState, request: Request) -> Result<(), String> {
                     request,
                     StatusCode(401),
                     &json!({"ok": false, "error": "unauthorized"}),
-                    head,
                 );
             }
             let body = {
@@ -248,13 +252,11 @@ fn handle_request(state: &AppState, request: Request) -> Result<(), String> {
                     StatusCode(200),
                     "application/json; charset=utf-8",
                     bytes,
-                    head,
                 ),
                 Err(err) => send_json(
                     request,
                     StatusCode(500),
                     &json!({"ok": false, "error": "snapshot failed", "detail": err}),
-                    head,
                 ),
             }
         }
@@ -264,10 +266,9 @@ fn handle_request(state: &AppState, request: Request) -> Result<(), String> {
                     request,
                     StatusCode(401),
                     &json!({"ok": false, "error": "unauthorized"}),
-                    head,
                 );
             }
-            serve_static(state, request, p.trim_start_matches('/'), head)
+            serve_static(state, request, p.trim_start_matches('/'))
         }
         (Method::Get | Method::Head, p) if p.starts_with("/static/") => {
             if !authorized(state, &request) {
@@ -275,16 +276,14 @@ fn handle_request(state: &AppState, request: Request) -> Result<(), String> {
                     request,
                     StatusCode(401),
                     &json!({"ok": false, "error": "unauthorized"}),
-                    head,
                 );
             }
-            serve_static(state, request, &p["/static/".len()..], head)
+            serve_static(state, request, &p["/static/".len()..])
         }
         _ => send_json(
             request,
             StatusCode(404),
             &json!({"ok": false, "error": "not found"}),
-            false,
         ),
     }
 }
@@ -371,7 +370,6 @@ fn handle_unlock(state: &AppState, mut request: Request) -> Result<(), String> {
                 request,
                 StatusCode(401),
                 &json!({"ok": false, "error": "unauthorized"}),
-                false,
             );
         }
         return send_redirect(request, "/unlock?e=1", None);
@@ -443,19 +441,13 @@ fn urlencoding_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn serve_static(
-    state: &AppState,
-    request: Request,
-    rel: &str,
-    head: bool,
-) -> Result<(), String> {
+fn serve_static(state: &AppState, request: Request, rel: &str) -> Result<(), String> {
     let rel = rel.trim_start_matches('/');
     if rel.is_empty() {
         return send_json(
             request,
             StatusCode(404),
             &json!({"ok": false, "error": "not found"}),
-            head,
         );
     }
     for c in Path::new(rel).components() {
@@ -464,7 +456,6 @@ fn serve_static(
                 request,
                 StatusCode(404),
                 &json!({"ok": false, "error": "not found"}),
-                head,
             );
         }
     }
@@ -476,7 +467,6 @@ fn serve_static(
                 request,
                 StatusCode(404),
                 &json!({"ok": false, "error": "not found"}),
-                head,
             );
         }
     };
@@ -485,7 +475,6 @@ fn serve_static(
             request,
             StatusCode(404),
             &json!({"ok": false, "error": "not found"}),
-            head,
         );
     }
     let body = fs::read(&resolved).map_err(|e| format!("read static: {e}"))?;
@@ -496,23 +485,12 @@ fn serve_static(
         Some("svg") => "image/svg+xml",
         _ => "application/octet-stream",
     };
-    send_bytes(request, StatusCode(200), ctype, body, head)
+    send_bytes(request, StatusCode(200), ctype, body)
 }
 
-fn send_json(
-    request: Request,
-    status: StatusCode,
-    value: &Value,
-    head: bool,
-) -> Result<(), String> {
+fn send_json(request: Request, status: StatusCode, value: &Value) -> Result<(), String> {
     let body = serde_json::to_vec(value).map_err(|e| format!("json: {e}"))?;
-    send_bytes(
-        request,
-        status,
-        "application/json; charset=utf-8",
-        body,
-        head,
-    )
+    send_bytes(request, status, "application/json; charset=utf-8", body)
 }
 
 fn send_json_with_cookie(
@@ -530,19 +508,8 @@ fn send_json_with_cookie(
         .map_err(|e| format!("respond: {e}"))
 }
 
-fn send_html(
-    request: Request,
-    status: StatusCode,
-    body: &[u8],
-    head: bool,
-) -> Result<(), String> {
-    send_bytes(
-        request,
-        status,
-        "text/html; charset=utf-8",
-        body.to_vec(),
-        head,
-    )
+fn send_html(request: Request, status: StatusCode, body: &[u8]) -> Result<(), String> {
+    send_bytes(request, status, "text/html; charset=utf-8", body.to_vec())
 }
 
 fn send_bytes(
@@ -550,18 +517,8 @@ fn send_bytes(
     status: StatusCode,
     content_type: &str,
     body: Vec<u8>,
-    head: bool,
 ) -> Result<(), String> {
-    if head {
-        let response = Response::empty(status)
-            .with_header(header("Content-Type", content_type)?)
-            .with_header(header("Cache-Control", "no-store")?)
-            .with_header(header("X-Content-Type-Options", "nosniff")?)
-            .with_header(header("Content-Length", &body.len().to_string())?);
-        return request
-            .respond(response)
-            .map_err(|e| format!("respond: {e}"));
-    }
+    // tiny_http omits the body for HEAD and derives Content-Length.
     let mut response = Response::from_data(body).with_status_code(status);
     add_std_headers(&mut response, content_type)?;
     request

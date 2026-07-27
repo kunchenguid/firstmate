@@ -142,13 +142,14 @@
     return card;
   }
 
-  function pruneCards(liveKeys) {
+  /** Drop card nodes whose keys start with prefix and are not in liveKeys. */
+  function pruneByPrefix(prefix, liveKeys) {
     Object.keys(state.cardNodes).forEach(function (key) {
-      if (!liveKeys[key]) {
-        var node = state.cardNodes[key];
-        if (node && node.parentNode) node.parentNode.removeChild(node);
-        delete state.cardNodes[key];
-      }
+      if (key.indexOf(prefix) !== 0) return;
+      if (liveKeys[key]) return;
+      var node = state.cardNodes[key];
+      if (node && node.parentNode) node.parentNode.removeChild(node);
+      delete state.cardNodes[key];
     });
   }
 
@@ -216,6 +217,7 @@
       el.callBody.appendChild(
         emptyState("your-call", "clear", "No captain-actionable decisions in the current snapshot.")
       );
+      pruneByPrefix("decision:", live);
       return;
     }
 
@@ -271,14 +273,7 @@
       origin.textContent = "key: " + key;
       card.appendChild(origin);
     }
-    // Only prune decision cards that disappeared (keep other kinds).
-    Object.keys(state.cardNodes).forEach(function (k) {
-      if (k.indexOf("decision:") === 0 && !live[k]) {
-        var node = state.cardNodes[k];
-        if (node && node.parentNode) node.parentNode.removeChild(node);
-        delete state.cardNodes[k];
-      }
-    });
+    pruneByPrefix("decision:", live);
   }
 
   function renderReady(snap) {
@@ -349,6 +344,7 @@
       el.fleetBody.appendChild(
         emptyState("fleet-now", "clear", "No live task metadata under state/.")
       );
+      pruneByPrefix("task:", live);
       return;
     }
     tasks.forEach(function (t) {
@@ -389,13 +385,7 @@
         card.appendChild(link);
       }
     });
-    Object.keys(state.cardNodes).forEach(function (k) {
-      if (k.indexOf("task:") === 0 && !live[k]) {
-        var node = state.cardNodes[k];
-        if (node && node.parentNode) node.parentNode.removeChild(node);
-        delete state.cardNodes[k];
-      }
-    });
+    pruneByPrefix("task:", live);
   }
 
   function renderTrains(snap) {
