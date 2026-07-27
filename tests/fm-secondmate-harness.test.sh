@@ -920,6 +920,11 @@ if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
   printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 fi
 case "$*" in
+  *list-windows*)
+    state_dir=${FM_STATE_OVERRIDE:-${FM_HOME:?}/state}
+    sed -n 's/^window=[^:]*://p' "$state_dir"/*.meta 2>/dev/null
+    exit 0
+    ;;
   *display-message*'#{pane_current_command}'*) printf '%s\n' codex; exit 0 ;;
   *display-message*'#{pane_id}'*) printf '%s\n' '%1'; exit 0 ;;
   *display-message*'#{cursor_y}'*) printf '%s\n' 0; exit 0 ;;

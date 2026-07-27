@@ -29,6 +29,13 @@ case "${1:-}" in
     exit 0
     ;;
   list-windows)
+    case "$*" in
+      *'-F #{window_name}'*)
+        [ -z "${FM_FAKE_TMUX_SESSION_WINDOWS:-}" ] \
+          || printf '%s\n' "$FM_FAKE_TMUX_SESSION_WINDOWS"
+        exit 0
+        ;;
+    esac
     if [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then
       printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
     fi
@@ -37,6 +44,7 @@ case "${1:-}" in
   display-message)
     case "$*" in
       *'#{cursor_y}'*) printf '0\n' ;;
+      *'#{pane_current_command}'*) printf 'codex\n' ;;
       *) printf 'firstmate\n' ;;
     esac
     exit 0
