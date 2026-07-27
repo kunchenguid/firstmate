@@ -256,12 +256,12 @@ test_no_mistakes_dod_wording() {
   assert_grep '`help`' "$brief" \
     "no-mistakes DOD must render literal backticks around help"
   assert_no_grep "no-mistakes' own guidance" "$brief" \
-    "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
+    "no-mistakes DOD regressed to superseded guidance wording"
   assert_no_grep "firstmate's authority check" "$brief" \
-    "no-mistakes DOD retained another apostrophe form that breaks bash -n"
+    "no-mistakes DOD retained the superseded authority wording"
   assert_grep "the authority check applied by firstmate" "$brief" \
-    "no-mistakes DOD lost the apostrophe-safe authority wording"
-  pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
+    "no-mistakes DOD lost the current authority wording"
+  pass "fm-brief.sh: no-mistakes DOD uses the current authority wording"
 }
 
 test_ship_project_memory_wording() {

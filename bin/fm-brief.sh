@@ -281,6 +281,9 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
+# Each branch builds its DOD with a read-based heredoc, deliberately outside
+# command substitution. Keep that structure so edits to DOD prose, including
+# apostrophes, remain parse-safe (regression coverage: tests/fm-brief.test.sh).
 case "$MODE" in
   direct-PR)
     SETUP2=""
