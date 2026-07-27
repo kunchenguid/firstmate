@@ -1371,6 +1371,160 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   pass "herdr projection teardown retains the stale journal and attempts no workspace cleanup when exact-pane close is unconfirmed"
 }
 
+# Lane-B safety tests: kind=scout/secondmate uniformly checked at the
+# unconditional call site fm-teardown.sh:1087 after the inner kind exemption
+# was removed from validate_worktree_teardown_safety. These tests pin the new
+# function-level behavior so future scripts cannot silently re-introduce the
+# blanket exemption without a failing test.
+#
+# The teardown script's own kind-specific gates (line 1062 scout report+gate;
+# line 1046 secondmate in-flight) run before the safety check and would refuse
+# first under realistic state. We exercise the safety function directly by
+# extracting it and stubbing its three external dependencies
+# (worktree_safety_blocked_by_lock, default_branch, work_is_landed), so the
+# kind-uniqueness property of the change is the only thing under test.
+
+# Args: case_dir kind [force]
+# Echoes "refused:rc=N" on rc!=0 or "ok" on rc=0.
+run_safety_function() {
+  local case_dir=$1 kind=$2 force=${3:-}
+  local out
+  # Extract the function body from fm-teardown.sh and run it inside a fresh
+  # bash subshell. The function's three external dependencies
+  # (worktree_safety_blocked_by_lock, default_branch, work_is_landed) are
+  # defined inside the subshell so the kind-uniqueness property of the
+  # change is the only thing under test.
+  out=$(
+    WT="$case_dir/wt" \
+    FORCE="$force" \
+    MODE="no-mistakes" \
+    PROJ="$case_dir/project" \
+    TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED=42 \
+    KIND="$kind" \
+    bash -c '
+      worktree_safety_blocked_by_lock() { return 1; }
+      default_branch() { printf "%s\n" "main"; }
+      work_is_landed() { return 1; }
+      '"$(awk '/^validate_worktree_teardown_safety\(\) \{$/,/^\}$/' "$TEARDOWN")"'
+      validate_worktree_teardown_safety
+    ' 2>/dev/null
+  )
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'refused:rc=%d\n' "$rc"
+  else
+    printf 'ok\n'
+  fi
+  return 0
+}
+
+test_safety_function_scout_dirty_refuses() {
+  local case_dir out
+  case_dir=$(make_case scout-dirty)
+  # Don't write a meta file - we are exercising the function directly, not the
+  # kind-specific gates. Just need a real worktree that the function can see
+  # as dirty.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  printf '%s\n' "uncommitted edit" > "$case_dir/wt/feature.txt"
+
+  out=$(run_safety_function "$case_dir" scout)
+  case "$out" in
+    refused:*) pass "scout kind with dirty worktree is refused by the safety function (uniform behavior)" ;;
+    *) fail "scout kind with dirty worktree was NOT refused (got: $out)" ;;
+  esac
+}
+
+test_safety_function_scout_unpushed_refuses() {
+  local case_dir out
+  case_dir=$(make_case scout-unpushed)
+  wt_commit "$case_dir" "scout work on a branch"
+
+  out=$(run_safety_function "$case_dir" scout)
+  case "$out" in
+    refused:*) pass "scout kind with unpushed commits is refused by the safety function (uniform behavior)" ;;
+    *) fail "scout kind with unpushed commits was NOT refused (got: $out)" ;;
+  esac
+}
+
+test_safety_function_secondmate_dirty_refuses() {
+  local case_dir out
+  case_dir=$(make_case sm-dirty)
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  printf '%s\n' "uncommitted edit" > "$case_dir/wt/feature.txt"
+
+  out=$(run_safety_function "$case_dir" secondmate)
+  case "$out" in
+    refused:*) pass "secondmate kind with dirty worktree is refused by the safety function (uniform behavior)" ;;
+    *) fail "secondmate kind with dirty worktree was NOT refused (got: $out)" ;;
+  esac
+}
+
+test_safety_function_secondmate_unpushed_refuses() {
+  local case_dir out
+  case_dir=$(make_case sm-unpushed)
+  wt_commit "$case_dir" "secondmate home init"
+
+  out=$(run_safety_function "$case_dir" secondmate)
+  case "$out" in
+    refused:*) pass "secondmate kind with unpushed commits is refused by the safety function (uniform behavior)" ;;
+    *) fail "secondmate kind with unpushed commits was NOT refused (got: $out)" ;;
+  esac
+}
+
+test_safety_function_scout_clean_pushed_allows() {
+  local case_dir out
+  case_dir=$(make_case scout-clean)
+  # Clean working tree, all commits pushed to a fork remote.
+  wt_commit "$case_dir" "scout work on a branch"
+  add_fork_with_pushed_branch "$case_dir"
+
+  out=$(run_safety_function "$case_dir" scout)
+  case "$out" in
+    ok) pass "scout kind with clean worktree and pushed commits is allowed by the safety function" ;;
+    *) fail "scout kind with clean pushed worktree was unexpectedly refused (got: $out)" ;;
+  esac
+}
+
+test_safety_function_secondmate_clean_pushed_allows() {
+  local case_dir out
+  case_dir=$(make_case sm-clean)
+  wt_commit "$case_dir" "secondmate home init"
+  add_fork_with_pushed_branch "$case_dir"
+
+  out=$(run_safety_function "$case_dir" secondmate)
+  case "$out" in
+    ok) pass "secondmate kind with clean worktree and pushed commits is allowed by the safety function" ;;
+    *) fail "secondmate kind with clean pushed worktree was unexpectedly refused (got: $out)" ;;
+  esac
+}
+
+test_safety_function_scout_force_skips() {
+  local case_dir out
+  case_dir=$(make_case scout-force)
+  # Even a fully dirty and unpushed worktree must be allowed under --force.
+  wt_commit "$case_dir" "scout work on a branch"
+  printf '%s\n' "uncommitted edit" > "$case_dir/wt/feature.txt"
+
+  out=$(run_safety_function "$case_dir" scout --force)
+  case "$out" in
+    ok) pass "scout kind under --force skips the safety function (escape hatch preserved)" ;;
+    *) fail "scout kind under --force was unexpectedly refused (got: $out)" ;;
+  esac
+}
+
+test_safety_function_secondmate_force_skips() {
+  local case_dir out
+  case_dir=$(make_case sm-force)
+  wt_commit "$case_dir" "secondmate home init"
+  printf '%s\n' "uncommitted edit" > "$case_dir/wt/feature.txt"
+
+  out=$(run_safety_function "$case_dir" secondmate --force)
+  case "$out" in
+    ok) pass "secondmate kind under --force skips the safety function (escape hatch preserved)" ;;
+    *) fail "secondmate kind under --force was unexpectedly refused (got: $out)" ;;
+  esac
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -1403,3 +1557,13 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+# Lane-B safety: kind=scout/secondmate uniformly checked by the safety function
+# after the inner kind exemption was removed from validate_worktree_teardown_safety.
+test_safety_function_scout_dirty_refuses
+test_safety_function_scout_unpushed_refuses
+test_safety_function_secondmate_dirty_refuses
+test_safety_function_secondmate_unpushed_refuses
+test_safety_function_scout_clean_pushed_allows
+test_safety_function_secondmate_clean_pushed_allows
+test_safety_function_scout_force_skips
+test_safety_function_secondmate_force_skips
