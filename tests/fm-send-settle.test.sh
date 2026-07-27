@@ -39,6 +39,11 @@ case "${1:-}" in
     for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '\xe2\x94\x82 \xe2\x94\x82\n'; exit 0 ;;
+  # fm-send verifies an explicit endpoint by ENUMERATING live panes, because
+  # tmux answers display-message for a gone target with another window's pane id
+  # (bin/backends/tmux.sh's fm_backend_tmux_target_exists). List the explicit
+  # targets these cases use, so "this endpoint exists" is expressible at all.
+  list-panes) printf '%s\n' ${FM_FAKE_TMUX_PANES:-sess:win}; exit 0 ;;
   list-windows) exit 0 ;;
 esac
 exit 0

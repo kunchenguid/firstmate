@@ -267,6 +267,17 @@ window_backend() {
   echo tmux
 }
 
+# bind_window_socket: point this process's fm_tmux calls at the tmux server the
+# meta for <w> records. Always assigns, so iterating windows can never carry the
+# previous window's socket into the next one; a window with no meta (or no
+# recorded socket) resolves to the ambient fleet socket, which is what every
+# reader used before the field existed. See bin/fm-tmux-lib.sh.
+bind_window_socket() {  # <window>
+  local w=$1
+  fm_backend_bind_meta "$(window_backend "$w")" \
+    "$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)" || return 0
+}
+
 window_label() {
   local w=$1 task
   task=$(window_to_task "$w" "$STATE")
@@ -409,6 +420,7 @@ pause_state_class() {  # <window> <task>
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if [ "$(window_kind "$win")" != secondmate ]; then
+      bind_window_socket "$win"
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
         rm -f "$recheck_file"
@@ -426,6 +438,7 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ "$(window_kind "$win")" != secondmate ]; then
+    bind_window_socket "$win"
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then
       rm -f "$recheck_file"
@@ -969,6 +982,7 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi
+    bind_window_socket "$w"
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')

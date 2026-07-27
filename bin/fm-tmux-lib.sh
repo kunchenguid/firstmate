@@ -60,6 +60,164 @@
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
+# --- fleet socket ------------------------------------------------------------
+#
+# Every fleet-side tmux call goes through fm_tmux, which addresses the fleet's
+# tmux server EXPLICITLY with `-S <socket>` instead of letting tmux pick a server
+# from the caller's ambient environment.
+#
+# Why (incident 2026-07-28 00:47, and 2026-07-27 20:16 before it): the whole
+# fleet - primary, secondmate, every crewmate - shared ONE tmux server on the
+# default socket, and every pane inherited $TMUX, so a bare `tmux` typed inside
+# any crew pane operated on the fleet's own server. A crewmate experimenting
+# with tmux behavior ran one command in its pane and the server exited cleanly
+# (atop process accounting: tmux pid 588148, exit code 0, five agents SIGHUP'd
+# out with it). The fleet's lifeline was reachable from every pane.
+#
+# The isolation has two halves, and both are needed:
+#   1. bin/fm-spawn.sh gives each pane a PRIVATE tmux namespace - it unsets $TMUX
+#      and points TMUX_TMPDIR at a per-task sandbox dir - so a bare `tmux` (or
+#      `tmux -L anything`) inside a pane resolves to that task's own throwaway
+#      server. `tmux kill-server` there kills only the sandbox.
+#   2. Because the pane no longer carries $TMUX, firstmate's OWN scripts can no
+#      longer rely on the ambient server either. fm_tmux names the socket
+#      explicitly, which is what lets a secondmate - a firstmate primary living
+#      in a sandboxed pane - keep dispatching its crew onto the shared fleet
+#      server (bin/fm-spawn.sh exports FM_TMUX_SOCKET into secondmate panes).
+#
+# Resolution order (fm_tmux_socket_resolve), highest first:
+#   1. FM_TMUX_SOCKET - an explicit binding: a task's recorded socket
+#      (fm_tmux_bind_meta), the value fm-spawn exports into a secondmate pane, or
+#      an operator/test override.
+#   2. $TMUX's socket path - the server this process is actually running in.
+#      Ambient wins over any configured preference on purpose: the fleet must be
+#      the server the captain has attached, so crew windows stay in one session
+#      and one window list.
+#   3. ${TMUX_TMPDIR:-/tmp}/tmux-<uid>/default - tmux's own default socket, i.e.
+#      exactly where a firstmate launched outside tmux put its fleet before this
+#      change. `tmux attach` keeps working unchanged.
+# A dedicated fleet socket is therefore an operator choice, not a code default:
+# start the primary inside `tmux -L <name>` and rule 2 puts the whole fleet
+# there, attached with `tmux -L <name> attach -t <home-basename>`.
+#
+# The fleet is always ONE tmux server: rules 2 and 3 keep crew windows in the
+# same session and the same window list as the primary, so `tmux attach` shows
+# the whole fleet exactly as it did before. Rule 1 exists to keep a reader
+# pointed at the server a given endpoint is on, never to spread the fleet across
+# servers.
+FM_TMUX_SOCKET_BASENAME_DEFAULT=default
+
+# fm_tmux_socket_dir: tmux's own socket directory for this user.
+fm_tmux_socket_dir() {
+  printf '%s/tmux-%s' "${TMUX_TMPDIR:-/tmp}" "$(id -u)"
+}
+
+# fm_tmux_socket_from_env: the socket path encoded in $TMUX ("<socket>,<pid>,<id>"),
+# i.e. the server this process runs inside. Returns 1 when not inside tmux.
+fm_tmux_socket_from_env() {
+  local v=${TMUX:-}
+  [ -n "$v" ] || return 1
+  v=${v%%,*}
+  [ -n "$v" ] || return 1
+  printf '%s' "$v"
+}
+
+# fm_tmux_implicit_socket: the socket a BARE `tmux` would use in this process -
+# rules 2 and 3 above, without the explicit binding. This is what makes the
+# default path byte-identical: fm_tmux only adds `-S` when the fleet socket is
+# something other than what tmux would have picked anyway.
+fm_tmux_implicit_socket() {
+  local s
+  if s=$(fm_tmux_socket_from_env); then
+    printf '%s' "$s"
+    return 0
+  fi
+  printf '%s/%s' "$(fm_tmux_socket_dir)" "$FM_TMUX_SOCKET_BASENAME_DEFAULT"
+}
+
+# fm_tmux_socket_resolve: print the fleet socket path per the order above.
+fm_tmux_socket_resolve() {
+  if [ -n "${FM_TMUX_SOCKET:-}" ]; then
+    printf '%s' "$FM_TMUX_SOCKET"
+    return 0
+  fi
+  fm_tmux_implicit_socket
+}
+
+# fm_tmux_socket: this home's FLEET socket, resolved once and then PINNED for the
+# life of the process.
+#
+# Pinned deliberately. A per-task binding replaces the socket fm_tmux addresses
+# (FM_TMUX_SOCKET), but it must never change what "the fleet socket" means:
+# otherwise a loop over tasks would resolve the next task's absent
+# `tmux_socket=` to the PREVIOUS task's server - the exact "read the wrong
+# endpoint" failure this whole contract exists to prevent.
+#
+# Neither variable is exported: a child process resolves for itself, and a
+# task-scoped binding must not leak into a sibling task's process. fm-spawn hands
+# the value to a secondmate pane explicitly.
+fm_tmux_socket() {
+  [ -n "${_FM_TMUX_FLEET_SOCKET:-}" ] || _FM_TMUX_FLEET_SOCKET=$(fm_tmux_socket_resolve)
+  printf '%s' "$_FM_TMUX_FLEET_SOCKET"
+}
+
+# fm_tmux_socket_of_meta: the socket a task's endpoint lives on. fm-spawn records
+# `tmux_socket=` for every tmux task; an older meta has no such line and predates
+# any socket move, so it resolves to the ambient fleet socket - byte-identical to
+# what every reader did before this field existed. That is the compatibility
+# contract: a pre-existing task keeps resolving to the server it was spawned on.
+fm_tmux_socket_of_meta() {  # <meta-file>
+  local meta=${1:-} v=
+  if [ -n "$meta" ] && [ -f "$meta" ]; then
+    v=$(grep '^tmux_socket=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  fi
+  if [ -n "$v" ]; then
+    printf '%s' "$v"
+  else
+    fm_tmux_socket
+  fi
+}
+
+# fm_tmux_bind_meta: point every subsequent fm_tmux call in THIS process at the
+# server <meta-file>'s endpoint lives on. Always assigns, so a loop over tasks
+# cannot carry a previous task's socket into the next one.
+fm_tmux_bind_meta() {  # <meta-file>
+  # Pin the fleet socket before rebinding, so the fallback for a meta with no
+  # recorded socket stays the fleet's server rather than the last bound task's.
+  fm_tmux_socket >/dev/null
+  FM_TMUX_SOCKET=$(fm_tmux_socket_of_meta "${1:-}")
+}
+
+# fm_tmux: run tmux against the fleet socket.
+#
+# `-S <socket>` is added ONLY when the fleet socket differs from the one a bare
+# `tmux` would already use in this process. In the primary's own pane the two are
+# the same server, so the command line stays byte-identical to what every one of
+# these call sites ran before - no argv change for anything that observes them.
+# The flag appears exactly where it changes the outcome: a task bound to a socket
+# other than the ambient one, and a sandboxed pane (no $TMUX, private
+# TMUX_TMPDIR) that was handed the fleet socket explicitly.
+#
+# `kill-server` is refused outright. It is never a legitimate firstmate
+# operation, and it is the one command that takes the whole fleet down, so no
+# future edit to a fleet-side script can reach it by accident. A task's own
+# sandbox server is torn down by path in bin/fm-teardown.sh, not through here.
+fm_tmux() {
+  case "${1:-}" in
+    kill-server)
+      echo "error: fm_tmux refuses kill-server (fleet socket $(fm_tmux_socket))" >&2
+      return 1
+      ;;
+  esac
+  [ -n "${FM_TMUX_SOCKET:-}" ] || FM_TMUX_SOCKET=$(fm_tmux_socket)
+  [ -n "${_FM_TMUX_IMPLICIT_SOCKET:-}" ] || _FM_TMUX_IMPLICIT_SOCKET=$(fm_tmux_implicit_socket)
+  if [ "$FM_TMUX_SOCKET" = "$_FM_TMUX_IMPLICIT_SOCKET" ]; then
+    tmux "$@"
+  else
+    tmux -S "$FM_TMUX_SOCKET" "$@"
+  fi
+}
+
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
 # (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
@@ -173,9 +331,9 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 # prompt reads unknown.
 fm_tmux_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 cy raw plain stripped bordered=0
-  cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
+  cy=$(fm_tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
-  raw=$(tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || { printf 'unknown'; return 0; }
+  raw=$(fm_tmux capture-pane -e -p -t "$target" -S "$cy" -E "$cy" 2>/dev/null) || { printf 'unknown'; return 0; }
   # bordered: from the plain row (borders survive an all-ANSI strip).
   plain=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
   plain="${plain#"${plain%%[![:space:]]*}"}"
@@ -220,11 +378,11 @@ fm_pane_input_pending() {  # <target>
 # repainting, so it reads not-busy and still escalates.
 fm_pane_is_busy() {  # <target>
   local win=$1 t0 t1
-  t0=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
+  t0=$(fm_tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
   fm_busy_hint_in_text "$t0" && return 0
   fm_spinner_in_text "$t0" || return 1
   sleep "${FM_BUSY_LIVENESS_SECS:-$FM_TMUX_BUSY_LIVENESS_SECS_DEFAULT}"
-  t1=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
+  t1=$(fm_tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
   fm_spinner_in_text "$t1" || return 1
   fm_pane_text_advanced "$t0" "$t1"
 }
@@ -250,7 +408,7 @@ fm_pane_is_busy() {  # <target>
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
   local target=$1 retries=$2 sleep_s=$3 i=0 state
   while :; do
-    tmux send-keys -t "$target" Enter 2>/dev/null || true
+    fm_tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target")
     [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
@@ -271,7 +429,7 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5
-  tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
+  fm_tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s"
 }

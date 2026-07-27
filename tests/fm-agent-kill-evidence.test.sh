@@ -43,6 +43,17 @@ make_fakebin() {  # <dir> -> echoes fakebin path
 case "${1:-}" in
   display-message) printf '%s\n' "${FM_FAKE_PANE_PID:-}" ;;
   capture-pane)    printf '%s\n' "${FM_FAKE_PANE:-}" ;;
+  # Pane presence is read by ENUMERATING live panes, because tmux answers
+  # display-message for a gone window with another window's pane id
+  # (bin/backends/tmux.sh's fm_backend_tmux_target_exists). Derive the list from
+  # the same metas the scripts read, so a new case needs no fake change.
+  list-panes)
+    for _m in "${FM_HOME:-}"/state/*.meta; do
+      [ -e "$_m" ] || continue
+      _w=$(grep '^window=' "$_m" | tail -1 | cut -d= -f2-)
+      [ -n "$_w" ] && printf '%s\n' "$_w"
+    done
+    ;;
   *)               exit 1 ;;
 esac
 SH

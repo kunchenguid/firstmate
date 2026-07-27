@@ -192,6 +192,13 @@ shift
 
 fm_backend_validate "$TARGET_BACKEND" || exit 1
 
+# Send to the tmux server the resolved target's own metadata records. TARGET_META
+# is empty for the explicit session:window escape hatch, which then resolves to
+# the ambient fleet socket exactly as before - a message must never land on a
+# same-named window belonging to another server
+# (bin/fm-tmux-lib.sh's fm_tmux_socket_of_meta).
+fm_backend_bind_meta "$TARGET_BACKEND" "$TARGET_META" || exit 1
+
 # Classify a from-firstmate -> secondmate request. Only a task selector resolved
 # through this home's meta whose authoritative kind is secondmate is marked: the
 # secondmate then routes its reply via the status path (see fm-marker-lib.sh).

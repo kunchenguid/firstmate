@@ -149,6 +149,20 @@ case "${1:-}" in
   list-windows)
     [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
     exit 0 ;;
+  # Endpoint presence is read by ENUMERATING live panes, because tmux answers
+  # display-message for a gone window with another window's pane id
+  # (bin/backends/tmux.sh's fm_backend_tmux_target_exists). Emit every identifier
+  # these cases can resolve a supervisor pane to, under the same
+  # FM_FAKE_TMUX_PANE_ALIVE switch display-message honors.
+  list-panes)
+    [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 0
+    # "firstmate:0" is FM_SUPERVISOR_TARGET_DEFAULT, what inject_msg falls back to
+    # when nothing is configured (bin/fm-supervisor-target-lib.sh).
+    printf '%s\n' "fakepane" "firstmate:0" "${FM_SUPERVISOR_TARGET:-}" "${TMUX_PANE:-}" "${FM_FAKE_TMUX_WINDOW:-}"
+    if [ -n "${FM_HOME:-}" ]; then
+      _h=$(cd "$FM_HOME" 2>/dev/null && pwd -P) && printf '%s:0\n' "${_h##*/}"
+    fi
+    exit 0 ;;
   capture-pane)
     # Honor a single-line band capture (-S N -E M, both non-negative) the way the
     # composer reader now bounds its capture to the cursor row; otherwise (e.g.
@@ -233,6 +247,14 @@ case "${1:-}" in
     exit 0 ;;
   capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
   list-windows) exit 0 ;;
+  # Endpoint presence is read by enumerating live panes; see make_supercase's
+  # shim for why display-message cannot answer it.
+  list-panes)
+    printf '%s\n' "fakepane" "win" "sess:win" "firstmate:0" "${FM_SUPERVISOR_TARGET:-}" "${TMUX_PANE:-}"
+    if [ -n "${FM_HOME:-}" ]; then
+      h=$(cd "$FM_HOME" 2>/dev/null && pwd -P) && printf '%s:0\n' "${h##*/}"
+    fi
+    exit 0 ;;
   send-keys)
     shift
     text=""; is_enter=0; lit=0

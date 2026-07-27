@@ -29,6 +29,20 @@ SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
+  # Endpoint presence is read by ENUMERATING live panes, because tmux answers
+  # display-message for a gone window with another window's pane id
+  # (bin/backends/tmux.sh's fm_backend_tmux_target_exists). Every window this
+  # fixture records is present; the fake derives the list from the same metas
+  # the script reads, so a new case needs no fake change.
+  list-panes)
+    for m in "${FM_HOME:-}"/state/*.meta; do
+      [ -e "$m" ] || continue
+      w=$(grep '^window=' "$m" | tail -1 | cut -d= -f2-)
+      [ -n "$w" ] || continue
+      case "$w" in *dead-*) continue ;; esac  # this fixture's dead-* endpoints are gone
+      printf '%s\n' "$w"
+    done
+    exit 0 ;;
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
   capture-pane)
     case "$*" in

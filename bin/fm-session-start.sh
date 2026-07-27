@@ -350,6 +350,8 @@ for meta in "$STATE"/*.meta; do
   target=$(fm_backend_target_of_meta "$meta")
   if [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
+    # Probe the tmux server this task recorded, not this process's own.
+    fm_backend_bind_meta "$backend" "$meta" || true
     if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
       printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
     else

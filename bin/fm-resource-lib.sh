@@ -18,7 +18,13 @@
 # Read by the sampler and the watcher, not by this lib.
 # shellcheck disable=SC2034
 FM_RESOURCE_SAMPLE_INTERVAL_DEFAULT=30   # seconds between sampling passes
+# shellcheck disable=SC2034
 FM_RESOURCE_SAMPLES_MAX_DEFAULT=2000     # lines kept per state/<id>.resource
+
+# tmux reads go through fm_tmux so they name the fleet socket explicitly rather
+# than inheriting a server from the environment (bin/fm-tmux-lib.sh).
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-tmux-lib.sh"
 
 FM_RES_UNAME=$(uname 2>/dev/null || echo unknown)
 
@@ -119,7 +125,8 @@ fm_res_pane_pid() {  # <meta>
   [ "$backend" = tmux ] || return 1
   window=$(fm_res_meta_value "$meta" window)
   [ -n "$window" ] || return 1
-  pid=$(tmux display-message -p -t "$window" '#{pane_pid}' 2>/dev/null) || return 1
+  fm_tmux_bind_meta "$meta"
+  pid=$(fm_tmux display-message -p -t "$window" '#{pane_pid}' 2>/dev/null) || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s' "$pid"
 }
