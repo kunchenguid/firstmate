@@ -64,6 +64,7 @@ test_stock_bash_parse_uses_owner_inventory() {
   expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
   [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
     || fail "fm-lint.sh --list-files did not return the complete canonical shell inventory"
+  # shellcheck disable=SC2016 # Literal assertion must remain unexpanded.
   assert_grep 'bin/fm-lint.sh --list-files > "$shell_inventory"' "$CI" \
     "stock macOS Bash parse sweep must consume fm-lint.sh's canonical inventory"
   assert_no_grep 'for f in bin/*.sh bin/backends/*.sh tests/*.sh' "$CI" \

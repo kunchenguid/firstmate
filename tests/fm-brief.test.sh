@@ -44,7 +44,9 @@ test_no_heredoc_in_command_substitution() {
   local unsafe safe
   unsafe="$TMP_ROOT/heredoc-in-substitution.sh"
   safe="$TMP_ROOT/plain-heredoc.sh"
+  # shellcheck disable=SC2016 # Literal shell fixtures must remain unexpanded.
   printf '%s\n' 'value=$(' '  cat <<EOF' 'body' 'EOF' ')' > "$unsafe"
+  # shellcheck disable=SC2016 # Literal shell fixtures must remain unexpanded.
   printf '%s\n' 'cat <<EOF' '$(' '  cat <<INNER' 'INNER' ')' 'EOF' > "$safe"
   if no_heredoc_in_command_substitution "$unsafe"; then
     fail "structural guard accepted a multiline heredoc nested in a command substitution"
