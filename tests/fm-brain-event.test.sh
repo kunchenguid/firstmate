@@ -73,3 +73,44 @@ set -e
 grep -Fq 'invalid action' "$CAPTURE.invalid.err" \
   || fail "invalid action was not diagnosed"
 pass "fm-brain-event: invalid lifecycle metadata fails closed without breaking Firstmate"
+
+# A machine without brain-event is the default, so an inactive bridge must be a
+# silent no-op: no warning noise on any lifecycle command. The stripped PATH and
+# throwaway HOME remove both discovery sources.
+CLEAN_HOME="$TMP_ROOT/clean-home"
+mkdir -p "$CLEAN_HOME"
+set +e
+env -u FM_BRAIN_EVENT_COMMAND PATH=/usr/bin:/bin HOME="$CLEAN_HOME" \
+  "$ROOT/bin/fm-brain-event.sh" spawn TASK_START task-4 stable safe \
+  > "$CAPTURE.absent" 2> "$CAPTURE.absent.err"
+RC=$?
+set -e
+[ "$RC" -eq 0 ] || fail "missing brain-event changed the lifecycle outcome"
+[ ! -s "$CAPTURE.absent" ] || fail "missing brain-event produced stdout"
+[ ! -s "$CAPTURE.absent.err" ] \
+  || fail "missing brain-event warned on a machine that never opted in"
+pass "fm-brain-event: an uninstalled bridge is a silent no-op"
+
+# Stock macOS ships neither timeout nor gtimeout, so the bound rests on the perl
+# fallback. Without it a stalled event store would hang the lifecycle command for
+# as long as the store stalls.
+STALL="$TMP_ROOT/stalling-brain-event"
+cat > "$STALL" <<'SH'
+#!/usr/bin/env bash
+sleep 600
+SH
+chmod +x "$STALL"
+STARTED=$(date +%s)
+set +e
+env PATH=/usr/bin:/bin FM_BRAIN_EVENT_COMMAND="$STALL" FM_BRAIN_EVENT_TIMEOUT=2 \
+  "$ROOT/bin/fm-brain-event.sh" teardown TASK_DONE task-5 stable safe \
+  > "$CAPTURE.stall" 2> "$CAPTURE.stall.err"
+RC=$?
+set -e
+ELAPSED=$(( $(date +%s) - STARTED ))
+[ "$RC" -eq 0 ] || fail "a stalled event store changed the lifecycle outcome"
+[ "$ELAPSED" -lt 30 ] \
+  || fail "stalled event store was not bounded by FM_BRAIN_EVENT_TIMEOUT (${ELAPSED}s)"
+grep -Fq 'lifecycle event was not accepted' "$CAPTURE.stall.err" \
+  || fail "stalled event store was not surfaced as a warning"
+pass "fm-brain-event: a stalled event store is bounded, not a hung lifecycle command"
