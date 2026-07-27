@@ -138,14 +138,16 @@ test_hold_is_durable_and_bounded() {
     "a held task is not recorded durably on the backlog with the capacity hold kind"
   assert_no_grep 'to merge" --kind captain' "$SKILL" \
     "a slot wait is still recorded as a captain decision hold"
-  assert_grep 'the durable re-evaluation of queued work after every teardown and heartbeat enforces the bound' "$SKILL" \
-    "delivery-pipeline lost the queue-age bound on holds or its durable mechanism"
-  assert_grep 'when it finds a load-held item older than 24 hours it surfaces it to the captain once, with the blocking PR' "$SKILL" \
-    "delivery-pipeline lost the 24-hour escalation of an aged hold"
-  assert_grep 'Surfacing it re-arms the bound instead of repeating it' "$SKILL" \
-    "the aged-hold escalation re-fires on every later teardown and heartbeat"
-  assert_grep '--kind captain --until <one bound period out>' "$SKILL" \
-    "an escalated hold is not converted to a time-gated captain-gated thread"
+  assert_grep 'The item stays load-held and serialized the whole time it waits' "$SKILL" \
+    "a held task can be released or reassigned before its blocker merges"
+  assert_no_grep '--until' "$SKILL" \
+    "a date gate would release the hold while the blocking task is still open"
+  assert_grep 'keeping a long wait visible is a review responsibility, not a timer' "$SKILL" \
+    "the queue-age bound invents a timer the backlog primitives do not support"
+  assert_grep 'the heartbeat fleet review that already re-evaluates held work is where firstmate raises one that has aged past a day' "$SKILL" \
+    "delivery-pipeline lost the queue-age bound on holds or the review that enforces it"
+  assert_grep 'the blocking PR' "$SKILL" \
+    "an aged hold is surfaced without the blocking PR"
   assert_grep "Read that age from the held item's \`created\` timestamp" "$SKILL" \
     "the queue-age bound names no readable backlog field to measure the age from"
   assert_grep 'escalate it as a plan deviation for re-approval rather than starting silently on a stale plan.' "$SKILL" \
