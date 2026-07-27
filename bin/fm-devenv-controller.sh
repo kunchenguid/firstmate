@@ -38,16 +38,22 @@ fm_devenv_controller_error() {
 
 fm_devenv_atomic_write() (
   [ "$#" -eq 2 ] || return 2
-  local destination=$1 content=$2 directory base temporary
+  local destination=$1 content=$2 directory base temporary temporary_name
   directory=$(dirname "$destination")
   base=$(basename "$destination")
   mkdir -p "$directory" || return 1
   chmod 0700 "$directory" || return 1
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    [ -f "$destination" ] && [ ! -L "$destination" ] || return 1
+  fi
   temporary=$(mktemp "$directory/.${base}.tmp.XXXXXX") || return 1
-  trap 'rm -f -- "$temporary"' EXIT
+  temporary_name=$(basename "$temporary") || return 1
+  trap '[ -z "$temporary" ] || { rm -f -- "$temporary"; rm -f -- "$destination/$temporary_name" 2>/dev/null || true; }' EXIT
   chmod 0600 "$temporary" || return 1
   printf '%s\n' "$content" > "$temporary" || return 1
   mv -f -- "$temporary" "$destination" || return 1
+  [ -f "$destination" ] && [ ! -L "$destination" ] || return 1
+  printf '%s\n' "$content" | cmp -s - "$destination" || return 1
   temporary=
 )
 

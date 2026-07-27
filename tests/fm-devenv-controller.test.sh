@@ -291,6 +291,257 @@ seed_local_lease() {
     > "$STATE_ROOT/tasks/fm-example.json"
 }
 
+publication_fixture() {
+  case "$1" in
+    queue)
+      printf '[%s]\n' "$(task_json fm-example 0 "$ISSUED_AT")"
+      ;;
+    task)
+      fm_devenv_task_claim_json "$TOKEN" alpha expanly-alpha fm-example fm/fm-example "$ISSUED_AT" claiming ''
+      ;;
+    environment|quarantine)
+      jq -cn --arg token "$TOKEN" --arg issued_at "$ISSUED_AT" \
+        '{schema:"firstmate.devenv.controller-lease.v1",generation_token:$token,environment:"alpha",vm:"expanly-alpha",task_id:"fm-example",branch:"fm/fm-example",lease_state:"leased",phase:"control-plane-test",issued_at:$issued_at}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+
+publication_destination() {
+  case "$1" in
+    queue) printf '%s\n' "$FM_DEVENV_QUEUE" ;;
+    task) printf '%s\n' "$FM_DEVENV_TASKS/fm-example.json" ;;
+    environment) printf '%s\n' "$FM_DEVENV_ENVIRONMENTS/alpha.json" ;;
+    quarantine) printf '%s\n' "$FM_DEVENV_QUARANTINE/alpha.json" ;;
+    *) return 2 ;;
+  esac
+}
+
+publish_fixture() {
+  local kind=$1 fixture=$2
+  case "$kind" in
+    queue) fm_devenv_atomic_write "$FM_DEVENV_QUEUE" "$fixture" ;;
+    task) fm_devenv_publish_task_claim fm-example "$fixture" ;;
+    environment) fm_devenv_publish_local_lease alpha "$fixture" ;;
+    quarantine) fm_devenv_publish_quarantine alpha "$fixture" fixture_quarantine ;;
+    *) return 2 ;;
+  esac
+}
+
+publication_expected() {
+  local kind=$1 fixture=$2
+  if [ "$kind" = quarantine ]; then
+    printf '%s\n' "$fixture" | jq -ce \
+      '. + {schema:"firstmate.devenv.controller-quarantine.v1",lease_state:"quarantined",reason:"fixture_quarantine"}'
+  else
+    printf '%s\n' "$fixture"
+  fi
+}
+
+test_atomic_state_publication_rejects_directories_and_symlink_directories() {
+  local kind shape destination target sentinel fixture expected expected_file rc
+  for kind in queue task environment quarantine; do
+    fixture=$(publication_fixture "$kind") || fail "$kind publication fixture could not be built"
+    for shape in directory symlink-directory; do
+      reset_controller_state
+      destination=$(publication_destination "$kind") || fail "$kind publication destination is missing"
+      target="$TMP_ROOT/publication-$kind-$shape"
+      rm -rf "$target"
+      mkdir -p "$(dirname "$destination")" "$target"
+      if [ "$shape" = directory ]; then
+        rmdir "$target"
+        mkdir -p "$destination"
+        target=$destination
+      else
+        ln -s "$target" "$destination"
+      fi
+      sentinel="$target/sentinel"
+      printf 'preserve\n' > "$sentinel"
+      publish_fixture "$kind" "$fixture" >/dev/null 2>&1
+      rc=$?
+      [ "$rc" -ne 0 ] || fail "$kind publication reported success for a $shape destination"
+      [ "$(cat "$sentinel")" = preserve ] || fail "$kind publication changed the preserved $shape object"
+      [ -z "$(find "$target" -name '.*.tmp.*' -print -quit)" ] \
+        || fail "$kind publication leaked a temporary file inside the $shape destination"
+      if [ "$shape" = directory ]; then
+        [ -d "$destination" ] && [ ! -L "$destination" ] \
+          || fail "$kind publication replaced its directory destination"
+      else
+        [ -L "$destination" ] || fail "$kind publication replaced its symlink-directory destination"
+      fi
+    done
+
+    reset_controller_state
+    destination=$(publication_destination "$kind") || fail "$kind success destination is missing"
+    publish_fixture "$kind" "$fixture" || fail "$kind canonical publication failed"
+    [ -f "$destination" ] && [ ! -L "$destination" ] \
+      || fail "$kind canonical publication was not a regular non-symlink file"
+    expected=$(publication_expected "$kind" "$fixture") || fail "$kind expected bytes could not be built"
+    expected_file="$TMP_ROOT/publication-$kind-expected"
+    printf '%s\n' "$expected" > "$expected_file"
+    cmp -s "$expected_file" "$destination" || fail "$kind canonical publication did not preserve exact bytes"
+  done
+  pass "devenv controller: queue, task, environment, and quarantine publication rejects directory aliases and verifies canonical bytes"
+}
+
+test_atomic_state_publication_cleans_directory_races() {
+  local kind shape destination target sentinel fixture rc
+  for kind in queue task environment quarantine; do
+    fixture=$(publication_fixture "$kind") || fail "$kind race publication fixture could not be built"
+    for shape in directory symlink-directory; do
+      reset_controller_state
+      destination=$(publication_destination "$kind") || fail "$kind race publication destination is missing"
+      target="$TMP_ROOT/publication-$kind-raced-$shape"
+      rm -rf "$destination" "$target"
+      mkdir -p "$(dirname "$destination")"
+      if [ "$shape" = symlink-directory ]; then
+        mkdir -p "$target"
+      else
+        target=$destination
+      fi
+      sentinel="$target/sentinel"
+      (
+        # shellcheck disable=SC2329
+        mv() {
+          if [ "$shape" = directory ]; then
+            mkdir -p "$destination"
+          else
+            ln -s "$target" "$destination"
+          fi
+          printf 'preserve\n' > "$sentinel"
+          /bin/mv "$@"
+        }
+        publish_fixture "$kind" "$fixture" >/dev/null 2>&1
+      )
+      rc=$?
+      [ "$rc" -ne 0 ] || fail "$kind publication reported success when a $shape appeared during rename"
+      [ "$(cat "$sentinel")" = preserve ] || fail "$kind publication changed a raced $shape object"
+      [ -z "$(find "$target" -name '.*.tmp.*' -print -quit)" ] \
+        || fail "$kind publication leaked its moved temporary file inside a raced $shape"
+    done
+  done
+  pass "devenv controller: publication detects directory races through rename and removes moved temporary files"
+}
+
+test_task_fence_publication_failure_prevents_remote_claim() {
+  local running rc marker
+  reset_controller_state
+  running=$(inspection_json alpha running)
+  TEST_OBSERVATIONS=("$running" "$running")
+  seed_one_task || fail "task-fence publication fixture enqueue failed"
+  marker="$STATE_ROOT/tasks/fm-example.json"
+  mkdir -p "$marker"
+  printf 'preserve\n' > "$marker/sentinel"
+  fm_devenv_claim_next fm-example fm/fm-example "$ISSUED_AT" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "task-fence directory publication reported a successful claim"
+  [ ! -s "$REMOTE_LOG" ] || fail "task-fence publication failure reached remote mutation"
+  [ "$(cat "$marker/sentinel")" = preserve ] || fail "task-fence publication failure changed its destination object"
+  [ -z "$(find "$marker" -name '.*.tmp.*' -print -quit)" ] \
+    || fail "task-fence publication failure leaked a nested temporary file"
+  pass "devenv controller: task-fence publication must succeed before remote claim"
+}
+
+test_concurrent_claims_serialize_after_queue_head_validation() {
+  local first_ready_fifo first_release_fifo second_blocked_fifo first_pid second_pid signal artifacts
+  reset_controller_state
+  TEST_REGISTRY='[{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":""},{"name":"beta","vm":"expanly-beta","slot":2,"frontend_port":5175,"branch":""}]'
+  fm_devenv_enqueue_json "$(task_json fm-first 0 "$ISSUED_AT")" || fail "first concurrent task enqueue failed"
+  fm_devenv_enqueue_json "$(task_json fm-second 0 "$ISSUED_AT")" || fail "second concurrent task enqueue failed"
+  first_ready_fifo="$TMP_ROOT/first-ready.fifo"
+  first_release_fifo="$TMP_ROOT/first-release.fifo"
+  second_blocked_fifo="$TMP_ROOT/second-blocked.fifo"
+  rm -f "$first_ready_fifo" "$first_release_fifo" "$second_blocked_fifo"
+  mkfifo "$first_ready_fifo" "$first_release_fifo" "$second_blocked_fifo"
+  exec 7<> "$first_ready_fifo"
+  exec 8<> "$first_release_fifo"
+  exec 9<> "$second_blocked_fifo"
+
+  (
+    # shellcheck disable=SC2329
+    fm_devenv_task_has_local_fence() {
+      printf 'ready\n' > "$first_ready_fifo"
+      IFS= read -r -t 5 signal < "$first_release_fifo" || return 0
+      [ "$signal" = release ] || return 0
+      return 1
+    }
+    # shellcheck disable=SC2329
+    fm_devenv_observe_environment() {
+      local row=$1 name marker observation lease
+      name=$(printf '%s\n' "$row" | jq -er '.name') || return 1
+      observation=$(inspection_json "$name" running) || return 1
+      marker="$STATE_ROOT/environments/$name.json"
+      if [ -f "$marker" ]; then
+        lease=$(jq -ce . "$marker") || return 1
+        observation=$(printf '%s\n' "$observation" | jq -ce --argjson lease "$lease" '.local_lease = $lease') || return 1
+      fi
+      printf '%s\n' "$observation"
+    }
+    # shellcheck disable=SC2329
+    fm_devenv_new_token() { printf '%s\n' "$TOKEN"; }
+    fm_devenv_claim_next fm-first fm/fm-first "$ISSUED_AT" > "$TMP_ROOT/first-result" 2> "$TMP_ROOT/first-error"
+    printf '%s\n' "$?" > "$TMP_ROOT/first-rc"
+  ) &
+  first_pid=$!
+
+  IFS= read -r -t 5 signal <&7 || fail "first concurrent claim did not reach its post-head-validation barrier"
+  [ "$signal" = ready ] || fail "first concurrent claim emitted an unexpected barrier signal"
+  (
+    # shellcheck disable=SC2329
+    fm_devenv_observe_environment() {
+      local row=$1 name marker observation lease
+      name=$(printf '%s\n' "$row" | jq -er '.name') || return 1
+      observation=$(inspection_json "$name" running) || return 1
+      marker="$STATE_ROOT/environments/$name.json"
+      if [ -f "$marker" ]; then
+        lease=$(jq -ce . "$marker") || return 1
+        observation=$(printf '%s\n' "$observation" | jq -ce --argjson lease "$lease" '.local_lease = $lease') || return 1
+      fi
+      printf '%s\n' "$observation"
+    }
+    # shellcheck disable=SC2329
+    fm_devenv_new_token() { printf '%s\n' "$STALE_TOKEN"; }
+    # shellcheck disable=SC2329
+    sleep() {
+      if [ ! -e "$TMP_ROOT/second-wait-notified" ]; then
+        : > "$TMP_ROOT/second-wait-notified"
+        printf 'blocked\n' > "$second_blocked_fifo"
+      fi
+      /bin/sleep "$1"
+    }
+    FM_DEVENV_LEASE_LOCK_TIMEOUT=5 fm_devenv_claim_next fm-second fm/fm-second "$ISSUED_AT" > "$TMP_ROOT/second-result" 2> "$TMP_ROOT/second-error"
+    printf '%s\n' "$?" > "$TMP_ROOT/second-rc"
+  ) &
+  second_pid=$!
+
+  IFS= read -r -t 5 signal <&9 || fail "second concurrent claim did not block on the held queue lock"
+  [ "$signal" = blocked ] || fail "second concurrent claim emitted an unexpected lock signal"
+  [ ! -s "$REMOTE_LOG" ] || fail "a concurrent claim reached remote mutation before the first claim resumed"
+  printf 'release\n' >&8
+  wait "$first_pid"
+  wait "$second_pid"
+  exec 7>&-
+  exec 8>&-
+  exec 9>&-
+
+  [ "$(cat "$TMP_ROOT/first-rc")" = 0 ] || fail "first concurrent claim failed: $(cat "$TMP_ROOT/first-error")"
+  [ "$(cat "$TMP_ROOT/second-rc")" = 0 ] || fail "second concurrent claim failed: $(cat "$TMP_ROOT/second-error")"
+  jq -e '.claimed == true and .environment == "alpha"' "$TMP_ROOT/first-result" >/dev/null \
+    || fail "first queue head did not claim alpha"
+  jq -e '.claimed == true and .environment == "beta"' "$TMP_ROOT/second-result" >/dev/null \
+    || fail "second queue head did not claim beta after serialization"
+  [ "$(awk -F'|' '$2 == "claim" {print $3}' "$REMOTE_LOG" | paste -sd, -)" = "$TOKEN,$STALE_TOKEN" ] \
+    || fail "concurrent remote claims did not preserve queue order"
+  [ "$(awk -F'|' -v token="$TOKEN" '$2 == "claim" && $3 == token {count++} END {print count + 0}' "$REMOTE_LOG")" = 1 ] \
+    || fail "first task produced more than one remote lease"
+  [ "$(awk -F'|' -v token="$STALE_TOKEN" '$2 == "claim" && $3 == token {count++} END {print count + 0}' "$REMOTE_LOG")" = 1 ] \
+    || fail "second task produced more than one remote lease"
+  [ "$(fm_devenv_queue_json | jq 'length')" = 0 ] || fail "serialized concurrent claims left queued tasks"
+  artifacts=$(find "$STATE_ROOT" \( -name '*.lock' -o -name '*.lock.*' -o -name '.*.tmp.*' \) -print -quit)
+  [ -z "$artifacts" ] || fail "serialized concurrent claims leaked a lock or temporary artifact: $artifacts"
+  pass "devenv controller: concurrent queue-head claims serialize before remote mutation and preserve one lease per task"
+}
+
 test_claim_enforces_durable_queue_head() {
   local running rc queue
   reset_controller_state
@@ -545,6 +796,9 @@ test_publication_failure_retains_remote_lease_and_quarantines() {
 
 test_controller_contract_exists
 test_priority_fifo_and_exact_queue_schema
+test_atomic_state_publication_rejects_directories_and_symlink_directories
+test_atomic_state_publication_cleans_directory_races
+test_task_fence_publication_failure_prevents_remote_claim
 test_selection_order_and_no_preemption
 test_every_unsafe_or_unreadable_observation_queues
 test_unsafe_explicit_preference_does_not_fall_back
@@ -558,3 +812,4 @@ test_claim_scans_orphaned_local_task_fences
 test_ambiguous_remote_claim_fences_task_and_environment
 test_queue_removal_failure_leaves_claim_fenced
 test_publication_failure_retains_remote_lease_and_quarantines
+test_concurrent_claims_serialize_after_queue_head_validation
