@@ -86,7 +86,7 @@ bounded_event() {  # <command> [args...]
   case "$HAVE_TIMEOUT" in
     timeout)  timeout "$EVENT_TIMEOUT" "$@" ;;
     gtimeout) gtimeout "$EVENT_TIMEOUT" "$@" ;;
-    perl)     perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$EVENT_TIMEOUT" "$@" ;;
+    perl)     perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? & 127 ? 128 + ($? & 127) : $? >> 8)' "$EVENT_TIMEOUT" "$@" ;;
     *)        "$@" ;;
   esac
 }

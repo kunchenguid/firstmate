@@ -16,6 +16,7 @@ set -u
 # the rest of the suite: the no-mistakes gate runs this suite from a gate worktree,
 # which the guard would otherwise refuse.
 export FM_GATE_REFUSE_BYPASS=1
+export FM_BRAIN_EVENT_COMMAND=/usr/bin/true
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SPAWN="$ROOT/bin/fm-spawn.sh"

@@ -85,4 +85,4 @@ gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${mer
 "$SCRIPT_DIR/fm-brain-event.sh" pr-merged NOTE "$ID" \
   "$URL" \
   "merged PR for $ID url=$URL" \
-  --pr-url "$URL"
+  --pr-url "$URL" || true

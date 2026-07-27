@@ -1529,5 +1529,5 @@ fi
 
 "$SCRIPT_DIR/fm-brain-event.sh" spawn TASK_START "$ID" \
   "$META_WINDOW|$WT|$KIND|$HARNESS|$BACKEND|$MODE" \
-  "spawned $ID kind=$KIND harness=$HARNESS backend=$BACKEND mode=$MODE"
+  "spawned $ID kind=$KIND harness=$HARNESS backend=$BACKEND mode=$MODE" || true
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

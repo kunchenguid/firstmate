@@ -333,7 +333,7 @@ fi
 
 "$SCRIPT_DIR/fm-brain-event.sh" backlog-handoff HANDOFF "$ID" \
   "${TO_MOVE[*]}" \
-  "til=$ID handed off ${#TO_MOVE[@]} queued item(s): ${TO_MOVE[*]}"
+  "til=$ID handed off ${#TO_MOVE[@]} queued item(s): ${TO_MOVE[*]}" || true
 echo "handed off ${#TO_MOVE[@]} item(s) to $ID: ${TO_MOVE[*]}"
 echo "  into $SUB_BACKLOG"
 if [ "${#ALREADY[@]}" -gt 0 ]; then

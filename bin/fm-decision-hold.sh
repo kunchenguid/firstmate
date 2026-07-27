@@ -370,7 +370,7 @@ EOF
 emit_resolution_event() {  # <origin> <hold-id> <decision-digest> <routed-csv>
   "$SCRIPT_DIR/fm-brain-event.sh" decision-resolved DECISION "$1" \
     "$2|$3" \
-    "resolved captain decision hold $2 digest=$3 routed=$4"
+    "resolved captain decision hold $2 digest=$3 routed=$4" || true
 }
 
 command_resolve() {
