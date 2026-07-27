@@ -119,6 +119,21 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 
+Pi 0.82.1 revalidated actionable wake delivery on 2026-07-27 through a real isolated TUI and extension event loop with a deterministic provider, the real durable queue, and the real drain script.
+An isolated fake arm child controlled two pre-drain closes and one post-drain close without touching a live fleet.
+The first handling turn drained the signal and stale records together, the retired stale reason produced no later prompt, one genuinely new record produced exactly one second prompt, four successor cycles stayed continuous, and records remained queued until each drain.
+The same test exercised OpenCode's close handler and matching-idle coalescing at the plugin boundary.
+
+```text
+$ pi --version
+0.82.1
+
+$ tests/fm-pi-watch-extension.test.sh
+ok - Pi coalesces actionable closes until a real drain and preserves later events
+ok - native Pi coalesces pre-drain closes, suppresses retired stale delivery, and preserves a new post-drain event
+ok - OpenCode coalesces actionable closes until a real drain and preserves later events
+```
+
 Deterministic entry points:
 
 ```sh

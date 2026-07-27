@@ -382,6 +382,8 @@ test_pi_actionable_close_starts_single_successor_before_delivery() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  : > "$home/state/.wake-queue"
+  mkdir "$home/state/.wake-queue.lock"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
@@ -445,9 +447,358 @@ process.exit(0);
 EOF
   )
   status=$?
-  expect_code 0 "$status" "Pi actionable close must start one successor before wake delivery settles"
+  expect_code 0 "$status" "Pi actionable close must survive an active queue lock and start one successor before wake delivery settles"
   [ -z "$out" ] || fail "Pi continuous-rearm test printed output: $out"
-  pass "Pi actionable close starts one successor before wake delivery settles"
+  pass "Pi actionable close survives an active queue lock and starts one successor before delivery"
+}
+
+test_pi_coalesces_actionable_closes_until_real_drain() {
+  local repo home plugin log release_batch release_new stop out status
+  repo="$TMP_ROOT/pi-drain-coalesce-root"
+  home="$TMP_ROOT/pi-drain-coalesce-home"
+  log="$TMP_ROOT/pi-drain-coalesce.log"
+  release_batch="$TMP_ROOT/pi-drain-coalesce-batch.release"
+  release_new="$TMP_ROOT/pi-drain-coalesce-new.release"
+  stop="$TMP_ROOT/pi-drain-coalesce.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-wake-drain.sh" "$repo/bin/"
+  cat > "$repo/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$FM_ROOT_OVERRIDE/bin/fm-wake-lib.sh"
+case "$count" in
+  1)
+    fm_wake_append signal task.status "signal: $FM_HOME/state/task.status"
+    printf 'signal: %s/state/task.status\n' "$FM_HOME"
+    ;;
+  2)
+    while [ ! -e "$FM_RELEASE_BATCH" ]; do sleep 0.01; done
+    fm_wake_append stale 'default:w6:p2' 'stale: default:w6:p2'
+    printf 'stale: default:w6:p2\n'
+    ;;
+  3)
+    while [ ! -e "$FM_RELEASE_NEW" ]; do sleep 0.01; done
+    fm_wake_append signal new.status "signal: $FM_HOME/state/new.status"
+    printf 'stale: default:w6:p2\n'
+    ;;
+  *)
+    trap 'exit 0' TERM INT
+    while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+    ;;
+esac
+SH
+  chmod +x "$repo/bin/fm-guard.sh" "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-wake-drain.sh"
+  printf 'window=default:w6:p2\n' > "$home/state/task.meta"
+  printf 'done: completed scout\n' > "$home/state/task.status"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_RELEASE_BATCH="$release_batch" FM_RELEASE_NEW="$release_new" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let tool = null;
+const prompts = [];
+const pi = {
+  events: { on() {} },
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+const waitFor = async (predicate, message) => {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+};
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+const queueRows = () => {
+  const path = `${process.env.FM_HOME}/state/.wake-queue`;
+  return existsSync(path)
+    ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean)
+    : [];
+};
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-coalesce", {}, undefined, undefined, {});
+await waitFor(() => prompts.length === 1 && armRows().length === 2, "first Pi wake prompt or successor missing");
+writeFileSync(process.env.FM_RELEASE_BATCH, "release\n");
+await waitFor(() => armRows().length === 3, "coalesced Pi close did not start its successor");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (prompts.length !== 1) throw new Error(`coalesced batch scheduled ${prompts.length} Pi prompts`);
+if (queueRows().length !== 2) throw new Error(`coalescing changed durable queue rows: ${queueRows().join(" | ")}`);
+
+const drain = spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-wake-drain.sh`, [], {
+  encoding: "utf8",
+  env: process.env,
+});
+if (drain.status !== 0) throw new Error(`real drain failed: ${drain.stderr}`);
+const drainedRows = drain.stdout.trim().split("\n").filter((line) => line.split("\t").length >= 5);
+if (drainedRows.length !== 2) throw new Error(`real drain did not consume both records: ${drain.stdout}`);
+if (queueRows().length !== 0) throw new Error("real drain left the coalesced batch queued");
+rmSync(`${process.env.FM_HOME}/state/task.meta`);
+await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (prompts.length !== 1) throw new Error("retired stale endpoint produced a post-drain Pi prompt");
+
+writeFileSync(`${process.env.FM_HOME}/state/new.meta`, "window=default:w7:p3\n");
+writeFileSync(`${process.env.FM_HOME}/state/new.status`, "working: genuinely new event\n");
+writeFileSync(process.env.FM_RELEASE_NEW, "release\n");
+await waitFor(() => prompts.length === 2 && armRows().length === 4, "post-drain Pi event was not delivered with a successor");
+if (!prompts[1].includes("new.status")) throw new Error(`wrong post-drain Pi prompt: ${prompts[1]}`);
+if (queueRows().length !== 1) throw new Error("post-drain Pi event was removed before a real drain");
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must coalesce actionable closes through one real drain without dropping a later event"
+  [ -z "$out" ] || fail "Pi drain-coalescing test printed output: $out"
+  pass "Pi coalesces actionable closes until a real drain and preserves later events"
+}
+
+# This runs the real Pi TUI and extension event loop with a deterministic provider.
+# The isolated fake arm child controls close timing, so detector classification remains covered by the watcher suites.
+test_pi_native_delivery_coalesces_through_real_drain() {
+  local repo home plugin release_batch release_new stop socket session pane i
+  if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
+    echo "skip: pi or tmux not found for native Pi wake coalescing E2E"
+    return 0
+  fi
+  repo="$TMP_ROOT/pi-native-coalesce-root"
+  home="$TMP_ROOT/pi-native-coalesce-home"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  release_batch="$TMP_ROOT/pi-native-coalesce-batch.release"
+  release_new="$TMP_ROOT/pi-native-coalesce-new.release"
+  stop="$TMP_ROOT/pi-native-coalesce.stop"
+  socket="fm-pi-watch-native-$$"
+  session=pi-native-wake-coalesce
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  cp "$EXT" "$plugin"
+  cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-wake-drain.sh" "$repo/bin/"
+  cat > "$repo/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$FM_ROOT_OVERRIDE/bin/fm-wake-lib.sh"
+case "$count" in
+  1)
+    fm_wake_append signal task.status "signal: $FM_HOME/state/task.status"
+    printf 'signal: %s/state/task.status\n' "$FM_HOME"
+    ;;
+  2)
+    while [ ! -e "$FM_RELEASE_BATCH" ]; do sleep 0.01; done
+    fm_wake_append stale 'default:w6:p2' 'stale: default:w6:p2'
+    printf 'stale: default:w6:p2\n'
+    ;;
+  3)
+    while [ ! -e "$FM_RELEASE_NEW" ]; do sleep 0.01; done
+    fm_wake_append signal new.status "signal: $FM_HOME/state/new.status"
+    printf 'stale: default:w6:p2\n'
+    ;;
+  *)
+    trap 'exit 0' TERM INT
+    while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+    ;;
+esac
+SH
+  cat > "$repo/native-wake-e2e.ts" <<'TS'
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import {
+  type AssistantMessage,
+  createAssistantMessageEventStream,
+} from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+const state = `${process.env.FM_HOME}/state`;
+const promptCountPath = `${state}/native-prompt-count`;
+
+function queueRows(): string[] {
+  const path = `${state}/.wake-queue`;
+  return existsSync(path)
+    ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean)
+    : [];
+}
+
+async function waitForQueueRows(expected: number): Promise<boolean> {
+  for (let i = 0; i < 500; i += 1) {
+    if (queueRows().length === expected) return true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return false;
+}
+
+function drain(label: string): void {
+  const result = spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-wake-drain.sh`, [], {
+    encoding: "utf8",
+    env: process.env,
+  });
+  writeFileSync(`${state}/${label}-drain`, `${result.status}\n${result.stdout}${result.stderr}`);
+}
+
+function finish(stream: ReturnType<typeof createAssistantMessageEventStream>, model: any, text: string): void {
+  const output: AssistantMessage = {
+    role: "assistant",
+    content: [],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
+    timestamp: Date.now(),
+  };
+  stream.push({ type: "start", partial: output });
+  const block = { type: "text" as const, text };
+  output.content.push(block);
+  stream.push({ type: "text_start", contentIndex: 0, partial: output });
+  stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
+  stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
+  stream.push({ type: "done", reason: "stop", message: output });
+  stream.end();
+}
+
+export default function (pi: ExtensionAPI): void {
+  pi.on("session_start", async (_event, ctx) => {
+    const model = ctx.modelRegistry.find("native-wake-e2e", "deterministic");
+    if (!model || !(await pi.setModel(model))) throw new Error("native wake E2E model unavailable");
+    writeFileSync(`${state}/native-provider-ready`, "ready\n");
+  });
+  pi.on("input", (event) => {
+    if (event.source !== "extension" || !event.text.includes("FIRSTMATE WATCHER WAKE")) return;
+    const count = Number(readFileSync(promptCountPath, "utf8").trim() || "0") + 1;
+    writeFileSync(promptCountPath, `${count}\n`);
+    if (count === 1) writeFileSync(process.env.FM_RELEASE_BATCH, "release\n");
+  });
+  pi.registerProvider("native-wake-e2e", {
+    baseUrl: "http://127.0.0.1/unused",
+    apiKey: "test-only",
+    api: "native-wake-e2e-api",
+    models: [{
+      id: "deterministic",
+      name: "Deterministic native wake coalescing",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 128,
+    }],
+    streamSimple(model) {
+      const stream = createAssistantMessageEventStream();
+      queueMicrotask(() => {
+        void (async () => {
+          const count = Number(readFileSync(promptCountPath, "utf8").trim() || "0");
+          if (count === 1) {
+            if (!(await waitForQueueRows(2))) {
+              finish(stream, model, "FIRST_QUEUE_TIMEOUT");
+              return;
+            }
+            drain("first");
+            rmSync(`${state}/task.meta`);
+            writeFileSync(`${state}/new.meta`, "window=default:w7:p3\n");
+            writeFileSync(`${state}/new.status`, "working: genuinely new event\n");
+            writeFileSync(process.env.FM_RELEASE_NEW, "release\n");
+            if (!(await waitForQueueRows(1))) {
+              finish(stream, model, "SECOND_QUEUE_TIMEOUT");
+              return;
+            }
+            finish(stream, model, "HANDLED_FIRST_BATCH");
+            return;
+          }
+          drain("second");
+          rmSync(`${state}/new.meta`);
+          writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+          finish(stream, model, "HANDLED_SECOND_EVENT");
+        })();
+      });
+      return stream;
+    },
+  });
+}
+TS
+  chmod +x "$repo/bin/fm-guard.sh" "$repo/bin/fm-operational-input.sh" "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-wake-drain.sh"
+  printf 'window=default:w6:p2\n' > "$home/state/task.meta"
+  printf 'done: completed scout\n' > "$home/state/task.status"
+  : > "$home/state/native-prompt-count"
+  tmux -L "$socket" kill-session -t "$session" 2>/dev/null || true
+  tmux -L "$socket" new-session -d -s "$session" -x 160 -y 36 -c "$repo" \
+    "env FM_HOME='$home' FM_ROOT_OVERRIDE='$repo' FM_ARM_LOG='$TMP_ROOT/pi-native-coalesce.log' FM_RELEASE_BATCH='$release_batch' FM_RELEASE_NEW='$release_new' FM_STOP_FILE='$stop' PI_CODING_AGENT_DIR='$TMP_ROOT/pi-native-coalesce-config' PI_OFFLINE=1 bash -lc 'printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; exec pi --approve --no-session --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-primary-pi-watch.ts -e ./native-wake-e2e.ts'"
+  i=0
+  while [ "$i" -lt 240 ]; do
+    pane=$(tmux -L "$socket" capture-pane -p -t "$session" -S - 2>/dev/null || true)
+    [ -f "$home/state/native-provider-ready" ] && printf '%s\n' "$pane" | grep -Fq 'native-wake-e2e.ts' && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -f "$home/state/native-provider-ready" ] || fail "native Pi wake E2E provider did not become ready"
+  printf '%s\n' "$pane" | grep -Fq 'native-wake-e2e.ts' || fail "native Pi wake E2E did not reach the composer"
+  tmux -L "$socket" send-keys -t "$session" -l '/fm-watch-arm-pi'
+  tmux -L "$socket" send-keys -t "$session" Enter
+  i=0
+  while [ "$i" -lt 500 ]; do
+    if [ -f "$home/state/second-drain" ] && [ -f "$TMP_ROOT/pi-native-coalesce.log" ] && \
+       [ "$(wc -l < "$TMP_ROOT/pi-native-coalesce.log" | tr -d '[:space:]')" -ge 4 ]; then
+      break
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  # --no-session keeps the transcript only in memory, so the provider artifacts are the native completion proof.
+  [ "$(cat "$home/state/native-prompt-count")" = 2 ] || fail "native Pi scheduled $(cat "$home/state/native-prompt-count") wake prompts instead of two batches"
+  [ "$(sed -n '1p' "$home/state/first-drain")" = 0 ] || fail "native Pi first drain failed"
+  [ "$(grep -c "$(printf '\t')" "$home/state/first-drain" || true)" -eq 2 ] || fail "native Pi first turn did not drain the signal and stale batch together"
+  [ "$(sed -n '1p' "$home/state/second-drain")" = 0 ] || fail "native Pi second drain failed"
+  [ "$(grep -c "$(printf '\t')" "$home/state/second-drain" || true)" -eq 1 ] || fail "native Pi second turn did not drain exactly one new event"
+  [ ! -s "$home/state/.wake-queue" ] || fail "native Pi left a handled wake queued"
+  [ "$(wc -l < "$TMP_ROOT/pi-native-coalesce.log" | tr -d '[:space:]')" -eq 4 ] || fail "native Pi close/re-arm sequence did not establish four cycles"
+  tmux -L "$socket" send-keys -t "$session" -l '/quit' 2>/dev/null || true
+  tmux -L "$socket" send-keys -t "$session" Enter 2>/dev/null || true
+  sleep 0.2
+  tmux -L "$socket" kill-session -t "$session" 2>/dev/null || true
+  pass "native Pi coalesces pre-drain closes, suppresses retired stale delivery, and preserves a new post-drain event"
 }
 
 test_pi_hung_successor_falls_back_to_typed_wake() {
@@ -625,10 +976,13 @@ SH
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+const handlers = new Map();
 let tool = null;
 const prompts = [];
 const pi = {
-  on() {},
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
   registerCommand() {},
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
@@ -662,6 +1016,7 @@ await waitFor(
 );
 if (rows().length !== 2) throw new Error(`unretired arm overlapped before fallback: ${rows().join(" | ")}`);
 if (!prompts[0]?.includes("original wake")) throw new Error(`missing original fallback: ${prompts.join(" | ")}`);
+await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
 writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
 for (let i = 0; i < 500; i += 1) {
   if (rows().length >= 3 && (process.env.FM_LATE_KIND !== "actionable" || prompts.some((message) => message.includes("late wake")))) break;
@@ -1199,7 +1554,11 @@ const hooks = await mod.FmPrimaryWatchArm({
 const event = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, "999999\n");
 await hooks.event(event);
-await new Promise((resolve) => setTimeout(resolve, 120));
+const refused = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+if (refused !== "read-only") {
+  console.error(`watch arm returned ${refused} without owning the session lock`);
+  process.exit(1);
+}
 if (existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm ran without owning the session lock");
   process.exit(1);
@@ -1279,6 +1638,8 @@ test_opencode_primary_watch_plugin_rearms_after_wake() {
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
+  : > "$home/state/.wake-queue"
+  mkdir "$home/state/.wake-queue.lock"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
@@ -1342,9 +1703,136 @@ releasePrompt();
 EOF
   )
   status=$?
-  [ "$status" -eq 0 ] || fail "OpenCode watch plugin must start one successor before wake prompt delivery settles: $out"
+  [ "$status" -eq 0 ] || fail "OpenCode watch plugin must survive an active queue lock and start one successor before wake prompt delivery settles: $out"
   [ -z "$out" ] || fail "OpenCode rearm test printed output: $out"
-  pass "OpenCode watcher plugin starts one successor before wake prompt delivery settles"
+  pass "OpenCode actionable close survives an active queue lock and starts one successor before delivery"
+}
+
+test_opencode_coalesces_actionable_closes_until_real_drain() {
+  local plugin repo home log release_batch release_new stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-drain-coalesce-root"
+  home="$TMP_ROOT/opencode-drain-coalesce-home"
+  log="$TMP_ROOT/opencode-drain-coalesce.log"
+  release_batch="$TMP_ROOT/opencode-drain-coalesce-batch.release"
+  release_new="$TMP_ROOT/opencode-drain-coalesce-new.release"
+  stop="$TMP_ROOT/opencode-drain-coalesce.stop"
+  mkdir -p "$repo/.opencode/plugins/lib" "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  cp "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$repo/.opencode/plugins/fm-primary-watch-arm.js"
+  cp "$ROOT/.opencode/plugins/lib/fm-operational-input.js" "$repo/.opencode/plugins/lib/fm-operational-input.js"
+  cp "$ROOT/.opencode/plugins/package.json" "$repo/.opencode/plugins/package.json"
+  cp "$ROOT/bin/fm-operational-input.sh" "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-wake-drain.sh" "$repo/bin/"
+  cat > "$repo/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$FM_ROOT_OVERRIDE/bin/fm-wake-lib.sh"
+case "$count" in
+  1)
+    fm_wake_append signal task.status "signal: $FM_HOME/state/task.status"
+    printf 'signal: %s/state/task.status\n' "$FM_HOME"
+    ;;
+  2)
+    while [ ! -e "$FM_RELEASE_BATCH" ]; do sleep 0.01; done
+    fm_wake_append stale 'default:w6:p2' 'stale: default:w6:p2'
+    printf 'stale: default:w6:p2\n'
+    ;;
+  3)
+    while [ ! -e "$FM_RELEASE_NEW" ]; do sleep 0.01; done
+    fm_wake_append signal new.status "signal: $FM_HOME/state/new.status"
+    printf 'stale: default:w6:p2\n'
+    ;;
+  *)
+    trap 'exit 0' TERM INT
+    while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+    ;;
+esac
+SH
+  chmod +x "$repo/bin/fm-guard.sh" "$repo/bin/fm-operational-input.sh" "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-wake-drain.sh"
+  printf 'window=default:w6:p2\n' > "$home/state/task.meta"
+  printf 'done: completed scout\n' > "$home/state/task.status"
+  out=$(PLUGIN="$repo/.opencode/plugins/fm-primary-watch-arm.js" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_BATCH="$release_batch" FM_RELEASE_NEW="$release_new" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const prompts = [];
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompts.push(request.body.parts[0].text);
+    },
+  },
+};
+const waitFor = async (predicate, message) => {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+};
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+const queueRows = () => {
+  const path = `${process.env.FM_HOME}/state/.wake-queue`;
+  return existsSync(path)
+    ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean)
+    : [];
+};
+
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+const idle = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event(idle);
+await waitFor(() => prompts.length === 1 && armRows().length === 2, "first OpenCode wake prompt or successor missing");
+writeFileSync(process.env.FM_RELEASE_BATCH, "release\n");
+await waitFor(() => armRows().length === 3, "coalesced OpenCode close did not start its successor");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (prompts.length !== 1) throw new Error(`coalesced batch scheduled ${prompts.length} OpenCode prompts`);
+if (queueRows().length !== 2) throw new Error(`coalescing changed durable queue rows: ${queueRows().join(" | ")}`);
+
+const drain = spawnSync(`${process.env.WORKTREE}/bin/fm-wake-drain.sh`, [], {
+  encoding: "utf8",
+  env: { ...process.env, FM_ROOT_OVERRIDE: process.env.WORKTREE },
+});
+if (drain.status !== 0) throw new Error(`real drain failed: ${drain.stderr}`);
+const drainedRows = drain.stdout.trim().split("\n").filter((line) => line.split("\t").length >= 5);
+if (drainedRows.length !== 2) throw new Error(`real drain did not consume both records: ${drain.stdout}`);
+if (queueRows().length !== 0) throw new Error("real drain left the coalesced batch queued");
+rmSync(`${process.env.FM_HOME}/state/task.meta`);
+await hooks.event(idle);
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (prompts.length !== 1) throw new Error("retired stale endpoint produced a post-drain OpenCode prompt");
+
+writeFileSync(`${process.env.FM_HOME}/state/new.meta`, "window=default:w7:p3\n");
+writeFileSync(`${process.env.FM_HOME}/state/new.status`, "working: genuinely new event\n");
+writeFileSync(process.env.FM_RELEASE_NEW, "release\n");
+await waitFor(() => prompts.length === 2 && armRows().length === 4, "post-drain OpenCode event was not delivered with a successor");
+if (!prompts[1].includes("new.status")) throw new Error(`wrong post-drain OpenCode prompt: ${prompts[1]}`);
+if (queueRows().length !== 1) throw new Error("post-drain OpenCode event was removed before a real drain");
+rmSync(`${process.env.FM_HOME}/state/new.meta`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode must coalesce actionable closes through one real drain without dropping a later event"
+  [ -z "$out" ] || fail "OpenCode drain-coalescing test printed output: $out"
+  pass "OpenCode coalesces actionable closes until a real drain and preserves later events"
 }
 
 test_opencode_pre_ready_actionable_close_preserves_its_successor() {
@@ -1410,6 +1898,7 @@ for (let i = 0; i < 500; i += 1) {
 const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 if (rows.length !== 2) throw new Error(`pre-ready successor was replaced before its close: ${rows.join(" | ")}`);
 if (!prompts.some((message) => message.includes("original wake"))) throw new Error(`original actionable wake was not delivered: ${prompts.join(" | ")}`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
 await new Promise((resolve) => setTimeout(resolve, 150));
 if (existsSync(process.env.FM_PRE_READY_RETIRED_FILE)) throw new Error("pre-ready actionable successor was retired before its close");
 writeFileSync(process.env.FM_PRE_READY_RELEASE_FILE, "release\n");
@@ -1648,6 +2137,7 @@ await waitFor(
 );
 if (rows().length !== 2) throw new Error(`unretired arm overlapped before fallback: ${rows().join(" | ")}`);
 if (!prompts[0]?.includes("original wake")) throw new Error(`missing original fallback: ${prompts.join(" | ")}`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
 writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
 for (let i = 0; i < 500; i += 1) {
   if (rows().length >= 3 && (process.env.FM_LATE_KIND !== "actionable" || prompts.some((message) => message.includes("late wake")))) break;
@@ -2005,6 +2495,8 @@ test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
+test_pi_coalesces_actionable_closes_until_real_drain
+test_pi_native_delivery_coalesces_through_real_drain
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
@@ -2021,6 +2513,7 @@ test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
+test_opencode_coalesces_actionable_closes_until_real_drain
 test_opencode_pre_ready_actionable_close_preserves_its_successor
 test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry

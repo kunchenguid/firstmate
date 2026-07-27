@@ -17,6 +17,12 @@ While supervision is still needed and away mode remains inactive, an actionable 
 ## Actionable wake ordering
 
 After an actionable Pi or OpenCode child close, the adapter starts and verifies one singleton successor before it delivers the original wake.
+It revalidates actionable delivery against the durable queue and suppresses the prompt when a completed drain has already consumed the reason.
+When another record is now pending, the prompt names that current queued payload instead of replaying delayed child output for a retired endpoint.
+A missing or unreadable queue, or an empty queue observed while its mutation lock exists, remains an unknown state that preserves delivery rather than risking event loss.
+While one adapter-injected handling turn is pending or active, later actionable closes are coalesced behind it instead of scheduling more host prompts.
+At Pi's next `agent_settled` event or OpenCode's next matching `session.idle` event, the adapter delivers at most one coalesced prompt only when the durable queue still contains a record.
+Continuity failures remain deliverable independently of queue state.
 It waits at most one readiness timeout per attempt, then sends TERM and waits a bounded retirement confirmation before the next lock-verified exponential retry.
 If the unready arm does not retire within that bound, the adapter keeps ownership, starts no overlapping retry, and delivers the typed fallback immediately.
 When that retained arm later closes, its actual close is classified as a new supervised event without replaying the earlier fallback.
@@ -52,6 +58,8 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 ## Regression coverage
 
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops, then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
+Its isolated-home drain regressions also use the real durable queue and drain script to prove one prompt per coalesced batch, post-drain suppression for a retired endpoint, delivery of a genuinely new post-drain event, successor continuity across concurrent closes, and queue retention until a real drain.
+The Pi case additionally runs through the real TUI and extension event loop with a deterministic provider, while an isolated fake arm child controls close timing and leaves production detector classification to the watcher suites.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, and exit-2 translation.

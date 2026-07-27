@@ -18,6 +18,10 @@ let launchInFlight = null;
 let restorationInFlight = null;
 let armClose = new WeakMap();
 let armReadiness = new WeakMap();
+let wakePromptOutstanding = false;
+let wakePromptSessionID = "";
+let pendingActionableReason = "";
+let pendingFailureReason = "";
 
 function positiveInteger(name, fallback) {
   const value = Number(process.env[name]);
@@ -193,9 +197,71 @@ function wakePrompt(reason) {
   return `WATCHER FIRED - drain queued wakes with bin/fm-wake-drain.sh and handle the reported wake. Watcher continuity is plugin-owned.\n\n${reason}`;
 }
 
+function queuedWakeSnapshot(paths) {
+  const queue = `${paths.state}/.wake-queue`;
+  const lock = `${paths.state}/.wake-queue.lock`;
+  try {
+    if (existsSync(lock)) return { state: "unknown", reason: "" };
+    const content = readFileSync(queue, "utf8");
+    if (existsSync(lock)) return { state: "unknown", reason: "" };
+    if (!content.trim()) return { state: "empty", reason: "" };
+    let reason = "";
+    for (const line of content.split(/\r?\n/)) {
+      const fields = line.split("\t");
+      if (fields.length >= 5 && fields[4].trim()) reason = fields.slice(4).join("\t").trim();
+    }
+    return reason ? { state: "pending", reason } : { state: "unknown", reason: "" };
+  } catch {
+    return { state: "unknown", reason: "" };
+  }
+}
+
+async function flushWakePrompt(paths, client, sessionID) {
+  if (wakePromptOutstanding) return;
+  const queue = queuedWakeSnapshot(paths);
+  let message = "";
+  let actionable = "";
+  let failure = "";
+  if (pendingFailureReason) {
+    failure = pendingFailureReason;
+    pendingFailureReason = "";
+    if (pendingActionableReason && queue.state !== "empty") {
+      actionable = pendingActionableReason;
+      pendingActionableReason = "";
+      message = `${queue.reason || actionable}\n\n${failure}`;
+    } else {
+      message = failure;
+    }
+  } else if (pendingActionableReason) {
+    if (queue.state === "empty") {
+      pendingActionableReason = "";
+      return;
+    }
+    actionable = pendingActionableReason;
+    pendingActionableReason = "";
+    message = queue.reason || actionable;
+  }
+  if (!message) return;
+  wakePromptOutstanding = true;
+  wakePromptSessionID = sessionID;
+  try {
+    await sendPrompt(paths, client, sessionID, wakePrompt(message));
+  } catch {
+    wakePromptOutstanding = false;
+    wakePromptSessionID = "";
+    if (actionable) pendingActionableReason = actionable;
+    if (failure) pendingFailureReason = failure;
+  }
+}
+
+function requestActionableWake(paths, client, sessionID, reason) {
+  pendingActionableReason = reason;
+  void flushWakePrompt(paths, client, sessionID);
+}
+
 function surfaceFailure(paths, client, sessionID, reason) {
-  void sendPrompt(paths, client, sessionID, wakePrompt(reason)).catch(() => {
-  });
+  pendingFailureReason = pendingFailureReason ? `${pendingFailureReason}\n\n${reason}` : reason;
+  void flushWakePrompt(paths, client, sessionID);
 }
 
 function retryDelay(attempt) {
@@ -340,8 +406,11 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       restorationInFlight = restoration;
       void restoration.then((failure) => {
         if (restorationInFlight === restoration) restorationInFlight = null;
-        const message = failure ? `${classification.message}\n\n${failure}` : classification.message;
-        return sendPrompt(paths, client, sessionID, wakePrompt(message));
+        if (failure) {
+          surfaceFailure(paths, client, sessionID, `${classification.message}\n\n${failure}`);
+        } else {
+          requestActionableWake(paths, client, sessionID, classification.message);
+        }
       }).catch(() => {
       });
       return;
@@ -419,6 +488,13 @@ export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
       if (event.type !== "session.idle") return;
       const sessionID = event.properties?.sessionID;
       if (!sessionID) return;
+      if (wakePromptOutstanding && wakePromptSessionID === sessionID) {
+        wakePromptOutstanding = false;
+        wakePromptSessionID = "";
+      }
+      if (pendingActionableReason || pendingFailureReason) {
+        void flushWakePrompt(paths, client, sessionID);
+      }
       void ensureArm(paths, sessionID, client);
     },
   };

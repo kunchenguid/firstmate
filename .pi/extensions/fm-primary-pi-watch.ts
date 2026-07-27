@@ -1,7 +1,7 @@
 // Firstmate primary watcher bridge for Pi.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -192,18 +192,81 @@ export default function (pi: ExtensionAPI) {
   };
   process.once("exit", cleanupOnProcessExit);
 
-  async function sendWake(message: string): Promise<void> {
+  let wakePromptOutstanding = false;
+  let pendingActionableReason = "";
+  let pendingFailureReason = "";
+
+  function queuedWakeSnapshot(): ["pending" | "empty" | "unknown", string] {
+    const queue = `${state}/.wake-queue`;
+    const lock = `${state}/.wake-queue.lock`;
+    try {
+      if (existsSync(lock)) return ["unknown", ""];
+      const content = readFileSync(queue, "utf8");
+      if (existsSync(lock)) return ["unknown", ""];
+      if (!content.trim()) return ["empty", ""];
+      let reason = "";
+      for (const line of content.split(/\r?\n/)) {
+        const fields = line.split("\t");
+        if (fields.length >= 5 && fields[4].trim()) reason = fields.slice(4).join("\t").trim();
+      }
+      return reason ? ["pending", reason] : ["unknown", ""];
+    } catch {
+      return ["unknown", ""];
+    }
+  }
+
+  function sendWake(message: string): void {
     const content = encodeFirstmateOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
-    await pi.sendUserMessage(content, { deliverAs: "followUp" });
+    pi.sendUserMessage(content, { deliverAs: "followUp" });
+  }
+
+  function flushWakePrompt(): void {
+    if (stopping || wakePromptOutstanding) return;
+    const [queueState, queuedReason] = queuedWakeSnapshot();
+    let message = "";
+    let actionable = "";
+    let failure = "";
+    if (pendingFailureReason) {
+      failure = pendingFailureReason;
+      pendingFailureReason = "";
+      if (pendingActionableReason && queueState !== "empty") {
+        actionable = pendingActionableReason;
+        pendingActionableReason = "";
+        message = `${queuedReason || actionable}\n\n${failure}`;
+      } else {
+        message = failure;
+      }
+    } else if (pendingActionableReason) {
+      if (queueState === "empty") {
+        pendingActionableReason = "";
+        return;
+      }
+      actionable = pendingActionableReason;
+      pendingActionableReason = "";
+      message = queuedReason || actionable;
+    }
+    if (!message) return;
+    wakePromptOutstanding = true;
+    try {
+      sendWake(message);
+    } catch {
+      wakePromptOutstanding = false;
+      if (actionable) pendingActionableReason = actionable;
+      if (failure) pendingFailureReason = failure;
+    }
+  }
+
+  function requestActionableWake(message: string): void {
+    pendingActionableReason = message;
+    flushWakePrompt();
   }
 
   function surfaceFailure(message: string): void {
-    void sendWake(message).catch(() => {
-      // Pi owns delivery errors; continuity restoration never waits on prompting.
-    });
+    pendingFailureReason = pendingFailureReason ? `${pendingFailureReason}\n\n${message}` : message;
+    flushWakePrompt();
   }
 
   function retryDelay(attempt: number): number {
@@ -381,8 +444,11 @@ export default function (pi: ExtensionAPI) {
           const failure = await restoreAfterActionableClose(predecessor);
           restoring = false;
           if (stopping) return;
-          const message = failure ? `${classification.message}\n\n${failure}` : classification.message;
-          await sendWake(message);
+          if (failure) {
+            surfaceFailure(`${classification.message}\n\n${failure}`);
+          } else {
+            requestActionableWake(classification.message);
+          }
         })().catch(() => {
         });
         return;
@@ -408,6 +474,10 @@ export default function (pi: ExtensionAPI) {
 
   pi.on?.("session_start", () => {
     markLoaded();
+  });
+  pi.on?.("agent_settled", () => {
+    wakePromptOutstanding = false;
+    flushWakePrompt();
   });
   pi.on?.("session_shutdown", () => {
     stopArm();
