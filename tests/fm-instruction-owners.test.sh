@@ -16,6 +16,7 @@ SECONDMATE="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
 CONFIG="$ROOT/docs/configuration.md"
 AGENTS="$ROOT/AGENTS.md"
 BRIEF="$ROOT/bin/fm-brief.sh"
+BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
 
 test_new_skill_metadata_and_triggers() {
   local skill name count
@@ -100,6 +101,43 @@ test_generic_effort_fallback_respects_precedence() {
     fail "generic effort fallback must not contain Sol-specific policy"
   fi
   pass "generic effort fallback applies only below captain and standing configuration"
+}
+
+test_agent_owned_quota_array_dispatch_contract() {
+  local phrase
+  for phrase in \
+    'Firstmate alone resolves a matched profile array' \
+    'run `quota-axi --json` at that intake' \
+    'evaluate every configured candidate against that current output' \
+    'choose the candidate with the most real headroom' \
+    'if any harness/model/provider relationship, applicable quota data, or interpretation cannot be established, stop and report that candidate' \
+    'instead of omitting it, guessing, falling back, or calling the result quota-informed' \
+    'Preserve malformed profile configuration as an actionable error' \
+    "preserve the captain's strongest-reasoning class rather than silently downgrading it" \
+    'Break genuine headroom ties without array-order or harness bias' \
+    '`quota-axi` owns how model or product windows relate to bounding account windows'; do
+    assert_grep "$phrase" "$AGENTS" "array-dispatch contract lost '$phrase'"
+  done
+
+  for phrase in \
+    '| claude | Open the current interactive session' \
+    '| codex | Open the current interactive session' \
+    '| opencode | Run `opencode models [provider]`' \
+    '| pi | Run `pi --list-models [search]`' \
+    '| grok | Run `grok models`' \
+    "For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing" \
+    'If those sources do not establish the relationship needed for dispatch, fail loudly and report the unresolved candidate.'; do
+    assert_grep "$phrase" "$HARNESS" "model discovery guidance lost '$phrase'"
+  done
+  assert_grep 'not as a permanent namespace or provider mapping' "$HARNESS" \
+    "model discovery guidance permits a fixed provider table"
+  assert_grep '`AGENTS.md` section 4 owns the dispatch and array-selection procedure.' "$CONFIG" \
+    "configuration docs do not point to the agent-owned array procedure"
+  assert_grep 'quota-axi is required for the' "$BOOTSTRAP" \
+    "bootstrap docs lost the quota-axi dependency pointer"
+  assert_grep 'agent-owned dispatch-profile array procedure in AGENTS.md section 4.' "$BOOTSTRAP" \
+    "bootstrap docs do not point to the agent-owned array procedure"
+  pass "firstmate directly compares every quota candidate with authoritative model discovery"
 }
 
 test_shared_authoring_requirements_are_owned() {
@@ -252,6 +290,7 @@ test_new_skill_metadata_and_triggers
 test_diagnostic_owner_covers_causal_procedure
 test_project_management_owner_covers_guarded_operations
 test_generic_effort_fallback_respects_precedence
+test_agent_owned_quota_array_dispatch_contract
 test_shared_authoring_requirements_are_owned
 test_secondmate_registry_contract_stays_concise
 test_state_startup_and_ordinary_recovery_placement

@@ -59,7 +59,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|grok|kimi)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters.
@@ -101,7 +101,9 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
-# Per-harness turn-end hooks are installed automatically; some live outside the worktree.
+# Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
+# Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
+# a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
@@ -386,7 +388,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|grok)
+    ''|claude|codex|opencode|pi|grok|kimi)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -447,6 +449,11 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # Kimi Code rejects a positional prompt, so it launches bare and receives
+    # only an absolute brief pointer after the TUI readiness gate below.
+    # Its turn-end signal is a globally configured Stop hook plus a guarded
+    # per-task worktree token, so no launch placeholder belongs here.
+    kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
     *) return 1 ;;
   esac
 }
@@ -530,11 +537,35 @@ shell_quote() {
   printf "'"
 }
 
+resolve_kimi_binary() {
+  local candidate dir fallback
+  candidate=$(command -v kimi 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  fallback="${HOME:-}/.kimi-code/bin/kimi"
+  if [ -n "${HOME:-}" ] && [ -x "$fallback" ]; then
+    printf '%s\n' "$fallback"
+    return 0
+  fi
+  echo "error: kimi executable not found; searched PATH for 'kimi' and fallback '$fallback'" >&2
+  return 1
+}
+
 model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|grok)
+    claude|codex|opencode|pi|grok|kimi)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -576,8 +607,23 @@ effort_flag_for_harness() {
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
+    # kimi likewise has no reasoning-effort flag; the requested axis stays in
+    # task metadata but never reaches the launch command.
   esac
 }
+
+case "$LAUNCH" in
+  *__KIMIBIN__*)
+    KIMI_BIN=$(resolve_kimi_binary) || exit 1
+    LAUNCH=${LAUNCH//__KIMIBIN__/$(shell_quote "$KIMI_BIN")}
+    if [ "$KIND" != secondmate ]; then
+      "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" install || {
+        echo "error: refusing Kimi spawn because the global turn-end hook could not be installed safely" >&2
+        exit 1
+      }
+    fi
+    ;;
+esac
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -754,6 +800,8 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
+BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
@@ -1125,6 +1173,58 @@ spawn_send_key() {  # <target> <key>
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
 }
+
+kimi_capture() {
+  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+}
+
+kimi_capture_has_empty_composer() {  # <plain-pane-capture>
+  printf '%s\n' "$1" \
+    | grep -Eq '^[[:space:]]*(│|┃|\|)[[:space:]]*>[[:space:]]*(│|┃|\|)[[:space:]]*$'
+}
+
+kimi_wait_for_ready() {
+  local pane i=0 max=${FM_KIMI_READY_POLLS:-60} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(kimi_capture)
+    if printf '%s\n' "$pane" | grep -Fq 'Welcome to Kimi Code!' \
+       || kimi_capture_has_empty_composer "$pane"; then
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+kimi_delivery_is_confirmed() {  # <plain-pane-capture>
+  local pane=$1
+  kimi_capture_has_empty_composer "$pane" || return 1
+  if { printf '%s\n' "$pane" | grep -Fq '✨' \
+       && printf '%s\n' "$pane" | grep -Fq 'Read the brief at'; } \
+     || printf '%s\n' "$pane" \
+       | grep -qiE 'context:[[:space:]]*(0\.[0-9]*[1-9][0-9]*|[1-9][0-9]*([.][0-9]+)?)[[:space:]]*%'; then
+    return 0
+  fi
+  return 1
+}
+
+kimi_wait_for_delivery() {
+  local pane i=0 max=${FM_KIMI_DELIVERY_POLLS:-40} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(kimi_capture)
+    kimi_delivery_is_confirmed "$pane" && return 0
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+kimi_spawn_fail() {  # <detail>
+  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+}
+
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
@@ -1183,9 +1283,10 @@ fi
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
 
-# Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
-# agent finishes a turn. Worktree-resident hooks are kept out of git's view so
-# they never block teardown's dirty check or leak into a commit.
+# Per-harness turn-end hook where enabled: a file that touches
+# state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
+# and token pointers stay out of git's view so they never block teardown's dirty
+# check or leak into a commit.
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
@@ -1283,6 +1384,21 @@ EOF
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
       exclude_path '.fm-grok-turnend'
       ;;
+    kimi*)
+      # Kimi's Stop hook is global, but it is inert unless cwd contains this
+      # task's token pointer and the token resolves through Firstmate's private
+      # registry. The installer above owns the format-preserving config edit and
+      # the always-zero, silent hook script.
+      KIMI_AUTH_DIR="$HOME/.kimi-code/fm-turn-end.d"
+      old_umask=$(umask)
+      umask 077
+      auth_file=$(mktemp "$KIMI_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      printf '%s\n' "$TURNEND" > "$auth_file"
+      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.kimi-turnend-token"
+      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
+      exclude_path '.fm-kimi-turnend'
+      ;;
   esac
 fi
 
@@ -1377,6 +1493,30 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$HARNESS" = kimi ]; then
+  if ! kimi_wait_for_ready; then
+    kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
+    exit 1
+  fi
+  KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
+  KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
+  KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
+  KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
+    "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
+    "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W") || {
+    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    exit 1
+  }
+  if [ "$KIMI_SUBMIT_VERDICT" = send-failed ]; then
+    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    exit 1
+  fi
+  if ! kimi_wait_for_delivery; then
+    kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
+    exit 1
+  fi
+fi
 if [ "$KIND" = secondmate ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
     if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
