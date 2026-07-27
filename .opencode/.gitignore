@@ -1,0 +1,9 @@
+node_modules
+package.json
+package-lock.json
+bun.lock
+# opencode.json is the opencode CLI's per-user plugin/extension config; it
+# declares the openrouter ai-sdk provider and may vary per host. Keep it
+# captain-private and out of accidental commits.
+opencode.json
+.gitignore
