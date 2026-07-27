@@ -6,6 +6,14 @@ The [README](../README.md) carries the high-level diagram and a short synopsis.
 This document expands every part of it.
 firstmate's always-loaded operating contract and routing index for conditional procedures is [`AGENTS.md`](../AGENTS.md); this is the human-facing companion.
 
+## Managed project context
+
+`bin/fm-graphify.sh` is the one owner of deterministic Graphify path resolution, source containment, generation state, lock, fingerprint, transactional publication, query limits, and cleanup mechanics.
+It resolves names through the private project registry and keeps the managed Python environment and all graph generations under the effective home's `data/graphify/`, so Firstmate does not modify project clones.
+Natural-language intake selects the question and decides how to use the bounded answer, while the script supplies only fresh local structural context with file provenance.
+Fleet sync and merge owners invalidate derived state after their guarded project revisions change.
+The current operator workflow and limits are in [`configuration.md`](configuration.md#managed-graphify-context-datagraphify).
+
 ## Event-driven supervision
 
 A zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet, classifies detected wakes in bash, and wakes the first mate only when something is actionable.

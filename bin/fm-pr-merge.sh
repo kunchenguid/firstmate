@@ -82,3 +82,10 @@ if ! caller_has_merge_method "$@"; then
 fi
 
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+# A successful remote merge changes the project's next guarded refresh input.
+# Keep the last valid local graph available but prevent it from being injected
+# into a later brief as though it still represented the merged project.
+PROJ=$(sed -n 's/^project=//p' "$META" | head -n 1)
+if [ -n "$PROJ" ]; then
+  "$FM_ROOT/bin/fm-graphify.sh" mark-stale "$(basename "$PROJ")" "project PR merged: $URL" >/dev/null 2>&1 || true
+fi

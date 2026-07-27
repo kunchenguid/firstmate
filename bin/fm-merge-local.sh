@@ -65,4 +65,6 @@ fi
 before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
+PROJECT_NAME=$(basename "$PROJ")
+"$FM_ROOT/bin/fm-graphify.sh" mark-stale "$PROJECT_NAME" "local project merge $before..$after" >/dev/null 2>&1 || true
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"

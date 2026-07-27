@@ -2,8 +2,11 @@
 # Scaffold a crewmate brief or persistent secondmate charter at
 # data/<task-id>/brief.md under the active firstmate home.
 # For ordinary tasks, the standard Setup/Rules/Definition-of-done contract is
-# filled in. Firstmate then replaces the {TASK} placeholder with the task
-# description, acceptance criteria, and context, and may adjust other sections
+# filled in. Firstmate normally replaces the {TASK} placeholder with the task
+# description, acceptance criteria, and context. When FM_BRIEF_TASK supplies
+# that task text at intake, this script queries a fresh managed Graphify graph
+# before writing the task section and appends only bounded provenance-rich context.
+# Missing, stale, and failed derived context is a no-op. Firstmate may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
@@ -193,6 +196,11 @@ exit 0
 fi
 
 REPO=${POS[1]}
+TASK_BODY=${FM_BRIEF_TASK:-"{TASK}"}
+GRAPH_CONTEXT=""
+if [ -n "${FM_BRIEF_TASK:-}" ] && [ -x "$FM_ROOT/bin/fm-graphify.sh" ]; then
+  GRAPH_CONTEXT=$("$FM_ROOT/bin/fm-graphify.sh" intake "$REPO" "$FM_BRIEF_TASK" 2>/dev/null || true)
+fi
 
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
@@ -231,7 +239,7 @@ cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
-{TASK}
+$TASK_BODY$GRAPH_CONTEXT
 
 $HERDR_SECTION
 
@@ -337,7 +345,7 @@ cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
-{TASK}
+$TASK_BODY$GRAPH_CONTEXT
 
 $HERDR_SECTION
 

@@ -76,3 +76,4 @@ First obtain the captain's explicit removal decision, then inspect the current d
 If any dependency or unlanded work exists, stop and report it before changing the registry.
 Until a guarded removal helper and corresponding prime-directive exception exist, report that implementation gap instead of bypassing the project-write boundary.
 When a clone has already been removed through an approved guarded path, or the registry is provably stale because no clone exists, remove its registry line so navigation matches reality.
+After that owner path has removed the clone, run `bin/fm-graphify.sh cleanup <project-name>` to remove only the matching derived local graph generation.

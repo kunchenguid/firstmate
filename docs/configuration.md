@@ -13,6 +13,7 @@ The tracked code root contains the shared instruction, skill, documentation, wor
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
 `state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated X-mode artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the guarded exceptions in `AGENTS.md`.
+`data/graphify/` holds Firstmate-managed Graphify tooling and project-derived graph generations, never project files.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 The producing PR and X helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
@@ -45,6 +46,20 @@ Bootstrap requires compatible `tasks-axi` on every profile; see "Toolchain" belo
 Set the local, gitignored `config/backlog-backend` file to `manual` to force manual backlog editing and suppress the verbose `BOOTSTRAP_INFO: tasks-axi available` fact, not missing-tool reporting.
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
+
+## Managed Graphify context (data/graphify)
+
+Bootstrap requires the pinned local `graphifyy==0.9.28` environment and reports `MISSING: graphify` with the consent-gated installer when it is absent or incompatible.
+The installer creates `data/graphify/venv` under the effective `FM_HOME`, so an ambient `graphify` command is never trusted.
+`bin/fm-graphify.sh status <project>`, `rebuild <project>`, `query <project> <question>`, `mark-stale <project> <reason>`, and `cleanup <project>` are the supported management interface.
+Every command accepts a registered project name only, resolves the clone from `data/projects.md`, and stores derived output outside the clone under `data/graphify/projects/<project>/`.
+Rebuilds are local structural extraction only, exclude secret and dependency material, ignore symlinks, build into a private generation, and preserve the previous published graph if validation or publication fails.
+Freshness fingerprints the selected files, project Git revision, Graphify pin, and managed limits.
+Guarded fleet refreshes and successful merges mark the affected generation stale, while a project-removal owner must call `cleanup` after its guarded clone removal.
+Use `FM_BRIEF_TASK='<task text>' bin/fm-brief.sh <id> <project>` when composing a brief to add fresh Graphify context automatically.
+The context renderer is bounded and provenance-rich, and silently omits unavailable, failed, or stale graphs so dispatch continues normally.
+No Graphify semantic backend, cloud model, or external source is enabled.
+The script header owns exact limits, state fields, and command mechanics.
 
 ## Runtime backend (config/backend / FM_BACKEND)
 
