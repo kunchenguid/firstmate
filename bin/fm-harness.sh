@@ -30,8 +30,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Only claude, pi, and grok set verified markers of their own; codex, opencode,
-  # and kimi are markerless, so a foreign marker retained in a terminal
+  # Opencode and kimi are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
@@ -40,14 +39,14 @@ detect_own() {
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
     return
   fi
-  # Codex exposes a stable per-session marker to tool processes. This is
-  # required in PID-isolated tool sandboxes where Codex is not visible in the
-  # child process ancestry.
-  [ -n "${CODEX_THREAD_ID:-}" ] && { echo codex; return; }
   # grok sets GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
   # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
   # is unambiguous when firstmate runs natively on grok.
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # Codex exposes a stable per-session marker to tool processes. This is
+  # required in PID-isolated tool sandboxes where Codex is not visible in the
+  # child process ancestry.
+  [ -n "${CODEX_THREAD_ID:-}" ] && { echo codex; return; }
   # Layer 2: walk the parent chain and match the command name.
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do

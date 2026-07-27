@@ -48,6 +48,7 @@ if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
     missing) printf '\t\t\t\n' ;;
     invalid) printf 'error\tfake-user\tkeyring\tHTTP 401: Bad credentials\n' ;;
     network) printf 'error\tfake-user\tkeyring\tdial tcp: lookup api.github.com: no such host\n' ;;
+    timeout) printf 'timeout\tfake-user\tkeyring\tcontext deadline exceeded\n' ;;
     credential-store) printf 'error\tfake-user\tdefault\tconfigured credential unavailable\n' ;;
     sandbox) printf 'error\tfake-user\tdefault\tdial tcp: lookup api.github.com: connection refused\n' ;;
     inspect-failure) exit 1 ;;
@@ -328,6 +329,7 @@ success^
 missing^NEEDS_GH_AUTH: missing or invalid GitHub authentication - run gh auth login -h github.com
 invalid^NEEDS_GH_AUTH: missing or invalid GitHub authentication - run gh auth login -h github.com
 network^GH_NETWORK: GitHub API unreachable - check network and DNS access to api.github.com, then rerun
+timeout^GH_NETWORK: GitHub API unreachable - check network and DNS access to api.github.com, then rerun
 credential-store^GH_CREDENTIAL_STORE: configured GitHub credential is inaccessible - rerun Firstmate where the OS credential store is available; if it still fails, run gh auth login -h github.com
 sandbox^GH_SANDBOX: restricted environment blocks api.github.com and the configured GitHub credential store - rerun Firstmate outside that sandbox
 inspect-failure^GH_AUTH_CHECK: unable to inspect GitHub authentication - run gh auth status -h github.com outside Firstmate and resolve its diagnostic

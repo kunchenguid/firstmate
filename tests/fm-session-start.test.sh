@@ -454,6 +454,14 @@ SH
   pass "session start accepts Codex's PID-isolated process marker"
 }
 
+test_grok_marker_precedes_inherited_codex_marker() {
+  local out
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT GROK_AGENT=1 CODEX_THREAD_ID=inherited-codex-thread \
+    FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = grok ] || fail "Grok marker should override an inherited Codex marker, got: $out"
+  pass "Grok marker takes precedence over an inherited Codex marker"
+}
+
 # prepare_session_start_secondmate <name>: a throwaway main home and Pi
 # secondmate home wired to the real spawn implementation through the fixture
 # root. Echoes root|home|fakebin|mate|log|spawned.
@@ -1418,6 +1426,7 @@ EOF
 
 test_context_digest_absent_empty_present
 test_session_start_accepts_codex_pid_isolated_marker
+test_grok_marker_precedes_inherited_codex_marker
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_session_lock_concurrent_single_winner

@@ -872,6 +872,7 @@ EOF
     token_available=1
   fi
   network_error=0
+  [ "$state" = timeout ] && network_error=1
   case "$error" in
     *"api.github.com"*"lookup"*|*"lookup api.github.com"*|*"dial tcp"*|*"Could not resolve host"*|*"could not resolve host"*|*"no such host"*|*"Network is unreachable"*|*"network is unreachable"*|*"connection refused"*|*"Connection refused"*|*"i/o timeout"*|*"Client.Timeout"*|*"error connecting to api.github.com"*)
       network_error=1
