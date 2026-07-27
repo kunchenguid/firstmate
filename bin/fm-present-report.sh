@@ -64,17 +64,18 @@ fi
 OUTPUT="$OUTPUT_DIR/$NAME"
 TEMP="$OUTPUT.tmp.$$"
 RENDER_ERROR="$TEMP.err"
-mkdir -p "$OUTPUT_DIR" || {
+mkdir -p "$OUTPUT_DIR" 2>/dev/null || {
   printf 'fm-present-report: could not render static HTML under %s; using canonical Markdown: %s\n' "$OUTPUT_DIR" "$SOURCE" >&2
   printf 'markdown:%s\n' "$SOURCE"
   exit 0
 }
 
-if ! FM_PRESENT_MODE="$MODE" \
-  FM_PRESENT_SOURCE="$SOURCE" \
-  FM_PRESENT_SNAPSHOT="$SNAPSHOT" \
-  FM_PRESENT_NOW_VALUE="$NOW" \
-  node --input-type=module >"$TEMP" 2>"$RENDER_ERROR" <<'JS'
+if ! {
+  FM_PRESENT_MODE="$MODE" \
+    FM_PRESENT_SOURCE="$SOURCE" \
+    FM_PRESENT_SNAPSHOT="$SNAPSHOT" \
+    FM_PRESENT_NOW_VALUE="$NOW" \
+    node --input-type=module >"$TEMP" 2>"$RENDER_ERROR" <<'JS'
 import { readFileSync, realpathSync } from "node:fs";
 import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 
@@ -366,16 +367,17 @@ if (mode === "markdown") {
   throw new Error("unsupported presentation mode");
 }
 JS
+} 2>/dev/null
 then
-  rm -f "$TEMP" "$RENDER_ERROR"
+  rm -f "$TEMP" "$RENDER_ERROR" 2>/dev/null
   printf 'fm-present-report: could not render static HTML; using canonical Markdown: %s\n' "$SOURCE" >&2
   printf 'markdown:%s\n' "$SOURCE"
   exit 0
 fi
 
-rm -f "$RENDER_ERROR"
-if ! mv "$TEMP" "$OUTPUT"; then
-  rm -f "$TEMP"
+rm -f "$RENDER_ERROR" 2>/dev/null
+if ! mv "$TEMP" "$OUTPUT" 2>/dev/null; then
+  rm -f "$TEMP" 2>/dev/null
   printf 'fm-present-report: could not publish static HTML; using canonical Markdown: %s\n' "$SOURCE" >&2
   printf 'markdown:%s\n' "$SOURCE"
   exit 0

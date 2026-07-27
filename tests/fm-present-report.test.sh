@@ -31,6 +31,25 @@ cat >"$FAKEBIN/xdg-open" <<'SH'
 printf 'xdg-open %s\n' "$1" >>"$OPEN_LOG"
 [ "${FAIL_OPEN:-0}" != 1 ]
 SH
+cat >"$FAKEBIN/mkdir" <<'SH'
+#!/usr/bin/env bash
+if [ "${FAIL_PRESENT_MKDIR:-0}" = 1 ]; then
+  printf 'primitive mkdir failure\n' >&2
+  exit 91
+fi
+if [ "${FAIL_PRESENT_REDIRECT:-0}" = 1 ]; then
+  exit 0
+fi
+command -p mkdir "$@"
+SH
+cat >"$FAKEBIN/mv" <<'SH'
+#!/usr/bin/env bash
+if [ "${FAIL_PRESENT_MV:-0}" = 1 ]; then
+  printf 'primitive mv failure\n' >&2
+  exit 91
+fi
+command -p mv "$@"
+SH
 for tool in curl gh gh-axi wget; do
   cat >"$FAKEBIN/$tool" <<'SH'
 #!/usr/bin/env bash
@@ -39,15 +58,21 @@ exit 91
 SH
   chmod +x "$FAKEBIN/$tool"
 done
-chmod +x "$FAKEBIN/uname" "$FAKEBIN/open" "$FAKEBIN/xdg-open"
+chmod +x "$FAKEBIN/uname" "$FAKEBIN/open" "$FAKEBIN/xdg-open" "$FAKEBIN/mkdir" "$FAKEBIN/mv"
 
-run_presenter() {
+run_presenter_for_home() {
+  local effective_home=$1
+  shift
   PATH="$FAKEBIN:$PATH" \
-    FM_HOME="$HOME_DIR" \
+    FM_HOME="$effective_home" \
     FM_PRESENT_NOW="$NOW" \
     OPEN_LOG="$OPEN_LOG" \
     NET_LOG="$NET_LOG" \
     "$PRESENTER" "$@"
+}
+
+run_presenter() {
+  run_presenter_for_home "$HOME_DIR" "$@"
 }
 
 SOURCE="$HOME_DIR/data/sample-report.md"
@@ -332,9 +357,44 @@ test_render_failure_falls_back_without_partial_page() {
   pass "rendering failure emits one actionable warning and leaves no partial page"
 }
 
+test_publication_failures_emit_one_fallback_warning() {
+  local scenario home err out diagnostic expected rc
+  for scenario in mkdir redirect mv; do
+    home="$TMP_ROOT/publication-$scenario"
+    mkdir -p "$home"
+    err="$TMP_ROOT/publication-$scenario.err"
+    case "$scenario" in
+      mkdir)
+        out=$(FAIL_PRESENT_MKDIR=1 run_presenter_for_home "$home" markdown --source "$SOURCE" 2>"$err")
+        rc=$?
+        expected="fm-present-report: could not render static HTML under $home/.lavish; using canonical Markdown: $SOURCE"
+        ;;
+      redirect)
+        out=$(FAIL_PRESENT_REDIRECT=1 run_presenter_for_home "$home" markdown --source "$SOURCE" 2>"$err")
+        rc=$?
+        expected="fm-present-report: could not render static HTML; using canonical Markdown: $SOURCE"
+        ;;
+      mv)
+        out=$(FAIL_PRESENT_MV=1 run_presenter_for_home "$home" markdown --source "$SOURCE" 2>"$err")
+        rc=$?
+        expected="fm-present-report: could not publish static HTML; using canonical Markdown: $SOURCE"
+        ;;
+    esac
+    [ "$rc" -eq 0 ] || fail "$scenario publication failure blocked canonical report completion"
+    [ "$out" = "markdown:$SOURCE" ] || fail "$scenario publication failure did not return the canonical Markdown fallback: $out"
+    diagnostic=$(cat "$err")
+    [ "$diagnostic" = "$expected" ] || fail "$scenario publication failure emitted unexpected diagnostics: $diagnostic"
+    if [ -d "$home/.lavish" ]; then
+      [ -z "$(find "$home/.lavish" -type f -print -quit)" ] || fail "$scenario publication failure left a partial artifact"
+    fi
+  done
+  pass "artifact publication failures emit one actionable Markdown fallback warning"
+}
+
 assert_present "$PRESENTER" "static report presentation owner is missing"
 test_markdown_html_is_local_escaped_accessible_and_quiet
 test_markdown_links_and_report_local_images_are_safe_and_self_contained
 test_bearings_page_renders_authoritative_four_section_report
 test_open_is_explicit_and_browser_failure_falls_back_to_markdown
 test_render_failure_falls_back_without_partial_page
+test_publication_failures_emit_one_fallback_warning

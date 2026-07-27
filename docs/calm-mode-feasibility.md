@@ -304,34 +304,13 @@ ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.82.1
 
 $ tests/fm-present-report.test.sh
 ok - Markdown presentation is escaped, accessible, timestamped, local-only, and does not open unsolicited tabs
-ok - Bearings renders every all-current worker, secondmate, decision, completion, and gate exactly once with timestamp and omissions
+ok - Markdown permits only HTTPS links and embeds only safe report-local PNG and SVG assets
+ok - Bearings renders the canonical four-section report without independent reclassification
 ok - only explicit --open launches a local page and opener failure falls back without blocking
-ok - rendering failure leaves no partial page and falls back to canonical Markdown
+ok - rendering failure emits one actionable warning and leaves no partial page
+ok - artifact publication failures emit one actionable Markdown fallback warning
 ```
 
-The static-page browser pass used `chrome-devtools-axi` against direct `file://` report and Bearings pages at desktop, a requested 375 by 812 narrow viewport, keyboard-only focus traversal, native disclosure activation, and CSS zoom 2.
-The browser bridge enforces a 500-pixel minimum inner width; at that width and zoom 2, both pages reported zero document overflow, one H1, no script elements, no refresh metadata, and only the single local file request.
-Keyboard traversal focused the skip link first and the omissions summary second, and Enter exposed the complete omission list.
-
-```text
-$ chrome-devtools-axi eval '({title:document.title,lang:document.documentElement.lang,main:!!document.querySelector("main"),observed:document.querySelector("time")?.dateTime,headings:[...document.querySelectorAll("h1,h2")].map(x=>x.textContent),records:document.querySelectorAll("[data-record-id]").length,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,refresh:!!document.querySelector("meta[http-equiv=refresh]")})'
-{"title":"Fleet bearings","lang":"en","main":true,"observed":"2026-07-26T16:00:00Z","headings":["Fleet bearings","Captain's Call","Recently Landed","Underway","Charted Next"],"records":6,"overflow":0,"refresh":false}
-
-$ chrome-devtools-axi press Tab
-$ chrome-devtools-axi eval '({tag:document.activeElement.tagName,text:document.activeElement.textContent.trim()})'
-{"tag":"A","text":"Skip to report"}
-
-$ chrome-devtools-axi press Tab
-$ chrome-devtools-axi press Enter
-$ chrome-devtools-axi eval '({tag:document.activeElement.tagName,expanded:document.activeElement.parentElement.open,omissions:document.activeElement.parentElement.textContent.includes("live PR discovery")})'
-{"tag":"SUMMARY","expanded":true,"omissions":true}
-
-$ chrome-devtools-axi eval '() => { document.body.style.zoom="2"; return {h1:document.querySelectorAll("h1").length,regions:document.querySelectorAll("main section[aria-labelledby]").length,records:document.querySelectorAll("[data-record-id]").length,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,zoom:getComputedStyle(document.body).zoom,refresh:!!document.querySelector("meta[http-equiv=refresh]")}; }'
-{"h1":1,"regions":4,"records":6,"overflow":0,"zoom":"2","refresh":false}
-
-$ chrome-devtools-axi network
-GET file:///.../.lavish/bearings-20260726T161600Z.html [200]
-
-$ node "$HOME/.agents/skills/impeccable/scripts/detect.mjs" --json bin/fm-present-report.sh
-[]
-```
+The corrected Bearings projection renders the canonical Markdown inside `article[aria-label="Canonical Bearings report"]`, while the JSON snapshot supplies only its schema and observation timestamp.
+The focused presenter run verifies the canonical title and four headings, candidate and recorded PR content, the report pointer, gate ownership, and exclusion of snapshot-only endpoint reclassification.
+It also verifies the local-only content policy, skip link and main landmarks, keyboard focus and reduced-motion styles, no scripts or refresh metadata, no network access or unsolicited browser opening, and one actionable warning across renderer and artifact-publication failures.
