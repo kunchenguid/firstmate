@@ -225,10 +225,11 @@ Classify the deliverable:
 A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.
 Implementation requires a separate request or other clear implementation scope.
 Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
-When the captain asks to work on an issue in a named repo, or for the best issue to work on there, load `issue-workflow`; the skill owns picking, grilling, scoping for approval, and single-crewmate dispatch.
+When work arrives in any shape for a named repo - an open issue, a reported bug, a research or design question, or a feature request - load `delivery-pipeline`; the skill owns the universal five-stage pipeline and the plan gate.
+No implementation crewmate is ever spawned, for any intake shape, before the captain approves a plan on record.
 
-Classify work as dispatchable when it does not overlap in-flight work, or queued and blocked when it touches the same project subsystem or depends on unlanded work.
-Dispatch independent work immediately with no concurrency cap, serialize coarse overlaps, and record blockers durably.
+Two implementation tasks never run in the same repo at once: dispatch when the repo's implementation slot is free, and otherwise hold the approved overflow with its approval banked and a reason naming the blocking task.
+Planners and research read only and are uncapped; record blockers durably and re-evaluate a held task when its blocking PR merges.
 Write the task-specific brief under section 11 before spawning.
 
 ### Dispatch and supervision handoff
@@ -447,7 +448,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 
 - `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap section prints any diagnostic or capability line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `CREW_HARNESS_OVERRIDE:`, `CREW_DISPATCH:`, `FLEET_SYNC:`, `PR_CHECK_MIGRATION:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `TASKS_AXI:`, `NUDGE_SECONDMATES:`, or `FMX:`); silence needs no load.
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
-- `issue-workflow` - load when the captain asks to work on an issue in a named repo, asks for the best issue to work on there, or names a specific issue to take on; owns pick, grill, scope-for-approval, and single-crewmate dispatch.
+- `delivery-pipeline` - load when work arrives in any shape for a named repo (an open issue, a reported bug, a research or design question, or a feature request); owns the universal five-stage pipeline and the plan gate.
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `firstmate-orca` - load before switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.
 - `project-management` - load before adding, creating, removing, or initializing a project.
