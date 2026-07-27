@@ -437,9 +437,9 @@ fm_backend_cmux_target_ready() {  # <target> [expected-label]
 #
 # Verified pitfall (finding #2 above): cmux's `current_directory` field DOES
 # reflect a `cd` run directly in the surface's own top-level shell, but stays
-# FROZEN at whatever directory that shell was in when it launched `treehouse
-# get` as a foreground command - it never follows that command's own internal
-# `cd` into the acquired worktree. cmux's control socket exposes no
+# FROZEN at whatever directory that shell was in when it launched a foreground
+# subshell such as legacy `treehouse get` - it never follows that command's
+# internal `cd` into the acquired worktree. cmux's control socket exposes no
 # live-process cwd field either (unlike herdr's `foreground_cwd`), so passive
 # polling cannot solve this here any more than it could for zellij. Active
 # probe instead: print the surface's `$PWD` with a unique marker (atomically
@@ -504,7 +504,7 @@ fm_backend_cmux_send_key() {  # <target> <key> [expected-label]
 # fm_backend_cmux_send_text_line: send one line of TEXT then submit. cmux has
 # no single-call atomic "run and submit" primitive (like herdr's `pane run`),
 # so this composes send (literal) + send-key enter, exactly like zellij's
-# equivalent - used for the fixed spawn-time commands (treehouse get, the
+# equivalent - used for fixed spawn-time shell commands (worktree entry and the
 # GOTMPDIR export).
 fm_backend_cmux_send_text_line() {  # <target> <text> [expected-label]
   fm_backend_cmux_send_literal "$1" "$2" "${3:-}" || return 1

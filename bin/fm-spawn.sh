@@ -106,7 +106,7 @@
 #   scout into a ship.
 #   Backends without a recovery-grade endpoint classifier (zellij, orca, cmux)
 #   therefore never relaunch onto an existing record. A task id with no record
-#   takes the unchanged fresh-allocation path.
+#   takes the fresh-allocation path.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -978,7 +978,7 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 # worktree for reconciliation (stuck-crewmate-recovery). Backends with no
 # recovery-grade classifier (zellij, orca, cmux) therefore never relaunch onto
 # an existing record: their ownership cannot be proven, so they refuse.
-# A task id with no record is untouched - the fresh-allocation path is unchanged.
+# A task id with no record continues through the fresh-allocation path.
 SPAWN_RECORDED_WT=
 SPAWN_RECORDED_LEASE_HOLDER=
 
@@ -1438,7 +1438,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     WT_SOURCE="leased worktree entry"
   fi
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Wait for the pane's top-level shell to enter the task worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
@@ -1450,7 +1450,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # A single read that already differs from PROJ_ABS_REAL is not proof the pane
   # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
   # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
+  # checkout entirely) before the shell catches up with the requested cd. That
   # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
   # below (it resolves to a real, distinct worktree top-level too), so accepting it
   # on one read alone silently records the wrong worktree= in state/<id>.meta. Require

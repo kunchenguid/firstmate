@@ -88,7 +88,7 @@ Target readiness therefore uses the structural `list-panes` response instead of 
 Capture remains bounded and locally trimmed after `read-screen` becomes available.
 
 `current_directory` follows a top-level shell `cd` but not the foreground subshell opened by `treehouse get`.
-Spawn-time worktree discovery sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
+Spawn-time worktree discovery sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines so the same probe remains reliable for direct entry and legacy subshell-held worktrees.
 
 Literal send and Enter are separate calls.
 Enter, Escape, and Ctrl-C are supported.
