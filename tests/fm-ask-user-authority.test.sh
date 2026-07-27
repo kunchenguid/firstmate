@@ -109,6 +109,8 @@ test_repeated_same_theme_escalates_before_another_round() {
 }
 
 test_stronger_security_boundary_survives() {
+  assert_grep 'regardless of step 2'\''s classification or `yolo`' "$OWNER" \
+    "stronger captain boundaries do not override the substantive classification step"
   assert_grep 'genuinely security-sensitive choices always escalate' "$OWNER" \
     "security-sensitive choices no longer use the stronger captain boundary"
   assert_grep 'genuinely security-sensitive action requires the captain under the stronger existing boundary' "$OWNER" \
