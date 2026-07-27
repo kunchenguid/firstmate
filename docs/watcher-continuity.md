@@ -16,7 +16,7 @@ While supervision is still needed and away mode remains inactive, an actionable 
 
 ## Actionable wake ordering
 
-After an actionable Pi or OpenCode child close, the adapter starts and verifies one singleton successor before it delivers the original wake.
+After an actionable Pi or OpenCode child close, the adapter starts and verifies one singleton successor before it considers any host wake prompt delivery.
 It revalidates actionable delivery against the durable queue and suppresses the prompt when a completed drain has already consumed the reason.
 When another record is now pending, the prompt names that current queued payload instead of replaying delayed child output for a retired endpoint.
 An active wake-queue mutation lock defers actionable delivery, retries the queue read through the bounded adapter retry path, and suppresses delayed delivery only after an unlocked empty read.
@@ -27,7 +27,7 @@ When OpenCode reports `session.deleted` or a session-scoped `session.error` for 
 A failed prompt send restores its undelivered reasons without clobbering newer ones that arrived during delivery: the newest actionable reason wins and failure reasons merge in arrival order.
 Only the send that latched the outstanding handling turn can release that latch on failure, so a delayed rejection from an earlier send never breaks a newer prompt's coalescing.
 Continuity failures remain deliverable independently of queue state.
-It waits at most one readiness timeout per attempt, then sends TERM and waits a bounded retirement confirmation before the next lock-verified exponential retry.
+For successor restoration, the adapter waits at most one readiness timeout per attempt, then sends TERM and waits a bounded retirement confirmation before the next lock-verified exponential retry.
 If the unready arm does not retire within that bound, the adapter keeps ownership, starts no overlapping retry, and delivers the typed fallback immediately.
 When that retained arm later closes, its actual close is classified as a new supervised event without replaying the earlier fallback.
 After the configured retry bound is exhausted, it delivers the original wake with a typed continuity-restoration failure even if every successor arm hung without reporting readiness.
