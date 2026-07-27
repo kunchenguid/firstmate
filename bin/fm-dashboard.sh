@@ -303,11 +303,18 @@ port_open() {
   (echo >/dev/tcp/"$host"/"$port") >/dev/null 2>&1
 }
 
+# Readiness polls in a tight loop before any traffic exists, so it wants a short
+# budget. A one-shot probe of a live server has to allow for a snapshot build in
+# flight, since requests are served one at a time.
+READY_PROBE_MAX_S=1
+STATUS_PROBE_MAX_S=5
+
 # pid reported by whatever server answers /healthz on the bind address.
 healthz_pid() {
-  local host=$1 port=$2
+  local host=$1 port=$2 max_time=${3:-$READY_PROBE_MAX_S}
   command -v curl >/dev/null 2>&1 || return 1
-  curl -sS --connect-timeout 0.3 --max-time 1 "http://${host}:${port}/healthz" 2>/dev/null |
+  curl -sS --connect-timeout 0.3 --max-time "$max_time" \
+    "http://${host}:${port}/healthz" 2>/dev/null |
     sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' | head -n 1
 }
 
@@ -315,11 +322,11 @@ healthz_pid() {
 # port probe would accept another home's server already holding the port, and
 # report a permanently failing bind as started.
 server_confirmed() {
-  local host=$1 port=$2 want got
+  local host=$1 port=$2 max_time=${3:-$READY_PROBE_MAX_S} want got
   want=$(read_pid "$SERVER_PID_FILE")
   pid_alive "$want" || return 1
   if command -v curl >/dev/null 2>&1; then
-    got=$(healthz_pid "$host" "$port")
+    got=$(healthz_pid "$host" "$port" "$max_time")
     [ -n "$got" ] && [ "$got" = "$want" ]
     return $?
   fi
@@ -520,10 +527,11 @@ cmd_status() {
       printf '  server_pid: (restarting or not yet written)\n'
     fi
     if [ "$bind" != "(unresolved)" ]; then
-      if server_confirmed "${bind%:*}" "${bind##*:}"; then
+      if server_confirmed "${bind%:*}" "${bind##*:}" "$STATUS_PROBE_MAX_S"; then
         printf '  health: ok\n'
       else
-        printf '  health: not answering (supervisor is retrying; see %s)\n' "$SERVER_LOG"
+        printf '  health: not answering within %ss (busy or restarting; see %s)\n' \
+          "$STATUS_PROBE_MAX_S" "$SERVER_LOG"
       fi
     fi
     printf '  bind: %s\n' "$bind"

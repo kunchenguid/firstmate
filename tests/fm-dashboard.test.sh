@@ -343,6 +343,20 @@ server_bin() {
   printf '%s\n' "$bin"
 }
 
+# The bounded-child path (deadline kill, process-group reap, pipe drain) cannot
+# be reached from a shell test at a 60s timeout, so its coverage lives in the
+# crate's own unit tests. Run them here or they never execute anywhere.
+test_server_unit_tests() {
+  local out status
+  command -v cargo >/dev/null 2>&1 ||
+    fail "cargo is required to run the dashboard server unit tests"
+  out=$(cd "$ROOT/dashboard" && cargo test --release 2>&1) && status=0 || status=$?
+  [ "$status" -eq 0 ] || fail "dashboard server unit tests failed: $out"
+  assert_contains "$out" "test result: ok" "cargo test summary"
+  assert_not_contains "$out" "0 passed" "unit tests must not be empty"
+  pass "dashboard server unit tests run (bounded child, decode, bind guards)"
+}
+
 test_server_refuses_wildcard_env() {
   local out status bin home host
   home=$(make_home env-wild)
@@ -444,6 +458,7 @@ test_unlock_survives_malformed_form_body
 test_stop_status_without_server_binary
 test_lifecycle_start_stop_status_restart
 test_static_ui_present
+test_server_unit_tests
 test_server_refuses_wildcard_env
 
 printf 'All fm-dashboard tests passed.\n'

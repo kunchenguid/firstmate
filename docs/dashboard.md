@@ -173,3 +173,4 @@ bin/fm-test-run.sh tests/fm-dashboard.test.sh
 ```
 
 Coverage includes lifecycle, FM_HOME refusal, bind safety (including IPv4-mapped wildcards), auth, healthz, malformed unlock bodies, toolchain-free stop/status, and snapshot shape with stable keys.
+That script also runs `cargo test --release` in `dashboard/`, which covers the bounded-child paths (deadline kill, process-group reap, pipe drain) that a shell test cannot reach at a sixty-second timeout.
