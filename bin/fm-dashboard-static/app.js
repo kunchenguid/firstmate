@@ -228,11 +228,13 @@
       var rawKey = d.key || d.id;
       if (!rawKey) continue;
       var key = String(rawKey).indexOf("decision:") === 0 ? String(rawKey) : entityKey("decision", rawKey);
+      // Raw backlog hold id (never the decision: prefixed board key) for
+      // hold-id based write-back in wave 3.
+      var holdId = d.hold_id || String(rawKey).replace(/^decision:/, "");
       live[key] = true;
       var card = acquireCard(el.callBody, key, "decision", "card");
-      // Compat alias for hold-id based write-back (wave 3).
-      card.setAttribute("data-decision-key", rawKey);
-      card.dataset.decisionKey = rawKey;
+      card.setAttribute("data-decision-key", holdId);
+      card.dataset.decisionKey = holdId;
 
       card.textContent = "";
       card.appendChild(decisionChip(d));
@@ -259,7 +261,7 @@
         b.disabled = true;
         b.title = "Write-back lands in wave 3";
         b.dataset.key = key;
-        b.dataset.decisionKey = rawKey;
+        b.dataset.decisionKey = holdId;
         b.dataset.action = label.toLowerCase();
         act.appendChild(b);
       });

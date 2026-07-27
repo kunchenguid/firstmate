@@ -323,6 +323,9 @@ test_static_ui_present() {
   assert_grep 'data-key="section:production"' "$html" "production section key"
   assert_grep "data-key" "$js" "cards set data-key in JS"
   assert_grep "data-decision-key" "$js" "decision hold-id alias"
+  # The alias must be the raw backlog hold id, not the prefixed board key.
+  assert_grep 'card.setAttribute("data-decision-key", holdId)' "$js" "alias uses raw hold id"
+  assert_grep 'd.hold_id || String(rawKey).replace(/^decision:/, "")' "$js" "hold id from snapshot hold_id"
   assert_grep "setKey" "$js" "setKey helper"
   assert_grep "decision:" "$js" "decision key prefix"
   assert_grep "task:" "$js" "task key prefix"
