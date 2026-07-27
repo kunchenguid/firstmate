@@ -385,11 +385,27 @@ test_browser_as_user_rule_reaches_ship_and_scout() {
       "$kind brief lost the scripted repeatable reproduction path"
     assert_grep "drive the system browser with Playwright instead of falling back to code reading" "$brief" \
       "$kind brief lost the environment-agnostic system-browser fallback"
-    assert_grep "that reproduction becomes the regression test" "$brief" \
-      "$kind brief lost the reproduction-becomes-the-regression-test rule"
+    assert_grep "If no browser driver at all is available, append" "$brief" \
+      "$kind brief lost the no-browser-driver escalation"
+    assert_grep "never silently skip the browser check and report success" "$brief" \
+      "$kind brief no longer makes an omitted browser check visible"
+    assert_grep "Where the project already has an e2e harness, that reproduction becomes the regression test" "$brief" \
+      "$kind brief lost the conditional reproduction-becomes-the-regression-test rule"
+    assert_grep "do not introduce a harness for it" "$brief" \
+      "$kind brief no longer disclaims e2e harness adoption for projects without one"
+    assert_grep "the profile and cache directories a browser or its driver creates and manages for itself" "$brief" \
+      "$kind brief lost the rule 2 browser profile and cache carve-out"
+    assert_grep "not project paths, not repository paths, not any other location" "$brief" \
+      "$kind brief no longer bounds the rule 2 carve-out"
   done
-  diff <(sed -n '/^3\. Use gh-axi/,/regression test\.$/p' "$home/data/brief-browser-ship/brief.md") \
-       <(sed -n '/^3\. Use gh-axi/,/regression test\.$/p' "$home/data/brief-browser-scout/brief.md") \
+  assert_grep "Stay inside this worktree; modify nothing outside it" \
+    "$home/data/brief-browser-ship/brief.md" \
+    "ship rule 2 lost its own outside-the-worktree wording"
+  assert_grep "the only files you may write outside it are the report and the status file" \
+    "$home/data/brief-browser-scout/brief.md" \
+    "scout rule 2 lost its own outside-the-worktree wording"
+  diff <(sed -n '/^3\. Use gh-axi/,/do not introduce a harness for it\.$/p' "$home/data/brief-browser-ship/brief.md") \
+       <(sed -n '/^3\. Use gh-axi/,/do not introduce a harness for it\.$/p' "$home/data/brief-browser-scout/brief.md") \
     >/dev/null 2>&1 \
     || fail "ship and scout browser rules diverged; they must share one owner"
   pass "fm-brief.sh: ship and scout share one browser-as-a-user rule"

@@ -37,9 +37,15 @@
 # verify user-visible behavior by driving the browser as a real user, with
 # chrome-devtools-axi for interactive rendered state and the project's
 # Playwright/e2e harness for a scripted repeatable flow that becomes the
-# regression test once a fix is authorized. It stays environment-agnostic:
-# when a bundled interactive browser cannot launch, Playwright drives the
-# system browser instead of the worker falling back to code reading.
+# regression test once a fix is authorized, where such a harness already
+# exists - the rule never asks a project to adopt one. It stays
+# environment-agnostic: when a bundled interactive browser cannot launch,
+# Playwright drives the system browser instead of the worker falling back to
+# code reading, and when no browser driver at all is available the worker
+# reports that gap as blocked rather than silently skipping the check.
+# Both scaffolds' rule 2 carries a matching narrow exemption for the profile
+# and cache directories a browser or its driver manages for itself, with the
+# rest of each variant's own outside-the-worktree wording unchanged.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
@@ -233,6 +239,14 @@ EOF
 )
 fi
 
+# The rule 2 carve-out is shared by the ship and scout scaffolds so the one
+# exemption driving a real browser needs has a single owner, while each variant
+# keeps its own distinct outside-the-worktree wording ahead of it.
+BROWSER_PATH_EXEMPTION=$(cat <<'EOF'
+   One narrow exemption: the profile and cache directories a browser or its driver creates and manages for itself. Nothing else outside this worktree is exempt - not project paths, not repository paths, not any other location.
+EOF
+)
+
 # Rule 3 is shared by the ship and scout scaffolds so the browser-as-a-user
 # contract has one owner and cannot drift between the two variants.
 BROWSER_RULE=$(cat <<'EOF'
@@ -240,7 +254,8 @@ BROWSER_RULE=$(cat <<'EOF'
    When the task involves user-visible web behavior, reproduce and verify it by driving the browser AS A REAL USER; reading code, API responses, or database rows never proves what a page actually rendered.
    Use `chrome-devtools-axi` to drive a real browser interactively and inspect live rendered state, and the project's Playwright/e2e harness for a scripted, repeatable run of the same user flow.
    If a bundled interactive browser cannot launch in this environment, drive the system browser with Playwright instead of falling back to code reading.
-   When a fix is authorized, that reproduction becomes the regression test.
+   If no browser driver at all is available, append `blocked: no browser driver available to verify {the behavior}` and stop - never silently skip the browser check and report success on rendered behavior you never saw.
+   Where the project already has an e2e harness, that reproduction becomes the regression test once a fix is authorized; a project without one gains no obligation here, so do not introduce a harness for it.
 EOF
 )
 
@@ -262,6 +277,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+$BROWSER_PATH_EXEMPTION
 $BROWSER_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -371,6 +387,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
+$BROWSER_PATH_EXEMPTION
 $BROWSER_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
