@@ -111,6 +111,7 @@ Everything else - how many repos run in parallel, research alongside code - stay
   File the work item on the backlog first and hold it only then, the order `bin/fm-decision-hold.sh` uses, because `tasks-axi hold` fails `NOT_FOUND` on an id the backlog does not carry yet.
   Record the hold durably with `tasks-axi hold <ship-id> --reason "held - waiting on <repo> #<n> to merge" --kind load`, the capacity kind for a slot wait; `--kind captain` belongs to the decision-hold lifecycle and would misread as a pending captain decision.
   No hold sits silently, and no agent has to remember elapsed time: the durable re-evaluation of queued work after every teardown and heartbeat enforces the bound, and when it finds a held item older than 24 hours it surfaces it to the captain with the blocking PR's full URL and asks for a merge, a re-scope, or an explicit P0 override.
+  Read that age from the held item's `created` timestamp, which `tasks-axi list --fields created` returns and which is a faithful proxy for when the hold began, because this branch files the work item and holds it in the same step.
 - **Slot free** - dispatch exactly one implementation crewmate:
   1. Copy the approved plan from the planner's `<this-firstmate-home>/data/<planner-id>/plan.html` to the ship task's `data/<ship-id>/plan.html` under the active home, creating that directory first if it does not exist.
      `fm-brief.sh` fails hard with `--plan file not found` when the copy is skipped, so it happens before the brief is scaffolded.
@@ -130,7 +131,7 @@ Stage 5 is implementation-only; a research task already ended at its report in s
 The crewmate follows the project's selected delivery path to a single PR; there is one PR per work item, opened only after the work is done.
 A repo with no remote ends instead at a clean ready branch the captain approves; the plan gate, the grill, and the trust rules all still apply, only the PR ending differs.
 
-Deviation threshold, carried verbatim into every plan artifact:
+Deviation threshold, carried verbatim into every implementation plan artifact:
 
 - **Minor mechanical deviations** (wording, ordering, naming): adapt, and disclose EVERY one where the delivery path surfaces it - the PR body under "Deviations from approved plan" for a PR-producing mode, or the final ready-branch done summary for local-only.
 - **Material deviations** (a different approach, files added or dropped, changed success criteria): STOP, append `needs-decision: plan deviation - {summary}` to the status file, and wait for re-approval.

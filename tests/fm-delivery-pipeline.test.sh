@@ -110,6 +110,8 @@ test_plan_sections_depend_on_intake_shape() {
     "the implementation-only plan sections are no longer marked implementation-only"
   assert_grep 'A research or design plan writes no code and never reaches stage 5, so it omits those four as inapplicable and must instead contain:' "$SKILL" \
     "a research plan is still forced to carry an implementer's files table"
+  assert_grep 'Deviation threshold, carried verbatim into every implementation plan artifact:' "$SKILL" \
+    "stage 5 still demands the deviation threshold in plans stage 3 tells research to omit it from"
   assert_grep '- **Report outline** - the sections `data/<scout-id>/report.md` must carry.' "$SKILL" \
     "the research plan shape lost its report outline"
   pass "plan minimums are conditional on the intake shape"
@@ -138,6 +140,8 @@ test_hold_is_durable_and_bounded() {
     "delivery-pipeline lost the queue-age bound on holds or its durable mechanism"
   assert_grep 'when it finds a held item older than 24 hours it surfaces it to the captain with the blocking PR' "$SKILL" \
     "delivery-pipeline lost the 24-hour escalation of an aged hold"
+  assert_grep "Read that age from the held item's \`created\` timestamp" "$SKILL" \
+    "the queue-age bound names no readable backlog field to measure the age from"
   assert_grep 'escalate it as a plan deviation for re-approval rather than starting silently on a stale plan.' "$SKILL" \
     "delivery-pipeline lost the banked-plan re-validation before auto-start"
   pass "holds are durable, age-bounded, and re-validated before auto-start"
