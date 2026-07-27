@@ -207,9 +207,6 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
-if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
-  exit 0
-fi
 exec "$REAL_TREEHOUSE" "$@"
 SH
 
