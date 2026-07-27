@@ -110,8 +110,15 @@ For Pi, approve the project trust prompt once per clone on first launch so both 
 > ahoy! look at my github project xyz, then fix the flaky login test and add dark mode
 
 # firstmate checks its toolchain (asking your consent before installing anything),
-# clones the project under projects/, and spawns two crewmates in the active backend
-# fm-fix-login-k3 and fm-dark-mode-p7.
+# clones the project under projects/, and puts a plan for each task in front of you
+# in the browser - no implementation crewmate is spawned before you approve one.
+
+  Two plans up for review, captain: flaky login test, dark mode
+
+> both look good, approved
+
+# One implementation task per repo at a time: fm-fix-login-k3 goes out now,
+# fm-dark-mode-p7 is held with its approval already banked until the first one merges.
 # Minutes later:
 
   PR ready for review, captain: https://github.com/you/xyz/pull/42
@@ -150,7 +157,9 @@ Setup guides for tmux (the default) and every other supported backend (herdr, ze
 ```
 
 You chat with the first mate.
-It routes each request to a crewmate in its own session endpoint and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
+Whatever shape the work arrives in - an open issue, a bug report, a research question, or a feature request - it takes the same route, and no implementation crewmate is spawned before you approve a plan.
+Implementation runs one task per repo at a time, so the next one starts from a base containing everything before it; planning and investigation are uncapped.
+It routes each approved request to a crewmate in its own session endpoint and git worktree, supervises the fleet with a zero-token event-driven watcher, and brings you finished PRs, approved local merges, or investigation reports.
 Optional secondmates extend this to persistent domain supervisors, dispatch profiles let you steer which harness handles which task, and an opt-in X mode lets the same fleet answer public mentions.
 `codex-app` is not a runtime backend yet; [docs/codex-app-backend.md](docs/codex-app-backend.md) owns the Codex App boundary.
 
