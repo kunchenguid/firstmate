@@ -94,7 +94,7 @@ fm_busy_lines_match() {  # [harness]
       claude) regex=$FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT ;;
       codex) regex=$FM_TMUX_CODEX_BUSY_REGEX_DEFAULT ;;
       opencode) regex=$FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT ;;
-      pi) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
+      pi|pi-signed) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_TMUX_GROK_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_TMUX_KIMI_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_TMUX_BUSY_REGEX_DEFAULT ;;

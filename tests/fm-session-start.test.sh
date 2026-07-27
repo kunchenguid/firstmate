@@ -405,15 +405,22 @@ SH
 # run_session_start <home> <root> <path>
 # Drop every harness env marker from bin/fm-harness.sh detect_own so the
 # surrounding interactive shell cannot leak past the suite's fake ps harness.
-# Markers today: CLAUDECODE (claude), PI_CODING_AGENT (pi), GROK_AGENT (grok).
+# Markers today: CLAUDECODE (claude), PI_CODING_AGENT plus FM_PI_HARNESS
+# (Pi family), GROK_AGENT (grok).
 # codex and opencode have no env markers (ancestry only). Without this, a local
 # claude/pi/grok session fails cases that pin a different fake harness while CI
 # (no ambient markers) still passes.
 run_session_start() {
-  local home=$1 root=$2 path=$3
-  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
-    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
-    "$SESSION_START"
+  local home=$1 root=$2 path=$3 pi_harness=${4:-}
+  if [ -n "$pi_harness" ]; then
+    env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+      "$SESSION_START"
+  else
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+      "$SESSION_START"
+  fi
 }
 
 # prepare_session_start_secondmate <name>: a throwaway main home and Pi
@@ -1251,6 +1258,29 @@ EOF
   pass "session start emits exactly one detected harness block and reports Pi extension load state"
 }
 
+test_pi_signed_primary_uses_pi_extensions_without_identity_normalization() {
+  local rec root home fakebin out
+  rec=$(new_world pi-signed-supervision-block)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi-signed
+
+  out=$(FM_FAKE_HARNESS=pi-signed run_session_start "$home" "$root" "$fakebin:$BASE_PATH" pi-signed)
+
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: pi-signed" \
+    "session start normalized a pi-signed primary to pi"
+  assert_contains "$out" "Mode: Pi extension background wake." \
+    "pi-signed primary did not reuse Pi's supervision protocol"
+  assert_contains "$out" "PI_WATCH_EXTENSION: not loaded" \
+    "pi-signed primary skipped Pi extension validation"
+  assert_contains "$out" "restart pi-signed so $root/.pi/extensions/fm-primary-turnend-guard.ts and $root/.pi/extensions/fm-primary-pi-watch.ts auto-load" \
+    "pi-signed extension diagnostic did not preserve the executable identity"
+
+  pass "session start preserves pi-signed primary identity while applying Pi extension guarantees"
+}
+
 test_pi_diagnostic_rejects_stale_loaded_marker() {
   local rec root home fakebin out marker holder_pid
   rec=$(new_world pi-stale-loaded-marker)
@@ -1378,6 +1408,7 @@ test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic
+test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker

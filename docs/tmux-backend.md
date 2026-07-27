@@ -46,12 +46,11 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 A target-existence check proves only that the pane exists.
 The deeper tmux agent-liveness probe first verifies exact window membership, then reads `#{pane_current_command}` to distinguish a running harness process from a bare idle shell.
-It classifies recognized Claude, Codex, OpenCode, Grok, and Kimi process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
+It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
 
-Pi runs through a generic `node` process name and cannot be attributed confidently from the tmux foreground-process field.
-An existing Pi pane is therefore reported as ambiguous rather than auto-healed, while an authoritatively missing Pi window can be relaunched safely.
-This is the active tmux liveness limitation.
+The verified Pi Launcher path reports the exact foreground command `pi-launcher` for both pi and pi-signed, while direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly.
+Similar or prefixed process names are not accepted through those exact Pi-family entries.
 
 Agent liveness and composer safety are separate checks.
 For a bordered composer, the tmux reader locates the complete box structurally and classifies every content row through the shared ANSI and ghost handling in `bin/fm-composer-lib.sh`.
@@ -79,7 +78,6 @@ Ambiguous pending text never receives the busy-queue conversion.
 ## Limits and regression entry points
 
 - tmux is the reference path and supports secondmate homes.
-- Existing Pi agent-process liveness is inconclusive, while an authoritatively missing Pi window can trigger recovery.
 - The OpenCode busy-queue exception is tmux-specific; Herdr retains its separately documented gap.
 
 ```sh

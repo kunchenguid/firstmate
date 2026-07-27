@@ -9,7 +9,7 @@
 # This file is sourced by scripts and has no side effects on source.
 
 # Known harness command names; extend when a new adapter is verified.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$'
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
 
 # Walk the current process ancestry (up to 8 hops) and print the first pid whose
 # command looks like a verified harness. The harness pid lives as long as the
@@ -34,10 +34,19 @@ fm_harness_ancestry_pid() {
 
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
-  local pid=$1 comm
+  local pid=$1 comm args
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  printf '%s' "$(basename "$comm") $(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$FM_HARNESS_RE"
+  if printf '%s' "$(basename "$comm")" | grep -qE "$FM_HARNESS_RE"; then
+    return 0
+  fi
+  case "$comm" in
+    *node*|*python*)
+      args=$(ps -o args= -p "$pid" 2>/dev/null)
+      printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 # True when state dir $1 holds a session lock whose pid is the harness ancestor
