@@ -374,6 +374,12 @@ browser_carve_out_block() {
   awk '/^3\. Use gh-axi/{printf "%s", buf; exit} /^2\. /{buf=""; next} {buf = buf $0 "\n"}' "$1"
 }
 
+# An extraction that comes back empty makes the drift diff pass vacuously, so
+# each block must be proven present at its own rule boundary before comparison.
+assert_block_non_empty() {
+  [ -n "$1" ] || fail "$2"
+}
+
 # The browser-as-a-user rule has a single owner shared by the ship and scout
 # scaffolds, so it must render identically in both rather than drifting into
 # two divergent copies.
@@ -411,8 +417,12 @@ test_browser_as_user_rule_reaches_ship_and_scout() {
       "$kind brief still forbids the e2e harness adoption the browser rule can require"
     assert_grep "the profile and cache directories a browser or its driver creates and manages for itself" "$brief" \
       "$kind brief lost the rule 2 browser profile and cache carve-out"
-    assert_grep "not project paths, not repository paths, not any other location" "$brief" \
-      "$kind brief no longer bounds the rule 2 carve-out"
+    assert_grep "No other path a browser or driver touches is exempt" "$brief" \
+      "$kind brief no longer bounds the rule 2 carve-out to browser paths"
+    assert_grep "this changes nothing else in this rule" "$brief" \
+      "$kind brief carve-out no longer leaves the rest of rule 2 intact"
+    assert_no_grep "Nothing else outside this worktree is exempt" "$brief" \
+      "$kind brief carve-out still overrides rule 2's own outside-the-worktree permissions"
   done
   assert_grep "Stay inside this worktree; modify nothing outside it" \
     "$home/data/brief-browser-ship/brief.md" \
@@ -423,13 +433,22 @@ test_browser_as_user_rule_reaches_ship_and_scout() {
   # Both shared blocks are extracted by their surrounding rule boundaries, not
   # by their own current wording, so a divergent per-variant line added anywhere
   # inside either block is caught rather than falling outside the range.
-  diff <(browser_rule_block "$home/data/brief-browser-ship/brief.md") \
-       <(browser_rule_block "$home/data/brief-browser-scout/brief.md") \
-    >/dev/null 2>&1 \
+  local ship_rule scout_rule ship_carve_out scout_carve_out
+  ship_rule=$(browser_rule_block "$home/data/brief-browser-ship/brief.md")
+  scout_rule=$(browser_rule_block "$home/data/brief-browser-scout/brief.md")
+  ship_carve_out=$(browser_carve_out_block "$home/data/brief-browser-ship/brief.md")
+  scout_carve_out=$(browser_carve_out_block "$home/data/brief-browser-scout/brief.md")
+  assert_block_non_empty "$ship_rule" \
+    "ship brief has no rule 3 block between rule 3 and rule 4"
+  assert_block_non_empty "$scout_rule" \
+    "scout brief has no rule 3 block between rule 3 and rule 4"
+  assert_block_non_empty "$ship_carve_out" \
+    "ship brief has no browser carve-out between its rule 2 and rule 3"
+  assert_block_non_empty "$scout_carve_out" \
+    "scout brief has no browser carve-out between its rule 2 and rule 3"
+  [ "$ship_rule" = "$scout_rule" ] \
     || fail "ship and scout browser rules diverged; they must share one owner"
-  diff <(browser_carve_out_block "$home/data/brief-browser-ship/brief.md") \
-       <(browser_carve_out_block "$home/data/brief-browser-scout/brief.md") \
-    >/dev/null 2>&1 \
+  [ "$ship_carve_out" = "$scout_carve_out" ] \
     || fail "ship and scout rule 2 browser carve-outs diverged; they must share one owner"
   pass "fm-brief.sh: ship and scout share one browser-as-a-user rule"
 }

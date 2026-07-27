@@ -245,7 +245,7 @@ fi
 # exemption driving a real browser needs has a single owner, while each variant
 # keeps its own distinct outside-the-worktree wording ahead of it.
 BROWSER_PATH_EXEMPTION=$(cat <<'EOF'
-   One narrow exemption: the profile and cache directories a browser or its driver creates and manages for itself. Nothing else outside this worktree is exempt - not project paths, not repository paths, not any other location.
+   One narrow exemption: the profile and cache directories a browser or its driver creates and manages for itself. No other path a browser or driver touches is exempt - not project paths, not repository paths - and this changes nothing else in this rule.
 EOF
 )
 
