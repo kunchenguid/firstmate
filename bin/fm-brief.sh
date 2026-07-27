@@ -39,6 +39,9 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Optional decision/blocker keys use the wire format owned by bin/fm-classify-lib.sh:
+# the [key=<slug>] token sits between the verb and the colon only
+# (needs-decision [key=route]: ...), never after the colon as trailing prose.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -172,9 +175,10 @@ This is also how you return the answer to a marked from-firstmate request above.
 A marked request requires one correlated answer after the work; it does not require a separate receipt or start acknowledgement.
 Never append \`working:\` merely to acknowledge receipt or announce that a marked request has started.
 When a routed-work phase has a supervisor-actionable material change worth reporting under the rule above, give that reported phase a stable key.
-If its first reportable event is \`working [key=<work-slug>]: {material phase}\`, use the same key on its later \`$PAUSED_VERB\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded.
+If its first reportable event is \`working [key=<work-slug>]: {material phase}\`, use the same key on its later \`$PAUSED_VERB\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded: e.g. \`needs-decision [key=<work-slug>]: {summary}\`, \`blocked [key=<work-slug>]: {why}\`, \`$PAUSED_VERB [key=<work-slug>]: {why}\`, \`done [key=<work-slug>]: {outcome}\`, \`failed [key=<work-slug>]: {why}\`.
 When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>]: {why it is no longer active}\`.
-When a decision you escalated is answered or a blocker clears and your domain resumes, append \`resolved: {how it was decided or unblocked}\` (keyed with \`[key=<slug>]\` if you opened it with one) so it is durably closed instead of resurfacing behind later unrelated events.
+When a decision you escalated is answered or a blocker clears and your domain resumes, append \`resolved: {how it was decided or unblocked}\` for a genuine one-off, or \`resolved [key=<work-slug>]: {how}\` when you opened it with a key, so it is durably closed instead of resurfacing behind later unrelated events.
+The \`[key=<work-slug>]\` token always sits between the verb and the colon; a trailing \`[key=...]\` after the colon is note text only and leaves the structured key as default.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
 # Definition of done
@@ -258,7 +262,9 @@ The report is the only thing that survives, so anything worth keeping must be in
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
-   When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` (add the same \`[key=<slug>]\` if you opened it with one) so the decision or blocker is durably closed and does not keep resurfacing.
+   When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` so the decision or blocker is durably closed and does not keep resurfacing.
+   For concurrent or multi-item decisions and blockers, put the key token between the verb and the colon on every related event: \`needs-decision [key=<work-slug>]: {summary}\`, \`blocked [key=<work-slug>]: {why}\`, \`$PAUSED_VERB [key=<work-slug>]: {why}\`, \`done [key=<work-slug>]: {outcome}\`, \`failed [key=<work-slug>]: {why}\`, \`resolved [key=<work-slug>]: {how}\`.
+   Omit the token for a genuine one-off (structured key \`default\`); a trailing \`[key=...]\` after the colon is note text only and does not set the structured key.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
@@ -370,7 +376,9 @@ $RULE1
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.
-   When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` (add the same \`[key=<slug>]\` if you opened it with one) so the decision or blocker is durably closed and does not keep resurfacing.
+   When firstmate replies or a blocker clears and you resume, append \`resolved: {how it was decided or unblocked}\` so the decision or blocker is durably closed and does not keep resurfacing.
+   For concurrent or multi-item decisions and blockers, put the key token between the verb and the colon on every related event: \`needs-decision [key=<work-slug>]: {summary}\`, \`blocked [key=<work-slug>]: {why}\`, \`$PAUSED_VERB [key=<work-slug>]: {why}\`, \`done [key=<work-slug>]: {outcome}\`, \`failed [key=<work-slug>]: {why}\`, \`resolved [key=<work-slug>]: {how}\`.
+   Omit the token for a genuine one-off (structured key \`default\`); a trailing \`[key=...]\` after the colon is note text only and does not set the structured key.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.

@@ -273,8 +273,14 @@ test_secondmate_marked_request_reporting_contract() {
     "secondmate charter lost keyed working syntax for a reportable material phase"
   assert_grep "use the same key on its later \`paused\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event" "$brief" \
     "secondmate charter lost same-key closure for a reportable material phase"
-  assert_grep 'resolved [key=<work-slug>]' "$brief" \
+  assert_grep 'needs-decision [key=<work-slug>]: {summary}' "$brief" \
+    "secondmate charter lost exact needs-decision key placement"
+  assert_grep 'resolved [key=<work-slug>]: {why it is no longer active}' "$brief" \
     "secondmate charter lost resolved closure for a keyed material phase"
+  assert_grep 'between the verb and the colon' "$brief" \
+    "secondmate charter did not state key token placement"
+  assert_grep "trailing \`[key=...]\` after the colon is note text only" "$brief" \
+    "secondmate charter did not reject trailing prose key tokens"
 
   assert_grep 'include that exact token in your parent status reply' "$brief" \
     "secondmate charter lost correlated parent results"
@@ -382,6 +388,84 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# Generated status protocol must teach the exact keyed form owned by
+# bin/fm-classify-lib.sh: [key=<slug>] between verb and colon only.
+# A trailing token after the colon is note prose and must not be taught as a key.
+assert_keyed_status_protocol_guidance() {
+  local brief=$1 label=$2
+  assert_grep 'needs-decision [key=<work-slug>]: {summary}' "$brief" \
+    "$label did not teach needs-decision [key=<work-slug>]: placement"
+  assert_grep 'resolved [key=<work-slug>]: {how}' "$brief" \
+    "$label did not teach resolved [key=<work-slug>]: placement"
+  assert_grep 'blocked [key=<work-slug>]: {why}' "$brief" \
+    "$label did not teach blocked [key=<work-slug>]: placement"
+  assert_grep "trailing \`[key=...]\` after the colon is note text only" "$brief" \
+    "$label did not warn that a trailing prose token is not a structured key"
+  assert_grep 'needs-decision: {summary of options}' "$brief" \
+    "$label dropped the valid unkeyed one-off needs-decision form"
+  assert_grep 'resolved: {how it was decided or unblocked}' "$brief" \
+    "$label dropped the valid unkeyed one-off resolved form"
+  # Reject the ambiguous parenthetical that caused workers to emit trailing keys.
+  assert_no_grep "add the same \`[key=<slug>]\` if you opened it with one" "$brief" \
+    "$label still teaches the ambiguous trailing-key parenthetical"
+  assert_no_grep "keyed with \`[key=<slug>]\` if you opened it with one" "$brief" \
+    "$label still teaches the ambiguous keyed-with parenthetical"
+}
+
+test_keyed_status_protocol_guidance_all_scaffolds() {
+  local home brief
+  home="$TMP_ROOT/keyed-status-home"
+  mkdir -p "$home/data"
+  write_registry "$home"
+
+  FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=paused \
+    "$ROOT/bin/fm-brief.sh" keyed-ship some-proj >/dev/null 2>&1 \
+    || fail "ship scaffold for keyed status guidance exited non-zero"
+  brief="$home/data/keyed-ship/brief.md"
+  assert_keyed_status_protocol_guidance "$brief" "ship brief"
+
+  FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=paused \
+    "$ROOT/bin/fm-brief.sh" keyed-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "scout scaffold for keyed status guidance exited non-zero"
+  brief="$home/data/keyed-scout/brief.md"
+  assert_keyed_status_protocol_guidance "$brief" "scout brief"
+
+  FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=paused \
+    FM_SECONDMATE_CHARTER='Handle routed domain work.' \
+    "$ROOT/bin/fm-brief.sh" keyed-mate --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "secondmate scaffold for keyed status guidance exited non-zero"
+  brief="$home/data/keyed-mate/brief.md"
+  # Secondmate uses a slightly different resolved demo for phase end vs decision close.
+  assert_grep 'needs-decision [key=<work-slug>]: {summary}' "$brief" \
+    "secondmate charter did not teach needs-decision [key=<work-slug>]: placement"
+  assert_grep 'resolved [key=<work-slug>]: {how}' "$brief" \
+    "secondmate charter did not teach resolved [key=<work-slug>]: how for decision close"
+  assert_grep 'blocked [key=<work-slug>]: {why}' "$brief" \
+    "secondmate charter did not teach blocked [key=<work-slug>]: placement"
+  assert_grep "trailing \`[key=...]\` after the colon is note text only" "$brief" \
+    "secondmate charter did not warn that a trailing prose token is not a structured key"
+  assert_grep 'resolved: {how it was decided or unblocked}' "$brief" \
+    "secondmate charter dropped the valid unkeyed one-off resolved form"
+  assert_no_grep "add the same \`[key=<slug>]\` if you opened it with one" "$brief" \
+    "secondmate charter still teaches the ambiguous trailing-key parenthetical"
+  assert_no_grep "keyed with \`[key=<slug>]\` if you opened it with one" "$brief" \
+    "secondmate charter still teaches the ambiguous keyed-with parenthetical"
+
+  # Parser contract reinforcement: trailing prose key must not become structured key.
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$ROOT/bin/fm-classify-lib.sh"
+  [ "$(_fm_decision_key 'needs-decision: summary [key=route]')" = default ] \
+    || fail "trailing prose key was parsed as a structured key"
+  [ "$(_fm_decision_key 'needs-decision [key=route]: summary')" = route ] \
+    || fail "between-verb-and-colon key was not parsed as the structured key"
+  [ "$(_fm_decision_key 'resolved: how [key=route]')" = default ] \
+    || fail "trailing prose key on resolved was parsed as a structured key"
+  [ "$(_fm_decision_key 'resolved [key=route]: how')" = route ] \
+    || fail "between-verb-and-colon resolved key was not parsed"
+
+  pass "fm-brief.sh: every scaffold teaches exact keyed status syntax"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
@@ -397,3 +481,4 @@ test_secondmate_marked_request_reporting_contract
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_keyed_status_protocol_guidance_all_scaffolds
