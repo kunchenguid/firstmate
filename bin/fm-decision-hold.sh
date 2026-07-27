@@ -397,6 +397,9 @@ command_resolve() {
     hold_show=$(task_show "$id")
     hold_body=$(show_field "$hold_show" body)
     verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
+    "$SCRIPT_DIR/fm-brain-event.sh" decision-resolved DECISION "$origin" \
+      "$id|$decision_digest" \
+      "resolved captain decision hold $id digest=$decision_digest routed=$routed_csv"
     printf 'resolved: %s\n' "$id"
     return 0
   fi
@@ -450,6 +453,9 @@ command_resolve() {
   done
   tasks_axi "done" "$id" >/dev/null || fail "could not close resolved captain hold $id"
   verify_hold_resolved "$id" || fail "captain hold $id did not retain its durable resolution record"
+  "$SCRIPT_DIR/fm-brain-event.sh" decision-resolved DECISION "$origin" \
+    "$id|$decision_digest" \
+    "resolved captain decision hold $id digest=$decision_digest routed=$routed_csv"
   printf 'resolved: %s -> %s\n' "$id" "$routed"
 }
 
