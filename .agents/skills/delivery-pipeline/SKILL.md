@@ -100,7 +100,7 @@ Once approved, branch on the deliverable:
   The scout writes `data/<scout-id>/report.md`; deliver that report to the captain and stop, because research never enters stage 5.
 - **implementation** - check the repo's implementation slot before dispatching.
 
-Two implementation tasks never run in the same repo at once.
+Two implementation tasks do not run in the same repo at once by default.
 That is the mechanical default, not a judgement call: it prevents real branch and merge conflicts, because freeing the slot only at merge means every task starts from a base containing everything before it.
 The single exception is a task the captain has explicitly flagged P0, which may dispatch into a busy repo concurrently on the captain's stated acceptance of the merge-conflict and rebase cost; record that acceptance on the work item.
 Firstmate never opens that exception from its own read of urgency, so absent an explicit P0 flag the default stands.
@@ -109,9 +109,10 @@ Everything else - how many repos run in parallel, research alongside code - stay
 - **Slot busy** - the task is held with its approval already banked, so it is not re-approved when it starts.
   Every hold states its reason naming the blocking task, in the shape `held - waiting on <repo> #<n> to merge`.
   File the work item on the backlog first and hold it only then, the order `bin/fm-decision-hold.sh` uses, because `tasks-axi hold` fails `NOT_FOUND` on an id the backlog does not carry yet.
-  Record the hold durably with `tasks-axi hold <ship-id> --reason "held - waiting on <repo> #<n> to merge" --kind load`, the capacity kind for a slot wait; `--kind captain` belongs to the decision-hold lifecycle and would misread as a pending captain decision.
-  No hold sits silently, and no agent has to remember elapsed time: the durable re-evaluation of queued work after every teardown and heartbeat enforces the bound, and when it finds a held item older than 24 hours it surfaces it to the captain with the blocking PR's full URL and asks for a merge, a re-scope, or an explicit P0 override.
+  Record the hold durably with `tasks-axi hold <ship-id> --reason "held - waiting on <repo> #<n> to merge" --kind load`, the capacity kind for a slot wait; `--kind captain` belongs to the decision-hold lifecycle and would misread as a pending captain decision until the escalation below genuinely makes it one.
+  No hold sits silently, and no agent has to remember elapsed time: the durable re-evaluation of queued work after every teardown and heartbeat enforces the bound, and when it finds a load-held item older than 24 hours it surfaces it to the captain once, with the blocking PR's full URL, and asks for a merge, a re-scope, or an explicit P0 override.
   Read that age from the held item's `created` timestamp, which `tasks-axi list --fields created` returns and which is a faithful proxy for when the hold began, because this branch files the work item and holds it in the same step.
+  Surfacing it re-arms the bound instead of repeating it, so the escalation cannot re-fire on every later sweep: re-hold the item with `tasks-axi hold <ship-id> --reason "escalated - captain decision pending on <repo> #<n>" --kind captain --until <one bound period out>`, which moves it off the load queue onto the ordinary captain-gated pending-decision thread and sets the time gate that keeps every later teardown and heartbeat quiet about it until the captain acts or that gate clears.
 - **Slot free** - dispatch exactly one implementation crewmate:
   1. Copy the approved plan from the planner's `<this-firstmate-home>/data/<planner-id>/plan.html` to the ship task's `data/<ship-id>/plan.html` under the active home, creating that directory first if it does not exist.
      `fm-brief.sh` fails hard with `--plan file not found` when the copy is skipped, so it happens before the brief is scaffolded.

@@ -54,8 +54,10 @@ test_universal_plan_gate() {
 test_same_repo_serialization() {
   # Success criterion 3: a second implementation task in a busy repo is held,
   # with a reason naming the blocking task.
-  assert_grep 'Two implementation tasks never run in the same repo at once.' "$SKILL" \
-    "delivery-pipeline lost the same-repo serialization rule"
+  assert_grep 'Two implementation tasks do not run in the same repo at once by default.' "$SKILL" \
+    "delivery-pipeline lost the same-repo serialization rule or states it as absolute"
+  assert_no_grep 'Two implementation tasks never run in the same repo at once' "$SKILL" \
+    "the serialization topic sentence contradicts the P0 carve-out below it"
   assert_grep 'held with its approval already banked' "$SKILL" \
     "delivery-pipeline lost the banked-approval hold"
   assert_grep 'held - waiting on <repo> #<n> to merge' "$SKILL" \
@@ -138,8 +140,12 @@ test_hold_is_durable_and_bounded() {
     "a slot wait is still recorded as a captain decision hold"
   assert_grep 'the durable re-evaluation of queued work after every teardown and heartbeat enforces the bound' "$SKILL" \
     "delivery-pipeline lost the queue-age bound on holds or its durable mechanism"
-  assert_grep 'when it finds a held item older than 24 hours it surfaces it to the captain with the blocking PR' "$SKILL" \
+  assert_grep 'when it finds a load-held item older than 24 hours it surfaces it to the captain once, with the blocking PR' "$SKILL" \
     "delivery-pipeline lost the 24-hour escalation of an aged hold"
+  assert_grep 'Surfacing it re-arms the bound instead of repeating it' "$SKILL" \
+    "the aged-hold escalation re-fires on every later teardown and heartbeat"
+  assert_grep '--kind captain --until <one bound period out>' "$SKILL" \
+    "an escalated hold is not converted to a time-gated captain-gated thread"
   assert_grep "Read that age from the held item's \`created\` timestamp" "$SKILL" \
     "the queue-age bound names no readable backlog field to measure the age from"
   assert_grep 'escalate it as a plan deviation for re-approval rather than starting silently on a stale plan.' "$SKILL" \
