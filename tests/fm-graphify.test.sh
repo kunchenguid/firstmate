@@ -12,6 +12,11 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-graphify)
+# fm_test_tmproot registers its EXIT cleanup inside the command substitution
+# that produced the path, so the caller's own tree is never removed by it. This
+# fixture provisions a real ~200MB Graphify venv, so it owns its teardown
+# explicitly rather than leaving one venv per run behind in TMPDIR.
+trap 'rm -rf "$TMP_ROOT"' EXIT
 HOME_DIR="$TMP_ROOT/home"
 PROJECT="$HOME_DIR/projects/demo"
 GRAPH="$ROOT/bin/fm-graphify.sh"
