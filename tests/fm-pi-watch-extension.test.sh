@@ -254,6 +254,64 @@ EOF
   pass "Pi custom tool exposes repair-only metadata and returns automatic-continuation guidance"
 }
 
+test_pi_tool_refusal_is_classified_as_error() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-tool-refusal-root"
+  home="$TMP_ROOT/pi-tool-refusal-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let toolResultHandler = null;
+const pi = {
+  on(event, handler) {
+    if (event === "tool_result") toolResultHandler = handler;
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {},
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (!tool) throw new Error("Pi watch tool was not registered");
+if (!toolResultHandler) throw new Error("Pi watch tool-result classifier was not registered");
+const result = await tool.execute("tool-call-refusal", {}, undefined, undefined, {});
+if (result.details?.ok !== false || result.details?.message !== result.content[0]?.text) {
+  throw new Error(`watcher refusal lost structured details: ${JSON.stringify(result)}`);
+}
+const event = {
+  type: "tool_result",
+  toolName: "fm_watch_arm_pi",
+  toolCallId: "tool-call-refusal",
+  input: {},
+  content: result.content,
+  details: result.details,
+  isError: false,
+};
+const classification = await toolResultHandler(event, {});
+if (classification?.isError !== true) {
+  throw new Error(`watcher refusal was not classified as an error: ${JSON.stringify(classification)}`);
+}
+if (classification.content !== undefined || classification.details !== undefined) {
+  throw new Error(`watcher refusal classifier replaced structured evidence: ${JSON.stringify(classification)}`);
+}
+const unrelated = await toolResultHandler({ ...event, toolName: "other_tool" }, {});
+if (unrelated !== undefined) {
+  throw new Error(`watcher classifier changed an unrelated result: ${JSON.stringify(unrelated)}`);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi watcher refusals must become errors without replacing structured evidence"
+  [ -z "$out" ] || fail "Pi tool-refusal test printed output: $out"
+  pass "Pi watcher refusals are classified as errors with structured evidence intact"
+}
+
 test_pi_redundant_tool_call_is_owned_noop() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-redundant-tool-root"
@@ -2003,6 +2061,7 @@ test_tracked_extension_present_and_self_hashing
 test_spawn_template_mentions_pi_watch_placeholder
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
+test_pi_tool_refusal_is_classified_as_error
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery

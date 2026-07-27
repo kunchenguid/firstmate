@@ -68,6 +68,32 @@ raw <failure> & output
 ```
 MD
 
+BEARINGS_SOURCE="$HOME_DIR/data/bearings-report.md"
+cat >"$BEARINGS_SOURCE" <<'MD'
+# Bearings - Sunday 2026-07-26
+
+The canonical report is the complete presentation source.
+
+## Captain's Call
+
+- Decision options: deploy now or wait for the maintenance window.
+- Candidate PR: [review and merge](https://example.com/pulls/42).
+
+## Recently Landed
+
+- Recorded PR: https://example.com/pulls/17 landed cleanly.
+
+## Underway
+
+- worker-alpha is implementing <safe> output.
+- Report pointer: `data/worker-alpha/report.md`.
+
+## Charted Next
+
+- Gate owner mate-held is waiting on worker-alpha.
+- Endpoint endpoint-one is unhealthy but needs no captain action.
+MD
+
 RICH_DIR="$HOME_DIR/data/rich-report"
 RICH_SOURCE="$RICH_DIR/report.md"
 OUTSIDE_PNG="$HOME_DIR/data/outside.png"
@@ -145,6 +171,9 @@ cat >"$SNAPSHOT" <<'JSON'
   "decisions_open": [
     {"id":"decision-one","key":"route","verb":"captain-hold","summary":"Choose <route> A or B","owner":"(main)"}
   ],
+  "unhealthy_endpoints": [
+    {"id":"endpoint-one","state":"unhealthy","reason":"Snapshot-only endpoint classification"}
+  ],
   "landed": [
     {"id":"landed-one","what":"Completed & verified","artifact":"data/landed/report.md","owner":"(main)"}
   ],
@@ -153,8 +182,15 @@ cat >"$SNAPSHOT" <<'JSON'
     {"id":"task-1","title":"Main queue item","blocked_by":"-","reason":"queued","owner":"(main)"},
     {"id":"task-1","title":"Secondmate queue item","blocked_by":"-","reason":"queued","owner":"mate-held"}
   ],
-  "reports": [],
-  "recorded_prs": [],
+  "reports": [
+    {"id":"worker-alpha","path":"data/worker-alpha/report.md"}
+  ],
+  "recorded_prs": [
+    {"id":"recorded-pr","url":"https://example.com/pulls/17"}
+  ],
+  "candidate_prs": [
+    {"id":"candidate-pr","url":"https://example.com/pulls/42","ready":true}
+  ],
   "omitted": [
     {"surface":"live PR discovery + checks","reveal":"--include-prs"}
   ]
@@ -220,37 +256,40 @@ test_markdown_links_and_report_local_images_are_safe_and_self_contained() {
   pass "Markdown permits only HTTPS links and embeds only safe report-local PNG and SVG assets"
 }
 
-test_bearings_page_has_all_current_rows_once_and_discloses_freshness() {
-  local out html body id count headings expected
-  out=$(run_presenter bearings --source "$SOURCE" --snapshot "$SNAPSHOT") \
+test_bearings_page_renders_authoritative_four_section_report() {
+  local out html body fact count headings expected
+  out=$(run_presenter bearings --source "$BEARINGS_SOURCE" --snapshot "$SNAPSHOT") \
     || fail "Bearings presentation failed: $out"
   case "$out" in html:*) html=${out#html:} ;; *) fail "Bearings presenter did not return an HTML artifact: $out" ;; esac
   [ "$html" = "$HOME_DIR/.lavish/bearings-20260726T142039Z.html" ] \
     || fail "Bearings artifact path was not timestamped: $html"
   body=$(cat "$html")
-  for id in worker-alpha mate-active mate-held decision-one landed-one gate-one; do
-    count=$(grep -Fo "data-record-id=\"$id\"" "$html" | wc -l | tr -d ' ')
-    [ "$count" -eq 1 ] || fail "Bearings row $id appeared $count times instead of once"
+  for fact in \
+    "Decision options: deploy now or wait for the maintenance window." \
+    "Candidate PR:" \
+    "Recorded PR:" \
+    "worker-alpha is implementing &lt;safe&gt; output." \
+    "Report pointer:" \
+    "Gate owner mate-held is waiting on worker-alpha." \
+    "Endpoint endpoint-one is unhealthy but needs no captain action."; do
+    count=$(grep -Fo "$fact" "$html" | wc -l | tr -d ' ')
+    [ "$count" -eq 1 ] || fail "canonical Bearings fact appeared $count times instead of once: $fact"
   done
-  count=$(grep -Fo 'data-record-id="task-1"' "$html" | wc -l | tr -d ' ')
-  [ "$count" -eq 2 ] || fail "Bearings rows with matching IDs from separate homes appeared $count times instead of twice"
   headings=$(printf '%s' "$body" | grep -Eo '<h2[^>]*>[^<]+' | sed -E 's/<h2[^>]*>//')
-  expected=$(printf '%s\n' "Captain's Call" "Recently Landed" "Underway" "Charted Next")
+  expected=$(printf '%s\n' "Captain&#39;s Call" "Recently Landed" "Underway" "Charted Next")
   [ "$headings" = "$expected" ] || fail "Bearings sections changed order: $headings"
+  assert_contains "$body" '<h1>Bearings - Sunday 2026-07-26</h1>' "canonical Bearings title"
   assert_contains "$body" '<time datetime="2026-07-26T14:19:00Z">' "Bearings source observation timestamp"
-  assert_contains "$body" 'fresh · observed 2s before snapshot' "Bearings secondmate freshness"
-  assert_contains "$body" 'Main queue item' "main-home queued item with a shared ID"
-  assert_contains "$body" 'Secondmate queue item' "secondmate-home queued item with a shared ID"
+  assert_contains "$body" '<a href="https://example.com/pulls/42"' "canonical candidate PR link"
+  assert_contains "$body" '<code>data/worker-alpha/report.md</code>' "canonical report pointer"
   assert_contains "$body" 'Run <code>/bearings</code> again to refresh.' "Bearings honest refresh instruction"
   assert_contains "$body" 'fm-bearings.v1' "Bearings source schema disclosure"
-  assert_contains "$body" 'live PR discovery + checks' "Bearings omission disclosure"
-  assert_contains "$body" '&lt;safe&gt;' "Bearings task content escaping"
-  assert_contains "$body" '&lt;route&gt;' "Bearings decision content escaping"
+  assert_not_contains "$body" 'Snapshot-only endpoint classification' "snapshot data must not override canonical section classification"
   assert_not_contains "$body" '<script>' "Bearings page must not contain client JavaScript"
   assert_not_contains "$body" 'http-equiv="refresh"' "Bearings page must remain a static snapshot"
   [ ! -s "$OPEN_LOG" ] || fail "Bearings rendering without --open opened a tab"
   [ ! -s "$NET_LOG" ] || fail "Bearings rendering made a network call: $(cat "$NET_LOG")"
-  pass "Bearings renders every all-current worker, secondmate, decision, completion, and gate exactly once with timestamp and omissions"
+  pass "Bearings renders the canonical four-section report without independent reclassification"
 }
 
 test_open_is_explicit_and_browser_failure_falls_back_to_markdown() {
@@ -272,7 +311,7 @@ test_open_is_explicit_and_browser_failure_falls_back_to_markdown() {
 }
 
 test_render_failure_falls_back_without_partial_page() {
-  local broken out err rc before after
+  local broken out err diagnostic rc before after
   broken="$TMP_ROOT/broken.json"
   printf '{not json\n' >"$broken"
   before=$(find "$HOME_DIR/.lavish" -type f | wc -l | tr -d ' ')
@@ -282,15 +321,20 @@ test_render_failure_falls_back_without_partial_page() {
   [ "$rc" -eq 0 ] || fail "HTML rendering failure blocked canonical report completion"
   [ "$out" = "markdown:$SOURCE" ] || fail "HTML rendering failure did not return the Markdown fallback: $out"
   [ "$before" -eq "$after" ] || fail "HTML rendering failure left a partial page"
-  assert_contains "$(cat "$err")" "could not render" "render failure fallback warning"
+  diagnostic=$(cat "$err")
+  assert_contains "$diagnostic" "could not render" "render failure fallback warning"
+  assert_contains "$diagnostic" "using canonical Markdown: $SOURCE" "render fallback warning names the authoritative report"
+  [ "$(wc -l <"$err" | tr -d ' ')" -eq 1 ] || fail "render failure emitted more than one fallback diagnostic: $diagnostic"
+  assert_not_contains "$diagnostic" "SyntaxError" "render failure leaked the Node parser error"
+  assert_not_contains "$diagnostic" "at JSON.parse" "render failure leaked a Node stack frame"
   [ "$(wc -l <"$OPEN_LOG" | tr -d ' ')" -eq 1 ] || fail "render failure attempted to open a browser"
   [ ! -s "$NET_LOG" ] || fail "render failure fallback made a network call: $(cat "$NET_LOG")"
-  pass "rendering failure leaves no partial page and falls back to canonical Markdown"
+  pass "rendering failure emits one actionable warning and leaves no partial page"
 }
 
 assert_present "$PRESENTER" "static report presentation owner is missing"
 test_markdown_html_is_local_escaped_accessible_and_quiet
 test_markdown_links_and_report_local_images_are_safe_and_self_contained
-test_bearings_page_has_all_current_rows_once_and_discloses_freshness
+test_bearings_page_renders_authoritative_four_section_report
 test_open_is_explicit_and_browser_failure_falls_back_to_markdown
 test_render_failure_falls_back_without_partial_page

@@ -423,6 +423,12 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.on?.("tool_result", (event) => {
+    if (event.toolName !== "fm_watch_arm_pi") return;
+    const result = event.details as Partial<ArmResult> | undefined;
+    if (result?.ok === false) return { isError: true };
+  });
+
   pi.registerTool?.({
     name: "fm_watch_arm_pi",
     label: "Arm firstmate watcher",

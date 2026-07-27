@@ -63,6 +63,7 @@ else
 fi
 OUTPUT="$OUTPUT_DIR/$NAME"
 TEMP="$OUTPUT.tmp.$$"
+RENDER_ERROR="$TEMP.err"
 mkdir -p "$OUTPUT_DIR" || {
   printf 'fm-present-report: could not render static HTML under %s; using canonical Markdown: %s\n' "$OUTPUT_DIR" "$SOURCE" >&2
   printf 'markdown:%s\n' "$SOURCE"
@@ -73,7 +74,7 @@ if ! FM_PRESENT_MODE="$MODE" \
   FM_PRESENT_SOURCE="$SOURCE" \
   FM_PRESENT_SNAPSHOT="$SNAPSHOT" \
   FM_PRESENT_NOW_VALUE="$NOW" \
-  node --input-type=module >"$TEMP" <<'JS'
+  node --input-type=module >"$TEMP" 2>"$RENDER_ERROR" <<'JS'
 import { readFileSync, realpathSync } from "node:fs";
 import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 
@@ -351,53 +352,13 @@ if (mode === "markdown") {
 } else if (mode === "bearings") {
   const snapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
   if (snapshot?.schema !== "fm-bearings.v1") throw new Error("unsupported Bearings schema");
-  if (snapshot.unhealthy_endpoints === undefined) snapshot.unhealthy_endpoints = [];
-  for (const key of ["in_flight", "secondmates", "decisions_open", "landed", "gates", "unhealthy_endpoints", "omitted"]) {
-    if (!Array.isArray(snapshot[key])) throw new Error(`Bearings snapshot is missing ${key}`);
-  }
   if (typeof snapshot.generated !== "string" || !snapshot.generated) throw new Error("Bearings snapshot is missing generated");
-  const secondmateMirrors = new Set();
-  const decisions = [];
-  const underway = [];
-  const charted = [];
-  const landed = [];
-  const add = (target, kind, row, primary, detail) => {
-    const id = String(row.id ?? "unknown");
-    target.push({ id, kind, primary, detail });
-  };
-  for (const row of snapshot.decisions_open) add(decisions, "decision", row, row.summary ?? row.id, `${row.owner ?? "-"} · ${row.verb ?? "decision"}`);
-  for (const row of snapshot.unhealthy_endpoints) add(decisions, "endpoint", row, row.id, `${row.state ?? "unhealthy"} · ${row.reason ?? "Endpoint unavailable"}`);
-  for (const row of snapshot.secondmates) {
-    const target = row.state === "active_child_work" ? underway : charted;
-    const freshness = `${row.freshness ?? "freshness unknown"}${Number.isFinite(row.age_seconds) ? ` · observed ${row.age_seconds}s before snapshot` : ""}`;
-    const contradiction = row.contradiction ? ` · contradiction: ${row.reason ?? "reported"}` : "";
-    add(target, "secondmate", row, row.id, `${row.state ?? "unknown"} · ${row.doing ?? row.reason ?? "Current detail unavailable"} · ${freshness}${contradiction}`);
-    secondmateMirrors.add(String(row.id ?? "unknown"));
-  }
-  for (const row of snapshot.in_flight) {
-    if (row.kind === "secondmate" && secondmateMirrors.has(String(row.id ?? "unknown"))) continue;
-    add(underway, "worker", row, row.id, `${row.state ?? "unknown"} · ${row.doing ?? "Current detail unavailable"}`);
-  }
-  for (const row of snapshot.gates) add(charted, "gate", row, row.title ?? row.id, `Blocked by ${row.blocked_by ?? "-"} · ${row.reason ?? "queued"}`);
-  for (const row of snapshot.landed) add(landed, "landed", row, row.what ?? row.id, `${row.owner ?? "-"} · ${row.artifact ?? "-"}`);
-
-  const records = (items, empty) => items.length === 0
-    ? `<p class="empty">${escapeHtml(empty)}</p>`
-    : `<ul class="records">${items.map((item) => `<li class="record" data-record-kind="${escapeHtml(item.kind)}" data-record-id="${escapeHtml(item.id)}"><strong>${escapeHtml(item.primary)}</strong><p>${escapeHtml(item.detail)}</p></li>`).join("")}</ul>`;
-  const omissions = snapshot.omitted.length === 0
-    ? "<p>No omitted surfaces were reported.</p>"
-    : `<ul>${snapshot.omitted.map((item) => `<li><strong>${escapeHtml(item.surface)}</strong> - reveal with <code>${escapeHtml(item.reveal)}</code></li>`).join("")}</ul>`;
-  const body = `
-<section class="captains-call" aria-labelledby="captains-call"><h2 id="captains-call">Captain's Call</h2>${records(decisions, "Nothing needs your action right now.")}</section>
-<section aria-labelledby="recently-landed"><h2 id="recently-landed">Recently Landed</h2>${records(landed, "No recent completions are in the current baseline.")}</section>
-<section aria-labelledby="underway"><h2 id="underway">Underway</h2>${records(underway, "Nothing is underway.")}</section>
-<section aria-labelledby="charted-next"><h2 id="charted-next">Charted Next</h2>${records(charted, "Nothing is queued.")}</section>
-<details><summary>Omissions and data health</summary>${omissions}<p>PR enrichment: ${escapeHtml(snapshot.prs ?? "not reported")}</p></details>`;
+  const firstHeading = markdown.match(/^#\s+(.+)$/m)?.[1] ?? "Fleet bearings";
   process.stdout.write(shell({
-    title: "Fleet bearings",
-    eyebrow: `${underway.length} current · ${decisions.length} Captain's Call`,
+    title: firstHeading,
+    eyebrow: "Firstmate bearings",
     intro: "An on-demand Firstmate snapshot. Run <code>/bearings</code> again to refresh.",
-    body,
+    body: `<article aria-label="Canonical Bearings report">${renderMarkdown(markdown.replace(/^#\s+.+\n?/, ""))}</article>`,
     schema: snapshot.schema,
     observed: snapshot.generated,
   }));
@@ -406,12 +367,13 @@ if (mode === "markdown") {
 }
 JS
 then
-  rm -f "$TEMP"
+  rm -f "$TEMP" "$RENDER_ERROR"
   printf 'fm-present-report: could not render static HTML; using canonical Markdown: %s\n' "$SOURCE" >&2
   printf 'markdown:%s\n' "$SOURCE"
   exit 0
 fi
 
+rm -f "$RENDER_ERROR"
 if ! mv "$TEMP" "$OUTPUT"; then
   rm -f "$TEMP"
   printf 'fm-present-report: could not publish static HTML; using canonical Markdown: %s\n' "$SOURCE" >&2
