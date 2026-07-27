@@ -3620,6 +3620,45 @@ SH
   printf '%s\n' "$path"
 }
 
+test_events_capability_large_schema_has_no_sigpipe_noise() {
+  local dir fb grepbin err schema
+  dir="$TMP_ROOT/events-capability-sigpipe"; mkdir -p "$dir/responses" "$dir/grep-bin"
+  fb=$(make_herdr_fakebin "$dir")
+  printf '%s\n' '{"client":{"version":"0.7.3","protocol":16}}' > "$dir/responses/1.out"
+  schema="$dir/responses/2.out"
+  {
+    printf '%s\n' '{"events.subscribe":true,"pane.agent_status_changed":true}'
+    awk 'BEGIN { for (i = 0; i < 220000; i++) printf "padding-%06d\n", i }'
+  } > "$schema"
+
+  grepbin="$dir/grep-bin/grep"
+  cat > "$grepbin" <<'SH'
+#!/usr/bin/env bash
+set -u
+pattern=${2:-}
+IFS= read -r line || exit 1
+case "$line" in
+  *"$pattern"*) exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$grepbin"
+
+  err="$dir/stderr"
+  if ! (
+    PATH="$dir/grep-bin:$fb:$PATH" \
+      FM_HERDR_RESPONSES="$dir/responses" FM_HERDR_LOG="$dir/log" FM_HERDR_SCRIPT_STATUS=1 \
+      bash -c 'trap '\'''\'' PIPE; . "$0/bin/backends/herdr.sh"; fm_backend_herdr_events_capable synthetic-session' "$ROOT"
+  ) 2>"$err"; then
+    fail "large-schema capability detection should succeed"
+  fi
+  case "$(cat "$err")" in
+    *"Broken pipe"*|*"write error"*)
+      fail "large-schema capability detection emitted SIGPIPE noise: $(cat "$err")" ;;
+  esac
+  pass "fm_backend_herdr_events_capable: large schema capability detection emits no SIGPIPE noise"
+}
+
 set_fake_agent() {  # <agent-dir> <window-or-pane> <status>
   local dir=$1 target=$2 status=$3 key
   key=$(printf '%s' "$target" | tr ':/.' '___')
@@ -3887,6 +3926,7 @@ test_repeated_cycles_reuse_one_workspace_no_orphans
 test_adopted_workspace_never_prunes_default_tab
 test_label_collision_startup_workspace_leaves_live_tab_alone
 test_prune_refuses_a_working_agent_pane_defense_in_depth
+test_events_capability_large_schema_has_no_sigpipe_noise
 test_create_task_refuses_duplicate_label
 test_create_task_refuses_duplicate_label_when_agent_live
 test_create_task_refuses_when_any_duplicate_label_is_live
