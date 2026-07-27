@@ -1394,6 +1394,8 @@ test_opencode_primary_watch_plugin_static_wiring() {
   assert_contains "$(cat "$module_boundary")" '"type": "module"' "OpenCode plugin package boundary is not explicitly ESM"
   text=$(cat "$plugin")
   assert_contains "$text" "session.idle" "OpenCode plugin does not listen for session.idle"
+  assert_contains "$text" "session.deleted" "OpenCode plugin does not release the wake latch on session deletion"
+  assert_contains "$text" "session.error" "OpenCode plugin does not release the wake latch on session error"
   assert_contains "$text" "fm-watch-arm.sh" "OpenCode plugin does not spawn the watcher arm"
   assert_contains "$text" "promptAsync" "OpenCode plugin does not wake with promptAsync"
   assert_contains "$text" 'encodeFirstmateOperationalInput' "OpenCode plugin does not construct typed synthetic user-role wakes"
@@ -1833,6 +1835,284 @@ EOF
   expect_code 0 "$status" "OpenCode must coalesce actionable closes through one real drain without dropping a later event"
   [ -z "$out" ] || fail "OpenCode drain-coalescing test printed output: $out"
   pass "OpenCode coalesces actionable closes until a real drain and preserves later events"
+}
+
+test_opencode_failed_send_preserves_newer_actionable_reason() {
+  local plugin repo home log release stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-failed-send-actionable-root"
+  home="$TMP_ROOT/opencode-failed-send-actionable-home"
+  log="$TMP_ROOT/opencode-failed-send-actionable.log"
+  release="$TMP_ROOT/opencode-failed-send-actionable.release"
+  stop="$TMP_ROOT/opencode-failed-send-actionable.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  : > "$home/state/.wake-queue"
+  mkdir "$home/state/.wake-queue.lock"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$count" -eq 1 ]; then
+  printf 'signal: first wake\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.02; done
+  printf 'signal: second wake\n'
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const prompts = [];
+let rejectFirstSend = () => {};
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompts.push(request.body.parts[0].text);
+      if (prompts.length === 1) {
+        await new Promise((_, reject) => {
+          rejectFirstSend = reject;
+        });
+      }
+    },
+  },
+};
+const waitFor = async (predicate, message) => {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+};
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+const idle = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event(idle);
+await waitFor(() => prompts.length === 1 && armRows().length === 2, "first blocked wake prompt or successor missing");
+writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+await waitFor(() => armRows().length === 3, "second actionable close did not start its successor");
+await new Promise((resolve) => setTimeout(resolve, 150));
+if (prompts.length !== 1) throw new Error(`coalesced close scheduled ${prompts.length} prompts behind a blocked send`);
+rejectFirstSend(new Error("synthetic send failure"));
+await new Promise((resolve) => setTimeout(resolve, 50));
+await hooks.event(idle);
+await waitFor(() => prompts.length === 2, "failed send did not restore a deliverable actionable reason");
+if (!prompts[1].includes("signal: second wake")) throw new Error(`failed send clobbered the newer actionable reason: ${prompts[1]}`);
+if (prompts[1].includes("signal: first wake")) throw new Error(`failed send replayed the stale actionable reason: ${prompts[1]}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "OpenCode failed send must keep the newer coalesced actionable reason"
+  [ -z "$out" ] || fail "OpenCode failed-send actionable test printed output: $out"
+  pass "OpenCode failed send preserves the newer coalesced actionable reason"
+}
+
+test_opencode_failed_send_merges_undelivered_failure_reasons() {
+  local plugin repo home log release_one release_two out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-failed-send-failure-root"
+  home="$TMP_ROOT/opencode-failed-send-failure-home"
+  log="$TMP_ROOT/opencode-failed-send-failure.log"
+  release_one="$TMP_ROOT/opencode-failed-send-failure-one.release"
+  release_two="$TMP_ROOT/opencode-failed-send-failure-two.release"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$count" -eq 1 ]; then
+  while [ ! -e "$FM_RELEASE_ONE" ]; do sleep 0.02; done
+  printf 'signal: first failing wake\n'
+  exit 0
+fi
+while [ ! -e "$FM_RELEASE_TWO" ]; do sleep 0.02; done
+printf 'signal: second failing wake\n'
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_ONE="$release_one" FM_RELEASE_TWO="$release_two" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const prompts = [];
+let rejectFirstSend = () => {};
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompts.push(request.body.parts[0].text);
+      if (prompts.length === 1) {
+        await new Promise((_, reject) => {
+          rejectFirstSend = reject;
+        });
+      }
+    },
+  },
+};
+const waitFor = async (predicate, message) => {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+};
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+const lock = `${process.env.FM_HOME}/state/.lock`;
+
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(lock, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-a" } } });
+await waitFor(() => armRows().length === 1, "first arm child did not start");
+rmSync(lock);
+writeFileSync(process.env.FM_RELEASE_ONE, "release\n");
+await waitFor(() => prompts.length === 1, "first continuity failure was not surfaced");
+writeFileSync(lock, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-b" } } });
+await waitFor(() => armRows().length === 2, "second arm child did not start");
+rmSync(lock);
+writeFileSync(process.env.FM_RELEASE_TWO, "release\n");
+await new Promise((resolve) => setTimeout(resolve, 300));
+rejectFirstSend(new Error("synthetic send failure"));
+await new Promise((resolve) => setTimeout(resolve, 50));
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-b" } } });
+await waitFor(() => prompts.length === 2, "failed send did not restore deliverable failure reasons");
+if (!prompts[1].includes("signal: first failing wake")) throw new Error(`failed send dropped the undelivered failure: ${prompts[1]}`);
+if (!prompts[1].includes("signal: second failing wake")) throw new Error(`failed send clobbered the newer failure: ${prompts[1]}`);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "OpenCode failed send must merge undelivered and newer failure reasons"
+  [ -z "$out" ] || fail "OpenCode failed-send failure test printed output: $out"
+  pass "OpenCode failed send merges undelivered failure reasons instead of clobbering"
+}
+
+test_opencode_session_end_releases_wake_prompt_latch() {
+  local plugin repo home log release_two release_three stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-latch-release-root"
+  home="$TMP_ROOT/opencode-latch-release-home"
+  log="$TMP_ROOT/opencode-latch-release.log"
+  release_two="$TMP_ROOT/opencode-latch-release-two.release"
+  release_three="$TMP_ROOT/opencode-latch-release-three.release"
+  stop="$TMP_ROOT/opencode-latch-release.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  : > "$home/state/.wake-queue"
+  mkdir "$home/state/.wake-queue.lock"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$count" -eq 1 ]; then
+  printf 'signal: first wake\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  while [ ! -e "$FM_RELEASE_TWO" ]; do sleep 0.02; done
+  printf 'signal: second wake\n'
+  exit 0
+fi
+if [ "$count" -eq 3 ]; then
+  while [ ! -e "$FM_RELEASE_THREE" ]; do sleep 0.02; done
+  printf 'signal: third wake\n'
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_TWO="$release_two" FM_RELEASE_THREE="$release_three" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const prompts = [];
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompts.push({ session: request.path.id, text: request.body.parts[0].text });
+    },
+  },
+};
+const waitFor = async (predicate, message) => {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+};
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean)
+  : [];
+
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-a" } } });
+await waitFor(() => prompts.length === 1 && armRows().length === 2, "first wake prompt or successor missing");
+if (prompts[0].session !== "session-a") throw new Error(`first prompt targeted ${prompts[0].session}`);
+await hooks.event({ event: { type: "session.deleted", properties: { info: { id: "session-other" } } } });
+await hooks.event({ event: { type: "session.error", properties: {} } });
+writeFileSync(process.env.FM_RELEASE_TWO, "release\n");
+await waitFor(() => armRows().length === 3, "second actionable close did not start its successor");
+await new Promise((resolve) => setTimeout(resolve, 150));
+if (prompts.length !== 1) throw new Error("foreign session end released the wake prompt latch");
+await hooks.event({ event: { type: "session.deleted", properties: { info: { id: "session-a" } } } });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-b" } } });
+await waitFor(() => prompts.length === 2, "deleted outstanding session left the wake prompt latch stuck");
+if (!prompts[1].text.includes("signal: second wake")) throw new Error(`wrong coalesced prompt after deletion: ${prompts[1].text}`);
+if (prompts[1].session !== "session-b") throw new Error(`post-deletion prompt targeted ${prompts[1].session}`);
+writeFileSync(process.env.FM_RELEASE_THREE, "release\n");
+await waitFor(() => armRows().length === 4, "third actionable close did not start its successor");
+await new Promise((resolve) => setTimeout(resolve, 150));
+if (prompts.length !== 2) throw new Error("outstanding latch did not coalesce the third close");
+await hooks.event({ event: { type: "session.error", properties: { sessionID: "session-b" } } });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-c" } } });
+await waitFor(() => prompts.length === 3, "errored outstanding session left the wake prompt latch stuck");
+if (!prompts[2].text.includes("signal: third wake")) throw new Error(`wrong coalesced prompt after session error: ${prompts[2].text}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "OpenCode must release the wake prompt latch when the outstanding session ends"
+  [ -z "$out" ] || fail "OpenCode latch-release test printed output: $out"
+  pass "OpenCode releases the wake prompt latch when the outstanding session is deleted or errors"
 }
 
 test_opencode_pre_ready_actionable_close_preserves_its_successor() {
@@ -2514,6 +2794,9 @@ test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_coalesces_actionable_closes_until_real_drain
+test_opencode_failed_send_preserves_newer_actionable_reason
+test_opencode_failed_send_merges_undelivered_failure_reasons
+test_opencode_session_end_releases_wake_prompt_latch
 test_opencode_pre_ready_actionable_close_preserves_its_successor
 test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry

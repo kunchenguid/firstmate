@@ -249,8 +249,8 @@ async function flushWakePrompt(paths, client, sessionID) {
   } catch {
     wakePromptOutstanding = false;
     wakePromptSessionID = "";
-    if (actionable) pendingActionableReason = actionable;
-    if (failure) pendingFailureReason = failure;
+    if (actionable && !pendingActionableReason) pendingActionableReason = actionable;
+    if (failure) pendingFailureReason = pendingFailureReason ? `${failure}\n\n${pendingFailureReason}` : failure;
   }
 }
 
@@ -485,6 +485,14 @@ export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
 
   return {
     event: async ({ event }) => {
+      if (event.type === "session.deleted" || event.type === "session.error") {
+        const endedSessionID = event.properties?.info?.id ?? event.properties?.sessionID ?? "";
+        if (wakePromptOutstanding && endedSessionID && endedSessionID === wakePromptSessionID) {
+          wakePromptOutstanding = false;
+          wakePromptSessionID = "";
+        }
+        return;
+      }
       if (event.type !== "session.idle") return;
       const sessionID = event.properties?.sessionID;
       if (!sessionID) return;
