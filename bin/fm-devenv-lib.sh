@@ -26,30 +26,40 @@ fm_devenv_registry_error() {  # <message>
   return 1
 }
 
+fm_devenv_jq() {  # <registry-json> <jq-arguments...>
+  local registry_json=$1
+  shift
+  printf '%s' "$registry_json" | jq "$@"
+}
+
 fm_devenv_registry_json() {  # <registry-path>
-  local registry_path=${1-} entry_error duplicate
+  local registry_path=${1-} registry_json entry_error duplicate
   [ "$#" -eq 1 ] || {
     fm_devenv_registry_error 'expected one registry path'
     return 1
   }
   [ -f "$registry_path" ] || {
-    fm_devenv_registry_error "registry is not a readable file: $registry_path"
+    fm_devenv_registry_error 'registry is not a readable file'
     return 1
   }
   command -v jq >/dev/null 2>&1 || {
     fm_devenv_registry_error 'jq is required'
     return 1
   }
-  jq -e -s 'length == 1' "$registry_path" >/dev/null 2>&1 || {
-    fm_devenv_registry_error "invalid JSON: $registry_path"
+  registry_json=$(cat "$registry_path" 2>/dev/null) || {
+    fm_devenv_registry_error 'registry is not a readable file'
     return 1
   }
-  jq -e 'type == "array"' "$registry_path" >/dev/null 2>&1 || {
-    fm_devenv_registry_error "registry root must be an array: $registry_path"
+  fm_devenv_jq "$registry_json" -e -s 'length == 1' >/dev/null 2>&1 || {
+    fm_devenv_registry_error 'invalid JSON'
+    return 1
+  }
+  fm_devenv_jq "$registry_json" -e 'type == "array"' >/dev/null 2>&1 || {
+    fm_devenv_registry_error 'registry root must be an array'
     return 1
   }
 
-  entry_error=$(jq -r '
+  entry_error=$(fm_devenv_jq "$registry_json" -r '
     [
       range(0; length) as $index
       | .[$index] as $entry
@@ -58,13 +68,13 @@ fm_devenv_registry_json() {  # <registry-path>
         elif (($entry.name | type) != "string") then
           "entry \($index) name must be a string"
         elif ($entry.name | test("^[A-Za-z0-9_-]+$") | not) then
-          "entry \($index) has an invalid name: \($entry.name)"
+          "entry \($index) has an invalid name"
         elif ($entry.name == "main") then
           "entry \($index) must not be named main"
         elif (($entry.vm | type) != "string") then
           "entry \($index) vm must be a string"
         elif ($entry.vm | test("^expanly-[A-Za-z0-9_-]+$") | not) then
-          "entry \($index) has an invalid VM name: \($entry.vm)"
+          "entry \($index) has an invalid VM name"
         elif (($entry.slot | type) != "number" or ($entry.slot | floor) != $entry.slot) then
           "entry \($index) slot must be an integer"
         elif ($entry.slot <= 0) then
@@ -79,8 +89,8 @@ fm_devenv_registry_json() {  # <registry-path>
           empty
         end
     ] | .[0] // empty
-  ' "$registry_path") || {
-    fm_devenv_registry_error "could not inspect registry: $registry_path"
+  ') || {
+    fm_devenv_registry_error 'could not inspect registry'
     return 1
   }
   [ -z "$entry_error" ] || {
@@ -89,13 +99,13 @@ fm_devenv_registry_json() {  # <registry-path>
   }
 
   for duplicate in name vm slot frontend_port; do
-    entry_error=$(jq -r --arg field "$duplicate" '
+    entry_error=$(fm_devenv_jq "$registry_json" -r --arg field "$duplicate" '
       [{name:"main", vm:"expanly-main", slot:0, frontend_port:5173, branch:""}] + .
       | group_by(.[$field])
       | map(select(length > 1) | .[0][$field])
       | .[0] // empty
-    ' "$registry_path") || {
-      fm_devenv_registry_error "could not inspect registry: $registry_path"
+    ') || {
+      fm_devenv_registry_error 'could not inspect registry'
       return 1
     }
     [ -z "$entry_error" ] || {
@@ -104,11 +114,11 @@ fm_devenv_registry_json() {  # <registry-path>
     }
   done
 
-  jq '
+  fm_devenv_jq "$registry_json" '
     [{name:"main", vm:"expanly-main", slot:0, frontend_port:5173, branch:""}] + .
     | sort_by(.slot)
     | map({name, vm, slot, frontend_port, branch})
-  ' "$registry_path"
+  '
 }
 
 fm_devenv_registry_get() {  # <registry-path> <environment-name>

@@ -29,7 +29,7 @@ assert_registry_rejected() {  # <json> <label>
   stderr="$TMP_ROOT/stderr"
   fm_devenv_registry_json "$TMP_ROOT/registry.json" >"$stdout" 2>"$stderr"
   rc=$?
-  [ "$rc" -ne 0 ] || fail "$label was accepted"
+  expect_code 1 "$rc" "$label rejection"
   [ ! -s "$stdout" ] || fail "$label printed registry data on failure"
   [ -s "$stderr" ] || fail "$label did not report a precise error"
   line_count=$(wc -l < "$stderr" | tr -d ' ')
@@ -71,6 +71,50 @@ test_validators_and_exact_lookup() {
   pass "devenv registry: reusable validators and exact lookup reject invalid input"
 }
 
+test_registry_uses_one_immutable_snapshot() {
+  local registry fakebin real_jq triggered replacement result expected
+  registry="$TMP_ROOT/mutable-registry.json"
+  fakebin="$TMP_ROOT/mutable-fakebin"
+  real_jq=$(command -v jq)
+  triggered="$TMP_ROOT/jq-triggered"
+  replacement='[{"name":"intruder","vm":"expanly-intruder","slot":2,"frontend_port":5175,"branch":"feature/intruder"}]'
+  printf '%s\n' '[{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":"feature/alpha"}]' > "$registry"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+output=$("$FM_TEST_REAL_JQ" "$@")
+rc=$?
+if [ ! -e "$FM_TEST_JQ_TRIGGERED" ]; then
+  : > "$FM_TEST_JQ_TRIGGERED"
+  printf '%s\n' "$FM_TEST_REPLACEMENT_JSON" > "$FM_TEST_MUTABLE_REGISTRY"
+fi
+printf '%s' "$output"
+[ -z "$output" ] || printf '\n'
+exit "$rc"
+SH
+  chmod +x "$fakebin/jq"
+
+  result=$(
+    export FM_TEST_REAL_JQ="$real_jq"
+    export FM_TEST_JQ_TRIGGERED="$triggered"
+    export FM_TEST_MUTABLE_REGISTRY="$registry"
+    export FM_TEST_REPLACEMENT_JSON="$replacement"
+    export PATH="$fakebin:$PATH"
+    fm_devenv_registry_json "$registry"
+  ) || fail "registry discovery failed while its source path changed"
+  expected='[{"name":"main","vm":"expanly-main","slot":0,"frontend_port":5173,"branch":""},{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":"feature/alpha"}]'
+  [ -e "$triggered" ] || fail "mutable-registry fixture did not replace the source path"
+  [ "$(printf '%s' "$result" | "$real_jq" -c .)" = "$expected" ] \
+    || fail "registry output did not come from the same snapshot that validation observed: $result"
+  pass "devenv registry: validation and output consume one immutable registry snapshot"
+}
+
+test_hostile_name_reports_one_line() {
+  assert_registry_rejected '[{"name":"alpha\nbeta","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":""}]' \
+    "name containing a newline"
+  pass "devenv registry: hostile names cannot split a validation diagnostic across lines"
+}
+
 test_invalid_registries_fail_closed() {
   assert_registry_rejected '{' "invalid JSON"
   assert_registry_rejected '[]
@@ -89,4 +133,6 @@ test_invalid_registries_fail_closed() {
 
 test_discovery_prepends_main_and_sorts_by_slot
 test_validators_and_exact_lookup
+test_hostile_name_reports_one_line
+test_registry_uses_one_immutable_snapshot
 test_invalid_registries_fail_closed
