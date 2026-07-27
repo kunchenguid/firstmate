@@ -105,6 +105,7 @@ test_agy_missing_binary_refuses_before_pane_creation() {
   local id=agy-missing-z3 rec out status
   rec=$(make_case missing "$id")
   read_case "$rec"
+  # shellcheck disable=SC2329 # Exported and invoked by the spawned subprocess's PATH lookup.
   agy() { :; }
   export -f agy
   out=$(run_spawn "$id")
@@ -135,6 +136,7 @@ test_agy_busy_and_composer_signatures_are_scoped() {
   local capture out
   capture="$TMP_ROOT/pane"
   printf 'esc to cancel generation\n' > "$capture"
+  # shellcheck disable=SC2329 # Invoked by the sourced tmux-lib helpers, not directly here.
   tmux() {
     case "${1:-}" in
       capture-pane) cat "$capture" ;;
@@ -175,6 +177,7 @@ test_agy_tmux_submit_and_key_steering() {
         ;;
     esac
   }
+  # shellcheck disable=SC2034 # Consumed by tmux.sh's own sourcing of fm-tmux-lib.sh, not by this test.
   FM_BACKEND_LIB_DIR="$ROOT/bin"
   # shellcheck source=/dev/null
   . "$ROOT/bin/backends/tmux.sh"
@@ -188,6 +191,7 @@ test_agy_herdr_composer_uses_recorded_harness() {
   local out
   # shellcheck source=/dev/null
   . "$ROOT/bin/backends/herdr.sh"
+  # shellcheck disable=SC2034 # Consumed by fm_backend_herdr_composer_state after this override runs.
   fm_backend_herdr_parse_target() { FM_BACKEND_HERDR_SESSION=s; FM_BACKEND_HERDR_PANE=p; }
   fm_backend_herdr_capture_ansi() { printf '────────────────\n> \033[90mAccept-edits mode: file edits auto-approved (shift+tab to cycle)\033[0m\n────────────────\n'; }
   out=$(fm_backend_herdr_composer_state s:p agy)
