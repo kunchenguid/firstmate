@@ -72,14 +72,15 @@ test_validators_and_exact_lookup() {
 }
 
 test_registry_uses_one_immutable_snapshot() {
-  local registry fakebin real_jq triggered replacement result expected
+  local registry snapshot_dir fakebin real_jq triggered replacement result expected leaked
   registry="$TMP_ROOT/mutable-registry.json"
+  snapshot_dir="$TMP_ROOT/mutable-snapshots"
   fakebin="$TMP_ROOT/mutable-fakebin"
   real_jq=$(command -v jq)
   triggered="$TMP_ROOT/jq-triggered"
   replacement='[{"name":"intruder","vm":"expanly-intruder","slot":2,"frontend_port":5175,"branch":"feature/intruder"}]'
   printf '%s\n' '[{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":"feature/alpha"}]' > "$registry"
-  mkdir -p "$fakebin"
+  mkdir -p "$snapshot_dir" "$fakebin"
   cat > "$fakebin/jq" <<'SH'
 #!/usr/bin/env bash
 output=$("$FM_TEST_REAL_JQ" "$@")
@@ -100,12 +101,15 @@ SH
     export FM_TEST_MUTABLE_REGISTRY="$registry"
     export FM_TEST_REPLACEMENT_JSON="$replacement"
     export PATH="$fakebin:$PATH"
+    export TMPDIR="$snapshot_dir"
     fm_devenv_registry_json "$registry"
   ) || fail "registry discovery failed while its source path changed"
   expected='[{"name":"main","vm":"expanly-main","slot":0,"frontend_port":5173,"branch":""},{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":"feature/alpha"}]'
   [ -e "$triggered" ] || fail "mutable-registry fixture did not replace the source path"
   [ "$(printf '%s' "$result" | "$real_jq" -c .)" = "$expected" ] \
     || fail "registry output did not come from the same snapshot that validation observed: $result"
+  leaked=$(find "$snapshot_dir" -mindepth 1 -maxdepth 1 -print -quit)
+  [ -z "$leaked" ] || fail "successful registry discovery leaked an immutable snapshot: $leaked"
   pass "devenv registry: validation and output consume one immutable registry snapshot"
 }
 
@@ -113,6 +117,26 @@ test_hostile_name_reports_one_line() {
   assert_registry_rejected '[{"name":"alpha\nbeta","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":""}]' \
     "name containing a newline"
   pass "devenv registry: hostile names cannot split a validation diagnostic across lines"
+}
+
+test_raw_nul_registry_is_rejected_without_snapshot_leak() {
+  local registry snapshot_dir stdout stderr rc line_count leaked
+  registry="$TMP_ROOT/nul-registry.json"
+  snapshot_dir="$TMP_ROOT/nul-snapshots"
+  stdout="$TMP_ROOT/nul-stdout"
+  stderr="$TMP_ROOT/nul-stderr"
+  mkdir -p "$snapshot_dir"
+  printf '\0%s\n' '[{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":"feature/alpha"}]' > "$registry"
+
+  TMPDIR="$snapshot_dir" fm_devenv_registry_json "$registry" >"$stdout" 2>"$stderr"
+  rc=$?
+  expect_code 1 "$rc" "raw NUL registry rejection"
+  [ ! -s "$stdout" ] || fail "raw NUL registry printed registry data on failure"
+  line_count=$(wc -l < "$stderr" | tr -d ' ')
+  [ "$line_count" = 1 ] || fail "raw NUL registry did not print exactly one error"
+  leaked=$(find "$snapshot_dir" -mindepth 1 -maxdepth 1 -print -quit)
+  [ -z "$leaked" ] || fail "raw NUL registry leaked an immutable snapshot: $leaked"
+  pass "devenv registry: raw NUL input fails once without output or snapshot leakage"
 }
 
 test_invalid_registries_fail_closed() {
@@ -134,5 +158,6 @@ test_invalid_registries_fail_closed() {
 test_discovery_prepends_main_and_sorts_by_slot
 test_validators_and_exact_lookup
 test_hostile_name_reports_one_line
+test_raw_nul_registry_is_rejected_without_snapshot_leak
 test_registry_uses_one_immutable_snapshot
 test_invalid_registries_fail_closed

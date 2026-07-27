@@ -26,14 +26,14 @@ fm_devenv_registry_error() {  # <message>
   return 1
 }
 
-fm_devenv_jq() {  # <registry-json> <jq-arguments...>
-  local registry_json=$1
+fm_devenv_jq() {  # <registry-snapshot> <jq-arguments...>
+  local registry_snapshot=$1
   shift
-  printf '%s' "$registry_json" | jq "$@"
+  jq "$@" "$registry_snapshot"
 }
 
-fm_devenv_registry_json() {  # <registry-path>
-  local registry_path=${1-} registry_json entry_error duplicate
+fm_devenv_registry_json() (  # <registry-path>
+  local registry_path=${1-} registry_snapshot entry_error duplicate
   [ "$#" -eq 1 ] || {
     fm_devenv_registry_error 'expected one registry path'
     return 1
@@ -46,20 +46,25 @@ fm_devenv_registry_json() {  # <registry-path>
     fm_devenv_registry_error 'jq is required'
     return 1
   }
-  registry_json=$(cat "$registry_path" 2>/dev/null) || {
+  registry_snapshot=$(mktemp "${TMPDIR:-/tmp}/fm-devenv-registry.XXXXXX" 2>/dev/null) || {
+    fm_devenv_registry_error 'could not create registry snapshot'
+    return 1
+  }
+  trap 'rm -f -- "$registry_snapshot"' EXIT
+  cp "$registry_path" "$registry_snapshot" 2>/dev/null || {
     fm_devenv_registry_error 'registry is not a readable file'
     return 1
   }
-  fm_devenv_jq "$registry_json" -e -s 'length == 1' >/dev/null 2>&1 || {
+  fm_devenv_jq "$registry_snapshot" -e -s 'length == 1' >/dev/null 2>&1 || {
     fm_devenv_registry_error 'invalid JSON'
     return 1
   }
-  fm_devenv_jq "$registry_json" -e 'type == "array"' >/dev/null 2>&1 || {
+  fm_devenv_jq "$registry_snapshot" -e 'type == "array"' >/dev/null 2>&1 || {
     fm_devenv_registry_error 'registry root must be an array'
     return 1
   }
 
-  entry_error=$(fm_devenv_jq "$registry_json" -r '
+  entry_error=$(fm_devenv_jq "$registry_snapshot" -r '
     [
       range(0; length) as $index
       | .[$index] as $entry
@@ -99,7 +104,7 @@ fm_devenv_registry_json() {  # <registry-path>
   }
 
   for duplicate in name vm slot frontend_port; do
-    entry_error=$(fm_devenv_jq "$registry_json" -r --arg field "$duplicate" '
+    entry_error=$(fm_devenv_jq "$registry_snapshot" -r --arg field "$duplicate" '
       [{name:"main", vm:"expanly-main", slot:0, frontend_port:5173, branch:""}] + .
       | group_by(.[$field])
       | map(select(length > 1) | .[0][$field])
@@ -114,12 +119,12 @@ fm_devenv_registry_json() {  # <registry-path>
     }
   done
 
-  fm_devenv_jq "$registry_json" '
+  fm_devenv_jq "$registry_snapshot" '
     [{name:"main", vm:"expanly-main", slot:0, frontend_port:5173, branch:""}] + .
     | sort_by(.slot)
     | map({name, vm, slot, frontend_port, branch})
   '
-}
+)
 
 fm_devenv_registry_get() {  # <registry-path> <environment-name>
   local registry_path=${1-} name=${2-}
