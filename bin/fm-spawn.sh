@@ -995,7 +995,7 @@ spawn_relaunch_refuse() {  # <detail>
 }
 
 resolve_recorded_task_worktree() {
-  local meta="$STATE/$ID.meta" expected_holder="fm-$ID"
+  local meta="$STATE/$ID.meta" adoption="$STATE/$ID.worktree-adoption" expected_holder="fm-$ID"
   local old_backend old_kind old_project old_project_real old_target old_state recorded recorded_real recorded_top recorded_top_real recorded_holder
   { [ -e "$meta" ] || [ -L "$meta" ]; } || return 0
   [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] \
@@ -1037,11 +1037,13 @@ resolve_recorded_task_worktree() {
   [ "$recorded_real" != "$PROJ_ABS_REAL" ] \
     || spawn_relaunch_refuse "its recorded worktree $recorded resolves to the primary checkout"
   recorded_holder=$(spawn_meta_field_exact "$meta" lease_holder 2>/dev/null || true)
-  if fm_worktree_proven_lease "$PROJ_ABS_REAL" "$recorded_real" "$expected_holder"; then
+  if fm_worktree_proven_lease "$PROJ_ABS_REAL" "$recorded_real" "$expected_holder" \
+     && { [ ! -e "$adoption" ] \
+          || fm_worktree_adoption_proves "$adoption" "$ID" "$recorded_real" "$PROJ_ABS_REAL" "$expected_holder"; }; then
     SPAWN_RECORDED_LEASE_HOLDER=$expected_holder
   else
     fm_worktree_pool_lookup "$PROJ_ABS_REAL" "$recorded_real" >/dev/null 2>&1 || true
-    spawn_relaunch_refuse "durable protection for $recorded_real is not provable (pool=${FM_WORKTREE_POOL_RESULT:-unreadable}, status=${FM_WORKTREE_POOL_STATUS:-unknown}, holder=${FM_WORKTREE_POOL_HOLDER:-none}, recorded-holder=${recorded_holder:-none}); require an existing lease held by $expected_holder before relaunch"
+    spawn_relaunch_refuse "durable protection for $recorded_real is not provable (pool=${FM_WORKTREE_POOL_RESULT:-unreadable}, status=${FM_WORKTREE_POOL_STATUS:-unknown}, holder=${FM_WORKTREE_POOL_HOLDER:-none}, recorded-holder=${recorded_holder:-none}, or adoption manifest missing/mismatched); run bin/fm-adopt-worktree.sh $ID after verifying the worker is gone"
   fi
   SPAWN_RECORDED_WT=$recorded_real
   echo "notice: relaunching $ID into its recorded worktree $SPAWN_RECORDED_WT (existing work preserved)" >&2

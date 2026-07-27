@@ -37,23 +37,28 @@ run_adopt() {
     FM_CONFIG_OVERRIDE="$CASE_HOME/config" FM_FAKE_POOL_PATH="${FM_FAKE_POOL_PATH:-$CASE_WORKTREE}" \
     FM_FAKE_POOL_STATUS="${FM_FAKE_POOL_STATUS:-in-use}" \
     FM_FAKE_LEASE_HOLDER="${FM_FAKE_LEASE_HOLDER:-}" \
+    FM_FAKE_TREEHOUSE_STATE_FILE="${FM_FAKE_TREEHOUSE_STATE_FILE:-}" \
     FM_FAKE_WINDOWS="${FM_FAKE_WINDOWS:-}" FM_FAKE_PANE_COMMAND="${FM_FAKE_PANE_COMMAND:-bash}" \
     PATH="$CASE_FAKEBIN:$PATH" "$ROOT/bin/fm-adopt-worktree.sh" "$id" 2>&1
 }
 
-test_unleased_copy_refuses_unchanged() {
-  local id before out status
+test_unleased_copy_is_atomically_leased_unchanged() {
+  local id before out state
   id=adopt-success-a1
   make_case success "$id"
+  state="$(dirname "$(dirname "$CASE_WORKTREE")")/treehouse-state.json"
+  printf '{"worktrees":[{"name":"1","path":"%s","test_status":"in-use","owner_pid":999999,"owner_started_at":1}]}\n' \
+    "$CASE_WORKTREE" > "$state"
   before=$(git -C "$CASE_WORKTREE" status --porcelain)
-  out=$(run_adopt "$id")
-  status=$?
-  expect_code 1 "$status" "unleased legacy copy should refuse adoption"
-  assert_contains "$out" 'not a durable' "unleased refusal did not require a durable task lease"
-  assert_grep 'legacy handoff' "$CASE_WORKTREE/handoff.md" "refusal changed the untracked handoff"
+  out=$(FM_FAKE_TREEHOUSE_STATE_FILE="$state" run_adopt "$id")
+  expect_code 0 "$?" "unleased legacy copy should acquire a durable lease: $out"
+  assert_grep '"leased": true' "$state" "adoption did not persist a durable lease"
+  assert_grep "\"lease_holder\": \"fm-$id\"" "$state" "adoption used the wrong lease holder"
+  assert_present "$CASE_HOME/state/$id.worktree-adoption" "adoption proof was not published"
+  assert_grep 'legacy handoff' "$CASE_WORKTREE/handoff.md" "adoption changed the untracked handoff"
   [ "$before" = "$(git -C "$CASE_WORKTREE" status --porcelain)" ] \
-    || fail "refusal wrote into the legacy copy"
-  pass "unleased adoption refuses without changing the legacy copy"
+    || fail "adoption wrote into the legacy copy"
+  pass "adoption atomically leases the legacy copy without changing its content"
 }
 
 test_refusals_and_native_lease_noop() {
@@ -84,11 +89,11 @@ test_refusals_and_native_lease_noop() {
 
   out=$(FM_FAKE_POOL_STATUS=leased FM_FAKE_LEASE_HOLDER="fm-$id" run_adopt "$id")
   expect_code 0 "$?" "native matching lease should verify successfully: $out"
-  assert_contains "$out" 'durably leased' "native lease verification was not explicit"
+  assert_contains "$out" 'under durable lease' "native lease verification was not explicit"
   pass "adoption refuses unsafe states and accepts an existing native lease"
 }
 
-test_unleased_copy_refuses_unchanged
+test_unleased_copy_is_atomically_leased_unchanged
 test_refusals_and_native_lease_noop
 
 echo "# all fm-adopt-worktree tests passed"

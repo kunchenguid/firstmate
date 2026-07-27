@@ -3,8 +3,8 @@
 # Usage: fm-adopt-worktree.sh <task-id>
 # The task record must name a ship or scout whose endpoint is recovery-grade
 # dead or missing and whose isolated worktree still belongs to the same project.
-# The pool entry must already be durably leased to the expected fm-<task-id>
-# holder. Every other pool state refuses without changing the task copy.
+# The pool entry must be in-use or dirty and unleased, or already leased to the
+# expected fm-<task-id> holder. Every other pool state refuses.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,6 +23,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 META="$STATE/$ID.meta"
+ADOPTION="$STATE/$ID.worktree-adoption"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -65,8 +66,44 @@ case "$AGENT_STATE" in dead|missing) ;; *) refuse "recorded endpoint $TARGET is 
 EXPECTED="fm-$ID"
 fm_worktree_pool_lookup "$PROJECT_REAL" "$WORKTREE_REAL" || refuse "treehouse pool state is unreadable"
 [ "$FM_WORKTREE_POOL_RESULT" = present ] || refuse "worktree is absent from the treehouse pool"
-[ "$FM_WORKTREE_POOL_STATUS" = leased ] \
-  || refuse "worktree has pool status $FM_WORKTREE_POOL_STATUS, not a durable $EXPECTED lease"
-[ "$FM_WORKTREE_POOL_HOLDER" = "$EXPECTED" ] \
-  || refuse "worktree is leased to ${FM_WORKTREE_POOL_HOLDER:-an unknown holder}, not $EXPECTED"
-echo "verified: $WORKTREE_REAL is durably leased to $EXPECTED"
+if [ "$FM_WORKTREE_POOL_STATUS" = leased ]; then
+  [ "$FM_WORKTREE_POOL_HOLDER" = "$EXPECTED" ] \
+    || refuse "worktree is leased to ${FM_WORKTREE_POOL_HOLDER:-an unknown holder}, not $EXPECTED"
+else
+  case "$FM_WORKTREE_POOL_STATUS" in
+    in-use|in_use|dirty) ;;
+    available) refuse "worktree is available and may already have been recycled" ;;
+    *) refuse "pool status $FM_WORKTREE_POOL_STATUS is not an adoptable legacy state" ;;
+  esac
+  fm_worktree_content_manifest "$WORKTREE_REAL" || refuse "content manifest could not be captured"
+  BEFORE_DIGEST=$FM_WORKTREE_MANIFEST_DIGEST
+  BEFORE_BODY=$FM_WORKTREE_MANIFEST_BODY
+  fm_worktree_acquire_existing_lease "$WORKTREE_REAL" "$EXPECTED" \
+    || refuse "durable lease acquisition failed"
+  fm_worktree_proven_lease "$PROJECT_REAL" "$WORKTREE_REAL" "$EXPECTED" \
+    || refuse "acquired lease could not be verified"
+  fm_worktree_content_manifest "$WORKTREE_REAL" || refuse "content manifest could not be verified"
+  [ "$BEFORE_DIGEST" = "$FM_WORKTREE_MANIFEST_DIGEST" ] \
+    && [ "$BEFORE_BODY" = "$FM_WORKTREE_MANIFEST_BODY" ] \
+    || refuse "worktree content changed during lease acquisition"
+fi
+
+fm_worktree_content_manifest "$WORKTREE_REAL" || refuse "content manifest could not be captured"
+TMP="$ADOPTION.tmp.$$"
+trap 'rm -f "$TMP"' EXIT HUP INT TERM
+{
+  echo "task_id=$ID"
+  echo "worktree=$WORKTREE_REAL"
+  echo "project=$PROJECT_REAL"
+  echo "pool_status=leased"
+  echo "expected_holder=$EXPECTED"
+  echo "manifest_digest=$FM_WORKTREE_MANIFEST_DIGEST"
+  echo "manifest_body_begin"
+  [ -z "$FM_WORKTREE_MANIFEST_BODY" ] || printf '%s\n' "$FM_WORKTREE_MANIFEST_BODY"
+  echo "manifest_body_end"
+} > "$TMP"
+mv "$TMP" "$ADOPTION"
+trap - EXIT HUP INT TERM
+fm_worktree_adoption_proves "$ADOPTION" "$ID" "$WORKTREE_REAL" "$PROJECT_REAL" "$EXPECTED" \
+  || refuse "published adoption proof could not be verified"
+echo "verified: adopted $WORKTREE_REAL under durable lease $EXPECTED"

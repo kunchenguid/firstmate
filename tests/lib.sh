@@ -108,9 +108,20 @@ if [ "${1:-}" = get ]; then
   [ "${FM_FAKE_TREEHOUSE_FAIL:-0}" = 1 ] && exit 1
   printf '%s\n' "${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-$FM_FAKE_TREEHOUSE_DEFAULT}}"
 elif [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
-  printf '{"worktrees":[{"path":"%s","status":"%s","lease_holder":"%s"}]}\n' \
-    "${FM_FAKE_POOL_PATH:-${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-$FM_FAKE_TREEHOUSE_DEFAULT}}}" \
-    "${FM_FAKE_POOL_STATUS:-leased}" "${FM_FAKE_LEASE_HOLDER:-}"
+  if [ -n "${FM_FAKE_TREEHOUSE_STATE_FILE:-}" ]; then
+    python3 - "$FM_FAKE_TREEHOUSE_STATE_FILE" <<'PY'
+import json, sys
+with open(sys.argv[1]) as handle:
+    state = json.load(handle)
+for entry in state["worktrees"]:
+    entry["status"] = "leased" if entry.get("leased") else entry.get("test_status", "available")
+print(json.dumps(state))
+PY
+  else
+    printf '{"worktrees":[{"path":"%s","status":"%s","lease_holder":"%s"}]}\n' \
+      "${FM_FAKE_POOL_PATH:-${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-$FM_FAKE_TREEHOUSE_DEFAULT}}}" \
+      "${FM_FAKE_POOL_STATUS:-leased}" "${FM_FAKE_LEASE_HOLDER:-}"
+  fi
 fi
 exit 0
 SH

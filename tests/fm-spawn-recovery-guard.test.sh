@@ -121,6 +121,7 @@ run_spawn() {
     FM_FAKE_POOL_PATH="${FM_FAKE_POOL_PATH:-$CASE_WT_A}" \
     FM_FAKE_POOL_STATUS="${FM_FAKE_POOL_STATUS:-leased}" \
     FM_FAKE_LEASE_HOLDER="${FM_FAKE_LEASE_HOLDER-fm-$id}" \
+    FM_FAKE_TREEHOUSE_STATE_FILE="${FM_FAKE_TREEHOUSE_STATE_FILE:-}" \
     FM_FAKE_TREEHOUSE_LOG="$CASE_TREEHOUSE_LOG" \
     FM_FAKE_WINDOWS="${FM_FAKE_WINDOWS:-}" FM_FAKE_PANE_COMMAND="${FM_FAKE_PANE_COMMAND:-bash}" \
     PATH="$CASE_FAKEBIN:$PATH" \
@@ -133,6 +134,7 @@ run_adopt() {
     FM_CONFIG_OVERRIDE="$CASE_HOME/config" FM_FAKE_POOL_PATH="$CASE_WT_A" \
     FM_FAKE_POOL_STATUS="${FM_FAKE_POOL_STATUS:-in-use}" \
     FM_FAKE_LEASE_HOLDER="${FM_FAKE_LEASE_HOLDER:-}" \
+    FM_FAKE_TREEHOUSE_STATE_FILE="${FM_FAKE_TREEHOUSE_STATE_FILE:-}" \
     FM_FAKE_WINDOWS="" PATH="$CASE_FAKEBIN:$PATH" \
     "$ROOT/bin/fm-adopt-worktree.sh" "$id" 2>&1
 }
@@ -325,7 +327,7 @@ test_project_change_refuses() {
 }
 
 test_legacy_copy_requires_durable_lease() {
-  local id out status before
+  local id out status before state handoff_hash
   id=recovery-adopt-a7
   make_case adoption "$id"
   out=$(run_spawn "$id" "$CASE_WT_A")
@@ -340,14 +342,19 @@ test_legacy_copy_requires_durable_lease() {
   out=$(FM_FAKE_POOL_STATUS=in-use FM_FAKE_LEASE_HOLDER='' run_spawn "$id" "$CASE_WT_B")
   status=$?
   expect_code 1 "$status" "legacy relaunch without durable proof should refuse"
-  assert_contains "$out" 'require an existing lease' "refusal did not require a durable task lease"
+  assert_contains "$out" 'fm-adopt-worktree.sh' "refusal did not point to guarded lease adoption"
   [ "$before" = "$(cat "$CASE_HOME/state/$id.meta")" ] || fail "refusal changed the legacy record"
   assert_grep 'preserve exactly' "$CASE_WT_A/handoff.md" "refusal changed legacy content"
 
-  out=$(FM_FAKE_POOL_STATUS=in-use FM_FAKE_LEASE_HOLDER='' run_adopt "$id")
-  status=$?
-  expect_code 1 "$status" "unleased legacy adoption should refuse"
-  assert_contains "$out" 'not a durable' "adoption did not require a durable task lease"
+  state="$(dirname "$(dirname "$CASE_WT_A")")/treehouse-state.json"
+  printf '{"worktrees":[{"name":"1","path":"%s","test_status":"in-use","owner_pid":999999,"owner_started_at":1},{"name":"2","path":"%s","test_status":"available"}]}\n' \
+    "$CASE_WT_A" "$CASE_WT_B" > "$state"
+  handoff_hash=$(sha256sum "$CASE_WT_A/handoff.md")
+  out=$(FM_FAKE_TREEHOUSE_STATE_FILE="$state" run_adopt "$id")
+  expect_code 0 "$?" "guarded legacy adoption should acquire the lease: $out"
+  assert_grep "\"lease_holder\": \"fm-$id\"" "$state" "adoption did not acquire the task lease"
+  [ "$handoff_hash" = "$(sha256sum "$CASE_WT_A/handoff.md")" ] \
+    || fail "adoption changed the untracked handoff"
 
   out=$(FM_FAKE_POOL_STATUS=available FM_FAKE_LEASE_HOLDER='' run_spawn "$id" "$CASE_WT_B")
   status=$?
@@ -365,7 +372,7 @@ test_legacy_copy_requires_durable_lease() {
   assert_grep 'preserve exactly' "$CASE_WT_A/handoff.md" \
     "foreign-lease refusal changed adopted content"
 
-  out=$(FM_FAKE_POOL_STATUS=leased FM_FAKE_LEASE_HOLDER="fm-$id" run_spawn "$id" "$CASE_WT_B")
+  out=$(FM_FAKE_TREEHOUSE_STATE_FILE="$state" run_spawn "$id" "$CASE_WT_B")
   expect_code 0 "$?" "relaunch with an exact durable lease should succeed: $out"
   assert_grep "cd '$CASE_WT_A'" "$CASE_SENT_FILE" "leased relaunch did not enter the recovered copy"
   assert_present "$CASE_WT_A/handoff.md" "relaunch lost the untracked handoff"
@@ -373,12 +380,14 @@ test_legacy_copy_requires_durable_lease() {
   : > "$CASE_CWD_FILE"
   : > "$CASE_SENT_FILE"
   : > "$CASE_TREEHOUSE_LOG"
-  FM_FAKE_TREEHOUSE_LOG="$CASE_TREEHOUSE_LOG" FM_FAKE_LEASE_PATH="$CASE_WT_B" FM_FAKE_POOL_PATH="$CASE_WT_A" \
-    FM_FAKE_POOL_STATUS=leased FM_FAKE_LEASE_HOLDER="fm-$id" \
+  FM_FAKE_TREEHOUSE_LOG="$CASE_TREEHOUSE_LOG" FM_FAKE_LEASE_PATH="$CASE_WT_B" \
+    FM_FAKE_TREEHOUSE_STATE_FILE="$state" \
     "$CASE_FAKEBIN/treehouse" get --lease --lease-holder another-task >/dev/null
   assert_grep "get --lease --lease-holder another-task" "$CASE_TREEHOUSE_LOG" \
     "post-exit allocation was not exercised"
   assert_present "$CASE_WT_A/handoff.md" "post-exit allocation recycled the recovered copy"
+  [ "$handoff_hash" = "$(sha256sum "$CASE_WT_A/handoff.md")" ] \
+    || fail "post-exit allocation changed the recovered handoff"
   pass "recovered work stays leased and preserves its untracked handoff after worker exit"
 }
 
