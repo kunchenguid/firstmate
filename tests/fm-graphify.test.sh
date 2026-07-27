@@ -19,6 +19,7 @@ GRAPH_DIR="$HOME_DIR/data/graphify/projects/demo"
 GRAPH_JSON="$GRAPH_DIR/graph.json"
 STATE_JSON="$GRAPH_DIR/state.json"
 LOCK_DIR="$GRAPH_DIR/.build.lock"
+SLOT_DIR="$HOME_DIR/data/graphify/scheduler"
 VENV_PYTHON="$HOME_DIR/data/graphify/venv/bin/python"
 mkdir -p "$PROJECT" "$HOME_DIR/data"
 printf '%s\n' '- demo - Graphify fixture (added 2026-07-28)' > "$HOME_DIR/data/projects.md"
@@ -143,6 +144,8 @@ test_build_lock_liveness() {
   assert_not_contains "$status" '"state":"building"' "an abandoned lock kept reporting building"
   run_graph rebuild demo >/dev/null
   assert_absent "$LOCK_DIR" "rebuild did not release the lock it broke and retook"
+  [ -z "$(find "$GRAPH_DIR" -maxdepth 1 -name '.build.lock.abandoned.*' -print -quit)" ] \
+    || fail "abandoned-lock recovery left its renamed marker behind"
   assert_contains "$(run_graph status demo)" '"state": "fresh"' "rebuild after a broken lock did not publish"
   pass "fm-graphify: live locks serialize while abandoned locks are recovered"
 }
@@ -151,11 +154,16 @@ test_lifecycle_refresh_owner() {
   local before after
   run_graph rebuild demo >/dev/null
   before=$(graph_sha)
-  # No revision or configuration change: record the lifecycle event, rebuild
-  # nothing, and keep the published generation byte-for-byte.
-  run_graph refresh demo 'project PR merged: fixture' >/dev/null \
+  # No revision or configuration change: a fresh project stays a cheap no-op.
+  run_graph refresh demo 'project already current at aaa' >/dev/null \
     || fail "refresh must never fail its lifecycle caller"
   [ "$before" = "$(graph_sha)" ] || fail "refresh rebuilt an unchanged project"
+  assert_contains "$(run_graph status demo)" '"state": "fresh"' "refresh invalidated an unchanged fresh graph"
+  # The explicit invalidate token is what a remote merge needs: the local clone
+  # still lags, so the published generation is kept but no longer offered.
+  run_graph refresh demo 'project PR merged: fixture' invalidate >/dev/null \
+    || fail "refresh must never fail its lifecycle caller"
+  [ "$before" = "$(graph_sha)" ] || fail "invalidating refresh rebuilt an unchanged project"
   assert_contains "$(run_graph status demo)" '"state": "stale"' "refresh did not record the lifecycle event"
   # A real source change is the only trigger for an eager rebuild.
   printf '%s\n' 'def refreshed(): pass' >> "$PROJECT/app.py"
@@ -167,6 +175,61 @@ test_lifecycle_refresh_owner() {
   assert_contains "$(run_graph intake demo 'where is refreshed?')" 'Provenance:' \
     "refreshed graph was not available to bounded intake"
   pass "fm-graphify: one lifecycle owner rebuilds only on real change and never fails its caller"
+}
+
+# The worker body is driven directly so coalescing and the home-wide rebuild cap
+# are asserted on their own terms, with no dependence on scheduling timing.
+test_scheduling_owner_coalesces_and_bounds() {
+  local holder request worker
+  request="$GRAPH_DIR/.refresh.request"
+  worker="$GRAPH_DIR/.refresh.worker"
+  run_graph cleanup demo >/dev/null
+  mkdir -p "$GRAPH_DIR"
+  sleep 30 &
+  holder=$!
+  # A live worker for this project absorbs the repeat: the request survives so
+  # the running worker re-reads it instead of a second worker duplicating it.
+  mkdir -p "$worker"
+  printf '%s\n' "$holder" > "$worker/pid"
+  : > "$request"
+  run_graph refresh-worker demo 'coalesced event' || fail "a coalesced event must not fail"
+  assert_present "$request" "a coalesced event discarded its outstanding request"
+  assert_absent "$GRAPH_JSON" "a coalesced event rebuilt behind the live worker"
+  rm -rf "$worker"
+  # Every rebuild slot is taken, so the worker gives up without losing the work.
+  mkdir -p "$SLOT_DIR/slot.1"
+  printf '%s\n' "$holder" > "$SLOT_DIR/slot.1/pid"
+  FM_HOME="$HOME_DIR" FM_GRAPHIFY_MAX_CONCURRENT_REBUILDS=1 FM_GRAPHIFY_SCHEDULE_WAIT=0 \
+    "$GRAPH" refresh-worker demo 'capped event' || fail "a capped event must not fail"
+  assert_present "$request" "the rebuild cap discarded outstanding work instead of deferring it"
+  assert_absent "$GRAPH_JSON" "the rebuild cap was exceeded"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  rm -rf "$SLOT_DIR/slot.1"
+  # With a free worker and a free slot the same request builds the first graph.
+  run_graph refresh-worker demo 'first graph' || fail "the worker must not fail its caller"
+  assert_absent "$request" "the worker did not consume the request it served"
+  assert_absent "$worker" "the worker did not release its project marker"
+  assert_contains "$(run_graph status demo)" '"state": "fresh"' \
+    "the scheduling owner did not build a first graph for a project with none"
+  pass "fm-graphify: scheduling coalesces per project, bounds concurrent rebuilds, and defers rather than drops"
+}
+
+# schedule is the front door every lifecycle caller uses: it must return without
+# waiting for the generation and must leave no temporary state behind.
+test_schedule_returns_without_waiting() {
+  local waited=0
+  run_graph cleanup demo >/dev/null
+  run_graph schedule demo 'detached first graph' || fail "schedule must never fail its lifecycle caller"
+  while [ -d "$GRAPH_DIR/.refresh.worker" ] || [ -f "$GRAPH_DIR/.refresh.request" ]; do
+    [ "$waited" -lt 300 ] || fail "the detached scheduling worker never settled"
+    sleep 1
+    waited=$((waited + 1))
+  done
+  assert_contains "$(run_graph status demo)" '"state": "fresh"' "the detached worker did not publish a graph"
+  [ -z "$(find "$HOME_DIR/data/graphify" -maxdepth 1 -name 'tmp.*' -print -quit)" ] \
+    || fail "a Graphify run leaked its temporary fingerprint directory"
+  pass "fm-graphify: schedule returns immediately and leaves no temporary state behind"
 }
 
 test_cleanup() {
@@ -192,4 +255,6 @@ test_real_e2e_and_scope
 test_interrupted_generation_is_never_fresh
 test_build_lock_liveness
 test_lifecycle_refresh_owner
+test_scheduling_owner_coalesces_and_bounds
+test_schedule_returns_without_waiting
 test_cleanup

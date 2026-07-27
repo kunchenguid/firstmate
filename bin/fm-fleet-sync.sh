@@ -386,6 +386,9 @@ sync_project() {
     else
       echo "$label: already current"
     fi
+    # An unchanged clone still needs a first managed graph. The scheduling owner
+    # builds one only when it is missing and is a cheap no-op once it is fresh.
+    "$FM_ROOT/bin/fm-graphify.sh" schedule "$label" "project already current at $local_rev" >/dev/null 2>&1 || true
     return 0
   fi
   if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BASE"; then
@@ -416,10 +419,10 @@ sync_project() {
   fi
   # A managed graph is derived state outside the clone. The guarded refresh is
   # the only point that changes this checkout here, so hand the single graph
-  # lifecycle owner the revision change. Detached because the bootstrap refresh
-  # budget is tens of seconds while a generation may take minutes; the owner
-  # serializes, never installs, and preserves the last valid graph on failure.
-  ( "$FM_ROOT/bin/fm-graphify.sh" refresh "$label" "project refreshed $before..$after" >/dev/null 2>&1 & ) || true
+  # scheduling owner the revision change after the sync result is already
+  # reported. It returns immediately, coalesces repeats, bounds how many
+  # generations run at once, never installs, and preserves the last valid graph.
+  "$FM_ROOT/bin/fm-graphify.sh" schedule "$label" "project refreshed $before..$after" >/dev/null 2>&1 || true
   return 0
 }
 
