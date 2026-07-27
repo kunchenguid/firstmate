@@ -181,6 +181,7 @@ test_auth_and_snapshot_shape() {
   assert_contains "$body" '"sources"' "snapshot sources"
   assert_contains "$body" '"fleet"' "snapshot fleet"
   assert_contains "$body" '"decisions"' "snapshot decisions"
+  assert_contains "$body" '"sections"' "snapshot section anchors"
   # fleet payload should include tasks or composed fallback
   python3 -c '
 import json,sys
@@ -191,6 +192,15 @@ assert isinstance(d.get("sources"), list) and d["sources"]
 assert isinstance(d.get("fleet"), dict)
 assert "tasks" in d["fleet"] or d["fleet"].get("schema")=="fm-fleet-snapshot.v1"
 assert isinstance(d.get("decisions"), list)
+assert isinstance(d.get("sections"), list) and d["sections"]
+assert all(s.get("key","").startswith("section:") for s in d["sections"])
+# tasks carry stable keys when present
+for t in (d.get("fleet") or {}).get("tasks") or []:
+    assert t.get("key","").startswith("task:"), t
+# decisions carry board key + hold_id
+for dec in d.get("decisions") or []:
+    assert dec.get("key","").startswith("decision:"), dec
+    assert dec.get("hold_id") or dec.get("key")
 # side sources deferred honestly
 ids={s.get("id") for s in d["sources"]}
 assert "quota" in ids or any(s.get("deferred") for s in d["sources"])
@@ -267,22 +277,34 @@ test_lifecycle_start_stop_status_restart() {
 }
 
 test_static_ui_present() {
-  assert_present "$ROOT/bin/fm-dashboard-static/index.html"
-  assert_present "$ROOT/bin/fm-dashboard-static/app.js"
-  assert_grep "Your call" "$ROOT/bin/fm-dashboard-static/index.html"
-  assert_grep "Since you looked" "$ROOT/bin/fm-dashboard-static/index.html"
-  assert_grep "Ready for you" "$ROOT/bin/fm-dashboard-static/index.html"
-  assert_grep "Fleet now" "$ROOT/bin/fm-dashboard-static/index.html"
-  assert_grep "The trains" "$ROOT/bin/fm-dashboard-static/index.html"
-  assert_grep "Meters" "$ROOT/bin/fm-dashboard-static/index.html"
-  assert_grep "Production" "$ROOT/bin/fm-dashboard-static/index.html"
-  assert_grep "prefers-color-scheme" "$ROOT/bin/fm-dashboard-static/index.html"
-  assert_grep "data-decision-key" "$ROOT/bin/fm-dashboard-static/app.js"
-  assert_grep "wired in wave 2" "$ROOT/bin/fm-dashboard-static/app.js"
-  assert_grep "answer" "$ROOT/bin/fm-dashboard-static/app.js"
-  assert_grep "dismiss" "$ROOT/bin/fm-dashboard-static/app.js"
-  assert_grep "snooze" "$ROOT/bin/fm-dashboard-static/app.js"
-  pass "UI shell has required sections, themes, and decision-key architecture"
+  local html=$ROOT/bin/fm-dashboard-static/index.html
+  local js=$ROOT/bin/fm-dashboard-static/app.js
+  assert_present "$html" "index.html present"
+  assert_present "$js" "app.js present"
+  assert_grep "Your call" "$html" "section label Your call"
+  assert_grep "Since you looked" "$html" "section label Since you looked"
+  assert_grep "Ready for you" "$html" "section label Ready for you"
+  assert_grep "Fleet now" "$html" "section label Fleet now"
+  assert_grep "The trains" "$html" "section label trains"
+  assert_grep "Meters" "$html" "section label Meters"
+  assert_grep "Production" "$html" "section label Production"
+  assert_grep "prefers-color-scheme" "$html" "dual theme via prefers-color-scheme"
+  # Universal stable keys for wave 3 annotation / tick / dismiss / snooze.
+  assert_grep "data-key" "$html" "sections carry data-key in HTML"
+  assert_grep 'data-key="section:your-call"' "$html" "your-call section key"
+  assert_grep 'data-key="section:fleet-now"' "$html" "fleet-now section key"
+  assert_grep 'data-key="section:production"' "$html" "production section key"
+  assert_grep "data-key" "$js" "cards set data-key in JS"
+  assert_grep "data-decision-key" "$js" "decision hold-id alias"
+  assert_grep "setKey" "$js" "setKey helper"
+  assert_grep "decision:" "$js" "decision key prefix"
+  assert_grep "task:" "$js" "task key prefix"
+  assert_grep "empty:" "$js" "empty-state key prefix"
+  assert_grep "wired in wave 2" "$js" "honest empty states"
+  assert_grep "Answer" "$js" "answer action scaffold"
+  assert_grep "Dismiss" "$js" "dismiss action scaffold"
+  assert_grep "Snooze" "$js" "snooze action scaffold"
+  pass "UI shell has required sections, themes, and universal data-key architecture"
 }
 
 test_server_refuses_wildcard_env() {

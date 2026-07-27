@@ -596,7 +596,7 @@ fn civil_from_days(secs: u64) -> (i32, u32, u32, u32, u32, u32) {
 fn build_snapshot(state: &AppState) -> Result<Value, String> {
     let generated = utc_now();
     let mut sources: Vec<Value> = Vec::new();
-    let (fleet, primary_ok) = load_fleet(state, &generated, &mut sources);
+    let (mut fleet, primary_ok) = load_fleet(state, &generated, &mut sources);
 
     if !primary_ok {
         sources.push(json!({
@@ -627,6 +627,30 @@ fn build_snapshot(state: &AppState) -> Result<Value, String> {
         }));
     }
 
+    // Ensure every fleet task carries a stable key (wave 3 annotation anchor).
+    if let Some(tasks) = fleet.get_mut("tasks").and_then(|t| t.as_array_mut()) {
+        for t in tasks.iter_mut() {
+            let needs_key = t
+                .get("key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .is_empty();
+            if !needs_key {
+                continue;
+            }
+            let id = t
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if id.is_empty() {
+                continue;
+            }
+            if let Some(obj) = t.as_object_mut() {
+                obj.insert("key".into(), json!(format!("task:{id}")));
+            }
+        }
+    }
     let decisions = extract_decisions(&fleet);
     Ok(json!({
         "schema": SCHEMA_SNAPSHOT,
@@ -640,6 +664,17 @@ fn build_snapshot(state: &AppState) -> Result<Value, String> {
         "sources": sources,
         "fleet": fleet,
         "decisions": decisions,
+        // Section anchors for wave 3 free-text / dismiss on empty or whole sections.
+        "sections": [
+            {"key": "section:mast", "kind": "section", "id": "mast"},
+            {"key": "section:since-you-looked", "kind": "section", "id": "since-you-looked"},
+            {"key": "section:your-call", "kind": "section", "id": "your-call"},
+            {"key": "section:ready-for-you", "kind": "section", "id": "ready-for-you"},
+            {"key": "section:fleet-now", "kind": "section", "id": "fleet-now"},
+            {"key": "section:trains", "kind": "section", "id": "trains"},
+            {"key": "section:meters", "kind": "section", "id": "meters"},
+            {"key": "section:production", "kind": "section", "id": "production"}
+        ],
         "events": Value::Null,
         "open_prs": Value::Null,
         "trains": Value::Null,
@@ -774,8 +809,11 @@ fn compose_minimal(state: &AppState, generated: &str, sources: &mut Vec<Value>) 
             };
             let report_path = state.cfg.data.join(&id).join("report.md");
             let report_present = report_path.is_file();
+            // Stable key for wave 3 annotation / tick / dismiss / snooze.
+            let key = format!("task:{id}");
             tasks.push(json!({
                 "id": id,
+                "key": key,
                 "kind": fields.get("kind").and_then(|v| v.as_str()).unwrap_or(""),
                 "harness": fields.get("harness").and_then(|v| v.as_str()).unwrap_or(""),
                 "backend": fields.get("backend").and_then(|v| v.as_str()).unwrap_or(""),
@@ -961,8 +999,15 @@ fn extract_decisions(fleet: &Value) -> Value {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        // key is the stable board anchor (prefixed); hold_id is the backlog id.
+        let board_key = if key.starts_with("decision:") {
+            key.clone()
+        } else {
+            format!("decision:{key}")
+        };
         decisions.push(json!({
-            "key": key,
+            "key": board_key,
+            "hold_id": key,
             "title": title,
             "body": body,
             "hold_kind": rec.get("hold_kind").or_else(|| rec.get("kind")).cloned().unwrap_or(json!("")),
@@ -971,7 +1016,7 @@ fn extract_decisions(fleet: &Value) -> Value {
             "state": rec.get("state").cloned().unwrap_or(json!("")),
             "recommendation": rec.get("recommendation").cloned().unwrap_or(json!("")),
             "options": rec.get("options").cloned().unwrap_or(json!([])),
-            "actions_supported": ["answer", "dismiss", "snooze"],
+            "actions_supported": ["answer", "dismiss", "snooze", "annotate"],
             "origin": rec.get("repo").or_else(|| rec.get("origin_task")).cloned().unwrap_or(json!("")),
             "pr_url": rec.get("pr_url").cloned().unwrap_or(json!("")),
             "report_path": rec.get("report_path").cloned().unwrap_or(json!(""))

@@ -91,7 +91,22 @@ Themes follow `prefers-color-scheme`: chart-room dark (deck `#131A17`, brass `#C
 Section order matches the captain-approved mock: mast + freshness, since-you-looked, your call, ready for you, fleet now, trains, meters, production.
 Sections whose data arrives in later waves render labeled empty states (`wired in wave 2`) rather than invented numbers.
 The client polls every five seconds; a failed poll turns the freshness beat red.
-Decision cards carry stable `data-decision-key` attributes (backlog hold ids) so wave-3 answer / dismiss / snooze write-back can attach without rework.
+
+### Stable keys (wave 3 annotation anchors)
+
+Wave 3 adds lavish-style two-way feedback (tick-to-done, dismiss/snooze, free-text annotation) on **any** card or section.
+Wave 1 therefore stamps a stable `data-key` (and `data-key-kind`) on every section and every card/row in the DOM, and mirrors keys in the snapshot JSON:
+
+| Kind | Key shape | Example |
+| --- | --- | --- |
+| section | `section:<slug>` | `section:your-call` |
+| decision | `decision:<hold-id>` | `decision:demo-decision` |
+| task | `task:<id>` | `task:ship-a` |
+| event / pr / train / meter | `<kind>:<id>` | `pr:466` |
+| empty placeholder | `empty:<section-slug>` | `empty:trains` |
+
+Decision cards also keep `data-decision-key` / `hold_id` as the raw backlog id for write-back routing.
+No write path ships in wave 1; the keys only prepare the board for wave 3.
 
 ## Lifecycle (no systemd required)
 

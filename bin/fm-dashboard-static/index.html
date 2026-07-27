@@ -94,47 +94,53 @@
 </head>
 <body>
 <main class="frame">
-  <div class="dash" id="dash">
-    <div class="mast">
+  <!--
+    Wave 3 lavish-style feedback (tick / dismiss / snooze / free-text) anchors on
+    stable data-key attributes. Every section and every card/row must carry one.
+    Convention: section:<slug> | decision:<hold-id> | task:<id> | event:<id>
+    | pr:<id> | train:<id> | meter:<id> | production:<id> | empty:<section>
+  -->
+  <div class="dash" id="dash" data-key="surface:board" data-key-kind="surface">
+    <div class="mast" id="sec-mast" data-key="section:mast" data-key-kind="section" data-section="mast">
       <span class="title"><span class="anchor">&#9875;</span> Live fleet</span>
-      <span class="pulse" id="pulse" aria-live="polite">
+      <span class="pulse" id="pulse" aria-live="polite" data-key="surface:freshness" data-key-kind="surface">
         <span class="dot red" id="beat-dot"></span>
         <span class="beat-text" id="beat-text">connecting…</span>
       </span>
     </div>
-    <div class="home-line" id="home-line"></div>
+    <div class="home-line" id="home-line" data-key="surface:home" data-key-kind="surface"></div>
 
-    <section class="section" id="sec-since" data-section="since-you-looked">
+    <section class="section" id="sec-since" data-key="section:since-you-looked" data-key-kind="section" data-section="since-you-looked">
       <div class="sec-h"><h3>Since you looked</h3><span class="n" id="since-meta"></span></div>
       <div id="since-body"></div>
     </section>
 
-    <section class="section" id="sec-call" data-section="your-call">
+    <section class="section" id="sec-call" data-key="section:your-call" data-key-kind="section" data-section="your-call">
       <div class="sec-h"><h3>Your call</h3><span class="n" id="call-meta"></span></div>
       <div class="cards" id="call-body"></div>
     </section>
 
-    <section class="section" id="sec-ready" data-section="ready-for-you">
+    <section class="section" id="sec-ready" data-key="section:ready-for-you" data-key-kind="section" data-section="ready-for-you">
       <div class="sec-h"><h3>Ready for you</h3><span class="n" id="ready-meta"></span></div>
       <div id="ready-body"></div>
     </section>
 
-    <section class="section" id="sec-fleet" data-section="fleet-now">
+    <section class="section" id="sec-fleet" data-key="section:fleet-now" data-key-kind="section" data-section="fleet-now">
       <div class="sec-h"><h3>Fleet now</h3><span class="n" id="fleet-meta"></span></div>
       <div class="cards" id="fleet-body"></div>
     </section>
 
-    <section class="section" id="sec-trains" data-section="trains">
+    <section class="section" id="sec-trains" data-key="section:trains" data-key-kind="section" data-section="trains">
       <div class="sec-h"><h3>The trains</h3><span class="n" id="trains-meta"></span></div>
       <div class="train" id="trains-body"></div>
     </section>
 
-    <section class="section" id="sec-meters" data-section="meters">
+    <section class="section" id="sec-meters" data-key="section:meters" data-key-kind="section" data-section="meters">
       <div class="sec-h"><h3>Meters</h3><span class="n" id="meters-meta"></span></div>
       <div class="meters" id="meters-body"></div>
     </section>
 
-    <section class="section" id="sec-prod" data-section="production">
+    <section class="section" id="sec-prod" data-key="section:production" data-key-kind="section" data-section="production">
       <div class="sec-h"><h3>Production</h3><span class="n" id="prod-meta"></span></div>
       <div class="prod" id="prod-body"></div>
     </section>

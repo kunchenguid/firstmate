@@ -1,6 +1,14 @@
 /* Live fleet dashboard UI - wave 1 shell.
  * Polls GET /api/v1/snapshot every 5s. Patches the DOM; does not rebuild the page.
  * No CDN. Offline on the tailnet.
+ *
+ * Wave 3 lavish-style feedback (tick / dismiss / snooze / free-text annotation)
+ * anchors on stable data-key attributes present on EVERY section and card/row.
+ * Wave 1 is read-only; keys are architectural only.
+ *
+ * Key convention:
+ *   section:<slug> | decision:<hold-id> | task:<id> | event:<id>
+ *   | pr:<id> | train:<id> | meter:<id> | production:<id> | empty:<section>
  */
 (function () {
   "use strict";
@@ -10,8 +18,7 @@
     lastOkAt: null,
     lastGenerated: null,
     failStreak: 0,
-    decisionKeys: Object.create(null),
-    taskKeys: Object.create(null),
+    cardNodes: Object.create(null), // key -> element for patch reuse
   };
 
   var el = {
@@ -34,9 +41,24 @@
     prodBody: document.getElementById("prod-body"),
   };
 
-  function emptyState(label, detail) {
+  /** Assign stable data-key (and kind) for wave 3 annotation anchoring. */
+  function setKey(node, key, kind) {
+    if (!node || !key) return node;
+    node.setAttribute("data-key", key);
+    node.dataset.key = key;
+    if (kind) {
+      node.setAttribute("data-key-kind", kind);
+      node.dataset.keyKind = kind;
+    }
+    // Wave 3 actions attach here without rework.
+    node.setAttribute("data-annotatable", "1");
+    return node;
+  }
+
+  function emptyState(sectionSlug, label, detail) {
     var d = document.createElement("div");
     d.className = "empty";
+    setKey(d, "empty:" + sectionSlug, "empty");
     var tag = document.createElement("span");
     tag.className = "tag";
     tag.textContent = label;
@@ -96,7 +118,6 @@
     if (age !== null) parts.push("snapshot " + age + "s");
     else if (gen) parts.push("snapshot @ " + gen);
     else parts.push("snapshot age unknown");
-    // Absolute time always available when we have generated.
     if (gen) parts.push(formatLocal(gen));
 
     var level = "ok";
@@ -108,30 +129,64 @@
     setBeat(cls, parts.join(" · "));
   }
 
+  /** Ensure card for key exists under parent; reuses node when possible. */
+  function acquireCard(parent, key, kind, className) {
+    var card = state.cardNodes[key];
+    if (!card) {
+      card = document.createElement("div");
+      card.className = className || "card";
+      setKey(card, key, kind);
+      state.cardNodes[key] = card;
+    } else {
+      setKey(card, key, kind);
+      if (className) card.className = className;
+    }
+    if (card.parentNode !== parent) parent.appendChild(card);
+    return card;
+  }
+
+  function pruneCards(liveKeys) {
+    Object.keys(state.cardNodes).forEach(function (key) {
+      if (!liveKeys[key]) {
+        var node = state.cardNodes[key];
+        if (node && node.parentNode) node.parentNode.removeChild(node);
+        delete state.cardNodes[key];
+      }
+    });
+  }
+
+  function entityKey(prefix, id) {
+    return prefix + ":" + String(id || "unknown");
+  }
+
   function renderSince(snap) {
     var events = snap.events;
     el.sinceMeta.textContent = "";
     el.sinceBody.textContent = "";
     if (events == null) {
       el.sinceBody.appendChild(
-        emptyState("wired in wave 2", "Delta strip needs event cursor + side sources.")
+        emptyState("since-you-looked", "wired in wave 2", "Delta strip needs event cursor + side sources.")
       );
       return;
     }
     if (!Array.isArray(events) || events.length === 0) {
       el.sinceBody.appendChild(
-        emptyState("clear", "Nothing new since you last looked.")
+        emptyState("since-you-looked", "clear", "Nothing new since you last looked.")
       );
       return;
     }
-    // Wave 2 will fill this; keep a defensive renderer for the schema.
     var wrap = document.createElement("div");
     wrap.className = "delta";
+    setKey(wrap, "surface:since-list", "surface");
     var max = Math.min(events.length, 7);
     for (var i = 0; i < max; i++) {
       var ev = events[i] || {};
+      var ek =
+        ev.key ||
+        entityKey("event", ev.id || ev.ts || ev.at || i);
       var row = document.createElement("div");
       row.className = "row";
+      setKey(row, ek, "event");
       var t = document.createElement("span");
       t.className = "t";
       t.textContent = ev.t || ev.at || "";
@@ -159,35 +214,31 @@
     el.callBody.textContent = "";
     var shown = list.length;
     el.callMeta.textContent = shown ? shown + " open" : "none open";
+    var live = Object.create(null);
     if (!shown) {
       el.callBody.appendChild(
-        emptyState("clear", "No captain-actionable decisions in the current snapshot.")
+        emptyState("your-call", "clear", "No captain-actionable decisions in the current snapshot.")
       );
-      state.decisionKeys = Object.create(null);
       return;
     }
 
-    var next = Object.create(null);
     for (var i = 0; i < list.length; i++) {
       var d = list[i];
-      if (!d || !d.key) continue;
-      next[d.key] = true;
-      var card = state.decisionKeys[d.key];
-      if (!card) {
-        card = document.createElement("div");
-        card.className = "card";
-        card.dataset.decisionKey = d.key;
-        card.setAttribute("data-decision-key", d.key);
-        el.callBody.appendChild(card);
-      } else if (card.parentNode !== el.callBody) {
-        el.callBody.appendChild(card);
-      }
-      // Patch contents in place.
+      if (!d) continue;
+      var rawKey = d.key || d.id;
+      if (!rawKey) continue;
+      var key = String(rawKey).indexOf("decision:") === 0 ? String(rawKey) : entityKey("decision", rawKey);
+      live[key] = true;
+      var card = acquireCard(el.callBody, key, "decision", "card");
+      // Compat alias for hold-id based write-back (wave 3).
+      card.setAttribute("data-decision-key", rawKey);
+      card.dataset.decisionKey = rawKey;
+
       card.textContent = "";
       card.appendChild(decisionChip(d));
       var k = document.createElement("div");
       k.className = "k";
-      k.textContent = d.title || d.key;
+      k.textContent = d.title || rawKey;
       card.appendChild(k);
       var v = document.createElement("div");
       v.className = "v";
@@ -199,8 +250,7 @@
       card.appendChild(v);
       var act = document.createElement("div");
       act.className = "act";
-      // Wave 3 wires write-back. Buttons exist with stable keys so the board
-      // can answer / dismiss / snooze without rework; disabled for wave 1.
+      // Wave 3 wires write-back. Buttons carry the same stable key.
       ["Answer", "Dismiss", "Snooze"].forEach(function (label) {
         var b = document.createElement("button");
         b.type = "button";
@@ -208,7 +258,8 @@
         b.textContent = label;
         b.disabled = true;
         b.title = "Write-back lands in wave 3";
-        b.dataset.decisionKey = d.key;
+        b.dataset.key = key;
+        b.dataset.decisionKey = rawKey;
         b.dataset.action = label.toLowerCase();
         act.appendChild(b);
       });
@@ -218,16 +269,15 @@
       origin.style.marginTop = "6px";
       origin.style.fontFamily = "var(--mono)";
       origin.style.fontSize = "11px";
-      origin.textContent = "key: " + d.key;
+      origin.textContent = "key: " + key;
       card.appendChild(origin);
-      state.decisionKeys[d.key] = card;
     }
-    // Remove cards no longer present.
-    Object.keys(state.decisionKeys).forEach(function (key) {
-      if (!next[key]) {
-        var node = state.decisionKeys[key];
+    // Only prune decision cards that disappeared (keep other kinds).
+    Object.keys(state.cardNodes).forEach(function (k) {
+      if (k.indexOf("decision:") === 0 && !live[k]) {
+        var node = state.cardNodes[k];
         if (node && node.parentNode) node.parentNode.removeChild(node);
-        delete state.decisionKeys[key];
+        delete state.cardNodes[k];
       }
     });
   }
@@ -238,22 +288,26 @@
     if (!Array.isArray(prs)) {
       el.readyMeta.textContent = "";
       el.readyBody.appendChild(
-        emptyState("wired in wave 2", "Open PR stack comes from gh-axi per project.")
+        emptyState("ready-for-you", "wired in wave 2", "Open PR stack comes from gh-axi per project.")
       );
       return;
     }
     el.readyMeta.textContent = prs.length + " open";
     if (!prs.length) {
       el.readyBody.appendChild(
-        emptyState("clear", "Nothing waiting in the open PR list.")
+        emptyState("ready-for-you", "clear", "Nothing waiting in the open PR list.")
       );
       return;
     }
     var cards = document.createElement("div");
     cards.className = "cards";
-    prs.forEach(function (pr) {
+    setKey(cards, "surface:ready-list", "surface");
+    prs.forEach(function (pr, idx) {
+      var id = pr.key || pr.number || pr.id || pr.url || idx;
+      var key = String(id).indexOf("pr:") === 0 ? String(id) : entityKey("pr", id);
       var c = document.createElement("div");
       c.className = "card";
+      setKey(c, key, "pr");
       var k = document.createElement("div");
       k.className = "k";
       k.textContent = pr.title || pr.url || "PR";
@@ -291,18 +345,24 @@
     var tasks = Array.isArray(fleet.tasks) ? fleet.tasks : [];
     el.fleetMeta.textContent = tasks.length ? tasks.length + " live" : "idle";
     el.fleetBody.textContent = "";
-    state.taskKeys = Object.create(null);
+    var live = Object.create(null);
     if (!tasks.length) {
       el.fleetBody.appendChild(
-        emptyState("clear", "No live task metadata under state/.")
+        emptyState("fleet-now", "clear", "No live task metadata under state/.")
       );
       return;
     }
     tasks.forEach(function (t) {
       var id = t.id || "?";
-      var card = document.createElement("div");
-      card.className = "card";
+      var key = t.key && String(t.key).indexOf("task:") === 0
+        ? String(t.key)
+        : entityKey("task", id);
+      live[key] = true;
+      var card = acquireCard(el.fleetBody, key, "task", "card");
       card.dataset.taskId = id;
+      card.setAttribute("data-task-id", id);
+
+      card.textContent = "";
       var cs = (t.current_state && t.current_state.state) || "unknown";
       card.appendChild(stateChip(cs));
       var k = document.createElement("div");
@@ -329,8 +389,13 @@
         link.appendChild(a);
         card.appendChild(link);
       }
-      el.fleetBody.appendChild(card);
-      state.taskKeys[id] = card;
+    });
+    Object.keys(state.cardNodes).forEach(function (k) {
+      if (k.indexOf("task:") === 0 && !live[k]) {
+        var node = state.cardNodes[k];
+        if (node && node.parentNode) node.parentNode.removeChild(node);
+        delete state.cardNodes[k];
+      }
     });
   }
 
@@ -339,11 +404,29 @@
     if (snap.trains == null) {
       el.trainsMeta.textContent = "";
       el.trainsBody.appendChild(
-        emptyState("wired in wave 2", "Trains file + UI land with D6.")
+        emptyState("trains", "wired in wave 2", "Trains file + UI land with D6.")
       );
       return;
     }
     el.trainsMeta.textContent = "loaded";
+    // Wave 2+ populates train rows; each must use train:<id> data-key.
+    var list = Array.isArray(snap.trains)
+      ? snap.trains
+      : snap.trains.trains || [];
+    if (Array.isArray(list)) {
+      list.forEach(function (tr, idx) {
+        var id = tr.id || tr.key || idx;
+        var key = String(id).indexOf("train:") === 0 ? String(id) : entityKey("train", id);
+        var row = document.createElement("div");
+        row.className = "row";
+        setKey(row, key, "train");
+        var left = document.createElement("span");
+        left.innerHTML = "<b></b>";
+        left.querySelector("b").textContent = tr.title || tr.id || key;
+        row.appendChild(left);
+        el.trainsBody.appendChild(row);
+      });
+    }
   }
 
   function renderMeters(snap) {
@@ -351,11 +434,40 @@
     if (snap.quota == null) {
       el.metersMeta.textContent = "";
       el.metersBody.appendChild(
-        emptyState("wired in wave 2", "Quota meters come from quota-axi (D3).")
+        emptyState("meters", "wired in wave 2", "Quota meters come from quota-axi (D3).")
       );
       return;
     }
     el.metersMeta.textContent = "live";
+    // When quota object has providers, each meter gets meter:<id>.
+    var providers = snap.quota.providers || snap.quota.meters || null;
+    if (Array.isArray(providers)) {
+      providers.forEach(function (m, idx) {
+        var id = m.id || m.name || idx;
+        var key = String(id).indexOf("meter:") === 0 ? String(id) : entityKey("meter", id);
+        var meter = document.createElement("div");
+        meter.className = "meter";
+        setKey(meter, key, "meter");
+        var lbl = document.createElement("div");
+        lbl.className = "lbl";
+        lbl.textContent = m.label || m.name || id;
+        meter.appendChild(lbl);
+        el.metersBody.appendChild(meter);
+      });
+    } else if (typeof snap.quota === "object") {
+      Object.keys(snap.quota).forEach(function (name) {
+        if (name === "providers" || name === "meters") return;
+        var key = entityKey("meter", name);
+        var meter = document.createElement("div");
+        meter.className = "meter";
+        setKey(meter, key, "meter");
+        var lbl = document.createElement("div");
+        lbl.className = "lbl";
+        lbl.textContent = name;
+        meter.appendChild(lbl);
+        el.metersBody.appendChild(meter);
+      });
+    }
   }
 
   function renderProduction(snap) {
@@ -363,11 +475,12 @@
     if (snap.production == null) {
       el.prodMeta.textContent = "";
       el.prodBody.appendChild(
-        emptyState("wired in wave 2", "Production probe + marker land with D7.")
+        emptyState("production", "wired in wave 2", "Production probe + marker land with D7.")
       );
       return;
     }
     el.prodMeta.textContent = "live";
+    setKey(el.prodBody, "production:status", "production");
   }
 
   function applySnapshot(snap) {
@@ -396,7 +509,6 @@
     fetch("/api/v1/snapshot", opts)
       .then(function (res) {
         if (res.status === 401) {
-          // Cookie expired or missing mid-session.
           window.location.href = "/unlock";
           return null;
         }
@@ -418,7 +530,6 @@
       });
   }
 
-  // First paint + interval.
   poll();
   setInterval(poll, POLL_MS);
 })();
