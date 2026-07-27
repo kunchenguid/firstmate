@@ -220,6 +220,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/dashboard.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/decision-hold-lifecycle.md",
       "audience": "maintainer-architecture"
     },

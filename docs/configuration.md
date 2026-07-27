@@ -23,6 +23,18 @@ Wake, watcher, away-mode, and X-specific state mechanics remain with their named
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Live fleet dashboard (config/dashboard-bind, config/dashboard-token)
+
+Optional local files under `config/` for the session-independent HTTP board:
+
+- `config/dashboard-bind` - first line is `IP` or `IP:PORT` (default port `8391`).
+  When absent, `bin/fm-dashboard.sh` uses `tailscale ip -4`.
+  Wildcard addresses such as `0.0.0.0` are refused.
+- `config/dashboard-token` - bearer token, mode `0600`, created on first start when missing.
+
+Runtime files for the portable supervisor live under `state/dashboard/`.
+[`docs/dashboard.md`](dashboard.md) owns lifecycle, auth, the snapshot API, and the no-systemd supervisor design.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.

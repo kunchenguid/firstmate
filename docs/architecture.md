@@ -38,6 +38,7 @@ In that status-log fallback, a declared external wait reports the distinct `paus
 For herdr, that pane fallback trusts a native `busy` verdict outright, but corroborates native `idle` or unknown verdicts against the recorded harness's rendered busy signature before deciding the crew is not working.
 For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, current crew state, endpoint probes, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
+The optional live HTTP board (`bin/fm-dashboard.sh`) is a session-independent sidecar that serves the same snapshot contract to a phone-first UI over Tailscale; [`docs/dashboard.md`](dashboard.md) owns bind, auth, and lifecycle.
 The script header owns the exact JSON schema.
 
 ### Registered secondmate current state
