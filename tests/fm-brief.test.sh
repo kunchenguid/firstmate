@@ -204,6 +204,36 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
 
+# FM_BRIEF_TASK inlines the task at intake, so no {TASK} placeholder survives:
+# nothing downstream may still tell firstmate to replace one. Graphify is absent
+# in this home, which is the common no-op path for the bounded context append.
+test_intake_task_text_replaces_the_placeholder() {
+  local home id brief out
+  home="$TMP_ROOT/intake-task-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-intake-$kind"
+    if [ "$kind" = scout ]; then
+      out=$(FM_HOME="$home" FM_BRIEF_TASK='Fix the flaky settle probe.' \
+        "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout 2>/dev/null)
+    else
+      out=$(FM_HOME="$home" FM_BRIEF_TASK='Fix the flaky settle probe.' \
+        "$ROOT/bin/fm-brief.sh" "$id" firstmate 2>/dev/null)
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind: brief was not scaffolded with FM_BRIEF_TASK"
+    assert_grep "Fix the flaky settle probe." "$brief" "$kind: brief omitted the supplied task text"
+    assert_no_grep "{TASK}" "$brief" "$kind: brief kept a placeholder the task text replaced"
+    assert_no_grep "Bounded Graphify context" "$brief" \
+      "$kind: brief appended graph context without a provisioned Graphify"
+    assert_grep "this scaffold does not interpret the task text above" "$brief" \
+      "$kind: Herdr gate still cites a {TASK} placeholder that no longer exists"
+    assert_not_contains "$out" "replace {TASK}" \
+      "$kind: completion message still points at a placeholder that no longer exists"
+  done
+  pass "fm-brief.sh: an inlined intake task leaves no {TASK} placeholder or instruction behind"
+}
+
 test_secondmate_no_projects_charter() {
   local home brief status
   home="$TMP_ROOT/no-projects-home"
@@ -391,6 +421,7 @@ test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
+test_intake_task_text_replaces_the_placeholder
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract

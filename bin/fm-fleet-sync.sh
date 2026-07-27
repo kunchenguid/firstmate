@@ -415,9 +415,11 @@ sync_project() {
     echo "$label: synced $before..$after"
   fi
   # A managed graph is derived state outside the clone. The guarded refresh is
-  # the only point that changes this checkout here, so invalidate quietly after
-  # the successful fast-forward and leave graph rebuilding explicit.
-  "$FM_ROOT/bin/fm-graphify.sh" mark-stale "$label" "project refreshed $before..$after" >/dev/null 2>&1 || true
+  # the only point that changes this checkout here, so hand the single graph
+  # lifecycle owner the revision change. Detached because the bootstrap refresh
+  # budget is tens of seconds while a generation may take minutes; the owner
+  # serializes, never installs, and preserves the last valid graph on failure.
+  ( "$FM_ROOT/bin/fm-graphify.sh" refresh "$label" "project refreshed $before..$after" >/dev/null 2>&1 & ) || true
   return 0
 }
 

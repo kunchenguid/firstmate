@@ -10,6 +10,7 @@
 #
 # Usage: fm-graphify.sh status <project>
 #        fm-graphify.sh rebuild <project>
+#        fm-graphify.sh refresh <project> <reason>
 #        fm-graphify.sh query <project> <question>
 #        fm-graphify.sh intake <project> <question>
 #        fm-graphify.sh mark-stale <project> <reason>
@@ -18,6 +19,14 @@
 #        fm-graphify.sh available
 #
 # status returns one JSON object with state missing|building|fresh|stale|failed.
+# A published graph is reported fresh only after a generation completed and was
+# recorded; an interrupted or unrecorded generation reports stale, never fresh.
+# refresh is the single lifecycle owner for guarded fleet sync and merges: it
+# rebuilds only when the revision or graph configuration actually changed, is
+# serialized and deduplicated through the build lock, never installs Graphify,
+# never fails its caller, and keeps the last valid graph byte-for-byte on failure.
+# A build lock whose recorded holder process is gone is broken automatically, so
+# a hard kill or reboot cannot wedge a project permanently.
 # query and intake refuse stale graphs; intake is a bounded, provenance-rich
 # worker-context rendering and returns success without output when unavailable.
 # Limits and the private state format are owned here. Operators should use the
@@ -25,6 +34,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -44,9 +54,48 @@ QUERY_TOKENS=${FM_GRAPHIFY_QUERY_TOKENS:-600}
 QUERY_BYTES=${FM_GRAPHIFY_QUERY_BYTES:-12000}
 CONFIG_VERSION="v1;files=$MAX_FILES;file_bytes=$MAX_FILE_BYTES;total_bytes=$MAX_TOTAL_BYTES;graph_bytes=$MAX_GRAPH_BYTES;semantic=disabled"
 
-usage() { sed -n '2,20p' "$0" | sed 's/^# \?//'; }
+PROJECT_NAME=''
+PROJECT_ROOT=''
+GRAPH_DIR=''
+GRAPH_FILE=''
+STATE_FILE=''
+STAGE_DIR=''
+LOCK_DIR=''
+SCRATCH_DIR=''
+
+usage() { sed -n '2,33p' "$0" | sed 's/^# \?//'; }
 die() { printf 'fm-graphify: %s\n' "$*" >&2; exit 1; }
-json_error() { printf '{"state":"%s","diagnostic":"%s"}\n' "$1" "${2//\"/\\\"}"; }
+
+# Diagnostics carry third-party output (tracebacks, quotes, backslashes,
+# newlines), so every JSON string this script emits without Python goes through
+# one escaper; the documented "one JSON object" contract must hold on failures.
+json_escape() {
+  local LC_ALL=C s=${1:-}
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\t'/\\t}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\n'/\\n}
+  s=${s//[$'\001'-$'\010'$'\013'$'\014'$'\016'-$'\037'$'\177']/}
+  printf '%s' "$s"
+}
+json_error() { printf '{"state":"%s","diagnostic":"%s"}\n' "$1" "$(json_escape "${2:-}")"; }
+
+on_exit() {
+  [ -z "$STAGE_DIR" ] || rm -rf -- "$STAGE_DIR"
+  if [ -n "$LOCK_DIR" ]; then
+    rm -f -- "$LOCK_DIR/pid"
+    rmdir -- "$LOCK_DIR" 2>/dev/null || true
+  fi
+  [ -z "$SCRATCH_DIR" ] || rm -rf -- "$SCRATCH_DIR"
+  return 0
+}
+trap on_exit EXIT
+
+scratch_dir() {
+  [ -n "$SCRATCH_DIR" ] || SCRATCH_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-graphify.XXXXXX")
+  printf '%s' "$SCRATCH_DIR"
+}
 
 bounded_run() {  # <whole-seconds> <command> [args...]
   local seconds=$1 pid elapsed=0 rc
@@ -85,6 +134,7 @@ resolve_project() {
   [ "${root#"$projects_real"/}" = "$name" ] || die "registered project '$name' is not a direct clone child"
   git_root=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) || die "registered project '$name' is not a git clone"
   [ "$(cd "$git_root" && pwd -P)" = "$root" ] || die "registered project '$name' root is not its clone root"
+  PROJECT_NAME=$name
   PROJECT_ROOT=$root
   GRAPH_DIR="$GRAPH_HOME/projects/$name"
   GRAPH_FILE="$GRAPH_DIR/graph.json"
@@ -123,10 +173,13 @@ os.replace(tmp,p)
 PY
 }
 
-fingerprint() {
-  "$PYTHON" - "$PROJECT_ROOT" "$GRAPHIFY_VERSION" "$CONFIG_VERSION" "$MAX_FILES" "$MAX_FILE_BYTES" "$MAX_TOTAL_BYTES" <<'PY'
+# The fingerprint enumerates every selected source path, so it is handed to the
+# next stage as a file. A single argv string is capped at MAX_ARG_STRLEN (128KiB
+# on Linux), far below the documented MAX_FILES bound.
+fingerprint_to() {  # <destination-file>
+  "$PYTHON" - "$1" "$PROJECT_ROOT" "$GRAPHIFY_VERSION" "$CONFIG_VERSION" "$MAX_FILES" "$MAX_FILE_BYTES" "$MAX_TOTAL_BYTES" <<'PY'
 import hashlib, json, os, subprocess, sys
-root, version, config, max_files, max_file, max_total = sys.argv[1:]
+dest, root, version, config, max_files, max_file, max_total = sys.argv[1:]
 max_files, max_file, max_total = map(int,(max_files,max_file,max_total))
 skip_dirs={'.git','.hg','.svn','node_modules','vendor','vendors','deps','dependency','dependencies','dist','build','out','target','coverage','graphify-out','.graphify','.venv','venv','__pycache__'}
 extensions={'.py','.pyi','.js','.mjs','.cjs','.ts','.tsx','.jsx','.go','.rs','.java','.kt','.c','.h','.cc','.cpp','.hpp','.cs','.rb','.php','.swift','.scala','.sh','.bash','.zsh','.sql','.yaml','.yml','.json','.toml','.md','.mdx','.rst'}
@@ -156,44 +209,111 @@ for rel,size in items:
     h.update(rel.encode()); h.update(b'\0'); h.update(str(size).encode()); h.update(b'\0')
     with open(os.path.join(root,*rel.split('/')),'rb') as f:
         for b in iter(lambda:f.read(1024*1024),b''): h.update(b)
-print(json.dumps({'fingerprint':h.hexdigest(),'revision':head,'files':[x[0] for x in items]},separators=(',',':')))
+with open(dest,'w',encoding='utf-8') as f:
+    json.dump({'fingerprint':h.hexdigest(),'revision':head,'files':[x[0] for x in items]},f,separators=(',',':'))
 PY
 }
 
-status() {
-  local lock=0 fp=''
-  [ -d "$GRAPH_DIR/.build.lock" ] && lock=1
+json_file_field() {  # <json-file> <key>
+  "$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8")).get(sys.argv[2],""))' "$1" "$2"
+}
+
+json_text_field() {  # <json-text> <key>
+  printf '%s' "$1" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1],""))' "$2"
+}
+
+lock_holder_pid() {  # <lock-dir>; fails when no numeric holder was recorded
+  local holder
+  holder=$(head -n 1 "$1/pid" 2>/dev/null || true)
+  case "$holder" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$holder"
+}
+
+dir_age_seconds() {  # <path>
+  "$PYTHON" -c 'import os,sys,time; print(max(0,int(time.time()-os.path.getmtime(sys.argv[1]))))' "$1" 2>/dev/null || printf '0'
+}
+
+# free | live | abandoned. A lock is abandoned when its recorded holder is gone,
+# so a SIGKILL, OOM kill, or reboot cannot wedge the project forever. A lock with
+# no readable holder is only abandoned once it outlived a whole build window,
+# which keeps the mkdir-then-record window safe.
+build_lock_state() {
+  local lock="$GRAPH_DIR/.build.lock" holder
+  [ -d "$lock" ] || { printf 'free\n'; return 0; }
+  if holder=$(lock_holder_pid "$lock"); then
+    if kill -0 "$holder" 2>/dev/null; then printf 'live\n'; else printf 'abandoned\n'; fi
+    return 0
+  fi
+  if [ "$(dir_age_seconds "$lock")" -ge "$BUILD_TIMEOUT" ]; then printf 'abandoned\n'; else printf 'live\n'; fi
+}
+
+acquire_build_lock() {
+  local lock="$GRAPH_DIR/.build.lock"
+  if ! mkdir "$lock" 2>/dev/null; then
+    [ "$(build_lock_state)" = abandoned ] || return 1
+    rm -rf -- "$lock"
+    mkdir "$lock" 2>/dev/null || return 1
+  fi
+  LOCK_DIR=$lock
+  printf '%s\n' "$$" > "$lock/pid"
+}
+
+status_json() {  # <include-graph-digest 0|1>
+  local digest=$1 lock fpf err
   if ! graphify_available; then json_error missing "Graphify $GRAPHIFY_DIST is not installed in this Firstmate home"; return 0; fi
-  if ! fp=$(fingerprint 2>&1); then json_error failed "$fp"; return 0; fi
-  "$PYTHON" - "$STATE_FILE" "$GRAPH_FILE" "$fp" "$lock" <<'PY'
+  lock=$(build_lock_state)
+  if [ "$lock" = live ]; then json_error building "a rebuild holds the project lock"; return 0; fi
+  fpf="$(scratch_dir)/fingerprint.json"
+  if ! err=$(fingerprint_to "$fpf" 2>&1); then json_error failed "$err"; return 0; fi
+  "$PYTHON" - "$STATE_FILE" "$GRAPH_FILE" "$fpf" "$digest" <<'PY'
 import hashlib,json,os,sys
-state_file,graph_file,current,lock=sys.argv[1:]; current=json.loads(current)
-if lock=='1': print(json.dumps({'state':'building','diagnostic':'a rebuild holds the project lock'})); raise SystemExit
-if not os.path.isfile(graph_file) or os.path.islink(graph_file): print(json.dumps({'state':'missing','diagnostic':'no published graph'})); raise SystemExit
+state_file,graph_file,fp_file,digest=sys.argv[1:]
+current=json.load(open(fp_file,encoding='utf-8'))
+def emit(d):
+    print(json.dumps(d)); raise SystemExit
+if not os.path.isfile(graph_file) or os.path.islink(graph_file):
+    emit({'state':'missing','diagnostic':'no published graph','fingerprint':current['fingerprint'],'state_fingerprint':'','revision':current['revision']})
 try: state=json.load(open(state_file,encoding='utf-8'))
 except Exception: state={}
-if state.get('state')=='failed': print(json.dumps({'state':'failed','diagnostic':state.get('diagnostic','last rebuild failed')})); raise SystemExit
-if state.get('state')=='stale': print(json.dumps({'state':'stale','diagnostic':state.get('diagnostic','graph was explicitly invalidated'),'revision':current['revision']})); raise SystemExit
+common={'fingerprint':current['fingerprint'],'state_fingerprint':state.get('fingerprint',''),'revision':current['revision']}
+if state.get('state')=='failed':
+    emit({'state':'failed','diagnostic':state.get('diagnostic','last rebuild failed'),**common})
+if state.get('state')=='stale':
+    emit({'state':'stale','diagnostic':state.get('diagnostic','graph was explicitly invalidated'),**common})
+# Recorded as building with no live lock: the generation was interrupted before
+# it was published and recorded, so the published graph may predate this
+# fingerprint. Only an explicitly recorded fresh generation may be compared, so
+# no unrecorded or partial outcome can ever be reported fresh.
+if state.get('state')=='building':
+    emit({'state':'stale','diagnostic':'a rebuild was interrupted before it published a generation',**common})
+if state.get('state')!='fresh':
+    emit({'state':'stale','diagnostic':'no recorded published generation',**common})
 if state.get('fingerprint') != current['fingerprint']:
- print(json.dumps({'state':'stale','diagnostic':'project revision or graph configuration changed','revision':current['revision']})); raise SystemExit
-print(json.dumps({'state':'fresh','revision':current['revision'],'files':len(current['files']),'graph_sha256':hashlib.sha256(open(graph_file,'rb').read()).hexdigest()}))
+    emit({'state':'stale','diagnostic':'project revision or graph configuration changed',**common})
+fresh={'state':'fresh','files':len(current['files']),**common}
+if digest=='1': fresh['graph_sha256']=hashlib.sha256(open(graph_file,'rb').read()).hexdigest()
+emit(fresh)
 PY
 }
+
+status() { status_json 1; }
 
 rebuild() {
   graphify_available || die "Graphify $GRAPHIFY_DIST is unavailable; request bootstrap install consent"
   mkdir -p "$GRAPH_DIR"
-  if ! mkdir "$GRAPH_DIR/.build.lock" 2>/dev/null; then json_error building "a rebuild is already running"; return 0; fi
-  local stage fp out
-  trap 'rm -rf -- "${stage:-}"; rmdir -- "$GRAPH_DIR/.build.lock" 2>/dev/null || true' EXIT
-  fp=$(fingerprint) || { write_state failed "cannot enumerate source scope"; die "cannot enumerate source scope"; }
-  write_state building "generation is building" "$(printf '%s' "$fp" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])')"
-  stage=$(mktemp -d "$GRAPH_DIR/.generation.XXXXXX")
-  if ! out=$(bounded_run "$BUILD_TIMEOUT" "$PYTHON" - "$PROJECT_ROOT" "$stage" "$fp" "$MAX_GRAPH_BYTES" <<'PY' 2>&1
+  acquire_build_lock || { json_error building "a rebuild is already running"; return 0; }
+  local fpf afterf fp out published
+  fpf="$(scratch_dir)/fingerprint.json"
+  fingerprint_to "$fpf" || { write_state failed "cannot enumerate source scope"; die "cannot enumerate source scope"; }
+  fp=$(json_file_field "$fpf" fingerprint)
+  write_state building "generation is building" "$fp"
+  STAGE_DIR=$(mktemp -d "$GRAPH_DIR/.generation.XXXXXX")
+  if ! out=$(bounded_run "$BUILD_TIMEOUT" "$PYTHON" - "$PROJECT_ROOT" "$STAGE_DIR" "$fpf" "$MAX_GRAPH_BYTES" "$GRAPHIFY_VERSION" <<'PY' 2>&1
 import hashlib,json,os,shutil,sys
 from pathlib import Path
 import graphify
-root, stage, fp_text, max_graph = sys.argv[1:]; fp=json.loads(fp_text); stage=Path(stage); source=stage/'source'; source.mkdir()
+root, stage, fp_file, max_graph, version = sys.argv[1:]
+fp=json.load(open(fp_file,encoding='utf-8')); stage=Path(stage); source=stage/'source'; source.mkdir()
 for rel in fp['files']:
     inp=Path(root,*rel.split('/')); dst=source.joinpath(*rel.split('/')); dst.parent.mkdir(parents=True,exist_ok=True); shutil.copyfile(inp,dst)
 sources=[source.joinpath(*p.split('/')) for p in fp['files']]
@@ -209,55 +329,110 @@ for n in raw.get('nodes',[]):
     if not isinstance(n,dict): raise RuntimeError('Graphify output has malformed nodes')
     p=n.get('source_file')
     if p and (not isinstance(p,str) or p.startswith('/') or '..' in Path(p).parts or p.replace('\\','/') not in fp['files']): raise RuntimeError('Graphify output cites an out-of-scope source')
-raw.setdefault('graph',{}).setdefault('firstmate',{}).update({'schema':1,'graphify_version':'0.9.28','semantic_backend':'disabled','fingerprint':fp['fingerprint'],'revision':fp['revision'],'source_files':len(fp['files'])})
+raw.setdefault('graph',{}).setdefault('firstmate',{}).update({'schema':1,'graphify_version':version,'semantic_backend':'disabled','fingerprint':fp['fingerprint'],'revision':fp['revision'],'source_files':len(fp['files'])})
 payload=json.dumps(raw,sort_keys=True,separators=(',',':')).encode()
 if not payload or len(payload)>int(max_graph): raise RuntimeError('Graphify output exceeds graph byte limit')
 out.write_bytes(payload)
-print(json.dumps({'nodes':graph.number_of_nodes(),'edges':graph.number_of_edges(),'sha256':hashlib.sha256(payload).hexdigest()}))
+# The measured result goes to a file, never to stdout: the caller captures
+# stdout and stderr together, so any third-party warning would corrupt it.
+(stage/'result.json').write_text(json.dumps({'nodes':graph.number_of_nodes(),'edges':graph.number_of_edges(),'sha256':hashlib.sha256(payload).hexdigest()},separators=(',',':')),encoding='utf-8')
 PY
 ); then
-    write_state failed "${out:0:1000}" "$(printf '%s' "$fp" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])')"
+    write_state failed "${out:0:1000}" "$fp"
     die "rebuild failed: ${out:0:1000}"
   fi
-  local after
-  after=$(fingerprint) || { write_state failed "cannot re-enumerate source scope after generation"; die "source scope changed during generation"; }
-  [ "$(printf '%s' "$after" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])')" = "$(printf '%s' "$fp" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])')" ] || {
-    write_state stale "source scope changed during generation" "$(printf '%s' "$after" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])')"
+  afterf="$(scratch_dir)/fingerprint.after.json"
+  fingerprint_to "$afterf" || { write_state failed "cannot re-enumerate source scope after generation"; die "source scope changed during generation"; }
+  [ "$(json_file_field "$afterf" fingerprint)" = "$fp" ] || {
+    write_state stale "source scope changed during generation" "$(json_file_field "$afterf" fingerprint)"
     die "source scope changed during generation; prior graph was preserved"
   }
-  "$PYTHON" - "$stage/graph.json" "$GRAPH_FILE" "$fp" "$out" <<'PY'
+  # Publication is the last step that can fail, so it records a failed outcome
+  # too; state must never stay at building while status can still be consulted.
+  if ! published=$("$PYTHON" - "$STAGE_DIR/graph.json" "$GRAPH_FILE" "$fpf" "$STAGE_DIR/result.json" <<'PY' 2>&1
 import json,os,sys
-stage,canonical,fp_text,out=sys.argv[1:]; fp=json.loads(fp_text); result=json.loads(out)
+stage,canonical,fp_file,result_file=sys.argv[1:]
+fp=json.load(open(fp_file,encoding='utf-8')); result=json.load(open(result_file,encoding='utf-8'))
 if not os.path.isfile(stage) or os.path.islink(stage): raise SystemExit('generation did not produce a regular graph')
-current=json.loads(sys.stdin.read() or '{}') if False else fp
 os.replace(stage,canonical)
 print(json.dumps({'state':'fresh','revision':fp['revision'],'fingerprint':fp['fingerprint'],**result},separators=(',',':')))
 PY
-  write_state fresh "" "$(printf '%s' "$fp" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])')"
+  ); then
+    write_state failed "publication failed: ${published:0:1000}" "$fp"
+    die "publication failed: ${published:0:1000}"
+  fi
+  write_state fresh "" "$fp"
+  printf '%s\n' "$published"
 }
 
 mark_stale() {
-  local reason=$1 current=''
+  local reason=$1 current='' fpf
   [ -d "$GRAPH_DIR" ] || return 0
-  current=$(fingerprint 2>/dev/null | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])' 2>/dev/null || true)
+  graphify_available || return 0
+  fpf="$(scratch_dir)/fingerprint.stale.json"
+  if fingerprint_to "$fpf" 2>/dev/null; then
+    current=$(json_file_field "$fpf" fingerprint 2>/dev/null || true)
+  fi
   write_state stale "${reason:0:1000}" "$current"
-  printf '{"state":"stale","diagnostic":"%s"}\n' "${reason//\"/\\\"}"
+  printf '{"state":"stale","diagnostic":"%s"}\n' "$(json_escape "${reason:0:1000}")"
 }
 
-query() {
-  local question=$1 st out
-  st=$(status)
-  if [ "$(printf '%s' "$st" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["state"])')" != fresh ]; then return 2; fi
+# The one lifecycle-owned invalidate-and-refresh path. Guarded fleet sync, the
+# local merge, and the PR merge all call this and nothing else, so the policy
+# lives in exactly one place: never install, never fail the caller, rebuild only
+# when the fingerprint actually moved, and leave the last valid graph untouched
+# (and never reported fresh) when a rebuild cannot run or fails.
+refresh() {
+  local reason=$1 st state current persisted
+  graphify_available || return 0
+  if [ "$(build_lock_state)" = live ]; then return 0; fi
+  st=$(status_json 0) || return 0
+  state=$(json_text_field "$st" state) || return 0
+  current=$(json_text_field "$st" fingerprint)
+  persisted=$(json_text_field "$st" state_fingerprint)
+  case "$state" in
+    building) return 0 ;;
+    missing) ;;
+    failed)
+      # The same input already failed; retry only once its fingerprint moves.
+      [ -n "$current" ] && [ "$current" != "$persisted" ] || return 0
+      ;;
+    *)
+      if [ -n "$current" ] && [ "$current" = "$persisted" ]; then
+        # Nothing the graph depends on changed, so an identical rebuild would be
+        # waste. Record the lifecycle event and keep the published generation.
+        mark_stale "$reason" >/dev/null 2>&1 || true
+        return 0
+      fi
+      ;;
+  esac
+  # A separate process so the rebuild owns its own lock, stage, and exit trap
+  # and can never abort the lifecycle operation that asked for the refresh.
+  "$SELF" rebuild "$PROJECT_NAME" >/dev/null 2>&1 || true
+  return 0
+}
+
+query() {  # <question> [already-computed status JSON]
+  local question=$1 st=${2:-} out
+  graphify_available || return 2
+  [ -n "$st" ] || st=$(status_json 0)
+  [ "$(json_text_field "$st" state)" = fresh ] || return 2
   out=$(cd "$GRAPH_DIR" && HOME="$GRAPH_DIR/home" XDG_CACHE_HOME="$GRAPH_DIR/cache" bounded_run "$QUERY_TIMEOUT" "$VENV/bin/graphify" query "$question" --graph "$GRAPH_FILE" --budget "$QUERY_TOKENS" 2>&1) || return 1
-  printf '%s' "$out" | head -c "$QUERY_BYTES"
-  printf '\n'
+  # head closes the pipe at the cap, which raises SIGPIPE under pipefail; the
+  # captured bytes are already complete, so the truncation is not a failure.
+  out=$(printf '%s' "$out" | head -c "$QUERY_BYTES") || true
+  printf '%s\n' "$out"
 }
 
 intake() {
-  local question=$1 st context provenance
-  st=$(status)
-  [ "$(printf '%s' "$st" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["state"])')" = fresh ] || return 0
-  context=$(query "$question") || return 0
+  local question=$1 st context provenance revision
+  graphify_available || return 0
+  st=$(status_json 0)
+  [ "$(json_text_field "$st" state)" = fresh ] || return 0
+  context=$(query "$question" "$st") || return 0
+  [ -n "$context" ] || return 0
+  revision=$(json_text_field "$st" revision)
+  [ -n "$revision" ] || revision=unknown
   provenance=$("$PYTHON" - "$GRAPH_FILE" <<'PY'
 import json,sys
 d=json.load(open(sys.argv[1],encoding='utf-8')); seen=[]
@@ -267,8 +442,7 @@ for n in d.get('nodes',[]):
 print(', '.join(seen[:8]))
 PY
 )
-  [ -n "$context" ] || return 0
-  printf '\n## Bounded Graphify context\n%s\n\nProvenance: revision %s; cited source files: %s\n' "$context" "$(printf '%s' "$st" | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin).get("revision","unknown"))')" "$provenance"
+  printf '\n## Bounded Graphify context\n%s\n\nProvenance: revision %s; cited source files: %s\n' "$context" "$revision" "$provenance"
 }
 
 cleanup() {
@@ -283,11 +457,12 @@ cmd=$1; shift
 case "$cmd" in
   available) [ $# -eq 0 ] || die 'available takes no arguments'; graphify_available ;;
   install) [ $# -eq 0 ] || die 'install takes no arguments'; install ;;
-  status|rebuild|mark-stale|cleanup|query|intake)
+  status|rebuild|refresh|mark-stale|cleanup|query|intake)
     [ $# -ge 1 ] || die "$cmd requires a registered project name"; resolve_project "$1"; shift
     case "$cmd" in
       status) [ $# -eq 0 ] || die 'status takes no extra arguments'; status ;;
       rebuild) [ $# -eq 0 ] || die 'rebuild takes no extra arguments'; rebuild ;;
+      refresh) [ $# -eq 1 ] || die 'refresh requires one reason'; refresh "$1" ;;
       mark-stale) [ $# -eq 1 ] || die 'mark-stale requires one reason'; mark_stale "$1" ;;
       cleanup) [ $# -eq 0 ] || die 'cleanup takes no extra arguments'; cleanup ;;
       query|intake) [ $# -eq 1 ] || die "$cmd requires one bounded question"; [ ${#1} -le 1000 ] || die 'question exceeds 1000 characters'; "$cmd" "$1" ;;

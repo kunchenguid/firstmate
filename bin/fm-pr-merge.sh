@@ -83,9 +83,11 @@ fi
 
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
 # A successful remote merge changes the project's next guarded refresh input.
-# Keep the last valid local graph available but prevent it from being injected
-# into a later brief as though it still represented the merged project.
+# The single managed-graph lifecycle owner keeps the last valid local graph but
+# stops it being injected into a later brief as though it already represented
+# the merged project; the local clone only moves at the next guarded sync, so it
+# rebuilds there rather than here.
 PROJ=$(sed -n 's/^project=//p' "$META" | head -n 1)
 if [ -n "$PROJ" ]; then
-  "$FM_ROOT/bin/fm-graphify.sh" mark-stale "$(basename "$PROJ")" "project PR merged: $URL" >/dev/null 2>&1 || true
+  "$FM_ROOT/bin/fm-graphify.sh" refresh "$(basename "$PROJ")" "project PR merged: $URL" >/dev/null 2>&1 || true
 fi

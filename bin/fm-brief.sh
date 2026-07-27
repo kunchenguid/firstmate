@@ -225,10 +225,17 @@ HERDR_SECTION=$(printf '%s\n' \
 'Never bypass the helper, even for a read-only lifecycle probe or cleanup after failure.' \
 'The captain fleet uses the running `default` session.')
 else
-HERDR_SECTION=$(cat <<'EOF'
+# The gate never interprets task text either way; only its stated basis differs,
+# because an inlined FM_BRIEF_TASK leaves no {TASK} placeholder to refer to.
+if [ "$TASK_BODY" = "{TASK}" ]; then
+  HERDR_GATE_BASIS="this scaffold cannot inspect the task text that replaces \`{TASK}\` later"
+else
+  HERDR_GATE_BASIS='this scaffold does not interpret the task text above'
+fi
+HERDR_SECTION=$(cat <<EOF
 # Herdr lifecycle declaration - NOT ENABLED
-**HARD SAFETY GATE:** this scaffold cannot inspect the task text that replaces `{TASK}` later.
-If the task will start, stop, delete, restart, profile, or otherwise drive Herdr lifecycle behavior, stop and regenerate the brief with `--herdr-lab` before dispatch.
+**HARD SAFETY GATE:** $HERDR_GATE_BASIS.
+If the task will start, stop, delete, restart, profile, or otherwise drive Herdr lifecycle behavior, stop and regenerate the brief with \`--herdr-lab\` before dispatch.
 Do not add Herdr lifecycle commands to this unguarded brief by hand.
 EOF
 )
@@ -278,7 +285,11 @@ Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-l
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
-echo "scaffolded: $BRIEF (scout; replace {TASK})"
+if [ "$TASK_BODY" = "{TASK}" ]; then
+  echo "scaffolded: $BRIEF (scout; replace {TASK})"
+else
+  echo "scaffolded: $BRIEF (scout)"
+fi
 exit 0
 fi
 
@@ -392,4 +403,8 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+if [ "$TASK_BODY" = "{TASK}" ]; then
+  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+else
+  echo "scaffolded: $BRIEF (ship, mode=$MODE)"
+fi

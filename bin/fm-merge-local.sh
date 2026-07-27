@@ -66,5 +66,8 @@ before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 PROJECT_NAME=$(basename "$PROJ")
-"$FM_ROOT/bin/fm-graphify.sh" mark-stale "$PROJECT_NAME" "local project merge $before..$after" >/dev/null 2>&1 || true
+# The merge just moved this clone's default branch, so hand the change to the
+# single managed-graph lifecycle owner. It rebuilds only because the revision
+# really moved, never installs Graphify, and never fails this merge.
+"$FM_ROOT/bin/fm-graphify.sh" refresh "$PROJECT_NAME" "local project merge $before..$after" >/dev/null 2>&1 || true
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"

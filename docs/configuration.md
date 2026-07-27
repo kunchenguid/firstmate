@@ -51,11 +51,14 @@ The file format is unchanged in both modes; tasks-axi and manual edits produce t
 
 Bootstrap requires the pinned local `graphifyy==0.9.28` environment and reports `MISSING: graphify` with the consent-gated installer when it is absent or incompatible.
 The installer creates `data/graphify/venv` under the effective `FM_HOME`, so an ambient `graphify` command is never trusted.
-`bin/fm-graphify.sh status <project>`, `rebuild <project>`, `query <project> <question>`, `mark-stale <project> <reason>`, and `cleanup <project>` are the supported management interface.
+`bin/fm-graphify.sh status <project>`, `rebuild <project>`, `refresh <project> <reason>`, `query <project> <question>`, `mark-stale <project> <reason>`, and `cleanup <project>` are the supported management interface.
 Every command accepts a registered project name only, resolves the clone from `data/projects.md`, and stores derived output outside the clone under `data/graphify/projects/<project>/`.
 Rebuilds are local structural extraction only, exclude secret and dependency material, ignore symlinks, build into a private generation, and preserve the previous published graph if validation or publication fails.
-Freshness fingerprints the selected files, project Git revision, Graphify pin, and managed limits.
-Guarded fleet refreshes and successful merges mark the affected generation stale, while a project-removal owner must call `cleanup` after its guarded clone removal.
+Freshness fingerprints the selected files, project Git revision, Graphify pin, and managed limits, and a graph is reported fresh only after a generation was published and recorded, so an interrupted rebuild reports stale rather than fresh.
+`refresh` is the single lifecycle owner of that state and the only call the guarded fleet sync, the local merge, and the PR merge make: it rebuilds only when the fingerprint actually moved, serializes and deduplicates through the generation lock, never installs Graphify without the bootstrap consent step, never fails the lifecycle operation that called it, and leaves the last valid graph byte-for-byte intact when a rebuild cannot run or fails.
+Fleet sync detaches its `refresh` because its bootstrap budget is tens of seconds while a generation may take up to `FM_GRAPHIFY_BUILD_TIMEOUT`; a project-removal owner must call `cleanup` after its guarded clone removal.
+A generation lock whose recorded holder process is gone is broken and retaken automatically, so a hard kill, OOM kill, or reboot during a rebuild needs no operator recovery step.
+Operators normally only run `rebuild` by hand to build a first graph for a project that has not been synced or merged yet.
 Use `FM_BRIEF_TASK='<task text>' bin/fm-brief.sh <id> <project>` when composing a brief to add fresh Graphify context automatically.
 The context renderer is bounded and provenance-rich, and silently omits unavailable, failed, or stale graphs so dispatch continues normally.
 No Graphify semantic backend, cloud model, or external source is enabled.
