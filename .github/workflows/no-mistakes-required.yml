@@ -33,7 +33,9 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -eu
-          marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+          # The pipeline writes the '## Pipeline' lead-in in the author's
+          # language, so only the link itself is localization-invariant.
+          marker='[git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
           if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
             echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
             exit 0
@@ -45,7 +47,7 @@ jobs:
             echo "That pipeline runs the required review/test/lint/CI steps and writes a"
             echo "deterministic '## Pipeline' section into the PR body containing:"
             echo
-            echo "    $marker"
+            echo "    Updates from $marker"
             echo
             echo "See CONTRIBUTING.md for setup and the full workflow."
             echo

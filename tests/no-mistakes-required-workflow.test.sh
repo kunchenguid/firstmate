@@ -7,7 +7,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 WORKFLOW="$ROOT/.github/workflows/no-mistakes-required.yml"
-MARKER='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+MARKER='[git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
 
 extract_signature_script() {
   awk '
@@ -43,6 +43,12 @@ test_signature_sequence_at_fixed_head() {
   fi
   signature_result "Synthetic signed edit\n$MARKER" || fail "signed edited event must succeed"
   pass "fixed-head signed opened, unsigned edited, signed edited yields 0/1/0"
+}
+
+test_signature_survives_localized_lead_in() {
+  signature_result "## Pipeline\nUpdates from $MARKER" || fail "English lead-in must succeed"
+  signature_result "## Pipeline\nAtualizações de $MARKER" || fail "localized lead-in must succeed"
+  pass "signature is recognized regardless of the lead-in language"
 }
 
 test_event_identity_contract() {
@@ -91,6 +97,7 @@ test_security_and_signature_contract_is_preserved() {
 }
 
 test_signature_sequence_at_fixed_head
+test_signature_survives_localized_lead_in
 test_event_identity_contract
 test_run_names_are_ordered_and_unique
 test_security_and_signature_contract_is_preserved
