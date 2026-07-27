@@ -16,7 +16,7 @@ This skill owns the stage ordering and the per-stage contract only.
 It points at existing machinery for every mechanic - `bin/fm-brief.sh` for briefs, `bin/fm-spawn.sh` for launch, `lavish-axi` for the review surface, the backlog verbs for tracking, and AGENTS.md section 8 for supervision - and never restates lifecycle mechanics.
 
 The plan gate is a hard rule and it is universal: no implementation crewmate is ever spawned, for any intake shape, before the captain approves a plan on record.
-Research reaches the same gate; it just ends at the approved report rather than a PR.
+Research reaches the same gate; its approved plan governs a scout whose report is the deliverable, never a PR.
 
 ## Stage 1 - Intake and classify
 
@@ -24,7 +24,7 @@ Resolve the project exactly as AGENTS.md section 7 intake requires; route in-sco
 Classify the intake shape so the ending is unambiguous:
 
 - **issue**, **bug**, and **feature** are implementation work and end at a merged PR, or at a clean ready branch the captain approves for a repo with no remote.
-- **research** is a knowledge deliverable and ends at a report in `data/<id>/report.md`, never a PR.
+- **research** is a knowledge deliverable and ends at a report in `data/<scout-id>/report.md`, never a PR.
 
 When the captain asks for the best issue to work on in a named repo, list the repo's open issues with `gh-axi issue list` and rank them:
 
@@ -52,7 +52,12 @@ Spawn a planner crewmate that reads the repo and drafts the plan.
 Planners only read code, so the same-repo serialization rule in stage 4 does not bind them: planners are uncapped, and several plans drafted for one repo at once is what keeps the review queue full while code work serializes.
 Run planning on the dispatch profile that matches planning and scout work, per AGENTS.md section 4 and the dispatch profiles.
 
-The plan is one live artifact per task at `data/<id>/plan.html`, presented for review with `lavish-axi` (load the `lavish` skill for its mechanics).
+A planner is a scout, scaffolded with `bin/fm-brief.sh <planner-id> <repo> --scout`.
+`--plan` applies only to ship briefs, so a planner or scout brief names any plan path in its task text instead of passing the flag.
+The generated scout definition of done is unchanged, so brief the planner for both artifacts: the plan at `data/<planner-id>/plan.html`, and a `data/<planner-id>/report.md` that stands alone - what it read, what it recommends, and the plan's path.
+Without that report, `bin/fm-teardown.sh` refuses the planner's teardown and the decision-hold completion gate never passes.
+
+The plan is one live artifact per task at `data/<planner-id>/plan.html`, presented for review with `lavish-axi` (load the `lavish` skill for its mechanics).
 It is overwritten in place across revisions, with a rev counter incremented on each revision; no revision history is kept.
 One task per artifact, at full depth - never fold multiple work items into one plan.
 
@@ -77,18 +82,28 @@ On the captain's verdict:
 No implementation crewmate runs before the captain approves the plan; this gate is universal and has no exception for any intake shape.
 Once approved, branch on the deliverable:
 
-- **research** - the approved plan or report was the deliverable; deliver it, no PR, done.
+- **research** - dispatch exactly one scout crewmate to execute the approved plan; its report is the deliverable and there is no PR.
+  1. Scaffold the brief with `bin/fm-brief.sh <scout-id> <repo> --scout`, then replace `{TASK}` with the question, the approved plan's absolute path, the acceptance criteria, and context per AGENTS.md section 11.
+  2. Spawn through `bin/fm-spawn.sh` on the planning and scout dispatch profile, after the profile and backend checks in AGENTS.md section 4.
+  3. Record the work item on the backlog and hand off to normal supervision under AGENTS.md section 8.
+  Scouts read only, so they neither take the repo's implementation slot nor wait behind one.
+  The scout writes `data/<scout-id>/report.md`; deliver that report to the captain and stop, because research never enters stage 5.
 - **implementation** - check the repo's implementation slot before dispatching.
 
 Two implementation tasks never run in the same repo at once.
-That is the one mechanical rule, not a judgement call: it prevents real branch and merge conflicts, because freeing the slot only at merge means every task starts from a base containing everything before it.
-Everything else - how many repos run in parallel, research alongside code, urgency - stays firstmate's contextual call.
+That is the mechanical default, not a judgement call: it prevents real branch and merge conflicts, because freeing the slot only at merge means every task starts from a base containing everything before it.
+The single exception is a task the captain has explicitly flagged P0, which may dispatch into a busy repo concurrently on the captain's stated acceptance of the merge-conflict and rebase cost; record that acceptance on the work item.
+Firstmate never opens that exception from its own read of urgency, so absent an explicit P0 flag the default stands.
+Everything else - how many repos run in parallel, research alongside code - stays firstmate's contextual call.
 
 - **Slot busy** - the task is held with its approval already banked, so it is not re-approved when it starts.
   Every hold states its reason naming the blocking task, in the shape `held - waiting on <repo> #<n> to merge`.
+  Record the hold durably before moving on, with `tasks-axi hold <ship-id> --reason "held - waiting on <repo> #<n> to merge" --kind captain`, so it survives a restart and the post-teardown queue pass finds it.
+  No hold sits silently: once it has been held 24 hours, surface it to the captain with the blocking PR's full URL and ask for a merge, a re-scope, or an explicit P0 override, then re-set that bound.
 - **Slot free** - dispatch exactly one implementation crewmate:
-  1. Write the approved plan to `data/<id>/plan.html` under the active home.
-  2. Scaffold the brief with `bin/fm-brief.sh <id> <repo> --plan data/<id>/plan.html`, then replace `{TASK}` with the task description, acceptance criteria, and context per AGENTS.md section 11.
+  1. Copy the approved plan from the planner's `data/<planner-id>/plan.html` to the ship task's `data/<ship-id>/plan.html` under the active home, creating that directory first if it does not exist.
+     `fm-brief.sh` fails hard with `--plan file not found` when the copy is skipped, so it happens before the brief is scaffolded.
+  2. Scaffold the brief with `bin/fm-brief.sh <ship-id> <repo> --plan data/<ship-id>/plan.html`, then replace `{TASK}` with the task description, acceptance criteria, and context per AGENTS.md section 11.
      fm-brief resolves a relative `--plan` path against the current working directory, so pass the plan's absolute path when invoking from any directory other than the active firstmate home.
      The `--plan` block already carries the binding-plan declaration and the deviation threshold, so do not restate them in the task text.
      If the task touches firstmate's own shared tracked material, add the `firstmate-coding-guidelines` load instruction by hand as section 11 requires.
@@ -96,9 +111,11 @@ Everything else - how many repos run in parallel, research alongside code, urgen
   4. Record the work item on the backlog and hand off to normal supervision under AGENTS.md section 8.
 
 When the blocking PR merges, the repo's slot frees; a held task auto-starts from its banked approval and the captain is told after, not asked again.
+Re-validate the banked plan against the new base before that auto-start: if the merged work touched the plan's files or invalidated its success criteria, escalate it as a plan deviation for re-approval rather than starting silently on a stale plan.
 
 ## Stage 5 - Ship
 
+Stage 5 is implementation-only; a research task already ended at its report in stage 4 and never reaches here.
 The crewmate follows the project's selected delivery path to a single PR; there is one PR per work item, opened only after the work is done.
 A repo with no remote ends instead at a clean ready branch the captain approves; the plan gate, the grill, and the trust rules all still apply, only the PR ending differs.
 

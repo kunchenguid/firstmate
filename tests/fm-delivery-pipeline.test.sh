@@ -68,11 +68,57 @@ test_same_repo_serialization() {
 }
 
 test_research_produces_no_pr() {
-  assert_grep 'ends at a report in `data/<id>/report.md`, never a PR.' "$SKILL" \
+  assert_grep 'ends at a report in `data/<scout-id>/report.md`, never a PR.' "$SKILL" \
     "delivery-pipeline no longer ends research at a report with no PR"
-  assert_grep '**research** - the approved plan or report was the deliverable; deliver it, no PR, done.' "$SKILL" \
+  assert_grep '**research** - dispatch exactly one scout crewmate to execute the approved plan; its report is the deliverable and there is no PR.' "$SKILL" \
     "delivery-pipeline stage 4 lost the research-no-PR branch"
-  pass "research ends at a report, never a PR"
+  assert_grep 'bin/fm-brief.sh <scout-id> <repo> --scout' "$SKILL" \
+    "delivery-pipeline stage 4 never dispatches the scout that writes the research report"
+  assert_grep 'The scout writes `data/<scout-id>/report.md`; deliver that report to the captain and stop, because research never enters stage 5.' "$SKILL" \
+    "delivery-pipeline research path lost its report deliverable"
+  assert_grep 'Stage 5 is implementation-only; a research task already ended at its report in stage 4 and never reaches here.' "$SKILL" \
+    "delivery-pipeline stage 5 no longer excludes research"
+  pass "research dispatches a scout and ends at its report, never a PR"
+}
+
+test_planner_satisfies_scout_deliverable() {
+  assert_grep 'A planner is a scout, scaffolded with `bin/fm-brief.sh <planner-id> <repo> --scout`.' "$SKILL" \
+    "delivery-pipeline no longer states the planner's brief shape"
+  assert_grep '`--plan` applies only to ship briefs' "$SKILL" \
+    "delivery-pipeline lost the ship-only --plan constraint"
+  assert_grep 'and a `data/<planner-id>/report.md` that stands alone' "$SKILL" \
+    "planner brief no longer satisfies the scout report deliverable"
+  pass "planner is briefed as a scout that leaves the report teardown requires"
+}
+
+test_plan_is_copied_to_the_ship_task() {
+  assert_grep "Copy the approved plan from the planner's \`data/<planner-id>/plan.html\` to the ship task's \`data/<ship-id>/plan.html\`" "$SKILL" \
+    "delivery-pipeline no longer copies the approved plan into the ship task's data dir"
+  assert_grep 'bin/fm-brief.sh <ship-id> <repo> --plan data/<ship-id>/plan.html' "$SKILL" \
+    "delivery-pipeline lost the disambiguated ship-task brief invocation"
+  assert_no_grep 'data/<id>/plan.html' "$SKILL" \
+    "delivery-pipeline still uses the ambiguous <id> placeholder for the plan artifact"
+  pass "planner id and ship id are distinct and the plan is copied before briefing"
+}
+
+test_hold_is_durable_and_bounded() {
+  assert_grep 'tasks-axi hold <ship-id> --reason "held - waiting on <repo> #<n> to merge" --kind captain' "$SKILL" \
+    "a held task is not recorded durably on the backlog"
+  assert_grep 'once it has been held 24 hours, surface it to the captain' "$SKILL" \
+    "delivery-pipeline lost the queue-age bound on holds"
+  assert_grep 'escalate it as a plan deviation for re-approval rather than starting silently on a stale plan.' "$SKILL" \
+    "delivery-pipeline lost the banked-plan re-validation before auto-start"
+  pass "holds are durable, age-bounded, and re-validated before auto-start"
+}
+
+test_p0_serialization_override() {
+  assert_grep 'The single exception is a task the captain has explicitly flagged P0' "$SKILL" \
+    "delivery-pipeline lost the explicit P0 carve-out to the same-repo cap"
+  assert_grep 'Firstmate never opens that exception from its own read of urgency, so absent an explicit P0 flag the default stands.' "$SKILL" \
+    "delivery-pipeline lost the rule that only the captain opens the P0 carve-out"
+  assert_no_grep 'research alongside code, urgency - stays' "$SKILL" \
+    "delivery-pipeline still contradicts itself by leaving urgency to firstmate's judgement"
+  pass "the same-repo default and its P0 carve-out read consistently"
 }
 
 test_planners_uncapped() {
@@ -114,6 +160,10 @@ test_five_stages_present_and_ordered
 test_universal_plan_gate
 test_same_repo_serialization
 test_research_produces_no_pr
+test_planner_satisfies_scout_deliverable
+test_plan_is_copied_to_the_ship_task
+test_hold_is_durable_and_bounded
+test_p0_serialization_override
 test_planners_uncapped
 test_issue_workflow_ranking_carried_verbatim
 test_deviation_threshold_carried_verbatim
