@@ -68,9 +68,118 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_grep "**Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`" "$brief" \
+      "$id: brief missing the worktree-isolation assertion"
+    assert_grep "blocked: launched in primary checkout, not an isolated worktree" "$brief" \
+      "$id: brief missing the primary-checkout block status"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+}
+
+test_cost_discipline_rules_render_for_ship_and_scout() {
+  local home item kind id proj brief
+  home="$TMP_ROOT/cost-discipline-home"
+  write_registry "$home"
+
+  for item in \
+    "no-mistakes:brief-cost-nm:no-registry-proj" \
+    "direct-PR:brief-cost-direct:direct-proj" \
+    "local-only:brief-cost-local:local-proj" \
+    "scout:brief-cost-scout:scout-proj"; do
+    kind=${item%%:*}
+    id=${item#*:}
+    id=${id%%:*}
+    proj=${item##*:}
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "8. Cost discipline: cap tool output." "$brief" \
+      "$kind brief missing cost discipline rule"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep 'Aggregate with `rg -c` / `jq` counts, and pipe long logs through `tail -c 4000` or `cut -c1-200` before reading them.' "$brief" \
+      "$kind brief missing capped aggregation guidance"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep 'On codex, set a small shell output budget for risky commands with `// @exec: {"max_output_tokens": 2000}` as the first line of the shell tool call.' "$brief" \
+      "$kind brief missing codex max output budget guidance"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep 'Never `tail` or `cat` rollout or agent-session JSONL files.' "$brief" \
+      "$kind brief missing rollout JSONL guard"
+    assert_grep "Waiting is runtime-specific." "$brief" \
+      "$kind brief missing runtime-specific wait framing"
+    assert_grep "On codex, Pi, and other 30s-clamped runtimes, do not assemble a long wait out of repeated short sleeps." "$brief" \
+      "$kind brief missing 30s-clamped runtime wait guidance"
+    assert_grep "Redirect long-running work to a log file, let it run, and check the log with capped reads." "$brief" \
+      "$kind brief missing log-backed wait guidance"
+    assert_grep "On Claude Code and runtimes with true long blocking calls or background-completion wakes, use one long blocking call or the background wake instead of repeated empty polls." "$brief" \
+      "$kind brief missing true-long-wait runtime guidance"
+    if grep -Ei 'codex.*(one long blocking call|background wake)' "$brief" >/dev/null; then
+      fail "$kind brief told codex to use an unsupported long wait path"
+    fi
+  done
+  pass "fm-brief.sh: ship and scout briefs render runtime-specific cost discipline"
+}
+
+test_no_mistakes_validation_keeps_cost_discipline() {
+  local home id brief
+  home="$TMP_ROOT/validation-cost-home"
+  mkdir -p "$home/data"
+  id="brief-validation-cost"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep 'While driving validation, keep the cost-discipline rules active' "$brief" \
+    "no-mistakes DOD missing validation cost reminder"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_grep 'use the codex `// @exec: {"max_output_tokens": 2000}` pragma for shell output that could be long' "$brief" \
+    "no-mistakes DOD missing codex output budget reminder"
+  assert_grep "use the runtime-specific wait pattern instead of repeated empty polls" "$brief" \
+    "no-mistakes DOD missing wait-poll cost reminder"
+  pass "fm-brief.sh: no-mistakes validation DOD keeps cost discipline active"
+}
+
+test_pr_description_contract_renders_only_for_pr_modes() {
+  local home item kind id proj brief
+  home="$TMP_ROOT/pr-description-home"
+  write_registry "$home"
+
+  for item in \
+    "no-mistakes:brief-prdesc-nm:no-registry-proj" \
+    "direct-PR:brief-prdesc-direct:direct-proj" \
+    "local-only:brief-prdesc-local:local-proj" \
+    "scout:brief-prdesc-scout:scout-proj"; do
+    kind=${item%%:*}
+    id=${item#*:}
+    id=${id%%:*}
+    proj=${item##*:}
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    case "$kind" in
+      no-mistakes|direct-PR)
+        assert_grep "A PR description must be whole and self-contained for a reader with no prior context." "$brief" \
+          "$kind brief missing whole PR description contract"
+        assert_grep "It covers what the change does, why, how it was verified, and what it explicitly does not cover." "$brief" \
+          "$kind brief missing PR description content requirements"
+        assert_grep 'Do not write it as a delta against a previous revision of itself, such as "addressed the review comments" or "as discussed above".' "$brief" \
+          "$kind brief missing no-delta PR description rule"
+        assert_grep "Do not include task-process narration or firstmate task ids." "$brief" \
+          "$kind brief missing PR process-narration guard"
+        assert_grep "When the PR grows in scope, rewrite the description rather than appending to it." "$brief" \
+          "$kind brief missing PR description rewrite rule"
+        ;;
+      *)
+        assert_no_grep "A PR description must be whole and self-contained for a reader with no prior context." "$brief" \
+          "$kind brief should not carry PR description guidance"
+        ;;
+    esac
+  done
+  pass "fm-brief.sh: whole PR description contract renders only for PR modes"
 }
 
 test_faster_paths_use_configured_authority_without_stacked_review() {
@@ -385,6 +494,9 @@ test_scout_and_secondmate_scaffold() {
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_cost_discipline_rules_render_for_ship_and_scout
+test_no_mistakes_validation_keeps_cost_discipline
+test_pr_description_contract_renders_only_for_pr_modes
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording

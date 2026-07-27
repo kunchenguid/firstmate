@@ -226,6 +226,34 @@ EOF
 )
 fi
 
+COST_DISCIPLINE_RULE=$(cat <<'EOF'
+8. Cost discipline: cap tool output.
+   Do not dump large command output into context.
+   Aggregate with `rg -c` / `jq` counts, and pipe long logs through `tail -c 4000` or `cut -c1-200` before reading them.
+   On codex, set a small shell output budget for risky commands with `// @exec: {"max_output_tokens": 2000}` as the first line of the shell tool call.
+   Never `tail` or `cat` rollout or agent-session JSONL files.
+   Those files carry very large encrypted payload fields and can blow out context in one call.
+   Waiting is runtime-specific.
+   On codex, Pi, and other 30s-clamped runtimes, do not assemble a long wait out of repeated short sleeps.
+   Redirect long-running work to a log file, let it run, and check the log with capped reads.
+   On Claude Code and runtimes with true long blocking calls or background-completion wakes, use one long blocking call or the background wake instead of repeated empty polls.
+EOF
+)
+
+PR_DESCRIPTION_CONTRACT=$(cat <<'EOF'
+A PR description must be whole and self-contained for a reader with no prior context.
+It covers what the change does, why, how it was verified, and what it explicitly does not cover.
+Do not write it as a delta against a previous revision of itself, such as "addressed the review comments" or "as discussed above".
+Do not include task-process narration or firstmate task ids.
+When the PR grows in scope, rewrite the description rather than appending to it.
+EOF
+)
+
+VALIDATION_COST_REMINDER=$(cat <<'EOF'
+While driving validation, keep the cost-discipline rules active: cap long output, use the codex `// @exec: {"max_output_tokens": 2000}` pragma for shell output that could be long, never read rollout or agent-session JSONL files directly, and use the runtime-specific wait pattern instead of repeated empty polls.
+EOF
+)
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -262,6 +290,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$COST_DISCIPLINE_RULE
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -290,6 +319,7 @@ case "$MODE" in
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+$PR_DESCRIPTION_CONTRACT
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
 )
@@ -320,14 +350,16 @@ Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
+$VALIDATION_COST_REMINDER
 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
   Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
+- Avoid \`--yes\`: it would silently bypass firstmate authority checks and any required captain escalation.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+$PR_DESCRIPTION_CONTRACT
 EOF
 )
     ;;
@@ -374,6 +406,7 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$COST_DISCIPLINE_RULE
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
