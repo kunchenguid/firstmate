@@ -277,6 +277,40 @@ SH
   pass "GNU stat file reads select -c without BSD filesystem-report pollution"
 }
 
+test_darwin_stat_bypasses_path_shadow() {
+  local home mate fakebin canonical stat_log stderr_log
+  home=$(make_home darwin-stat-parent)
+  mate="$TMP_ROOT/darwin-stat-home"
+  write_domain_alpha_fixture "$home" "$mate"
+  fakebin=$(make_fakebin "$home")
+  stat_log="$home/stat.log"
+  stderr_log="$home/stderr.log"
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'Darwin\n'
+SH
+  cat > "$fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STAT_LOG"
+printf '  File: "%s"\nBlocks: Total: 1\n' "${3:-${2:-unknown}}"
+SH
+  chmod +x "$fakebin/uname" "$fakebin/stat"
+  if ! canonical=$(PATH="$fakebin:$PATH" STAT_LOG="$stat_log" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_NOW_EPOCH=1783792800 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json 2>"$stderr_log"); then
+    fail "Darwin snapshot did not bypass the PATH stat shadow: $(cat "$stderr_log")"
+  fi
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "domain-alpha")
+    | .provenance.selected == "structured-home"
+      and .freshness.status == "fresh"
+      and .parent_event.activity_scan.available == true
+  ' >/dev/null || fail "Darwin stat fixture lost readable secondmate data: $canonical"
+  [ ! -s "$stat_log" ] || fail "Darwin snapshot invoked PATH stat instead of /usr/bin/stat: $(cat "$stat_log")"
+  assert_not_contains "$(cat "$stderr_log")" "unbound variable" "Darwin stat emitted an arithmetic expansion failure"
+  pass "Darwin stat reads bypass PATH shadows and preserve secondmate data"
+}
+
 test_parent_activity_evidence_is_bounded_and_disclosed() {
   local home mate fakebin canonical json i
   home=$(make_home bounded-parent-activity)
@@ -1890,6 +1924,7 @@ test_chat_contract_four_sections() {
   pass "the /bearings skill states the four-section chat contract in order, with empty-states and the At Anchor exclusion"
 }
 
+test_darwin_stat_bypasses_path_shadow
 test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed
