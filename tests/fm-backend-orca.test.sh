@@ -725,8 +725,13 @@ test_peek_send_and_crew_state_route_through_orca_meta() {
     "peek/crew-state did not read the recorded Orca terminal"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f'"fm-$id" \
     "crew-state should not read the stable Orca alias as a terminal handle"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-io'$'\x1f''--text'$'\x1f''hello orca'$'\x1f''--json' \
+  # Body match, not whole-argument match: a metadata-routed scout steer also carries
+  # the firstmate-steer mark (bin/fm-send.sh). This case is about the Orca route, not
+  # the marker, which is pinned in tests/fm-send-secondmate-marker.test.sh.
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-io'$'\x1f''--text'$'\x1f' \
     "send did not type through the recorded Orca terminal"
+  assert_contains "$(cat "$LOG")" $'hello orca\x1f''--json' \
+    "send did not type the steer body through the recorded Orca terminal"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-io'$'\x1f''--text'$'\x1f\x1f''--enter'$'\x1f''--json' \
     "send did not submit Enter through the recorded Orca terminal"
   pass "fm-peek/fm-send/fm-crew-state route through backend=orca metadata"
