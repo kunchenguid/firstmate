@@ -453,8 +453,8 @@ test_backend_validate_refuses_unknown() {
   fm_backend_validate tmux 2>/dev/null || fail "fm_backend_validate should accept tmux"
   fm_backend_validate orca 2>/dev/null || fail "fm_backend_validate should accept orca"
   local out
-  # bogus names a backend with no adapter at all; tmux, herdr, zellij, orca,
-  # and cmux are all known adapters and spawn-supported.
+  # bogus names a backend with no adapter at all. The existing lifecycle
+  # adapters are known and spawn-supported; devenv is known but non-spawn.
   out=$(fm_backend_validate bogus 2>&1) && fail "fm_backend_validate should refuse bogus (no such adapter)"
   assert_contains "$out" "unknown backend 'bogus'" "fm_backend_validate did not name the rejected backend"
   out=$(fm_backend_validate codex-app 2>&1) && fail "fm_backend_validate should refuse codex-app"
@@ -462,6 +462,52 @@ test_backend_validate_refuses_unknown() {
   out=$(fm_backend_validate "tmux herdr" 2>&1) && fail "fm_backend_validate should refuse a multi-token backend name"
   assert_contains "$out" "unknown backend 'tmux herdr'" "fm_backend_validate accepted a multi-token backend name"
   pass "fm_backend_validate: implemented adapters accepted, unknown and blocked codex-app backends refused loudly"
+}
+
+test_devenv_is_known_non_spawn_backend() {
+  local out
+  fm_backend_validate devenv 2>/dev/null \
+    || fail "fm_backend_validate should accept the devenv control backend"
+  [ "$(fm_backend_required_tools devenv 2>/dev/null)" = "ssh jq" ] \
+    || fail "devenv should require exactly ssh and jq"
+  fm_backend_list_contains "$FM_BACKEND_KNOWN" devenv \
+    || fail "devenv should be present in FM_BACKEND_KNOWN"
+  ! fm_backend_list_contains "$FM_BACKEND_SPAWN" devenv \
+    || fail "devenv must remain absent from FM_BACKEND_SPAWN until resident execution is installed"
+  out=$(fm_backend_validate_spawn devenv 2>&1) \
+    && fail "fm_backend_validate_spawn should refuse the control-plane-only devenv backend"
+  assert_contains "$out" "backend 'devenv' does not support task spawning yet" \
+    "devenv spawn refusal did not explain the missing capability"
+  bash -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source devenv && declare -F fm_backend_devenv_request >/dev/null" 2>/dev/null \
+    || fail "bash: fm_backend_source devenv should load the fixed-command SSH adapter"
+  if command -v zsh >/dev/null 2>&1; then
+    zsh -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source devenv && whence -w fm_backend_devenv_request >/dev/null" 2>/dev/null \
+      || fail "zsh: fm_backend_source devenv should load the fixed-command SSH adapter"
+  fi
+  pass "devenv is known, sourceable, requires ssh + jq, and cannot enter generic spawn dispatch"
+}
+
+test_devenv_orchestration_skill_contract() {
+  local skill="$ROOT/.agents/skills/devenv-orchestration/SKILL.md" trigger_count
+  [ -f "$skill" ] || fail "devenv-orchestration skill is missing"
+  [ "$(sed -n '1p' "$skill")" = "---" ] || fail "devenv-orchestration skill is missing YAML frontmatter"
+  assert_grep 'name: devenv-orchestration' "$skill" "devenv-orchestration skill has the wrong name"
+  assert_grep 'description: Use when ' "$skill" "devenv-orchestration skill needs a trigger-only model-facing description"
+  assert_grep 'user-invocable: false' "$skill" "devenv-orchestration skill must be agent-only"
+  assert_grep '  internal: true' "$skill" "devenv-orchestration skill must be internal"
+  assert_no_grep 'disable-model-invocation:' "$skill" "devenv-orchestration must remain model-invoked"
+  assert_grep 'reviews if safe' "$skill" "skill must distinguish a soft environment suggestion from a strict preference"
+  assert_grep 'priority 10' "$skill" "skill must explain that numeric priority does not guarantee the next claim"
+  assert_grep 'status --json' "$skill" "skill must translate conversational status requests"
+  assert_grep 'durable packet path' "$skill" "skill must require durable task packets before enqueue"
+  assert_grep 'pipeline_active' "$skill" "skill must disclose the current unreadable pipeline inspection field"
+  assert_grep 'unknown_checkout_process' "$skill" "skill must disclose the current unreadable process inspection field"
+  assert_grep 'agent launch' "$skill" "skill must stop before agent launch"
+  assert_grep 'tmux fallback is outside this backend contract' "$skill" "skill must forbid a tmux fallback"
+  # shellcheck disable=SC2016 # Literal backticks delimit the Markdown skill name.
+  trigger_count=$(grep -c 'load `devenv-orchestration`' "$ROOT/AGENTS.md" 2>/dev/null || true)
+  [ "$trigger_count" -eq 1 ] || fail "AGENTS.md must contain exactly one devenv-orchestration load trigger"
+  pass "devenv-orchestration is a model-invoked internal skill with one load trigger and the approved control-plane boundaries"
 }
 
 test_backend_source_shell_portable() {
@@ -1116,6 +1162,8 @@ test_backend_name_cmux_fallback_notice
 test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
+test_devenv_is_known_non_spawn_backend
+test_devenv_orchestration_skill_contract
 test_backend_source_shell_portable
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta

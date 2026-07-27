@@ -26,6 +26,10 @@
 # marker) with no explicit backend setting - unlike Orca, which stays
 # never-auto-detected because it also owns the task worktree; see
 # docs/cmux-backend.md for its empirical basis.
+# P6 registers bin/backends/devenv.sh as a non-spawn remote control backend
+# behind `FM_BACKEND=devenv`/`config/backend`. It exposes fixed-command SSH
+# requests for VM inspection, queueing, and control-plane leases, requires ssh
+# and jq, and refuses generic task spawn until resident execution is installed.
 # Codex App is intentionally not in the known set yet.
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
@@ -65,8 +69,10 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # spawn-capable; unlike tmux/herdr/zellij it is also the worktree provider.
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
+# devenv is control-plane-only and deliberately absent from FM_BACKEND_SPAWN
+# until resident execution can prepare a checkout and launch an agent.
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
+FM_BACKEND_KNOWN="tmux herdr zellij orca cmux devenv"
 FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
@@ -299,13 +305,15 @@ fm_backend_validate_spawn() {  # <name>
 # docs/configuration.md "Toolchain" and bootstrap's COMMON list). This is the
 # single owner of the per-backend dependency delta, so bootstrap follows the
 # RESOLVED backend instead of demanding an inactive backend's tools. Each set is:
-#   - the session-provider CLI itself (tmux/herdr/zellij/orca/cmux);
+#   - the backend transport CLI itself (tmux/herdr/zellij/orca/cmux, or ssh for
+#     the remote devenv control plane);
 #   - jq, for the JSON-emitting experimental adapters (herdr, zellij, cmux) whose
 #     spawn/liveness paths parse the backend's JSON output (see each adapter's
 #     tool check, e.g. fm_backend_herdr_tool_check);
 #   - the treehouse worktree provider for every session-provider-only backend
 #     (tmux, herdr, zellij, cmux); orca owns its own task worktree and terminal,
-#     so it drops both treehouse and any other backend's session CLI.
+#     so it drops both treehouse and any other backend's session CLI; devenv
+#     operates the resident remote checkout and therefore requires neither.
 # Prints a single space-separated line and returns 0 for a known backend; returns
 # 1 and prints nothing for an unknown backend.
 fm_backend_required_tools() {  # <backend>
@@ -315,6 +323,7 @@ fm_backend_required_tools() {  # <backend>
     zellij) printf '%s' 'zellij jq treehouse' ;;
     cmux)   printf '%s' 'cmux jq treehouse' ;;
     orca)   printf '%s' 'orca' ;;
+    devenv) printf '%s' 'ssh jq' ;;
     *) return 1 ;;
   esac
 }
@@ -419,7 +428,7 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 
 # fm_backend_source: source the named backend's adapter file, once per shell.
 # Each adapter is an independently linted canonical root. The /dev/null source
-# boundaries keep runtime dispatch from importing all five adapter ASTs into
+# boundaries keep runtime dispatch from importing all six adapter ASTs into
 # every dispatcher consumer while preserving the runtime source operations.
 fm_backend_source() {  # <name>
   local name=$1
@@ -458,6 +467,13 @@ fm_backend_source() {  # <name>
         # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/cmux.sh" || return 1
         _FM_BACKEND_CMUX_SOURCED=1
+      fi
+      ;;
+    devenv)
+      if [ -z "${_FM_BACKEND_DEVENV_SOURCED:-}" ]; then
+        # shellcheck source=/dev/null
+        . "$FM_BACKEND_LIB_DIR/backends/devenv.sh" || return 1
+        _FM_BACKEND_DEVENV_SOURCED=1
       fi
       ;;
   esac

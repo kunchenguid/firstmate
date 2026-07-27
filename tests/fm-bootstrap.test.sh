@@ -475,10 +475,30 @@ test_unknown_backend_reports_invalid_configuration() {
   fakebin=$(make_fake_toolchain "$case_dir")
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" "BACKEND_INVALID: bogus (known: tmux herdr zellij orca cmux)" \
+  assert_contains "$out" "BACKEND_INVALID: bogus (known: tmux herdr zellij orca cmux devenv)" \
     "bootstrap should report an unknown resolved backend"
   assert_not_contains "$out" "MISSING: tmux" "an unknown backend should not silently fall back to tmux dependencies"
   pass "bootstrap: unknown resolved backends fail closed with an actionable diagnostic"
+}
+
+test_devenv_backend_reports_control_plane_only_without_tmux_fallback() {
+  local case_dir fakebin out diagnostic
+  case_dir="$TMP_ROOT/devenv-control-plane-only"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' devenv > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" ssh jq
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  diagnostic="BACKEND_CONTROL_PLANE_ONLY: devenv (resident execution not installed; task spawning unavailable)"
+  assert_contains "$out" "$diagnostic" \
+    "backend=devenv should report its resident-execution boundary clearly"
+  assert_not_contains "$out" "BACKEND_INVALID" "devenv should be recognized as a known control backend"
+  assert_not_contains "$out" "MISSING: tmux" "backend=devenv must never fall through to tmux dependencies"
+  pass "bootstrap: backend=devenv stops at the control-plane-only boundary without a tmux fallback"
 }
 
 test_json_backends_require_jq_not_tmux() {
@@ -811,6 +831,7 @@ test_session_provider_backends_gate_own_cli_not_tmux
 test_herdr_install_requires_manual_action
 test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
+test_devenv_backend_reports_control_plane_only_without_tmux_fallback
 test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
 test_fleet_sync_timeout_scales_with_origin_backed_project_count

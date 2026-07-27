@@ -8,6 +8,7 @@
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
+#                 "BACKEND_CONTROL_PLANE_ONLY: devenv (resident execution not installed; task spawning unavailable)",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
@@ -483,6 +484,7 @@ secondmate_liveness_sweep() {
 install_cmd() {
   case "$1" in
     tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
+    ssh) echo "brew install openssh  # or the platform's package manager" ;;
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
@@ -823,6 +825,9 @@ fi
 
 if [ "$BACKEND_VALID" -eq 0 ]; then
   echo "BACKEND_INVALID: $BACKEND (known: $FM_BACKEND_KNOWN)"
+fi
+if [ "$BACKEND" = devenv ]; then
+  echo "BACKEND_CONTROL_PLANE_ONLY: devenv (resident execution not installed; task spawning unavailable)"
 fi
 for t in $BACKEND_TOOLS; do
   fm_backend_required_tool_available "$BACKEND" "$t" \

@@ -175,6 +175,7 @@ Do not add model-specific versions of that policy.
 
 `secondmate-provisioning` owns secondmate harness pins and inherited local material, while `harness-adapters` owns the harness consequences.
 Dispatch only on a backend that `fm-spawn` validates as spawn-capable.
+When the resolved backend is `devenv`, load `devenv-orchestration` before interpreting a queue, status, claim, or launch request.
 A missing dependency, authentication failure, unsupported backend, or version refusal is a blocker; never silently retry on another backend.
 
 ## 5. Recovery
