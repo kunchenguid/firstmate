@@ -48,15 +48,21 @@ fm_devenv_smoke_snapshot() {
   herdr --session "$1" api snapshot
 }
 
-# A running agent animates one leading spinner frame into both terminal title
-# fields, so that prefix alone is volatile. Everything else, including the rest
-# of each title, stays byte-exact so a real ambient change still fails closed.
+# An agent animates two purely presentational prefixes into both terminal title
+# fields: one leading spinner frame while it works, and a bracket marker that
+# blinks between "[ . ]" and "[ ! ]" while it waits on input. Only which of those
+# two markers is showing is volatile, so the pair collapses to one canonical
+# marker rather than being removed: a marker that appears or disappears is a real
+# Action-Required transition and must still fail closed. The "Action Required"
+# status word itself and everything after it stay byte-exact, as does every other
+# field, so a real ambient change still fails closed too.
 fm_devenv_smoke_normalize_snapshot() {
   [ "$#" -eq 1 ] || return 2
   printf '%s\n' "$1" | jq -ce '
     def unspin: if type == "string" then sub("^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏][ \t]+"; "") else . end;
-    def unspin_key($key): if has($key) then .[$key] |= unspin else . end;
-    walk(if type == "object" then unspin_key("terminal_title") | unspin_key("terminal_title_stripped") else . end)
+    def unblink: if type == "string" then sub("^\\[ [.!] \\](?<kept>[ \t]+Action Required[ \t]+\\|)"; "[ ~ ]" + .kept) else . end;
+    def normalize_key($key): if has($key) then .[$key] |= (unspin | unblink) else . end;
+    walk(if type == "object" then normalize_key("terminal_title") | normalize_key("terminal_title_stripped") else . end)
   '
 }
 
@@ -225,6 +231,8 @@ fm_devenv_smoke_use_fakes() {
   fm_devenv_smoke_snapshot() {
     local session=$1 counter count revision=1 title='expanly-platform'
     local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+    local markers=('[ . ]' '[ ! ]')
+    local statuses=('Action Required' 'Action Blocked')
     [ -z "${FM_TEST_SMOKE_LOG:-}" ] || printf 'snapshot:%s\n' "$session" >> "$FM_TEST_SMOKE_LOG"
     if [ "$session" = "${FM_TEST_SMOKE_MUTATE_SESSION:-}" ]; then
       counter="$FM_TEST_SMOKE_COUNTER/$session"
@@ -232,11 +240,17 @@ fm_devenv_smoke_use_fakes() {
       count=$(wc -l < "$counter" | tr -d '[:space:]')
       case "${FM_TEST_SMOKE_MUTATE_KIND:-structure}" in
         spinner) title="${frames[$(( (count - 1) % ${#frames[@]} ))]} $title" ;;
+        marker) title="${markers[$(( (count - 1) % 2 ))]} Action Required | $title" ;;
+        status) title="${markers[$(( (count - 1) % 2 ))]} ${statuses[$(( (count - 1) % 2 ))]} | $title" ;;
+        cleared)
+          title="Action Required | $title"
+          [ $(( (count - 1) % 2 )) -eq 1 ] || title="${markers[0]} $title"
+          ;;
         title) title="$title-$count" ;;
         *) revision=$count ;;
       esac
     fi
-    printf '%s\n' "{\"session\":\"$session\",\"revision\":$revision,\"panes\":[{\"terminal_title\":\"$title\",\"terminal_title_stripped\":\"$title\"}]}"
+    printf '%s\n' "{\"session\":\"$session\",\"revision\":$revision,\"panes\":[{\"revision\":$revision,\"terminal_title\":\"$title\",\"terminal_title_stripped\":\"$title\"}]}"
   }
   fm_devenv_smoke_runtime_verify() {
     [ -z "${FM_TEST_SMOKE_LOG:-}" ] || printf 'verify:%s\n' "$1" >> "$FM_TEST_SMOKE_LOG"
@@ -386,6 +400,60 @@ test_fake_spinner_only_title_drift_is_accepted() {
   pass "devenv smoke: an animated terminal-title spinner frame is not a session change"
 }
 
+test_fake_action_required_marker_blink_is_accepted() {
+  local changed
+  for changed in fm-devenv-protocol-lab default; do
+    (
+      FM_TEST_SMOKE_COUNTER=$(mktemp -d "${TMPDIR:-/tmp}/fm-devenv-smoke-marker.XXXXXX") || exit 1
+      trap 'rm -rf -- "$FM_TEST_SMOKE_COUNTER"' EXIT
+      FM_TEST_SMOKE_TOKEN=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+      FM_TEST_SMOKE_MUTATE_SESSION=$changed
+      FM_TEST_SMOKE_MUTATE_KIND=marker
+      fm_devenv_smoke_use_fakes
+
+      fm_devenv_smoke_round_trip reviews fm-devenv-protocol-lab default >/dev/null \
+        || fail "a blinking Action Required marker was treated as a Herdr session change for $changed"
+    ) || return 1
+  done
+  pass "devenv smoke: a blinking Action Required marker is not a session change"
+}
+
+test_fake_action_required_marker_clearing_is_refused() {
+  local changed
+  for changed in fm-devenv-protocol-lab default; do
+    (
+      FM_TEST_SMOKE_COUNTER=$(mktemp -d "${TMPDIR:-/tmp}/fm-devenv-smoke-cleared.XXXXXX") || exit 1
+      trap 'rm -rf -- "$FM_TEST_SMOKE_COUNTER"' EXIT
+      FM_TEST_SMOKE_TOKEN=2222222222222222222222222222222222222222222222222222222222222222
+      FM_TEST_SMOKE_MUTATE_SESSION=$changed
+      FM_TEST_SMOKE_MUTATE_KIND=cleared
+      fm_devenv_smoke_use_fakes
+
+      ! fm_devenv_smoke_round_trip reviews fm-devenv-protocol-lab default >/dev/null 2>&1 \
+        || fail "an Action Required marker that disappeared was accepted for $changed"
+    ) || return 1
+  done
+  pass "devenv smoke: an Action Required marker appearing or clearing is refused"
+}
+
+test_fake_action_required_status_drift_is_refused() {
+  local changed
+  for changed in fm-devenv-protocol-lab default; do
+    (
+      FM_TEST_SMOKE_COUNTER=$(mktemp -d "${TMPDIR:-/tmp}/fm-devenv-smoke-status.XXXXXX") || exit 1
+      trap 'rm -rf -- "$FM_TEST_SMOKE_COUNTER"' EXIT
+      FM_TEST_SMOKE_TOKEN=1111111111111111111111111111111111111111111111111111111111111111
+      FM_TEST_SMOKE_MUTATE_SESSION=$changed
+      FM_TEST_SMOKE_MUTATE_KIND=status
+      fm_devenv_smoke_use_fakes
+
+      ! fm_devenv_smoke_round_trip reviews fm-devenv-protocol-lab default >/dev/null 2>&1 \
+        || fail "an Action Required status change was accepted for $changed"
+    ) || return 1
+  done
+  pass "devenv smoke: the Action Required status word itself must not change"
+}
+
 test_fake_substantive_title_drift_is_refused() {
   local changed
   for changed in fm-devenv-protocol-lab default; do
@@ -411,6 +479,9 @@ test_fake_round_trip_order_and_token_continuity || exit 1
 test_fake_failure_attempts_token_guarded_cleanup || exit 1
 test_fake_snapshot_mutation_is_refused || exit 1
 test_fake_spinner_only_title_drift_is_accepted || exit 1
+test_fake_action_required_marker_blink_is_accepted || exit 1
+test_fake_action_required_marker_clearing_is_refused || exit 1
+test_fake_action_required_status_drift_is_refused || exit 1
 test_fake_substantive_title_drift_is_refused || exit 1
 
 smoke_environment=${FM_DEVENV_SMOKE_ENV:-}

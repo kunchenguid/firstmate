@@ -83,9 +83,10 @@ Selecting `devenv` for a generic task spawn reports that task spawning is not su
 ## One-VM verification
 
 The opt-in smoke test requires an explicitly clean feature environment and an already-running dedicated Herdr session that is neither `default` nor the current ambient session.
-It also requires the ambient session to be otherwise idle: an agent that is still producing output advances pane fields such as `revision` on its own, and the tripwire reports that as a session change.
+The ambient session may hold running agents, including one that is animating its title or waiting on input, but it must not be producing output: output advances pane fields such as `revision` on its own, and the tripwire reports that as a session change.
 It snapshots both the dedicated and ambient Herdr sessions, verifies the pinned runtime, inspects the VM, claims one `control-plane-test` lease, performs status through a fresh SSH request with the same token, releases, verifies the marker is absent, and requires both snapshots to remain identical.
-The single tolerated difference is the leading animated spinner frame a running agent writes into `terminal_title` and `terminal_title_stripped`, which is removed from both snapshots before they are compared; every other session, workspace, tab, pane, agent, and title byte must still match exactly.
+Exactly two purely presentational title animations are tolerated, both normalized in `terminal_title` and `terminal_title_stripped` before the snapshots are compared: the leading spinner frame a working agent writes, which is removed, and the bracket marker that blinks between `[ . ]` and `[ ! ]` in front of an `Action Required` title, which is collapsed to one canonical marker rather than removed, so a marker that appears or clears is still a real Action-Required transition and still fails closed.
+Everything else stays byte-exact, including the `Action Required` status word itself, the rest of every title, and every other session, workspace, tab, pane, and agent field.
 
 ```sh
 FM_DEVENV_SMOKE_ENV=<clean-feature-environment> \
