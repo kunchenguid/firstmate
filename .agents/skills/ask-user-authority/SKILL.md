@@ -28,7 +28,7 @@ The concise standing authority boundary remains always loaded in `AGENTS.md` sec
 7. Examine the causal theme across prior findings and fix rounds.
    Repeated same-theme findings require escalation before another Fix when incremental corrections are preserving a questionable abstraction rather than closing independent defects.
 8. Apply the existing stronger captain boundaries first, regardless of step 2's classification or `yolo`.
-   PR merges always require the captain, and destructive, irreversible, and genuinely security-sensitive choices always escalate regardless of whether they also expand the contract.
+   Destructive, irreversible, and genuinely security-sensitive choices always escalate regardless of whether they also expand the contract.
 
 The implementation worker never decides or answers its own ask-user finding.
 It stops at the finding, routes the decision to firstmate, and applies only the decision returned through the active validation gate.
@@ -52,5 +52,4 @@ Do not relay reviewer labels or gate output as if they settled the decision.
 - Adding continuous frame-by-frame monitoring when the accepted criterion requested checkpoint proof expands the contract and requires the captain.
 - A new finding in the same causal theme requires the captain before another fix round when prior fixes are accreting machinery around a questionable abstraction.
 - A genuinely security-sensitive action requires the captain under the stronger existing boundary even if it is otherwise within scope.
-- Merging a PR requires the captain regardless of `yolo`; pushing its feature branch, opening it, updating it, and running CI do not.
 - Complex architecture explicitly requested by the captain stays within scope and does not escalate merely because it is complex.
