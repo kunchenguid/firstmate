@@ -255,13 +255,13 @@ test_no_mistakes_dod_wording() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`help`' "$brief" \
     "no-mistakes DOD must render literal backticks around help"
-  # The apostrophe in "firstmate's authority check" is now structurally safe
-  # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
-  # being reworded or escaped away. test_no_heredoc_in_command_substitution
-  # guards the structure that makes it safe.
-  assert_grep "firstmate's authority check" "$brief" \
-    "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
-  pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
+  assert_no_grep "no-mistakes' own guidance" "$brief" \
+    "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
+  assert_no_grep "firstmate's authority check" "$brief" \
+    "no-mistakes DOD retained another apostrophe form that breaks bash -n"
+  assert_grep "the authority check applied by firstmate" "$brief" \
+    "no-mistakes DOD lost the apostrophe-safe authority wording"
+  pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
 test_ship_project_memory_wording() {
