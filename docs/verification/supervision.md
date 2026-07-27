@@ -45,7 +45,7 @@ pi -p -e .pi/extensions/fm-primary-turnend-guard.ts \
 
 Observed result: `PI_SMOKE_DONE`, with one session-start execution.
 The earlier `sendUserMessage` counterfactual raced the positional prompt; the current non-triggering `pi.sendMessage` custom message did not.
-The installed pi-signed 0.82.0 wrapper repeated the Pi primary extension and session-start path on 2026-07-28 while preserving `pi-signed` as the detected identity.
+The installed pi-signed 0.82.0 wrapper repeated the Pi primary extension and session-start path on 2026-07-27 while preserving `pi-signed` as the detected identity.
 [`runtime-backends.md`](runtime-backends.md#tmux) owns the detailed real-wrapper command and process evidence.
 
 Current deterministic and live entry points:
