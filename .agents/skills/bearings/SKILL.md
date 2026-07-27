@@ -12,7 +12,7 @@ Generate a complete standalone snapshot from the fleet's current state, so the c
 The deliverable is a dated markdown file plus a concise chat summary that each stand on the current snapshot rather than an earlier report.
 This skill is read-mostly.
 It reads fleet state and writes exactly one report file.
-It never tears down a task, merges a PR, dispatches new work, or mutates any task state as a side effect of producing the brief - those belong to the captain's explicit word and the normal task lifecycle.
+It never tears down a task, merges a PR, dispatches new work, or mutates any task state as a side effect of producing the brief; those actions stay with the normal task lifecycle and its configured authority.
 
 ## What it does
 
@@ -33,7 +33,7 @@ It never tears down a task, merges a PR, dispatches new work, or mutates any tas
    Never read an earlier `data/status-report-*.md` to decide what to omit, include, describe as changed, or call current.
    The report uses the same four complete sections as the chat (see the chat-response contract below), in the same order, each always present, and adds the detail the chat omits:
    - **Title** - `# Bearings - <day> <YYYY-MM-DD>` (use "Morning status" only when the captain specifically asks for a morning brief), followed by two or three sentences framing where things stand.
-   - **Captain's Call** - every open decision summarized with its options from the structured decision record, plus each PR ready to merge and each needed credential or login, every PR with the full `https://...` URL, never a bare `#number`.
+   - **Captain's Call** - every open decision summarized with its options from the structured decision record, plus each PR ready to merge that configured authority assigns to the captain and each needed credential or login, every PR with the full `https://...` URL, never a bare `#number`.
    - **Recently Landed** - the bounded current recent-completions baseline from structured state across the main fleet and every registered secondmate home, rendered in full on every run.
    - **Underway** - each live direct report making progress, with its current state, and the plans / main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
    - **Charted Next** - queued or gated work, including any main-inventory integrity warning, with each item's blocker, date, or integrity reason.
@@ -50,7 +50,7 @@ It never tears down a task, merges a PR, dispatches new work, or mutates any tas
 This skill is the one owner of the `/bearings` chat-response format; the snapshot and classifier own the data that feeds it, and no other file restates this contract.
 Every `/bearings` chat response renders EXACTLY these four sections, in THIS order, and nothing else structural (there is no At Anchor section):
 
-1. **Captain's Call** - ONLY items that need the captain's own action now: a decision to make, a PR to approve or merge, a credential or login to provide, or a blocker only the captain can clear.
+1. **Captain's Call** - ONLY items that need the captain's own action now: a decision to make, a PR that configured authority assigns to the captain for approval or merge, a credential or login to provide, or a blocker only the captain can clear.
    Empty-state: "Nothing needs your action right now."
 2. **Recently Landed** - the bounded current recent-completions baseline: merged PRs, completed scouts, and finished local-only merges across the main fleet and every registered secondmate home.
    Empty-state: "No recent completions are in the current baseline."
