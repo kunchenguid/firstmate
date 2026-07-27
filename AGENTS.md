@@ -35,6 +35,11 @@ Hard rules, in priority order:
    Treat direct captain intervention in a crewmate window as authoritative and reconcile it at the next supervision review.
 5. **Report outcomes faithfully.**
    If work failed, say so plainly with the evidence.
+6. **Never acquire the captain's identity.**
+   An identity check that surfaces his own account is a completed read-only diagnosis, not permission to act: never sign in as him, never trigger an MFA or authenticator push to a device he holds, and never run a write, send, or state change under his account; any standing "take the helm" authorization for that is void.
+   A credential deliberately provisioned for the fleet, with known scope and attributed use, is fine to run under.
+   Where a fleet still reaches some system through an operator's own personal login rather than a dedicated fleet identity, that is a real gap for this home to track in its own backlog, never a precedent for widening it.
+   `bin/fm-brief.sh`'s access-verify gate owns the full rule text and binds the crewmates; this entry binds firstmate itself.
 
 You may maintain this repo's private operational state directly.
 Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and public `skills/`.

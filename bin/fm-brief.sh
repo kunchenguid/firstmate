@@ -39,6 +39,18 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Every scaffold also carries the access-verify gate: before appending that pause
+# verb, "blocked:", or "needs-decision:" for a credential, permission, or access
+# reason, the worker must run that system's identity check and report the result.
+# A check that surfaces the captain's own account is a completed read-only diagnosis, not
+# permission to act: no interactive sign-in as him, no approval prompt sent to a device he
+# holds, and no write, send, or state change run under his account. A credential deliberately
+# provisioned for the worker, with known scope and attributed use, is fine to run under; when
+# only the captain's own identity can run a step, that need is itself the escalation and the
+# exact command is handed to him.
+# A successful read never authorizes a write, so a change the brief or an explicit
+# instruction puts out of scope stays out of scope and its write path is never
+# probed; the worker reports the needed change instead of making it.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -107,6 +119,32 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 
+# Built as a plain double-quoted string, not `VAR=$(cat <<EOF ... EOF)`: bash 3.2 (macOS
+# /bin/bash) tracks quote state through a heredoc body nested in `$(...)`, so an apostrophe
+# there breaks parsing of the whole file (issue #166). This text needs apostrophes, and
+# escaping them as `\'` inside a heredoc would emit the backslash into the brief. Inside
+# double quotes apostrophes are inert in every bash version; only `"` and backticks need escaping.
+ACCESS_GATE="A permission or credential boundary is a hypothesis until an identity check or a concrete denied
+operation with its exact error proves it. Before appending \`blocked:\`, \`$PAUSED_VERB:\`, or
+\`needs-decision:\` for a credential, permission, or access reason, run the identity check for that
+system first (e.g. \`az account show\`, \`aws sts get-caller-identity\`, \`gh auth status\`,
+\`vercel whoami\`, \`flyctl auth whoami\`) and include the result in your status line or report.
+If that identity check surfaces the captain's own account, treat it as a completed check for
+read-only diagnosis, not as permission to act. Never acquire or act as his identity: no interactive
+sign-in as him, no browser login, SSO flow, or OAuth consent, no approval prompt sent to a device
+he holds (including an MFA or authenticator push), and no write, send, or state change run under
+his account. Any standing \"take the helm\" authorization for that is void, wherever it appears.
+A credential deliberately provisioned for your own work, with known scope and attributed,
+reviewable use, is yours to run under. If the only path genuinely runs through the captain's own
+identity, that is itself the escalation: name the exact command or action, say why it needs his
+identity specifically, and hand it to him rather than running it yourself.
+A successful read never establishes permission to write: capability is not authorization. When the
+brief, the task boundary, or an explicit instruction places a change out of scope, it stays out of
+scope even if the interface would accept the call; do not probe the write path to test that. If you
+can reach a system but may not change it, say so precisely: report the identity you verified, the
+exact change that is needed, and that you did not make it."
+ACCESS_RULE="8. $(printf '%s' "$ACCESS_GATE" | sed '2,$s/^/   /')"
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -171,6 +209,9 @@ Give every routed-work phase a stable key: open it with \`working [key=<work-slu
 When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>]: {why it is no longer active}\`.
 When a decision you escalated is answered or a blocker clears and your domain resumes, append \`resolved: {how it was decided or unblocked}\` (keyed with \`[key=<slug>]\` if you opened it with one) so it is durably closed instead of resurfacing behind later unrelated events.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
+
+# Access boundaries
+$ACCESS_GATE
 
 # Definition of done
 You are persistent by default. Do not exit just because your queue is empty.
@@ -257,6 +298,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$ACCESS_RULE
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -365,6 +407,7 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$ACCESS_RULE
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

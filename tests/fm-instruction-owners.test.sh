@@ -221,7 +221,26 @@ test_compressed_agents_retains_authority_and_supervision_safety() {
   pass "compressed AGENTS.md retains authority, supervision, AFK, and X safety"
 }
 
+test_captain_identity_rule_defers_to_the_brief_gate() {
+  assert_grep "**Never acquire the captain's identity.**" "$AGENTS" \
+    "AGENTS.md lost the captain-identity hard rule"
+  assert_grep "a completed read-only diagnosis, not permission to act" "$AGENTS" \
+    "AGENTS.md rule 6 does not carry the same read-versus-act distinction as the brief gate"
+  assert_grep "access-verify gate owns the full rule text" "$AGENTS" \
+    "AGENTS.md rule 6 stopped pointing at the gate that owns the full text"
+  assert_grep "read-only diagnosis, not as permission to act" "$BRIEF" \
+    "the access-verify gate AGENTS.md defers to no longer carries the full rule text"
+  # AGENTS.md is shared template material that other operators fork, so per-home state -
+  # private backlog ids and this fleet's own account facts - must not be pinned into it.
+  assert_no_grep "fm-fleet-github-identity-x1" "$AGENTS" \
+    "AGENTS.md pinned a private backlog id into shared template material"
+  assert_no_grep "the captain's personal account" "$AGENTS" \
+    "AGENTS.md pinned this home's own GitHub-session fact into shared template material"
+  pass "captain-identity rule stays generic in AGENTS.md and defers to the brief gate that owns it"
+}
+
 test_new_skill_metadata_and_triggers
+test_captain_identity_rule_defers_to_the_brief_gate
 test_diagnostic_owner_covers_causal_procedure
 test_project_management_owner_covers_guarded_operations
 test_generic_effort_fallback_respects_precedence

@@ -8,7 +8,9 @@
 # substitution, so a single unescaped apostrophe anywhere in that body breaks
 # parsing of the *entire rest of the script* - `bash -n` fails, not just the
 # generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
-# is unaffected, so the secondmate charter block does not need this guard.
+# is unaffected, so the secondmate charter block does not need this guard, and
+# neither does the shared `ACCESS_GATE` text it interpolates: that one sidesteps
+# the bug entirely by being a plain double-quoted string rather than a heredoc.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -264,28 +266,35 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
   pass "fm-brief.sh: Herdr lab contract covers scouts and rejects secondmate misuse"
 }
 
+# render_brief_kind <home> <id> <kind> <pause-verb>: scaffold one brief of the given
+# kind and echo its path, so scaffold-wide tests share one dispatch to extend.
+render_brief_kind() {
+  local home=$1 id=$2 kind=$3 verb=$4
+  case "$kind" in
+    ship)
+      FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB="$verb" \
+        "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+      ;;
+    scout)
+      FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB="$verb" \
+        "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+      ;;
+    secondmate)
+      FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB="$verb" \
+        "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+      ;;
+    *) fail "render_brief_kind: unknown brief kind $kind" ;;
+  esac
+  echo "$home/data/$id/brief.md"
+}
+
 test_pause_verb_override_renders_all_brief_scaffolds() {
-  local home kind id brief
+  local home kind brief
   home="$TMP_ROOT/pause-verb-home"
   mkdir -p "$home/data"
 
   for kind in ship scout secondmate; do
-    id="brief-pause-verb-$kind"
-    case "$kind" in
-      ship)
-        FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
-          "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
-        ;;
-      scout)
-        FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
-          "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
-        ;;
-      secondmate)
-        FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
-          "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
-        ;;
-    esac
-    brief="$home/data/$id/brief.md"
+    brief=$(render_brief_kind "$home" "brief-pause-verb-$kind" "$kind" awaiting)
     assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
@@ -317,6 +326,65 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   assert_grep "load \`decision-hold-lifecycle\`" "$charter" \
     "secondmate charter did not load the shared decision policy for detailed investigations"
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
+}
+
+test_every_scaffold_carries_access_verify_gate() {
+  local home brief rule8
+  home="$TMP_ROOT/access-verify-home"
+  mkdir -p "$home/data"
+  for kind in ship scout secondmate; do
+    brief=$(render_brief_kind "$home" "brief-access-verify-$kind" "$kind" paused)
+    assert_grep "A permission or credential boundary is a hypothesis until an identity check or a concrete denied" "$brief" \
+      "$kind brief missing the access-boundary-is-a-hypothesis rule"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep 'operation with its exact error proves it. Before appending `blocked:`, `paused:`, or' "$brief" \
+      "$kind brief does not gate the paused verb behind the identity check"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep '`needs-decision:` for a credential, permission, or access reason, run the identity check' "$brief" \
+      "$kind brief does not gate needs-decision behind the identity check"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep 'system first (e.g. `az account show`, `aws sts get-caller-identity`, `gh auth status`,' "$brief" \
+      "$kind brief missing the identity-check examples"
+    assert_grep "If that identity check surfaces the captain's own account, treat it as a completed check for" "$brief" \
+      "$kind brief does not resolve the identity check landing on the captain's own account"
+    assert_grep "read-only diagnosis, not as permission to act. Never acquire or act as his identity: no interactive" "$brief" \
+      "$kind brief missing the read-versus-act distinction or the interactive-sign-in prohibition"
+    assert_grep "including an MFA or authenticator push" "$brief" \
+      "$kind brief missing the forbidden approval-prompt acquisition pattern"
+    assert_grep "and no write, send, or state change run under" "$brief" \
+      "$kind brief missing the prohibition on acting under the captain's account"
+    # The blanket clause below forbade reading under an ambient credential too, which made the
+    # mandatory identity check itself unrunnable; the rule now separates reads from acts.
+    assert_no_grep "never reach for an ambient credential" "$brief" \
+      "$kind brief regressed to the blanket ambient-credential prohibition that also barred reads"
+    assert_grep "A credential deliberately provisioned for your own work, with known scope and attributed," "$brief" \
+      "$kind brief missing the provisioned-credential permission"
+    # The absolute clause below forbade the fleet's own provisioned sessions along with the
+    # captain's identity, so the rule was rewritten around acquisition instead of reuse.
+    assert_no_grep "or session for any purpose, reads included" "$brief" \
+      "$kind brief regressed to the absolute reads-included token/session prohibition"
+    assert_no_grep "or session to make a change" "$brief" \
+      "$kind brief regressed to the write-scoped token qualifier"
+    assert_grep "that is itself the escalation" "$brief" \
+      "$kind brief missing the captain-identity-only escalation instruction"
+    assert_grep "A successful read never establishes permission to write" "$brief" \
+      "$kind brief missing the read-does-not-authorize-write rule"
+    assert_grep "do not probe the write path to test that" "$brief" \
+      "$kind brief missing the explicit prohibition on write-path probing"
+    assert_no_grep "check the write path before declaring it unreachable" "$brief" \
+      "$kind brief regressed to the write-probing sentence"
+    assert_grep "report the identity you verified, the" "$brief" \
+      "$kind brief missing the no-capability-claim escalation wording"
+    assert_no_grep "verified you could make it" "$brief" \
+      "$kind brief regressed to the forbidden capability claim"
+    # The gate is injected as a hardcoded `8.` into two independently maintained rule
+    # lists. If either list ever grows its own rule 8, the brief renders two of them.
+    if [ "$kind" != secondmate ]; then
+      rule8=$(grep -c '^8\. ' "$brief") || true
+      [ "$rule8" -eq 1 ] || fail "$kind brief has $rule8 rule-8 markers, expected exactly 1 (the access-verify gate collides with another rule 8)"
+    fi
+  done
+  pass "fm-brief.sh: ship, scout, and secondmate briefs carry the mandatory self-verify-access gate"
 }
 
 # Scout and secondmate paths still scaffold well-formed briefs.
@@ -352,4 +420,5 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_every_scaffold_carries_access_verify_gate
 test_scout_and_secondmate_scaffold
