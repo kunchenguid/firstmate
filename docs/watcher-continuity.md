@@ -40,6 +40,9 @@ The turn-end guard remains the final backstop rather than the normal continuity 
 An actionable child output returns that reason normally.
 A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
 An attached arm follows verified identity-matched successors and reports the same typed failure if that chain ends without one.
+One exception keeps concurrent arms honest: several arms can follow the same cycle, and only the one that owns the watcher prints its wake reason.
+When the durable wake queue holds a record appended at or after the followed cycle began and the liveness beacon is still fresh, the close is explained, so the follower prints `watcher: cycle closed on a wake already queued by a concurrent arm` with those queued reason lines and exits zero instead of reporting a failure.
+A stale or absent beacon never qualifies, so genuinely down supervision still fails loudly.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
 Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.

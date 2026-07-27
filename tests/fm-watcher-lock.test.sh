@@ -444,8 +444,19 @@ test_watch_restart_attaches_to_healthy_peer() {
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
   mark_pr_check_migration_complete "$state"
-  node -e 'process.on("SIGTERM", () => {}); setTimeout(() => {}, 300000)' &
+  # The peer stands in for a TERM-resistant watcher, so the restart under test
+  # must find it still alive. Node installs the handler some milliseconds after
+  # fork, so wait for the peer to announce readiness before arming: without that
+  # the restart's TERM can land during interpreter startup, kill the peer, and
+  # turn this into a spurious "started" instead of the attach it asserts.
+  node -e 'process.on("SIGTERM", () => {}); require("fs").writeFileSync(process.argv[1], "ready"); setTimeout(() => {}, 300000)' "$state/.peer-ready" &
   peer=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$state/.peer-ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$state/.peer-ready" ] || fail "TERM-resistant peer never became ready"
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
@@ -763,6 +774,95 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   pass "arm attaches to a peer watcher after child stands down and surfaces a missing successor"
 }
 
+# A cycle can be followed by more than one arm at once (the model's background
+# task and the Claude Stop-owned auto-arm both run bin/fm-watch-arm.sh). Only the
+# arm that owns the watcher prints its wake reason; every follower sees the same
+# close with no successor. The durable wake queue is the shared record of what
+# that cycle did, so a follower whose cycle queued a wake while the beacon stayed
+# fresh must report that wake, not a typed failure - a chatty fleet otherwise
+# turned every duplicate arm into a "cycle FAILED" repair demand. A queued wake
+# alone is not enough: with a stale beacon no watcher is really running and the
+# failure must stand.
+seed_peer_watcher_lock() {  # <state> <dir> <peer-pid>
+  local state=$1 dir=$2 peer=$3 identity
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || return 1
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+}
+
+wait_for_arm_attach() {  # <armout> <peer-pid>
+  local armout=$1 peer=$2 i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$peer" "$armout" 2>/dev/null && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+test_arm_follower_reports_queued_wake_instead_of_failure() {
+  local dir state fakebin armout peer armpid status
+  dir=$(make_case arm-follower-queued-wake)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  sleep 300 &
+  peer=$!
+  seed_peer_watcher_lock "$state" "$dir" "$peer" || fail "could not seed the peer watcher lock"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait_for_arm_attach "$armout" "$peer" || fail "arm did not attach to the seeded peer watcher: $(cat "$armout")"
+  # The followed cycle surfaces a wake (queued by the watcher before it prints
+  # and exits) and then ends. The beacon stays fresh, as it is while a real
+  # watcher beats right up to its close.
+  append_wake "$state" stale "test:fm-op" "stale: test:fm-op" || fail "could not queue the cycle's wake"
+  touch "$state/.last-watcher-beat"
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  wait_for_exit "$armpid" 120
+  status=$?
+  [ "$status" -ne 124 ] || fail "follower arm never returned after its followed cycle closed"
+  expect_code 0 "$status" "a followed cycle explained by a queued wake must not exit non-zero"
+  ! grep -qF 'watcher: FAILED' "$armout" || fail "follower arm reported FAILED for a cycle that queued a wake: $(cat "$armout")"
+  grep -qF 'watcher: cycle closed on a wake already queued by a concurrent arm' "$armout" \
+    || fail "follower arm did not report the queued close: $(cat "$armout")"
+  grep -qF 'stale: test:fm-op' "$armout" || fail "follower arm did not propagate the queued wake reason"
+  pass "an arm following a cycle that queued a wake reports that wake instead of a typed failure"
+}
+
+test_arm_follower_still_fails_on_stale_beacon() {
+  local dir state fakebin armout peer armpid status
+  dir=$(make_case arm-follower-stale-beacon)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  sleep 300 &
+  peer=$!
+  seed_peer_watcher_lock "$state" "$dir" "$peer" || fail "could not seed the peer watcher lock"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait_for_arm_attach "$armout" "$peer" || fail "arm did not attach to the seeded peer watcher: $(cat "$armout")"
+  # Same queued wake, but supervision itself is genuinely down: nothing has beaten
+  # the liveness beacon for far longer than the grace window.
+  append_wake "$state" stale "test:fm-op" "stale: test:fm-op" || fail "could not queue the cycle's wake"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  wait_for_exit "$armpid" 120
+  status=$?
+  [ "$status" -ne 124 ] || fail "arm never returned for a stale-beacon cycle close"
+  [ "$status" -ne 0 ] || fail "arm exited zero with a stale beacon and no live watcher"
+  grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$armout" \
+    || fail "a stale beacon must still produce the typed cycle-end failure: $(cat "$armout")"
+  pass "a queued wake never excuses a stale beacon: down supervision still fails loudly"
+}
+
 test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   local dir state fakebin armout live armpid status
   dir=$(make_case arm-failed-stale)
@@ -980,6 +1080,8 @@ test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
+test_arm_follower_reports_queued_wake_instead_of_failure
+test_arm_follower_still_fails_on_stale_beacon
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified

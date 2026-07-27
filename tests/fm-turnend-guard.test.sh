@@ -264,6 +264,40 @@ test_hook_silent_with_live_lock_and_fresh_beacon() {
   pass "fm-turnend-guard: silent no-op with a live watcher lock and fresh beacon"
 }
 
+# A chatty fleet is not a broken one. While the watcher absorbs benign wakes and
+# queues the actionable ones it keeps holding the lock and beating the beacon,
+# and pending durable-queue records are ordinary work waiting for the next turn,
+# not evidence that supervision is down. The guard must therefore stay silent on
+# that state and block only on the beacon itself going stale or absent - the
+# genuinely-down case its banner exists for.
+test_hook_silent_with_pending_wakes_and_fresh_beacon() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pending-wakes")
+  : > "$dir/state/task1.meta"
+  printf '%s\t1\tstale\ttest:fm-op\tstale: test:fm-op\n' "$(date +%s)" > "$dir/state/.wake-queue"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live watcher holder"
+  }
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "hook must exit 0 for a live beating watcher with wakes queued for the next turn"
+  [ -z "$out" ] || fail "hook produced output for a chatty but healthy fleet: $out"
+  # Same live lock and same pending wakes, but nothing has beaten the beacon at
+  # all: supervision really is down and the block must stand.
+  rm -f "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "hook must block when no beacon exists, whatever the queue holds"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: silent for a chatty healthy fleet, still blocking when the beacon is absent"
+}
+
 test_hook_blocks_with_live_lock_and_stale_beacon() {
   local dir pid identity out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-live-lock-stale")
@@ -1096,6 +1130,7 @@ test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
+test_hook_silent_with_pending_wakes_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state

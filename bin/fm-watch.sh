@@ -329,8 +329,25 @@ clear_pause_tracking() {  # <window>
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
 }
 
+# 0 when this window's declared pause or captain-held transfer has ALREADY been
+# surfaced once inside the current bounded-recheck window, proved by the
+# .paused-resurfaced-<key> throttle marker every pause surface writes.
+# The always-on path surfaces a LIVE declaration once so firstmate sees it, and
+# must then hand that declaration to the PAUSE_RESURFACE_SECS cadence. Without
+# this test the live-agent reconciliation below demoted the same declaration back
+# to `none` on every fresh stale hash, so a crew legitimately parked on long
+# external monitors - whose pane text keeps drifting one line at a time - had its
+# declared wait surfaced again on every watcher cycle, and each surface then wiped
+# the cadence markers, leaving no bound on the repetition at all.
+pause_declaration_already_surfaced() {  # <key>
+  local key=$1
+  [ -e "$STATE/.paused-$key" ] || return 1
+  [ "$(age_of "$STATE/.paused-resurfaced-$key")" -lt "$PAUSE_RESURFACE_SECS" ]
+}
+
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# Only a confidently dead ordinary crew may recover paused classification after
+# Only a confidently dead ordinary crew, or a declaration already surfaced inside
+# the current bounded window, may recover paused classification after
 # fm-crew-state has fallen back to stopped or unknown.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
@@ -345,7 +362,7 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$(window_kind "$win")" != secondmate ]; then
+    if [ "$(window_kind "$win")" != secondmate ] && ! pause_declaration_already_surfaced "$key"; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
         rm -f "$recheck_file"
@@ -360,6 +377,14 @@ pause_state_class() {  # <window> <task>
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'
+    return
+  fi
+  # An active run always outranks the declaration (handled just above); once it
+  # does not, an already-surfaced declaration stays on its bounded cadence
+  # whether or not its agent is still live.
+  if pause_declaration_already_surfaced "$key"; then
+    date +%s > "$recheck_file"
+    printf 'paused'
     return
   fi
   if [ "$(window_kind "$win")" != secondmate ]; then
@@ -959,10 +984,13 @@ EOF
         fi
       else
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping.
+        # The pause cadence markers deliberately survive a busy pane: while the
+        # status still DECLARES a wait, the bounded PAUSE_RESURFACE_SECS cadence
+        # owns this window, and the withdrawal check at the top of this loop is
+        # the one owner of clearing it. Clearing here on a busy blip re-armed the
+        # first-sight surface, so a crew parked on monitors that briefly look
+        # busy surfaced the same declared wait again on the next idle hash.
         rm -f "$ssf" "$ewf"
-        if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
-          clear_pause_tracking "$w"
-        fi
       fi
     else
       printf '%s' "$h" > "$hf"

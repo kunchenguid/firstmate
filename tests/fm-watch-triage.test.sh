@@ -753,6 +753,80 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
 }
 
+# --- supervision churn: a LIVE declared pause on a DRIFTING pane -------------
+# The live 2026-07-28 case: an operator crewmate parked on long sub-agent and
+# build monitors declared `paused:`, but its pane text kept drifting one printed
+# line at a time. Every drift reclassified the still-live declaration as `none`,
+# which wiped the pause cadence markers, so the very next stable hash surfaced
+# the same declared wait again and the watcher closed its cycle on it - on every
+# single cycle, forever. A declaration must surface ONCE and then hold its
+# bounded PAUSE_RESURFACE_SECS cadence across pane drift, while a pane whose
+# declaration is withdrawn still trips stale normally.
+test_live_declared_pause_absorbs_across_pane_drift() {
+  local dir state fakebin out capture_file statusf window key sig pid round wakes pane
+  dir=$(make_case live-pause-drift); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/op.status"
+  window="test:fm-op"
+  pane='operator: monitoring build 1'
+  printf '%s\n' "$pane" > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/op.meta"
+  printf 'paused: parked on long sub-agent build monitors\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-op_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # Prime the pane hash so the first poll of each cycle already sees a stably
+  # stale pane, exactly as a re-armed watcher does on a long-running task.
+  printf '%s' "$(hash_text "$pane")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  # Phase A: first sight of the live declaration still surfaces once, so a
+  # declared wait firstmate has not seen yet is never hidden by the cadence.
+  run_pause_drift_cycle() {  # -> 0 absorbed (still blocking), 1 exited
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+      FM_FAKE_CREW_STATE='state: paused · source: status-log · parked on long sub-agent build monitors' \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_PAUSE_RESURFACE_SECS=3600 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+    pid=$!
+    if wait_live "$pid" 30; then reap "$pid"; return 0; fi
+    wait "$pid" 2>/dev/null || true
+    return 1
+  }
+  run_pause_drift_cycle && fail "live declared pause did not surface on first sight"
+  grep -F "stale: $window" "$out" >/dev/null || fail "first sight of a live declared pause printed no stale wake"
+
+  # Phase B: the operator keeps printing - a fresh pane hash every cycle. Each
+  # of those cycles must ABSORB, never close on the same declared wait again.
+  round=2
+  while [ "$round" -le 5 ]; do
+    printf 'operator: monitoring build %s\n' "$round" >> "$capture_file"
+    run_pause_drift_cycle || fail "drift cycle $round re-surfaced a declared pause instead of absorbing it: $(cat "$out")"
+    round=$((round + 1))
+  done
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 1 ] || fail "a live declared pause churned $wakes stale wakes across a drifting pane"
+  [ -e "$state/.paused-$key" ] || fail "pane drift wiped the pause cadence flag"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "pane drift wiped the bounded re-surface anchor"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a declared pause must never run the wedge timer"
+
+  # Phase C: the crew withdraws the declaration and goes quiet with no running
+  # pipeline. That is an ordinary stopped/wedged pane again and must surface.
+  printf 'working: back on the build\n' >> "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-op_status"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · idle composer' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=3600 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "a withdrawn pause left an idle stopped pane unsurfaced"
+  grep -F "stale: $window" "$out" >/dev/null || fail "a withdrawn pause did not restore ordinary stale surfacing"
+  [ ! -e "$state/.paused-$key" ] || fail "a withdrawn declaration kept its pause cadence flag"
+  pass "a live declared pause surfaces once then absorbs across pane drift, and still surfaces when withdrawn"
+}
+
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1291,6 +1365,7 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_live_declared_pause_absorbs_across_pane_drift
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
