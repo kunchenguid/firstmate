@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, and kimi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, and agy.
 user-invocable: false
 metadata:
   internal: true
@@ -124,6 +124,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
+| agy | `--model <model>` | `--effort <low\|medium\|high>` | Verified 2026-07-27 on Antigravity CLI 1.1.7. |
 
 ### Model support discovery
 
@@ -138,6 +139,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
+| agy | Run `agy models`, which lists the current authenticated Google models. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 If those sources do not establish the relationship needed for dispatch, fail loudly and report the unresolved candidate.
@@ -156,6 +158,7 @@ Natural language is acceptable if uncertain.
 - pi and pi-signed: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the structural composer reader; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
+- agy: no separate verified skill invocation exists; use a natural-language validation instruction.
 
 ## Submission acknowledgement hazards
 
@@ -349,6 +352,40 @@ The adapter therefore runs the shared predicate and, when it returns 2, forces o
 It does not pass `--permission-mode`, so the passive hook cannot escalate the primary session's tool permissions.
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
+
+## agy (VERIFIED 2026-07-27, Antigravity CLI 1.1.7; ordinary crewmate/scout only)
+
+AGY launches as `agy --dangerously-skip-permissions --mode accept-edits --model <model> --effort <low|medium|high> --prompt-interactive <encoded-brief>`.
+`--dangerously-skip-permissions` and `--mode accept-edits` ran read, command, and write tools unattended.
+Its child/tool-process marker is `ANTIGRAVITY_AGENT=1`.
+The busy footer is `esc to cancel` or `esc to cancel generation`.
+The idle footer is `? for shortcuts` and the accept-edits composer is a `>` row between horizontal rules with dim `Accept-edits mode: file edits auto-approved (shift+tab to cycle)` placeholder text.
+Send Escape to interrupt and `/exit` to leave the TUI.
+Resume with `agy --conversation <UUID>` or cwd-scoped `agy --continue`.
+A fresh isolated worktree can show `Do you trust the contents of this project?`; accept the dialog with Enter, then verify the brief is processing.
+Do not pre-seed or edit `~/.gemini/antigravity-cli/settings.json`.
+AGY 1.1.7 exposes no verified user-facing lifecycle hook, so ordinary pane monitoring remains the wake path.
+AGY is not a primary or secondmate runtime.
+
+Verification evidence from 2026-07-27:
+
+```sh
+/usr/bin/agy -p "Reply with exactly AGY_OK and nothing else." \
+  --model gemini-3.1-pro-high --effort high --print-timeout 2m
+```
+
+```text
+AGY_OK
+```
+
+```sh
+agy --help
+```
+
+```text
+--effort Reasoning effort for the current CLI session (low|medium|high)
+--prompt-interactive Run an initial prompt interactively and continue the session
+```
 
 ## kimi (VERIFIED 2026-07-25, kimi 0.29.1)
 

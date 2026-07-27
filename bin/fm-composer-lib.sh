@@ -72,7 +72,7 @@ fm_composer_strip_ansi() {
 #     38:2::r:g:b) whose perceived luminance (0.299R + 0.587G + 0.114B) is below
 #     FM_COMPOSER_GHOST_LUMA_MAX (default 128): how grok renders its placeholder
 #     and hint text. A reset (SGR 0), a default-foreground (SGR 39), any base
-#     foreground colour (30-37 / 90-97), or a lighter 38;2 foreground ends the
+#     foreground colour (30-37 / 91-97), or a lighter 38;2 foreground ends the
 #     dark-foreground run. This assumes a DARK terminal theme, the firstmate
 #     fleet reality, where real typed input is bright and only de-emphasised UI
 #     is dark; the SGR-2 signal above stays theme-independent. A 256-colour
@@ -80,6 +80,7 @@ fm_composer_strip_ansi() {
 #     no fleet harness uses it for ghost text, so it is kept (real text wins:
 #     under-stripping merely defers, which the max-defer alarm surfaces, while
 #     over-stripping would inject over real input).
+#   - SGR 90 dark gray: AGY's accept-edits placeholder is rendered this way.
 # The dim/faint and dark-foreground states are tracked together as "de-emphasis";
 # codes are processed left to right within a sequence, so "ESC[0;2m" reads as dim.
 # LC_ALL=C makes awk walk bytes, so multibyte glyphs (e.g. ❯) and de-emphasised
@@ -145,7 +146,8 @@ fm_composer_strip_ghost() {
                 else if (code == "22") dim = 0
                 else if (code == "39") darkfg = 0
                 else if (code + 0 >= 30 && code + 0 <= 37) darkfg = 0
-                else if (code + 0 >= 90 && code + 0 <= 97) darkfg = 0
+                else if (code == "90") darkfg = 1
+                else if (code + 0 >= 91 && code + 0 <= 97) darkfg = 0
               }
             }
             if (j <= n) { i = j + 1; continue }

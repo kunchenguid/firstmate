@@ -82,6 +82,7 @@ FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
+FM_TMUX_AGY_BUSY_REGEX_DEFAULT='esc to cancel( generation)?'
 FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]
@@ -96,6 +97,7 @@ fm_busy_lines_match() {  # [harness]
       opencode) regex=$FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT ;;
       pi|pi-signed) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_TMUX_GROK_BUSY_REGEX_DEFAULT ;;
+      agy) regex=$FM_TMUX_AGY_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_TMUX_KIMI_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_TMUX_BUSY_REGEX_DEFAULT ;;
       *)
@@ -296,6 +298,33 @@ EOF
   return 1
 }
 
+# fm_tmux_find_agy_composer: locate AGY's complete horizontal-rule composer
+# around the cursor. This shape is accepted only for a metadata-routed AGY task,
+# so transcript separators or a dead shell in another harness cannot become an
+# injection target. Prints the zero-based opening and closing rule rows.
+fm_tmux_find_agy_composer() {  # <cursor-y> <plain-visible-pane>
+  local cy=$1 pane=$2 line row=0 top=-1 content_rows=0 trimmed
+  while IFS= read -r line; do
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    if [ "${#trimmed}" -ge 8 ] && [ -z "${trimmed//─/}" ]; then
+      if [ "$top" -ge 0 ] && [ "$content_rows" -gt 0 ] \
+         && [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; then
+        printf '%s %s' "$top" "$row"
+        return 0
+      fi
+      top=$row
+      content_rows=0
+    elif [ "$top" -ge 0 ]; then
+      content_rows=$((content_rows + 1))
+    fi
+    row=$((row + 1))
+  done <<EOF
+$pane
+EOF
+  return 1
+}
+
 # fm_tmux_composer_state classification contract:
 # A row is structural only when its first or last non-whitespace character is a
 # composer edge. A complete box has matching border families and bounded top and
@@ -307,14 +336,29 @@ EOF
 # requires positive proof: a genuinely empty composer, an all-empty unambiguous
 # box, an empty non-bordered fallback row, or the submit core's proven
 # busy-queued Enter conversion.
-fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
-  local target=$1 cy raw pane plain box box_status top bottom geometry_ambiguous
+fm_tmux_composer_state() {  # <target> [harness] -> empty|pending|pending-unproven|unknown
+  local target=$1 harness=${2:-} cy raw pane plain box box_status top bottom geometry_ambiguous
   local row row_raw state unknown_seen=0
   cy=$(tmux display-message -p -t "$target" '#{cursor_y}' 2>/dev/null) || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   pane=$(tmux capture-pane -e -p -t "$target" -S 0 -E - 2>/dev/null) || { printf 'unknown'; return 0; }
   plain=$(printf '%s\n' "$pane" | fm_composer_strip_ansi)
-  if box=$(fm_tmux_find_composer_box "$cy" "$plain"); then
+  if [ "$harness" = agy ] && box=$(fm_tmux_find_agy_composer "$cy" "$plain"); then
+    top=${box%% *}
+    bottom=${box#* }
+    row=$((top + 1))
+    while [ "$row" -lt "$bottom" ]; do
+      row_raw=$(printf '%s\n' "$pane" | sed -n "$((row + 1))p")
+      state=$(fm_tmux_composer_row_state "$row_raw" 1 0)
+      case "$state" in
+        pending) printf 'pending'; return 0 ;;
+        unknown) printf 'unknown'; return 0 ;;
+      esac
+      row=$((row + 1))
+    done
+    printf 'empty'
+    return 0
+  elif box=$(fm_tmux_find_composer_box "$cy" "$plain"); then
     top=${box%% *}
     box=${box#* }
     bottom=${box%% *}
@@ -386,12 +430,12 @@ fm_pane_is_busy() {  # <target> [harness]
 # `empty` so the caller does not re-send), while an idle pane keeps `pending` as
 # a genuine swallow. Pending-unproven receives the same Enter retry budget but
 # never reaches this exception.
-fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
-  local target=$1 retries=$2 sleep_s=$3 i=0 state
+fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness]
+  local target=$1 retries=$2 sleep_s=$3 harness=${4:-} i=0 state
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
-    state=$(fm_tmux_composer_state "$target")
+    state=$(fm_tmux_composer_state "$target" "$harness")
     case "$state" in
       pending|pending-unproven) ;;
       *) printf '%s' "$state"; return 0 ;;
@@ -408,16 +452,16 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
   # and queued the message for processing when the current turn ends.
   # Treat it as submitted so the caller does not re-send.
   # On an idle pane, keep reporting pending - a genuine swallow.
-  if fm_pane_is_busy "$target"; then
+  if fm_pane_is_busy "$target" "$harness"; then
     printf 'empty'
   else
     printf 'pending'
   fi
 }
 
-fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5
+fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [harness]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-}
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s"
+  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$harness"
 }
