@@ -1232,5 +1232,11 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
+TEARDOWN_EVENT_ARGS=()
+[ -n "$PR_URL" ] && TEARDOWN_EVENT_ARGS=(--pr-url "$PR_URL")
+"$SCRIPT_DIR/fm-brain-event.sh" teardown TASK_DONE "$ID" \
+  "$T|$WT|$KIND|$MODE|$PR_URL" \
+  "teardown $ID complete kind=$KIND mode=$MODE${PR_URL:+ pr=$PR_URL}" \
+  "${TEARDOWN_EVENT_ARGS[@]+"${TEARDOWN_EVENT_ARGS[@]}"}"
 echo "teardown $ID complete (window $T, worktree $WT)"
 backlog_refresh_reminder

@@ -25,5 +25,8 @@ echo "kind=ship" >> "$TMP"
 mv "$TMP" "$META"
 
 HOME_Q=$(printf '%q' "$FM_HOME")
+"$SCRIPT_DIR/fm-brain-event.sh" promote PLAN_CHANGE "$ID" \
+  "scout-to-ship" \
+  "promoted $ID from scout to ship"
 echo "promoted $ID to ship (teardown protection restored)"
 echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"

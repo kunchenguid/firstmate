@@ -1527,4 +1527,7 @@ if [ "$KIND" = secondmate ]; then
   fi
 fi
 
+"$SCRIPT_DIR/fm-brain-event.sh" spawn TASK_START "$ID" \
+  "$META_WINDOW|$WT|$KIND|$HARNESS|$BACKEND|$MODE" \
+  "spawned $ID kind=$KIND harness=$HARNESS backend=$BACKEND mode=$MODE"
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
