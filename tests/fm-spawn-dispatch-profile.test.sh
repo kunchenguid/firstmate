@@ -72,6 +72,12 @@ enable_dispatch_profile() {
     > "$home/config/crew-dispatch.json"
 }
 
+enable_yolo_project() {
+  local home=$1 project=$2
+  printf -- '- %s [no-mistakes +yolo] - test project (added 2026-07-27)\n' \
+    "$(basename "$project")" > "$home/data/projects.md"
+}
+
 make_seeded_secondmate_home() {
   local home=$1 id=$2
   mkdir -p "$home/bin" "$home/data"
@@ -348,6 +354,8 @@ test_pi_threads_model_and_max_effort() {
     "pi launch still exports the removed Calm input-reroute binding"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi launch lost the canonical typed launch-brief envelope"
+  assert_not_contains "$launch" "PI_PERMISSION_SYSTEM_YOLO=1" \
+    "pi launch enabled the permission override for a yolo-off project"
   pass "pi receives --model and --thinking max profile flags"
 }
 
@@ -417,6 +425,76 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
 
+test_pi_harness_yolo_ship_and_scout_receive_permission_override() {
+  local rec id harness kind out status launch
+  for harness in pi pi-signed; do
+    for kind in ship scout; do
+      id="profile-$harness-yolo-$kind-z17"
+      rec=$(make_spawn_case "profile-$harness-yolo-$kind" "$harness" "$id")
+      read_case_record "$rec"
+      enable_yolo_project "$HOME_DIR" "$PROJ_DIR"
+
+      if [ "$kind" = scout ]; then
+        out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+          "$id" "$PROJ_DIR" --scout)
+      else
+        out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+          "$id" "$PROJ_DIR")
+      fi
+      status=$?
+      expect_code 0 "$status" "$harness $kind spawn for a yolo-on project should succeed"
+      launch=$(cat "$LAUNCH_LOG")
+      assert_contains "$launch" \
+        "PI_PERMISSION_SYSTEM_YOLO=1 FM_PI_HARNESS=$harness $harness" \
+        "$harness $kind launch did not receive the process-scoped permission override"
+      assert_grep "yolo=on" "$HOME_DIR/state/$id.meta" \
+        "$harness $kind metadata did not record yolo=on"
+    done
+  done
+  pass "Pi harness yolo-on ship and scout launches receive the permission override"
+}
+
+test_non_pi_yolo_launch_omits_permission_override() {
+  local rec id out status launch
+  id=profile-codex-yolo-z18
+  rec=$(make_spawn_case profile-codex-yolo codex "$id")
+  read_case_record "$rec"
+  enable_yolo_project "$HOME_DIR" "$PROJ_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn for a yolo-on project should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "PI_PERMISSION_SYSTEM_YOLO=1" \
+    "non-pi launch received the pi permission override"
+  assert_grep "yolo=on" "$HOME_DIR/state/$id.meta" \
+    "codex metadata did not record yolo=on"
+  pass "non-pi yolo-on launches omit the pi permission override"
+}
+
+test_pi_harness_secondmate_omits_permission_override() {
+  local rec id harness sm out status launch
+  for harness in pi pi-signed; do
+    id="profile-$harness-secondmate-yolo-z19"
+    rec=$(make_spawn_case "profile-$harness-secondmate-yolo" "$harness" "$id")
+    read_case_record "$rec"
+    sm="$CASE_DIR/secondmate-home"
+    make_seeded_secondmate_home "$sm" "$id"
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$sm" --secondmate)
+    status=$?
+    expect_code 0 "$status" "$harness secondmate spawn should succeed"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_not_contains "$launch" "PI_PERMISSION_SYSTEM_YOLO=1" \
+      "$harness secondmate launch received the project-task permission override"
+    assert_grep "yolo=off" "$HOME_DIR/state/$id.meta" \
+      "$harness secondmate metadata did not retain yolo=off"
+  done
+  pass "Pi harness secondmate launches omit the project-task permission override"
+}
+
 test_batch_forwards_shared_profile_flags() {
   local rec id1 id2 out status
   id1=profile-batch-a-z9
@@ -471,6 +549,9 @@ test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
+test_pi_harness_yolo_ship_and_scout_receive_permission_override
+test_non_pi_yolo_launch_omits_permission_override
+test_pi_harness_secondmate_omits_permission_override
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
