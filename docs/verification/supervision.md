@@ -123,6 +123,7 @@ Pi 0.82.1 revalidated actionable wake delivery on 2026-07-27 through a real isol
 An isolated fake arm child controlled two pre-drain closes and one post-drain close without touching a live fleet.
 The first handling turn drained the signal and stale records together, the retired stale reason produced no later prompt, one genuinely new record produced exactly one second prompt, four successor cycles stayed continuous, and records remained queued until each drain.
 The same test exercised OpenCode's close handler and matching-idle coalescing at the plugin boundary.
+The Pi and OpenCode cases also held the real wake-drain mutation lock after the live queue was truncated and proved no delayed prompt was delivered until an unlocked queue read confirmed whether a wake remained.
 
 ```text
 $ pi --version
@@ -132,6 +133,23 @@ $ tests/fm-pi-watch-extension.test.sh
 ok - Pi coalesces actionable closes until a real drain and preserves later events
 ok - native Pi coalesces pre-drain closes, suppresses retired stale delivery, and preserves a new post-drain event
 ok - OpenCode coalesces actionable closes until a real drain and preserves later events
+```
+
+OpenCode 1.16.2 revalidated the coalescing latch on 2026-07-27 through a real persistent TUI session in an isolated project and home.
+The TUI ran with `opencode -m opencode/ling-3.0-flash-free`; a tmux driver submitted the initial instruction after the composer was visible, a fake arm child emitted one first wake and one second wake, and a wrapper around the real drain held the first handling turn open while the second close arrived.
+
+```sh
+opencode --version
+OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' \
+  FM_HOME="$fixture/fmhome" FM_ROOT_OVERRIDE="$fixture/project" \
+  opencode -m opencode/ling-3.0-flash-free
+```
+
+Observed output:
+
+```text
+1.16.2
+ok - OpenCode 1.16.2 real TUI coalesced a second watcher close behind the outstanding wake latch and delivered it after idle using opencode/ling-3.0-flash-free
 ```
 
 Deterministic entry points:

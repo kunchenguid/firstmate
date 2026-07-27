@@ -382,7 +382,7 @@ test_pi_actionable_close_starts_single_successor_before_delivery() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
-  : > "$home/state/.wake-queue"
+  printf '1\t1\tsignal\ttask.status\tsignal: synthetic queued wake\n' > "$home/state/.wake-queue"
   mkdir "$home/state/.wake-queue.lock"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -397,8 +397,8 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=100 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 let tool = null;
@@ -430,11 +430,16 @@ for (let i = 0; i < 250; i += 1) {
   const rows = existsSync(process.env.FM_ARM_LOG)
     ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
     : [];
-  if (rows.length >= 2 && deliveryStarted) break;
+  if (rows.length >= 2) break;
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 if (rows.length !== 2) throw new Error(`expected one successor arm, got ${rows.length}: ${rows.join(" | ")}`);
+if (deliveryStarted) throw new Error("wake delivery began while the wake queue lock was active");
+rmSync(`${process.env.FM_HOME}/state/.wake-queue.lock`, { recursive: true, force: true });
+for (let i = 0; i < 250 && !deliveryStarted; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
 if (!deliveryStarted) throw new Error("wake delivery did not begin");
 if (rowsAtDelivery !== 2) throw new Error(`wake delivery began before successor establishment (${rowsAtDelivery} arm rows)`);
 if (!/predecessor=[0-9]+/.test(rows[1])) throw new Error(`successor did not receive predecessor identity: ${rows[1]}`);
@@ -502,7 +507,7 @@ SH
   printf 'done: completed scout\n' > "$home/state/task.status"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_RELEASE_BATCH="$release_batch" FM_RELEASE_NEW="$release_new" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 const handlers = new Map();
@@ -549,15 +554,33 @@ await new Promise((resolve) => setTimeout(resolve, 100));
 if (prompts.length !== 1) throw new Error(`coalesced batch scheduled ${prompts.length} Pi prompts`);
 if (queueRows().length !== 2) throw new Error(`coalescing changed durable queue rows: ${queueRows().join(" | ")}`);
 
-const drain = spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-wake-drain.sh`, [], {
-  encoding: "utf8",
-  env: process.env,
+const drain = spawn(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-wake-drain.sh`, [], {
+  env: { ...process.env, FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT: "1" },
 });
-if (drain.status !== 0) throw new Error(`real drain failed: ${drain.stderr}`);
-const drainedRows = drain.stdout.trim().split("\n").filter((line) => line.split("\t").length >= 5);
-if (drainedRows.length !== 2) throw new Error(`real drain did not consume both records: ${drain.stdout}`);
-if (queueRows().length !== 0) throw new Error("real drain left the coalesced batch queued");
+let drainStdout = "";
+let drainStderr = "";
+drain.stdout.on("data", (chunk) => {
+  drainStdout += chunk.toString();
+});
+drain.stderr.on("data", (chunk) => {
+  drainStderr += chunk.toString();
+});
+const drainClosed = new Promise((resolveDrain) => {
+  drain.on("close", (code) => resolveDrain(code ?? 0));
+});
+await waitFor(
+  () => existsSync(`${process.env.FM_HOME}/state/.wake-queue.lock`) && queueRows().length === 0,
+  "real drain did not expose the locked empty queue window",
+);
 rmSync(`${process.env.FM_HOME}/state/task.meta`);
+await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (prompts.length !== 1) throw new Error("drain-locked empty queue produced a Pi prompt");
+const drainStatus = await drainClosed;
+if (drainStatus !== 0) throw new Error(`real drain failed: ${drainStderr}`);
+const drainedRows = drainStdout.trim().split("\n").filter((line) => line.split("\t").length >= 5);
+if (drainedRows.length !== 2) throw new Error(`real drain did not consume both records: ${drainStdout}`);
+if (queueRows().length !== 0) throw new Error("real drain left the coalesced batch queued");
 await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
 await new Promise((resolve) => setTimeout(resolve, 100));
 if (prompts.length !== 1) throw new Error("retired stale endpoint produced a post-drain Pi prompt");
@@ -588,8 +611,6 @@ test_pi_failed_send_restores_coalesced_wake_delivery() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
-  : > "$home/state/.wake-queue"
-  mkdir "$home/state/.wake-queue.lock"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
@@ -1742,7 +1763,7 @@ test_opencode_primary_watch_plugin_rearms_after_wake() {
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
-  : > "$home/state/.wake-queue"
+  printf '1\t1\tsignal\ttask.status\tsignal: synthetic queued wake\n' > "$home/state/.wake-queue"
   mkdir "$home/state/.wake-queue.lock"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1757,8 +1778,8 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node 2>&1 <<'EOF'
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=100 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -1791,11 +1812,16 @@ for (let i = 0; i < 250; i += 1) {
   const rows = existsSync(process.env.FM_ARM_LOG)
     ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
     : [];
-  if (rows.length >= 2 && prompts >= 1) break;
+  if (rows.length >= 2) break;
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 if (rows.length !== 2) throw new Error(`expected one successor arm, got ${rows.length}: ${rows.join(" | ")}`);
+if (prompts !== 0) throw new Error("wake prompt began while the wake queue lock was active");
+rmSync(`${process.env.FM_HOME}/state/.wake-queue.lock`, { recursive: true, force: true });
+for (let i = 0; i < 250 && prompts < 1; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
 if (prompts !== 1) throw new Error(`expected one blocked wake prompt, got ${prompts}`);
 if (rowsAtPrompt !== 2) throw new Error(`wake prompt began before successor establishment (${rowsAtPrompt} arm rows)`);
 if (!/predecessor=[0-9]+/.test(rows[1])) throw new Error(`successor did not receive predecessor identity: ${rows[1]}`);
@@ -1866,7 +1892,7 @@ SH
   printf 'done: completed scout\n' > "$home/state/task.status"
   out=$(PLUGIN="$repo/.opencode/plugins/fm-primary-watch-arm.js" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_BATCH="$release_batch" FM_RELEASE_NEW="$release_new" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -1910,15 +1936,37 @@ await new Promise((resolve) => setTimeout(resolve, 100));
 if (prompts.length !== 1) throw new Error(`coalesced batch scheduled ${prompts.length} OpenCode prompts`);
 if (queueRows().length !== 2) throw new Error(`coalescing changed durable queue rows: ${queueRows().join(" | ")}`);
 
-const drain = spawnSync(`${process.env.WORKTREE}/bin/fm-wake-drain.sh`, [], {
-  encoding: "utf8",
-  env: { ...process.env, FM_ROOT_OVERRIDE: process.env.WORKTREE },
+const drain = spawn(`${process.env.WORKTREE}/bin/fm-wake-drain.sh`, [], {
+  env: {
+    ...process.env,
+    FM_ROOT_OVERRIDE: process.env.WORKTREE,
+    FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT: "1",
+  },
 });
-if (drain.status !== 0) throw new Error(`real drain failed: ${drain.stderr}`);
-const drainedRows = drain.stdout.trim().split("\n").filter((line) => line.split("\t").length >= 5);
-if (drainedRows.length !== 2) throw new Error(`real drain did not consume both records: ${drain.stdout}`);
-if (queueRows().length !== 0) throw new Error("real drain left the coalesced batch queued");
+let drainStdout = "";
+let drainStderr = "";
+drain.stdout.on("data", (chunk) => {
+  drainStdout += chunk.toString();
+});
+drain.stderr.on("data", (chunk) => {
+  drainStderr += chunk.toString();
+});
+const drainClosed = new Promise((resolveDrain) => {
+  drain.on("close", (code) => resolveDrain(code ?? 0));
+});
+await waitFor(
+  () => existsSync(`${process.env.FM_HOME}/state/.wake-queue.lock`) && queueRows().length === 0,
+  "real drain did not expose the locked empty queue window",
+);
 rmSync(`${process.env.FM_HOME}/state/task.meta`);
+await hooks.event(idle);
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (prompts.length !== 1) throw new Error("drain-locked empty queue produced an OpenCode prompt");
+const drainStatus = await drainClosed;
+if (drainStatus !== 0) throw new Error(`real drain failed: ${drainStderr}`);
+const drainedRows = drainStdout.trim().split("\n").filter((line) => line.split("\t").length >= 5);
+if (drainedRows.length !== 2) throw new Error(`real drain did not consume both records: ${drainStdout}`);
+if (queueRows().length !== 0) throw new Error("real drain left the coalesced batch queued");
 await hooks.event(idle);
 await new Promise((resolve) => setTimeout(resolve, 100));
 if (prompts.length !== 1) throw new Error("retired stale endpoint produced a post-drain OpenCode prompt");
@@ -1951,8 +1999,6 @@ test_opencode_failed_send_preserves_newer_actionable_reason() {
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
-  : > "$home/state/.wake-queue"
-  mkdir "$home/state/.wake-queue.lock"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
@@ -2131,8 +2177,6 @@ test_opencode_session_end_releases_wake_prompt_latch() {
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
-  : > "$home/state/.wake-queue"
-  mkdir "$home/state/.wake-queue.lock"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
@@ -2230,8 +2274,6 @@ test_opencode_stale_rejected_send_cannot_release_newer_latch() {
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
-  : > "$home/state/.wake-queue"
-  mkdir "$home/state/.wake-queue.lock"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"

@@ -23,6 +23,9 @@ let wakePromptSessionID = "";
 let wakePromptEpoch = 0;
 let pendingActionableReason = "";
 let pendingFailureReason = "";
+let queueLockRetryTimer = null;
+let queueLockRetryFailures = 0;
+let queueLockRetryReported = false;
 
 function positiveInteger(name, fallback) {
   const value = Number(process.env[name]);
@@ -202,9 +205,9 @@ function queuedWakeSnapshot(paths) {
   const queue = `${paths.state}/.wake-queue`;
   const lock = `${paths.state}/.wake-queue.lock`;
   try {
-    if (existsSync(lock)) return { state: "unknown", reason: "" };
+    if (existsSync(lock)) return { state: "locked", reason: "" };
     const content = readFileSync(queue, "utf8");
-    if (existsSync(lock)) return { state: "unknown", reason: "" };
+    if (existsSync(lock)) return { state: "locked", reason: "" };
     if (!content.trim()) return { state: "empty", reason: "" };
     let reason = "";
     for (const line of content.split(/\r?\n/)) {
@@ -217,16 +220,39 @@ function queuedWakeSnapshot(paths) {
   }
 }
 
+function scheduleQueueLockRetry(paths, client, sessionID) {
+  if (queueLockRetryTimer || wakePromptOutstanding || !pendingActionableReason) return "blocked";
+  if (queueLockRetryReported) return "blocked";
+  queueLockRetryFailures += 1;
+  if (queueLockRetryFailures > REARM_RETRY_LIMIT) {
+    return "exhausted";
+  }
+  const timer = setTimeout(() => {
+    if (queueLockRetryTimer === timer) queueLockRetryTimer = null;
+    void flushWakePrompt(paths, client, sessionID);
+  }, retryDelay(queueLockRetryFailures));
+  timer.unref();
+  queueLockRetryTimer = timer;
+  return "scheduled";
+}
+
 async function flushWakePrompt(paths, client, sessionID) {
   if (wakePromptOutstanding) return;
   const queue = queuedWakeSnapshot(paths);
+  if (queue.state !== "locked") {
+    queueLockRetryFailures = 0;
+    queueLockRetryReported = false;
+  }
   let message = "";
   let actionable = "";
   let failure = "";
   if (pendingFailureReason) {
     failure = pendingFailureReason;
     pendingFailureReason = "";
-    if (pendingActionableReason && queue.state !== "empty") {
+    if (pendingActionableReason && queue.state === "locked") {
+      scheduleQueueLockRetry(paths, client, sessionID);
+      message = failure;
+    } else if (pendingActionableReason && queue.state !== "empty") {
       actionable = pendingActionableReason;
       pendingActionableReason = "";
       message = `${queue.reason || actionable}\n\n${failure}`;
@@ -234,13 +260,22 @@ async function flushWakePrompt(paths, client, sessionID) {
       message = failure;
     }
   } else if (pendingActionableReason) {
-    if (queue.state === "empty") {
+    if (queue.state === "locked") {
+      if (scheduleQueueLockRetry(paths, client, sessionID) === "exhausted") {
+        message = `watcher: FAILED - OpenCode could not revalidate queued wake delivery while the wake queue lock stayed active after ${REARM_RETRY_LIMIT} retries`;
+        failure = message;
+        queueLockRetryReported = true;
+      } else {
+        return;
+      }
+    } else if (queue.state === "empty") {
       pendingActionableReason = "";
       return;
+    } else {
+      actionable = pendingActionableReason;
+      pendingActionableReason = "";
+      message = queue.reason || actionable;
     }
-    actionable = pendingActionableReason;
-    pendingActionableReason = "";
-    message = queue.reason || actionable;
   }
   if (!message) return;
   wakePromptOutstanding = true;

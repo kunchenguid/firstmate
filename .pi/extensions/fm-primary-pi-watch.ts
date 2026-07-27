@@ -183,6 +183,8 @@ export default function (pi: ExtensionAPI) {
     stopping = true;
     if (retryTimer) clearTimeout(retryTimer);
     retryTimer = null;
+    if (queueLockRetryTimer) clearTimeout(queueLockRetryTimer);
+    queueLockRetryTimer = null;
     if (child) child.kill("SIGTERM");
     child = null;
   }
@@ -196,14 +198,17 @@ export default function (pi: ExtensionAPI) {
   let wakePromptEpoch = 0;
   let pendingActionableReason = "";
   let pendingFailureReason = "";
+  let queueLockRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let queueLockRetryFailures = 0;
+  let queueLockRetryReported = false;
 
-  function queuedWakeSnapshot(): ["pending" | "empty" | "unknown", string] {
+  function queuedWakeSnapshot(): ["pending" | "empty" | "unknown" | "locked", string] {
     const queue = `${state}/.wake-queue`;
     const lock = `${state}/.wake-queue.lock`;
     try {
-      if (existsSync(lock)) return ["unknown", ""];
+      if (existsSync(lock)) return ["locked", ""];
       const content = readFileSync(queue, "utf8");
-      if (existsSync(lock)) return ["unknown", ""];
+      if (existsSync(lock)) return ["locked", ""];
       if (!content.trim()) return ["empty", ""];
       let reason = "";
       for (const line of content.split(/\r?\n/)) {
@@ -224,16 +229,39 @@ export default function (pi: ExtensionAPI) {
     await pi.sendUserMessage(content, { deliverAs: "followUp" });
   }
 
+  function scheduleQueueLockRetry(): "scheduled" | "exhausted" | "blocked" {
+    if (queueLockRetryTimer || wakePromptOutstanding || !pendingActionableReason) return "blocked";
+    if (queueLockRetryReported) return "blocked";
+    queueLockRetryFailures += 1;
+    if (queueLockRetryFailures > retryLimit) {
+      return "exhausted";
+    }
+    const timer = setTimeout(() => {
+      if (queueLockRetryTimer === timer) queueLockRetryTimer = null;
+      flushWakePrompt();
+    }, retryDelay(queueLockRetryFailures));
+    timer.unref();
+    queueLockRetryTimer = timer;
+    return "scheduled";
+  }
+
   function flushWakePrompt(): void {
     if (stopping || wakePromptOutstanding) return;
     const [queueState, queuedReason] = queuedWakeSnapshot();
+    if (queueState !== "locked") {
+      queueLockRetryFailures = 0;
+      queueLockRetryReported = false;
+    }
     let message = "";
     let actionable = "";
     let failure = "";
     if (pendingFailureReason) {
       failure = pendingFailureReason;
       pendingFailureReason = "";
-      if (pendingActionableReason && queueState !== "empty") {
+      if (pendingActionableReason && queueState === "locked") {
+        scheduleQueueLockRetry();
+        message = failure;
+      } else if (pendingActionableReason && queueState !== "empty") {
         actionable = pendingActionableReason;
         pendingActionableReason = "";
         message = `${queuedReason || actionable}\n\n${failure}`;
@@ -241,13 +269,22 @@ export default function (pi: ExtensionAPI) {
         message = failure;
       }
     } else if (pendingActionableReason) {
-      if (queueState === "empty") {
+      if (queueState === "locked") {
+        if (scheduleQueueLockRetry() === "exhausted") {
+          message = `watcher: FAILED - Pi extension could not revalidate queued wake delivery while the wake queue lock stayed active after ${retryLimit} retries`;
+          failure = message;
+          queueLockRetryReported = true;
+        } else {
+          return;
+        }
+      } else if (queueState === "empty") {
         pendingActionableReason = "";
         return;
+      } else {
+        actionable = pendingActionableReason;
+        pendingActionableReason = "";
+        message = queuedReason || actionable;
       }
-      actionable = pendingActionableReason;
-      pendingActionableReason = "";
-      message = queuedReason || actionable;
     }
     if (!message) return;
     wakePromptOutstanding = true;
