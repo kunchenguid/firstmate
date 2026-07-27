@@ -88,6 +88,30 @@ fm_fakebin() {
   printf '%s\n' "$fakebin"
 }
 
+# fm_fake_treehouse <fakebin> [default-lease-path]: a treehouse stub that models
+# the acquisition contract bin/fm-spawn.sh depends on - `get --lease` prints the
+# leased worktree path on stdout and every other subcommand exits 0. The path
+# comes from $FM_FAKE_LEASE_PATH, then $FM_FAKE_PANE_PATH, then the optional
+# baked-in default. Set $FM_FAKE_TREEHOUSE_LOG to record calls, and
+# $FM_FAKE_TREEHOUSE_FAIL=1 to make the lease fail.
+fm_fake_treehouse() {
+  local fakebin=$1 default_path=${2:-}
+  printf '#!/usr/bin/env bash\nFM_FAKE_TREEHOUSE_DEFAULT=%q\n' "$default_path" > "$fakebin/treehouse"
+  sed 1d >> "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_FAKE_TREEHOUSE_LOG:-}" ]; then
+  { printf 'treehouse'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >> "$FM_FAKE_TREEHOUSE_LOG"
+fi
+if [ "${1:-}" = get ]; then
+  [ "${FM_FAKE_TREEHOUSE_FAIL:-0}" = 1 ] && exit 1
+  printf '%s\n' "${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-$FM_FAKE_TREEHOUSE_DEFAULT}}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+}
+
 fm_fake_exit0() {
   local fakebin=$1 tool
   shift

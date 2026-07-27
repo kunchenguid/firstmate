@@ -76,14 +76,10 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  # A fake `treehouse` that hands out the NEXT free worktree, exactly like the
-  # real one: it has no task identity, so a relaunch would silently get a
-  # different copy.
-  cat > "$fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/treehouse"
+  # A fake `treehouse` that leases the NEXT free worktree, exactly like the real
+  # one: it has no task identity, so a relaunch would silently get a different
+  # copy. Calls are logged so a test can prove no fresh acquisition happened.
+  fm_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -100,6 +96,7 @@ make_case() {
   CASE_FAKEBIN=$(make_fakebin "$case_dir/fake")
   CASE_CWD_FILE="$case_dir/pane-cwd"
   CASE_SENT_FILE="$case_dir/pane-sent"
+  CASE_TREEHOUSE_LOG="$case_dir/treehouse-calls"
   mkdir -p "$CASE_HOME/data" "$CASE_HOME/projects" "$CASE_HOME/state" "$CASE_HOME/config"
   printf 'codex\n' > "$CASE_HOME/config/crew-harness"
   touch "$CASE_HOME/state/.last-watcher-beat"
@@ -109,6 +106,7 @@ make_case() {
   printf 'brief for %s\n' "$id" > "$CASE_HOME/data/$id/brief.md"
   : > "$CASE_CWD_FILE"
   : > "$CASE_SENT_FILE"
+  : > "$CASE_TREEHOUSE_LOG"
 }
 
 # run_spawn <id> <pane-path-when-no-cd-yet>: one spawn against the fake tmux.
@@ -119,7 +117,8 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$CASE_HOME/projects" FM_CONFIG_OVERRIDE="$CASE_HOME/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$pane_path" FM_FAKE_CWD_FILE="$CASE_CWD_FILE" \
-    FM_FAKE_SENT_FILE="$CASE_SENT_FILE" \
+    FM_FAKE_SENT_FILE="$CASE_SENT_FILE" FM_FAKE_LEASE_PATH="$pane_path" \
+    FM_FAKE_TREEHOUSE_LOG="$CASE_TREEHOUSE_LOG" \
     FM_FAKE_WINDOWS="${FM_FAKE_WINDOWS:-}" FM_FAKE_PANE_COMMAND="${FM_FAKE_PANE_COMMAND:-bash}" \
     PATH="$CASE_FAKEBIN:$PATH" \
     "$SPAWN" "$id" "$CASE_PROJ" 2>&1
@@ -150,6 +149,7 @@ test_relaunch_reuses_recorded_worktree() {
   leave_unlanded_work "$CASE_WT_A"
   : > "$CASE_CWD_FILE"
   : > "$CASE_SENT_FILE"
+  : > "$CASE_TREEHOUSE_LOG"
 
   # treehouse would now hand out worktree b.
   out=$(run_spawn "$id" "$CASE_WT_B")
@@ -159,8 +159,8 @@ test_relaunch_reuses_recorded_worktree() {
     "relaunch did not keep the recorded worktree"
   assert_no_grep "worktree=$CASE_WT_B" "$CASE_HOME/state/$id.meta" \
     "REGRESSION: relaunch allocated a fresh worktree and overwrote the task record"
-  assert_no_grep 'treehouse get' "$CASE_SENT_FILE" \
-    "REGRESSION: relaunch asked treehouse for another worktree"
+  assert_no_grep 'get --lease' "$CASE_TREEHOUSE_LOG" \
+    "REGRESSION: relaunch leased another worktree"
   assert_grep "cd '$CASE_WT_A'" "$CASE_SENT_FILE" "relaunch did not re-enter the recorded worktree"
   assert_present "$CASE_WT_A/scratch.txt" "relaunch lost the recorded worktree's uncommitted edit"
   assert_contains "$(git -C "$CASE_WT_A" log --oneline -1)" 'unlanded work' \
@@ -180,6 +180,7 @@ test_live_recorded_endpoint_refuses() {
   before=$(cat "$CASE_HOME/state/$id.meta")
   : > "$CASE_CWD_FILE"
   : > "$CASE_SENT_FILE"
+  : > "$CASE_TREEHOUSE_LOG"
 
   out=$(FM_FAKE_WINDOWS="fm-$id
 " FM_FAKE_PANE_COMMAND=codex run_spawn "$id" "$CASE_WT_B")
@@ -189,7 +190,7 @@ test_live_recorded_endpoint_refuses() {
   assert_contains "$out" 'is alive' "refusal did not report the live endpoint state"
   [ "$before" = "$(cat "$CASE_HOME/state/$id.meta")" ] \
     || fail "refused relaunch still changed the task record"
-  assert_no_grep 'treehouse get' "$CASE_SENT_FILE" "refused relaunch still asked for a worktree"
+  assert_no_grep 'get --lease' "$CASE_TREEHOUSE_LOG" "refused relaunch still leased a worktree"
   pass "a relaunch onto a live recorded endpoint refuses and leaves the record intact"
 }
 
@@ -209,6 +210,7 @@ test_unresolvable_recorded_worktree_refuses() {
   before=$(cat "$CASE_HOME/state/$id.meta")
   : > "$CASE_CWD_FILE"
   : > "$CASE_SENT_FILE"
+  : > "$CASE_TREEHOUSE_LOG"
 
   out=$(run_spawn "$id" "$CASE_WT_B")
   status=$?
@@ -230,7 +232,8 @@ test_fresh_task_still_allocates() {
   expect_code 0 "$status" "a task with no record should spawn normally: $out"
   assert_contains "$out" "spawned $id" "fresh spawn did not report success"
   assert_grep "worktree=$CASE_WT_A" "$CASE_HOME/state/$id.meta" "fresh spawn did not record its worktree"
-  assert_grep 'treehouse get' "$CASE_SENT_FILE" "fresh spawn did not allocate through treehouse"
+  assert_grep 'get --lease --lease-holder fm-'"$id" "$CASE_TREEHOUSE_LOG" \
+    "fresh spawn did not durably lease its worktree"
   pass "a task id with no record still takes the unchanged fresh-allocation path"
 }
 
@@ -246,6 +249,7 @@ test_kind_change_refuses() {
   before=$(cat "$CASE_HOME/state/$id.meta")
   : > "$CASE_CWD_FILE"
   : > "$CASE_SENT_FILE"
+  : > "$CASE_TREEHOUSE_LOG"
 
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$CASE_HOME" \
     FM_STATE_OVERRIDE="$CASE_HOME/state" FM_DATA_OVERRIDE="$CASE_HOME/data" \
@@ -280,6 +284,7 @@ test_project_change_refuses() {
   before=$(cat "$CASE_HOME/state/$id.meta")
   : > "$CASE_CWD_FILE"
   : > "$CASE_SENT_FILE"
+  : > "$CASE_TREEHOUSE_LOG"
 
   out=$(run_spawn "$id" "$CASE_WT_B")
   status=$?

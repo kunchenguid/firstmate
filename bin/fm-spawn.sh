@@ -84,6 +84,17 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   A fresh ship/scout worktree is acquired as a DURABLE TREEHOUSE LEASE held by
+#   fm-<task-id>, and the pane is sent into it with cd. The interactive
+#   `treehouse get` subshell is deliberately not used: its lifetime ends with the
+#   subshell a pane falls back to when an agent exits normally, and its
+#   clean-and-return prompt defaults to yes, so one stray Enter would recycle the
+#   worktree and delete every untracked file in it. A lease survives with no live
+#   process, is never handed out by a later get or removed by prune, and is
+#   released only by teardown's explicit treehouse return. A failed lease is
+#   terminal for the spawn; there is no fallback to the interactive form. This
+#   spawn releases a lease it just acquired only when it aborts before recording
+#   the task AND the worktree holds no uncommitted or untracked content.
 #   A ship/scout spawn for a task id that already has state/<id>.meta is treated
 #   as a RELAUNCH of that recorded task, never as a fresh allocation. It re-enters
 #   the recorded worktree - preserving its uncommitted edits and unpushed commits -
@@ -126,7 +137,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,98p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,109p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -244,6 +255,8 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+WT_LEASED=
+TREEHOUSE_LEASE_ABORT_CLEANUP=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -311,6 +324,10 @@ spawn_abort_cleanup() {
         fi
       fi
     fi
+  fi
+  if [ "$TREEHOUSE_LEASE_ABORT_CLEANUP" = 1 ]; then
+    TREEHOUSE_LEASE_ABORT_CLEANUP=0
+    release_leased_task_worktree "${WT_LEASED:-}" || true
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
@@ -1322,6 +1339,62 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
+# --- durable task-worktree acquisition ---------------------------------------
+#
+# Task worktrees are DURABLY LEASED, never held only by an interactive
+# `treehouse get` subshell. The interactive form ties the worktree's lifetime to
+# that subshell: when it exits - which is what a pane falls back to the moment a
+# non-Claude agent exits normally - treehouse offers to clean and return the
+# worktree with an AFFIRMATIVE default, so one stray Enter recycles the pool slot
+# and deletes every untracked file in it (a handoff note, a scratch repro, an
+# unstaged fix). Nothing in the agent's own exit is abnormal, and firstmate's
+# record still claims the worktree, so the loss is silent.
+#
+# A lease is recorded in treehouse's own persistent state instead: it survives
+# with no live process, is never handed out by a later get or removed by prune,
+# and is released only by an explicit `treehouse return`. That is the same
+# durability firstmate already relies on for secondmate homes
+# (bin/fm-home-seed.sh's acquire_treehouse_home), and it removes the
+# agent-exit-to-auto-return path entirely rather than trying to survive it.
+# `treehouse get --lease` support is already a bootstrap requirement for every
+# treehouse-using backend (bin/fm-bootstrap.sh), so a failure here is terminal:
+# never fall back to the interactive form.
+acquire_leased_task_worktree() {
+  local wt
+  wt=$( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "fm-$ID" ) || {
+    echo "error: treehouse get --lease failed to lease a worktree for $ID in $PROJ_ABS" >&2
+    return 1
+  }
+  [ -n "$wt" ] || {
+    echo "error: treehouse get --lease did not report a worktree for $ID in $PROJ_ABS" >&2
+    return 1
+  }
+  printf '%s\n' "$wt"
+}
+
+# Release a lease this spawn just acquired, and only that one. Guarded twice: the
+# lease holder must still be this task, and the worktree must hold no untracked
+# or uncommitted content - an automatic return must never delete work, which is
+# the whole point of leasing in the first place. Anything unprovable is left
+# leased and reported, because a leaked pool slot is recoverable and deleted work
+# is not.
+release_leased_task_worktree() {  # <worktree>
+  local wt=$1 dirty
+  [ -n "$wt" ] || return 0
+  dirty=$(git -C "$wt" status --porcelain 2>/dev/null) || {
+    echo "warning: could not inspect leased worktree $wt for $ID; leaving it leased" >&2
+    return 0
+  }
+  if [ -n "$dirty" ]; then
+    echo "warning: leased worktree $wt for $ID holds uncommitted or untracked content; leaving it leased" >&2
+    return 0
+  fi
+  ( cd "$PROJ_ABS" && treehouse return --force --if-lease-holder "fm-$ID" "$wt" ) >/dev/null 2>&1 || {
+    echo "warning: could not release the leased worktree $wt for $ID; it stays leased" >&2
+    return 0
+  }
+}
+
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # A proven relaunch (resolve_recorded_task_worktree above) re-enters the
   # RECORDED worktree instead of asking treehouse for another one, so the
@@ -1330,8 +1403,10 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$SPAWN_RECORDED_WT")"
     WT_SOURCE="recorded worktree re-entry"
   else
-    spawn_send_text_line "$WT_TARGET" 'treehouse get'
-    WT_SOURCE="treehouse get"
+    WT_LEASED=$(acquire_leased_task_worktree) || exit 1
+    TREEHOUSE_LEASE_ABORT_CLEANUP=1
+    spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$WT_LEASED")"
+    WT_SOURCE="leased worktree entry"
   fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -1385,6 +1460,16 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     WT_REAL=$(cd "$WT" 2>/dev/null && pwd -P) || WT_REAL=
     [ "$WT_REAL" = "$SPAWN_RECORDED_WT" ] \
       || spawn_relaunch_refuse "the relaunched worker settled in ${WT_REAL:-an uninspectable path} instead of its recorded worktree $SPAWN_RECORDED_WT"
+  fi
+  # The pane must be in the worktree this spawn actually leased; recording any
+  # other path would leave the lease unowned and the work unprotected.
+  if [ -n "$WT_LEASED" ]; then
+    WT_REAL=$(cd "$WT" 2>/dev/null && pwd -P) || WT_REAL=
+    WT_LEASED_REAL=$(cd "$WT_LEASED" 2>/dev/null && pwd -P) || WT_LEASED_REAL=$WT_LEASED
+    if [ "$WT_REAL" != "$WT_LEASED_REAL" ]; then
+      echo "error: $ID settled in ${WT_REAL:-an uninspectable path} instead of its leased worktree $WT_LEASED; refusing to launch. Inspect target $T" >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -1573,6 +1658,8 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+# The record now owns the lease: teardown releases it, this spawn never does.
+TREEHOUSE_LEASE_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
