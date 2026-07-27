@@ -90,7 +90,8 @@ fm_fakebin() {
 
 # fm_fake_treehouse <fakebin> [default-lease-path]: a treehouse stub that models
 # the acquisition contract bin/fm-spawn.sh depends on - `get --lease` prints the
-# leased worktree path on stdout and every other subcommand exits 0. The path
+# leased worktree path on stdout and `status --json` reports the configured
+# pool state. The path
 # comes from $FM_FAKE_LEASE_PATH, then $FM_FAKE_PANE_PATH, then the optional
 # baked-in default. Set $FM_FAKE_TREEHOUSE_LOG to record calls, and
 # $FM_FAKE_TREEHOUSE_FAIL=1 to make the lease fail.
@@ -106,6 +107,10 @@ fi
 if [ "${1:-}" = get ]; then
   [ "${FM_FAKE_TREEHOUSE_FAIL:-0}" = 1 ] && exit 1
   printf '%s\n' "${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-$FM_FAKE_TREEHOUSE_DEFAULT}}"
+elif [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
+  printf '{"worktrees":[{"path":"%s","status":"%s","lease_holder":"%s"}]}\n' \
+    "${FM_FAKE_POOL_PATH:-${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-$FM_FAKE_TREEHOUSE_DEFAULT}}}" \
+    "${FM_FAKE_POOL_STATUS:-leased}" "${FM_FAKE_LEASE_HOLDER:-}"
 fi
 exit 0
 SH

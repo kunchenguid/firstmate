@@ -72,6 +72,65 @@ test_real_treehouse_exit_paths() {
   pass "real treehouse: a subshell exit destroys untracked content, a leased copy entered with cd survives it"
 }
 
+test_real_treehouse_adopts_unleased_copy_without_writing_it() {
+  local repo fifo transcript holder_pid wt id home fakebin before out i
+  if ! command -v treehouse >/dev/null 2>&1 || ! command -v script >/dev/null 2>&1; then
+    echo "skip: treehouse or script not found (real legacy adoption)"
+    return 0
+  fi
+  repo="$TMP_ROOT/adoption-pool/repo"
+  home="$TMP_ROOT/adoption-pool/home"
+  id=preservation-adopt-real
+  make_pool_repo "$repo"
+  mkdir -p "$home/state" "$home/config"
+  fakebin=$(fm_fakebin "$TMP_ROOT/adoption-pool/fake")
+  ln -s "$(command -v treehouse)" "$fakebin/treehouse"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fifo="$TMP_ROOT/adoption-pool/input"
+  transcript="$TMP_ROOT/adoption-pool/transcript"
+  mkfifo "$fifo"
+  exec 9<>"$fifo"
+  ( cd "$repo" && script -qec "treehouse get" /dev/null < "$fifo" > "$transcript" 2>&1 ) &
+  holder_pid=$!
+  printf 'printf "legacy bytes\\n" > handoff.md\n' >&9
+  wt=
+  for i in $(seq 1 30); do
+    wt=$(cd "$repo" && treehouse status --json | jq -r '.[] | select(.status == "in-use") | .path' 2>/dev/null | head -n 1)
+    [ -z "$wt" ] || break
+    sleep 0.1
+  done
+  if [ -z "$wt" ]; then
+    kill "$holder_pid" 2>/dev/null || true
+    exec 9>&-
+    fail "real treehouse did not expose an in-use legacy worktree"
+  fi
+  for i in $(seq 1 30); do
+    [ -f "$wt/handoff.md" ] && break
+    sleep 0.1
+  done
+  assert_present "$wt/handoff.md" "interactive legacy copy did not receive handoff.md"
+  before=$(sha256sum "$wt/handoff.md")
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$repo" "kind=ship" "harness=codex"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_CONFIG_OVERRIDE="$home/config" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-adopt-worktree.sh" "$id" 2>&1)
+  expect_code 0 "$?" "real unleased legacy copy should be adoptable: $out"
+  [ "$before" = "$(sha256sum "$wt/handoff.md")" ] \
+    || fail "REGRESSION: adoption changed the real legacy handoff.md"
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  exec 9>&-
+  pass "real treehouse: adoption preserves an unleased in-use copy byte-for-byte"
+}
+
 # --- acquisition contract (fakes; runs everywhere) ---------------------------
 
 make_case() {
@@ -192,6 +251,7 @@ test_abort_never_returns_a_dirty_copy() {
 }
 
 test_real_treehouse_exit_paths
+test_real_treehouse_adopts_unleased_copy_without_writing_it
 test_spawn_leases_and_never_uses_the_interactive_subshell
 test_failed_lease_refuses_without_fallback
 test_abort_never_returns_a_dirty_copy

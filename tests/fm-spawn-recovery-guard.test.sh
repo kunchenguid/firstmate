@@ -118,10 +118,23 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$pane_path" FM_FAKE_CWD_FILE="$CASE_CWD_FILE" \
     FM_FAKE_SENT_FILE="$CASE_SENT_FILE" FM_FAKE_LEASE_PATH="$pane_path" \
+    FM_FAKE_POOL_PATH="${FM_FAKE_POOL_PATH:-$CASE_WT_A}" \
+    FM_FAKE_POOL_STATUS="${FM_FAKE_POOL_STATUS:-leased}" \
+    FM_FAKE_LEASE_HOLDER="${FM_FAKE_LEASE_HOLDER:-fm-$id}" \
     FM_FAKE_TREEHOUSE_LOG="$CASE_TREEHOUSE_LOG" \
     FM_FAKE_WINDOWS="${FM_FAKE_WINDOWS:-}" FM_FAKE_PANE_COMMAND="${FM_FAKE_PANE_COMMAND:-bash}" \
     PATH="$CASE_FAKEBIN:$PATH" \
     "$SPAWN" "$id" "$CASE_PROJ" 2>&1
+}
+
+run_adopt() {
+  local id=$1
+  FM_ROOT_OVERRIDE='' FM_HOME="$CASE_HOME" FM_STATE_OVERRIDE="$CASE_HOME/state" \
+    FM_CONFIG_OVERRIDE="$CASE_HOME/config" FM_FAKE_POOL_PATH="$CASE_WT_A" \
+    FM_FAKE_POOL_STATUS="${FM_FAKE_POOL_STATUS:-in-use}" \
+    FM_FAKE_LEASE_HOLDER="${FM_FAKE_LEASE_HOLDER:-}" \
+    FM_FAKE_WINDOWS="" PATH="$CASE_FAKEBIN:$PATH" \
+    "$ROOT/bin/fm-adopt-worktree.sh" "$id" 2>&1
 }
 
 # leave_unlanded_work <worktree>: an unpushed commit plus an uncommitted edit -
@@ -299,11 +312,48 @@ test_project_change_refuses() {
   pass "a relaunch whose record names another project refuses"
 }
 
+test_legacy_copy_requires_adoption_and_manifest_stays_current() {
+  local id out status before
+  id=recovery-adopt-a7
+  make_case adoption "$id"
+  out=$(run_spawn "$id" "$CASE_WT_A")
+  expect_code 0 "$?" "first spawn should succeed"
+  sed '/^lease_holder=/d' "$CASE_HOME/state/$id.meta" > "$CASE_HOME/state/$id.meta.new"
+  mv "$CASE_HOME/state/$id.meta.new" "$CASE_HOME/state/$id.meta"
+  printf 'preserve exactly\n' > "$CASE_WT_A/handoff.md"
+  before=$(cat "$CASE_HOME/state/$id.meta")
+  : > "$CASE_CWD_FILE"
+  : > "$CASE_TREEHOUSE_LOG"
+
+  out=$(FM_FAKE_POOL_STATUS=in-use FM_FAKE_LEASE_HOLDER= run_spawn "$id" "$CASE_WT_B")
+  status=$?
+  expect_code 1 "$status" "legacy relaunch without durable proof should refuse"
+  assert_contains "$out" 'fm-adopt-worktree.sh' "refusal did not point to guarded adoption"
+  [ "$before" = "$(cat "$CASE_HOME/state/$id.meta")" ] || fail "refusal changed the legacy record"
+  assert_grep 'preserve exactly' "$CASE_WT_A/handoff.md" "refusal changed legacy content"
+
+  out=$(FM_FAKE_POOL_STATUS=in-use FM_FAKE_LEASE_HOLDER= run_adopt "$id")
+  expect_code 0 "$?" "guarded legacy adoption should succeed: $out"
+  out=$(FM_FAKE_POOL_STATUS=in-use FM_FAKE_LEASE_HOLDER= run_spawn "$id" "$CASE_WT_B")
+  expect_code 0 "$?" "relaunch with matching adoption proof should succeed: $out"
+  assert_grep "cd '$CASE_WT_A'" "$CASE_SENT_FILE" "adopted relaunch did not enter the legacy copy"
+
+  printf 'changed after adoption\n' >> "$CASE_WT_A/handoff.md"
+  : > "$CASE_CWD_FILE"
+  out=$(FM_FAKE_POOL_STATUS=in-use FM_FAKE_LEASE_HOLDER= run_spawn "$id" "$CASE_WT_B")
+  status=$?
+  expect_code 1 "$status" "relaunch after adopted content changes should refuse"
+  assert_contains "$out" 'manifest missing/mismatched' "refusal did not identify stale adoption proof"
+  assert_grep 'changed after adoption' "$CASE_WT_A/handoff.md" "stale-proof refusal changed content"
+  pass "legacy relaunch requires current adoption proof and preserves the copy"
+}
+
 test_relaunch_reuses_recorded_worktree
 test_live_recorded_endpoint_refuses
 test_kind_change_refuses
 test_project_change_refuses
 test_unresolvable_recorded_worktree_refuses
 test_fresh_task_still_allocates
+test_legacy_copy_requires_adoption_and_manifest_stays_current
 
 echo "# all fm-spawn-recovery-guard tests passed"

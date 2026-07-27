@@ -163,6 +163,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-worktree-lease-lib.sh
+. "$SCRIPT_DIR/fm-worktree-lease-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -992,7 +994,8 @@ spawn_relaunch_refuse() {  # <detail>
 }
 
 resolve_recorded_task_worktree() {
-  local meta="$STATE/$ID.meta" old_backend old_kind old_project old_project_real old_target old_state recorded recorded_real recorded_top recorded_top_real
+  local meta="$STATE/$ID.meta" adoption="$STATE/$ID.worktree-adoption" expected_holder="fm-$ID"
+  local old_backend old_kind old_project old_project_real old_target old_state recorded recorded_real recorded_top recorded_top_real recorded_holder
   { [ -e "$meta" ] || [ -L "$meta" ]; } || return 0
   [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] \
     || spawn_relaunch_refuse "its record at $meta is not a readable regular file"
@@ -1032,6 +1035,16 @@ resolve_recorded_task_worktree() {
     || spawn_relaunch_refuse "its recorded worktree $recorded is no longer an isolated worktree root"
   [ "$recorded_real" != "$PROJ_ABS_REAL" ] \
     || spawn_relaunch_refuse "its recorded worktree $recorded resolves to the primary checkout"
+  recorded_holder=$(spawn_meta_field_exact "$meta" lease_holder 2>/dev/null || true)
+  if [ "$recorded_holder" = "$expected_holder" ] \
+    && fm_worktree_proven_lease "$PROJ_ABS_REAL" "$recorded_real" "$expected_holder"; then
+    :
+  elif fm_worktree_adoption_proves "$adoption" "$ID" "$recorded_real" "$PROJ_ABS_REAL" "$expected_holder"; then
+    :
+  else
+    fm_worktree_pool_lookup "$PROJ_ABS_REAL" "$recorded_real" >/dev/null 2>&1 || true
+    spawn_relaunch_refuse "durable protection for $recorded_real is not provable (pool=${FM_WORKTREE_POOL_RESULT:-unreadable}, status=${FM_WORKTREE_POOL_STATUS:-unknown}, holder=${FM_WORKTREE_POOL_HOLDER:-none}, recorded-holder=${recorded_holder:-none}, or adoption manifest missing/mismatched); run bin/fm-adopt-worktree.sh $ID after verifying the worker is gone"
+  fi
   SPAWN_RECORDED_WT=$recorded_real
   echo "notice: relaunching $ID into its recorded worktree $SPAWN_RECORDED_WT (existing work preserved)" >&2
 }
@@ -1633,6 +1646,9 @@ META_WINDOW=$T
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -n "${WT_LEASED:-}" ]; then
+    echo "lease_holder=fm-$ID"
+  fi
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
