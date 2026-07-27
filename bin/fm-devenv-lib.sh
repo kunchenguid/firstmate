@@ -70,6 +70,7 @@ fm_devenv_registry_json() (  # <registry-path>
     return 1
   }
 
+  # shellcheck disable=SC2016
   entry_error=$(fm_devenv_jq "$registry_snapshot" -r '
     [
       range(0; length) as $index
@@ -110,6 +111,7 @@ fm_devenv_registry_json() (  # <registry-path>
   }
 
   for duplicate in name vm slot frontend_port; do
+    # shellcheck disable=SC2016
     entry_error=$(fm_devenv_jq "$registry_snapshot" -r --arg field "$duplicate" '
       [{name:"main", vm:"expanly-main", slot:0, frontend_port:5173, branch:""}] + .
       | group_by(.[$field])
