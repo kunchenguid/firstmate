@@ -21,7 +21,7 @@ STALE_TOKEN=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 ISSUED_AT=2026-07-27T12:00:00Z
 
 mkdir -p "$HOME_DIR/state"
-printf '%s\n' '[{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":""},{"name":"beta","vm":"expanly-beta","slot":2,"frontend_port":5175,"branch":""},{"name":"gamma","vm":"expanly-gamma","slot":3,"frontend_port":5176,"branch":""}]' > "$REGISTRY_FILE"
+printf '%s\n' '{"alpha":{"vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":""},"beta":{"vm":"expanly-beta","slot":2,"frontend_port":5175,"branch":""},"gamma":{"vm":"expanly-gamma","slot":3,"frontend_port":5176,"branch":""}}' > "$REGISTRY_FILE"
 
 export FM_HOME="$HOME_DIR"
 export FM_DEVENV_REGISTRY="$REGISTRY_FILE"

@@ -14,7 +14,7 @@ export FM_TEST_REAL_GIT="$REAL_GIT"
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
 write_registry() {
-  printf '%s\n' '[{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":"feature/alpha"}]' > "$TMP_ROOT/registry.json"
+  printf '%s\n' '{"alpha":{"vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":"feature/alpha"}}' > "$TMP_ROOT/registry.json"
 }
 
 make_fake_ssh() {

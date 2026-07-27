@@ -38,14 +38,17 @@ assert_registry_rejected() {  # <json> <label>
 
 test_discovery_prepends_main_and_sorts_by_slot() {
   local result expected first
-  write_registry '[
-    {"name":"beta","vm":"expanly-beta","slot":2,"frontend_port":5175,"branch":"feature/beta"},
-    {"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":"feature/alpha"}
-  ]'
+  write_registry '{
+    "reviews":{"vm":"expanly-reviews","slot":2,"frontend_port":5175,"branch":"reviews"},
+    "scoring":{"vm":"expanly-scoring","slot":5,"frontend_port":5178,"branch":"scoring"},
+    "feature-dev":{"vm":"expanly-feature-dev","slot":1,"frontend_port":5174,"branch":"feature-dev"},
+    "pipeline":{"vm":"expanly-pipeline","slot":4,"frontend_port":5177,"branch":"pipeline"},
+    "billing":{"vm":"expanly-billing","slot":3,"frontend_port":5176,"branch":"billing"}
+  }'
 
   result=$(fm_devenv_registry_json "$TMP_ROOT/registry.json") \
     || fail "valid feature environments were rejected"
-  expected='[{"name":"main","vm":"expanly-main","slot":0,"frontend_port":5173,"branch":""},{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":"feature/alpha"},{"name":"beta","vm":"expanly-beta","slot":2,"frontend_port":5175,"branch":"feature/beta"}]'
+  expected='[{"name":"main","vm":"expanly-main","slot":0,"frontend_port":5173,"branch":""},{"name":"feature-dev","vm":"expanly-feature-dev","slot":1,"frontend_port":5174,"branch":"feature-dev"},{"name":"reviews","vm":"expanly-reviews","slot":2,"frontend_port":5175,"branch":"reviews"},{"name":"billing","vm":"expanly-billing","slot":3,"frontend_port":5176,"branch":"billing"},{"name":"pipeline","vm":"expanly-pipeline","slot":4,"frontend_port":5177,"branch":"pipeline"},{"name":"scoring","vm":"expanly-scoring","slot":5,"frontend_port":5178,"branch":"scoring"}]'
   [ "$(printf '%s' "$result" | jq -c .)" = "$expected" ] \
     || fail "discovery did not prepend main and sort every row by slot: $result"
   first=$(printf '%s' "$result" | jq -c '.[0]')
@@ -61,10 +64,10 @@ test_validators_and_exact_lookup() {
   fm_devenv_vm_valid 'expanly-alpha_1-beta' || fail "valid VM name was rejected"
   ! fm_devenv_vm_valid 'alpha' || fail "invalid VM name was accepted"
 
-  write_registry '[{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":"feature/alpha"}]'
-  row=$(fm_devenv_registry_get "$TMP_ROOT/registry.json" alpha) \
+  write_registry '{"feature-dev":{"vm":"expanly-feature-dev","slot":1,"frontend_port":5174,"branch":"feature-dev"}}'
+  row=$(fm_devenv_registry_get "$TMP_ROOT/registry.json" feature-dev) \
     || fail "exact environment lookup rejected an existing row"
-  [ "$row" = '{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":"feature/alpha"}' ] \
+  [ "$row" = '{"name":"feature-dev","vm":"expanly-feature-dev","slot":1,"frontend_port":5174,"branch":"feature-dev"}' ] \
     || fail "exact environment lookup returned the wrong row: $row"
   ! fm_devenv_registry_get "$TMP_ROOT/registry.json" missing >/dev/null 2>&1 \
     || fail "exact environment lookup accepted a missing row"
@@ -78,8 +81,8 @@ test_registry_uses_one_immutable_snapshot() {
   fakebin="$TMP_ROOT/mutable-fakebin"
   real_jq=$(command -v jq)
   triggered="$TMP_ROOT/jq-triggered"
-  replacement='[{"name":"intruder","vm":"expanly-intruder","slot":2,"frontend_port":5175,"branch":"feature/intruder"}]'
-  printf '%s\n' '[{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":"feature/alpha"}]' > "$registry"
+  replacement='{"intruder":{"vm":"expanly-intruder","slot":2,"frontend_port":5175,"branch":"feature/intruder"}}'
+  printf '%s\n' '{"alpha":{"vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":"feature/alpha"}}' > "$registry"
   mkdir -p "$snapshot_dir" "$fakebin"
   cat > "$fakebin/jq" <<'SH'
 #!/usr/bin/env bash
@@ -114,7 +117,7 @@ SH
 }
 
 test_hostile_name_reports_one_line() {
-  assert_registry_rejected '[{"name":"alpha\nbeta","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":""}]' \
+  assert_registry_rejected '{"alpha\nbeta":{"vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":""}}' \
     "name containing a newline"
   pass "devenv registry: hostile names cannot split a validation diagnostic across lines"
 }
@@ -126,7 +129,7 @@ test_raw_nul_registry_is_rejected_without_snapshot_leak() {
   stdout="$TMP_ROOT/nul-stdout"
   stderr="$TMP_ROOT/nul-stderr"
   mkdir -p "$snapshot_dir"
-  printf '\0%s\n' '[{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":"feature/alpha"}]' > "$registry"
+  printf '\0%s\n' '{"alpha":{"vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":"feature/alpha"}}' > "$registry"
 
   TMPDIR="$snapshot_dir" fm_devenv_registry_json "$registry" >"$stdout" 2>"$stderr"
   rc=$?
@@ -141,17 +144,22 @@ test_raw_nul_registry_is_rejected_without_snapshot_leak() {
 
 test_invalid_registries_fail_closed() {
   assert_registry_rejected '{' "invalid JSON"
-  assert_registry_rejected '[]
-[]' "multiple JSON documents"
-  assert_registry_rejected '{"name":"alpha"}' "non-array root"
-  assert_registry_rejected '[{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":""},{"name":"beta","vm":"expanly-alpha","slot":2,"frontend_port":5175,"branch":""}]' "duplicate VM names"
-  assert_registry_rejected '[{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":""},{"name":"beta","vm":"expanly-beta","slot":1,"frontend_port":5175,"branch":""}]' "duplicate slots"
-  assert_registry_rejected '[{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":""},{"name":"beta","vm":"expanly-beta","slot":2,"frontend_port":5174,"branch":""}]' "duplicate ports"
-  assert_registry_rejected '[{"name":"alpha beta","vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":""}]' "invalid names"
-  assert_registry_rejected '[{"name":"alpha","vm":"expanly-alpha","slot":1.5,"frontend_port":5174,"branch":""}]' "non-integer slots"
-  assert_registry_rejected '[{"name":"alpha","vm":"expanly-alpha","slot":1,"frontend_port":5174.5,"branch":""}]' "non-integer ports"
-  assert_registry_rejected '[{"name":"alpha","vm":"expanly-alpha","slot":0,"frontend_port":5174,"branch":""}]' "feature slot zero"
-  assert_registry_rejected '[{"name":"main","vm":"expanly-other","slot":1,"frontend_port":5174,"branch":""}]' "feature named main"
+  assert_registry_rejected '{}
+{}' "multiple JSON documents"
+  assert_registry_rejected '[]' "non-object root"
+  assert_registry_rejected '{"alpha":"not-an-object"}' "non-object feature value"
+  assert_registry_rejected '{"alpha":{"vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":""},"beta":{"vm":"expanly-alpha","slot":2,"frontend_port":5175,"branch":""}}' "duplicate VM names"
+  assert_registry_rejected '{"alpha":{"vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":""},"beta":{"vm":"expanly-beta","slot":1,"frontend_port":5175,"branch":""}}' "duplicate slots"
+  assert_registry_rejected '{"alpha":{"vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":""},"beta":{"vm":"expanly-beta","slot":2,"frontend_port":5174,"branch":""}}' "duplicate ports"
+  assert_registry_rejected '{"alpha":{"vm":"expanly-main","slot":1,"frontend_port":5174,"branch":""}}' "VM name duplicated with main"
+  assert_registry_rejected '{"alpha":{"vm":"expanly-alpha","slot":1,"frontend_port":5173,"branch":""}}' "frontend port duplicated with main"
+  assert_registry_rejected '{"alpha beta":{"vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":""}}' "invalid environment key"
+  assert_registry_rejected '{"alpha":{"vm":"alpha","slot":1,"frontend_port":5174,"branch":""}}' "invalid VM field"
+  assert_registry_rejected '{"alpha":{"vm":"expanly-alpha","slot":1.5,"frontend_port":5174,"branch":""}}' "non-integer slots"
+  assert_registry_rejected '{"alpha":{"vm":"expanly-alpha","slot":1,"frontend_port":5174.5,"branch":""}}' "non-integer ports"
+  assert_registry_rejected '{"alpha":{"vm":"expanly-alpha","slot":1,"frontend_port":5174,"branch":1}}' "non-string branch"
+  assert_registry_rejected '{"alpha":{"vm":"expanly-alpha","slot":0,"frontend_port":5174,"branch":""}}' "feature slot zero"
+  assert_registry_rejected '{"main":{"vm":"expanly-other","slot":1,"frontend_port":5174,"branch":""}}' "feature keyed main"
   pass "devenv registry: malformed, conflicting, and reserved feature records fail closed"
 }
 

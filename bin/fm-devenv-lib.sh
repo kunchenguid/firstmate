@@ -3,9 +3,9 @@
 # fm-devenv-lib.sh - parse and validate Expanly's existing devenv registry.
 #
 # Source this library from control-plane commands. The registry file contains a
-# JSON array of feature-environment objects with name, vm, slot, frontend_port,
-# and branch fields. Main is intentionally synthesized here so all callers use
-# one complete, validated environment set.
+# JSON object keyed by feature-environment name. Each value contains vm, slot,
+# frontend_port, and branch fields. Main is intentionally synthesized here so
+# all callers use one complete, validated environment set.
 #
 # Public functions:
 #   fm_devenv_name_valid <name>
@@ -65,37 +65,37 @@ fm_devenv_registry_json() (  # <registry-path>
     fm_devenv_registry_error 'invalid JSON'
     return 1
   }
-  fm_devenv_jq "$registry_snapshot" -e 'type == "array"' >/dev/null 2>&1 || {
-    fm_devenv_registry_error 'registry root must be an array'
+  fm_devenv_jq "$registry_snapshot" -e 'type == "object"' >/dev/null 2>&1 || {
+    fm_devenv_registry_error 'registry root must be an object'
     return 1
   }
 
   # shellcheck disable=SC2016
   entry_error=$(fm_devenv_jq "$registry_snapshot" -r '
+    to_entries
+    |
     [
       range(0; length) as $index
       | .[$index] as $entry
-      | if ($entry | type) != "object" then
-          "entry \($index) must be an object"
-        elif (($entry.name | type) != "string") then
-          "entry \($index) name must be a string"
-        elif ($entry.name | test("^[A-Za-z0-9_-]+$") | not) then
+      | if ($entry.key | test("^[A-Za-z0-9_-]+$") | not) then
           "entry \($index) has an invalid name"
-        elif ($entry.name == "main") then
+        elif ($entry.key == "main") then
           "entry \($index) must not be named main"
-        elif (($entry.vm | type) != "string") then
+        elif (($entry.value | type) != "object") then
+          "entry \($index) value must be an object"
+        elif (($entry.value.vm | type) != "string") then
           "entry \($index) vm must be a string"
-        elif ($entry.vm | test("^expanly-[A-Za-z0-9_-]+$") | not) then
+        elif ($entry.value.vm | test("^expanly-[A-Za-z0-9_-]+$") | not) then
           "entry \($index) has an invalid VM name"
-        elif (($entry.slot | type) != "number" or ($entry.slot | floor) != $entry.slot) then
+        elif (($entry.value.slot | type) != "number" or ($entry.value.slot | floor) != $entry.value.slot) then
           "entry \($index) slot must be an integer"
-        elif ($entry.slot <= 0) then
+        elif ($entry.value.slot <= 0) then
           "entry \($index) slot must be greater than zero"
-        elif (($entry.frontend_port | type) != "number" or ($entry.frontend_port | floor) != $entry.frontend_port) then
+        elif (($entry.value.frontend_port | type) != "number" or ($entry.value.frontend_port | floor) != $entry.value.frontend_port) then
           "entry \($index) frontend_port must be an integer"
-        elif ($entry.frontend_port < 1 or $entry.frontend_port > 65535) then
+        elif ($entry.value.frontend_port < 1 or $entry.value.frontend_port > 65535) then
           "entry \($index) frontend_port must be between 1 and 65535"
-        elif (($entry.branch | type) != "string") then
+        elif (($entry.value.branch | type) != "string") then
           "entry \($index) branch must be a string"
         else
           empty
@@ -113,7 +113,8 @@ fm_devenv_registry_json() (  # <registry-path>
   for duplicate in name vm slot frontend_port; do
     # shellcheck disable=SC2016
     entry_error=$(fm_devenv_jq "$registry_snapshot" -r --arg field "$duplicate" '
-      [{name:"main", vm:"expanly-main", slot:0, frontend_port:5173, branch:""}] + .
+      [{name:"main", vm:"expanly-main", slot:0, frontend_port:5173, branch:""}]
+      + (to_entries | map({name:.key, vm:.value.vm, slot:.value.slot, frontend_port:.value.frontend_port, branch:.value.branch}))
       | group_by(.[$field])
       | map(select(length > 1) | .[0][$field])
       | .[0] // empty
@@ -128,7 +129,8 @@ fm_devenv_registry_json() (  # <registry-path>
   done
 
   fm_devenv_jq "$registry_snapshot" '
-    [{name:"main", vm:"expanly-main", slot:0, frontend_port:5173, branch:""}] + .
+    [{name:"main", vm:"expanly-main", slot:0, frontend_port:5173, branch:""}]
+    + (to_entries | map({name:.key, vm:.value.vm, slot:.value.slot, frontend_port:.value.frontend_port, branch:.value.branch}))
     | sort_by(.slot)
     | map({name, vm, slot, frontend_port, branch})
   '
