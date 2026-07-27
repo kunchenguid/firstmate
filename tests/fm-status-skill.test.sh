@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Static regression tests for the internal /status skill contract.
+# shellcheck disable=SC2016
 set -u
 
 # shellcheck source=tests/lib.sh
