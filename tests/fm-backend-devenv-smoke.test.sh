@@ -48,20 +48,18 @@ fm_devenv_smoke_snapshot() {
   herdr --session "$1" api snapshot
 }
 
-# An agent animates two purely presentational prefixes into both terminal title
-# fields: one leading spinner frame while it works, and a bracket marker that
-# blinks between "[ . ]" and "[ ! ]" while it waits on input. Only which of those
-# two markers is showing is volatile, so the pair collapses to one canonical
-# marker rather than being removed: a marker that appears or disappears is a real
-# Action-Required transition and must still fail closed. The "Action Required"
-# status word itself and everything after it stay byte-exact, as does every other
-# field, so a real ambient change still fails closed too.
+# A working agent animates one purely presentational leading spinner frame into
+# both terminal title fields without repainting its pane, so only that frame is
+# removed before the snapshots are compared. Nothing else is normalized: every
+# other field, including `panes[].revision` and `agents[].revision`, stays
+# byte-exact, so a real ambient change still fails closed. An agent signalling
+# "Action Required" blinks its bracket marker and advances its pane revision in
+# lockstep, so such a session is refused rather than tolerated.
 fm_devenv_smoke_normalize_snapshot() {
   [ "$#" -eq 1 ] || return 2
   printf '%s\n' "$1" | jq -ce '
     def unspin: if type == "string" then sub("^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏][ \t]+"; "") else . end;
-    def unblink: if type == "string" then sub("^\\[ [.!] \\](?<kept>[ \t]+Action Required[ \t]+\\|)"; "[ ~ ]" + .kept) else . end;
-    def normalize_key($key): if has($key) then .[$key] |= (unspin | unblink) else . end;
+    def normalize_key($key): if has($key) then .[$key] |= unspin else . end;
     walk(if type == "object" then normalize_key("terminal_title") | normalize_key("terminal_title_stripped") else . end)
   '
 }
@@ -232,7 +230,6 @@ fm_devenv_smoke_use_fakes() {
     local session=$1 counter count revision=1 title='expanly-platform'
     local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
     local markers=('[ . ]' '[ ! ]')
-    local statuses=('Action Required' 'Action Blocked')
     [ -z "${FM_TEST_SMOKE_LOG:-}" ] || printf 'snapshot:%s\n' "$session" >> "$FM_TEST_SMOKE_LOG"
     if [ "$session" = "${FM_TEST_SMOKE_MUTATE_SESSION:-}" ]; then
       counter="$FM_TEST_SMOKE_COUNTER/$session"
@@ -240,11 +237,11 @@ fm_devenv_smoke_use_fakes() {
       count=$(wc -l < "$counter" | tr -d '[:space:]')
       case "${FM_TEST_SMOKE_MUTATE_KIND:-structure}" in
         spinner) title="${frames[$(( (count - 1) % ${#frames[@]} ))]} $title" ;;
-        marker) title="${markers[$(( (count - 1) % 2 ))]} Action Required | $title" ;;
-        status) title="${markers[$(( (count - 1) % 2 ))]} ${statuses[$(( (count - 1) % 2 ))]} | $title" ;;
-        cleared)
-          title="Action Required | $title"
-          [ $(( (count - 1) % 2 )) -eq 1 ] || title="${markers[0]} $title"
+        # Real Herdr repaints the pane on every Action-Required marker blink, so
+        # the marker and the revision move together.
+        blink)
+          title="${markers[$(( (count - 1) % 2 ))]} Action Required | $title"
+          revision=$count
           ;;
         title) title="$title-$count" ;;
         *) revision=$count ;;
@@ -400,58 +397,22 @@ test_fake_spinner_only_title_drift_is_accepted() {
   pass "devenv smoke: an animated terminal-title spinner frame is not a session change"
 }
 
-test_fake_action_required_marker_blink_is_accepted() {
+test_fake_action_required_blink_is_refused() {
   local changed
   for changed in fm-devenv-protocol-lab default; do
     (
-      FM_TEST_SMOKE_COUNTER=$(mktemp -d "${TMPDIR:-/tmp}/fm-devenv-smoke-marker.XXXXXX") || exit 1
+      FM_TEST_SMOKE_COUNTER=$(mktemp -d "${TMPDIR:-/tmp}/fm-devenv-smoke-blink.XXXXXX") || exit 1
       trap 'rm -rf -- "$FM_TEST_SMOKE_COUNTER"' EXIT
       FM_TEST_SMOKE_TOKEN=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
       FM_TEST_SMOKE_MUTATE_SESSION=$changed
-      FM_TEST_SMOKE_MUTATE_KIND=marker
-      fm_devenv_smoke_use_fakes
-
-      fm_devenv_smoke_round_trip reviews fm-devenv-protocol-lab default >/dev/null \
-        || fail "a blinking Action Required marker was treated as a Herdr session change for $changed"
-    ) || return 1
-  done
-  pass "devenv smoke: a blinking Action Required marker is not a session change"
-}
-
-test_fake_action_required_marker_clearing_is_refused() {
-  local changed
-  for changed in fm-devenv-protocol-lab default; do
-    (
-      FM_TEST_SMOKE_COUNTER=$(mktemp -d "${TMPDIR:-/tmp}/fm-devenv-smoke-cleared.XXXXXX") || exit 1
-      trap 'rm -rf -- "$FM_TEST_SMOKE_COUNTER"' EXIT
-      FM_TEST_SMOKE_TOKEN=2222222222222222222222222222222222222222222222222222222222222222
-      FM_TEST_SMOKE_MUTATE_SESSION=$changed
-      FM_TEST_SMOKE_MUTATE_KIND=cleared
+      FM_TEST_SMOKE_MUTATE_KIND=blink
       fm_devenv_smoke_use_fakes
 
       ! fm_devenv_smoke_round_trip reviews fm-devenv-protocol-lab default >/dev/null 2>&1 \
-        || fail "an Action Required marker that disappeared was accepted for $changed"
+        || fail "an Action Required blink that advanced the pane revision was accepted for $changed"
     ) || return 1
   done
-  pass "devenv smoke: an Action Required marker appearing or clearing is refused"
-}
-
-test_fake_action_required_status_drift_is_refused() {
-  local changed
-  for changed in fm-devenv-protocol-lab default; do
-    (
-      FM_TEST_SMOKE_COUNTER=$(mktemp -d "${TMPDIR:-/tmp}/fm-devenv-smoke-status.XXXXXX") || exit 1
-      trap 'rm -rf -- "$FM_TEST_SMOKE_COUNTER"' EXIT
-      FM_TEST_SMOKE_TOKEN=1111111111111111111111111111111111111111111111111111111111111111
-      FM_TEST_SMOKE_MUTATE_SESSION=$changed
-      FM_TEST_SMOKE_MUTATE_KIND=status
-      fm_devenv_smoke_use_fakes
-
-      ! fm_devenv_smoke_round_trip reviews fm-devenv-protocol-lab default >/dev/null 2>&1 \
-        || fail "an Action Required status change was accepted for $changed"
-    ) || return 1
-  done
-  pass "devenv smoke: the Action Required status word itself must not change"
+  pass "devenv smoke: an Action Required blink advancing the pane revision is refused"
 }
 
 test_fake_substantive_title_drift_is_refused() {
@@ -479,9 +440,7 @@ test_fake_round_trip_order_and_token_continuity || exit 1
 test_fake_failure_attempts_token_guarded_cleanup || exit 1
 test_fake_snapshot_mutation_is_refused || exit 1
 test_fake_spinner_only_title_drift_is_accepted || exit 1
-test_fake_action_required_marker_blink_is_accepted || exit 1
-test_fake_action_required_marker_clearing_is_refused || exit 1
-test_fake_action_required_status_drift_is_refused || exit 1
+test_fake_action_required_blink_is_refused || exit 1
 test_fake_substantive_title_drift_is_refused || exit 1
 
 smoke_environment=${FM_DEVENV_SMOKE_ENV:-}
