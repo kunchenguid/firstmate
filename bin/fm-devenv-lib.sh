@@ -10,6 +10,7 @@
 # Public functions:
 #   fm_devenv_name_valid <name>
 #   fm_devenv_vm_valid <vm>
+#   fm_devenv_registry_path
 #   fm_devenv_registry_json <registry-path>
 #   fm_devenv_registry_get <registry-path> <environment-name>
 
@@ -19,6 +20,11 @@ fm_devenv_name_valid() {  # <name>
 
 fm_devenv_vm_valid() {  # <vm>
   [[ ${1-} =~ ^expanly-[A-Za-z0-9_-]+$ ]]
+}
+
+fm_devenv_registry_path() {
+  [ "$#" -eq 0 ] || return 1
+  printf '%s\n' "${FM_DEVENV_REGISTRY:-${HOME-}/.expanly-devenvs.json}"
 }
 
 fm_devenv_registry_error() {  # <message>
