@@ -28,6 +28,7 @@ test_default_scaffold_writes_headless_isolated_harness() {
   assert_grep "viewport: { width: 1857, height: 933 }" "$dir/playwright.config.ts" "default desktop viewport size missing"
   assert_grep "laptop-1440x900" "$dir/playwright.config.ts" "default laptop viewport project missing"
   assert_grep "viewport: { width: 1440, height: 900 }" "$dir/playwright.config.ts" "default laptop viewport size missing"
+  assert_no_grep "fullPage: true" "$dir/qa/specs/example.spec.ts" "generated screenshot is not exact-viewport"
 
   assert_grep "results/" "$dir/qa/.gitignore" "qa/.gitignore does not ignore run artifacts"
   pass "fm-playwright-scaffold.sh: default scaffold writes headless, isolated harness"

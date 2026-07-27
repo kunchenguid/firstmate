@@ -25,6 +25,5 @@ test('demo page renders and reacts to a click', async ({ page }, testInfo) => {
   // Capture exact-viewport visual evidence.
   await page.screenshot({
     path: `qa/screenshots/demo-${testInfo.project.name}.png`,
-    fullPage: true,
   });
 });

@@ -188,7 +188,6 @@ test('landing page renders its main heading', async ({ page }, testInfo) => {
   await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
   await page.screenshot({
     path: \`qa/screenshots/example-\${testInfo.project.name}.png\`,
-    fullPage: true,
   });
 });
 "
