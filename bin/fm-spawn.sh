@@ -975,7 +975,7 @@ spawn_relaunch_refuse() {  # <detail>
 }
 
 resolve_recorded_task_worktree() {
-  local meta="$STATE/$ID.meta" old_backend old_kind old_target old_state recorded recorded_real recorded_top recorded_top_real
+  local meta="$STATE/$ID.meta" old_backend old_kind old_project old_project_real old_target old_state recorded recorded_real recorded_top recorded_top_real
   { [ -e "$meta" ] || [ -L "$meta" ]; } || return 0
   [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] \
     || spawn_relaunch_refuse "its record at $meta is not a readable regular file"
@@ -989,6 +989,14 @@ resolve_recorded_task_worktree() {
   # (fm-teardown.sh), and the scout-to-ship direction is bin/fm-promote.sh's.
   [ "$old_kind" = "$KIND" ] \
     || spawn_relaunch_refuse "its record is a $old_kind task, not the $KIND task this spawn would record"
+  old_project=$(spawn_meta_field_exact "$meta" project) \
+    || spawn_relaunch_refuse "its record has no single project entry"
+  [ -n "$old_project" ] \
+    || spawn_relaunch_refuse "its record has an empty project entry"
+  old_project_real=$(cd "$old_project" 2>/dev/null && pwd -P) \
+    || spawn_relaunch_refuse "its recorded project $old_project cannot be inspected"
+  [ "$old_project_real" = "$PROJ_ABS_REAL" ] \
+    || spawn_relaunch_refuse "its recorded project $old_project does not match the requested project $PROJ_ABS"
   old_target=$(fm_backend_target_of_meta "$meta")
   [ -n "$old_target" ] || spawn_relaunch_refuse "its record has no endpoint to inspect"
   old_state=$(fm_backend_agent_state "$old_backend" "$old_target")

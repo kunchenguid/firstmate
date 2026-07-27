@@ -263,9 +263,41 @@ test_kind_change_refuses() {
   pass "a relaunch that would rewrite the recorded task contract refuses"
 }
 
+# A record from another project cannot authorize reuse of its worktree for this
+# spawn, even when every other recovery check would pass.
+test_project_change_refuses() {
+  local id out status before other_project
+  id=recovery-project-a6
+  make_case project "$id"
+  out=$(run_spawn "$id" "$CASE_WT_A")
+  expect_code 0 "$?" "first spawn should succeed"
+  leave_unlanded_work "$CASE_WT_A"
+  other_project="$TMP_ROOT/project/other-project"
+  mkdir -p "$other_project"
+  sed "s|^project=.*|project=$other_project|" "$CASE_HOME/state/$id.meta" \
+    > "$CASE_HOME/state/$id.meta.new"
+  mv "$CASE_HOME/state/$id.meta.new" "$CASE_HOME/state/$id.meta"
+  before=$(cat "$CASE_HOME/state/$id.meta")
+  : > "$CASE_CWD_FILE"
+  : > "$CASE_SENT_FILE"
+
+  out=$(run_spawn "$id" "$CASE_WT_B")
+  status=$?
+  expect_code 1 "$status" "relaunch whose record names another project should refuse"
+  assert_contains "$out" 'recorded project' "refusal did not identify the recorded project mismatch"
+  assert_contains "$out" 'does not match the requested project' \
+    "refusal did not explain the requested project mismatch"
+  [ "$before" = "$(cat "$CASE_HOME/state/$id.meta")" ] \
+    || fail "cross-project refused relaunch still changed the task record"
+  assert_no_grep 'treehouse get' "$CASE_SENT_FILE" \
+    "cross-project refused relaunch still asked for a worktree"
+  pass "a relaunch whose record names another project refuses"
+}
+
 test_relaunch_reuses_recorded_worktree
 test_live_recorded_endpoint_refuses
 test_kind_change_refuses
+test_project_change_refuses
 test_unresolvable_recorded_worktree_refuses
 test_fresh_task_still_allocates
 
