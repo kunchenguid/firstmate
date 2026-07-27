@@ -837,6 +837,66 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# --- treehouse base-ref preflight -------------------------------------------
+#
+# `treehouse get` takes no base-ref argument: treehouse picks the base commit
+# for every pool worktree itself, from the project clone's origin/HEAD, then the
+# clone's own checked-out branch, then init.defaultBranch. It does not verify
+# that the branch it picked still exists, so a clone whose origin/HEAD points at
+# a default branch that was since renamed or deleted dies inside the pane with
+# `git worktree add --detach <path> refs/remotes/origin/<gone>: fatal: invalid
+# reference` - for both a fresh worktree and the reuse-and-reset path, so a
+# non-empty pool does not rescue it. Verified live against treehouse v2.1.0 on a
+# clone that publishes only build/production while origin/HEAD still names main.
+#
+# All firstmate ever saw was the generic 60s "did not enter a worktree" timeout
+# below, which names neither the missing ref nor the branches that do exist.
+# Resolve the same base up front and refuse with the real cause instead. This is
+# read-only: firstmate never repairs a project's refs, so the remedy belongs to
+# whoever owns the clone.
+treehouse_base_branch() {  # echoes the branch name treehouse will resolve, or nothing
+  local ref
+  if git -C "$PROJ_ABS" remote 2>/dev/null | grep -qx origin; then
+    ref=$(git -C "$PROJ_ABS" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)
+    case "$ref" in
+      refs/remotes/origin/?*) printf '%s\n' "${ref#refs/remotes/origin/}"; return 0 ;;
+    esac
+  fi
+  ref=$(git -C "$PROJ_ABS" symbolic-ref --quiet HEAD 2>/dev/null || true)
+  case "$ref" in
+    refs/heads/?*) printf '%s\n' "${ref#refs/heads/}"; return 0 ;;
+  esac
+  git -C "$PROJ_ABS" config init.defaultBranch 2>/dev/null || true
+}
+
+assert_treehouse_base_ref() {
+  local branch remote_branches
+  git -C "$PROJ_ABS" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  branch=$(treehouse_base_branch)
+  remote_branches=$(git -C "$PROJ_ABS" for-each-ref --format='%(refname:lstrip=3)' \
+    refs/remotes/origin 2>/dev/null | grep -vx HEAD | paste -sd, - || true)
+  if [ -z "$branch" ]; then
+    echo "error: cannot determine the base branch treehouse would build the isolated worktree for $ID from in $PROJ_ABS (no usable origin/HEAD, no checked-out branch, no init.defaultBranch); refusing to launch. Remote branches: ${remote_branches:-none}" >&2
+    exit 1
+  fi
+  if git -C "$PROJ_ABS" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1 \
+     || git -C "$PROJ_ABS" rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null 2>&1; then
+    return 0
+  fi
+  # No remote-tracking branches at all means nothing has been fetched yet, and
+  # treehouse fetches before it allocates - that is not a broken base ref, so
+  # leave it to the existing paths rather than refusing a legitimate spawn.
+  [ -n "$remote_branches" ] || return 0
+  echo "error: treehouse would build the isolated worktree for $ID from '$branch', but neither refs/heads/$branch nor refs/remotes/origin/$branch exists in $PROJ_ABS; refusing to launch rather than allocating from a base ref that is not there. Remote branches present: $remote_branches. Repointing that clone's origin/HEAD at a branch that exists is a project-side repair firstmate does not make." >&2
+  exit 1
+}
+
+# Refuse before any window, worktree, or metadata exists: the same condition
+# that sends `treehouse get` below.
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  assert_treehouse_base_ref
+fi
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,

@@ -19,10 +19,21 @@
 
 # Resolve the default branch name of the git repo at <dir>: prefer origin/HEAD,
 # then fall back to a local main/master. Echoes the name, or returns 1.
+#
+# origin/HEAD is only trusted when the branch it names actually exists. A clone
+# whose remote advertised a default branch that was later renamed or deleted
+# keeps a DANGLING symbolic ref (seen live: refs/remotes/origin/HEAD ->
+# refs/remotes/origin/main in a repo that only publishes build/production).
+# `symbolic-ref` resolves that ref happily, so an unvalidated read invents a
+# default branch name no caller can ever check out, diff, or merge into.
+# Verifying the target keeps resolution honest: an unusable origin/HEAD falls
+# through to the local candidates and, failing those, returns 1 so callers
+# refuse with their own "cannot determine default branch" error instead of
+# operating against a branch that does not exist.
 fm_default_branch() {
   local dir=$1 ref branch
   ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
+  if [ -n "$ref" ] && git -C "$dir" rev-parse --verify --quiet "refs/remotes/$ref" >/dev/null 2>&1; then
     printf '%s\n' "${ref#origin/}"
     return 0
   fi

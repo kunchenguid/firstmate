@@ -26,26 +26,19 @@
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 
+# bin/fm-tangle-lib.sh owns fm_default_branch, the one default-branch resolution
+# rule in this repo (including its refusal to trust a dangling origin/HEAD).
+# shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-tangle-lib.sh"
+
 # --- helpers ---------------------------------------------------------------
 
 first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
 }
 
-default_branch() {
-  local dir=$1 ref branch
-  ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
-  fi
-  for branch in main master; do
-    if git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
-      echo "$branch"
-      return 0
-    fi
-  done
-  return 1
+default_branch() {  # <dir>
+  fm_default_branch "$1"
 }
 
 # Resolve the PRIMARY checkout's current default-branch commit - the local-HEAD

@@ -301,9 +301,120 @@ test_spawn_tmux_window_construction() {
   pass "fm-spawn: appends windows by session-colon, pins the name, and targets the window id"
 }
 
+# --- base-ref resolution: build-only projects and dangling origin/HEAD -------
+#
+# Not every project publishes main. A repo whose branches are build/production
+# still carries refs/remotes/origin/HEAD from whatever its remote advertised at
+# clone time, and that symbolic ref keeps resolving after the branch it names is
+# renamed or deleted. `git symbolic-ref` reports the dangling target happily, so
+# an unvalidated read hands every caller a branch name that cannot be checked
+# out, diffed, or merged into - and hands treehouse a base ref that makes
+# `git worktree add` fail, which is exactly how an isolated worktree stopped
+# being allocatable for a build-only project.
+
+# A repo with an `origin` remote and remote-tracking branches for each of
+# <branches>, checked out on the first one. Echoes its path.
+make_remote_repo() {
+  local dir=$1; shift
+  local upstream="$dir.upstream.git" b first=$1
+  git init -q --bare -b "$first" "$upstream"
+  git init -q -b "$first" "$dir"
+  git -C "$dir" commit -q --allow-empty -m init
+  git -C "$dir" remote add origin "$upstream"
+  for b in "$@"; do
+    [ "$b" = "$first" ] || git -C "$dir" branch -q -f "$b" HEAD
+    git -C "$dir" push -q origin "$b"
+  done
+  git -C "$dir" fetch -q origin
+  # Keep only the checked-out branch locally, so resolution has to go through
+  # the remote-tracking refs the way a firstmate project clone does.
+  for b in "$@"; do
+    [ "$b" = "$first" ] || git -C "$dir" branch -q -D "$b"
+  done
+  printf '%s\n' "$dir"
+}
+
+test_default_branch_ref_validation() {
+  local repo out
+  repo=$(make_remote_repo "$TMP_ROOT/db-repo" build production)
+
+  # A dangling origin/HEAD must not become the answer.
+  git -C "$repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  out=$(fm_default_branch "$repo" || true)
+  assert_not_contains "$out" "main" "a dangling origin/HEAD must not resolve to its missing target"
+  [ -z "$out" ] || fail "build-only repo with no local main/master should not resolve a default branch, got '$out'"
+
+  # A valid origin/HEAD is still authoritative, including a non-main default.
+  git -C "$repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/build
+  out=$(fm_default_branch "$repo" || true)
+  [ "$out" = build ] || fail "valid origin/HEAD should resolve to build, got '$out'"
+
+  # No origin/HEAD at all still falls back to a local main/master.
+  git -C "$repo" symbolic-ref -d refs/remotes/origin/HEAD
+  git -C "$repo" branch -q -f main HEAD
+  out=$(fm_default_branch "$repo" || true)
+  [ "$out" = main ] || fail "absent origin/HEAD should fall back to local main, got '$out'"
+
+  # A dangling origin/HEAD falls THROUGH to the local candidates rather than
+  # winning: the fallback is what keeps the invented name out of the answer.
+  git -C "$repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/gone
+  out=$(fm_default_branch "$repo" || true)
+  [ "$out" = main ] || fail "dangling origin/HEAD should fall through to local main, got '$out'"
+
+  pass "fm_default_branch: trusts origin/HEAD only when its target exists"
+}
+
+# fm-spawn cannot pass a base ref to treehouse - `treehouse get` takes none, and
+# treehouse resolves the base itself without checking that it exists. So the
+# guard is a refusal: fail with the real cause before a window, worktree, or
+# metadata exists, rather than allocating from a ref that is not there and
+# surfacing only the generic 60s "did not enter a worktree" timeout.
+test_spawn_refuses_missing_base_ref() {
+  local home proj fakebin out status
+  home="$TMP_ROOT/base-ref-home"
+  mkdir -p "$home/data"
+  proj=$(make_remote_repo "$TMP_ROOT/base-ref-proj" build production)
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/base-ref-fake")
+  git -C "$proj" worktree add -q --detach "$TMP_ROOT/base-ref-wt" >/dev/null 2>&1
+
+  # Build-only project whose origin/HEAD still names the deleted default.
+  git -C "$proj" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  out=$(run_spawn "$home" base-gone-hh8 "$proj" "$TMP_ROOT/base-ref-wt" "$fakebin"); status=$?
+  expect_code 1 "$status" "spawn should refuse when the resolved base ref does not exist"
+  assert_contains "$out" "refusing to launch" "missing base ref lacked the refusal"
+  assert_contains "$out" "build" "the refusal must name the branches that do exist"
+  assert_absent "$home/state/base-gone-hh8.meta" "refused spawn must not record meta"
+
+  # Same project, origin/HEAD repointed at a branch that exists: spawn proceeds.
+  git -C "$proj" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/build
+  out=$(run_spawn "$home" base-ok-ii9 "$proj" "$TMP_ROOT/base-ref-wt" "$fakebin"); status=$?
+  expect_code 0 "$status" "a build-only project with a valid origin/HEAD should spawn"
+  assert_contains "$out" "spawned base-ok-ii9" "valid build base did not report success"
+  assert_not_contains "$out" "refusing to launch" "valid build base wrongly tripped the base-ref guard"
+
+  # A clone with nothing fetched yet must NOT be refused: treehouse fetches
+  # before it allocates, so an empty remote-tracking namespace is not proof of a
+  # broken base ref.
+  local bare unfetched
+  bare="$TMP_ROOT/base-unfetched.git"
+  git init -q --bare -b main "$bare"
+  unfetched="$TMP_ROOT/base-unfetched"
+  git init -q -b main "$unfetched"
+  git -C "$unfetched" commit -q --allow-empty -m init
+  git -C "$unfetched" remote add origin "$bare"
+  git -C "$unfetched" worktree add -q --detach "$TMP_ROOT/base-unfetched-wt" >/dev/null 2>&1
+  out=$(run_spawn "$home" base-unfetched-jj0 "$unfetched" "$TMP_ROOT/base-unfetched-wt" "$fakebin"); status=$?
+  expect_code 0 "$status" "an unfetched clone must not be refused by the base-ref guard"
+  assert_not_contains "$out" "refusing to launch" "unfetched clone wrongly tripped the base-ref guard"
+
+  pass "fm-spawn: refuses a missing base ref, allows a build-only default and an unfetched clone"
+}
+
 test_lib_classification
 test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawn_tmux_window_construction
+test_default_branch_ref_validation
+test_spawn_refuses_missing_base_ref
