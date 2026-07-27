@@ -784,7 +784,12 @@ registry_secondmates_json() {
       '{present:true,available:false,complete:false,reason:$reason,provenance:"registered-table",path:$path,freshness:{status:"unavailable",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
     return 0
   fi
-  script=$(cat <<'BASH'
+  # Bounded reader source and jq filters are emitted by functions, never assigned
+  # with `VAR=$(cat <<DELIM ... DELIM)`: stock macOS Bash 3.2 scans a command
+  # substitution for its closing paren without skipping heredoc bodies, so one
+  # quote character in an embedded script or filter makes the whole file
+  # unparsable there. tests/fm-stock-bash-parse.test.sh enforces this repo-wide.
+  registry_reader_script() { cat <<'BASH'
     f=$1
     max_lines=$2
     max_bytes=$3
@@ -833,8 +838,9 @@ registry_secondmates_json() {
       --argjson records_in_window "$records_in_window" \
       --argjson max_records "$max_records" "$output_filter"
 BASH
-  )
-  parse_filter=$(cat <<'JQ'
+  }
+  script=$(registry_reader_script)
+  registry_parse_filter() { cat <<'JQ'
       [ inputs
         | select(startswith("- "))
         | (capture("^- (?<id>[^[:space:]]+)")?) as $id
@@ -845,8 +851,9 @@ BASH
       | group_by(.id)
       | map(if length > 1 then .[0] + {registry_error:"duplicate secondmate id in registry"} else .[0] end)
 JQ
-  )
-  output_filter=$(cat <<'JQ'
+  }
+  parse_filter=$(registry_parse_filter)
+  registry_output_filter() { cat <<'JQ'
       {present:true,available:true,reason:null,provenance:"registered-table",path:$path,
        freshness:{status:"fresh",observed_at:$observed},
        records:(if length > $max_records then .[:$max_records] else . end),
@@ -858,7 +865,8 @@ JQ
          (if $records_truncated then "record_limit" else empty end)
        ],lines_in_window:$lines_in_window,records_in_window:$records_in_window}
 JQ
-  )
+  }
+  output_filter=$(registry_output_filter)
   out=$(run_timed "$FM_SNAPSHOT_REGISTRY_TIMEOUT" bash -c "$script" \
     fm-secondmate-registry "$reg" "$FM_SNAPSHOT_REGISTRY_LINES" \
     "$FM_SNAPSHOT_REGISTRY_BYTES" "$FM_SNAPSHOT_REGISTRY_RECORDS" "$reg" "$SNAPSHOT_NOW" \
@@ -882,7 +890,8 @@ bounded_parent_activities_json() {  # <status-file>
     jq -n '{records:[],available:true,input_truncated:false,retained_truncated:false,reasons:[],lines_in_window:0,records_in_window:0}'
     return 0
   fi
-  script=$(cat <<'BASH'
+  # Emitted by a function, not `VAR=$(cat <<BASH ...)`; see registry_reader_script.
+  parent_activities_reader_script() { cat <<'BASH'
     classify=$1
     f=$2
     max_lines=$3
@@ -945,7 +954,8 @@ bounded_parent_activities_json() {  # <status-file>
          lines_in_window:$lines_in_window,
          records_in_window:$records_in_window}'
 BASH
-  )
+  }
+  script=$(parent_activities_reader_script)
   out=$(run_timed "$FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT" bash -c "$script" \
     fm-parent-activities "$SCRIPT_DIR/fm-classify-lib.sh" "$f" \
     "$FM_SNAPSHOT_PARENT_ACTIVITY_LINES" "$FM_SNAPSHOT_PARENT_ACTIVITY_BYTES" \

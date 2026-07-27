@@ -322,7 +322,16 @@ jobs:
           esac
           /bin/bash --version | head -1
           command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
-          /bin/bash -n bin/fm-fleet-snapshot.sh
+          # Parses every bin/*.sh and bin/backends/*.sh under this stock 3.2 and
+          # bans the heredoc-in-command-substitution shape 3.2 cannot lex, so a
+          # Mac-only parse break can never reach the fleet again (#166, #945).
+          parse_output=$(/bin/bash tests/fm-stock-bash-parse.test.sh)
+          printf '%s\n' "$parse_output"
+          parse_count=$(printf '%s\n' "$parse_output" | grep -c '^ok - ')
+          [ "$parse_count" -eq 3 ] || {
+            echo "::error::expected 3 stock-Bash parse tests, got $parse_count"
+            exit 1
+          }
 
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"

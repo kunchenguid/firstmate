@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-brief.sh.
 #
-# Regression coverage for the heredoc-in-command-substitution parse bug (issue
-# #166): each ship-mode branch builds its Definition-of-done text with
-# `VAR=$(cat <<EOF ... EOF)`. Bash's lexer tracks quote state through the
-# heredoc body while it scans for the matching `)` of the command
-# substitution, so a single unescaped apostrophe anywhere in that body breaks
-# parsing of the *entire rest of the script* - `bash -n` fails, not just the
-# generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
-# is unaffected, so the secondmate charter block does not need this guard.
+# The heredoc-in-command-substitution parse class that broke this script twice
+# (#166, then #945 on stock macOS Bash 3.2) is owned repo-wide by
+# tests/fm-stock-bash-parse.test.sh, which also documents why brief prose now
+# lives in emitter functions. What stays here is the file-specific consequence:
+# fm-brief.sh must parse, and every delivery mode must still scaffold a complete
+# brief with its text intact.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -18,9 +16,10 @@ TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
-# The script itself must always parse. This is the direct regression test for
-# issue #166: a stray apostrophe in any of the three DOD heredoc bodies
-# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
+# The script itself must always parse. Kept as the direct, file-level regression
+# for #166/#945: when this fails, no brief of any delivery mode can be scaffolded.
+# Note this runs the PATH `bash`, so on Linux CI it cannot see the stock-Bash-3.2
+# parse class; tests/fm-stock-bash-parse.test.sh is what catches that everywhere.
 test_script_parses() {
   local out rc
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
@@ -114,9 +113,12 @@ test_no_mistakes_dod_wording() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`help`' "$brief" \
     "no-mistakes DOD must render literal backticks around help"
+  # Wording guard only: the #166 phrasing must not return. Protection against the
+  # underlying parse class is structural now (emitter functions, enforced by
+  # tests/fm-stock-bash-parse.test.sh), not this string.
   assert_no_grep "no-mistakes' own guidance" "$brief" \
-    "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
-  pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
+    "no-mistakes DOD regressed to the superseded possessive phrasing"
+  pass "fm-brief.sh: no-mistakes DOD wording points at the authoritative help"
 }
 
 test_ship_project_memory_wording() {
