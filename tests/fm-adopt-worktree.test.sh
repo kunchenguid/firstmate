@@ -41,18 +41,19 @@ run_adopt() {
     PATH="$CASE_FAKEBIN:$PATH" "$ROOT/bin/fm-adopt-worktree.sh" "$id" 2>&1
 }
 
-test_success_preserves_copy() {
-  local id before out
+test_unleased_copy_refuses_unchanged() {
+  local id before out status
   id=adopt-success-a1
   make_case success "$id"
   before=$(git -C "$CASE_WORKTREE" status --porcelain)
   out=$(run_adopt "$id")
-  expect_code 0 "$?" "in-use legacy copy should be adoptable: $out"
-  assert_present "$CASE_HOME/state/$id.worktree-adoption" "adoption record was not written"
-  assert_grep 'legacy handoff' "$CASE_WORKTREE/handoff.md" "adoption changed the untracked handoff"
+  status=$?
+  expect_code 1 "$status" "unleased legacy copy should refuse adoption"
+  assert_contains "$out" 'not a durable' "unleased refusal did not require a durable task lease"
+  assert_grep 'legacy handoff' "$CASE_WORKTREE/handoff.md" "refusal changed the untracked handoff"
   [ "$before" = "$(git -C "$CASE_WORKTREE" status --porcelain)" ] \
-    || fail "adoption wrote into the legacy copy"
-  pass "adoption records preservation without writing into the copy"
+    || fail "refusal wrote into the legacy copy"
+  pass "unleased adoption refuses without changing the legacy copy"
 }
 
 test_refusals_and_native_lease_noop() {
@@ -82,13 +83,12 @@ test_refusals_and_native_lease_noop() {
   assert_contains "$out" 'absent from the treehouse pool' "absent refusal did not name pool state"
 
   out=$(FM_FAKE_POOL_STATUS=leased FM_FAKE_LEASE_HOLDER="fm-$id" run_adopt "$id")
-  expect_code 0 "$?" "native matching lease should be a no-op success: $out"
-  assert_contains "$out" 'adoption is unnecessary' "native lease no-op was not explicit"
-  assert_absent "$CASE_HOME/state/$id.worktree-adoption" "native lease no-op wrote an adoption record"
+  expect_code 0 "$?" "native matching lease should verify successfully: $out"
+  assert_contains "$out" 'durably leased' "native lease verification was not explicit"
   pass "adoption refuses unsafe states and accepts an existing native lease"
 }
 
-test_success_preserves_copy
+test_unleased_copy_refuses_unchanged
 test_refusals_and_native_lease_noop
 
 echo "# all fm-adopt-worktree tests passed"
