@@ -38,6 +38,12 @@
 #      flags still win.
 set -u
 
+# Every detect_own assertion below pins the harness explicitly (via CLAUDECODE=1,
+# PI_CODING_AGENT=true, or a fake ps ancestry). Harness markers exported by the
+# surrounding firstmate session would outrank those pins - CLAUDECODE=1 takes
+# precedence over PI_CODING_AGENT in detect_own - so scrub them first.
+unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null

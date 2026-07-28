@@ -679,15 +679,16 @@ EOF
 }
 
 test_session_lock_concurrent_single_winner() {
-  local rec root home fakebin ready completed winners pids i pid count
+  local rec root home fakebin ready completed handoff winners pids i pid child count
   rec=$(new_world lock-concurrency)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
   ready="$home/ready"
   completed="$home/done"
+  handoff="$home/handoff"
   winners="$home/winners"
-  mkdir -p "$ready" "$completed"
+  mkdir -p "$ready" "$completed" "$handoff"
   : > "$winners"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
@@ -723,7 +724,12 @@ SH
   i=1
   while [ "$i" -le 40 ]; do
     (
-      harness_pid=$BASHPID
+      # Stock macOS Bash 3.2 has no $BASHPID, so the parent hands each subshell
+      # its own pid instead: for `( ... ) &` the parent's $! is exactly the pid
+      # $BASHPID would report inside. Each contender still needs a distinct,
+      # genuinely live pid because fm_harness_pid_alive runs a real `kill -0`.
+      while [ ! -s "$handoff/$i" ]; do sleep 0.01; done
+      harness_pid=$(cat "$handoff/$i")
       : > "$home/state/harness-$harness_pid"
       : > "$ready/$i"
       while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
@@ -739,7 +745,11 @@ SH
         sleep 0.01
       done
     ) &
-    pids="$pids $!"
+    child=$!
+    # Publish the pid atomically so the subshell never reads a half-written file.
+    printf '%s\n' "$child" > "$handoff/$i.tmp"
+    mv "$handoff/$i.tmp" "$handoff/$i"
+    pids="$pids $child"
     i=$((i + 1))
   done
   for pid in $pids; do

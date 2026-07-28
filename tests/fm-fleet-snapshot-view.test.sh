@@ -441,27 +441,44 @@ EOF
 }
 
 test_registry_byte_truncation_discards_partial_line() {
-  local home first second limit out
+  local home first second partial limit out
   home=$(make_home registry-byte-truncation)
   first="- first (home: $home/first; scope: alpha)"
   second="- second (home: $home/second; scope: beta)"
-  printf '%s\n%s\n' "$first" "$second" > "$home/data/secondmates.md"
-  limit=$((${#first} + 1 + 7))
+  # The byte cut has to land *after* the second entry's home field. A shorter
+  # prefix carries no `(home: ...;` segment, so the registry parser drops it on
+  # its own and the assertions below would still hold with the partial-line
+  # discard deleted from fm-fleet-snapshot.sh - a vacuous guard.
+  partial="- second (home: $home/second;"
+  limit=$((${#first} + 1 + ${#partial}))
 
+  # Control: the prefix the byte budget leaves behind is a parseable record on
+  # its own, so requiring its absence below is a real requirement.
+  printf '%s\n' "$partial" > "$home/data/secondmates.md"
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    (.secondmate_current.registry.records | map(.id)) == ["second"]
+  ' >/dev/null || fail "control: the truncated prefix must parse as a record on its own: $out"
+
+  printf '%s\n%s\n' "$first" "$second" > "$home/data/secondmates.md"
   out=$(FM_HOME="$home" FM_SNAPSHOT_REGISTRY_BYTES="$limit" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .secondmate_current.registry.input_truncated == true
       and .secondmate_current.registry.complete == false
       and .secondmate_current.registry.reasons == ["byte_limit"]
+      and .secondmate_current.registry.lines_in_window == 1
       and (.secondmate_current.registry.records | map(.id)) == ["first"]
   ' >/dev/null || fail "registry byte truncation must keep only complete lines: $out"
 
-  printf '%s' "$first" > "$home/data/secondmates.md"
-  out=$(FM_HOME="$home" FM_SNAPSHOT_REGISTRY_BYTES=7 "$SNAPSHOT" --json)
+  # No newline anywhere in the window: every retained byte belongs to a partial
+  # line, so the window must empty rather than publish a half-read record.
+  printf '%s' "$second" > "$home/data/secondmates.md"
+  out=$(FM_HOME="$home" FM_SNAPSHOT_REGISTRY_BYTES="${#partial}" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .secondmate_current.registry.input_truncated == true
       and .secondmate_current.registry.complete == false
       and .secondmate_current.registry.reasons == ["byte_limit"]
+      and .secondmate_current.registry.lines_in_window == 0
       and (.secondmate_current.registry.records | length) == 0
   ' >/dev/null || fail "registry truncation before the first newline must discard all content: $out"
 
