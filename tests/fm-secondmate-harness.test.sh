@@ -194,6 +194,7 @@ SH
 # ===========================================================================
 test_propagate_lib() {
   local d src dest home m1 m2 outside stdout stderr guard_repo err_text report
+  local race_bin real_cp race_report
   d="$TMP_ROOT/prop-lib"
   src="$d/src"
   home="$d/home1"
@@ -331,6 +332,44 @@ test_propagate_lib() {
   [ "$(cat "$d/home4/config/backend")" = tmux ] || fail "unprovenanced backend symlink target changed on primary absence"
   assert_grep $'backend\tskipped\tpreserving deliberate local override' "$report" \
     "unprovenanced backend symlink should be preserved with primary absent"
+  printf 'herdr\n' > "$src/backend"
+
+  mkdir -p "$d/home5/config" "$d/home5/state"
+  printf 'tmux\n' > "$src/backend"
+  race_bin=$(fm_fakebin "$d/backend-race")
+  real_cp=$(command -v cp)
+  cat > "$race_bin/cp" <<'SH'
+#!/usr/bin/env bash
+set -eu
+"$FM_TEST_REAL_CP" "$@"
+if [ "${1:-}" = "$FM_TEST_RACE_SOURCE" ]; then
+  printf 'zellij\n' > "$FM_TEST_RACE_SOURCE"
+fi
+SH
+  chmod +x "$race_bin/cp"
+  race_report="$d/backend-race.report"
+  : > "$race_report"
+  PATH="$race_bin:$PATH" FM_TEST_REAL_CP="$real_cp" FM_TEST_RACE_SOURCE="$src/backend" \
+    FM_INHERITABLE_CONFIG=backend FM_CONFIG_INHERIT_REPORT="$race_report" \
+    propagate_inheritable_config "$src" "$d/home5/config"
+  [ "$(cat "$src/backend")" = zellij ] || fail "backend race did not replace the primary source"
+  [ "$(cat "$d/home5/config/backend")" = tmux ] || fail "backend race destination lost the snapshotted generation"
+  [ "$(cat "$d/home5/state/.fm-inherited-backend")" = tmux ] \
+    || fail "backend race provenance did not match the snapshotted generation"
+  cmp -s "$d/home5/config/backend" "$d/home5/state/.fm-inherited-backend" \
+    || fail "backend race published inconsistent destination and provenance generations"
+  if compgen -G "$d/home5/state/.fm-inherited-backend.snapshot.*" >/dev/null; then
+    fail "backend race left a source snapshot behind"
+  fi
+  : > "$race_report"
+  FM_INHERITABLE_CONFIG=backend FM_CONFIG_INHERIT_REPORT="$race_report" \
+    propagate_inheritable_config "$src" "$d/home5/config"
+  [ "$(cat "$d/home5/config/backend")" = zellij ] \
+    || fail "backend race destination was misclassified instead of converging later"
+  [ "$(cat "$d/home5/state/.fm-inherited-backend")" = zellij ] \
+    || fail "backend race provenance did not follow later convergence"
+  assert_grep $'backend\tpushed\t' "$race_report" \
+    "backend race later convergence should report pushed, not deliberate override"
   printf 'herdr\n' > "$src/backend"
 
   # 5b. deliberate local backend override is preserved across present and absent primary

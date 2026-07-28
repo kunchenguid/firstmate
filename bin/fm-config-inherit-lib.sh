@@ -438,6 +438,34 @@ fm_inherit_backend_write_provenance() {
   chmod 0600 "$provenance" 2>/dev/null || return 1
 }
 
+fm_inherit_backend_snapshot_source() {
+  local src=$1 provenance=$2 parent snapshot
+  [ -f "$src" ] || return 1
+  parent=${provenance%/*}
+  [ -n "$parent" ] && [ "$parent" != "$provenance" ] || return 1
+  mkdir -p "$parent" 2>/dev/null || return 1
+  snapshot=$(mktemp "$parent/.fm-inherited-backend.snapshot.XXXXXX" 2>/dev/null) || return 1
+  if cp "$src" "$snapshot" 2>/dev/null; then
+    printf '%s\n' "$snapshot"
+    return 0
+  fi
+  rm -f "$snapshot" 2>/dev/null || true
+  return 1
+}
+
+fm_inherit_backend_publish_snapshot() {
+  local snapshot=$1 dest=$2 provenance=$3
+  if ! copy_inheritable_file "$snapshot" "$dest"; then
+    rm -f "$snapshot" 2>/dev/null || true
+    return 1
+  fi
+  if ! fm_inherit_backend_write_provenance "$snapshot" "$provenance"; then
+    rm -f "$snapshot" 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$snapshot" 2>/dev/null
+}
+
 fm_inherit_backend_clear_provenance() {
   local provenance=$1
   [ -n "$provenance" ] || return 0
@@ -448,7 +476,7 @@ fm_inherit_backend_clear_provenance() {
 # override preservation via the private provenance marker. Returns 0 on handled
 # success/skip, 1 on real error.
 propagate_inheritable_backend_item() {
-  local src_config=$1 dest_config=$2 src dest provenance reason
+  local src_config=$1 dest_config=$2 src dest provenance snapshot reason
   src="$src_config/backend"
   dest="$dest_config/backend"
   provenance=$(fm_inherit_backend_provenance_path "$dest_config") || {
@@ -470,21 +498,27 @@ propagate_inheritable_backend_item() {
       record_inheritable_config_result backend skipped "$reason"
       return 0
     fi
-    if [ -f "$dest" ] && [ ! -L "$dest" ] && cmp -s "$src" "$dest"; then
+    snapshot=$(fm_inherit_backend_snapshot_source "$src" "$provenance") || {
+      reason="failed to snapshot primary backend"
+      warn_inheritable_config_error backend "$src" "$reason"
+      record_inheritable_config_result backend error "$reason"
+      return 1
+    }
+    if [ -f "$dest" ] && [ ! -L "$dest" ] && cmp -s "$snapshot" "$dest"; then
+      if ! rm -f "$snapshot" 2>/dev/null; then
+        reason="failed to clear backend snapshot"
+        warn_inheritable_config_error backend "$snapshot" "$reason"
+        record_inheritable_config_result backend error "$reason"
+        return 1
+      fi
       record_inheritable_config_result backend unchanged ""
       return 0
     fi
-    if copy_inheritable_file "$src" "$dest"; then
-      if fm_inherit_backend_write_provenance "$src" "$provenance"; then
-        record_inheritable_config_result backend pushed ""
-        return 0
-      fi
-      reason="failed to record backend provenance"
-      warn_inheritable_config_error backend "$provenance" "$reason"
-      record_inheritable_config_result backend error "$reason"
-      return 1
+    if fm_inherit_backend_publish_snapshot "$snapshot" "$dest" "$provenance"; then
+      record_inheritable_config_result backend pushed ""
+      return 0
     fi
-    reason="failed to copy"
+    reason="failed to publish backend snapshot"
     warn_inheritable_config_error backend "$dest" "$reason"
     record_inheritable_config_result backend error "$reason"
     return 1
