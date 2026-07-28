@@ -277,6 +277,14 @@ fi
 # Ship task: shape Setup / Rule 1 / Definition of done by the project's delivery mode.
 # yolo does not affect the brief because the worker never owns approval decisions;
 # firstmate applies the authority contract in AGENTS.md section 7, so discard it.
+
+# Bash 3.2 (stock on macOS) mis-scans a bare apostrophe inside a heredoc that is
+# nested in $( ), treating it as an unterminated quote and failing the whole file
+# with "unexpected EOF while looking for matching `''". Every other script here
+# parses under 3.2, so interpolate possessives in $( )-nested heredocs through
+# this instead of typing the apostrophe. The rest of the repo uses no bash 4+
+# features; keep it that way.
+APOS="'"
 read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
@@ -325,7 +333,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
   Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
+- Avoid \`--yes\`: it would silently bypass firstmate${APOS}s authority check and any required captain escalation.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
