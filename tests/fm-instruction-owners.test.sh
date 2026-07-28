@@ -48,7 +48,7 @@ test_new_skill_metadata_and_triggers() {
 # guesswork. It is captain-invocable, so its trigger belongs in an operating
 # section rather than the agent-only reference list.
 test_vendored_watch_skill_keeps_license_and_upstream_pin() {
-  local count script
+  local count script trigger
   assert_present "$WATCH" "vendored watch skill is missing"
   assert_present "$WATCH_LICENSE" "vendored watch skill lost its upstream LICENSE"
   assert_grep 'MIT License' "$WATCH_LICENSE" "vendored watch LICENSE is no longer the upstream MIT terms"
@@ -64,11 +64,22 @@ test_vendored_watch_skill_keeps_license_and_upstream_pin() {
       "vendored watch skill is missing scripts/$script"
   done
   [ -x "$ROOT/.agents/skills/watch/scripts/watch.py" ] || fail "scripts/watch.py is not executable"
+  assert_grep 'brew install ffmpeg yt-dlp' "$WATCH" \
+    "watch banner lost the macOS unattended-install disclosure"
+  assert_grep 'AUDIO EGRESS:' "$WATCH" \
+    "watch banner lost the third-party transcription upload disclosure"
+  assert_grep 'KEY-SOURCE TRAP, DELIBERATELY NOT PATCHED:' "$WATCH" \
+    "watch banner lost the working-directory .env key-source trap note"
   count=$(grep -Fc -- 'Load the `watch` skill' "$AGENTS")
   [ "$count" -eq 1 ] || fail "watch must have exactly one AGENTS.md trigger line, found $count"
+  trigger=$(grep -F -- 'Load the `watch` skill' "$AGENTS")
+  case "$trigger" in
+    *"consent before that first run"*) ;;
+    *) fail "the watch trigger line lost its first-run install and audio-egress consent gate" ;;
+  esac
   assert_no_grep '- `watch` -' "$AGENTS" \
     "captain-invocable watch must not be listed among the agent-only reference skills"
-  pass "vendored watch skill keeps its license, upstream pin, and single trigger"
+  pass "vendored watch skill keeps its license, upstream pin, consent gate, and single trigger"
 }
 
 test_diagnostic_owner_covers_causal_procedure() {

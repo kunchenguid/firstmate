@@ -24,6 +24,23 @@ NOT applied to this file for the same reason.
 To refresh: re-copy upstream skills/watch/{SKILL.md,scripts}, drop
 scripts/build-skill.sh and .skillignore, and re-apply this banner.
 
+FIRST-RUN SIDE EFFECTS - GET THE CAPTAIN'S CONSENT BEFORE THE FIRST RUN:
+scripts/setup.py installs missing dependencies itself on macOS only, where
+_install_macos runs `brew install ffmpeg yt-dlp` unattended; on Linux and
+Windows it only prints an install hint and exits non-zero. It also scaffolds
+~/.config/watch/.env and marks SETUP_COMPLETE=true there.
+AUDIO EGRESS: when a GROQ_API_KEY or OPENAI_API_KEY is configured, and only
+when captions are unavailable, scripts/whisper.py extracts the audio and
+uploads it to api.groq.com or api.openai.com for transcription. Pass
+`--no-whisper` to keep the transcript captions-only, or configure no key at
+all, and the upload path never runs.
+KEY-SOURCE TRAP, DELIBERATELY NOT PATCHED: scripts/whisper.py's load_api_key
+falls back to `Path.cwd()/.env` after ~/.config/watch/.env, so invoking
+/watch from inside a project clone that has its own .env can silently use
+THAT project's OPENAI_API_KEY or GROQ_API_KEY. It is upstream code below this
+banner, so patching it would break byte-identical parity for no safety gain;
+mitigate by invoking from a controlled directory or exporting an explicit key.
+
 FFMPEG VERSION TRAP (verified 2026-07-28 on this fleet):
 scripts/frames.py passes ffmpeg's `-vsync` flag, which was REMOVED from
 ffmpeg master builds (reproduced on N-125781-gacf6b520c1). Frame extraction

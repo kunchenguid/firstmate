@@ -176,6 +176,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/watch/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
     },
