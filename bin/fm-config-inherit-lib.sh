@@ -462,19 +462,13 @@ propagate_inheritable_backend_item() {
       record_inheritable_config_result backend skipped "$reason"
       return 0
     fi
-    if [ -f "$dest" ] && [ ! -L "$dest" ] && cmp -s "$src" "$dest"; then
-      if fm_inherit_backend_write_provenance "$src" "$provenance"; then
-        record_inheritable_config_result backend unchanged ""
-        return 0
-      fi
-      reason="failed to record backend provenance"
-      warn_inheritable_config_error backend "$provenance" "$reason"
-      record_inheritable_config_result backend error "$reason"
-      return 1
-    fi
     if fm_inherit_backend_is_deliberate "$dest" "$provenance"; then
       reason="preserving deliberate local override"
       record_inheritable_config_result backend skipped "$reason"
+      return 0
+    fi
+    if [ -f "$dest" ] && [ ! -L "$dest" ] && cmp -s "$src" "$dest"; then
+      record_inheritable_config_result backend unchanged ""
       return 0
     fi
     if copy_inheritable_file "$src" "$dest"; then

@@ -295,6 +295,25 @@ test_propagate_lib() {
   [ "$(cat "$d/home2/config/backend")" = herdr ] || fail "backend not propagated alongside"
   [ "$(cat "$d/home2/state/.fm-inherited-backend")" = herdr ] || fail "home2 backend provenance missing"
 
+  mkdir -p "$d/home3/config" "$d/home3/state"
+  printf 'herdr\n' > "$d/home3/config/backend"
+  report="$d/equal-unprovenanced.report"
+  : > "$report"
+  FM_CONFIG_INHERIT_REPORT="$report" propagate_inheritable_config "$src" "$d/home3/config"
+  [ "$(cat "$d/home3/config/backend")" = herdr ] || fail "equal unprovenanced backend changed"
+  [ ! -e "$d/home3/state/.fm-inherited-backend" ] \
+    || fail "equal unprovenanced backend was incorrectly claimed as inherited"
+  assert_grep $'backend\tskipped\tpreserving deliberate local override' "$report" \
+    "equal unprovenanced backend should report deliberate override preservation"
+  printf 'tmux\n' > "$src/backend"
+  : > "$report"
+  FM_CONFIG_INHERIT_REPORT="$report" propagate_inheritable_config "$src" "$d/home3/config"
+  [ "$(cat "$d/home3/config/backend")" = herdr ] \
+    || fail "equal unprovenanced backend was overwritten after primary changed"
+  [ ! -e "$d/home3/state/.fm-inherited-backend" ] \
+    || fail "unprovenanced backend gained provenance after primary changed"
+  printf 'herdr\n' > "$src/backend"
+
   # 5b. deliberate local backend override is preserved across present and absent primary
   report="$d/deliberate.report"
   printf 'tmux\n' > "$d/home2/config/backend"
