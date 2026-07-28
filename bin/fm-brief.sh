@@ -26,13 +26,12 @@
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
-# For ship tasks, the definition of done is shaped by the project's delivery mode
-# (data/projects.md via fm-project-mode.sh; see the project-management skill
-# and AGENTS.md task lifecycle):
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
-#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
-#   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
-#                captain approves, firstmate merges to local main
+# For ship tasks, bin/fm-delivery-contract-lib.sh is the single owner of the
+# mode-specific Setup, Rule 1, and Definition of done that this scaffold inserts
+# (mode from data/projects.md via fm-project-mode.sh; see the project-management
+# skill and AGENTS.md task lifecycle). Read that library for the exact per-mode
+# wording; bin/fm-promote.sh renders the same contract for a promoted scout, so
+# neither entry point may restate it here.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured

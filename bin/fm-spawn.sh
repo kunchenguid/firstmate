@@ -61,9 +61,13 @@
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi)
 #   overrides it for this spawn (either kind). A non-flag string containing
-#   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. pi-signed launches that exact executable name from PATH and
-#   refuses before endpoint creation when it is unavailable; it never falls back to pi.
+#   whitespace is treated as a RAW launch command - still the escape hatch for
+#   verifying new adapters on a --secondmate spawn, but no longer a worker guard
+#   bypass: an ordinary crewmate or scout spawn refuses before endpoint creation
+#   on kimi, and on a raw command whose executable is not a harness
+#   bin/fm-worker-guard-install.sh can guard. pi-signed launches that exact
+#   executable name from PATH and refuses before endpoint creation when it is
+#   unavailable; it never falls back to pi.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its

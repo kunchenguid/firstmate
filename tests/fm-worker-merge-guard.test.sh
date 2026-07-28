@@ -392,6 +392,43 @@ test_checker_binding_survives_a_symlinked_firstmate_path() {
   pass "worker merge guard: the checker binding survives a symlinked firstmate path"
 }
 
+test_teardown_leaves_no_guard_residue() {
+  local base fakebin guardbin token
+  base="$TMP_ROOT/teardown"
+  fakebin=$(make_fake_tools "$base")
+  fm_fake_exit0 "$fakebin" treehouse tmux
+  mkdir -p "$base/home/state" "$base/config" "$base/tasktmp"
+
+  # A pool worktree is reused by the next task, so a task that ends must not
+  # leave its own guard registration (or its private auth binding) behind.
+  git init -q --bare "$base/origin.git"
+  git -C "$base/origin.git" symbolic-ref HEAD refs/heads/main
+  fm_git_init_commit "$base/seed"
+  git -C "$base/seed" push -q "$base/origin.git" HEAD:main
+  git clone -q "$base/origin.git" "$base/project"
+  git -C "$base/project" worktree add -q -b fm/guard-task "$base/work" main
+  touch "$base/home/state/.last-watcher-beat"
+
+  guardbin=$(run_installer "$base" pi "$fakebin") || fail "teardown fixture installation failed"
+  token=$(cat "$base/home/state/guard-task.worker-guard-token")
+  fm_write_meta "$base/home/state/guard-task.meta" \
+    'window=firstmate:fm-guard-task' 'endpoint_task_id=guard-task' \
+    "worktree=$base/work" "project=$base/project" \
+    'kind=ship' 'mode=local-only' "tasktmp=$base/tasktmp" 'worker_guard=pr-merge-v1'
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$base/home/state" \
+    FM_CONFIG_OVERRIDE="$base/config" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-teardown.sh" guard-task --force >/dev/null 2>&1 \
+    || fail "teardown of a guarded worker task failed"
+
+  [ ! -e "$base/work/.fm-worker-guard" ] || fail "teardown left the workspace guard registration"
+  [ ! -e "$base/home/state/.worker-guard.d/$token" ] || fail "teardown left the private auth binding"
+  [ ! -e "$base/home/state/guard-task.worker-guard-token" ] || fail "teardown left the guard token"
+  [ ! -e "$base/home/state/guard-task.worker-guard.pi-ext.ts" ] || fail "teardown left the Pi guard extension"
+  [ ! -e "$guardbin/gh" ] || fail "teardown left the worker-only PATH wrapper"
+  pass "worker merge guard: teardown leaves no guard residue in a reusable worktree or in state"
+}
+
 test_respawn_reclaims_only_its_own_registration() {
   local base fakebin guardbin output rc
   base="$TMP_ROOT/respawn"
@@ -422,5 +459,6 @@ test_both_enforcement_layers_classify_identically
 test_pr_subcommand_lists_stay_in_sync
 test_grok_hook_follows_grok_home
 test_checker_binding_survives_a_symlinked_firstmate_path
+test_teardown_leaves_no_guard_residue
 test_respawn_reclaims_only_its_own_registration
 test_production_spawn_is_backend_independent
