@@ -49,7 +49,13 @@
 #      "Ctrl c" as ONE shell argument with an embedded space (NOT two argv
 #      words, NOT "C-c" or "Ctrl+c" - all verified to fail).
 #   3. `new-tab --cwd --name` DOES return the created tab's bare integer id on
-#      stdout, exactly as documented.
+#      stdout, exactly as documented - but ONLY when the spawned command
+#      outlives the CLI's report. Verified on zellij 0.44.3: the same
+#      `new-tab --close-on-exit -- <cmd>` prints the id for a long-lived
+#      <cmd> and prints NOTHING for one that exits immediately, while
+#      CREATING the tab either way (same for `new-pane`'s terminal_<id>).
+#      An empty id therefore means "the pane command died", not "no tab" -
+#      see fm_backend_zellij_supervisor_reconcile's recovery path.
 #   4. `list-panes --json`'s `pane_cwd` reflects a `cd` run DIRECTLY in the
 #      pane's own top-level shell within one poll (<0.3s) - but does NOT
 #      reflect a `cd` performed by a NESTED SUBSHELL the pane's shell
@@ -407,12 +413,33 @@ fm_backend_zellij_supervisor_command_argv() {  # <task-id>
   )
 }
 
+# fm_backend_zellij_supervisor_tab_candidates: the supervisor-titled tab ids
+# currently live in <session>, MINUS the ids the caller just asked zellij to
+# close. `close-tab-by-id` is fire-and-forget (file header, "Failure exit"), so
+# a just-closed tab can still appear in the very next `list-tabs`; treating one
+# as the freshly created tab would build the pane set onto a doomed tab.
+fm_backend_zellij_supervisor_tab_candidates() {  # <session> <title> [closed-id...]
+  local session=$1 title=$2
+  shift 2
+  local id closed skip
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    skip=
+    for closed in "$@"; do
+      [ "$id" = "$closed" ] && { skip=1; break; }
+    done
+    [ -n "$skip" ] || printf '%s\n' "$id"
+  done < <(fm_backend_zellij_tabs_by_name "$session" "$title")
+  return 0
+}
+
 fm_backend_zellij_supervisor_reconcile() {  # <session> [task-id...]
   local session=$1
   shift
   local title prev_active restore_target new_tab_id task_id old_id
-  local pane_name new_pane_id pane_digits
+  local pane_name new_pane_id pane_digits attempt cand
   local old_ids=()
+  local found_ids=()
   command -v zellij >/dev/null 2>&1 || {
     [ "$#" -eq 0 ] && return 0
     echo "error: zellij CLI not found; cannot reconcile supervisor panes" >&2
@@ -446,6 +473,41 @@ fm_backend_zellij_supervisor_reconcile() {  # <session> [task-id...]
     --name "$title" \
     --close-on-exit \
     -- "${FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV[@]}" 2>/dev/null | tr -d '[:space:]')
+  # An empty id here does NOT mean the tab was not created: `new-tab` only
+  # echoes the id when its command outlives the report (file header, #3), so a
+  # seed pane loop that exits at once - the task torn down between the caller's
+  # id scan and this call - creates the TAB and echoes NOTHING. Failing on
+  # stdout alone then left exactly the state this path exists to avoid: a
+  # supervisor tab whose seed pane still renders its raw `env ...` command as
+  # its title, no pane for the other crews, and no visible error (every call
+  # site discards it). So re-resolve the id by tab name before giving up -
+  # briefly, since a just-created tab is not listed instantly - and if it still
+  # cannot be pinned down to exactly one tab, close whatever supervisor-titled
+  # tabs are there so the next reconcile rebuilds from nothing instead of
+  # having to heal a half-built tab.
+  case "$new_tab_id" in
+    ''|*[!0-9]*)
+      attempt=0
+      while [ "$attempt" -lt 5 ]; do
+        found_ids=()
+        while IFS= read -r cand; do
+          [ -n "$cand" ] || continue
+          found_ids+=("$cand")
+        done < <(fm_backend_zellij_supervisor_tab_candidates \
+          "$session" "$title" ${old_ids[@]+"${old_ids[@]}"})
+        [ "${#found_ids[@]}" -eq 0 ] || break
+        attempt=$((attempt + 1))
+        sleep 0.2
+      done
+      if [ "${#found_ids[@]}" -eq 1 ]; then
+        new_tab_id=${found_ids[0]}
+      else
+        for cand in ${found_ids[@]+"${found_ids[@]}"}; do
+          fm_backend_zellij_cli "$session" action close-tab-by-id "$cand" >/dev/null 2>&1 || true
+        done
+      fi
+      ;;
+  esac
   case "$new_tab_id" in
     ''|*[!0-9]*)
       echo "error: zellij supervisor tab did not return a numeric tab id for '$title' (got '$new_tab_id')" >&2

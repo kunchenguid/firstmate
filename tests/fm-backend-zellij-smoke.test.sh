@@ -201,5 +201,32 @@ pass "real zellij: list_live discovers a live task tab by fm-<id> name"
 
 fm_backend_zellij_kill "$SESSION:$PANE_ID2"
 
+# --- new-tab's id is only echoed for a command that outlives the report ------
+# The contract fm_backend_zellij_supervisor_reconcile's recovery path rests on:
+# a `--close-on-exit` command that exits at once (a supervisor pane loop whose
+# task was torn down under it) makes `new-tab` print NOTHING while still
+# creating the tab, so an empty id must be re-resolved by name, not treated as
+# "no tab was created".
+
+SILENT_TITLE="fm-smoke-silent-$$"
+SILENT_ID=$(fm_backend_zellij_cli "$SESSION" action new-tab \
+  --cwd /tmp --name "$SILENT_TITLE" --close-on-exit -- bash -c 'exit 0' | tr -d '[:space:]')
+[ -z "$SILENT_ID" ] \
+  || fail "expected new-tab to echo no id for an instantly-exiting command, got '$SILENT_ID'"
+sleep 0.5
+RECOVERED=$(fm_backend_zellij_supervisor_tab_candidates "$SESSION" "$SILENT_TITLE")
+case "$RECOVERED" in
+  ''|*[!0-9]*) fail "the tab was created but could not be re-resolved by name, got '$RECOVERED'" ;;
+esac
+pass "real zellij: new-tab echoes no id for an instantly-exiting command yet creates the tab (recoverable by name)"
+
+# A just-closed tab id must not be offered as the recovery candidate: the CLI
+# can still list it for a moment after close-tab-by-id.
+[ -z "$(fm_backend_zellij_supervisor_tab_candidates "$SESSION" "$SILENT_TITLE" "$RECOVERED")" ] \
+  || fail "supervisor_tab_candidates must exclude the ids the caller just closed"
+pass "real zellij: supervisor tab candidates exclude the just-closed tab ids"
+
+fm_backend_zellij_cli "$SESSION" action close-tab-by-id "$RECOVERED" >/dev/null 2>&1 || true
+
 cleanup_all
 trap - EXIT

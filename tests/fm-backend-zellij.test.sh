@@ -574,6 +574,62 @@ test_supervisor_reconcile_seed_rename_is_best_effort() {
   pass "fm_backend_zellij_supervisor_reconcile: seed pane rename is best-effort when the pane id is unresolvable"
 }
 
+test_supervisor_reconcile_recovers_a_silent_new_tab_id() {
+  local dir fb title log
+  dir="$TMP_ROOT/supervisor-reconcile-silent-newtab"; mkdir -p "$dir/responses"
+  title="fm-supervisor-$(zellij_expected_home_label "$ROOT" "$ROOT")"
+  printf '[]\n' > "$dir/responses/1.out"
+  printf '[]\n' > "$dir/responses/2.out"
+  # 3: new-tab echoes NOTHING even though it created the tab - what the real
+  # CLI does when the seed pane's command exits at once (a task torn down
+  # under us). 4: the recovery list-tabs finds that tab by name.
+  : > "$dir/responses/3.out"
+  printf '[{"tab_id":8,"name":"%s"}]\n' "$title" > "$dir/responses/4.out"
+  printf '[{"id":30,"tab_id":8,"is_plugin":false}]\n' > "$dir/responses/5.out"
+  printf 'terminal_31\n' > "$dir/responses/7.out"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_supervisor_reconcile firstmate alpha bravo' "$ROOT" \
+    || fail "supervisor_reconcile should recover the tab id by name when new-tab echoes nothing"
+  log=$(cat "$dir/log")
+  assert_contains "$log" $'\x1f''rename-pane'$'\x1f''-p'$'\x1f''30'$'\x1f''fm-alpha' \
+    "supervisor_reconcile should still title the seed pane after recovering the tab id"
+  assert_contains "$log" $'\x1f''new-pane'$'\x1f''--tab-id'$'\x1f''8'$'\x1f''--cwd'$'\x1f'"$ROOT"$'\x1f''--name'$'\x1f''fm-bravo' \
+    "supervisor_reconcile should build the remaining panes on the recovered tab"
+  pass "fm_backend_zellij_supervisor_reconcile: recovers the tab id by name when new-tab echoes nothing"
+}
+
+test_supervisor_reconcile_closes_the_partial_tab_when_the_id_stays_unresolvable() {
+  local dir fb title err log
+  dir="$TMP_ROOT/supervisor-reconcile-ambiguous"; mkdir -p "$dir/responses"
+  title="fm-supervisor-$(zellij_expected_home_label "$ROOT" "$ROOT")"
+  printf '[]\n' > "$dir/responses/1.out"
+  printf '[]\n' > "$dir/responses/2.out"
+  : > "$dir/responses/3.out"
+  # Two tabs now carry the supervisor title, so which one new-tab created
+  # cannot be pinned down: both must be closed rather than half-built on.
+  printf '[{"tab_id":8,"name":"%s"},{"tab_id":9,"name":"%s"}]\n' "$title" "$title" \
+    > "$dir/responses/4.out"
+  fb=$(make_zellij_fakebin "$dir")
+  err=$(PATH="$fb:$PATH" FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_supervisor_reconcile firstmate alpha bravo' "$ROOT" 2>&1 >/dev/null) \
+    && fail "supervisor_reconcile should fail when the new tab id stays unresolvable"
+  assert_contains "$err" "did not return a numeric tab id" \
+    "supervisor_reconcile should report the unusable new-tab output"
+  log=$(cat "$dir/log")
+  assert_contains "$log" $'\x1f''close-tab-by-id'$'\x1f''8' \
+    "supervisor_reconcile should close the first unusable supervisor tab"
+  assert_contains "$log" $'\x1f''close-tab-by-id'$'\x1f''9' \
+    "supervisor_reconcile should close the second unusable supervisor tab"
+  assert_not_contains "$log" $'\x1f''new-pane' \
+    "supervisor_reconcile should not build panes once the tab id is unresolvable"
+  pass "fm_backend_zellij_supervisor_reconcile: leaves no partial tab when the new tab id stays unresolvable"
+}
+
 test_supervisor_reconcile_fails_when_new_pane_returns_no_pane_id() {
   local dir fb err
   dir="$TMP_ROOT/supervisor-reconcile-nopane"; mkdir -p "$dir/responses"
@@ -1181,6 +1237,8 @@ test_create_task_restores_previously_active_tab
 test_create_task_no_restore_when_new_tab_was_already_active
 test_supervisor_reconcile_builds_tab_and_panes
 test_supervisor_reconcile_seed_rename_is_best_effort
+test_supervisor_reconcile_recovers_a_silent_new_tab_id
+test_supervisor_reconcile_closes_the_partial_tab_when_the_id_stays_unresolvable
 test_supervisor_reconcile_fails_when_new_pane_returns_no_pane_id
 test_supervisor_command_argv_forwards_tuning_knobs
 test_supervisor_command_argv_forwards_resolved_override_dirs
