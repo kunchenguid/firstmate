@@ -99,12 +99,6 @@ pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
 x_mode_env="$CONFIG/x-mode.env"
 telegram_env="$CONFIG/telegram.env"
 
-shell_quote() {
-  printf "'"
-  printf '%s' "$1" | sed "s/'/'\\\\''/g"
-  printf "'"
-}
-
 if [ "$X_MODE" -eq 0 ] && [ -f "$x_mode_env" ]; then
   X_MODE=1
 fi
@@ -112,28 +106,14 @@ if [ "$TELEGRAM" -eq 0 ] && [ -f "$telegram_env" ]; then
   TELEGRAM=1
 fi
 
-# Both always-on channels raise the watcher cadence with their own generated
-# file, and a home may arm either, both, or neither. Everything downstream reads
-# this one ordered list instead of naming a specific channel, so adding or
-# removing a channel never means teaching each harness snippet about it.
-cadence_files_sh=
-cadence_source_sh=
-add_cadence_file() {
-  local path=$1 quoted
-  quoted=$(shell_quote "$path")
-  if [ -z "$cadence_files_sh" ]; then
-    cadence_files_sh=$quoted
-  else
-    cadence_files_sh="$cadence_files_sh and $quoted"
-  fi
-  cadence_source_sh="${cadence_source_sh}[ -f $quoted ] && . $quoted; "
-}
-if [ "$X_MODE" -eq 1 ]; then
-  add_cadence_file "$x_mode_env"
-fi
-if [ "$TELEGRAM" -eq 1 ]; then
-  add_cadence_file "$telegram_env"
-fi
+# An armed always-on channel needs a 30s watcher cadence rather than the 300s
+# default, and bin/fm-watch.sh now DERIVES that itself from the channel shim it
+# already authenticates byte-for-byte before every dispatch. No arm command
+# sources a cadence file any more, so this renderer emits no source node and
+# bin/fm-arm-command-policy.mjs blesses none: a home-private file that an
+# injected agent could write can no longer become shell code inside an arm.
+# X_MODE and TELEGRAM are still resolved above because the emitted protocol
+# names which channels are live, not because anything is sourced.
 
 # Literal placeholder substitution.
 #
@@ -161,7 +141,6 @@ render_snippet() {
   while IFS= read -r line || [ -n "$line" ]; do
     line=$(replace_all "$line" '__FM_PI_EXT__' "$pi_ext")
     line=$(replace_all "$line" '__FM_PI_TURNEND_EXT__' "$pi_turnend_ext")
-    line=$(replace_all "$line" '__FM_CADENCE_SOURCE_SH__' "$cadence_source_sh")
     printf '%s\n' "$line"
   done < "$SNIPPET"
 }
@@ -180,10 +159,6 @@ repair_line() {
   if [ "$QUEUE_PENDING" -eq 1 ]; then
     prefix='After draining queued wakes, '
   fi
-  if [ -n "$cadence_files_sh" ]; then
-    prefix="${prefix}source ${cadence_files_sh} first, then "
-  fi
-
   case "$HARNESS" in
     claude)
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision with bin/fm-watch-arm.sh as its own Claude Code background task, never shell &.'
@@ -250,12 +225,12 @@ else
   printf '%s\n' '- Away mode: inactive.'
 fi
 if [ "$X_MODE" -eq 1 ]; then
-  printf '%s%s%s\n' '- X mode: active; source ' "$x_mode_env" ' before launching any watcher process so the 30s cadence is inherited.'
+  printf '%s\n' '- X mode: active; the watcher derives its own 30s cadence from the armed relay poll, so arm it normally and source nothing.'
 else
   printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
 fi
 if [ "$TELEGRAM" -eq 1 ]; then
-  printf '%s%s%s\n' '- Telegram bridge: active; source ' "$telegram_env" ' before launching any watcher process so the 30s cadence is inherited.'
+  printf '%s\n' '- Telegram bridge: active; the watcher derives its own 30s cadence from the armed message poll, so arm it normally and source nothing.'
 else
   printf '%s\n' '- Telegram bridge: inactive.'
 fi

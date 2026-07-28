@@ -92,8 +92,12 @@ emit_error_once() {  # <class> <message>
 
 clear_error() {  # <class>...
   local stored class
-  fm_private_artifact_dir_device "$TG_DIR" >/dev/null 2>&1 || return 0
+  # The builtin test resolves the common case (no marker at all) with no fork.
+  # It runs once per accepted message and once per published entry, so probing
+  # the directory first spent three forks per call inside the same check budget
+  # the long poll and the prune already share.
   [ -f "$ERROR_FILE" ] || return 0
+  fm_private_artifact_dir_device "$TG_DIR" >/dev/null 2>&1 || return 0
   stored=$(sed -n 1p "$ERROR_FILE" 2>/dev/null) || return 0
   for class in "$@"; do
     if [ "$stored" = "$class" ]; then
@@ -117,16 +121,23 @@ command -v curl >/dev/null 2>&1 || { emit_error_once config "missing curl"; exit
 
 NOW=$(fmtg_now) || exit 0
 fmtg_budget_open "$NOW"
-fmtg_prune "$NOW"
 
 INBOX="$TG_DIR/inbox"
 SEEN="$TG_DIR/seen"
 
+# The confirmed offset is read before the prune because it is what lets the
+# prune retire duplicate-suppression markers by name: Telegram has already
+# deleted every update below it, so those markers can no longer prevent
+# anything. Pruning is bounded per cycle (FMTG_PRUNE_MAX) for the same reason
+# the request deadline is - this all runs inside one watcher check budget, and a
+# check the watcher kills produces no output, which is indistinguishable from
+# "nothing to report".
+OFFSET=$(fmtg_offset_get)
+fmtg_prune "$NOW" "$OFFSET"
+
 BODY_FILE=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-tg-poll.XXXXXX") || exit 0
 REQ_FILE=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-tg-req.XXXXXX") || { rm -f "$BODY_FILE"; exit 0; }
 trap 'rm -f "$BODY_FILE" "$REQ_FILE"' EXIT
-
-OFFSET=$(fmtg_offset_get)
 
 # How long Telegram may hold this connection open. The configured value is a
 # ceiling, not an entitlement: whatever the prune already spent is gone from the
@@ -192,15 +203,24 @@ add_wake() {
 # anything.
 PAIRED_LABEL=
 try_pairing() {  # <code> <user_id> <chat_id>
-  local code=$1 user=$2 chat=$3 offer expires salt want got label project
+  local code=$1 user=$2 chat=$3 offer expires salt want got label project expect
   PAIRED_LABEL=
   offer=$(fmtg_pairing_get 2>/dev/null) || return 1
   expires=$(printf '%s' "$offer" | jq -r '.expires_at // 0')
   case "$expires" in ''|*[!0-9]*) return 1 ;; esac
   [ "$NOW" -le "$expires" ] || return 1
-  # Consume one attempt before comparing, so a guessing loop exhausts the offer's
-  # budget whether or not it ever guesses right.
-  fmtg_pairing_attempt >/dev/null 2>&1 || return 1
+  # When the captain bound the offer to one numeric account, a sender who is not
+  # that account is dropped BEFORE the attempt budget is touched, so a stranger
+  # who knows the bot's @handle cannot spend the recipient's attempts. It is
+  # still answered with silence, so this discloses nothing either way.
+  expect=$(printf '%s' "$offer" | jq -r '.user_id // empty')
+  if [ -n "$expect" ] && [ "$expect" != "$user" ]; then
+    return 1
+  fi
+  # Consume one attempt for THIS sender before comparing, so a guessing loop
+  # exhausts its own budget whether or not it ever guesses right, and never
+  # anyone else's.
+  fmtg_pairing_attempt "$user" >/dev/null 2>&1 || return 1
   salt=$(printf '%s' "$offer" | jq -r '.salt // ""')
   want=$(printf '%s' "$offer" | jq -r '.code_sha256 // ""')
   [ -n "$salt" ] && [ -n "$want" ] || return 1

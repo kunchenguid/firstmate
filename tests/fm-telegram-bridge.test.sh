@@ -208,7 +208,11 @@ test_wrong_code_is_silent_and_bounded() {
   pass "a wrong pairing code is answered with silence and consumes one bounded attempt"
 }
 
-test_pairing_attempt_budget_is_enforced() {
+# The attempt budget is PER NUMERIC SENDER. A bot is reachable by any Telegram
+# user who knows its @handle, so a single global counter let a stranger burn the
+# whole offer and deny the intended recipient their own attempt - repeatably, on
+# demand. A guessing loop must exhaust its own budget and nobody else's.
+test_pairing_attempt_budget_is_per_sender() {
   local dir home fakebin code i
   dir="$TMP_ROOT/pair-budget"
   mkdir -p "$dir"
@@ -218,17 +222,74 @@ test_pairing_attempt_budget_is_enforced() {
   code=$(FM_TELEGRAM_PAIR_ATTEMPTS=2 tg_run "$home" "$fakebin" "$PAIR" begin \
     --label eren --project eren-pov-site | sed -n 's|^  /start ||p')
   i=0
-  while [ "$i" -lt 3 ]; do
+  while [ "$i" -lt 5 ]; do
     tg_queue "$(( 300 + i ))" "$OTHER_ID" "$OTHER_ID" "/start WRONGCDE"
     i=$(( i + 1 ))
   done
   FM_TELEGRAM_PAIR_ATTEMPTS=2 tg_run "$home" "$fakebin" "$POLL" >/dev/null
-  # The budget is spent, so even the correct code no longer redeems.
+  assert_absent "$home/state/telegram/peer.json" "a wrong code pinned a peer"
+
+  # The stranger is locked out, and its own counter shows why.
+  [ "$(jq -r --arg u "$OTHER_ID" '.attempts_by[$u]' "$home/state/telegram/pairing.json")" -ge 2 ] \
+    || fail "the guessing sender did not consume its own attempt budget"
+
+  # The intended recipient still has a full budget and can redeem.
   tg_queue 310 "$PEER_ID" "$PEER_ID" "/start $code"
   FM_TELEGRAM_PAIR_ATTEMPTS=2 tg_run "$home" "$fakebin" "$POLL" >/dev/null
+  assert_present "$home/state/telegram/peer.json" \
+    "a stranger's guessing loop denied the intended recipient their own pairing"
+  [ "$(jq -r '.user_id' "$home/state/telegram/peer.json")" = "$PEER_ID" ] \
+    || fail "the wrong identity was pinned"
+  pass "the pairing attempt budget is per sender, so a stranger cannot exhaust it remotely"
+}
+
+# A guessing loop from ONE sender still locks that sender out entirely.
+test_pairing_attempt_budget_locks_out_the_guesser() {
+  local dir home fakebin code i
+  dir="$TMP_ROOT/pair-budget-self"
+  mkdir -p "$dir"
+  tg_fake_api "$dir"
+  fakebin=$TG_FAKEBIN
+  home=$(tg_home "$dir" home "$TEST_TOKEN")
+  code=$(FM_TELEGRAM_PAIR_ATTEMPTS=2 tg_run "$home" "$fakebin" "$PAIR" begin \
+    --label eren --project eren-pov-site | sed -n 's|^  /start ||p')
+  i=0
+  while [ "$i" -lt 3 ]; do
+    tg_queue "$(( 320 + i ))" "$OTHER_ID" "$OTHER_ID" "/start WRONGCDE"
+    i=$(( i + 1 ))
+  done
+  FM_TELEGRAM_PAIR_ATTEMPTS=2 tg_run "$home" "$fakebin" "$POLL" >/dev/null
+  tg_queue 330 "$OTHER_ID" "$OTHER_ID" "/start $code"
+  FM_TELEGRAM_PAIR_ATTEMPTS=2 tg_run "$home" "$fakebin" "$POLL" >/dev/null
   assert_absent "$home/state/telegram/peer.json" \
-    "the correct code still paired after the attempt budget was spent"
-  pass "a guessing loop exhausts the offer's attempt budget and locks it out"
+    "the correct code still paired the sender that had already spent its budget"
+  pass "a sender that spends its own attempt budget cannot pair even with the right code"
+}
+
+# Binding the offer to one numeric account is the strongest form: any other
+# sender is dropped before the attempt budget is touched at all.
+test_pairing_can_be_bound_to_one_numeric_account() {
+  local dir home fakebin code
+  dir="$TMP_ROOT/pair-userid"
+  mkdir -p "$dir"
+  tg_fake_api "$dir"
+  fakebin=$TG_FAKEBIN
+  home=$(tg_home "$dir" home "$TEST_TOKEN")
+  code=$(tg_run "$home" "$fakebin" "$PAIR" begin --label eren \
+    --project eren-pov-site --user-id "$PEER_ID" | sed -n 's|^  /start ||p')
+
+  tg_queue 340 "$OTHER_ID" "$OTHER_ID" "/start $code"
+  tg_run "$home" "$fakebin" "$POLL" >/dev/null
+  assert_absent "$home/state/telegram/peer.json" \
+    "an account the offer was not bound to redeemed the code"
+  [ "$(jq -r '.attempts_by | length' "$home/state/telegram/pairing.json")" = 0 ] \
+    || fail "a sender the offer was not bound to still consumed an attempt"
+  [ "$(tg_sent_count)" = 0 ] || fail "a refused pairing attempt produced an outbound message"
+
+  tg_queue 341 "$PEER_ID" "$PEER_ID" "/start $code"
+  tg_run "$home" "$fakebin" "$POLL" >/dev/null
+  assert_present "$home/state/telegram/peer.json" "the bound account could not redeem its own offer"
+  pass "an offer bound to one numeric account refuses every other sender without spending anything"
 }
 
 test_expired_code_does_not_pair() {
@@ -697,7 +758,7 @@ test_routing_is_pinned_to_the_paired_project() {
   assert_contains "$out" "rc=6" "linking a task in another project was not refused"
   assert_no_grep 'tg_request=' "$HOME_DIR/state/wrong.meta" "a refused link still wrote to the task record"
 
-  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" arm-publish wrong --head abc1234 2>&1 || printf 'rc=%s' "$?")
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" arm-publish wrong 2>&1 || printf 'rc=%s' "$?")
   assert_contains "$out" "rc=6" "arming a publish in another project was not refused"
   pass "task links and publish arming are refused outside the paired project"
 }
@@ -734,24 +795,39 @@ test_show_names_an_absent_link_rather_than_printing_a_blank() {
 publish_home() {  # <name>
   local name=$1
   paired_home "$name"
-  fm_write_meta "$HOME_DIR/state/site.meta" "project=$HOME_DIR/projects/eren-pov-site" "window=t:1"
-  PUBLISH_CODE=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" arm-publish site --head aaaa111)
+  # arm-publish and confirm-publish resolve the prepared revision from the
+  # task's own worktree with `git rev-parse HEAD`, so the fixture needs a real
+  # one. That is the point: an agent cannot arm one revision and confirm
+  # against another, because neither end takes the revision from its caller.
+  PUBLISH_WT="$HOME_DIR/wt"
+  mkdir -p "$PUBLISH_WT"
+  git -C "$PUBLISH_WT" init -q
+  git -C "$PUBLISH_WT" -c user.email=t@example.invalid -c user.name=t \
+    commit -q --allow-empty -m prepared
+  fm_write_meta "$HOME_DIR/state/site.meta" "project=$HOME_DIR/projects/eren-pov-site" \
+    "worktree=$PUBLISH_WT" "window=t:1"
+  PUBLISH_HEAD=$(git -C "$PUBLISH_WT" rev-parse HEAD)
+  PUBLISH_CODE=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" arm-publish site)
 }
 
 test_publish_needs_a_matching_confirmation() {
   local msg out
   publish_home publish-ok
   [ -n "$PUBLISH_CODE" ] || fail "arm-publish printed no confirmation code"
+  # The armed revision is the worktree's real HEAD, resolved by arm-publish
+  # itself, so the record cannot describe a change the caller merely claimed.
+  [ "$(jq -r '.head' "$HOME_DIR/state/telegram/publish/site.json")" = "$PUBLISH_HEAD" ] \
+    || fail "arm-publish did not record the task's actual prepared revision"
   assert_no_grep "$PUBLISH_CODE" "$HOME_DIR/state/telegram/publish/site.json" \
     "the confirmation code was stored in the clear and could be replayed"
 
   msg="$HOME_DIR/msg.txt"
   printf 'ja mach das live: %s\n' "$PUBLISH_CODE" > "$msg"
-  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --head aaaa111 --message-file "$msg" 2>&1)
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --message-file "$msg" 2>&1)
   assert_contains "$out" "confirmed" "a matching confirmation was not accepted"
 
   # Single use.
-  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --head aaaa111 --message-file "$msg" 2>&1 \
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --message-file "$msg" 2>&1 \
     || printf 'rc=%s' "$?")
   assert_contains "$out" "rc=7" "a confirmation was accepted twice"
   pass "publishing needs one matching confirmation code, and it is single use"
@@ -762,7 +838,7 @@ test_bare_agreement_is_not_a_confirmation() {
   publish_home publish-bare
   msg="$HOME_DIR/msg.txt"
   printf 'ja klar, mach das\n' > "$msg"
-  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --head aaaa111 --message-file "$msg" 2>&1 \
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --message-file "$msg" 2>&1 \
     || printf 'rc=%s' "$?")
   assert_contains "$out" "rc=5" "a bare yes was treated as a publish confirmation"
   pass "a bare agreement without the code never authorizes publishing"
@@ -773,8 +849,12 @@ test_stale_confirmation_is_refused() {
   publish_home publish-stale
   msg="$HOME_DIR/msg.txt"
   printf '%s\n' "$PUBLISH_CODE" > "$msg"
-  # The prepared change moved after the preview was shown.
-  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --head bbbb222 --message-file "$msg" 2>&1 \
+  # The prepared change really moved after the preview was shown: the worktree
+  # has a new HEAD, and confirm-publish resolves that itself rather than
+  # believing a revision its caller passed in.
+  git -C "$PUBLISH_WT" -c user.email=t@example.invalid -c user.name=t \
+    commit -q --allow-empty -m rebuilt
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --message-file "$msg" 2>&1 \
     || printf 'rc=%s' "$?")
   assert_contains "$out" "rc=6" "a confirmation for a change that moved was accepted"
   assert_contains "$out" "re-preview" "the stale refusal did not say what to do next"
@@ -787,7 +867,7 @@ test_expired_and_over_budget_confirmations_are_refused() {
   msg="$HOME_DIR/msg.txt"
   printf '%s\n' "$PUBLISH_CODE" > "$msg"
   out=$(FMTG_NOW_OVERRIDE=$(( $(date +%s) + 200000 )) tg_run "$HOME_DIR" "$FAKEBIN" \
-    "$TGTASK" confirm-publish site --head aaaa111 --message-file "$msg" 2>&1 || printf 'rc=%s' "$?")
+    "$TGTASK" confirm-publish site --message-file "$msg" 2>&1 || printf 'rc=%s' "$?")
   assert_contains "$out" "rc=4" "an expired confirmation was accepted"
 
   publish_home publish-budget
@@ -795,11 +875,11 @@ test_expired_and_over_budget_confirmations_are_refused() {
   printf 'WRONGX\n' > "$msg"
   i=0
   while [ "$i" -lt 5 ]; do
-    tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --head aaaa111 --message-file "$msg" >/dev/null 2>&1 || true
+    tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --message-file "$msg" >/dev/null 2>&1 || true
     i=$(( i + 1 ))
   done
   printf '%s\n' "$PUBLISH_CODE" > "$msg"
-  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --head aaaa111 --message-file "$msg" 2>&1 \
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --message-file "$msg" 2>&1 \
     || printf 'rc=%s' "$?")
   assert_contains "$out" "rc=8" "the confirmation attempt budget was not enforced"
   pass "expired confirmations and exhausted attempt budgets are both refused"
@@ -814,7 +894,7 @@ test_reply_is_literal_and_single_target() {
   printf '%s\n' '*fett* _kursiv_ [link](x) `code` \ und & <b>' > "$body"
   tg_queue 1700 "$PEER_ID" "$PEER_ID" "frage"
   tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
-  tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" tg-1700 --text-file "$body" >/dev/null
+  tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" tg-1700 >/dev/null < "$body"
 
   out=$(sed -n '2p' "$FAKE_TG_DIR/sent.jsonl")
   [ "$(printf '%s' "$out" | jq -r 'has("parse_mode")')" = false ] \
@@ -836,7 +916,7 @@ test_reply_refuses_when_the_target_no_longer_matches() {
   jq -c '.chat_id = 424242 | .user_id = 424242' "$HOME_DIR/state/telegram/peer.json" \
     > "$HOME_DIR/peer.tmp" && mv -f "$HOME_DIR/peer.tmp" "$HOME_DIR/state/telegram/peer.json"
   chmod 600 "$HOME_DIR/state/telegram/peer.json"
-  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" tg-1800 --text-file "$HOME_DIR/reply.txt" 2>&1 \
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" tg-1800 2>&1 < "$HOME_DIR/reply.txt" \
     || printf 'rc=%s' "$?")
   assert_contains "$out" "rc=6" "a reply for an older conversation was sent to a new peer"
   pass "a reply is refused rather than redirected when the pinned peer changed"
@@ -850,7 +930,7 @@ test_reply_without_a_peer_sends_nothing() {
   fakebin=$TG_FAKEBIN
   home=$(tg_home "$dir" home "$TEST_TOKEN")
   printf 'hallo\n' > "$home/reply.txt"
-  out=$(tg_run "$home" "$fakebin" "$REPLY" tg-1 --text-file "$home/reply.txt" 2>&1 || printf 'rc=%s' "$?")
+  out=$(tg_run "$home" "$fakebin" "$REPLY" tg-1 2>&1 < "$home/reply.txt" || printf 'rc=%s' "$?")
   assert_contains "$out" "rc=3" "a reply was attempted with no pairing"
   [ "$(tg_sent_count)" = 0 ] || fail "sendMessage ran before any pairing existed"
   pass "sendMessage never runs before pairing"
@@ -868,7 +948,7 @@ test_long_reply_splits_deterministically() {
   done
   tg_queue 1900 "$PEER_ID" "$PEER_ID" "frage"
   tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
-  FM_TELEGRAM_MAX_CHARS=200 tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" tg-1900 --text-file "$body" >/dev/null
+  FM_TELEGRAM_MAX_CHARS=200 tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" tg-1900 >/dev/null < "$body"
 
   n=$(( $(tg_sent_count) - 1 ))
   [ "$n" -gt 1 ] || fail "a long reply was not split (sent $n messages)"
@@ -892,7 +972,7 @@ test_failed_send_is_preserved_and_resumes() {
   # Fail from the second delivery of this run onward (the pairing confirmation
   # already counts as one), so the reply lands partially.
   out=$(FAKE_TG_SEND_FAIL_FROM=3 FM_TELEGRAM_MAX_CHARS=100 \
-    tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" tg-2000 --text-file "$body" 2>&1 || printf 'rc=%s' "$?")
+    tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" tg-2000 2>&1 < "$body" || printf 'rc=%s' "$?")
   assert_contains "$out" "rc=5" "a failed send did not report a preserved retry"
   assert_present "$HOME_DIR/state/telegram/outbox/tg-2000.json" "the unsent reply was not preserved"
   delivered=$(jq -r '.sent' "$HOME_DIR/state/telegram/outbox/tg-2000.json")
@@ -913,7 +993,7 @@ test_final_reply_clears_the_link_but_keeps_evidence() {
   tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" link site tg-2100 >/dev/null
   printf 'fertig\n' > "$HOME_DIR/reply.txt"
 
-  tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" --task site --final --text-file "$HOME_DIR/reply.txt" >/dev/null
+  tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" --task site --final >/dev/null < "$HOME_DIR/reply.txt"
   assert_no_grep 'tg_request=' "$HOME_DIR/state/site.meta" "the final reply left the link postable"
   assert_grep 'project=' "$HOME_DIR/state/site.meta" "clearing the link damaged the rest of the task record"
   assert_present "$HOME_DIR/state/telegram/context/tg-2100.json" \
@@ -928,7 +1008,7 @@ test_dry_run_records_without_sending() {
   tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
   before=$(tg_sent_count)
   printf 'vorschau\n' > "$HOME_DIR/reply.txt"
-  FM_TELEGRAM_DRY_RUN=1 tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" tg-2200 --text-file "$HOME_DIR/reply.txt" >/dev/null
+  FM_TELEGRAM_DRY_RUN=1 tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" tg-2200 >/dev/null < "$HOME_DIR/reply.txt"
   [ "$(tg_sent_count)" = "$before" ] || fail "dry run still delivered a message"
   assert_grep '"dry_run":true' "$HOME_DIR/state/telegram/outbox/tg-2200.json" "no dry-run preview was recorded"
   pass "dry run records the would-be reply and sends nothing"
@@ -950,7 +1030,14 @@ test_bootstrap_arms_and_disarms_the_bridge() {
   assert_present "$home/state/telegram-watch.check.sh" "bootstrap did not arm the poll shim"
   assert_present "$home/config/telegram.env" "bootstrap did not write the cadence file"
   [ "$(path_mode "$home/state/telegram-watch.check.sh")" = 700 ] || fail "the poll shim is not mode 700"
-  assert_grep 'FM_CHECK_INTERVAL=30' "$home/config/telegram.env" "the cadence file does not raise the check rate"
+  # The marker is DATA, never shell: nothing sources it, and the watcher derives
+  # its own cadence from the byte-authenticated shim instead. A marker that
+  # still carried an `export` would invite exactly the arm-time execution the
+  # seatbelt can no longer bless.
+  assert_grep 'check_interval=30' "$home/config/telegram.env" \
+    "the armed marker does not record the bridged cadence"
+  assert_no_grep 'export' "$home/config/telegram.env" \
+    "the armed marker still looks like something a caller should source"
 
   # Idempotent.
   out=$(tg_run "$home" "$fakebin" "$BOOTSTRAP" 2>&1 || true)
@@ -982,7 +1069,11 @@ test_supervision_is_required_for_a_bridged_home() {
   pass "a bridged home needs the supervision cycle even with no project work"
 }
 
-test_cadence_instruction_reaches_every_harness() {
+# No harness protocol may tell anyone to source a cadence file, because nothing
+# sources one any more: the blessed-path source node was an indirect shell
+# execution vector, and bin/fm-watch.sh derives its cadence from the
+# byte-authenticated channel shim instead.
+test_no_harness_protocol_sources_a_cadence_file() {
   local dir home config out h
   dir="$TMP_ROOT/cadence"
   home="$dir/home"
@@ -992,13 +1083,87 @@ test_cadence_instruction_reaches_every_harness() {
   for h in claude codex opencode pi pi-signed grok unknown; do
     out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" \
       "$ROOT/bin/fm-supervision-instructions.sh" --harness "$h")
-    assert_contains "$out" "- Telegram bridge: active" "harness $h lost the bridge cadence state line"
-    assert_contains "$out" "$config/telegram.env" "harness $h did not name the effective cadence file"
+    assert_contains "$out" "- Telegram bridge: active" "harness $h lost the bridge state line"
+    assert_not_contains "$out" ". '$config/telegram.env'" \
+      "harness $h still renders a source node for the bridge cadence file"
+    assert_not_contains "$out" "source '$config/telegram.env'" \
+      "harness $h still tells the agent to source the bridge cadence file"
   done
   out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" \
     "$ROOT/bin/fm-supervision-instructions.sh" --harness claude --repair-line)
-  assert_contains "$out" "source '$config/telegram.env' first" "the repair line does not source the bridge cadence"
-  pass "every supported harness is told to inherit the bridge cadence"
+  assert_not_contains "$out" "$config/telegram.env" \
+    "the repair line still tells the agent to source the bridge cadence file"
+  pass "no harness protocol sources a cadence file, on any supported harness"
+}
+
+# The watcher resolves its own cadence, and only from a shim whose bytes still
+# match. A tampered or mode-widened shim falls back to the slow default rather
+# than being trusted.
+test_watcher_derives_its_cadence_from_the_authenticated_shim() {
+  local dir home out
+  dir="$TMP_ROOT/derived-cadence"
+  home="$dir/home"
+  mkdir -p "$home/state" "$home/config"
+  probe() {
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" bash -c \
+      '. "$1/bin/fm-watch.sh" >/dev/null 2>&1; printf "%s" "$CHECK_INTERVAL"' _ "$ROOT"
+  }
+  out=$(probe)
+  [ "$out" = 300 ] || fail "an unbridged home did not use the default cadence (got $out)"
+
+  bash -c '. "$1/bin/fm-tg-lib.sh"; fmtg_poll_shim_content "$2" "$1"' _ "$ROOT" "$home" \
+    > "$home/state/telegram-watch.check.sh"
+  chmod 700 "$home/state/telegram-watch.check.sh"
+  out=$(probe)
+  [ "$out" = 30 ] || fail "a bridged home did not derive the 30s cadence (got $out)"
+
+  printf '\n# tampered\n' >> "$home/state/telegram-watch.check.sh"
+  out=$(probe)
+  [ "$out" = 300 ] || fail "a tampered shim was still trusted for the fast cadence (got $out)"
+
+  bash -c '. "$1/bin/fm-tg-lib.sh"; fmtg_poll_shim_content "$2" "$1"' _ "$ROOT" "$home" \
+    > "$home/state/telegram-watch.check.sh"
+  chmod 777 "$home/state/telegram-watch.check.sh"
+  out=$(probe)
+  [ "$out" = 300 ] || fail "a world-writable shim was still trusted for the fast cadence (got $out)"
+  pass "the watcher derives its cadence only from a shim whose bytes and mode still validate"
+}
+
+# The exact adversarial reproducer: a mode-0600 cadence file at the blessed path
+# whose contents are a command. The seatbelt must deny the rendered arm rather
+# than allowing a source node it cannot authenticate.
+test_arm_seatbelt_blesses_no_source_node() {
+  local dir home out rc
+  dir="$TMP_ROOT/arm-source"
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/state"
+  printf 'touch %s\nexport FM_CHECK_INTERVAL=30\n' "$home/CODE_EXECUTED" > "$home/config/telegram.env"
+  chmod 600 "$home/config/telegram.env"
+
+  rc=0
+  FM_HOME="$home" "$ROOT/bin/fm-arm-pretool-check.sh" \
+    --command "[ -f $home/config/telegram.env ] && . $home/config/telegram.env; exec bin/fm-watch-arm.sh" \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "the seatbelt still allows an arm that sources the cadence file"
+
+  rc=0
+  FM_HOME="$home" "$ROOT/bin/fm-arm-pretool-check.sh" \
+    --command ". $home/config/telegram.env; exec bin/fm-watch-arm.sh" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "the seatbelt still allows a bare source node before the arm"
+
+  # The command firstmate actually renders is still allowed, and so is ordinary
+  # cd/export setup, so removing the source blessing did not break arming.
+  rc=0
+  FM_HOME="$home" "$ROOT/bin/fm-arm-pretool-check.sh" --command 'exec bin/fm-watch-arm.sh' \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || fail "the seatbelt denies the arm command firstmate itself renders"
+  rc=0
+  FM_HOME="$home" "$ROOT/bin/fm-arm-pretool-check.sh" \
+    --command 'cd /tmp; export FM_POLL=5; exec bin/fm-watch-arm.sh' >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || fail "the seatbelt denies ordinary cd/export setup before the arm"
+
+  assert_absent "$home/CODE_EXECUTED" "the cadence payload ran during the policy check"
+  pass "the arm seatbelt blesses no source node, so a writable cadence file cannot execute"
 }
 
 test_both_channels_coexist_in_one_home() {
@@ -1013,11 +1178,13 @@ test_both_channels_coexist_in_one_home() {
     "$ROOT/bin/fm-supervision-instructions.sh" --harness grok)
   assert_contains "$out" "- X mode: active" "X mode was dropped when the bridge was also armed"
   assert_contains "$out" "- Telegram bridge: active" "the bridge was dropped when X mode was also armed"
-  assert_contains "$out" "[ -f '$config/x-mode.env' ] && . '$config/x-mode.env'; [ -f '$config/telegram.env' ] && . '$config/telegram.env'; exec bin/fm-watch-arm.sh" \
-    "the arm command does not source both channels' cadence files"
+  assert_contains "$out" "exec bin/fm-watch-arm.sh" "the arm command was lost"
+  assert_not_contains "$out" "x-mode.env' ]" "the arm command still sources the X cadence file"
+  assert_not_contains "$out" "telegram.env' ]" "the arm command still sources the bridge cadence file"
   out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" \
     "$ROOT/bin/fm-supervision-instructions.sh" --harness claude --repair-line)
-  assert_contains "$out" "and '$config/telegram.env' first" "the repair line does not source both cadence files"
+  assert_not_contains "$out" "$config/telegram.env" "the repair line still sources a cadence file"
+  assert_not_contains "$out" "$config/x-mode.env" "the repair line still sources a cadence file"
   pass "X mode and the Telegram bridge coexist in one home without displacing each other"
 }
 
@@ -1133,26 +1300,30 @@ test_arm_seatbelt_allows_the_rendered_bridge_arm() {
   pass "the arm seatbelt accepts the rendered bridge arm, one or both channels, and nothing else"
 }
 
-test_stop_autoarm_inherits_the_bridge_cadence() {
-  local dir home config out
+# The routine arm path for the default primary harness must reach the bridged
+# cadence WITHOUT sourcing anything. The hook used to source both cadence files
+# directly, which is the same indirect execution vector the arm seatbelt was
+# hardened against; the cadence now comes from the watcher's own derivation.
+test_stop_autoarm_reaches_the_bridge_cadence_without_sourcing() {
+  local dir home out
   dir="$TMP_ROOT/autoarm"
   home="$dir/home"
-  config="$dir/config"
-  mkdir -p "$home/state" "$config"
-  printf 'export FM_CHECK_INTERVAL=30\n' > "$config/telegram.env"
+  mkdir -p "$home/state" "$home/config"
+  printf 'channel=telegram\ncheck_interval=30\n' > "$home/config/telegram.env"
 
-  # The hook sources every cadence file before foregrounding the arm; assert the
-  # inherited value rather than the file list, so the contract is what is pinned.
-  out=$(CONFIG="$config" bash -c '
-    for cadence_env in x-mode.env telegram.env; do
-      # shellcheck source=/dev/null
-      [ -f "$CONFIG/$cadence_env" ] && . "$CONFIG/$cadence_env"
-    done
-    printf "%s" "${FM_CHECK_INTERVAL:-300}"')
+  assert_no_grep '\. "\$CONFIG/\$cadence_env"' "$ROOT/bin/fm-claude-stop-autoarm.sh" \
+    "the Claude Stop auto-arm still sources a cadence file"
+  assert_no_grep 'cadence_env' "$ROOT/bin/fm-claude-stop-autoarm.sh" \
+    "the Claude Stop auto-arm still iterates cadence files to source"
+
+  # A bridged home still arms at 30s, derived from the validated shim.
+  bash -c '. "$1/bin/fm-tg-lib.sh"; fmtg_poll_shim_content "$2" "$1"' _ "$ROOT" "$home" \
+    > "$home/state/telegram-watch.check.sh"
+  chmod 700 "$home/state/telegram-watch.check.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" bash -c \
+    '. "$1/bin/fm-watch.sh" >/dev/null 2>&1; printf "%s" "$CHECK_INTERVAL"' _ "$ROOT")
   [ "$out" = 30 ] || fail "a bridge-only home would arm at cadence $out instead of 30"
-  assert_grep 'telegram.env' "$ROOT/bin/fm-claude-stop-autoarm.sh" \
-    "the Claude Stop auto-arm does not source the bridge cadence file"
-  pass "the default harness's routine arm inherits the bridge cadence, not the 300s default"
+  pass "the default harness's routine arm reaches the bridge cadence without sourcing anything"
 }
 
 test_gate_agent_cannot_reach_the_channel() {
@@ -1163,7 +1334,7 @@ test_gate_agent_cannot_reach_the_channel() {
   # AGENTS.md, so it can read that this channel exists. The same guard the fleet
   # entrypoints use must keep it away from a channel that reaches outside.
   out=$(NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS='' tg_run "$HOME_DIR" "$FAKEBIN" \
-    "$REPLY" tg-1 --text-file "$HOME_DIR/reply.txt" 2>&1 || true)
+    "$REPLY" tg-1 2>&1 < "$HOME_DIR/reply.txt" || true)
   assert_contains "$out" "gate agent must not drive the fleet" \
     "a gate agent was allowed to message the paired person"
   [ "$(tg_sent_count)" = 1 ] || fail "a gate agent delivered a message"
@@ -1175,7 +1346,7 @@ test_gate_agent_cannot_reach_the_channel() {
   assert_present "$HOME_DIR/state/telegram/peer.json" "a gate agent revoked the pairing"
 
   out=$(NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS='' tg_run "$HOME_DIR" "$FAKEBIN" \
-    "$TGTASK" arm-publish site --head aaaa111 2>&1 || true)
+    "$TGTASK" arm-publish site 2>&1 || true)
   assert_contains "$out" "gate agent must not drive the fleet" \
     "a gate agent was allowed to arm a publish confirmation"
   pass "a no-mistakes gate agent cannot message, unpair, or authorize a publish"
@@ -1209,6 +1380,314 @@ test_homes_cannot_read_each_other() {
   pass "one firstmate home can never read or consume another home's bridge state"
 }
 
+# --- adversarial regressions ------------------------------------------------
+#
+# Each test below is a counterexample from the two independent security reviews
+# of this branch, committed so the defect cannot come back silently.
+
+# The reply helper must not be a generic path-to-Telegram primitive, and must
+# not answer a request this home never accepted.
+test_reply_needs_a_real_request_and_takes_no_path() {
+  local out sentinel
+  paired_home reply-authentic
+  sentinel="$HOME_DIR/captain-private.txt"
+  printf 'CAPTAIN_PRIVATE_SENTINEL\n' > "$sentinel"
+
+  # The exact reproducer: a syntactically valid but never-accepted request id
+  # plus a file outside any reply area.
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" tg-nonexistent --text-file "$sentinel" 2>&1 \
+    || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=2" "the removed --text-file path argument was still accepted"
+  assert_not_contains "$out" "CAPTAIN_PRIVATE_SENTINEL" "the refusal echoed the file it was pointed at"
+
+  # Even on stdin, an invented request id cannot address the channel.
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" tg-nonexistent 2>&1 < "$sentinel" \
+    || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=4" "a request this home never accepted was answered anyway"
+  [ "$(tg_sent_count)" = 1 ] \
+    || fail "an unauthenticated reply reached the chat (only the pairing confirmation should have)"
+  assert_absent "$HOME_DIR/state/telegram/reply/tg-nonexistent.txt" \
+    "a refused reply still staged a body"
+  pass "a reply needs a request this home really accepted, and takes no caller-supplied path"
+}
+
+# A real request is answered, staged under bridge state, and closed by --final
+# so nothing can post against the finished exchange afterwards.
+test_reply_body_is_staged_and_the_request_closes() {
+  local out
+  paired_home reply-staged
+  tg_queue 2300 "$PEER_ID" "$PEER_ID" "kannst du die ueberschrift aendern"
+  tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
+
+  printf 'die ueberschrift ist geaendert\n' \
+    | tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" tg-2300 --final >/dev/null \
+    || fail "a genuine reply to a real request was refused"
+  [ "$(tg_sent_text 2)" = 'die ueberschrift ist geaendert' ] || fail "the staged body was not delivered"
+  assert_absent "$HOME_DIR/state/telegram/reply/tg-2300.txt" \
+    "the staged reply body outlived its delivery"
+  assert_present "$HOME_DIR/state/telegram/context/tg-2300.json" \
+    "closing the request erased the evidence of which conversation it answered"
+
+  out=$(printf 'nochmal\n' | tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" tg-2300 2>&1 || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=7" "a closed request accepted a further reply"
+  pass "a reply body is staged under bridge state and a final reply closes the request"
+}
+
+# The outbound path checks project scope, exactly as the inbound task
+# operations do.
+test_reply_refuses_a_task_outside_the_paired_project() {
+  local out
+  paired_home reply-project
+  tg_queue 2400 "$PEER_ID" "$PEER_ID" "frage"
+  tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
+  fm_write_meta "$HOME_DIR/state/other.meta" "project=$HOME_DIR/projects/venture-cockpit" \
+    "window=t:9" "tg_request=tg-2400" "tg_chat=$PEER_ID" "tg_request_ts=1"
+  out=$(printf 'hallo\n' | tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" --task other 2>&1 || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=6" "a task outside the paired project addressed the channel"
+  pass "a reply for a task outside the paired project is refused"
+}
+
+# Progress that is delivered but not durably recorded is ambiguous, never
+# "preserved for retry": a retry from a stale counter repeats a real message.
+test_undurable_progress_is_reported_as_ambiguous_delivery() {
+  local out body
+  paired_home reply-ambiguous
+  body="$HOME_DIR/reply.txt"
+  printf 'Erster Absatz mit genug Text fuer eine eigene Nachricht.\n\nZweiter Absatz mit genug Text fuer eine eigene Nachricht.\n' > "$body"
+  tg_queue 2500 "$PEER_ID" "$PEER_ID" "frage"
+  tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
+
+  # Make the outbox unwritable after the plan is staged, so the FIRST progress
+  # write after a successful send fails.
+  printf 'x\n' | tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" tg-2500 >/dev/null 2>&1 || true
+  tg_queue 2501 "$PEER_ID" "$PEER_ID" "frage2"
+  tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
+  chmod 500 "$HOME_DIR/state/telegram/outbox" 2>/dev/null || true
+  out=$(FM_TELEGRAM_MAX_CHARS=100 tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" tg-2501 2>&1 < "$body" \
+    || printf 'rc=%s' "$?")
+  chmod 700 "$HOME_DIR/state/telegram/outbox" 2>/dev/null || true
+  assert_contains "$out" "rc=" "an unwritable outbox produced no diagnosis at all"
+  assert_not_contains "$out" "retry with --retry" \
+    "an undurable progress record still claimed the reply was safely preserved for retry"
+  pass "delivery whose progress cannot be persisted is never reported as safely resumable"
+}
+
+# Cleanup must hold the same boundary publication does. Replacing the bridge
+# directory with a symlink must refuse, not delete the symlink's target.
+test_cleanup_refuses_a_symlinked_bridge_directory() {
+  local dir home victim out
+  dir="$TMP_ROOT/cleanup-symlink"
+  home="$dir/home"
+  victim="$dir/victim"
+  mkdir -p "$home/state" "$victim"
+  printf 'must-survive\n' > "$victim/peer.json"
+  printf 'must-survive\n' > "$victim/pairing.json"
+  ln -s "$victim" "$home/state/telegram"
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-tg-pair.sh" revoke --yes 2>&1 || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=2" "revoke through a symlinked bridge directory was not refused"
+  assert_present "$victim/peer.json" "revoke deleted a file outside bridge state"
+  assert_present "$victim/pairing.json" "revoke deleted a file outside bridge state"
+  pass "cleanup refuses a symlinked bridge directory instead of deleting through it"
+}
+
+# Only Telegram's own HTTPS endpoint, or an explicit loopback address, may ever
+# receive a request carrying the bot token.
+test_api_origin_is_restricted_to_telegram_or_loopback() {
+  local out
+  out=$(FM_HOME="$TMP_ROOT" bash -c '
+    . "$1/bin/fm-tg-lib.sh"
+    for u in http://attacker.example https://evil.test:8443/x https://api.telegram.org.evil.test \
+             http://user@127.0.0.1 http://127.0.0.1:8081 https://api.telegram.org; do
+      FM_TELEGRAM_API_URL=$u FM_TELEGRAM_BOT_TOKEN=1234567890:AAHfakefakefakefakefakefake fmtg_load_config
+      printf "%s=%s\n" "$u" "$FMTG_API"
+    done' _ "$ROOT")
+  assert_contains "$out" "http://attacker.example=https://api.telegram.org" \
+    "a remote plaintext origin was accepted for token-bearing traffic"
+  assert_contains "$out" "https://evil.test:8443/x=https://api.telegram.org" \
+    "an arbitrary remote HTTPS origin was accepted"
+  assert_contains "$out" "https://api.telegram.org.evil.test=https://api.telegram.org" \
+    "a lookalike host was accepted"
+  assert_contains "$out" "http://user@127.0.0.1=https://api.telegram.org" \
+    "a userinfo-carrying origin was accepted"
+  assert_contains "$out" "http://127.0.0.1:8081=http://127.0.0.1:8081" \
+    "an explicit loopback local Bot API server was rejected"
+  assert_contains "$out" "https://api.telegram.org=https://api.telegram.org" \
+    "the real Bot API endpoint was rejected"
+  pass "only Telegram's HTTPS endpoint or an explicit loopback origin may carry the bot token"
+}
+
+# Replacement is one crash-safe identity transition: the old peer loses
+# authority, and the new immutable numeric identity can actually redeem.
+test_replace_retires_the_old_peer_and_lets_the_new_one_redeem() {
+  local code out
+  paired_home replace
+  fm_write_meta "$HOME_DIR/state/site.meta" "project=$HOME_DIR/projects/eren-pov-site" "window=t:1"
+  tg_queue 2600 "$PEER_ID" "$PEER_ID" "alte anfrage"
+  tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
+  assert_present "$HOME_DIR/state/telegram/inbox/tg-2600.json" "the fixture message was not accepted"
+
+  code=$(tg_run "$HOME_DIR" "$FAKEBIN" "$PAIR" begin --label sibling \
+    --project eren-pov-site --replace | sed -n 's|^  /start ||p')
+  assert_absent "$HOME_DIR/state/telegram/peer.json" \
+    "--replace left the old peer pinned and still authorized"
+  assert_absent "$HOME_DIR/state/telegram/inbox/tg-2600.json" \
+    "--replace kept the retired peer's pending message"
+  assert_absent "$HOME_DIR/state/telegram/context/tg-2600.json" \
+    "--replace kept the retired peer's reply context"
+
+  # The old peer is no longer heard.
+  tg_queue 2601 "$PEER_ID" "$PEER_ID" "noch eine anfrage"
+  tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
+  assert_absent "$HOME_DIR/state/telegram/inbox/tg-2601.json" \
+    "the retired peer was still able to send work into the bridge"
+
+  # The replacement can actually redeem, which the stranded-offer defect made
+  # impossible.
+  tg_queue 2602 "$OTHER_ID" "$OTHER_ID" "/start $code"
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$POLL")
+  assert_contains "$out" "telegram-paired sibling" "the replacement identity could not redeem its own code"
+  [ "$(jq -r '.user_id' "$HOME_DIR/state/telegram/peer.json")" = "$OTHER_ID" ] \
+    || fail "the replacement was not pinned to its own numeric identity"
+  pass "--replace retires the old peer and its records, and the new numeric identity can redeem"
+}
+
+# An armed publish authorization must not survive a re-pairing.
+test_replace_clears_armed_publish_authorizations() {
+  publish_home replace-publish
+  assert_present "$HOME_DIR/state/telegram/publish/site.json" "the fixture did not arm a publish"
+  tg_run "$HOME_DIR" "$FAKEBIN" "$PAIR" begin --label sibling \
+    --project eren-pov-site --replace >/dev/null
+  assert_absent "$HOME_DIR/state/telegram/publish/site.json" \
+    "an armed publish authorization survived the re-pairing that retired the person who gave it"
+  pass "re-pairing clears publish authorizations the retired person had given"
+}
+
+# The per-poll prune is bounded work, so a large retained set cannot outrun the
+# check budget and silently kill delivery.
+test_prune_is_bounded_and_retires_confirmed_markers() {
+  local seen i before after
+  paired_home prune-bound
+  seen="$HOME_DIR/state/telegram/seen"
+  mkdir -p "$seen"
+  chmod 700 "$seen"
+  i=1
+  while [ "$i" -le 400 ]; do
+    printf '{"update_id":"%s","seen_at":1}\n' "$i" > "$seen/$i.json"
+    chmod 600 "$seen/$i.json"
+    i=$(( i + 1 ))
+  done
+  before=$(count_files "$seen")
+  [ "$before" -ge 400 ] || fail "the backlog fixture was not created"
+
+  # A real message still gets through with the backlog present.
+  tg_queue 2700 "$PEER_ID" "$PEER_ID" "frage trotz rueckstand"
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$POLL")
+  assert_contains "$out" "telegram-message tg-2700" \
+    "a large duplicate-suppression backlog stopped the bridge delivering"
+
+  # And the backlog is draining, by name, against the confirmed offset.
+  after=$(count_files "$seen")
+  [ "$after" -lt "$before" ] || fail "the prune retired nothing (before=$before after=$after)"
+  pass "the per-poll prune is bounded and retires markers the confirmed offset already covers"
+}
+
+# The other way a prepared change reaches the world is the guarded local merge,
+# so it carries the same gate. Without it, a project whose delivery mode is
+# local-only would land Telegram-requested work on the person's request alone.
+MERGE_LOCAL="$ROOT/bin/fm-merge-local.sh"
+
+# Build a local-only task whose project has a real default branch and fm/<id>
+# branch, plus a paired peer and a publish record in the requested state.
+local_merge_case() {  # <name> <record-project> <consumed-at|null> <head-mode>
+  local name=$1 record_project=$2 consumed=$3 head_mode=$4 dir proj head
+  dir="$TMP_ROOT/$name"
+  mkdir -p "$dir/state/telegram/publish"
+  chmod 700 "$dir/state/telegram" "$dir/state/telegram/publish"
+  proj="$dir/eren-pov-site"
+  mkdir -p "$proj"
+  git -C "$proj" init -q -b main
+  git -C "$proj" -c user.email=t@example.invalid -c user.name=t commit -q --allow-empty -m base
+  git -C "$proj" checkout -q -b fm/site
+  git -C "$proj" -c user.email=t@example.invalid -c user.name=t commit -q --allow-empty -m prepared
+  head=$(git -C "$proj" rev-parse "refs/heads/fm/site")
+  git -C "$proj" checkout -q main
+  [ "$head_mode" = moved ] && head=1111111111111111111111111111111111111111
+  fm_write_meta "$dir/state/site.meta" "project=$proj" "mode=local-only" \
+    "window=t:1" "worktree=$proj" "tg_request=tg-42" "tg_chat=$PEER_ID" "tg_request_ts=1"
+  printf '%s\n' '{"label":"eren","project":"eren-pov-site","user_id":555001,"chat_id":555001,"paired_at":1}' \
+    > "$dir/state/telegram/peer.json"
+  chmod 600 "$dir/state/telegram/peer.json"
+  if [ "$record_project" != none ]; then
+    printf '{"task_id":"site","project":"%s","head":"%s","salt":"s","code_sha256":"h","armed_at":1,"expires_at":9999999999,"consumed_at":%s,"attempts":0}\n' \
+      "$record_project" "$head" "$consumed" > "$dir/state/telegram/publish/site.json"
+    chmod 600 "$dir/state/telegram/publish/site.json"
+  fi
+  printf '%s\n' "$dir"
+}
+
+run_local_merge() {  # <case-dir>
+  FM_HOME="$1" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$1/state" \
+    "$MERGE_LOCAL" site 2>&1
+}
+
+test_local_merge_refuses_a_telegram_task_without_confirmation() {
+  local dir out
+  dir=$(local_merge_case local-absent none null exact)
+  out=$(run_local_merge "$dir" || printf 'rc=%s' "$?")
+  assert_contains "$out" "no publish confirmation was ever armed" \
+    "the local merge landed a Telegram-linked task with no confirmation"
+  git -C "$dir/eren-pov-site" merge-base --is-ancestor "refs/heads/fm/site" main 2>/dev/null \
+    && fail "the refused local merge still fast-forwarded the default branch"
+  pass "the local merge refuses a Telegram-linked task with no publish confirmation"
+}
+
+test_local_merge_refuses_an_unconsumed_or_moved_confirmation() {
+  local dir out
+  dir=$(local_merge_case local-unconsumed eren-pov-site null exact)
+  out=$(run_local_merge "$dir" || printf 'rc=%s' "$?")
+  assert_contains "$out" "has not confirmed publishing" \
+    "the local merge landed on an armed but unconfirmed record"
+  git -C "$dir/eren-pov-site" merge-base --is-ancestor "refs/heads/fm/site" main 2>/dev/null \
+    && fail "the refused local merge still fast-forwarded the default branch"
+
+  dir=$(local_merge_case local-moved eren-pov-site 100 moved)
+  out=$(run_local_merge "$dir" || printf 'rc=%s' "$?")
+  assert_contains "$out" "moved since the paired person approved it" \
+    "the local merge landed a revision the person never approved"
+  pass "the local merge refuses unconfirmed and moved-revision publish authorizations"
+}
+
+test_local_merge_lands_once_on_a_matching_confirmation() {
+  local dir out
+  dir=$(local_merge_case local-ok eren-pov-site 100 exact)
+  out=$(run_local_merge "$dir") || fail "a correctly confirmed local merge was refused: $out"
+  git -C "$dir/eren-pov-site" merge-base --is-ancestor "refs/heads/fm/site" main \
+    || fail "the confirmed local merge did not fast-forward the default branch"
+  assert_grep '"landed_at"' "$dir/state/telegram/publish/site.json" \
+    "the local landing did not consume the authorization"
+
+  # The same authorization cannot land again.
+  git -C "$dir/eren-pov-site" checkout -q fm/site
+  git -C "$dir/eren-pov-site" -c user.email=t@example.invalid -c user.name=t \
+    commit -q --allow-empty -m more
+  git -C "$dir/eren-pov-site" checkout -q main
+  out=$(run_local_merge "$dir" || printf 'rc=%s' "$?")
+  assert_contains "$out" "already used to land" "one local confirmation landed twice"
+  pass "the local merge lands exactly one confirmed change and refuses the replay"
+}
+
+test_local_merge_is_unaffected_without_a_telegram_link() {
+  local dir out
+  dir=$(local_merge_case local-unlinked none null exact)
+  fm_write_meta "$dir/state/site.meta" "project=$dir/eren-pov-site" "mode=local-only" "window=t:1"
+  out=$(run_local_merge "$dir") || fail "an unlinked local-only task was blocked by the bridge gate: $out"
+  git -C "$dir/eren-pov-site" merge-base --is-ancestor "refs/heads/fm/site" main \
+    || fail "the unlinked local merge did not fast-forward"
+  pass "a local-only task with no Telegram link merges exactly as it did before the bridge existed"
+}
+
 test_absent_config_is_a_complete_no_op
 test_malformed_token_is_refused_without_echoing_it
 test_token_never_reaches_argv_or_state
@@ -1216,7 +1695,9 @@ test_private_files_are_owner_only
 test_pairing_success_pins_numeric_identity
 test_pairing_stores_no_recoverable_code
 test_wrong_code_is_silent_and_bounded
-test_pairing_attempt_budget_is_enforced
+test_pairing_attempt_budget_is_per_sender
+test_pairing_attempt_budget_locks_out_the_guesser
+test_pairing_can_be_bound_to_one_numeric_account
 test_expired_code_does_not_pair
 test_code_cannot_be_replayed
 test_repair_requires_an_explicit_replace
@@ -1252,11 +1733,26 @@ test_final_reply_clears_the_link_but_keeps_evidence
 test_dry_run_records_without_sending
 test_bootstrap_arms_and_disarms_the_bridge
 test_supervision_is_required_for_a_bridged_home
-test_cadence_instruction_reaches_every_harness
+test_no_harness_protocol_sources_a_cadence_file
+test_watcher_derives_its_cadence_from_the_authenticated_shim
+test_arm_seatbelt_blesses_no_source_node
 test_both_channels_coexist_in_one_home
 test_watcher_rotates_between_always_on_channels
 test_migration_does_not_quarantine_the_bridge_shim
 test_arm_seatbelt_allows_the_rendered_bridge_arm
-test_stop_autoarm_inherits_the_bridge_cadence
+test_stop_autoarm_reaches_the_bridge_cadence_without_sourcing
 test_gate_agent_cannot_reach_the_channel
 test_homes_cannot_read_each_other
+test_reply_needs_a_real_request_and_takes_no_path
+test_reply_body_is_staged_and_the_request_closes
+test_reply_refuses_a_task_outside_the_paired_project
+test_undurable_progress_is_reported_as_ambiguous_delivery
+test_cleanup_refuses_a_symlinked_bridge_directory
+test_api_origin_is_restricted_to_telegram_or_loopback
+test_replace_retires_the_old_peer_and_lets_the_new_one_redeem
+test_replace_clears_armed_publish_authorizations
+test_prune_is_bounded_and_retires_confirmed_markers
+test_local_merge_refuses_a_telegram_task_without_confirmation
+test_local_merge_refuses_an_unconsumed_or_moved_confirmation
+test_local_merge_lands_once_on_a_matching_confirmation
+test_local_merge_is_unaffected_without_a_telegram_link

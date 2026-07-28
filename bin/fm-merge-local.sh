@@ -62,6 +62,30 @@ if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
   exit 1
 fi
 
+# Telegram publish gate.
+#
+# Same rule as bin/fm-pr-merge.sh, enforced here because this is the other way a
+# prepared change actually reaches the world: a task carrying a Telegram link
+# may not land without a live confirmation the paired person gave for exactly
+# the revision about to be fast-forwarded. The revision is resolved from the
+# branch itself in trusted code, and the authorization is consumed before the
+# merge so one approval can never land twice. A task with no Telegram link is
+# unaffected.
+# shellcheck source=bin/fm-tg-lib.sh
+. "$FM_ROOT/bin/fm-tg-lib.sh"
+if TG_REQUEST=$(fmtg_meta_get "$META" tg_request); then
+  fmtg_load_config
+  TG_NOW=$(fmtg_now) || { echo "error: cannot read the current time" >&2; exit 1; }
+  TG_HEAD=$(git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH") || TG_HEAD=
+  TG_REASON=$(fmtg_landing_guard "$ID" "$PROJ" "local:$DEFAULT" "$TG_HEAD" "$TG_NOW") || {
+    TG_RC=$?
+    printf 'REFUSED: %s\n' "$(fmtg_landing_refusal_text "$TG_REASON" "$ID" "local:$DEFAULT")" >&2
+    printf 'This task answers Telegram request %s. Preview the change to the paired person and have them confirm publishing it before merging.\n' \
+      "$TG_REQUEST" >&2
+    exit "$TG_RC"
+  }
+fi
+
 before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")

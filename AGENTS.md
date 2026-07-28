@@ -72,8 +72,8 @@ config/calm     Pi Calm presentation preference; LOCAL, gitignored, and not inhe
 config/herdr-presentation-spaces  optional presence flag for Herdr's default-off disposable single-task visual projection; LOCAL, gitignored; inherited by secondmate homes; see docs/herdr-backend.md "Optional presentation spaces"
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
-config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
-config/telegram.env  generated Telegram bridge watcher cadence; LOCAL, gitignored; source before arming watcher when present
+config/x-mode.env    generated X-mode armed marker; LOCAL, gitignored; data only, never sourced (the watcher derives its own cadence from the validated poll shim)
+config/telegram.env  generated Telegram bridge armed marker; LOCAL, gitignored; data only, never sourced (the watcher derives its own cadence from the validated poll shim)
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         this home's domain-local captain preferences and working style; LOCAL, gitignored, canonical even if harness memory mirrors it, and updated with inspect-then-update

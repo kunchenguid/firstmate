@@ -854,35 +854,26 @@ function analyzeProgram(command, context, depth = 0) {
   return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
 }
 
-// The cadence files an arm command may source before the protected watcher
-// command. Each always-on channel generates its own, and the supervision
-// renderer emits a source node for every armed one, so this list must cover all
-// of them or the seatbelt denies the exact command firstmate itself renders.
-const CADENCE_CONFIG_PATHS = ["config/x-mode.env", "config/telegram.env"];
-
-function cadencePathAllowed(value, home) {
-  for (const rel of CADENCE_CONFIG_PATHS) {
-    if (value === rel || value === `./${rel}`) return true;
-  }
-  if (!path.isAbsolute(value)) return false;
-  const normalized = path.normalize(value);
-  return CADENCE_CONFIG_PATHS.some(
-    (rel) => normalized === path.join(path.normalize(home), rel),
-  );
-}
+// No arm command may source anything. An always-on channel's 30s cadence used
+// to be carried by sourcing a generated `config/*.env`, and blessing that path
+// made the seatbelt's own trust list an indirect shell-execution vector: the
+// policy compared path strings only and never opened the file, so an agent that
+// could write the home-private cadence file could run arbitrary code through an
+// otherwise legitimate arm. bin/fm-watch.sh now derives the cadence from the
+// byte-authenticated channel shim instead, so no source node needs blessing and
+// `setupKind` recognizes none. Do not reintroduce one: a path-only allowance
+// cannot authenticate the bytes it admits.
 
 function ordinaryWordsOnly(tokens) {
   return tokens.every((token) => token.type === "word" && token.subs.length === 0);
 }
 
-function setupKind(info, context) {
+function setupKind(info) {
   const { tokens, position } = info;
   if (!ordinaryWordsOnly(tokens) || position.prefixAssignments > 0 || position.wrappers.length > 0) return "";
   const values = position.words.map((word) => word.value);
   if (values[0] === "cd" && values.length === 2) return "cd";
   if (values[0] === "export" && values.length === 2 && isAssignment(values[1])) return "export";
-  if ((values[0] === "source" || values[0] === ".") && values.length === 2 && cadencePathAllowed(values[1], context.home)) return "source";
-  if (values[0] === "[" && values[1] === "-f" && values[3] === "]" && values.length === 4 && cadencePathAllowed(values[2], context.home)) return "test-source";
   return "";
 }
 
@@ -900,13 +891,8 @@ function blessedProgram(analysis, context) {
   if (!finalProtectedAllowed(nodeInfos.at(-1))) return false;
   if (nodeInfos.slice(0, -1).some((info) => info.protectedKind || info.nestedProtected)) return false;
 
-  const setup = nodeInfos.slice(0, -1).map((info) => setupKind(info, context));
+  const setup = nodeInfos.slice(0, -1).map((info) => setupKind(info));
   if (setup.some((kind) => !kind)) return false;
-  for (let i = 0; i < setup.length; i += 1) {
-    if (setup[i] !== "test-source") continue;
-    if (setup[i + 1] !== "source" || separators[i] !== "&&") return false;
-    i += 1;
-  }
   return true;
 }
 

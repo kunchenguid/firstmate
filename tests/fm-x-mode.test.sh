@@ -682,14 +682,29 @@ test_bootstrap_activates_on_env_token() {
   [ -x "$home/state/x-watch.check.sh" ] || fail "the check shim must be executable"
   assert_grep "fm-x-poll.sh" "$home/state/x-watch.check.sh" "the shim must exec the poll script"
   assert_present "$home/config/x-mode.env" "bootstrap must drop the cadence config"
-  assert_grep "export FM_CHECK_INTERVAL=30" "$home/config/x-mode.env" "cadence must be 30s"
-  # Cadence inheritance: sourcing the config exports the 30s interval to a child,
-  # exactly how fm-watch-arm.sh's forked watcher inherits it.
-  local inherited
-  # shellcheck source=/dev/null
-  inherited=$( . "$home/config/x-mode.env" && bash -c 'echo "${FM_CHECK_INTERVAL:-300}"' )
-  [ "$inherited" = "30" ] \
-    || fail "sourcing the cadence config must export FM_CHECK_INTERVAL=30 to a child"
+  # DATA ONLY: the marker records that the channel is armed, and the watcher
+  # derives the 30s cadence itself from the byte-authenticated relay shim. A
+  # marker that still carried an `export` would invite the arm-time execution
+  # the seatbelt can no longer bless.
+  assert_grep "check_interval=30" "$home/config/x-mode.env" "the armed marker must record the cadence"
+  assert_no_grep "export" "$home/config/x-mode.env" \
+    "the armed marker still looks like something a caller should source"
+  # Cadence derivation: the watcher resolves the 30s interval itself from the
+  # relay shim it authenticates byte-for-byte, with nothing sourced. A tampered
+  # shim falls back to the slow default rather than being trusted.
+  local derived
+  derived=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" bash -c \
+    '. "$1/bin/fm-watch.sh" >/dev/null 2>&1; printf "%s" "$CHECK_INTERVAL"' _ "$ROOT")
+  [ "$derived" = "30" ] \
+    || fail "an armed X-mode home must derive the 30s cadence from its validated shim (got $derived)"
+  cp "$home/state/x-watch.check.sh" "$home/shim.orig"
+  printf '\n# tampered\n' >> "$home/state/x-watch.check.sh"
+  derived=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" bash -c \
+    '. "$1/bin/fm-watch.sh" >/dev/null 2>&1; printf "%s" "$CHECK_INTERVAL"' _ "$ROOT")
+  [ "$derived" = "300" ] \
+    || fail "a tampered relay shim must not be trusted for the fast cadence (got $derived)"
+  cp "$home/shim.orig" "$home/state/x-watch.check.sh"
+  rm -f "$home/shim.orig"
   # Idempotent: re-running changes nothing and does not duplicate the shim.
   sum1=$(cat "$home/state/x-watch.check.sh" "$home/config/x-mode.env" | shasum)
   FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1

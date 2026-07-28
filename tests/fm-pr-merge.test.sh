@@ -14,6 +14,9 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) a Telegram-linked task refuses to merge without a live, consumed publish
+#       confirmation bound to this exact revision, project, and landing target,
+#       and one such confirmation can never land twice
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -301,6 +304,157 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+# --- Telegram publish gate ---------------------------------------------------
+#
+# A message from the paired person authorizes preparing and previewing a change,
+# never publishing it. That rule used to live only in an agent skill while this
+# helper merged without ever looking at a publish record, so under a project's
+# standing autonomous-merge posture it was a comment rather than a gate.
+
+# Build a Telegram-linked case: a paired peer, a task in the pinned project, and
+# a publish record in whatever state the caller asks for. Echoes the case dir.
+make_telegram_case() {  # <name> <record-project> <record-head> <consumed-at|null>
+  local name=$1 record_project=$2 record_head=$3 consumed=$4 case_dir
+  case_dir=$(make_case "$name")
+  mkdir -p "$case_dir/wt" "$case_dir/state/telegram/publish"
+  chmod 700 "$case_dir/state/telegram" "$case_dir/state/telegram/publish"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/eren-pov-site" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "tg_request=tg-42" \
+    "tg_chat=555001" \
+    "tg_request_ts=1"
+  printf '%s\n' '{"label":"eren","project":"eren-pov-site","user_id":555001,"chat_id":555001,"paired_at":1}' \
+    > "$case_dir/state/telegram/peer.json"
+  chmod 600 "$case_dir/state/telegram/peer.json"
+  if [ "$record_project" != none ]; then
+    printf '{"task_id":"task-x1","project":"%s","head":"%s","salt":"s","code_sha256":"h","armed_at":1,"expires_at":9999999999,"consumed_at":%s,"attempts":0}\n' \
+      "$record_project" "$record_head" "$consumed" > "$case_dir/state/telegram/publish/task-x1.json"
+    chmod 600 "$case_dir/state/telegram/publish/task-x1.json"
+  fi
+  printf '%s\n' "$case_dir"
+}
+
+TG_HEAD_SHA=deadbeefcafefeed0000000000000000deadbeef
+
+tg_merge_refused() {  # <case-dir> <expected-message-fragment> <label>
+  local case_dir=$1 fragment=$2 label=$3 rc
+  add_gh_mocks "$case_dir" "$TG_HEAD_SHA"
+  : > "$case_dir/gh-axi.log"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "$label: the merge was allowed"
+  assert_grep "$fragment" "$case_dir/stderr" "$label: the refusal did not explain itself"
+  grep -q 'pr merge' "$case_dir/gh-axi.log" \
+    && fail "$label: gh-axi pr merge ran despite the refusal"
+  return 0
+}
+
+test_telegram_linked_merge_refuses_without_a_confirmation() {
+  local case_dir
+  case_dir=$(make_telegram_case tg-absent none "$TG_HEAD_SHA" null)
+  tg_merge_refused "$case_dir" "no publish confirmation was ever armed" "tg-absent"
+  pass "a Telegram-linked task never merges when no publish confirmation was armed"
+}
+
+test_telegram_linked_merge_refuses_an_unconsumed_confirmation() {
+  local case_dir
+  case_dir=$(make_telegram_case tg-unconsumed eren-pov-site "$TG_HEAD_SHA" null)
+  tg_merge_refused "$case_dir" "has not confirmed publishing" "tg-unconsumed"
+  pass "a Telegram-linked task never merges on an armed but unconfirmed publish record"
+}
+
+test_telegram_linked_merge_refuses_a_moved_revision() {
+  local case_dir
+  case_dir=$(make_telegram_case tg-moved eren-pov-site 1111111111111111111111111111111111111111 100)
+  tg_merge_refused "$case_dir" "moved since the paired person approved it" "tg-moved"
+  pass "a Telegram-linked task never merges a revision the person did not approve"
+}
+
+test_telegram_linked_merge_refuses_a_wrong_project_confirmation() {
+  local case_dir
+  case_dir=$(make_telegram_case tg-wrong-project other-project "$TG_HEAD_SHA" 100)
+  tg_merge_refused "$case_dir" "outside the project this bridge is paired for" "tg-wrong-project"
+  pass "a Telegram-linked task never merges on a confirmation given for another project"
+}
+
+test_telegram_linked_merge_refuses_when_the_revision_cannot_be_resolved() {
+  local case_dir rc
+  case_dir=$(make_telegram_case tg-unresolved eren-pov-site "$TG_HEAD_SHA" 100)
+  # No `gh`, so fm-pr-check.sh records no pr_head and the exact landing revision
+  # is unknown. An unverifiable revision must refuse, not merge.
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+  rm -f "$case_dir/fakebin/gh"
+  : > "$case_dir/gh-axi.log"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "tg-unresolved: an unverifiable revision was merged"
+  assert_grep 'could not be resolved' "$case_dir/stderr" "tg-unresolved: no explanation"
+  grep -q 'pr merge' "$case_dir/gh-axi.log" && fail "tg-unresolved: gh-axi pr merge ran anyway"
+  pass "a Telegram-linked task refuses to merge a revision it cannot verify"
+}
+
+test_telegram_linked_merge_lands_once_and_never_replays() {
+  local case_dir rc
+  case_dir=$(make_telegram_case tg-ok eren-pov-site "$TG_HEAD_SHA" 100)
+  add_gh_mocks "$case_dir" "$TG_HEAD_SHA"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "tg-ok: a correctly confirmed Telegram-linked merge was refused"
+  grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "tg-ok: the confirmed merge did not run"
+  assert_grep '"landed_at"' "$case_dir/state/telegram/publish/task-x1.json" \
+    "tg-ok: the authorization was not consumed by the landing"
+
+  # Replay: the same authorization must not land a second time.
+  : > "$case_dir/gh-axi.log"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr2"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "tg-replay: one confirmation landed a change twice"
+  assert_grep 'already used to land' "$case_dir/stderr2" "tg-replay: no explanation"
+  grep -q 'pr merge' "$case_dir/gh-axi.log" && fail "tg-replay: gh-axi pr merge ran a second time"
+  pass "one publish confirmation lands exactly one change and cannot be replayed"
+}
+
+test_unlinked_task_is_unaffected_by_the_telegram_gate() {
+  local case_dir rc
+  case_dir=$(make_case tg-unlinked)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$TG_HEAD_SHA"
+  : > "$case_dir/gh-axi.log"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "tg-unlinked: a task with no Telegram link was blocked by the bridge gate"
+  grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "tg-unlinked: the ordinary merge did not run"
+  pass "a task with no Telegram link merges exactly as it did before the bridge existed"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -311,3 +465,10 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_telegram_linked_merge_refuses_without_a_confirmation
+test_telegram_linked_merge_refuses_an_unconsumed_confirmation
+test_telegram_linked_merge_refuses_a_moved_revision
+test_telegram_linked_merge_refuses_a_wrong_project_confirmation
+test_telegram_linked_merge_refuses_when_the_revision_cannot_be_resolved
+test_telegram_linked_merge_lands_once_and_never_replays
+test_unlinked_task_is_unaffected_by_the_telegram_gate

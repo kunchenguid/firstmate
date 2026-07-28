@@ -2,22 +2,21 @@ Mode: Grok background-notify supervision.
 
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
-2. Source every cadence file named in the Current state block above first, when any is listed.
-3. First cycle: arm with Grok's tracked background tool, as its own call:
+2. First cycle: arm with Grok's tracked background tool, as its own call:
 
    `run_terminal_command` with `background: true` on:
-   `__FM_CADENCE_SOURCE_SH__exec bin/fm-watch-arm.sh`
+   `exec bin/fm-watch-arm.sh`
 
-4. Trust only the arm's one-line status.
-5. `watcher: started ...` or `watcher: attached ...` means a live cycle exists.
+3. Trust only the arm's one-line status.
+4. `watcher: started ...` or `watcher: attached ...` means a live cycle exists.
    On attach, the background task follows verified identity-matched successors instead of exiting when the first cycle ends.
-6. Failure or missing cycle only: `watcher: FAILED ...` means supervision is down; fix and re-arm.
-7. After a successful start or attach status, end the turn.
+5. Failure or missing cycle only: `watcher: FAILED ...` means supervision is down; fix and re-arm.
+6. After a successful start or attach status, end the turn.
    The background arm remains the live wait until it returns an actionable wake or failure.
-8. Waiting is silent.
-9. Never use shell `&` for firstmate supervision.
-10. Never bundle the arm onto another command.
-    A shell `&`, a truncating pipe, or bundling is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) whenever this project's Grok hooks are trusted.
+7. Waiting is silent.
+8. Never use shell `&` for firstmate supervision.
+9. Never bundle the arm onto another command.
+   A shell `&`, a truncating pipe, or bundling is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) whenever this project's Grok hooks are trusted.
 
 Grok injects a synthetic user message with `synthetic_reason: task_completed` when the background arm completes.
 When you see a background-task-completed system reminder for the arm:

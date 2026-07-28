@@ -97,7 +97,27 @@ fi
 POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
-CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
+# Seconds between *.check.sh sweeps. An always-on channel needs a far tighter
+# cadence than the 300s default, and that cadence is DERIVED here rather than
+# read from a generated file: the watcher already authenticates each channel
+# shim byte-for-byte before dispatching it, so the same validated artifact is
+# the honest evidence that this home polls a channel. Nothing sources a
+# config/*.env cadence file any more (bin/fm-arm-command-policy.mjs blesses no
+# source node at all), so a writable home-private file can no longer smuggle
+# shell code into an arm. An explicit FM_CHECK_INTERVAL still wins, because
+# tests and the captain override deliberately.
+channel_cadence_armed() {
+  fmx_poll_shim_valid "$STATE/x-watch.check.sh" "$FM_HOME" "$FM_ROOT" 2>/dev/null && return 0
+  fmtg_poll_shim_valid "$STATE/telegram-watch.check.sh" "$FM_HOME" "$FM_ROOT" 2>/dev/null && return 0
+  return 1
+}
+if [ -n "${FM_CHECK_INTERVAL:-}" ]; then
+  CHECK_INTERVAL=$FM_CHECK_INTERVAL
+elif channel_cadence_armed; then
+  CHECK_INTERVAL=30
+else
+  CHECK_INTERVAL=300
+fi
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's

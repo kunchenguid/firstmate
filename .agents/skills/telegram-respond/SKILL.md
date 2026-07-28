@@ -91,14 +91,15 @@ It never authorizes making it public.
 1. Prepare the change through the project's delivery path, then send a preview - what changed, in their words - together with the confirmation code printed by:
 
    ```sh
-   bin/fm-tg-task.sh arm-publish <task-id> --head <rev-of-the-prepared-change>
+   bin/fm-tg-task.sh arm-publish <task-id>
    ```
 
+   The prepared revision is resolved from the task's own worktree, not passed in, so you cannot arm a revision the task has not actually prepared.
    Ask them to reply with that code if they want it published.
 2. When a reply arrives, write it to a file and check it:
 
    ```sh
-   bin/fm-tg-task.sh confirm-publish <task-id> --head <current-rev> --message-file <path>
+   bin/fm-tg-task.sh confirm-publish <task-id> --message-file <path>
    ```
 
    Exit 0 means confirmed and consumed. Any other exit means **not confirmed**: the code did not match, it expired, it was already used, the attempt budget is spent, or the prepared change moved since the preview.
@@ -106,6 +107,10 @@ It never authorizes making it public.
 
 Only after exit 0 may the prepared change land, and only through the project's own approved landing path.
 A confirmation is valid for the exact change that was previewed: if the branch moved, re-preview and arm again rather than reusing the old code.
+
+You do not have to remember this at the moment of landing, and you cannot bypass it by forgetting.
+`bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` refuse to land any Telegram-linked task without a live confirmation bound to the exact revision they are about to land, and they consume it, so one approval lands exactly one change.
+If a landing helper refuses, the answer is to preview and get a fresh confirmation - never to work around the gate.
 Never accept a confirmation that arrived before the preview, never infer one from "yes", "ok", or a thumbs-up, and never arm and confirm in the same turn.
 
 Landing is not the same as deploying.
@@ -152,13 +157,17 @@ Treat `state/telegram/inbox/` as the source of truth and process **every** file 
       ```
 
       Link before step (e) removes the inbox file.
-   d. **Compose and send.** Write the reply to a file with your own file-writing tool - never inline message-influenced prose into a shell command:
+   d. **Compose and send.** Write the reply to a file with your own file-writing tool, then pipe it in - never inline message-influenced prose into a shell command:
 
       ```sh
-      bin/fm-tg-reply.sh <request_id> --text-file <path>
+      bin/fm-tg-reply.sh <request_id> < <path>
       ```
 
-      Exit 0 means sent. Exit 5 means some messages were delivered and the rest are preserved; retry with `bin/fm-tg-reply.sh --retry <request_id>` and do **not** redo the work behind the reply.
+      There is no path argument: the body is read from stdin and staged under bridge state, so this helper can never be pointed at an arbitrary file. It also refuses any request id this home did not really accept from the currently paired person.
+
+      Exit 0 means sent. Exit 5 means some messages were delivered, the rest are durably preserved, and `bin/fm-tg-reply.sh --retry <request_id>` finishes them; do **not** redo the work behind the reply.
+      Exit 9 means delivery is **ambiguous**: a message reached the person but the progress record did not survive, so a retry could repeat it. Do not retry blindly; tell the captain.
+      Exit 4 means the request id is not a real accepted message, exit 6 a peer or project mismatch, exit 7 an exchange already closed by a final reply.
    e. **On success, remove that inbox file** (`rm -f state/telegram/inbox/<request_id>.json`) and your temporary reply file. A cleared file is never answered twice.
    f. **On failure, leave the inbox file in place**, move to the next, and do not retry blindly. If a reply fails twice, tell the captain, including whether the underlying work was already done.
       A file left there is re-announced only a few times before the bridge stops waking on it and reports it once as a `telegram-error`, so it stays waiting for you rather than looping - which is exactly why telling the captain is your job and not the watcher's.
@@ -171,7 +180,7 @@ Spend milestone replies only on what that person would actually want to hear - t
 The terminal reply uses `--final`, which clears the task's link so nothing can post against a finished task afterwards:
 
 ```sh
-bin/fm-tg-reply.sh --task <task-id> --final --text-file <path>
+bin/fm-tg-reply.sh --task <task-id> --final < <path>
 ```
 
 `--final` deliberately does not delete the request's context record; that stays as evidence of which conversation the task answered until it ages out.

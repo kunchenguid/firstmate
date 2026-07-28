@@ -81,7 +81,8 @@ FMTG_BUDGET_MIN=2
 #   FMTG_MAX_TEXT     inbound text bound, above which a message is "oversized"
 #   FMTG_RATE_MAX / FMTG_RATE_WINDOW   accepted-message rate limit
 #   FMTG_PAIR_TTL / FMTG_PAIR_ATTEMPTS pairing offer lifetime and attempt budget
-#   FMTG_PUBLISH_TTL  publish-confirmation lifetime
+#   FMTG_PUBLISH_TTL / FMTG_PUBLISH_ATTEMPTS  publish-confirmation lifetime and
+#                     its own attempt budget, separate from the pairing one
 #   FMTG_RECOVERY_SECS  age after which a still-pending inbox entry re-wakes
 #   FMTG_RECOVERY_MAX   re-announcements one stranded entry may ever cause
 # shellcheck disable=SC2034 # Every FMTG_* here is read by callers after sourcing.
@@ -105,10 +106,12 @@ fmtg_load_config() {
   fi
   [ -n "$FMTG_API" ] || FMTG_API='https://api.telegram.org'
   FMTG_API=${FMTG_API%/}
-  # The base is written into a quoted curl config value, so anything outside a
-  # plain http(s) URL is refused rather than escaped.
-  printf '%s' "$FMTG_API" | grep -Eq '^https?://[A-Za-z0-9._~-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$' \
-    || FMTG_API='https://api.telegram.org' 
+  # The origin is a security boundary, not a convenience knob: the Bot API puts
+  # the token in the request PATH, so whatever host survives here receives the
+  # token. Anything but Telegram's own HTTPS endpoint or an explicit loopback
+  # address is refused and replaced with the default, so a plaintext or
+  # redirected remote origin can never carry the token off this machine.
+  fmtg_api_url_allowed "$FMTG_API" || FMTG_API='https://api.telegram.org'
 
   if [ -n "${FM_TELEGRAM_DRY_RUN+x}" ]; then
     dry=${FM_TELEGRAM_DRY_RUN-}
@@ -188,6 +191,16 @@ fmtg_load_config() {
   [ "$raw" -le 20 ] 2>/dev/null || raw=20
   FMTG_PAIR_ATTEMPTS=$raw
 
+  # Its own budget, not the pairing one. Sharing FMTG_PAIR_ATTEMPTS meant a
+  # single knob silently moved two unrelated limits - how many times a stranger
+  # may guess a pairing code, and how many times a reply may be scanned for a
+  # publish confirmation.
+  raw=${FM_TELEGRAM_PUBLISH_ATTEMPTS:-}
+  case "$raw" in ''|*[!0-9]*) raw=5 ;; esac
+  [ "$raw" -ge 1 ] 2>/dev/null || raw=5
+  [ "$raw" -le 20 ] 2>/dev/null || raw=5
+  FMTG_PUBLISH_ATTEMPTS=$raw
+
   raw=${FM_TELEGRAM_PUBLISH_TTL:-}
   case "$raw" in ''|*[!0-9]*) raw=86400 ;; esac
   [ "$raw" -ge 60 ] 2>/dev/null || raw=86400
@@ -203,6 +216,54 @@ fmtg_load_config() {
   [ "$raw" -ge 1 ] 2>/dev/null || raw=3
   [ "$raw" -le 20 ] 2>/dev/null || raw=20
   FMTG_RECOVERY_MAX=$raw
+}
+
+# Which API origins may receive a token-bearing request.
+#
+# Exactly two things are allowed:
+#   - https://api.telegram.org, the real Bot API, and the default;
+#   - an explicit LOOPBACK address, for a local Bot API server and for this
+#     repository's hermetic test transport.
+# Plaintext http is therefore possible only to this machine. A remote http
+# origin, a remote https origin that is not Telegram, userinfo, a path, a query,
+# or a non-numeric port are all refused, and the caller falls back to the
+# default rather than sending the token somewhere else.
+fmtg_api_url_allowed() {  # <url>
+  local url=$1 rest host port
+  [ "$url" = 'https://api.telegram.org' ] && return 0
+  case "$url" in
+    http://*) rest=${url#http://} ;;
+    https://*) rest=${url#https://} ;;
+    *) return 1 ;;
+  esac
+  # No path, no userinfo, no query, no fragment: the base must be an origin.
+  case "$rest" in
+    ''|*/*|*@*|*'?'*|*'#'*) return 1 ;;
+  esac
+  port=
+  case "$rest" in
+    '['*']')   host=${rest#[}; host=${host%]} ;;
+    '['*']:'*) host=${rest#[}; host=${host%%]*}; port=${rest##*]:} ;;
+    *:*)       host=${rest%%:*}; port=${rest#*:} ;;
+    *)         host=$rest ;;
+  esac
+  if [ -n "$port" ]; then
+    case "$port" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#port}" -le 5 ] || return 1
+  fi
+  case "$host" in
+    localhost|::1|0:0:0:0:0:0:0:1) return 0 ;;
+    # The whole 127.0.0.0/8 block is loopback.
+    127.*)
+      case "$host" in
+        *[!0-9.]*) return 1 ;;
+      esac
+      return 0
+      ;;
+  esac
+  return 1
 }
 
 # BotFather issues "<numeric bot id>:<opaque secret>". Anything else is refused
@@ -400,15 +461,24 @@ fmtg_code_hash() {
   printf '%s:%s' "$salt" "$code" | fmtg_sha256
 }
 
-fmtg_pairing_set() {  # <label> <project> <code> <created> <expires>
-  local label=$1 project=$2 code=$3 created=$4 expires=$5 salt hash dir
+# Open a pairing offer. <expected-user> is optional: when the captain knows the
+# recipient's immutable numeric Telegram user id, pinning it here means only
+# that account can ever redeem the code, and every other sender is dropped
+# before it can touch the attempt budget.
+fmtg_pairing_set() {  # <label> <project> <code> <created> <expires> [expected-user]
+  local label=$1 project=$2 code=$3 created=$4 expires=$5 expect=${6-} salt hash dir
   salt=$(fmtg_random_code 16) || return 1
   hash=$(fmtg_code_hash "$salt" "$code") || return 1
   dir=$(fmtg_dir)
+  if [ -n "$expect" ]; then
+    fmtg_chat_id_valid "$expect" || return 1
+  fi
   jq -cn --arg label "$label" --arg project "$project" --arg salt "$salt" \
     --arg hash "$hash" --argjson created "$created" --argjson expires "$expires" \
+    --argjson expect "$([ -n "$expect" ] && printf '%s' "$expect" || printf null)" \
     '{label:$label, project:$project, salt:$salt, code_sha256:$hash,
-      created_at:$created, expires_at:$expires, attempts:0}' \
+      created_at:$created, expires_at:$expires, attempts:0, attempts_by:{},
+      user_id:$expect}' \
     | fm_private_artifact_publish_stdin "$dir" pairing.json 600
 }
 
@@ -420,22 +490,39 @@ fmtg_pairing_get() {
 }
 
 fmtg_pairing_clear() {
-  local dir
-  dir=$(fmtg_dir)
-  rm -f -- "$dir/pairing.json" 2>/dev/null || true
-  [ ! -e "$dir/pairing.json" ]
+  fm_private_artifact_remove "$(fmtg_dir)" pairing.json
 }
 
-# Record one consumed pairing attempt. Returns 1 when the offer has no attempts
-# left, so an attacker gets a bounded number of guesses per offer.
-fmtg_pairing_attempt() {
-  local dir record attempts
+# Record one consumed pairing attempt, PER SENDER. Returns 1 once that sender
+# has no attempts left, so a wrong guess is bounded without ever becoming an
+# oracle.
+#
+# The budget is per numeric sender rather than global because a bot is reachable
+# by any Telegram user who knows its @handle. A single global counter let any
+# stranger burn the whole offer with five wrong `/start` messages, denying the
+# in-person recipient their own attempt and doing it again on demand. Each
+# numeric sender now gets its own budget, and the number of DISTINCT senders one
+# offer will track is capped, so the record cannot grow without bound either: a
+# new sender arriving at a full map is refused instead of being allowed to
+# consume anybody else's remaining attempts.
+FMTG_PAIR_SENDERS=${FMTG_PAIR_SENDERS:-20}
+fmtg_pairing_attempt() {  # <user_id>
+  local user=$1 dir record attempts senders
   dir=$(fmtg_dir)
+  fmtg_chat_id_valid "$user" || return 1
   record=$(fmtg_pairing_get) || return 1
-  attempts=$(printf '%s' "$record" | jq -r '.attempts // 0') || return 1
+  attempts=$(printf '%s' "$record" | jq -r --arg u "$user" '(.attempts_by // {})[$u] // 0') || return 1
   case "$attempts" in ''|*[!0-9]*) attempts=0 ;; esac
+  senders=$(printf '%s' "$record" | jq -r '(.attempts_by // {}) | length') || return 1
+  case "$senders" in ''|*[!0-9]*) senders=0 ;; esac
+  if [ "$attempts" -eq 0 ] && [ "$senders" -ge "${FMTG_PAIR_SENDERS:-20}" ]; then
+    return 1
+  fi
   attempts=$(( attempts + 1 ))
-  printf '%s' "$record" | jq -c --argjson n "$attempts" '.attempts = $n' \
+  printf '%s' "$record" \
+    | jq -c --arg u "$user" --argjson n "$attempts" \
+      '.attempts_by = ((.attempts_by // {}) | .[$u] = $n)
+       | .attempts = (([.attempts_by[]] | add) // 0)' \
     | fm_private_artifact_publish_stdin "$dir" pairing.json 600 || return 1
   [ "$attempts" -le "${FMTG_PAIR_ATTEMPTS:-5}" ]
 }
@@ -457,10 +544,36 @@ fmtg_peer_get() {
 }
 
 fmtg_peer_clear() {
-  local dir
+  fm_private_artifact_remove "$(fmtg_dir)" peer.json
+}
+
+# Drop every record that belonged to the pinned peer: pending messages, their
+# reply contexts, preserved outbound replies, armed publish authorizations, and
+# the per-entry re-announce bookkeeping, plus the transient poll counters.
+#
+# Both `revoke` and `begin --replace` need exactly this, and both need it to be
+# the SAME set: an armed publish authorization or a preserved reply that
+# outlived its peer would otherwise let the next person's channel land work the
+# previous person approved, or receive a reply meant for someone else.
+#
+# The update offset and the duplicate-suppression markers are deliberately KEPT,
+# so retiring a peer can never make Telegram replay old messages to whoever
+# comes next. Every deletion runs through the private-artifact boundary, so a
+# symlinked or otherwise unsafe bridge directory refuses instead of being
+# followed. Returns 1 if any single removal was refused.
+fmtg_peer_records_clear() {
+  local dir sub name rc=0
   dir=$(fmtg_dir)
-  rm -f -- "$dir/peer.json" 2>/dev/null || true
-  [ ! -e "$dir/peer.json" ]
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    fm_private_artifact_dir_device "$dir" >/dev/null || return 1
+  fi
+  for sub in inbox context publish outbox announce reply; do
+    fm_private_artifact_remove_all "$dir/$sub" || rc=1
+  done
+  for name in recovery.json limits.json poll.error; do
+    fm_private_artifact_remove "$dir" "$name" || rc=1
+  done
+  return "$rc"
 }
 
 # --- inbound ----------------------------------------------------------------
@@ -617,11 +730,9 @@ fmtg_context_get() {  # <request_id>
 }
 
 fmtg_context_clear() {  # <request_id>
-  local rid=$1 dir
+  local rid=$1
   fmtg_request_id_valid "$rid" || return 1
-  dir="$(fmtg_dir)/context"
-  rm -f -- "$dir/$rid.json" 2>/dev/null || true
-  [ ! -e "$dir/$rid.json" ]
+  fm_private_artifact_remove "$(fmtg_dir)/context" "$rid.json"
 }
 
 # Drop context and seen records past the retention window. Bounded retention is
@@ -630,35 +741,165 @@ fmtg_context_clear() {  # <request_id>
 # inbox entry, so each one lives exactly as long as the entry it bounds.
 # Orphaned publication temporaries go too - they carry message content, and no
 # scan that looks for published names can see them.
-fmtg_prune() {  # <now>
-  local now=$1 max_age dir sub file at device inbox
+#
+# THIS RUNS INSIDE THE POLL'S OWN CHECK BUDGET, so its cost is a delivery
+# guarantee, not housekeeping. An earlier shape walked every retained record on
+# every cycle and forked `uname`, two `stat`s and a `jq` per file; at a few
+# thousand records that outran FMTG_BUDGET_RESERVE, the watcher SIGKILLed the
+# whole check, and a killed check produces no output at all - so the bridge
+# stopped delivering while `fm-tg-pair.sh status` still reported it healthy.
+# Three things bound it now:
+#   - `seen` markers whose update id is already below the confirmed offset are
+#     dropped by NAME. Telegram deletes a confirmed update, so the marker's only
+#     purpose - the crash window between processing and offset confirmation - is
+#     already over. The file name IS the update id, so this costs no fork at all
+#     and is what keeps the steady-state set small instead of 7 days deep.
+#   - age comparison uses the file's mtime, which the publish set, instead of
+#     forking `jq` to read a timestamp out of every record.
+#   - the whole pass stops after FMTG_PRUNE_MAX files, so its cost is constant
+#     rather than proportional to the retained set. Retention is eventual, not
+#     per-cycle: whatever is left is pruned by the following cycles. One poll
+#     admits at most 25 updates (getUpdates `limit`), so a 100-file budget
+#     drains four times faster than the fastest possible growth and the set
+#     cannot run away while each cycle stays well inside the reserve.
+FMTG_PRUNE_MAX=${FMTG_PRUNE_MAX:-100}
+fmtg_prune() {  # <now> [confirmed-offset]
+  local now=$1 offset=${2:-0} max_age dir sub pattern file base at device inbox budget uid
   max_age=${FM_TELEGRAM_RETENTION_SECS:-604800}
   case "$max_age" in ''|*[!0-9]*) max_age=604800 ;; esac
   [ "$max_age" -le 2592000 ] 2>/dev/null || max_age=2592000
+  case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
+  budget=$FMTG_PRUNE_MAX
+  case "$budget" in ''|*[!0-9]*) budget=200 ;; esac
   inbox="$(fmtg_dir)/inbox"
-  for sub in context seen announce; do
+  # `outbox` and `reply` age out on the same schedule. A dry-run preview is
+  # never retried and never cleaned by a send, and a staged body whose send was
+  # interrupted has no other owner, so without this both accumulate for as long
+  # as the home stays bridged.
+  # `seen` first because it is the only class that grows with traffic, so a
+  # cycle's budget is never spent on the small classes before reaching it.
+  for sub in seen context announce outbox reply; do
+    [ "$budget" -gt 0 ] || break
     dir="$(fmtg_dir)/$sub"
     device=$(fm_private_artifact_dir_device "$dir" 2>/dev/null) || continue
-    while IFS= read -r -d '' file; do
+    case "$sub" in
+      reply) pattern='*.txt' ;;
+      *) pattern='*.json' ;;
+    esac
+    for file in "$dir"/$pattern; do
+      [ -e "$file" ] || [ -L "$file" ] || continue
+      [ "$budget" -gt 0 ] || break
+      budget=$(( budget - 1 ))
+      base=${file##*/}
+      # Confirmed-offset retirement comes FIRST because it costs no fork at all:
+      # the file name is the update id, and Telegram has already deleted every
+      # update below the confirmed offset, so the marker's only job - covering
+      # the crash window between processing and offset confirmation - is done.
+      if [ "$sub" = seen ] && [ "$offset" -gt 0 ]; then
+        uid=${base%.json}
+        case "$uid" in
+          ''|*[!0-9]*) ;;
+          *)
+            if [ "${#uid}" -le 19 ] && [ "$uid" -lt "$offset" ]; then
+              fm_private_artifact_remove "$dir" "$base" "$device" >/dev/null 2>&1 || true
+              continue
+            fi
+            ;;
+        esac
+      fi
       if ! fm_private_single_link_file_mode_valid "$file" 600 "$device"; then
-        rm -f -- "$file" 2>/dev/null || true
+        fm_private_artifact_remove "$dir" "$base" "$device" >/dev/null 2>&1 || true
         continue
       fi
       if [ "$sub" = announce ]; then
-        [ -e "$inbox/${file##*/}" ] || rm -f -- "$file" 2>/dev/null || true
+        [ -e "$inbox/$base" ] || fm_private_artifact_remove "$dir" "$base" "$device" >/dev/null 2>&1 || true
         continue
       fi
-      at=$(jq -r '(.recorded_at // .seen_at // empty) | tostring' "$file" 2>/dev/null) || at=
-      case "$at" in ''|*[!0-9]*) rm -f -- "$file" 2>/dev/null || true; continue ;; esac
+      # mtime is set by the publish that created the record, so ageing needs one
+      # stat rather than a `jq` fork per file.
+      at=$(fm_private_artifact_mtime "$file") || at=
+      case "$at" in
+        ''|*[!0-9]*) fm_private_artifact_remove "$dir" "$base" "$device" >/dev/null 2>&1 || true; continue ;;
+      esac
       if [ "$at" -gt "$now" ] || [ $(( now - at )) -gt "$max_age" ]; then
-        rm -f -- "$file" 2>/dev/null || true
+        fm_private_artifact_remove "$dir" "$base" "$device" >/dev/null 2>&1 || true
       fi
-    done < <(find "$dir" -type f -name '*.json' -print0 2>/dev/null)
+    done
   done
   # Far longer than any publish this home can still be running: the watcher kills
   # a poll at FMTG_CHECK_TIMEOUT, so anything this old is provably abandoned.
   fm_private_artifact_sweep_temps "$(fmtg_dir)" "$now" 600
   return 0
+}
+
+# --- authenticated request lifecycle ------------------------------------------
+#
+# A context record is the ONLY proof that a request id names a real message this
+# home actually accepted from the currently pinned peer. bin/fm-tg-poll.sh
+# creates one for every accepted message and for nothing else, so requiring it
+# on the outbound path is what stops a caller-invented id from addressing the
+# channel. `fmtg_request_authentic` is the single owner of that check.
+#
+# Exit codes let a caller say precisely why an outbound attempt was refused:
+#   0 authentic and still open   4 no such request (never accepted here)
+#   6 the request belongs to a chat that is not the pinned peer
+#   7 the request was already closed by a final reply
+#   1 malformed input
+fmtg_request_authentic() {  # <request_id> <peer-chat>
+  local rid=$1 peer=$2 ctx chat closed
+  fmtg_request_id_valid "$rid" || return 1
+  fmtg_chat_id_valid "$peer" || return 1
+  ctx=$(fmtg_context_get "$rid" 2>/dev/null) || return 4
+  chat=$(printf '%s' "$ctx" | jq -r '.chat_id // empty') || return 1
+  [ -n "$chat" ] || return 1
+  [ "$chat" = "$peer" ] || return 6
+  closed=$(printf '%s' "$ctx" | jq -r '.closed_at // "null"') || return 1
+  [ "$closed" = null ] || return 7
+}
+
+# Close a request permanently after its terminal reply lands, so a later
+# milestone - or a replayed command - cannot post against a finished exchange.
+# The record itself is deliberately KEPT as evidence of which conversation the
+# task answered, until its ordinary retention window expires.
+fmtg_request_close() {  # <request_id> <now>
+  local rid=$1 now=$2 dir ctx
+  fmtg_request_id_valid "$rid" || return 1
+  dir="$(fmtg_dir)/context"
+  ctx=$(fmtg_context_get "$rid" 2>/dev/null) || return 1
+  printf '%s' "$ctx" | jq -c --argjson at "$now" '.closed_at = $at' \
+    | fm_private_artifact_publish_stdin "$dir" "$rid.json" 600
+}
+
+# --- staged reply body --------------------------------------------------------
+#
+# The reply body is staged as a private artifact under bridge state and is read
+# back only from there.
+#
+# The outbound helper used to take `--text-file <path>` and read ANY readable
+# regular file, which made it a generic path-to-Telegram primitive: the one
+# capability in the fleet that reaches a person outside it could be pointed at
+# `.env`, a captain-private record, or an unrelated project, and its only guard
+# was prose in the agent skill. Staging removes the primitive itself - there is
+# no path argument left to point anywhere - and gives the body one auditable
+# location with a validated identity and an explicit lifecycle.
+fmtg_reply_stage() {  # <request_id>
+  local rid=$1
+  fmtg_request_id_valid "$rid" || return 1
+  fm_private_artifact_publish_stdin "$(fmtg_dir)/reply" "$rid.txt" 600
+}
+
+fmtg_reply_staged_read() {  # <request_id>
+  local rid=$1 dir
+  fmtg_request_id_valid "$rid" || return 1
+  dir="$(fmtg_dir)/reply"
+  fm_private_artifact_file_valid "$dir" "$rid.txt" 600 || return 1
+  cat "$dir/$rid.txt"
+}
+
+fmtg_reply_stage_clear() {  # <request_id>
+  local rid=$1
+  fmtg_request_id_valid "$rid" || return 1
+  fm_private_artifact_remove "$(fmtg_dir)/reply" "$rid.txt"
 }
 
 # --- outbound ---------------------------------------------------------------
@@ -795,7 +1036,104 @@ fmtg_publish_attempt() {  # <task-id>
   attempts=$(( attempts + 1 ))
   printf '%s' "$record" | jq -c --argjson n "$attempts" '.attempts = $n' \
     | fm_private_artifact_publish_stdin "$dir" "$task.json" 600 || return 1
-  [ "$attempts" -le "${FMTG_PAIR_ATTEMPTS:-5}" ]
+  [ "$attempts" -le "${FMTG_PUBLISH_ATTEMPTS:-5}" ]
+}
+
+# --- landing authorization ----------------------------------------------------
+#
+# The two-step rule - a request authorizes preparing and previewing, never
+# publishing - is only real if the code that actually LANDS a change enforces
+# it. Arming and confirming used to be the whole mechanism, and both landing
+# helpers merged without ever looking at a publish record, so the guarantee
+# rested entirely on the agent remembering to run a check that nothing required.
+# Under a project's standing autonomous-merge posture that is the difference
+# between a mechanical gate and a comment.
+#
+# fmtg_landing_guard is the single owner of that decision. It prints one
+# machine-readable reason word and returns:
+#   0 authorized, and the authorization is now consumed for THIS landing
+#   1 malformed input or a state write that did not become durable
+#   3 nothing armed for this task
+#   4 the confirmation expired before the change landed
+#   6 no pinned peer, or the task, record, or landing is outside the pinned project
+#   7 this authorization already landed something (replay)
+#   8 the person never confirmed: the record is armed but unconsumed
+#   9 the prepared revision moved since the person approved it
+#  10 the confirmation was bound to a different landing target
+#
+# The consume is written BEFORE the caller lands anything, so a crash between
+# the two refuses the next attempt rather than allowing a second landing on one
+# approval.
+fmtg_landing_guard() {  # <task-id> <task-project> <landing-target> <actual-revision> <now>
+  local task=$1 project=$2 target=$3 rev=$4 now=$5
+  local dir record peer pinned consumed landed armed_head armed_project armed_target expires
+  fmtg_publish_task_valid "$task" || { printf 'invalid-task'; return 1; }
+  [ -n "$target" ] || { printf 'missing-landing-target'; return 1; }
+  [ -n "$rev" ] || { printf 'unresolved-revision'; return 1; }
+  case "$now" in ''|*[!0-9]*) printf 'bad-clock'; return 1 ;; esac
+
+  peer=$(fmtg_peer_get 2>/dev/null) || { printf 'no-paired-peer'; return 6; }
+  pinned=$(printf '%s' "$peer" | jq -r '.project // empty') || { printf 'bad-peer-record'; return 1; }
+  [ -n "$pinned" ] || { printf 'bad-peer-record'; return 1; }
+  [ "$(basename "${project:-}")" = "$pinned" ] || { printf 'task-project-mismatch'; return 6; }
+
+  record=$(fmtg_publish_show "$task") || { printf 'no-armed-confirmation'; return 3; }
+  armed_project=$(printf '%s' "$record" | jq -r '.project // ""') || { printf 'bad-record'; return 1; }
+  [ "$armed_project" = "$pinned" ] || { printf 'record-project-mismatch'; return 6; }
+
+  landed=$(printf '%s' "$record" | jq -r '.landed_at // "null"') || { printf 'bad-record'; return 1; }
+  [ "$landed" = null ] || { printf 'already-landed'; return 7; }
+
+  consumed=$(printf '%s' "$record" | jq -r '.consumed_at // "null"') || { printf 'bad-record'; return 1; }
+  [ "$consumed" != null ] || { printf 'not-confirmed'; return 8; }
+
+  expires=$(printf '%s' "$record" | jq -r '.expires_at // 0') || { printf 'bad-record'; return 1; }
+  case "$expires" in ''|*[!0-9]*) printf 'bad-record'; return 1 ;; esac
+  [ "$now" -le "$expires" ] || { printf 'expired'; return 4; }
+
+  armed_head=$(printf '%s' "$record" | jq -r '.head // ""') || { printf 'bad-record'; return 1; }
+  [ -n "$armed_head" ] || { printf 'bad-record'; return 1; }
+  [ "$armed_head" = "$rev" ] || { printf 'revision-moved'; return 9; }
+
+  # A confirmation binds to the first landing target it is used against, so an
+  # approval given for a pull request cannot later be spent on a local merge.
+  armed_target=$(printf '%s' "$record" | jq -r '.landing_target // ""') || { printf 'bad-record'; return 1; }
+  if [ -n "$armed_target" ] && [ "$armed_target" != "$target" ]; then
+    printf 'landing-target-mismatch'
+    return 10
+  fi
+
+  dir="$(fmtg_dir)/publish"
+  printf '%s' "$record" \
+    | jq -c --argjson at "$now" --arg target "$target" --arg rev "$rev" \
+      '.landed_at = $at | .landing_target = $target | .landed_head = $rev' \
+    | fm_private_artifact_publish_stdin "$dir" "$task.json" 600 \
+    || { printf 'consume-write-failed'; return 1; }
+  printf 'authorized'
+}
+
+# Explain a fmtg_landing_guard refusal in one operator-facing line.
+fmtg_landing_refusal_text() {  # <reason> <task> <target>
+  local reason=$1 task=$2 target=$3
+  case "$reason" in
+    no-paired-peer) printf 'task %s is linked to a Telegram request but no peer is paired' "$task" ;;
+    task-project-mismatch|record-project-mismatch)
+      printf 'task %s is outside the project this bridge is paired for' "$task" ;;
+    no-armed-confirmation)
+      printf 'task %s is linked to a Telegram request but no publish confirmation was ever armed' "$task" ;;
+    not-confirmed)
+      printf 'the paired person has not confirmed publishing task %s; a request authorizes preparing and previewing, never publishing' "$task" ;;
+    expired) printf 'the publish confirmation for task %s expired before it landed' "$task" ;;
+    revision-moved)
+      printf 'the prepared change for task %s moved since the paired person approved it; re-preview and re-confirm' "$task" ;;
+    already-landed)
+      printf 'the publish confirmation for task %s was already used to land a change' "$task" ;;
+    landing-target-mismatch)
+      printf 'the publish confirmation for task %s was approved for a different landing target than %s' "$task" "$target" ;;
+    unresolved-revision)
+      printf 'the exact revision that task %s would land could not be resolved, so the confirmation cannot be checked' "$task" ;;
+    *) printf 'the publish confirmation for task %s could not be verified (%s)' "$task" "$reason" ;;
+  esac
 }
 
 fmtg_publish_show() {  # <task-id>
@@ -807,11 +1145,9 @@ fmtg_publish_show() {  # <task-id>
 }
 
 fmtg_publish_clear() {  # <task-id>
-  local task=$1 dir
+  local task=$1
   fmtg_publish_task_valid "$task" || return 1
-  dir="$(fmtg_dir)/publish"
-  rm -f -- "$dir/$task.json" 2>/dev/null || true
-  [ ! -e "$dir/$task.json" ]
+  fm_private_artifact_remove "$(fmtg_dir)/publish" "$task.json"
 }
 
 # Validate a confirmation against an armed record. Exit codes are distinct so a

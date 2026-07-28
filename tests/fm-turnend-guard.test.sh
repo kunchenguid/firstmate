@@ -308,7 +308,10 @@ test_hook_blocks_from_fm_home_state() {
   pass "fm-turnend-guard: blocks from active FM_HOME state, not only repo-root state"
 }
 
-test_hook_x_mode_reason_sources_cadence() {
+# The repair reason must NOT tell anyone to source a cadence file: nothing
+# sources one, and the arm seatbelt denies a source node in any form. A block
+# reason that still named one would hand the agent a command it cannot run.
+test_hook_x_mode_reason_carries_no_source_node() {
   local dir home out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-x-mode")
   home=$(cd "$dir" && pwd)
@@ -317,8 +320,9 @@ test_hook_x_mode_reason_sources_cadence() {
   : > "$dir/state/task1.meta"
   out=$(run_hook "$dir" false); status=$?
   expect_code 2 "$status" "hook must block when in-flight X-mode work has no live watcher"
-  assert_contains "$out" "source '$home/config/x-mode.env' first" "block reason must source the effective X-mode cadence"
-  pass "fm-turnend-guard: X-mode repair reason sources the cadence config"
+  assert_not_contains "$out" "$home/config/x-mode.env" \
+    "the block reason still tells the agent to source a cadence file"
+  pass "fm-turnend-guard: the X-mode repair reason carries no cadence source node"
 }
 
 test_hook_ignores_repo_state_when_fm_home_set() {
@@ -1201,7 +1205,7 @@ test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
-test_hook_x_mode_reason_sources_cadence
+test_hook_x_mode_reason_carries_no_source_node
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
 test_hook_loop_guard_allows_retry

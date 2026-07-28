@@ -17,6 +17,11 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# Sourcing the bridge library is inert for a home that never opted in; it is
+# needed here because a Telegram-linked task may not be merged without the
+# paired person's confirmation for this exact revision (see the gate below).
+# shellcheck source=bin/fm-tg-lib.sh
+. "$SCRIPT_DIR/fm-tg-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -75,6 +80,35 @@ grep -qxF "pr=$URL" "$META" || {
   echo "error: PR metadata recording failed" >&2
   exit 1
 }
+
+# Telegram publish gate.
+#
+# A message from the paired person authorizes preparing a change and showing a
+# preview. It never authorizes publishing that change, and this is where that
+# rule is enforced rather than merely documented: a task carrying a Telegram
+# link may not merge without a live confirmation the person gave for exactly the
+# revision this merge would land. The revision comes from the forge's own
+# recorded PR head, not from anything a caller asserted, and the authorization
+# is consumed here so it cannot be replayed onto a second landing.
+#
+# A task with no Telegram link is unaffected: the whole gate is skipped and the
+# merge behaves exactly as it did before the bridge existed.
+if TG_REQUEST=$(fmtg_meta_get "$META" tg_request); then
+  fmtg_load_config
+  TG_NOW=$(fmtg_now) || { echo "error: cannot read the current time" >&2; exit 1; }
+  TG_PROJECT=$(fmtg_meta_get "$META" project) || TG_PROJECT=
+  # The exact revision GitHub would merge. Without it there is nothing to check
+  # the person's approval against, so a linked task refuses rather than merging
+  # an unverified revision.
+  TG_HEAD=$(fmtg_meta_get "$META" pr_head) || TG_HEAD=
+  TG_REASON=$(fmtg_landing_guard "$ID" "$TG_PROJECT" "$URL" "$TG_HEAD" "$TG_NOW") || {
+    TG_RC=$?
+    printf 'REFUSED: %s\n' "$(fmtg_landing_refusal_text "$TG_REASON" "$ID" "$URL")" >&2
+    printf 'This task answers Telegram request %s. Preview the change to the paired person and have them confirm publishing it before merging.\n' \
+      "$TG_REQUEST" >&2
+    exit "$TG_RC"
+  }
+fi
 
 merge_args=()
 if ! caller_has_merge_method "$@"; then

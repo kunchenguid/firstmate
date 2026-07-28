@@ -7,7 +7,7 @@
 # carries the single project name every downstream step checks against.
 #
 # Usage:
-#   fm-tg-pair.sh begin --label <name> --project <project> [--replace]
+#   fm-tg-pair.sh begin --label <name> --project <project> [--user-id <n>] [--replace]
 #   fm-tg-pair.sh status
 #   fm-tg-pair.sh revoke [--yes]
 #   fm-tg-pair.sh --help
@@ -17,8 +17,15 @@
 #         cannot be recovered from disk, and it is single-use: redeeming it pins
 #         the peer and deletes the offer. It expires after FM_TELEGRAM_PAIR_TTL
 #         seconds (default 900) and allows FM_TELEGRAM_PAIR_ATTEMPTS guesses
-#         (default 5) before the offer is spent. Refuses to replace an existing
-#         pairing unless --replace is given, so re-pairing is always deliberate.
+#         (default 5) PER NUMERIC SENDER, so a stranger who knows the bot's
+#         @handle cannot burn the recipient's attempts. Pass --user-id <n> with
+#         Telegram's immutable numeric user id to bind the offer to exactly one
+#         account: every other sender is then ignored without spending anything.
+#         Refuses to replace an existing pairing unless --replace is given, so
+#         re-pairing is always deliberate. With --replace the old peer is
+#         retired, and its pending messages, reply contexts, preserved replies
+#         and armed publish authorizations are cleared, BEFORE the new offer
+#         exists - one transition, with no window in which both are valid.
 #
 # status  Report whether a pairing is open or pinned, the label, the project, the
 #         pinned numeric ids, pending message count, and the last bridge error.
@@ -90,12 +97,14 @@ esac
 
 LABEL=
 PROJECT=
+EXPECT_USER=
 REPLACE=0
 ASSUME_YES=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --label) [ "$#" -gt 1 ] || die "--label requires a value"; LABEL=$2; shift 2 ;;
     --project) [ "$#" -gt 1 ] || die "--project requires a value"; PROJECT=$2; shift 2 ;;
+    --user-id) [ "$#" -gt 1 ] || die "--user-id requires a numeric Telegram user id"; EXPECT_USER=$2; shift 2 ;;
     --replace) REPLACE=1; shift ;;
     --yes) ASSUME_YES=1; shift ;;
     *) die "unknown argument: $1" ;;
@@ -117,16 +126,42 @@ case "$COMMAND" in
     if ! fmtg_active; then
       die "the bridge is off; put FM_TELEGRAM_BOT_TOKEN in $FM_HOME/.env and rerun bin/fm-session-start.sh first"
     fi
-    if fmtg_peer_get >/dev/null 2>&1 && [ "$REPLACE" -eq 0 ]; then
-      die "a peer is already paired; pass --replace to deliberately replace it"
+    [ -z "$EXPECT_USER" ] || fmtg_chat_id_valid "$EXPECT_USER" \
+      || die "--user-id must be Telegram's numeric user id"
+    if fmtg_peer_get >/dev/null 2>&1; then
+      [ "$REPLACE" -eq 1 ] \
+        || die "a peer is already paired; pass --replace to deliberately replace it"
+      # ONE crash-safe identity transition, in this order.
+      #
+      # Replacement used to leave the old peer pinned and merely add an offer,
+      # which meant the old person kept full authority while the new code could
+      # never be redeemed at all: the poll only attempts redemption when no peer
+      # is pinned, so every `/start` from the replacement was dropped as a
+      # non-matching identity. The captain's deliberate hand-over silently did
+      # nothing.
+      #
+      # Retiring the old peer FIRST means there is no window in which both
+      # identities are valid, and no crash point that leaves the old peer
+      # authorized against a redeemable new code: a crash here leaves the home
+      # unpaired with no offer, which is the safe end of the transition.
+      fmtg_peer_clear || die "cannot retire the current pairing"
+      fmtg_peer_records_clear \
+        || die "cannot clear the retired pairing's messages, replies, and publish authorizations"
     fi
     CODE=$(fmtg_random_code 8) || die "cannot generate a pairing code"
     fmtg_pairing_set "$LABEL" "$PROJECT" "$CODE" "$NOW" "$(( NOW + FMTG_PAIR_TTL ))" \
-      || die "cannot record the pairing offer"
+      "$EXPECT_USER" || die "cannot record the pairing offer"
     printf 'Pairing open for "%s" on project "%s".\n' "$LABEL" "$PROJECT"
     printf 'Ask them to open a private chat with the bot and send exactly:\n\n'
     printf '  /start %s\n\n' "$CODE"
-    printf 'Valid for %s seconds, %s attempts, single use.\n' "$FMTG_PAIR_TTL" "$FMTG_PAIR_ATTEMPTS"
+    printf 'Valid for %s seconds, %s attempts per sender, single use.\n' \
+      "$FMTG_PAIR_TTL" "$FMTG_PAIR_ATTEMPTS"
+    if [ -n "$EXPECT_USER" ]; then
+      printf 'Only Telegram user id %s can redeem it; anyone else is ignored without spending an attempt.\n' \
+        "$EXPECT_USER"
+    else
+      printf 'Anyone with the code can redeem it. Pass --user-id <numeric id> to bind the offer to one account.\n'
+    fi
     printf 'A wrong or late code is answered with silence, so ask them to report back if nothing arrives.\n'
     ;;
 
@@ -184,13 +219,18 @@ case "$COMMAND" in
     if fmtg_peer_get >/dev/null 2>&1 && [ "$ASSUME_YES" -eq 0 ]; then
       die "a peer is currently paired; pass --yes to confirm revoking it"
     fi
+    # Every deletion below goes through the private-artifact boundary, so a
+    # bridge directory that is a symlink, has the wrong mode, or sits on another
+    # device is REFUSED rather than followed. Revoke used to delete by path,
+    # which meant replacing state/telegram with a symlink turned this command
+    # into a delete of attacker-chosen files outside bridge state.
+    if [ -e "$TG_DIR" ] || [ -L "$TG_DIR" ]; then
+      fm_private_artifact_dir_device "$TG_DIR" >/dev/null \
+        || die "$TG_DIR is not a private bridge directory (symlink, wrong mode, or wrong device); refusing to delete through it"
+    fi
     fmtg_peer_clear || die "cannot clear the pinned peer"
     fmtg_pairing_clear || die "cannot clear the pairing offer"
-    for sub in inbox context publish outbox announce; do
-      [ -d "$TG_DIR/$sub" ] || continue
-      find "$TG_DIR/$sub" -type f -name '*.json' -exec rm -f -- {} + 2>/dev/null || true
-    done
-    rm -f -- "$TG_DIR/recovery.json" "$TG_DIR/limits.json" "$TG_DIR/poll.error" 2>/dev/null || true
+    fmtg_peer_records_clear || die "cannot clear the retired pairing's records through the private bridge boundary"
     # A publish killed mid-write leaves a dot-prefixed temporary that still holds
     # the message it was about to store, and no *.json sweep can see it. Revoke
     # claims pending messages are gone, so it removes those too - with no age

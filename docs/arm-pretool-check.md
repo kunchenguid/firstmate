@@ -96,16 +96,15 @@ Approved setup nodes are:
 
 - `cd <one path word>`.
 - `export NAME=<one shell word>` with no command substitution, process substitution, or redirection.
-- `source <cadence path>` or `. <cadence path>`.
-- `[ -f <cadence path> ] && source <cadence path>` and the equivalent dot form.
 
-A cadence path is one always-on channel's generated watcher-cadence file: `config/x-mode.env` for X mode, or `config/telegram.env` for the Telegram bridge.
-Each is allowed as that relative path, as its `./` form, and as an absolute path that normalizes to the same file under the active firstmate home.
-An absolute cadence path outside the active home is not an approved setup node.
-A home may arm both channels, so an arm command may carry one such setup node per armed cadence file.
+No source node is approved, in any form.
+`source <path>` and `. <path>` are never blessed setup, so an arm command that sources anything is denied.
+An always-on channel's 30s cadence used to be carried by sourcing its generated `config/*.env`, and blessing that path made this policy's own trust list an indirect shell-execution vector: the policy compares path strings and never opens the file, so an agent able to write the home-private cadence file could execute arbitrary code through an otherwise legitimate arm.
+`bin/fm-watch.sh` now derives the cadence itself from the channel poll shim it already authenticates byte-for-byte, so no source node needs blessing.
+A path-only allowance cannot authenticate the bytes it admits; do not reintroduce one.
 
 Approved nodes may be separated by `;`, a real newline, or `&&`.
-`&&` is accepted after setup so a failed `cd`, `export`, or source prevents the protected call from running under the wrong setup.
+`&&` is accepted after setup so a failed `cd` or `export` prevents the protected call from running under the wrong setup.
 
 The final protected node may have one immediate `exec` wrapper.
 Its arguments are ordinary shell words and may contain quoted semicolons or watcher names.
@@ -197,6 +196,12 @@ tmux send-keys -t isolated-pi-lab "printf '%s\n' 'bin/fm-watch-arm.sh &'"; tmux 
 bin/fm-watch-arm.sh &
 ```
 
+**Superseded case.** The third command was an allowed shape when this live sweep ran.
+It is now DENIED, because no source node is blessed in any form (see "Blessed syntax tree" above): blessing a cadence path the policy never opens made this policy's own trust list an indirect shell-execution vector.
+The equivalent current shape for that slot is a plain setup node, `cd '<scratch-project>'; bin/fm-watch-checkpoint.sh --seconds 180`.
+The live cross-harness sweep below has not been re-run since that change; what the change is verified by is the matrix suite, where `DS01`-`DS08` and `E04` in `tests/fm-arm-pretool-check.test.sh` assert the denial and `A01`-`A16` assert that ordinary `cd`/`export` setup and the arm command firstmate itself renders are still allowed.
+The harness-adapter finding this sweep exists to record - that each harness maps a policy denial through its own native behavior - is unaffected by which command is denied.
+
 The real harness launch commands were:
 
 ```sh
@@ -207,7 +212,7 @@ OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode run --print-logs
 pi -p -e .pi/extensions/fm-primary-turnend-guard.ts --no-context-files --no-session "$PROMPT"
 ```
 
-Observed output for the four allowed calls was `UNRELATED_EXECUTED`, a successful read-only `pgrep`, `CHECKPOINT_EXECUTED`, and two `TMUX_ARGS:` lines that preserved the watcher text as data.
+Observed output for the four allowed calls, as the policy stood at the time of this sweep, was `UNRELATED_EXECUTED`, a successful read-only `pgrep`, `CHECKPOINT_EXECUTED`, and two `TMUX_ARGS:` lines that preserved the watcher text as data.
 Each harness blocked the final command with exit 2 mapped through its native adapter behavior.
 The stable reason was `[watcher-background] a protected watcher command cannot run in an asynchronous shell list or through nohup/disown`.
 The dummy arm body would have created `<harness>.sentinel` if the denied command executed.

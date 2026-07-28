@@ -50,7 +50,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 EPOCH="$STATE/.claude-autoarm-epoch"
@@ -128,15 +127,11 @@ write_epoch() {  # <outcome>
 
 write_epoch arming
 
-# Always-on channel cadence: source every generated config so a home that armed
-# X mode, the Telegram bridge, or both polls at its 30s cadence instead of the
-# 300s default (fm-bootstrap.sh x_mode_setup and telegram_setup contracts). This
-# is the routine arm path for the default primary harness, so a channel missing
-# here polls five minutes apart no matter what the supervision block says.
-for cadence_env in x-mode.env telegram.env; do
-  # shellcheck source=/dev/null
-  [ -f "$CONFIG/$cadence_env" ] && . "$CONFIG/$cadence_env"
-done
+# Always-on channel cadence is NOT sourced here. bin/fm-watch.sh derives the 30s
+# cadence itself from the channel shim it already authenticates byte-for-byte,
+# so this routine arm path carries no `.` of a home-private file that an
+# injected agent could have written. Removing the source is what makes the arm
+# seatbelt's "no source node at all" rule enforceable rather than advisory.
 
 # --- foreground the real arm wrapper ------------------------------------------
 # NO shell &: this hook process tree is the harness-owned lifecycle. The arm

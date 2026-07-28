@@ -5,7 +5,7 @@ Behavior, setup, and tunables are owned by [`configuration.md`](../configuration
 Re-run everything here after changing `bin/fm-tg-*`, `bin/fm-private-artifact-lib.sh`, `bin/fm-message-split-lib.sh`, `bin/fm-env-file-lib.sh`, the watcher check sweep, the PR-check migration, the arm command policy, or the Claude Stop auto-arm.
 `bin/fm-test-run.sh` encodes that list, so a change to any of them selects this suite.
 
-Recorded 2026-07-28 on macOS (Darwin 25.5.0, arm64), GNU bash 5.3.9, ShellCheck 0.11.0.
+Recorded 2026-07-29 on macOS (Darwin 25.5.0, arm64), GNU bash 5.3.9, ShellCheck 0.11.0, after the security repair described below.
 
 ## Regression suite
 
@@ -13,7 +13,9 @@ Recorded 2026-07-28 on macOS (Darwin 25.5.0, arm64), GNU bash 5.3.9, ShellCheck 
 bin/fm-test-run.sh --family telegram-bridge
 ```
 
-51 checks pass, covering: inert-by-default, token secrecy and file modes, pairing success/expiry/replay/wrong-code/wrong-identity/re-pair/revoke, exactly-once acceptance, duplicate delivery, both crash windows, offset confirmation, the recovery sweep and its per-entry budget, the long poll's fit inside the watcher's kill budget, one budget shared across a check's calls, orphaned publication temporaries, refusal of unpaired/group/channel/bot senders, unsupported and oversized payloads, injection inertness, rate limiting, project routing, the two-step publish gate, reply escaping/splitting/retry/final cleanup, bootstrap arm and disarm, supervision eligibility, cross-channel coexistence, sweep rotation, gate-agent refusal, home isolation, and the three channel-aware shared surfaces below.
+68 checks pass, covering: inert-by-default, token secrecy and file modes, pairing success/expiry/replay/wrong-code/wrong-identity/re-pair/revoke, exactly-once acceptance, duplicate delivery, both crash windows, offset confirmation, the recovery sweep and its per-entry budget, the long poll's fit inside the watcher's kill budget, one budget shared across a check's calls, orphaned publication temporaries, refusal of unpaired/group/channel/bot senders, unsupported and oversized payloads, injection inertness, rate limiting, project routing, the two-step publish gate, reply escaping/splitting/retry/final cleanup, bootstrap arm and disarm, supervision eligibility, cross-channel coexistence, sweep rotation, gate-agent refusal, home isolation, the channel-aware shared surfaces below, and the adversarial regressions in "Security repair" below.
+
+`bin/fm-test-run.sh --family pr-forge` covers the landing-gate half (`tests/fm-pr-merge.test.sh`, 17 checks) alongside `tests/fm-x-mode.test.sh` (102 checks).
 
 The Bot API is served by the fake local server in `tests/telegram-helpers.sh`: a stateful implementation of `getUpdates` and `sendMessage` reached through the client's real `curl --config` transport, read from the same stdin stream the client pipes.
 No socket is bound and no real token exists anywhere in the suite.
@@ -91,7 +93,7 @@ kimi       1
 unknown    1
 ```
 
-`test_cadence_instruction_reaches_every_harness` pins this, and `test_both_channels_coexist_in_one_home` pins the grok arm command sourcing both channels' cadence files when both are armed.
+`test_no_harness_protocol_sources_a_cadence_file` pins this across all eight snippets, and `test_both_channels_coexist_in_one_home` pins that neither channel displaces the other and that the arm command carries no source node for either.
 
 **Other channel-aware shared surfaces.** An earlier revision of this record claimed the compatibility axes had been inspected while only the supervision renderer and the supervision-eligibility predicate actually had been.
 Three further surfaces hard-code X mode's artifact name and were missed; all three are now fixed and pinned by a test that fails without its fix:
@@ -99,8 +101,8 @@ Three further surfaces hard-code X mode's artifact name and were missed; all thr
 | Surface | What it did to a bridged home | Regression |
 | --- | --- | --- |
 | `bin/fm-pr-check-migrate.sh` | quarantined the valid bridge shim, disarming the bridge on every watcher start | `test_migration_does_not_quarantine_the_bridge_shim` |
-| `bin/fm-arm-command-policy.mjs` | denied the arm command the supervision renderer itself emits | `test_arm_seatbelt_allows_the_rendered_bridge_arm` |
-| `bin/fm-claude-stop-autoarm.sh` | armed at the 300s default instead of 30s on the default harness | `test_stop_autoarm_inherits_the_bridge_cadence` |
+| `bin/fm-arm-command-policy.mjs` | denied the arm command the supervision renderer itself emits | `test_arm_seatbelt_blesses_no_source_node` |
+| `bin/fm-claude-stop-autoarm.sh` | armed at the 300s default instead of 30s on the default harness | `test_stop_autoarm_reaches_the_bridge_cadence_without_sourcing` |
 
 The migration exemption now has one owner (`channel_shim_exempt`) covering all four scan sites, rather than four copies of a single-channel condition - which is how the bridge came to be exempt in none of them.
 The two remaining X-only paths there, `x_shim_locked_scan_needed` and `refresh_v1_x_shim`, are correctly X-only: they migrate a legacy mode-0755 v1 shim, and the bridge shim has no v1 legacy.
@@ -121,7 +123,7 @@ The bridge spawns nothing and owns no endpoint, so tmux, herdr, zellij, orca, an
 A no-mistakes gate agent runs inside a firstmate checkout and auto-loads `AGENTS.md`, so it can read that this channel exists; the same capability-removal guard the fleet entrypoints use keeps it away from a channel that reaches someone outside the fleet.
 
 ```sh
-$ NO_MISTAKES_GATE=1 bin/fm-tg-reply.sh x --text-file /dev/null; echo "exit=$?"
+$ NO_MISTAKES_GATE=1 bin/fm-tg-reply.sh x < /dev/null; echo "exit=$?"
 error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)
 exit=3
 ```
@@ -136,6 +138,41 @@ With the rotation block in `bin/fm-watch.sh` replaced by a no-op, `test_watcher_
 ```
 not ok - the second sweep did not rotate to the other check, so one always-on channel starves the other
 ```
+
+## Security repair
+
+Two independent adversarial reviews of this branch each reached FIX BEFORE MERGE.
+Every counterexample they reproduced is now a committed negative regression, so none of these defects can return silently.
+
+| Defect | Disposition | Regression |
+| --- | --- | --- |
+| the reply helper accepted any readable file and any syntactically valid request id | no path argument at all; the body is staged as a private artifact and every send needs an authenticated, still-open request bound to the pinned peer and project | `test_reply_needs_a_real_request_and_takes_no_path`, `test_reply_body_is_staged_and_the_request_closes`, `test_reply_refuses_a_task_outside_the_paired_project` |
+| neither landing helper enforced the publish confirmation | both refuse a Telegram-linked task without a live confirmation bound to the revision they really land, and consume it atomically | `test_telegram_linked_merge_*` (7 cases), `test_local_merge_*` (4 cases) |
+| the blessed cadence file was sourced as shell without content authentication | nothing sources a cadence file; the watcher derives the cadence from the byte-authenticated shim and the seatbelt blesses no source node | `test_arm_seatbelt_blesses_no_source_node`, `test_watcher_derives_its_cadence_from_the_authenticated_shim`, `DS01`-`DS08` and `E04` in `tests/fm-arm-pretool-check.test.sh` |
+| `begin --replace` stranded the offer and left the old peer authorized | one crash-safe transition: the old peer and its records are retired before the new offer exists | `test_replace_retires_the_old_peer_and_lets_the_new_one_redeem`, `test_replace_clears_armed_publish_authorizations` |
+| cleanup followed a symlinked bridge directory | every deletion goes through the same validated directory/device/link boundary publication enforces | `test_cleanup_refuses_a_symlinked_bridge_directory` |
+| the API override accepted plaintext to any host | only Telegram's HTTPS endpoint or an explicit loopback address may carry the token | `test_api_origin_is_restricted_to_telegram_or_loopback` |
+| retry progress could be lost, repeating a delivered message | a send whose progress cannot be persisted is reported as ambiguous delivery, never as safely resumable | `test_undurable_progress_is_reported_as_ambiguous_delivery` |
+| the pairing offer was remotely exhaustible | the guess budget is per numeric sender, and `--user-id` binds an offer to one account | `test_pairing_attempt_budget_is_per_sender`, `test_pairing_attempt_budget_locks_out_the_guesser`, `test_pairing_can_be_bound_to_one_numeric_account` |
+| the per-poll prune was unbounded work inside the poll's own budget | markers below the confirmed offset retire by name, ageing uses mtime, and the pass is capped per cycle | `test_prune_is_bounded_and_retires_confirmed_markers` |
+
+### The prune is bounded, measured
+
+The earlier shape walked every retained record per cycle and forked roughly five processes per file, inside a five-second reserve.
+Measured on this machine at the same marker counts, the pass is now constant rather than proportional, and a real message is still delivered with a large backlog present:
+
+```
+markers=100   prune=1s  markers=500   prune=2s
+markers=2000  prune=2s  markers=3000  prune=1s   (reserve 5s)
+```
+
+`test_prune_is_bounded_and_retires_confirmed_markers` asserts the behavioral half: with 400 retained markers a queued message still produces its `telegram-message` wake, and the retained set is smaller after the cycle than before it.
+
+### Not claimed
+
+The processing boundary is bounded, not separated.
+Firstmate still reads the message, and firstmate can read the whole filesystem through its ordinary tools, so this repair does not claim that untrusted Telegram text is handled by a principal without access to captain-private data.
+What it does claim, and what the regressions above pin, is that the bridge's own outbound and landing primitives can no longer be pointed outside their authenticated request, peer, project, and revision - which is the part that was guarded only by prose.
 
 ## Not verified here
 

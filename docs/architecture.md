@@ -245,6 +245,12 @@ Nothing is ever sent to an unpaired chat, including a failed pairing attempt.
 That removes the two failure modes a friendlier error would introduce - an oracle telling a stranger whether an offer is open or what the bot is for, and an outbound-message amplifier reachable by anyone who finds the bot.
 It also makes "sendMessage only after pairing" structural: `bin/fm-tg-reply.sh` resolves its destination from the pinned peer, so there is no code path that addresses anyone else.
 
+**The outbound primitive is bounded, not just documented.**
+Replying is the one capability in the fleet that reaches a person outside it, so it is the boundary where a mistake leaves the fleet, and it must be mechanical rather than prose in a skill.
+`bin/fm-tg-reply.sh` therefore takes no path argument at all: the body is read from stdin and staged as a private artifact under bridge state, which removes the generic path-to-Telegram primitive rather than warning against pointing it somewhere.
+It also requires an authenticated, still-open request - one the poll recorded for a real accepted message from the currently pinned peer - so an invented request id, a stale conversation, a closed exchange, or a task outside the pinned project all refuse.
+Progress that Telegram accepted but that could not be persisted is reported as ambiguous delivery rather than as safely resumable, because a retry from a stale counter repeats a message the person already received.
+
 **The token never enters an argument vector.**
 The Bot API carries the token in the URL path, so a plain `curl` invocation would expose it to any local process through `ps`.
 Every request goes through a `curl --config` stream piped on stdin, so the token is never written to disk at all - the watcher SIGKILLs a check that outruns its budget, and a temporary file would survive that - and the token is shape-validated before it can be interpolated.
@@ -254,17 +260,25 @@ Telegram redelivers an update until an offset past it is confirmed, so the poll 
 A crash before the marker redelivers into an idempotent create-only claim; a crash after it drops the redelivery, so a drained message is never resurrected; a crash between the marker and the wake is healed by a bounded recovery sweep.
 This is the part that could not be borrowed from X mode, whose relay owns re-offer semantics on the server side.
 
-**A request is not permission to publish.**
+**A request is not permission to publish, and the code that lands work is what enforces that.**
 `bin/fm-tg-task.sh` arms a one-time confirmation against the exact prepared revision and refuses a confirmation that is late, guessed, replayed, over budget, or aimed at a preview that has since been rebuilt.
-Binding the confirmation to the revision is what makes "they approved what they actually saw" checkable rather than assumed.
+Both arming and confirming resolve that revision themselves from the task's own worktree, so neither end takes a revision from its caller; that is what makes "they approved what they actually saw" checkable rather than assumed.
+A gate only the agent remembers to run is a comment, so `bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` refuse to land a Telegram-linked task without a live confirmation bound to the revision they are really about to land, resolved from the forge's recorded head or the branch tip rather than asserted.
+The authorization is consumed before the merge runs, so one approval lands exactly one change; absent, unconsumed, expired, moved, wrong-project, wrong-target, and replayed authorizations all refuse, and a task with no Telegram link is unaffected.
 Landing remains the project's own delivery path, and anything that reaches a live host, a domain, or an outside audience stays a captain decision.
 
 **Shared contracts are extracted, not duplicated.**
 Three things both channels need now live in one owner each: [`fm-private-artifact-lib.sh`](../bin/fm-private-artifact-lib.sh) for owner-only file guarantees, [`fm-message-split-lib.sh`](../bin/fm-message-split-lib.sh) for outbound splitting, and [`fm-env-file-lib.sh`](../bin/fm-env-file-lib.sh) for reading the home's `.env`.
 Two copies of a file-permission or splitting contract would drift the moment only one was edited.
 
+**Cadence is derived, never sourced.**
+Both channels need a 30-second watcher cadence instead of the 300-second default, and that used to travel by sourcing a generated `config/*.env` that the arm seatbelt blessed by path.
+Blessing a path the policy never opens made the seatbelt's own trust list an indirect shell-execution vector: an agent able to write the home-private cadence file could run arbitrary code through an otherwise legitimate arm.
+`bin/fm-watch.sh` now derives the cadence from the channel poll shim it already authenticates byte-for-byte before every dispatch, so no arm command sources anything, `bin/fm-arm-command-policy.mjs` blesses no source node at all, and the generated marker is data with no shell syntax in it.
+A tampered or mode-widened shim falls back to the slow default rather than being trusted.
+
 **Coexistence is a scheduling property.**
-Both channels arm their own byte-static poll shim and their own cadence file, and the supervision block names every active one.
+Both channels arm their own byte-static poll shim, and the supervision block names every active one.
 The watcher's check sweep wakes on the first producing check and abandons the cycle, which was harmless with one always-on channel and became a starvation hazard with two, so the sweep now starts just after whichever check last woke firstmate and wraps around.
 Every check reaches the front within one rotation at unchanged per-cycle cost.
 `fm_supervision_needed` treats an armed bridge like an armed X mode, so a bridged home keeps its supervision cycle with no fleet work at all.

@@ -6,8 +6,8 @@
 #   fm-tg-task.sh link <task-id> <request-id>
 #   fm-tg-task.sh unlink <task-id>
 #   fm-tg-task.sh show <task-id>
-#   fm-tg-task.sh arm-publish <task-id> --head <rev>
-#   fm-tg-task.sh confirm-publish <task-id> --head <rev> --message-file <path>
+#   fm-tg-task.sh arm-publish <task-id>
+#   fm-tg-task.sh confirm-publish <task-id> --message-file <path>
 #   fm-tg-task.sh clear-publish <task-id>
 #   fm-tg-task.sh --help
 #
@@ -26,6 +26,14 @@
 #   revision is still exactly what was previewed. A confirmation is therefore
 #   refused when it is late, guessed, replayed, or aimed at a preview that has
 #   since been rebuilt - the person always approves the change they actually saw.
+#
+#   THE REVISION IS RESOLVED HERE, NOT ASSERTED BY THE CALLER. Both subcommands
+#   read the task's own recorded worktree and take `git rev-parse HEAD` from it,
+#   so "they approved what they actually saw" is checkable rather than trusted:
+#   an agent cannot arm one revision and confirm against another, and a change
+#   rebuilt between preview and confirmation is detected against the real repo.
+#   bin/fm-pr-merge.sh and bin/fm-merge-local.sh then require that same record,
+#   consumed, matching the revision they are really about to land.
 #
 #   The incoming reply is read from a FILE, never an argument. Only the salted
 #   hash of the code is stored, and only the code alphabet is scanned out of the
@@ -85,7 +93,9 @@ case "$COMMAND" in
 esac
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --head) [ "$#" -gt 1 ] || die "--head requires a revision"; HEAD_REV=$2; shift 2 ;;
+    --head)
+      die "--head was removed: the prepared revision is resolved from the task's own worktree, not asserted by the caller"
+      ;;
     --message-file) [ "$#" -gt 1 ] || die "--message-file requires a path"; MESSAGE_FILE=$2; shift 2 ;;
     *) die "unknown argument: $1" ;;
   esac
@@ -102,6 +112,27 @@ rev_valid() {
     ''|*[!0-9a-fA-F]*) return 1 ;;
   esac
   [ "${#1}" -ge 7 ] && [ "${#1}" -le 64 ]
+}
+
+# The exact revision this task has prepared, read from the task's own recorded
+# worktree. This is what makes the confirmation a statement about the change the
+# person actually previewed rather than about a string the caller supplied.
+prepared_revision() {
+  local worktree rev
+  worktree=$(fmtg_meta_get "$META" worktree) || {
+    printf 'fm-tg-task: task %s has no recorded worktree, so its prepared revision cannot be resolved\n' "$TASK" >&2
+    exit 6
+  }
+  [ -d "$worktree" ] || {
+    printf 'fm-tg-task: the recorded worktree for task %s is missing, so its prepared revision cannot be resolved\n' "$TASK" >&2
+    exit 6
+  }
+  rev=$(git -C "$worktree" rev-parse --verify --quiet HEAD) || rev=
+  rev_valid "$rev" || {
+    printf 'fm-tg-task: cannot resolve a prepared revision for task %s\n' "$TASK" >&2
+    exit 6
+  }
+  printf '%s' "$rev"
 }
 
 # The pinned project is the only project this bridge may act in.
@@ -169,8 +200,8 @@ case "$COMMAND" in
     ;;
 
   arm-publish)
-    rev_valid "$HEAD_REV" || die "--head must be a git revision (7-64 hex characters)"
     require_project_match
+    HEAD_REV=$(prepared_revision)
     CODE=$(fmtg_random_code 6) || die "cannot generate a confirmation code"
     PROJECT=$(pinned_project)
     fmtg_publish_arm "$TASK" "$PROJECT" "$HEAD_REV" "$CODE" "$NOW" \
@@ -179,9 +210,9 @@ case "$COMMAND" in
     ;;
 
   confirm-publish)
-    rev_valid "$HEAD_REV" || die "--head must be a git revision (7-64 hex characters)"
     [ -n "$MESSAGE_FILE" ] || die "confirm-publish requires --message-file <path>"
     require_project_match
+    HEAD_REV=$(prepared_revision)
     if [ "$MESSAGE_FILE" = - ]; then
       RAW=$(cat)
     else

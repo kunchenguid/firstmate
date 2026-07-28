@@ -301,11 +301,11 @@ For direct client invocations, environment values override `.env`; bootstrap act
 `FMX_ENV_FILE` can point direct poll/reply client invocations at another `.env`-style file, but it does not change bootstrap activation.
 
 The locked session-start bootstrap step turns the token into local generated state.
-It writes `state/x-watch.check.sh`, a byte-static identity shim for `bin/fm-x-poll.sh`, and `config/x-mode.env`, which exports `FM_CHECK_INTERVAL=30` for watcher processes in that home.
+It writes `state/x-watch.check.sh`, a byte-static identity shim for `bin/fm-x-poll.sh`, and `config/x-mode.env`, a data-only marker recording that the channel is armed.
 The watcher accepts the shim only when its bytes match the expected generated content, then invokes the trusted repository poll script directly instead of executing state-file source.
-This section is the single owner of the X-mode cadence contract: an X instance polls every 30 seconds instead of the default 300, a home without `config/x-mode.env` gets no X-mode speed-up, and the session-start supervision operating block includes the cadence instruction when that file exists.
-The active primary-harness supervision protocol owns how that sourced cadence reaches the watcher process.
-Because `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` only at process start, a cadence transition - opt-in while a watcher is already running, or opt-out - is applied by restarting the home-scoped watcher through the emitted harness protocol; bootstrap deliberately never restarts the watcher itself.
+This section is the single owner of the X-mode cadence contract: an X instance polls every 30 seconds instead of the default 300, and a home whose relay poll shim is absent or fails byte validation gets no X-mode speed-up.
+`bin/fm-watch.sh` derives that cadence itself from the validated shim, so nothing sources a cadence file and no arm command carries a source node; an explicit `FM_CHECK_INTERVAL` in the environment still wins.
+Because the watcher resolves the cadence only at process start, a cadence transition - opt-in while a watcher is already running, or opt-out - is applied by restarting the home-scoped watcher through the emitted harness protocol; bootstrap deliberately never restarts the watcher itself.
 While away mode is active the daemon owns the watcher and its default cadence applies; away-mode X cadence is a deferred follow-up.
 When the token is removed or empty, the next locked session-start bootstrap step removes those artifacts.
 Steady-state off is silent and writes nothing.
@@ -423,14 +423,23 @@ Bootstrap then removes the poll shim and the cadence file and the home returns t
 
 ### Generated state and cadence
 
+Pairing binds Telegram's immutable numeric `user_id` and `chat_id`; usernames and display names are informational and never authority.
+The offer's guess budget is counted PER NUMERIC SENDER, because a bot is reachable by any Telegram user who knows its `@handle` and a single global counter let a stranger burn the whole offer and deny the intended recipient their own attempt.
+`bin/fm-tg-pair.sh begin --user-id <numeric id>` binds the offer to exactly one account, and every other sender is then dropped before the attempt budget is touched at all.
+The number of distinct senders one offer will track is capped by `FM_TELEGRAM_PAIR_SENDERS` (default 20), so the record cannot grow without bound either.
+
+`begin --replace` is one crash-safe identity transition: the old peer is retired, and its pending messages, reply contexts, preserved replies and armed publish authorizations are cleared, BEFORE the replacement offer exists.
+There is no window in which both identities are valid, and a crash mid-transition leaves the home unpaired with no offer, which is the safe end.
+The update offset and duplicate-suppression markers are deliberately kept, so retiring a peer can never make Telegram replay old messages to whoever comes next.
+
 The locked session-start bootstrap step turns the token into local generated state, mirroring X mode:
 
 - `state/telegram-watch.check.sh` - a byte-static identity shim; the watcher accepts it only when its bytes match the expected content, then invokes the trusted `bin/fm-tg-poll.sh` directly rather than executing a state file.
-- `config/telegram.env` - exports `FM_CHECK_INTERVAL=30`, so a bridged home checks often enough for a chat.
+- `config/telegram.env` - a data-only marker recording that the bridge is armed; it is never sourced or executed.
 
 Both are gitignored and idempotent, and both are removed on opt-out.
 Like X mode, bootstrap never restarts the watcher itself: a cadence transition is applied by restarting the home-scoped watcher through the emitted harness protocol.
-When both channels are armed, the supervision block names both cadence files and the arm command sources both.
+When either channel's poll shim passes byte validation the watcher runs its 30s cadence, so a home that arms both channels needs no extra step and no arm command sources anything.
 
 The watcher's check sweep wakes on the first check that produces output and abandons the rest of the cycle, so the sweep now starts just after whichever check last woke firstmate (recorded in `state/.last-check-woke`) and wraps around.
 Every check therefore reaches the front within one rotation, which is what keeps one busy always-on channel from silencing another; the per-cycle cost is unchanged.
@@ -441,12 +450,21 @@ Every check therefore reaches the front within one rotation, which is what keeps
 - `offset` the confirmed Bot API update offset; `seen/<update_id>.json` duplicate-suppression markers
 - `inbox/<request_id>.json` accepted messages awaiting handling; `context/<request_id>.json` per-request conversation context
 - `outbox/<request_id>.json` dry-run previews and unsent replies preserved for retry
+- `reply/<request_id>.txt` the staged body of a reply, published before anything is sent
 - `publish/<task-id>.json` armed publish confirmations; `limits.json`, `recovery.json`, `poll.error` bookkeeping
 - `announce/<request_id>.json` how often a stranded inbox entry has been re-announced
 
-`seen/` and `context/` records are pruned after `FM_TELEGRAM_RETENTION_SECS` (default seven days, capped at thirty).
+`seen/`, `context/`, `outbox/` and `reply/` records are pruned after `FM_TELEGRAM_RETENTION_SECS` (default seven days, capped at thirty).
 An `announce/` record is retained differently: it bounds one inbox entry, so it is dropped when that entry is drained rather than on a timer, which is what keeps a spent budget from silently resetting.
-Each prune also removes publication temporaries orphaned by a killed write (`.<name>.fm-private.*`, older than ten minutes); `bin/fm-tg-pair.sh revoke` removes them with no age floor, so the message content it reports as gone really is.
+Each prune also removes publication temporaries orphaned by a killed write - `.<name>.fm-private.*`, `.fm-tg-meta.*`, `.fm-generated.*`, and the legacy `.fm-x.*`, all older than ten minutes; `bin/fm-tg-pair.sh revoke` removes them with no age floor, so the message content it reports as gone really is.
+
+The prune runs inside the poll's own check budget, so it is bounded work rather than proportional to what the home has retained.
+A duplicate-suppression marker whose update id is already below the confirmed offset is retired by NAME, with no read of the file, because Telegram has deleted that update and the marker's only job - covering the crash window between processing and offset confirmation - is over.
+Everything else ages by mtime, and the whole pass stops after `FMTG_PRUNE_MAX` files (default 100).
+One poll admits at most 25 updates, so that budget drains faster than the fastest possible growth while each cycle stays well inside the reserve; retention is eventual, not per-cycle.
+
+Every deletion in the bridge - revoke, re-pair, context, publish, outbox, reply staging, pruning, and bootstrap opt-out - goes through the same validated directory/device/link boundary that publication enforces.
+A bridge directory that is a symlink, has the wrong mode, or sits on another device is refused rather than followed, so cleanup can never reach outside bridge state.
 
 ### Inbound delivery
 
@@ -460,6 +478,32 @@ It is deliberately kept in the inbox rather than discarded: it still counts in `
 The poll runs as one watcher check under `timeout $FM_CHECK_TIMEOUT`, and a killed check produces no output at all - which the sweep cannot distinguish from "nothing to report".
 The long poll is therefore bounded by that budget and not only by its own ceiling: the watcher passes the effective budget down, the `curl` deadline sits five seconds inside it, and the long poll itself ends five seconds before that.
 `FM_TELEGRAM_POLL_TIMEOUT` above what the budget allows is lowered rather than honored, so at the default `FM_CHECK_TIMEOUT` of 30 the usable long poll is 20 seconds; raising the poll timeout past that requires raising `FM_CHECK_TIMEOUT` too.
+
+### The publish gate and landing
+
+A message from the paired person authorizes preparing a change and showing a preview.
+It never authorizes publishing that change, and that rule is enforced by the code that lands work rather than by instructions alone.
+
+`bin/fm-tg-task.sh arm-publish` records the prepared revision and prints a one-time code to include in the preview.
+Both `arm-publish` and `confirm-publish` resolve that revision themselves with `git rev-parse HEAD` in the task's own recorded worktree, so neither end takes a revision from its caller and "they approved what they actually saw" is checkable rather than trusted.
+`confirm-publish` accepts only a reply carrying the matching code while the prepared revision is still exactly what was previewed.
+
+`bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` then refuse to land any task carrying a Telegram link unless a live confirmation exists for exactly the revision they are really about to land.
+The pull-request path uses the forge's own recorded `pr_head`, and the local path resolves the branch tip itself; a revision that cannot be resolved refuses rather than merging something unverified.
+Absent, unconsumed, expired, moved, wrong-project, wrong-target, and already-used authorizations all refuse, and the authorization is consumed before the merge runs, so one approval can never land twice.
+A task with no Telegram link is unaffected and merges exactly as it did before the bridge existed.
+
+### Replies
+
+`bin/fm-tg-reply.sh` reads the reply body from stdin and stages it as a private artifact under `state/telegram/reply/` before anything is sent.
+It takes no path argument: a generic path-to-Telegram primitive would let the one capability that reaches a person outside the fleet be pointed at `.env`, a captain-private record, or an unrelated project, and prose in an agent skill is not a capability boundary.
+
+Every send also requires an authenticated, still-open request.
+The request id must name a message this home really accepted from the currently pinned peer, proven by the context record `bin/fm-tg-poll.sh` writes for accepted messages and for nothing else; an invented id is refused.
+A request whose recorded chat is no longer the pinned peer is refused, a request already closed by a final reply is refused, and with `--task` the task's own project must equal the pinned project, so the outbound path checks scope exactly as the inbound task operations do.
+
+Delivery progress must become durable before the next chunk is sent.
+If a chunk is accepted by Telegram but the progress record cannot be written, delivery is reported as AMBIGUOUS rather than as preserved for retry, because a retry from a stale counter would repeat a message the person already received.
 
 The budget belongs to the check, not to a request, and one check can issue more than one call - a code redeemed inside the poll is answered with a pairing confirmation in the same cycle.
 Each call therefore gets what is *left* of the budget rather than a fresh full-length deadline, and the long poll is shortened by whatever the prune already spent, so the sum of a cycle's requests still lands before the kill.
@@ -490,7 +534,7 @@ Before the first send the whole plan is written to `outbox/<request_id>.json`, a
 ### Publishing needs a second, matching confirmation
 
 A message authorizes preparing and previewing a change, never making it public.
-`bin/fm-tg-task.sh arm-publish <task-id> --head <rev>` records the exact prepared revision and prints a one-time code to include in the preview; `confirm-publish <task-id> --head <rev> --message-file <path>` accepts only a reply carrying that code while the prepared revision is still the one previewed.
+`bin/fm-tg-task.sh arm-publish <task-id>` records the exact prepared revision and prints a one-time code to include in the preview; `confirm-publish <task-id> --message-file <path>` accepts only a reply carrying that code while the prepared revision is still the one previewed. Both resolve that revision from the task's own worktree rather than from an argument.
 The reply is read from a file and only the code alphabet is scanned out of it, so no other part of that untrusted text is interpreted.
 A confirmation is refused when it is late, guessed, replayed, over its attempt budget, or aimed at a preview that has since been rebuilt; the script's `--help` owns the exact exit codes.
 
@@ -533,7 +577,7 @@ FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operatio
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
-FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
+FM_CHECK_INTERVAL=300   # seconds between slow checks; unset, the watcher derives 30 from an armed always-on channel shim and 300 otherwise
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
@@ -543,7 +587,7 @@ FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies a
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct X client invocations; bootstrap still checks $FM_HOME/.env
 FM_TELEGRAM_BOT_TOKEN=  # Telegram bridge bot token; .env opt-in, never printed, never copied out of .env
-FM_TELEGRAM_API_URL=https://api.telegram.org   # optional Bot API base override, mainly for a local Bot API server
+FM_TELEGRAM_API_URL=https://api.telegram.org   # token-bearing origin; only this endpoint or an explicit loopback address (local Bot API server) is accepted, anything else falls back to the default
 FM_TELEGRAM_ENV_FILE=   # optional alternate .env file for direct bridge invocations; bootstrap still checks $FM_HOME/.env
 FM_TELEGRAM_DRY_RUN=    # preview replies without sending; same truthiness rule as FMX_DRY_RUN
 FM_TELEGRAM_POLL_TIMEOUT=20   # seconds a getUpdates long poll is held open (clamped to 0-45, and further to FM_CHECK_TIMEOUT minus 10 so the watcher never kills the poll)
@@ -553,11 +597,13 @@ FM_TELEGRAM_MAX_TEXT=4096     # inbound bound; a longer message is recorded as o
 FM_TELEGRAM_RATE_MAX=60       # accepted messages per window before the bridge drops and reports once
 FM_TELEGRAM_RATE_WINDOW=3600  # seconds in that accept window
 FM_TELEGRAM_PAIR_TTL=900      # pairing offer lifetime in seconds (clamped to 30-3600)
-FM_TELEGRAM_PAIR_ATTEMPTS=5   # guesses allowed per pairing offer and per publish confirmation (clamped to 1-20)
+FM_TELEGRAM_PAIR_ATTEMPTS=5   # guesses allowed PER NUMERIC SENDER on one pairing offer (clamped to 1-20)
+FM_TELEGRAM_PAIR_SENDERS=20   # distinct senders one offer will track before refusing new ones
+FM_TELEGRAM_PUBLISH_ATTEMPTS=5  # confirmation scans allowed per armed publish record (clamped to 1-20)
 FM_TELEGRAM_PUBLISH_TTL=86400 # publish confirmation lifetime in seconds
 FM_TELEGRAM_RECOVERY_SECS=300 # age at which a still-pending message is re-announced, at most once per window
 FM_TELEGRAM_RECOVERY_MAX=3    # re-announcements one stranded message may ever cause before a single telegram-error retires it (clamped to 1-20)
-FM_TELEGRAM_RETENTION_SECS=604800  # retention for seen and per-request context records (capped at 30 days)
+FM_TELEGRAM_RETENTION_SECS=604800  # retention for seen, context, outbox and staged-reply records (capped at 30 days)
 FMX_DRY_RUN=            # truthy previews X replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
