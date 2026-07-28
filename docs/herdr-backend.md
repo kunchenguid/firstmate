@@ -271,6 +271,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 ```sh
 tests/fm-backend-herdr.test.sh
 tests/fm-backend-herdr-smoke.test.sh
+tests/fm-backend-herdr-schema-probe.test.sh
 tests/fm-backend-herdr-prune-safety-e2e.test.sh
 tests/fm-backend-herdr-respawn-idem-e2e.test.sh
 tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
