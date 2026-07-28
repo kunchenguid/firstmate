@@ -252,7 +252,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 It contains one decimal integer from 1 through 64 and is not inherited by secondmate homes.
 Every ordinary task metadata record occupies one slot until guarded teardown removes it, including terminal, parked, ambiguous, and captain-gated lanes.
 An absent file leaves section 7's no-arbitrary-cap rule and any explicit captain-recorded capacity in force.
-An unreadable, empty, non-integer, or out-of-range file blocks refill without authorizing cleanup or mutation of an existing lane.
+An unreadable, empty, non-integer, or out-of-range file blocks refill but does not block guarded closeout or grant authority beyond the existing landing and teardown guards.
 The capacity file provides only a bound; `AGENTS.md` section 8 owns the primary-agent lifecycle transaction, including work selection and launch.
 
 ## Toolchain

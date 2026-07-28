@@ -354,6 +354,7 @@ Handle actionable wakes as follows:
 Every mutable wake is one complete closeout-and-refill transaction before the next wait or turn boundary.
 Reconcile every terminal ordinary task, and when a routine ship is green or locally ready with `yolo=on`, select its existing guarded landing owner by metadata mode: `bin/fm-merge-local.sh` for `local-only`, or `bin/fm-pr-merge.sh` for `no-mistakes` and `direct-PR`; preserve every gated, ambiguous, parked, or security-sensitive lane.
 Run `bin/fm-teardown.sh` only after landing is confirmed, and treat a refusal as preservation of that lane rather than authority to bypass the guard.
+Count every ordinary `state/*.meta` lane as occupied until safe teardown removes it, including terminal, parked, ambiguous, and captain-gated lanes.
 After every successful teardown, update the backlog and launch dependency-cleared and date-eligible ready work through the normal intake and `bin/fm-spawn.sh` path until the applicable configured or captain-recorded capacity is full.
 When no explicit capacity applies, preserve section 7's no-arbitrary-cap rule.
 

@@ -111,7 +111,7 @@ The smallest current carry is commit `9d45f011cd17b45d4ed4d0f99ecd75bc0c4b2cdf`,
 It makes every mutable primary wake own one closeout-and-refill transaction, preserves read-only and ambiguous lanes, uses the existing guarded landing and teardown owners, and fails refill closed when an optional local capacity source is invalid.
 It does not add a coordinator, daemon, teardown implementation, migration, or runtime-backend mechanism.
 Per Firstmate's 2026-07-27 decision `[key=upstream-closeout-refill]` under the captain's pure-upstream rule, this commit is a temporary local carry required by the fleet and a queued upstream proposal, not a permanent fork delta.
-The clean contribution shape is a fresh topic from current upstream with this dependency-free commit plus the end-to-end regression, followed by the current changed-path and full validation gates.
+The clean contribution shape is a fresh topic from current canonical upstream proposed back to canonical upstream, never to the old fork `main`, with this dependency-free commit plus the end-to-end regression followed by the current changed-path and full validation gates.
 
 Focused verification commands:
 
@@ -122,9 +122,7 @@ bin/fm-test-run.sh \
   tests/fm-documentation-audiences.test.sh
 bin/fm-doc-audience-check.sh
 bin/fm-lint.sh
-git show 152b0fd:tests/fm-direct-lifecycle.test.sh |
-  sed '15s@.*@. "$PWD/tests/lib.sh"@' |
-  bash -s
+bin/fm-test-run.sh tests/fm-direct-lifecycle.test.sh
 ```
 
 Observed results:
@@ -136,11 +134,11 @@ ok - all instruction-owner tests passed
 ok - all documentation-audience tests passed
 fm-doc-audience-check: ok surfaces=55 local_links=151
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
-ok - routine PR work lands, cleans, and visibly refills in the same transaction
-ok - local-only work uses its guarded owner and refills configured capacity
-ok - unlanded work is preserved
-ok - captain-gated completed work is preserved
-ok - all direct lifecycle tests passed
+ok - routine PR work lands on default, cleans safely, and visibly refills in one transaction
+ok - local-only yolo work uses its guarded owner and refills to configured capacity
+ok - unlanded work fails closed and remains recoverable
+ok - captain-gated completed work remains parked without merge or cleanup
+# all direct lifecycle tests passed
 ```
 
 ## Watcher continuity
