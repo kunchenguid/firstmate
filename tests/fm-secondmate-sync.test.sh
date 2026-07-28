@@ -315,6 +315,9 @@ SH
   chmod +x "$fakebin/tmux"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-} ${2:-}" = "auth status" ]; then
+  printf 'success\tfake-user\tkeyring\t\n'
+fi
 exit 0
 SH
   chmod +x "$fakebin/gh"
