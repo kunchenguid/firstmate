@@ -812,11 +812,41 @@ test_scout_foreign_worktree_refuses_without_touching_owner() {
   pass "scout teardown refuses a recycled worktree without touching the live owner"
 }
 
-test_scout_own_worktree_skips_landed_work_check() {
+test_scout_worktree_gets_ordinary_unlanded_work_check() {
   local case_dir rc
   case_dir=$(make_case scout-own-scratch)
   write_meta "$case_dir" no-mistakes scout
   wt_commit_file "$case_dir" scratch.txt scratch "scratch scout work"
+  printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/data/task-x1"
+  printf '%s\n' '# Scout report' > "$case_dir/data/task-x1/report.md"
+  add_compatible_tasks_axi "$case_dir"
+  add_lifecycle_call_logs "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "scout-own-scratch: a scout worktree should get the ordinary unlanded-work check"
+  assert_grep "has work not on any remote and not landed" "$case_dir/stderr" \
+    "scout-own-scratch: refusal did not report the unlanded work"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "scout-own-scratch: refusal returned a worktree holding unlanded work"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "scout-own-scratch: teardown deleted metadata after refusing"
+  pass "a scout worktree is not exempt from the ordinary dirty and unlanded-work checks"
+}
+
+# A real scout works detached and never runs `git checkout -b`, so fm/<id> does
+# not exist and ownership cannot be proven either way. That must not dead-end at
+# --force: the content checks decide, and a scout holding nothing tears down.
+test_scout_detached_without_task_branch_allows() {
+  local case_dir rc
+  case_dir=$(make_case scout-detached-no-branch)
+  write_meta "$case_dir" no-mistakes scout
+  git -C "$case_dir/wt" checkout --detach -q
+  git -C "$case_dir/project" branch -D fm/task-x1 >/dev/null
   printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$case_dir/state/task-x1.meta"
   mkdir -p "$case_dir/data/task-x1"
   printf '%s\n' '# Scout report' > "$case_dir/data/task-x1/report.md"
@@ -827,9 +857,11 @@ test_scout_own_worktree_skips_landed_work_check() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "scout-own-scratch: teardown should skip landed-work checks for the scout's own scratch branch"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "scout-own-scratch: teardown printed a REFUSED line"
-  pass "scout teardown still skips landed-work checks after ownership is verified"
+  expect_code 0 "$rc" "scout-detached-no-branch: a detached scout with no task branch should still tear down"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "scout-detached-no-branch: teardown printed a REFUSED line"
+  [ -f "$case_dir/data/task-x1/report.md" ] \
+    || fail "scout-detached-no-branch: teardown removed the scout's durable record"
+  pass "a detached scout with no fm/<id> branch is decided by content, not dead-ended at --force"
 }
 
 test_scout_absent_worktree_allows_metadata_cleanup() {
@@ -905,8 +937,8 @@ test_never_branched_worktree_with_foreign_content_refuses() {
   head_after=$(git -C "$case_dir/wt" rev-parse HEAD)
 
   expect_code 1 "$rc" "never-branched-foreign: teardown should refuse a detached worktree holding foreign commits"
-  assert_grep "expected branch tip: <missing>" "$case_dir/stderr" \
-    "never-branched-foreign: refusal did not report the missing expected branch"
+  assert_grep "has work not on any remote and not landed" "$case_dir/stderr" \
+    "never-branched-foreign: refusal did not report the unlanded work it protected"
   [ "$head_after" = "$head_before" ] \
     || fail "never-branched-foreign: refusal changed the live owner's HEAD"
   [ ! -s "$case_dir/treehouse.log" ] \
@@ -932,15 +964,53 @@ test_never_branched_dirty_worktree_refuses() {
   set -e
 
   expect_code 1 "$rc" "never-branched-dirty: teardown should refuse a dirty never-branched worktree"
-  assert_grep "does not belong to task task-x1" "$case_dir/stderr" \
-    "never-branched-dirty: refusal did not report the failed ownership proof"
+  assert_grep "has uncommitted changes" "$case_dir/stderr" \
+    "never-branched-dirty: refusal did not name the uncommitted changes as the cause"
+  assert_grep "Commit them" "$case_dir/stderr" \
+    "never-branched-dirty: refusal did not offer the non-destructive remedy"
+  assert_not_contains "$(cat "$case_dir/stderr")" "does not belong to task" \
+    "never-branched-dirty: refusal blamed a foreign owner for this task's own uncommitted work"
   [ -f "$case_dir/wt/live.txt" ] \
     || fail "never-branched-dirty: refusal discarded the uncommitted work"
   [ ! -s "$case_dir/treehouse.log" ] \
     || fail "never-branched-dirty: refusal attempted to return the worktree"
   [ -f "$case_dir/state/task-x1.meta" ] \
     || fail "never-branched-dirty: teardown deleted metadata after refusing"
-  pass "a dirty never-branched worktree is not the no-work state and still refuses"
+  pass "a dirty never-branched worktree refuses by naming the uncommitted work, not a foreign owner"
+}
+
+# A never-branched worktree cannot prove ownership, so its verdict comes from the
+# content checks - and those must keep their stale-lock recovery instead of
+# reporting an index.lock as a failed ownership proof.
+test_never_branched_worktree_lock_blocked_uses_stale_lock_recovery() {
+  local case_dir rc lock
+  case_dir=$(make_case never-branched-lock-blocked)
+  write_meta "$case_dir" no-mistakes ship
+  git -C "$case_dir/wt" checkout --detach -q
+  git -C "$case_dir/project" branch -D fm/task-x1 >/dev/null
+
+  add_lock_aware_treehouse "$case_dir"
+  add_lsof_no_holder "$case_dir"
+  add_git_status_lock_failure "$case_dir"
+
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  set +e
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "never-branched-lock-blocked: teardown should recover through the stale-lock path"
+  assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
+    "never-branched-lock-blocked: teardown did not reach the stale-lock recovery"
+  assert_not_contains "$(cat "$case_dir/stderr")" "does not belong to task" \
+    "never-branched-lock-blocked: a lock-blocked status read was reported as a failed ownership proof"
+  assert_absent "$lock" "never-branched-lock-blocked: stale lock file should have been removed"
+  pass "an index.lock on a never-branched worktree routes to stale-lock recovery, not a wrong-owner refusal"
 }
 
 test_local_only_fork_remote_allows() {
@@ -2279,11 +2349,13 @@ test_detached_head_not_at_expected_branch_tip_refuses
 test_force_overrides_absent_worktree_refusal
 test_secondmate_carveout_skips_worktree_ownership_check
 test_scout_foreign_worktree_refuses_without_touching_owner
-test_scout_own_worktree_skips_landed_work_check
+test_scout_worktree_gets_ordinary_unlanded_work_check
+test_scout_detached_without_task_branch_allows
 test_scout_absent_worktree_allows_metadata_cleanup
 test_never_branched_worktree_allows_without_force
 test_never_branched_worktree_with_foreign_content_refuses
 test_never_branched_dirty_worktree_refuses
+test_never_branched_worktree_lock_blocked_uses_stale_lock_recovery
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present

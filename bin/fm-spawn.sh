@@ -1612,12 +1612,14 @@ META_WINDOW=$T
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
-  # The branch this task owns its worktree through: the brief's mandatory first
-  # action is `git checkout -b fm/<id>`, so that is the branch fm-teardown must
-  # find before it returns the worktree. Recorded explicitly (rather than
-  # re-derived from the task id) so a future dispatch onto a different branch has
-  # one place to say so; teardown still falls back to fm/<id> for older metadata.
-  [ "$KIND" = secondmate ] || echo "resume_branch=fm/$ID"
+  # The branch a ship task owns its worktree through: the ship brief's mandatory
+  # first action is `git checkout -b fm/<id>`, so that is the branch fm-teardown
+  # can hold the worktree to. Recorded explicitly (rather than re-derived from the
+  # task id) so a future dispatch onto a different branch has one place to say so;
+  # teardown still falls back to fm/<id> for older metadata. Scouts and
+  # secondmates are excluded because neither contract creates a branch: a scout
+  # works detached on scratch it discards, and a secondmate has no worktree.
+  [ "$KIND" != ship ] || echo "resume_branch=fm/$ID"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"

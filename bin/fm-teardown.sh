@@ -23,24 +23,28 @@
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
 # Before non-force cleanup of a task worktree, teardown verifies the recorded
-# worktree is inspectable and owned by this task's recorded branch. A missing,
-# empty, or foreign worktree refuses and preserves metadata rather than treating
-# an uninspectable landed-work check as safe. The owning branch is resume_branch=
-# from meta (written by fm-spawn) with fm/<task-id> as the fallback for metadata
-# written before that key existed. When that branch does not exist at all - a
-# pool worktree whose crewmate never ran `git checkout -b` - ownership is instead
-# proven by the documented no-work state: a clean tree detached at or behind the
-# project's default branch, which holds nothing to protect. Anything else refuses.
+# worktree is inspectable and, when that can be decided at all, that it is not
+# owned by someone else. A missing or empty path refuses and preserves metadata
+# rather than treating an uninspectable landed-work check as safe. The owning
+# branch is resume_branch= from meta (written by fm-spawn for ship tasks) with
+# fm/<task-id> as the fallback for metadata written before that key existed. When
+# that branch exists, the worktree must be on it, or detached at exactly its tip;
+# any other branch or detached commit is a proven foreign owner and refuses. When
+# it does not exist at all - a scout, which works detached by contract, or a
+# crewmate that died before `git checkout -b` - nothing can be proven foreign, so
+# the verdict is left to the ordinary dirty, unpushed, unmerged, and landed-work
+# checks below, which protect this task's own work and any recycled lane's alike.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
-# Scout tasks (kind=scout in meta) carve out of that check: their worktree is
-# declared scratch and the report at data/<task-id>/report.md is the work
-# product. Teardown proceeds only once the report exists and the shared
-# unresolved-decision completion gate verifies its captain-held inventory. A
-# scout still has to prove worktree ownership before a pooled worktree is
-# returned, but only when that worktree is actually there: an already-absent
-# scout path has no live lane to destroy and no durable record to lose.
+# Scout tasks (kind=scout in meta) get those same worktree checks: a scout
+# worktree is a real pool lane whose contents can be another task's, so it is not
+# exempt from dirty or unlanded-work refusals. Teardown proceeds only once the
+# report at data/<task-id>/report.md exists and the shared unresolved-decision
+# completion gate verifies its captain-held inventory. An already-absent scout
+# path is the one carve-out: there is no worktree to return and no live lane to
+# destroy, and the report teardown never touches is the durable record, so
+# refusing there would only dead-end metadata cleanup.
 # Before destructive cleanup, teardown validates task check artifacts and any
 # matching quarantine entries as ordinary single-link files on the state
 # device. It refuses and preserves task state when that proof fails; otherwise
@@ -599,30 +603,6 @@ inspectable_git_worktree() {
   git -C "$top" rev-parse --git-dir >/dev/null 2>&1
 }
 
-# firstmate's own worktree-resident artifacts (the settings shim and the harness
-# turn-end markers) are never crewmate work, so they never count as dirty.
-worktree_dirty_line() {
-  printf '%s\n' "$1" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true
-}
-
-# A pool worktree whose crewmate never ran `git checkout -b fm/<id>` is still in
-# its documented starting state: a clean tree at a detached HEAD already contained
-# in the project's default branch. That provably holds no task work, so it stands
-# in for the ownership proof when the expected branch does not exist at all. A
-# detached HEAD carrying content of its own is not this state and still has to
-# match the expected branch tip.
-worktree_holds_no_task_work() {
-  local head=$1 dirty_raw name ref
-  dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null) || return 1
-  [ -z "$(worktree_dirty_line "$dirty_raw")" ] || return 1
-  name=$(default_branch) || return 1
-  for ref in "refs/remotes/origin/$name" "refs/heads/$name"; do
-    git -C "$WT" rev-parse --quiet --verify "$ref" >/dev/null 2>&1 || continue
-    git -C "$WT" merge-base --is-ancestor "$head" "$ref" 2>/dev/null && return 0
-  done
-  return 1
-}
-
 require_recorded_worktree_ownership() {
   local expected found recorded_path head expected_head
   # The memo is load-bearing, not just a cache: validate_worktree_teardown_safety
@@ -642,6 +622,17 @@ require_recorded_worktree_ownership() {
     return 1
   fi
 
+  # No expected branch means no ref to compare against: a scout works detached by
+  # contract and never creates one, and a ship crewmate can die before its first
+  # `git checkout -b`. Nothing here can be proven foreign, and refusing would push
+  # both of those ordinary states to --force, so the verdict is left to the dirty,
+  # unpushed, unmerged, and landed-work checks that follow. They refuse on content
+  # rather than identity, which protects this task's own work and a recycled
+  # lane's work alike. Ownership stays unverified, so the post-cleanup recheck
+  # re-derives the same answer instead of inheriting an unproven pass.
+  expected_head=$(git -C "$WT" rev-parse --verify "$expected^{commit}" 2>/dev/null || true)
+  [ -n "$expected_head" ] || return 0
+
   found=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   if [ -z "$found" ]; then
     head=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null || true)
@@ -651,16 +642,9 @@ require_recorded_worktree_ownership() {
       echo "Cannot verify that the recorded worktree belongs to this task; preserving $META." >&2
       return 1
     fi
-    expected_head=$(git -C "$WT" rev-parse --verify "$expected^{commit}" 2>/dev/null || true)
-    if [ -n "$expected_head" ]; then
-      if [ "$head" = "$expected_head" ]; then
-        TEARDOWN_WORKTREE_OWNERSHIP_VERIFIED=1
-        TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$expected
-        return 0
-      fi
-    elif worktree_holds_no_task_work "$head"; then
+    if [ "$head" = "$expected_head" ]; then
       TEARDOWN_WORKTREE_OWNERSHIP_VERIFIED=1
-      TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=HEAD
+      TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$expected
       return 0
     fi
     found=HEAD
@@ -673,9 +657,7 @@ require_recorded_worktree_ownership() {
     echo "expected branch: $expected" >&2
     if [ "$found" = HEAD ]; then
       echo "found commit: $head" >&2
-      echo "expected branch tip: ${expected_head:-<missing>}" >&2
-      [ -n "$expected_head" ] || \
-        echo "The expected branch does not exist and this detached worktree is not in the clean, no-work state a never-branched task leaves behind." >&2
+      echo "expected branch tip: $expected_head" >&2
     fi
     echo "Correct $META to point at the task's real worktree, or get the captain's explicit OK to discard, then --force." >&2
     return 1
@@ -852,15 +834,18 @@ validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
+    # A secondmate "worktree" is a seeded firstmate home - a plain directory
+    # carrying a .fm-secondmate-home marker, not a git worktree - so every git -C
+    # check below fails and fail-safes to REFUSED, which would make secondmate
+    # teardown impossible. Its own validate-and-remove path owns that case.
     secondmate) return 0 ;;
-    # A scout's durable record is data/<id>/report.md, which teardown never
-    # touches, so an already-absent scout worktree has nothing to return and no
-    # live lane to destroy. A scout worktree that IS there still has to prove
-    # ownership before it is returned.
+    # A scout worktree is a real pool lane and gets the same checks as any other,
+    # but an already-absent one has nothing to return and no live lane to destroy,
+    # and the scout's durable record is data/<id>/report.md, which teardown never
+    # touches. Refusing there would only dead-end metadata cleanup.
     scout) [ -d "$WT" ] || return 0 ;;
   esac
   require_recorded_worktree_ownership || return 1
-  [ "$KIND" != scout ] || return 0
 
   if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
@@ -870,7 +855,7 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(worktree_dirty_line "$dirty_raw")
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -1566,7 +1551,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # TEARDOWN_WORKTREE_OWNERSHIP_VERIFIED memo set by the pre-cleanup run is what
   # keeps it from refusing a legitimate return as a foreign worktree.
   post_lock_cleanup_check=
-  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
+  if [ "$FORCE" != "--force" ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
   teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
