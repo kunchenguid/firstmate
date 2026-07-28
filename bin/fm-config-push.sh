@@ -25,9 +25,6 @@ Push the primary firstmate home's declared inherited local material into each
 live secondmate home.
 
 This is local-material-only:
-  - includes crew-dispatch.json, crew-harness, backlog-backend, backend,
-    herdr-presentation-spaces, and data/captain-shared.md
-  - preserves a deliberate per-home backend override and reports it as skipped
   - does not fast-forward tracked files
   - after successful config/* changes, writes a generation-specific
     literal-content reread instruction and sends its pointer to that live secondmate

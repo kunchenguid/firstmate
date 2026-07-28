@@ -19,8 +19,7 @@
 #      dispatch profiles, backlog backend, runtime-backend default, and Herdr
 #      presentation opt-in inherit the primary's settings. It is primary-authoritative
 #      (re-pushed at secondmate spawn, on the bootstrap secondmate sweep, and by
-#      config push), except that backend provenance preserves a deliberate
-#      per-home backend override.
+#      config push).
 #      config/secondmate-harness is deliberately NOT inherited (secondmates do
 #      not spawn secondmates). After a successful push that changes allowlisted
 #      config under an already-running home, a literal-content reread instruction
@@ -193,7 +192,7 @@ SH
 # B) propagate_inheritable_config unit behavior
 # ===========================================================================
 test_propagate_lib() {
-  local d src dest home m1 m2 p1 p2 outside stdout stderr guard_repo err_text report
+  local d src dest home m1 m2 outside stdout stderr guard_repo err_text
   d="$TMP_ROOT/prop-lib"
   src="$d/src"
   home="$d/home1"
@@ -216,30 +215,12 @@ test_propagate_lib() {
   [ "$(cat "$dest/backlog-backend")" = manual ] || fail "backlog-backend not propagated"
   [ "$(cat "$dest/backend")" = tmux ] || fail "backend not propagated"
   [ -f "$dest/herdr-presentation-spaces" ] || fail "herdr-presentation-spaces not propagated"
-  cmp -s "$src/backend" "$home/state/.fm-inherited-backend" \
-    || fail "backend last-inherited provenance not recorded byte-exact"
   printf 'herdr\n' > "$dest/backend"
-  report="$d/backend-override.report"
-  FM_CONFIG_INHERIT_REPORT="$report" propagate_inheritable_config "$src" "$dest" 2>"$d/backend-override.err"
-  [ "$(cat "$dest/backend")" = herdr ] || fail "deliberate backend override was not preserved"
-  assert_contains "$(cat "$report")" $'backend\tskipped\tpreserving deliberate local override' \
-    "backend override preservation was not inspectably reported"
-  assert_contains "$(cat "$d/backend-override.err")" "skipped backend" \
-    "backend override preservation did not emit a warning"
-  printf 'zellij\n' > "$src/backend"
-  printf 'zellij\n' > "$dest/backend"
-  : > "$report"
-  FM_CONFIG_INHERIT_REPORT="$report" propagate_inheritable_config "$src" "$dest" 2>"$d/backend-coincident.err"
-  assert_contains "$(cat "$report")" $'backend\tskipped\tpreserving deliberate local override' \
-    "a deliberate override equal to the new primary bytes lost its provenance distinction"
-  [ "$(cat "$home/state/.fm-inherited-backend")" = tmux ] \
-    || fail "coincident primary bytes replaced last-inherited provenance"
-  printf 'tmux\n' > "$src/backend"
-  printf 'tmux\n' > "$dest/backend"
+  propagate_inheritable_config "$src" "$dest"
+  [ "$(cat "$dest/backend")" = tmux ] || fail "primary backend did not overwrite a divergent destination"
 
   # 2. idempotent: an unchanged re-run does not churn the mtime
   m1=$(date -r "$dest/crew-harness" +%s 2>/dev/null || stat -c %Y "$dest/crew-harness")
-  p1=$(date -r "$home/state/.fm-inherited-backend" +%s 2>/dev/null || stat -c %Y "$home/state/.fm-inherited-backend")
   sleep 1
   stdout="$d/unchanged.out"
   stderr="$d/unchanged.err"
@@ -247,9 +228,7 @@ test_propagate_lib() {
   [ ! -s "$stdout" ] || fail "unchanged propagation wrote to stdout"
   [ ! -s "$stderr" ] || fail "unchanged propagation wrote to stderr"
   m2=$(date -r "$dest/crew-harness" +%s 2>/dev/null || stat -c %Y "$dest/crew-harness")
-  p2=$(date -r "$home/state/.fm-inherited-backend" +%s 2>/dev/null || stat -c %Y "$home/state/.fm-inherited-backend")
   [ "$m1" = "$m2" ] || fail "idempotent re-run churned mtime ($m1 -> $m2)"
-  [ "$p1" = "$p2" ] || fail "idempotent re-run churned backend provenance mtime ($p1 -> $p2)"
 
   # 3. a changed source value converges downstream
   printf '{"default":{"harness":"claude"}}\n' > "$src/crew-dispatch.json"
@@ -273,6 +252,7 @@ test_propagate_lib() {
   [ "$(cat "$outside")" = outside ] || fail "destination symlink target was overwritten"
 
   # 4. removing the source mirrors absence downstream (primary-authoritative)
+  printf 'herdr\n' > "$dest/backend"
   rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/backlog-backend" \
     "$src/backend" "$src/herdr-presentation-spaces"
   propagate_inheritable_config "$src" "$dest"
@@ -1127,8 +1107,7 @@ test_bootstrap_sweep_no_inheritance_is_noop() {
   pass "B10 bootstrap sweep with no inherited config is a config no-op and still fast-forwards"
 }
 
-# config/backend: inherited state converges exactly, while deliberate local
-# overrides are preserved and inspectably reported.
+# config/backend: present and absent primary state converges exactly.
 test_backend_inheritance_present_and_absent() {
   local w head out err status instruction
   w=$(new_world backend-inherit)
@@ -1144,37 +1123,24 @@ test_backend_inheritance_present_and_absent() {
   instruction=$(reread_instruction_path "$w/sm") || fail "backend present reread instruction missing"
   assert_contains "$(cat "$instruction")" $'-----BEGIN config/backend-----\ntmux\n-----END config/backend-----' \
     "backend present reread must include exact bytes"
-  cmp -s "$w/home/config/backend" "$w/sm/state/.fm-inherited-backend" \
-    || fail "backend present push did not record byte-exact provenance"
 
   printf 'herdr\n' > "$w/sm/config/backend"
   printf 'zellij\n' > "$w/home/config/backend"
   out=$(run_config_push "$w" 2>"$err"); status=$?
   expect_code 0 "$status" "backend changed push should succeed"
-  assert_contains "$out" "backend: skipped - preserving deliberate local override" \
-    "deliberate backend override should report a preservation skip"
-  [ "$(cat "$w/sm/config/backend")" = herdr ] \
-    || fail "deliberate backend override was overwritten"
-  assert_not_contains "$out" "config-reread: sent" \
-    "preserved backend override should not trigger a reread"
+  assert_contains "$out" "backend: pushed" "backend changed value should report pushed"
+  [ "$(cat "$w/sm/config/backend")" = zellij ] \
+    || fail "primary backend did not overwrite the divergent destination"
 
   rm -f "$w/home/config/backend"
   out=$(run_config_push "$w" 2>"$err"); status=$?
   expect_code 0 "$status" "backend absence push should succeed"
-  assert_contains "$out" "backend: skipped - preserving deliberate local override" \
-    "primary absence should preserve and report a deliberate backend override"
-  [ "$(cat "$w/sm/config/backend")" = herdr ] \
-    || fail "deliberate backend override was removed on primary absence"
-
-  printf 'tmux\n' > "$w/sm/config/backend"
-  out=$(run_config_push "$w" 2>"$err"); status=$?
-  expect_code 0 "$status" "inherited backend absence push should succeed"
-  assert_contains "$out" "backend: pushed - mirrored primary absence" "inherited backend should mirror primary absence"
-  [ -e "$w/sm/config/backend" ] && fail "inherited backend not removed on primary absence"
+  assert_contains "$out" "backend: pushed - mirrored primary absence" "backend should mirror primary absence"
+  [ -e "$w/sm/config/backend" ] && fail "backend not removed on primary absence"
   instruction=$(reread_instruction_path "$w/sm") || fail "backend absence reread instruction missing"
   assert_contains "$(cat "$instruction")" $'-----BEGIN config/backend-----\nABSENT\n-----END config/backend-----' \
     "backend absence reread must use ABSENT token"
-  pass "B12b backend inheritance: inherited bytes converge and deliberate per-home overrides are preserved"
+  pass "B12b backend inheritance: present values and primary absence converge exactly"
 }
 
 test_bootstrap_sweep_surfaces_config_propagation_failure() {

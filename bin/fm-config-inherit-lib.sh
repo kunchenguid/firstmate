@@ -22,9 +22,6 @@
 # (bin/fm-config-push.sh). It is PRIMARY-AUTHORITATIVE: the primary's value wins
 # and is re-pushed on every convergence, so the fleet stays converged on the
 # primary; an item the primary does not set is mirrored as absence downstream.
-# config/backend is the one deliberate exception: private last-inherited-byte
-# provenance distinguishes inherited state, which converges, from a per-home
-# local override, which is preserved.
 # After successful config/* changes under an already-running secondmate, callers
 # invoke fm_config_send_reread_nudge so the live agent re-reads exact post-write
 # bytes (spawn/respawn already re-reads at launch and needs no redundant nudge).
@@ -105,24 +102,6 @@ copy_inheritable_file() {
   return 1
 }
 
-copy_inherited_backend_provenance() {
-  local src=$1 provenance=$2 parent tmp
-  parent=${provenance%/*}
-  [ -n "$parent" ] && [ "$parent" != "$provenance" ] || return 1
-  if [ -e "$parent" ] || [ -L "$parent" ]; then
-    [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
-  else
-    mkdir -p "$parent" 2>/dev/null || return 1
-  fi
-  [ ! -L "$provenance" ] || return 1
-  [ ! -e "$provenance" ] || [ -f "$provenance" ] || return 1
-  tmp=$(umask 077; mktemp "$parent/.fm-inherited-backend.XXXXXX" 2>/dev/null) || return 1
-  if ! cat "$src" > "$tmp" || ! chmod 0600 "$tmp" 2>/dev/null || ! mv -f "$tmp" "$provenance" 2>/dev/null; then
-    rm -f "$tmp" 2>/dev/null || true
-    return 1
-  fi
-}
-
 destination_allows_inherited_item() {
   local dest_config=$1 item=$2 dest_parent dest_name dest_parent_abs top dest_path rel_path
   dest_parent=${dest_config%/*}
@@ -166,10 +145,6 @@ record_inheritable_config_result() {
 
 inheritable_config_skip_reason() {
   printf '%s' "destination does not allow inherited item (not gitignored or guard failed)"
-}
-
-inherited_backend_override_reason() {
-  printf '%s' "preserving deliberate local override"
 }
 
 warn_inheritable_config_skip() {
@@ -415,107 +390,6 @@ propagate_secondmate_inheritance() {
   return "$rc"
 }
 
-propagate_inherited_backend() {
-  local src_config=$1 dest_config=$2 src dest dest_home provenance reason
-  src="$src_config/backend"
-  dest="$dest_config/backend"
-  dest_home=${dest_config%/config}
-  [ -n "$dest_home" ] && [ "$dest_home" != "$dest_config" ] || return 1
-  provenance="$dest_home/state/.fm-inherited-backend"
-
-  if [ -f "$src" ]; then
-    if ! destination_allows_inherited_item "$dest_config" backend; then
-      reason=$(inheritable_config_skip_reason)
-      warn_inheritable_config_skip backend "$dest_config" "$reason"
-      record_inheritable_config_result backend skipped "$reason"
-      return 0
-    fi
-    if [ -f "$dest" ] && [ ! -L "$dest" ]; then
-      if [ -f "$provenance" ] && [ ! -L "$provenance" ]; then
-        if ! cmp -s "$dest" "$provenance"; then
-          reason=$(inherited_backend_override_reason)
-          warn_inheritable_config_skip backend "$dest_config" "$reason"
-          record_inheritable_config_result backend skipped "$reason"
-          return 0
-        fi
-      elif ! cmp -s "$dest" "$src"; then
-        reason=$(inherited_backend_override_reason)
-        warn_inheritable_config_skip backend "$dest_config" "$reason"
-        record_inheritable_config_result backend skipped "$reason"
-        return 0
-      fi
-    elif [ -e "$dest" ] || [ -L "$dest" ]; then
-      reason="failed to copy"
-      warn_inheritable_config_error backend "$dest" "$reason"
-      record_inheritable_config_result backend error "$reason"
-      return 1
-    fi
-
-    if [ -f "$dest" ] && [ ! -L "$dest" ] && cmp -s "$src" "$dest"; then
-      if [ -f "$provenance" ] && [ ! -L "$provenance" ] && cmp -s "$src" "$provenance"; then
-        record_inheritable_config_result backend unchanged ""
-        return 0
-      fi
-      if copy_inherited_backend_provenance "$src" "$provenance"; then
-        record_inheritable_config_result backend unchanged ""
-        return 0
-      fi
-      reason="failed to record inherited provenance"
-      warn_inheritable_config_error backend "$provenance" "$reason"
-      record_inheritable_config_result backend error "$reason"
-      return 1
-    fi
-    if copy_inheritable_file "$src" "$dest" && copy_inherited_backend_provenance "$src" "$provenance"; then
-      record_inheritable_config_result backend pushed ""
-      return 0
-    fi
-    reason="failed to copy or record inherited provenance"
-    warn_inheritable_config_error backend "$dest" "$reason"
-    record_inheritable_config_result backend error "$reason"
-    return 1
-  fi
-
-  if [ -f "$dest" ] && [ ! -L "$dest" ]; then
-    if [ ! -f "$provenance" ] || [ -L "$provenance" ] || ! cmp -s "$dest" "$provenance"; then
-      reason=$(inherited_backend_override_reason)
-      warn_inheritable_config_skip backend "$dest_config" "$reason"
-      record_inheritable_config_result backend skipped "$reason"
-      return 0
-    fi
-    if ! destination_allows_inherited_item "$dest_config" backend; then
-      reason=$(inheritable_config_skip_reason)
-      warn_inheritable_config_skip backend "$dest_config" "$reason"
-      record_inheritable_config_result backend skipped "$reason"
-      return 0
-    fi
-    if rm -f "$dest" "$provenance" 2>/dev/null; then
-      record_inheritable_config_result backend pushed "mirrored primary absence"
-      return 0
-    fi
-    reason="failed to remove"
-    warn_inheritable_config_error backend "$dest" "$reason"
-    record_inheritable_config_result backend error "$reason"
-    return 1
-  fi
-  if [ -e "$dest" ] || [ -L "$dest" ]; then
-    reason="failed to remove"
-    warn_inheritable_config_error backend "$dest" "$reason"
-    record_inheritable_config_result backend error "$reason"
-    return 1
-  fi
-  if [ -e "$provenance" ] || [ -L "$provenance" ]; then
-    if [ -f "$provenance" ] && [ ! -L "$provenance" ] && rm -f "$provenance" 2>/dev/null; then
-      record_inheritable_config_result backend unchanged ""
-      return 0
-    fi
-    reason="failed to remove inherited provenance"
-    warn_inheritable_config_error backend "$provenance" "$reason"
-    record_inheritable_config_result backend error "$reason"
-    return 1
-  fi
-  record_inheritable_config_result backend unchanged ""
-}
-
 propagate_inheritable_config() {
   local src_config=$1 dest_config=$2 item src dest reason rc
   [ -n "$src_config" ] || return 1
@@ -527,10 +401,6 @@ propagate_inheritable_config() {
     esac
     src="$src_config/$item"
     dest="$dest_config/$item"
-    if [ "$item" = backend ]; then
-      propagate_inherited_backend "$src_config" "$dest_config" || rc=1
-      continue
-    fi
     if [ -f "$src" ]; then
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
         reason=$(inheritable_config_skip_reason)
