@@ -65,7 +65,9 @@ if [ "${1:-}" = status ]; then
       sleep 120
       exit 0
     fi
-    cat "$FM_FAKE_TREEHOUSE_STATUS_BY_DIR/$(basename "$PWD")"
+    slow=$(sed -n 's/^FM_FAKE_TREEHOUSE_SLOW //p' "$FM_FAKE_TREEHOUSE_STATUS_BY_DIR/$(basename "$PWD")")
+    [ -z "$slow" ] || sleep "$slow"
+    grep -v '^FM_FAKE_TREEHOUSE_SLOW ' "$FM_FAKE_TREEHOUSE_STATUS_BY_DIR/$(basename "$PWD")" || true
   elif [ -n "${FM_FAKE_TREEHOUSE_STATUS_FILE:-}" ]; then
     cat "$FM_FAKE_TREEHOUSE_STATUS_FILE"
   fi
@@ -670,8 +672,10 @@ test_treehouse_dirty_idle_slot_audit_sweeps_project_pools() {
 }
 
 # The sweep forks `treehouse status` per clone on the always-executed detect path,
-# so one hung or lock-blocked pool must degrade to a partial, labelled report
-# instead of wedging session start.
+# so one hung or lock-blocked pool must degrade to a partial report instead of
+# wedging session start. The audit is advisory and changes nothing, so hitting the
+# bound must stay SILENT - a read-only sweep that reports its own incompleteness
+# would put a permanent actionable line in front of the captain forever.
 test_treehouse_dirty_idle_slot_audit_is_bounded() {
   local case_dir root home fakebin by_dir root_slot out start elapsed
   case_dir="$TMP_ROOT/treehouse-dirty-audit-timeout"
@@ -697,10 +701,69 @@ test_treehouse_dirty_idle_slot_audit_is_bounded() {
 
   assert_contains "$out" "TREEHOUSE_POOL: dirty idle slot 1 at $root_slot" \
     "a bounded audit must still relay the findings it completed"
-  assert_contains "$out" "TREEHOUSE_POOL: skipped: pool audit timed out (timeout=2s" \
-    "a hung pool must produce a labelled timeout skip line"
+  assert_not_contains "$out" "timed out" \
+    "an advisory read-only sweep must degrade quietly, not print a timeout diagnostic"
   [ "$elapsed" -lt 20 ] || fail "bounded audit took ${elapsed}s; the hung pool was not cut off"
-  pass "bootstrap: the dirty idle treehouse slot audit is bounded and reports partial findings"
+  pass "bootstrap: the dirty idle treehouse slot audit is bounded and degrades silently to partial findings"
+}
+
+# One `treehouse status` against a real pool costs SECONDS and the sweep forks it
+# per repo, so a small fixed default bound is a bound on the wrong quantity: it
+# would cut a perfectly healthy sweep short at every session start and silently
+# drop its findings. Pin that the default is generous enough for a pool that takes
+# well over ten seconds to answer.
+test_treehouse_dirty_idle_slot_audit_default_bound_tolerates_a_slow_pool() {
+  local case_dir root home fakebin by_dir slow_slot out
+  case_dir="$TMP_ROOT/treehouse-audit-default-bound"
+  root="$case_dir/root"
+  home="$case_dir/home"
+  slow_slot="$case_dir/slow-dirty-slot"
+  mkdir -p "$root" "$home/config" "$slow_slot"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  by_dir="$case_dir/status-by-dir"
+  mkdir -p "$by_dir"
+  printf 'FM_FAKE_TREEHOUSE_SLOW 12\n1     dirty        %s\n' "$slow_slot" > "$by_dir/root"
+
+  # FM_TREEHOUSE_AUDIT_TIMEOUT deliberately unset: this exercises the DEFAULT.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_FAKE_TREEHOUSE_STATUS_BY_DIR="$by_dir" \
+    "$ROOT/bin/fm-bootstrap.sh")
+
+  assert_contains "$out" "TREEHOUSE_POOL: dirty idle slot 1 at $slow_slot" \
+    "the default audit bound must be generous enough for a pool that answers slowly"
+  pass "bootstrap: the default pool-audit bound tolerates a slow but healthy pool"
+}
+
+# The audit is only meaningful for a backend whose worktrees ARE treehouse pool
+# slots. Orca owns its own worktrees, so an orca home with treehouse merely
+# installed must not fork `treehouse status` per clone at every session start -
+# the same resolved-backend rule the treehouse lease-support check follows.
+test_treehouse_dirty_idle_slot_audit_follows_resolved_backend() {
+  local case_dir root home fakebin status_file calls dirty_slot out
+  case_dir="$TMP_ROOT/treehouse-dirty-audit-orca"
+  root="$case_dir/root"
+  home="$case_dir/home"
+  dirty_slot="$case_dir/dirty-slot"
+  mkdir -p "$root" "$home/config" "$dirty_slot"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' orca > "$home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" orca
+  status_file="$case_dir/treehouse-status.txt"
+  calls="$case_dir/treehouse-calls.txt"
+  printf '1     dirty        %s\n' "$dirty_slot" > "$status_file"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_FAKE_TREEHOUSE_STATUS_FILE="$status_file" FM_FAKE_TREEHOUSE_CALLS="$calls" \
+    "$ROOT/bin/fm-bootstrap.sh")
+
+  assert_not_contains "$out" "TREEHOUSE_POOL:" "backend=orca must not run a treehouse pool audit"
+  assert_no_grep "status" "$calls" "backend=orca must not fork treehouse status at session start"
+  pass "bootstrap: the dirty idle pool audit follows the resolved backend's worktree provider"
 }
 
 # A zero bound is the operator turning this advisory sweep off. It must go quiet,
@@ -982,6 +1045,8 @@ test_treehouse_lease_check_follows_resolved_backend
 test_treehouse_dirty_idle_slot_audit_reports_read_only
 test_treehouse_dirty_idle_slot_audit_sweeps_project_pools
 test_treehouse_dirty_idle_slot_audit_is_bounded
+test_treehouse_dirty_idle_slot_audit_default_bound_tolerates_a_slow_pool
+test_treehouse_dirty_idle_slot_audit_follows_resolved_backend
 test_treehouse_dirty_idle_slot_audit_zero_timeout_disables_it
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets

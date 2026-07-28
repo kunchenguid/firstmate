@@ -870,6 +870,51 @@ test_dirty_worktree_refuses() {
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
 }
 
+# A treehouse pool slot legitimately carries an untracked root treehouse.toml (its
+# local treehouse config), and bin/fm-pool-lib.sh owns that exemption. Spawn already
+# leases such a slot, so teardown must judge it by the SAME predicate - otherwise
+# every task on that slot refuses at teardown, `treehouse return` never runs, and
+# the pool leaks a leased slot per task until someone passes --force.
+test_lone_pool_treehouse_toml_is_not_dirty() {
+  local case_dir rc
+  case_dir=$(make_case pool-toml)
+  write_meta "$case_dir" no-mistakes ship
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  printf 'slots = 4\n' > "$case_dir/wt/treehouse.toml"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "pool-toml: a lone untracked pool treehouse.toml must not read as dirty"$'\n'"$(cat "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "pool-toml: teardown refused a slot spawn already accepted"
+  pass "teardown shares the pool predicate's lone treehouse.toml exemption"
+}
+
+# The exemption is for that ONE file only: any other untracked or modified entry
+# alongside it is still real uncommitted work and must still refuse.
+test_treehouse_toml_plus_real_dirt_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_case pool-toml-dirty)
+  write_meta "$case_dir" no-mistakes ship
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  printf 'slots = 4\n' > "$case_dir/wt/treehouse.toml"
+  printf '%s\n' "unlanded work" > "$case_dir/wt/WIP.md"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "pool-toml-dirty: real dirt beside treehouse.toml must still refuse"
+  grep -q "uncommitted changes" "$case_dir/stderr" \
+    || fail "pool-toml-dirty: refusal did not cite uncommitted changes"
+  pass "teardown still refuses real dirt sitting beside a pool treehouse.toml"
+}
+
 test_gh_error_and_content_absent_refuses() {
   local case_dir rc
   case_dir=$(make_case gh-error)
@@ -1393,6 +1438,8 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_lone_pool_treehouse_toml_is_not_dirty
+test_treehouse_toml_plus_real_dirt_still_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses

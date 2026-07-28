@@ -50,9 +50,8 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Investigate the reason because that secondmate is not guaranteed live.
 - `TREEHOUSE_POOL: dirty idle slot <n> at <path> - inspect before cleanup; no changes made` - treehouse reports an idle, owner-less dirty slot that will not be handed out or pruned.
   Do not auto-clean it; inspect for unlanded WIP and use the normal teardown or human discard decision path.
-- `TREEHOUSE_POOL: skipped: pool audit timed out (timeout=<n>s elapsed=<n>s)` - the read-only pool sweep hit its bound, so the slot findings above it are partial and some pool went unchecked.
-  Nothing was changed and dispatch is unaffected; inspect the slow clone's pool by hand (`treehouse status` inside it) before trusting a clean audit, and raise `FM_TREEHOUSE_AUDIT_TIMEOUT` only when a large fleet legitimately needs longer.
-  Set `FM_TREEHOUSE_AUDIT_TIMEOUT=0` to turn this advisory sweep off entirely and silently; never set it to a bound too small to finish, which would make this line a permanent false alarm.
+  The audit runs only under a backend that uses treehouse for worktrees, and it never reports its own timeouts: exceeding `FM_TREEHOUSE_AUDIT_TIMEOUT` (default: 30s per swept pool, minimum 60s) is a silent skip that relays whatever findings completed, because an advisory sweep that changed nothing must not become a permanent startup warning.
+  So a session with no `TREEHOUSE_POOL:` line proves nothing was found OR that the sweep did not finish; when a clean audit matters, run `treehouse status` inside the pool by hand. Set `FM_TREEHOUSE_AUDIT_TIMEOUT=0` to turn the sweep off entirely.
 - `NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>` - the secondmate sweep fast-forwarded a running secondmate home and its loaded instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) changed, but the deterministic `fm-send.sh fm-<id>` re-read nudge failed.
   Inspect the reason, keep the pending marker under `state/.secondmate-nudge-pending/` intact, and rerun session start after the endpoint or metadata issue is fixed so bootstrap can retry the exact same marked send.
 - `FMX: X mode on ...` / `FMX: X mode off ...` - bootstrap confirmed or removed the local X-mode poll artifacts (`docs/configuration.md` "X mode (.env)").

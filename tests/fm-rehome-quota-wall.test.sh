@@ -163,6 +163,28 @@ test_dirty_worktree_refuses_without_override() {
   pass "rehome refuses dirty uncommitted work unless explicitly overridden"
 }
 
+# A pool slot legitimately carries an untracked root treehouse.toml (its local
+# treehouse config), and bin/fm-pool-lib.sh is the one owner of that exemption:
+# spawn already leases such a slot, so rehome must not refuse the same slot and
+# force an operator into --force-dirty over the pool's own config file.
+test_lone_pool_treehouse_toml_is_not_dirty() {
+  local rec out status
+  rec=$(make_case pooltoml task-pooltoml)
+  read_case "$rec"
+  printf 'slots = 4\n' > "$WT_DIR/treehouse.toml"
+
+  set +e
+  out=$(run_rehome "$HOME_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$TMUX_LOG" "$OLD_EXISTS" \
+    task-pooltoml --harness claude)
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "a lone untracked pool treehouse.toml must not read as dirty"$'\n'"$out"
+  assert_not_contains "$out" "REFUSED: worktree" "rehome must not refuse a slot spawn already accepted"
+  assert_present "$WT_DIR/treehouse.toml" "rehome must preserve the pool's treehouse.toml"
+  pass "rehome shares the pool predicate's lone treehouse.toml exemption"
+}
+
 test_dispatch_profile_requires_approval_flag() {
   local rec out status
   rec=$(make_case dispatch task-dispatch)
@@ -254,6 +276,7 @@ test_alive_old_endpoint_refuses_duplicate_owner() {
 
 test_rehome_reuses_task_identity_and_worktree
 test_dirty_worktree_refuses_without_override
+test_lone_pool_treehouse_toml_is_not_dirty
 test_dispatch_profile_requires_approval_flag
 test_opposite_harness_constraint_refuses_same_harness
 test_codex_rehome_substitutes_mcp_flag

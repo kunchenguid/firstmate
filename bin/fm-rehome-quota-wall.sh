@@ -29,6 +29,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-harness-launch-lib.sh"
 # shellcheck source=bin/fm-capacity-lib.sh
 . "$SCRIPT_DIR/fm-capacity-lib.sh"
+# shellcheck source=bin/fm-pool-lib.sh
+. "$SCRIPT_DIR/fm-pool-lib.sh"
 
 usage() {
   sed -n '2,18p' "$0" >&2
@@ -108,7 +110,9 @@ WT_TOP_REAL=$(cd "$WT_TOP" && pwd -P)
 [ "$WT_REAL" = "$WT_TOP_REAL" ] || { echo "error: recorded worktree is not its git top-level: $WT" >&2; exit 1; }
 
 DIRTY_RAW=$(git -C "$WT" status --porcelain)
-DIRTY=$(printf '%s\n' "$DIRTY_RAW" | grep -vE '^[?][?] (\.claude/|\.opencode/|\.fm-grok-turnend$)' | head -1 || true)
+DIRTY=$(printf '%s\n' "$DIRTY_RAW" \
+  | grep -vE '^[?][?] (\.claude/|\.opencode/|\.fm-grok-turnend$)' \
+  | fm_pool_ignorable_porcelain_filter | head -1 || true)
 if [ -n "$DIRTY" ] && [ "$FORCE_DIRTY" -ne 1 ]; then
   echo "REFUSED: worktree $WT has uncommitted changes; commit/stash them or rerun with --force-dirty." >&2
   printf '%s\n' "$DIRTY_RAW" >&2

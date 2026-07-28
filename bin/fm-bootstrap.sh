@@ -18,7 +18,6 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed: <reason>",
 #                 "TREEHOUSE_POOL: dirty idle slot <n> at <path> - inspect before cleanup; no changes made",
-#                 "TREEHOUSE_POOL: skipped: pool audit timed out (timeout=<n>s elapsed=<n>s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...",
 #                 "INTAKE: intake mode on ..." or "INTAKE: intake mode off ...".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
@@ -77,15 +76,17 @@
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
 #          The treehouse dirty-idle-slot audit is read-only and reports only
 #          abandoned dirty slots that treehouse will not hand out or prune. It
-#          sweeps the firstmate repo's pool AND every registered project clone
-#          that is a git repo, reporting each slot path once. The whole sweep is
-#          bounded by FM_TREEHOUSE_AUDIT_TIMEOUT when it is a non-empty numeric
-#          override, and by 10s otherwise (non-numeric values fall back to 10s);
-#          a timed-out sweep relays its completed findings and then prints
-#          "TREEHOUSE_POOL: skipped: pool audit timed out (timeout=<n>s
-#          elapsed=<n>s)" rather than wedging session start.
-#          FM_TREEHOUSE_AUDIT_TIMEOUT=0 turns this advisory sweep off entirely
-#          and prints nothing, rather than timing it out on every session start.
+#          runs only when the RESOLVED backend uses treehouse for worktrees (so
+#          never under orca), and sweeps the firstmate repo's pool AND every
+#          registered project clone that is a git repo, reporting each slot path
+#          once. The whole sweep is bounded by FM_TREEHOUSE_AUDIT_TIMEOUT when it
+#          is a non-empty numeric override, and otherwise by a generous default
+#          that scales with the number of pools swept (30s each, minimum 60s;
+#          non-numeric values fall back to that default). Because the audit is
+#          advisory and changes nothing, exceeding the bound is a SILENT skip: the
+#          sweep relays whatever findings it completed and prints no timeout line,
+#          rather than wedging session start or raising a permanent warning.
+#          FM_TREEHOUSE_AUDIT_TIMEOUT=0 turns this advisory sweep off entirely.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
 #          x_mode_setup, intake_mode_setup, fleet_sync) while still printing
@@ -280,37 +281,60 @@ treehouse_audit_scan_pools() {
   done
 }
 
+treehouse_audit_pool_count() {
+  local count proj
+  count=1
+  [ -d "$PROJECTS" ] || { echo "$count"; return 0; }
+  for proj in "$PROJECTS"/*; do
+    [ -d "$proj" ] || continue
+    git -C "$proj" rev-parse --git-dir >/dev/null 2>&1 || continue
+    count=$((count + 1))
+  done
+  echo "$count"
+}
+
+# One `treehouse status` against a real pool costs seconds, and the sweep forks it
+# once per repo, so a fixed whole-sweep bound is a bound on the WRONG quantity: on
+# any fleet with a few clones it fires on a healthy pool. Scale it with the number
+# of pools actually swept, generously, so hitting it means something is genuinely
+# wedged rather than merely normal.
 treehouse_audit_timeout() {
+  local count timeout
   case "${FM_TREEHOUSE_AUDIT_TIMEOUT:-}" in
-    ''|*[!0-9]*) echo 10 ;;
-    *) echo "$FM_TREEHOUSE_AUDIT_TIMEOUT" ;;
+    ''|*[!0-9]*) ;;
+    *) echo "$FM_TREEHOUSE_AUDIT_TIMEOUT"; return 0 ;;
   esac
+  count=$(treehouse_audit_pool_count)
+  timeout=$((30 * count))
+  [ "$timeout" -ge 60 ] || timeout=60
+  echo "$timeout"
 }
 
 treehouse_dirty_idle_slot_audit() {
+  # This sweep is only meaningful for a backend whose worktrees ARE treehouse pool
+  # slots. Orca owns its own worktrees, so an orca home with treehouse merely
+  # installed must not pay a `treehouse status` fork per clone at every session
+  # start for pools dispatch never leases - the same resolved-backend reasoning the
+  # treehouse lease-support check follows.
+  fm_backend_list_contains "$TOOLS" treehouse || return 0
   command -v treehouse >/dev/null 2>&1 || return 0
   # The sweep forks `treehouse status` once per registered clone and runs on the
   # always-executed detect path, including the read-only FM_BOOTSTRAP_DETECT_ONLY
   # session start, so a hung or lock-blocked provider must never wedge startup.
-  # Bound it the same way fleet_sync is bounded: run it as one background job,
-  # relay whatever it completed, and say so when the bound was hit. A missing
-  # TREEHOUSE_POOL line is far cheaper than a stalled session start.
+  # Bound it the same way fleet_sync is bounded: run it as one background job and
+  # relay whatever it completed. A missing TREEHOUSE_POOL line is far cheaper than
+  # a stalled session start.
   local tmp timeout
   timeout=$(treehouse_audit_timeout)
-  # A zero bound would kill the sweep before it could read anything and then
-  # print a timed-out TREEHOUSE_POOL line - an actionable diagnostic - on every
-  # session start forever. Read it as the opt-out it plainly is: this advisory
-  # sweep is the one thing here with no bound worth reporting, so skip it and
-  # stay silent instead of raising a permanent false alarm.
+  # A zero bound is the operator turning this advisory sweep off; skip it rather
+  # than kill the sweep before it can read anything.
   [ "$timeout" -gt 0 ] || return 0
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-treehouse-audit.XXXXXX" 2>/dev/null) || return 0
-  if ! bootstrap_run_bounded "$tmp" "$timeout" 0.2 treehouse_audit_scan_pools; then
-    bootstrap_relay_all_output "$tmp"
-    echo "TREEHOUSE_POOL: skipped: pool audit timed out (timeout=${timeout}s elapsed=${BOOTSTRAP_BOUNDED_ELAPSED}s)"
-    rm -f "$tmp"
-    return 0
-  fi
-
+  # Exceeding the bound is NOT itself actionable: nothing was changed, dispatch is
+  # unaffected, and a read-only advisory audit that reports its own incompleteness
+  # would put a permanent startup warning in front of the captain for a sweep they
+  # never asked for. Degrade quietly to the partial findings instead.
+  bootstrap_run_bounded "$tmp" "$timeout" 0.2 treehouse_audit_scan_pools || true
   bootstrap_relay_all_output "$tmp"
   rm -f "$tmp"
 }
