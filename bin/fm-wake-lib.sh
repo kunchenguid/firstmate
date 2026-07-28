@@ -9,6 +9,10 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+# Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
+# confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
+# the platform (Git Bash/MSYS) that already pays the highest fork price.
+FM_UNAME="${FM_UNAME:-$(uname 2>/dev/null || echo unknown)}"
 mkdir -p "$STATE"
 
 fm_current_pid() {
@@ -48,7 +52,7 @@ fm_pid_identity() {
     cmdline_hex=$(od -An -v -tx1 "$proc_root/$pid/cmdline" 2>/dev/null | tr -d '[:space:]') || return 1
     [ -n "$cmdline_hex" ] || return 1
     identity_key=proc-starttime
-    [ "$(uname)" != Linux ] || identity_key=linux-starttime
+    [ "$FM_UNAME" != Linux ] || identity_key=linux-starttime
     printf '%s=%s cmdline-hex=%s\n' "$identity_key" "$starttime" "$cmdline_hex"
     return 0
   fi
@@ -61,7 +65,7 @@ fm_pid_identity() {
 }
 
 fm_path_mtime() {
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$FM_UNAME" = Darwin ]; then
     stat -f %m "$1" 2>/dev/null
   else
     stat -c %Y "$1" 2>/dev/null
