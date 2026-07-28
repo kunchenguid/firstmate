@@ -30,7 +30,8 @@
     "docs/herdr-backend.md",
     "docs/zellij-backend.md",
     "docs/orca-backend.md",
-    "docs/cmux-backend.md"
+    "docs/cmux-backend.md",
+    "docs/remote-access.md"
   ],
   "requiredOwnerPointers": [
     {
@@ -100,6 +101,10 @@
     {
       "source": "docs/codex-app-backend.md",
       "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/remote-access.md",
+      "target": "docs/verification/remote-access.md"
     }
   ],
   "surfaces": [
@@ -260,6 +265,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/remote-access.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/scripts.md",
       "audience": "operator-current"
     },
@@ -302,6 +311,10 @@
     {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/verification/remote-access.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/runtime-backends.md",
