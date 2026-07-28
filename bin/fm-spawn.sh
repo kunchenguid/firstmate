@@ -1612,6 +1612,12 @@ META_WINDOW=$T
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
+  # The branch this task owns its worktree through: the brief's mandatory first
+  # action is `git checkout -b fm/<id>`, so that is the branch fm-teardown must
+  # find before it returns the worktree. Recorded explicitly (rather than
+  # re-derived from the task id) so a future dispatch onto a different branch has
+  # one place to say so; teardown still falls back to fm/<id> for older metadata.
+  [ "$KIND" = secondmate ] || echo "resume_branch=fm/$ID"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"

@@ -832,6 +832,117 @@ test_scout_own_worktree_skips_landed_work_check() {
   pass "scout teardown still skips landed-work checks after ownership is verified"
 }
 
+test_scout_absent_worktree_allows_metadata_cleanup() {
+  local case_dir rc missing
+  case_dir=$(make_case scout-absent-worktree)
+  missing="$case_dir/missing-wt"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$missing" \
+    "project=$case_dir/project" \
+    "kind=scout" \
+    "mode=no-mistakes" \
+    "decisions_reviewed=1" \
+    "decision_keys="
+  mkdir -p "$case_dir/data/task-x1"
+  printf '%s\n' '# Scout report' > "$case_dir/data/task-x1/report.md"
+  add_compatible_tasks_axi "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "scout-absent-worktree: teardown should proceed when there is no scout worktree to return"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "scout-absent-worktree: teardown printed a REFUSED line"
+  [ -f "$case_dir/data/task-x1/report.md" ] \
+    || fail "scout-absent-worktree: teardown removed the scout's durable record"
+  [ ! -f "$case_dir/state/task-x1.meta" ] \
+    || fail "scout-absent-worktree: teardown left task metadata behind"
+  pass "an already-absent scout worktree has nothing to return, so ownership does not gate cleanup"
+}
+
+# A crewmate that died before `git checkout -b fm/<id>` leaves the pool worktree in
+# its documented starting state: clean and detached on the default branch, with no
+# fm/<id> ref to prove ownership from. That holds no work, so teardown must return
+# it without normalizing the operator toward --force.
+test_never_branched_worktree_allows_without_force() {
+  local case_dir rc
+  case_dir=$(make_case never-branched-pristine)
+  write_meta "$case_dir" no-mistakes ship
+  git -C "$case_dir/wt" checkout --detach -q
+  git -C "$case_dir/project" branch -D fm/task-x1 >/dev/null
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "never-branched-pristine: teardown should accept a pristine never-branched worktree"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "never-branched-pristine: teardown printed a REFUSED line"
+  [ ! -f "$case_dir/state/task-x1.meta" ] \
+    || fail "never-branched-pristine: teardown left task metadata behind"
+  pass "a never-branched worktree at the default branch tears down without --force"
+}
+
+test_never_branched_worktree_with_foreign_content_refuses() {
+  local case_dir rc head_before head_after
+  case_dir=$(make_case never-branched-foreign)
+  write_meta "$case_dir" no-mistakes ship
+  git -C "$case_dir/wt" checkout -q -b fm/live-owner
+  wt_commit_file "$case_dir" live.txt owner "live owner commit"
+  git -C "$case_dir/wt" checkout --detach -q
+  git -C "$case_dir/project" branch -D fm/task-x1 >/dev/null
+  add_lifecycle_call_logs "$case_dir"
+
+  head_before=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  head_after=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  expect_code 1 "$rc" "never-branched-foreign: teardown should refuse a detached worktree holding foreign commits"
+  assert_grep "expected branch tip: <missing>" "$case_dir/stderr" \
+    "never-branched-foreign: refusal did not report the missing expected branch"
+  [ "$head_after" = "$head_before" ] \
+    || fail "never-branched-foreign: refusal changed the live owner's HEAD"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "never-branched-foreign: refusal attempted to return the live owner's worktree"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "never-branched-foreign: teardown deleted metadata after refusing"
+  pass "a missing expected branch does not excuse a detached worktree holding work that is not ours"
+}
+
+test_never_branched_dirty_worktree_refuses() {
+  local case_dir rc
+  case_dir=$(make_case never-branched-dirty)
+  write_meta "$case_dir" no-mistakes ship
+  git -C "$case_dir/wt" checkout --detach -q
+  git -C "$case_dir/project" branch -D fm/task-x1 >/dev/null
+  printf '%s\n' "uncommitted work" > "$case_dir/wt/live.txt"
+  git -C "$case_dir/wt" add -- live.txt
+  add_lifecycle_call_logs "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "never-branched-dirty: teardown should refuse a dirty never-branched worktree"
+  assert_grep "does not belong to task task-x1" "$case_dir/stderr" \
+    "never-branched-dirty: refusal did not report the failed ownership proof"
+  [ -f "$case_dir/wt/live.txt" ] \
+    || fail "never-branched-dirty: refusal discarded the uncommitted work"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "never-branched-dirty: refusal attempted to return the worktree"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "never-branched-dirty: teardown deleted metadata after refusing"
+  pass "a dirty never-branched worktree is not the no-work state and still refuses"
+}
+
 test_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
@@ -2169,6 +2280,10 @@ test_force_overrides_absent_worktree_refusal
 test_secondmate_carveout_skips_worktree_ownership_check
 test_scout_foreign_worktree_refuses_without_touching_owner
 test_scout_own_worktree_skips_landed_work_check
+test_scout_absent_worktree_allows_metadata_cleanup
+test_never_branched_worktree_allows_without_force
+test_never_branched_worktree_with_foreign_content_refuses
+test_never_branched_dirty_worktree_refuses
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
