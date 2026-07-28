@@ -204,6 +204,26 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
 
+test_browser_tool_routing_allows_authenticated_session_override() {
+  local home kind id brief
+  home="$TMP_ROOT/browser-routing-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-browser-routing-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations." "$brief" \
+      "$kind brief did not retain chrome-devtools-axi as the browser default"
+    assert_grep "Machine-level routing policy may override the browser-tool default for authenticated or account sessions." "$brief" \
+      "$kind brief did not allow machine-level authenticated-browser routing"
+  done
+  pass "fm-brief.sh: ship and scout briefs allow machine-level authenticated-browser routing"
+}
+
 test_secondmate_no_projects_charter() {
   local home brief status
   home="$TMP_ROOT/no-projects-home"
@@ -391,6 +411,7 @@ test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
+test_browser_tool_routing_allows_authenticated_session_override
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
