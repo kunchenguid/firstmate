@@ -105,10 +105,13 @@ test_zero_active_zellij_crews_close_existing_supervisor_tab() {
 }
 
 test_lifecycle_hooks_invoke_reconciler() {
+  # shellcheck disable=SC2016 # The $FM_ROOT/$SCRIPT_DIR references are literal text in the hook scripts.
   assert_grep '"$FM_ROOT/bin/fm-supervisor-panes.sh" >/dev/null 2>&1 || true' "$ROOT/bin/fm-spawn.sh" \
     "fm-spawn should reconcile the supervisor tab after a successful spawn"
+  # shellcheck disable=SC2016 # The $FM_ROOT reference is literal text in the hook script.
   assert_grep '"$FM_ROOT/bin/fm-supervisor-panes.sh" >/dev/null 2>&1 || true' "$ROOT/bin/fm-teardown.sh" \
     "fm-teardown should reconcile the supervisor tab after teardown"
+  # shellcheck disable=SC2016 # The $SCRIPT_DIR reference is literal text in the hook script.
   assert_grep '"$SCRIPT_DIR/fm-supervisor-panes.sh" >/dev/null 2>&1 || true' "$ROOT/bin/fm-session-start.sh" \
     "fm-session-start should reconcile the supervisor tab on the locked path"
   pass "lifecycle hooks invoke the zellij supervisor reconciler"
@@ -139,7 +142,7 @@ SH
 }
 
 run_pane_loop_briefly() {  # <bin> <state> <state-refresh-secs> <state-calls> <peek-calls> [render]
-  local bin=$1 state=$2 state_refresh=$3 state_calls=$4 peek_calls=$5 render=${6:-/dev/null} pid i
+  local bin=$1 state=$2 state_refresh=$3 state_calls=$4 peek_calls=$5 render=${6:-/dev/null} pid
   : > "$state_calls"
   : > "$peek_calls"
   [ "$render" = /dev/null ] || : > "$render"
@@ -155,7 +158,7 @@ run_pane_loop_briefly() {  # <bin> <state> <state-refresh-secs> <state-calls> <p
   pid=$!
   sleep 3
   rm -f "$state/alpha.meta"
-  for i in 1 2 3 4 5; do
+  for _ in 1 2 3 4 5; do
     kill -0 "$pid" 2>/dev/null || break
     sleep 1
   done
