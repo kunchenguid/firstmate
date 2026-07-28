@@ -393,6 +393,7 @@ test_codex_wiring() {
   [ -n "$command" ] || fail "codex PreToolUse must invoke fm-cd-pretool-check.sh"
   assert_contains "$command" 'pwd -P' "codex cd hook must anchor from the hook process working directory"
   assert_contains "$command" 'fm-cd-pretool-check.sh' "codex cd hook must invoke the cd-guard"
+  assert_contains "$command" 'fm-codex-hook-dispatch.sh' "codex cd hook must use the bounded stdin dispatcher"
   jq -e '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-arm-pretool-check.sh"))] | length == 1' "$settings" >/dev/null \
     || fail "codex cd hook must not displace the watcher-arm hook"
   pass ".codex/hooks.json: PreToolUse invokes the cd-guard alongside the arm guard"

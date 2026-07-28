@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Acquire or inspect the per-home firstmate session lock.
-# Writes the harness (agent) process PID found by walking the shell's ancestry,
-# which lives as long as the firstmate session - unlike the transient subshell
-# PID of any one tool call, which is dead moments after it is written.
+# Writes the harness identity found by walking the shell's ancestry.
+# API-hosted Codex sessions may hide that process ancestry, so the shared
+# identity owner falls back to CODEX_THREAD_ID.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -29,7 +29,17 @@ if [ "${1:-}" = "status" ]; then
     echo "lock: unreadable"
     exit 0
   }
-  if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  if fm_harness_pid_alive "$old"; then
+    case "$old" in
+      codex-thread:*) echo "lock: held by current codex thread ${old#codex-thread:}" ;;
+      *) echo "lock: held by live harness pid $old" ;;
+    esac
+  else
+    case "$old" in
+      codex-thread:*) echo "lock: stale (codex thread ${old#codex-thread:} is not this session)" ;;
+      *) echo "lock: stale (pid $old dead or not a harness)" ;;
+    esac
+  fi
   exit 0
 fi
 
@@ -84,4 +94,7 @@ if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
   exit 1
 fi
 release_claim_lock
-echo "lock acquired: harness pid $me"
+case "$me" in
+  codex-thread:*) echo "lock acquired: codex thread ${me#codex-thread:}" ;;
+  *) echo "lock acquired: harness pid $me" ;;
+esac

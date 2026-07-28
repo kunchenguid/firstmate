@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Shared session-lock harness identity.
 #
-# ONE owner of the "which verified-harness process holds this home's session
-# lock, and does the current process descend from that same harness?" decision.
+# ONE owner of the "which verified-harness identity holds this home's session
+# lock, and does the current process descend from or match that identity?" decision.
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock;
 # bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
 # lock-owning primary session before it may arm or rewake.
@@ -11,7 +11,14 @@
 # Known harness command names; extend when a new adapter is verified.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
 
-# Walk the current process ancestry (up to 16 hops) and print a harness pid.
+# Print Codex's thread identity when API-hosted Codex hides the harness process
+# ancestry that process-backed adapters expose.
+fm_codex_thread_identity() {
+  [ -n "${CODEX_THREAD_ID:-}" ] || return 1
+  printf 'codex-thread:%s\n' "$CODEX_THREAD_ID"
+}
+
+# Walk the current process ancestry (up to 16 hops) and print a harness identity.
 # For every harness except Claude, the first match wins (innermost pid), which
 # is where e.g. Pi's shared signed-wrapper ancestry actually holds the session:
 # a "pi-signed" launcher can be the direct parent of the inner "pi" engine
@@ -23,9 +30,10 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
 # looking for a still-more-ancestral claude-named match, and stops the
 # instant a non-match follows - never walking past that gap to an unrelated
 # claude-named process further up the real process tree (e.g. the live
-# session that launched a test as its own subprocess). The harness pid lives
-# as long as the session, unlike the transient subshell pid of any one tool
-# call.
+# session that launched a test as its own subprocess). Process-backed adapters
+# print a harness pid, which lives as long as the session, unlike the transient
+# subshell pid of any one tool call. API-hosted Codex falls back to
+# `codex-thread:<thread-id>` when no process ancestry match is visible.
 fm_harness_ancestry_pid() {
   local pid=$$ comm args best='' bc extending=0 hit=0 is_claude=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
@@ -61,12 +69,20 @@ fm_harness_ancestry_pid() {
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
   done
   [ -n "$best" ] && { echo "$best"; return 0; }
-  return 1
+  fm_codex_thread_identity || return 1
 }
 
-# True if $1 is a live process that looks like a verified harness.
+# True if $1 is a live process or current Codex thread that looks like a
+# verified harness identity.
 fm_harness_pid_alive() {
   local pid=$1 comm args
+  case "$pid" in
+    codex-thread:*)
+      [ -n "${CODEX_THREAD_ID:-}" ] && [ "$pid" = "codex-thread:$CODEX_THREAD_ID" ]
+      return
+      ;;
+    ''|*[!0-9]*) return 1 ;;
+  esac
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   if printf '%s' "$(basename "$comm")" | grep -qE "$FM_HARNESS_RE"; then
@@ -81,16 +97,17 @@ fm_harness_pid_alive() {
   esac
 }
 
-# True when state dir $1 holds a session lock whose pid is the harness ancestor
-# of the current process: this script runs inside the session that owns the
-# home's fleet lock. A missing lock, a lock held by another live harness, or an
-# ancestry that cannot be resolved all fail closed.
+# True when state dir $1 holds a session lock whose identity belongs to the
+# current process: this script runs inside the session that owns the home's
+# fleet lock. A missing lock, a lock held by another live harness, or an
+# identity that cannot be resolved all fail closed.
 fm_session_lock_owned_by_self() {
-  local state=$1 lock_pid my_pid
-  lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
-  case "$lock_pid" in
+  local state=$1 lock_id my_id
+  lock_id=$(cat "$state/.lock" 2>/dev/null || true)
+  case "$lock_id" in
+    codex-thread:*) fm_harness_pid_alive "$lock_id"; return ;;
     ''|*[!0-9]*) return 1 ;;
   esac
-  my_pid=$(fm_harness_ancestry_pid) || return 1
-  [ "$my_pid" = "$lock_pid" ]
+  my_id=$(fm_harness_ancestry_pid) || return 1
+  [ "$my_id" = "$lock_id" ]
 }

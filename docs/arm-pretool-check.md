@@ -157,7 +157,7 @@ Prose may improve without changing adapter behavior.
 
 | Harness | Exact command field | Adapter behavior on checker exit 2 |
 | --- | --- | --- |
-| Codex | `.tool_input.command` | The `.codex/hooks.json` command forwards the complete stdin payload and Codex blocks on exit 2. |
+| Codex | `.tool_input.command` | `.codex/hooks.json` invokes `bin/fm-codex-hook-dispatch.sh`, which performs a bounded stdin read before forwarding the payload; Codex blocks on exit 2. |
 | Claude | `.tool_input.command` | `.claude/settings.json` forwards stdin with `--claude`, leaving stdout empty and returning the stderr deny object. |
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |
 | OpenCode | `output.args.command` | `.opencode/plugins/fm-primary-pretool-check.js` passes one `--command` argument and throws only for exit 2. |

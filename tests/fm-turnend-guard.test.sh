@@ -732,8 +732,8 @@ test_codex_hook_invokes_shared_guard() {
   command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
   [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
   assert_contains "$command" 'pwd -P' "codex hook must anchor from the hook process working directory"
-  assert_contains "$command" '.codex/hooks.json' "codex hook must verify the hook-loaded firstmate root"
   assert_contains "$command" 'fm-turnend-guard.sh' "codex hook must invoke the shared guard"
+  assert_contains "$command" 'fm-codex-hook-dispatch.sh' "codex Stop hook must use the bounded stdin dispatcher"
   assert_not_contains "$command" '.cwd' "codex hook must not use payload cwd to select the guard executable"
   pass ".codex/hooks.json: Stop hook invokes the shared primary guard"
 }
@@ -749,12 +749,13 @@ test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
   expected_root=$(cd "$dir" && pwd -P)
   outside="$TMP_ROOT/codex-hook-outside"
   mkdir -p "$outside"
+  cp "$ROOT/bin/fm-codex-hook-dispatch.sh" "$dir/bin/fm-codex-hook-dispatch.sh"
   cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'guard=%s\n' "$0"
 cat
 EOF
-  chmod +x "$dir/bin/fm-turnend-guard.sh"
+  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-codex-hook-dispatch.sh"
   payload=$(jq -cn --arg cwd "$outside" '{cwd:$cwd,stop_hook_active:false}')
   out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
   expect_code 0 "$status" "codex hook must execute successfully when payload cwd is outside the firstmate root"
@@ -772,6 +773,7 @@ test_codex_hook_ignores_nested_git_root_guard() {
   dir=$(make_primary_dir "$TMP_ROOT/codex-hook-outer")
   mark_codex_hook_root "$dir"
   expected_root=$(cd "$dir" && pwd -P)
+  cp "$ROOT/bin/fm-codex-hook-dispatch.sh" "$dir/bin/fm-codex-hook-dispatch.sh"
   nested="$dir/projects/other"
   mkdir -p "$nested"
   git init -q "$nested"
@@ -790,7 +792,7 @@ EOF
 printf 'guard=%s\n' "$0"
 cat
 EOF
-  chmod +x "$dir/bin/fm-turnend-guard.sh"
+  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-codex-hook-dispatch.sh"
   subdir="$nested/deep/path"
   mkdir -p "$subdir"
   payload=$(jq -cn --arg cwd "$subdir" '{cwd:$cwd,stop_hook_active:false}')
@@ -835,7 +837,7 @@ exit 2
 EOF
   chmod +x "$worktree_dir/bin/fm-turnend-guard.sh"
   # Runtime module-format warnings are host noise; this assertion owns plugin output only.
-  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$wrong_dir" WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$wrong_dir" WORKTREE="$worktree_dir" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -923,7 +925,7 @@ SH
 exit 0
 SH
   chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
-  out=$(PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -988,7 +990,7 @@ SH
 exit 0
 SH
   chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
-  out=$(PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
 const handlers = new Map();

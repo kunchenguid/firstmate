@@ -71,8 +71,11 @@ cat >/dev/null 2>&1 || true
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 # --- identity: only the lock-owning session's hooks may arm ------------------
-# A prior session may have died after leaving its numeric harness pid in .lock.
+# A prior process-backed session may have died after leaving its harness pid in
+# .lock.
 # Use the shared liveness predicate to recognize only that stale-owner case.
+# Non-process lock identities, such as Codex thread fallback locks, remain inert
+# for Claude auto-arm unless they belong to this same session.
 # Defer the mutating claim until after the unchanged AFK and need gates, so an
 # idle or away home remains byte-for-byte inert. Missing or malformed locks are
 # uncertainty rather than stale-owner evidence and remain inert.

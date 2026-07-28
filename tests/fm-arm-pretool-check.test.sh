@@ -493,11 +493,22 @@ test_codex_hooks_pretool_wired() {
   [ -n "$command" ] || fail "PreToolUse hook command is missing from codex primary hooks"
   assert_contains "$command" 'fm-arm-pretool-check.sh' "codex pretool hook must invoke the shared checker"
   assert_contains "$command" 'pwd -P' "codex pretool hook must anchor to the hook process root like the Stop hook does"
-  assert_contains "$command" 'printf "%s" "$payload" | "$root/bin/fm-arm-pretool-check.sh"' "codex pretool hook must forward the exact captured payload to the checker"
+  assert_contains "$command" 'fm-codex-hook-dispatch.sh' "codex pretool hook must use the bounded stdin dispatcher"
   local matcher
   matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' "$settings")
   [ "$matcher" = "Bash" ] || fail "codex pretool hook must matcher-scope to Bash, got: $matcher"
   pass ".codex/hooks.json: PreToolUse hook invokes the shared checker"
+}
+
+test_codex_dispatcher_fails_open_without_stdin() {
+  local out rc start end
+  start=$(date +%s)
+  out=$(FM_CODEX_HOOK_READ_TIMEOUT=0.1 bash "$ROOT/bin/fm-codex-hook-dispatch.sh" PreToolUse fm-arm-pretool-check.sh < /dev/null 2>&1); rc=$?
+  end=$(date +%s)
+  [ "$rc" -eq 0 ] || fail "codex dispatcher should fail open without stdin, rc=$rc out=$out"
+  [ -z "$out" ] || fail "codex dispatcher should stay silent without stdin, got: $out"
+  [ $((end - start)) -lt 2 ] || fail "codex dispatcher took too long without stdin"
+  pass "fm-codex-hook-dispatch: fails open quickly without stdin"
 }
 
 test_opencode_pretool_plugin_wired() {
@@ -557,6 +568,7 @@ test_grok_pretool_hook_wired
 test_grok_turnend_hook_uses_safe_var_pattern
 test_claude_settings_pretool_hook_wired
 test_codex_hooks_pretool_wired
+test_codex_dispatcher_fails_open_without_stdin
 test_opencode_pretool_plugin_wired
 test_pi_extension_carries_pretool_check
 test_shellcheck_clean

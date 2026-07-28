@@ -137,6 +137,104 @@ SH
   pass "fm-lock recognizes grok harness processes"
 }
 
+make_non_harness_ps() {
+  local fakebin=$1
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' '/bin/sh'; exit 0 ;;
+  *"args="*) printf '%s\n' 'sh'; exit 0 ;;
+  *"ppid="*) printf '%s\n' '1'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+}
+
+make_codex_harness_ps() {
+  local fakebin=$1
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' '/usr/local/bin/codex'; exit 0 ;;
+  *"args="*) printf '%s\n' 'codex'; exit 0 ;;
+  *"ppid="*) printf '%s\n' '1'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+}
+
+test_fm_lock_uses_codex_thread_fallback() {
+  local home fakebin out
+  home="$TMP_ROOT/lock-codex-thread-home"
+  fakebin=$(fm_fakebin "$TMP_ROOT/lock-codex-thread-fake")
+  mkdir -p "$home/state"
+  make_non_harness_ps "$fakebin"
+
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    FM_HOME="$home" CODEX_THREAD_ID=thread-one PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh")
+  assert_contains "$out" "lock acquired: codex thread thread-one" "fm-lock did not acquire with CODEX_THREAD_ID fallback"
+
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    FM_HOME="$home" CODEX_THREAD_ID=thread-one PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: held by current codex thread thread-one" "fm-lock did not recognize current CODEX_THREAD_ID holder"
+
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    FM_HOME="$home" CODEX_THREAD_ID=thread-two PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: stale (codex thread thread-one is not this session)" "fm-lock did not treat another codex thread as stale"
+  pass "fm-lock falls back to CODEX_THREAD_ID when process ancestry is hidden"
+}
+
+test_session_lock_owned_by_codex_thread_self() {
+  local home fakebin
+  home="$TMP_ROOT/session-lock-codex-thread-home"
+  fakebin=$(fm_fakebin "$TMP_ROOT/session-lock-codex-thread-fake")
+  mkdir -p "$home/state"
+  make_non_harness_ps "$fakebin"
+  printf '%s\n' 'codex-thread:thread-one' > "$home/state/.lock"
+
+  # shellcheck disable=SC2016 # $1 and $2 are child bash -c arguments.
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    CODEX_THREAD_ID=thread-one PATH="$fakebin:$PATH" bash -c \
+    '. "$1/bin/fm-session-lock-lib.sh"; fm_session_lock_owned_by_self "$2"' _ "$ROOT" "$home/state" \
+    || fail "session-lock self proof did not accept the current Codex thread"
+
+  # shellcheck disable=SC2016 # $1 and $2 are child bash -c arguments.
+  if env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    CODEX_THREAD_ID=thread-two PATH="$fakebin:$PATH" bash -c \
+    '. "$1/bin/fm-session-lock-lib.sh"; fm_session_lock_owned_by_self "$2"' _ "$ROOT" "$home/state"; then
+    fail "session-lock self proof accepted another Codex thread"
+  fi
+
+  make_codex_harness_ps "$fakebin"
+  # shellcheck disable=SC2016 # $1 and $2 are child bash -c arguments.
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    CODEX_THREAD_ID=thread-one PATH="$fakebin:$PATH" bash -c \
+    '. "$1/bin/fm-session-lock-lib.sh"; fm_session_lock_owned_by_self "$2"' _ "$ROOT" "$home/state" \
+    || fail "session-lock self proof let a numeric Codex ancestor hide the matching Codex thread"
+
+  pass "session-lock self proof supports the current Codex thread identity only"
+}
+
+test_fm_harness_detects_codex_thread_marker_after_stronger_markers() {
+  local fakebin out
+  fakebin=$(fm_fakebin "$TMP_ROOT/fm-harness-codex-thread-fake")
+  make_non_harness_ps "$fakebin"
+
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    CODEX_THREAD_ID=thread-one PATH="$fakebin:$PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = codex ] || fail "fm-harness did not detect CODEX_THREAD_ID as codex (got '$out')"
+
+  out=$(env -u CLAUDECODE -u GROK_AGENT \
+    PI_CODING_AGENT=true CODEX_THREAD_ID=thread-one PATH="$fakebin:$PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = pi ] || fail "CODEX_THREAD_ID overrode Pi's current-harness marker (got '$out')"
+  pass "fm-harness detects Codex API sessions without overriding stronger harness markers"
+}
+
 test_grok_hook_requires_registered_token
 test_grok_teardown_removes_pointer_and_token
 test_fm_lock_recognizes_grok_holder
+test_fm_lock_uses_codex_thread_fallback
+test_session_lock_owned_by_codex_thread_self
+test_fm_harness_detects_codex_thread_marker_after_stronger_markers
