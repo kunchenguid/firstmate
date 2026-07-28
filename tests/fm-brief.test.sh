@@ -11,8 +11,8 @@
 # use `IFS= read -r -d '' VAR <<EOF || true` instead, which removes the `$(...)`
 # wrapper and eliminates the whole defect class regardless of future prose.
 # test_no_heredoc_in_command_substitution guards that structure directly.
-# Ambient `bash -n` here is Bash 5 and cannot see the bug, so the real
-# cross-version enforcement lives in the macos-stock-bash CI job.
+# The macos-stock-bash CI job enforces both the canonical parse inventory and
+# this complete real-script suite under Bash 3.2.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -22,10 +22,9 @@ TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
-# The script itself must always parse under the ambient bash. That is Bash 5 in
-# CI and locally, where the issue #958/#1069 parser bug does not fire, so this
-# is a weak guard on its own; test_no_heredoc_in_command_substitution and the
-# macos-stock-bash CI job carry the real cross-version enforcement.
+# The script itself must always parse under the Bash selected by the caller.
+# On macOS this exercises the Bash 3.2 parser that exposed this regression.
+# Elsewhere the structural guard below carries the cross-version enforcement.
 test_script_parses() {
   local out rc direct_count
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
@@ -210,14 +209,14 @@ test_task_modes_generate_safety_contracts() {
     assert_present "$brief" "$id: brief was not scaffolded"
     assert_grep "# Definition of done" "$brief" "$id: brief missing Definition of done section"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
-    assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
-      "$id: brief missing nonterminal working:/setup-complete gate protection"
     assert_grep "Verify isolation before anything else." "$brief" \
       "$id: ship brief lost worktree isolation"
     assert_grep "# Herdr lifecycle declaration - NOT ENABLED" "$brief" \
       "$id: ship brief lost its Herdr declaration"
     assert_grep "States: working, needs-decision, blocked, paused, done, failed." "$brief" \
       "$id: ship brief lost the status protocol"
+    assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
+      "$id: ship brief lost the nonterminal working/setup gate"
     assert_grep "# Project memory" "$brief" "$id: ship brief lost project-memory guidance"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker"
   done
@@ -321,10 +320,8 @@ test_no_mistakes_ask_user_authority_wording() {
     "no-mistakes DOD must keep direct requirements and exclude generic scaffold boilerplate from --intent"
   assert_grep "exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific" "$brief" \
     "no-mistakes DOD must exclude non-task-specific scaffold boilerplate from --intent"
-  # The apostrophe in "firstmate's authority check" is now structurally safe
-  # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
-  # being reworded or escaped away. test_no_heredoc_in_command_substitution
-  # guards the structure that makes it safe.
+  # The apostrophe in "firstmate's authority check" is structurally safe because
+  # the heredoc is not wrapped in a command substitution.
   assert_grep "firstmate's authority check" "$brief" \
     "no-mistakes DOD lost the Firstmate-owned authority boundary"
   assert_grep "ask-user findings are never yours to answer" "$brief" \

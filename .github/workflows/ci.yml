@@ -330,7 +330,6 @@ jobs:
             /bin/bash -n "$f" || { echo "::error::stock macOS Bash 3.2 failed to parse $f"; parse_fail=1; }
           done < "$shell_inventory"
           [ "$parse_fail" -eq 0 ] || { echo "::error::stock macOS Bash 3.2 parse sweep failed"; exit 1; }
-
           /bin/bash tests/fm-brief.test.sh
 
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
