@@ -163,6 +163,31 @@ EOF
   pass "worker merge guard: every verified worker harness enforces or refuses before launch"
 }
 
+# Installation refuses rather than overwriting a workspace .codex/hooks.json that
+# does not already register this guard, so Firstmate's own tracked hooks are
+# load-bearing: dropping the worker entry would make every Codex worker spawned on
+# a firstmate-repo worktree refuse to launch. Assert through the real installer so
+# this stays a launch fact rather than a copy of the installer's acceptance clause.
+test_tracked_codex_hooks_admit_a_codex_worker() {
+  local base fakebin settings
+  settings="$ROOT/.codex/hooks.json"
+  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
+  base="$TMP_ROOT/tracked-codex-hooks"
+  fakebin=$(make_fake_tools "$base")
+  mkdir -p "$base/home/state" "$base/tasktmp"
+  fm_git_init_commit "$base/work"
+  mkdir -p "$base/work/.codex"
+  cp "$settings" "$base/work/.codex/hooks.json"
+  run_installer "$base" codex "$fakebin" >/dev/null \
+    || fail "tracked .codex/hooks.json no longer registers the worker merge guard, so every Codex worker on a firstmate-repo worktree refuses to launch"
+  cmp -s "$settings" "$base/work/.codex/hooks.json" \
+    || fail "worker guard installation rewrote a project-owned .codex/hooks.json instead of accepting it"
+  jq -e '[.hooks.PreToolUse[]?.hooks[]?.command? | select(type == "string" and (contains("fm-arm-pretool-check.sh") or contains("fm-cd-pretool-check.sh")))] | length == 2' \
+    "$settings" >/dev/null \
+    || fail "the tracked worker merge-guard entry must sit alongside the arm and cd guards, not displace them"
+  pass "worker merge guard: the tracked .codex/hooks.json admits a Codex worker alongside the arm and cd guards"
+}
+
 test_registered_transport_and_path_wrapper() {
   local base fakebin guardbin before output rc primary_resolution worker_resolution
   base="$TMP_ROOT/transport"
@@ -452,6 +477,7 @@ test_respawn_reclaims_only_its_own_registration() {
 
 test_semantic_command_matrix
 test_harness_installation_and_safe_refusal
+test_tracked_codex_hooks_admit_a_codex_worker
 test_registered_transport_and_path_wrapper
 test_unpublished_installation_cleanup
 test_green_review_lifecycle_stops_without_merge

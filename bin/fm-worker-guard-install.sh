@@ -16,7 +16,8 @@
 # carries .codex/hooks.json must already register this guard. Firstmate's own
 # tracked .codex/hooks.json therefore includes the fm-worker-pretool-check.sh
 # PreToolUse entry (inert without a registration): removing it would make every
-# Codex worker spawned on a firstmate-repo worktree refuse to launch.
+# Codex worker spawned on a firstmate-repo worktree refuse to launch, which
+# tests/fm-worker-merge-guard.test.sh asserts against the tracked file.
 set -eu
 
 # Physical, so the recorded checker= binding matches the path the checker itself
