@@ -61,11 +61,12 @@
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi)
 #   overrides it for this spawn (either kind). A non-flag string containing
-#   whitespace is treated as a RAW launch command - still the escape hatch for
-#   verifying new adapters on a --secondmate spawn, but no longer a worker guard
-#   bypass: an ordinary crewmate or scout spawn refuses before endpoint creation
-#   on kimi, and on a raw command whose executable is not a harness
-#   bin/fm-worker-guard-install.sh can guard. pi-signed launches that exact
+#   whitespace is treated as a RAW launch command - the escape hatch for
+#   verifying new adapters on a --secondmate spawn, and nothing else: an ordinary
+#   crewmate or scout spawn refuses a raw command outright, before endpoint
+#   creation, even when its first word names a verified harness, because part of
+#   the worker merge guard rides the typed launch template. An ordinary spawn on
+#   kimi refuses for the same reason. pi-signed launches that exact
 #   executable name from PATH and refuses before endpoint creation when it is
 #   unavailable; it never falls back to pi.
 #   config/secondmate-harness may also carry an optional model and effort as extra
@@ -120,7 +121,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,79p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -476,7 +477,15 @@ launch_template() {
 }
 
 case "$ARG3" in
-  *' '*)  # raw launch command; ordinary workers still require verified guard support
+  *' '*)  # raw launch command: a --secondmate adapter-verification escape hatch only
+    # An ordinary worker's deterministic merge guard partly rides the launch
+    # command itself (pi's -e __PIWORKERGUARD__ extension), so a verbatim raw
+    # command cannot carry it even when its first word names a verified harness.
+    # Only the typed launch templates above are guaranteed to carry every layer.
+    if [ "$KIND" != secondmate ]; then
+      echo "error: refusing an ordinary worker spawn from a raw launch command; ordinary workers launch only from a verified typed launch template (claude, codex, opencode, pi, pi-signed, grok), which is what carries the deterministic PR merge guard. Raw commands remain the --secondmate adapter-verification escape hatch." >&2
+      exit 1
+    fi
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do

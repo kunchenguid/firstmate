@@ -36,7 +36,7 @@ If `config/crew-harness` or `config/secondmate-harness` names an unverified adap
 Do not pause current work for that future-verification choice, and never launch an unverified adapter.
 If the captain asks for a new harness, propose verifying it first in a maintainer-owned scratch environment, including a blocking shell-tool hook, before adding it to `fm-worker-guard-install.sh` and the production spawn allowlist.
 Then confirm every adapter fact empirically and record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier, the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
-A raw production worker launch is no longer a guard bypass and must refuse until that support exists.
+An ordinary production worker spawn refuses every raw launch command outright, even one whose first word names a verified adapter, because part of the merge guard rides the typed launch template; raw commands remain the `--secondmate` adapter-verification escape hatch only.
 
 ## Detection
 

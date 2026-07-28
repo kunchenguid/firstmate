@@ -196,22 +196,31 @@ test_active_dispatch_profile_allows_positional_harness() {
   pass "active crew-dispatch profile allows the legacy positional harness form"
 }
 
-test_active_dispatch_profile_refuses_unguarded_raw_launch_command() {
-  local rec id out status
-  id=profile-raw-z15
-  rec=$(make_spawn_case profile-raw claude "$id")
-  read_case_record "$rec"
-  enable_dispatch_profile "$HOME_DIR"
+# A raw launch command is used verbatim, so it cannot carry the parts of the
+# worker merge guard that ride the launch template (pi's -e guard extension).
+# Naming a verified harness as its first word does not change that, so an
+# ordinary worker spawn refuses every raw command; it stays the --secondmate
+# adapter-verification escape hatch only.
+test_ordinary_worker_refuses_every_raw_launch_command() {
+  local rec id out status raw n
+  n=0
+  for raw in "custom-agent --flag" "pi --model x" "claude --dangerously-skip-permissions hi" \
+    "FOO=1 pi-signed --resume"; do
+    n=$((n + 1))
+    id="profile-raw-z15$n"
+    rec=$(make_spawn_case "profile-raw$n" claude "$id")
+    read_case_record "$rec"
+    enable_dispatch_profile "$HOME_DIR"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --flag")
-  status=$?
-  [ "$status" -ne 0 ] || fail "unguarded raw launch command unexpectedly spawned"
-  assert_contains "$out" "no verified deterministic PR merge guard" \
-    "raw launch refusal did not name the missing guard"
-  [ ! -s "$LAUNCH_LOG" ] || fail "raw launch refusal created a worker endpoint"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "raw launch refusal published task metadata"
-  pass "active crew-dispatch profile refuses the unguarded raw launch-command escape hatch"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$raw")
+    status=$?
+    [ "$status" -ne 0 ] || fail "raw launch command '$raw' unexpectedly spawned an ordinary worker"
+    assert_contains "$out" "refusing an ordinary worker spawn from a raw launch command" \
+      "raw launch refusal for '$raw' did not name the boundary"
+    [ ! -s "$LAUNCH_LOG" ] || fail "raw launch refusal for '$raw' created a worker endpoint"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "raw launch refusal for '$raw' published task metadata"
+  done
+  pass "ordinary worker spawns refuse every raw launch command, including ones naming a verified harness"
 }
 
 test_respawn_replaces_metadata_but_refuses_unsafe_paths() {
@@ -494,7 +503,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
-test_active_dispatch_profile_refuses_unguarded_raw_launch_command
+test_ordinary_worker_refuses_every_raw_launch_command
 test_respawn_replaces_metadata_but_refuses_unsafe_paths
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort

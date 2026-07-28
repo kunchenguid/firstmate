@@ -51,6 +51,22 @@ gh-axi alias import -
 /usr/local/bin/gh alias import -
 printf 'land: pr merge\n' | gh alias import -
 bash -lc 'gh alias import merges.yml'
+if gh pr checks 792 | grep -q pass; then gh pr merge 792 --squash; fi
+if gh pr merge 792; then echo landed; fi
+if ! gh pr merge 792; then echo blocked; fi
+for i in 1; do gh pr merge 792; done
+while true; do gh pr merge 792; done
+until gh pr merge 792; do sleep 1; done
+! gh pr merge 792
+time gh pr merge 792
+nice gh pr merge 792
+setsid gh pr merge 792
+stdbuf -o0 gh pr merge 792
+xargs /usr/local/bin/gh pr merge 792
+nice -n 19 gh-axi pr --repo acme/api merge 792
+xargs -I{} sh -c 'gh pr merge {}'
+then gh alias set land 'pr merge'
+do env TOKEN=x gh pr merge 792
 EOF
   while IFS= read -r command; do
     policy_is allow "$command"
@@ -72,6 +88,12 @@ gh api GET /repos/acme/api/pulls/792
 printf '%s\n' 'gh pr merge 792'
 bash -lc "printf '%s\n' 'gh pr merge 792'"
 git push origin fm/fix
+if gh pr checks 792 | grep -q pass; then gh pr comment 792 --body green; fi
+for i in 1 2; do gh pr view 792; done
+while gh pr checks 792; do sleep 5; done
+time gh pr create --title merge-fix
+nice -n 19 gh pr view 792
+xargs gh pr checks
 EOF
   pass "worker merge guard: semantic policy denies merge execution without blocking PR work or data"
 }
@@ -167,9 +189,16 @@ EOF
 # does not already register this guard, so Firstmate's own tracked hooks are
 # load-bearing: dropping the worker entry would make every Codex worker spawned on
 # a firstmate-repo worktree refuse to launch. Assert through the real installer so
-# this stays a launch fact rather than a copy of the installer's acceptance clause.
+# this stays a launch fact rather than a copy of the installer's acceptance clause,
+# then run the tracked entry's exact command against real payloads: the tracked
+# hook must resolve the private spawn-time checker binding the installer recorded,
+# not whatever copy of the checker happens to sit in the guarded workspace.
+run_tracked_codex_hook() {  # <hook-command> <workspace> <payload>
+  ( cd "$2" && printf '%s' "$3" | bash -c "$1" 2>&1 )
+}
+
 test_tracked_codex_hooks_admit_a_codex_worker() {
-  local base fakebin settings
+  local base fakebin settings hook output rc
   settings="$ROOT/.codex/hooks.json"
   [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
   base="$TMP_ROOT/tracked-codex-hooks"
@@ -185,7 +214,62 @@ test_tracked_codex_hooks_admit_a_codex_worker() {
   jq -e '[.hooks.PreToolUse[]?.hooks[]?.command? | select(type == "string" and (contains("fm-arm-pretool-check.sh") or contains("fm-cd-pretool-check.sh")))] | length == 2' \
     "$settings" >/dev/null \
     || fail "the tracked worker merge-guard entry must sit alongside the arm and cd guards, not displace them"
-  pass "worker merge guard: the tracked .codex/hooks.json admits a Codex worker alongside the arm and cd guards"
+
+  hook=$(jq -r 'first(.hooks.PreToolUse[]?.hooks[]?.command? | select(type == "string" and contains(".fm-worker-guard"))) // empty' "$settings")
+  [ -n "$hook" ] || fail "the tracked Codex hooks no longer carry a worker merge-guard entry"
+  mkdir -p "$base/unregistered"
+  set +e
+  output=$(run_tracked_codex_hook "$hook" "$base/work" '{"tool_input":{"command":"ls"}}'); rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the tracked Codex hook denied an ordinary registered-worker command (rc=$rc): $output"
+  [ -z "$output" ] || fail "the tracked Codex hook spoke over an allowed command: $output"
+  set +e
+  output=$(run_tracked_codex_hook "$hook" "$base/work" '{"tool_input":{"command":"gh pr merge 792 --squash"}}'); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the tracked Codex hook allowed a registered worker to merge"
+  assert_contains "$output" "worker-pr-merge" "the tracked Codex hook denial lacked the stable reason"
+
+  set +e
+  output=$(run_tracked_codex_hook "$hook" "$base/unregistered" '{"tool_input":{"command":"gh pr merge 792"}}'); rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the tracked Codex hook acted on an unregistered primary (rc=$rc): $output"
+  [ -z "$output" ] || fail "the tracked Codex hook spoke in an unregistered primary: $output"
+  pass "worker merge guard: the tracked .codex/hooks.json dispatches through the spawn-time checker binding and stays inert for an unregistered primary"
+}
+
+# A Claude crewmate spawned before this guard existed carries a firstmate-written
+# Stop-only settings.local.json and no .fm-worker-guard pointer, so the
+# respawn-reclaim path never runs. Recovery, /updatefirstmate, and restart
+# respawns must survive that upgrade boundary while arbitrary project-owned local
+# settings are still refused rather than overwritten.
+test_claude_respawn_reclaims_only_the_legacy_turnend_settings() {
+  local base fakebin turnend settings output rc
+  base="$TMP_ROOT/claude-legacy"
+  fakebin=$(make_fake_tools "$base")
+  mkdir -p "$base/home/state" "$base/tasktmp"
+  fm_git_init_commit "$base/work"
+  mkdir -p "$base/work/.claude"
+  turnend="$base/home/state/guard-task.turn-ended"
+  settings="$base/work/.claude/settings.local.json"
+  cat > "$settings" <<EOF
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$turnend'"}]}]}}
+EOF
+  run_installer "$base" claude "$fakebin" >/dev/null \
+    || fail "a Claude respawn across the guard upgrade boundary could not reclaim its own legacy turn-end settings"
+  assert_grep 'fm-worker-pretool-check.sh' "$settings" "the reclaimed Claude settings lost the merge-guard hook"
+  assert_grep "$turnend" "$settings" "the reclaimed Claude settings dropped the task turn-end signal"
+  "$CHECKER" --workspace "$base/work" --command 'gh pr checks 792' \
+    || fail "the reclaimed Claude registration is not usable"
+
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)"]}}' > "$settings"
+  rm -f "$base/work/.fm-worker-guard"
+  set +e
+  output=$(run_installer "$base" claude "$fakebin" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "installation overwrote project-owned Claude local settings"
+  assert_contains "$output" "not an owned worker merge guard" "project-settings refusal was not actionable"
+  assert_grep 'permissions' "$settings" "the refusal rewrote project-owned Claude local settings"
+  pass "worker merge guard: a Claude respawn reclaims only the exact legacy turn-end settings and still refuses project-owned ones"
 }
 
 test_registered_transport_and_path_wrapper() {
@@ -478,6 +562,7 @@ test_respawn_reclaims_only_its_own_registration() {
 test_semantic_command_matrix
 test_harness_installation_and_safe_refusal
 test_tracked_codex_hooks_admit_a_codex_worker
+test_claude_respawn_reclaims_only_the_legacy_turnend_settings
 test_registered_transport_and_path_wrapper
 test_unpublished_installation_cleanup
 test_green_review_lifecycle_stops_without_merge

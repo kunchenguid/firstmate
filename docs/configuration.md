@@ -179,7 +179,8 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, and grok are empirically verified for crewmate and secondmate launches, while kimi is verified for secondmate launches only; [README requirements](../README.md#requirements) own the set supported for the primary session.
-An ordinary crewmate or scout spawn refuses before endpoint creation on kimi, and on a raw launch command whose executable is none of those six adapters, because the worker PR-merge guard has no verified blocking shell-tool hook there ([architecture.md](architecture.md#project-modes-are-explicit) owns that guard contract).
+An ordinary crewmate or scout spawn refuses before endpoint creation on kimi, and on any raw launch command - including one whose first word names a verified adapter - because part of the worker PR-merge guard rides the verified typed launch template and a verbatim raw command cannot carry it ([architecture.md](architecture.md#project-modes-are-explicit) owns that guard contract).
+Raw launch commands remain the `--secondmate` escape hatch for verifying a new adapter.
 New harnesses get verified through a supervised trial task before joining the set.
 The verified adapter knowledge - busy signatures, interrupt and exit commands, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
@@ -214,7 +215,7 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
 The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
-When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
+When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness` or a positional adapter).
 Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
 This section is the single owner of the canonical schema and its per-field semantics.

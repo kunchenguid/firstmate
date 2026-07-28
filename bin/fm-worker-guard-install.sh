@@ -18,6 +18,10 @@
 # PreToolUse entry (inert without a registration): removing it would make every
 # Codex worker spawned on a firstmate-repo worktree refuse to launch, which
 # tests/fm-worker-merge-guard.test.sh asserts against the tracked file.
+# That tracked entry dispatches through the private spawn-time binding - pointer
+# -> auth file -> checker= - exactly like the grok hook below, because the
+# checker only trusts the firstmate-owned path recorded here, not whatever copy
+# happens to sit in the guarded workspace.
 set -eu
 
 # Physical, so the recorded checker= binding matches the path the checker itself
@@ -193,9 +197,17 @@ case "$HARNESS" in
   claude)
     mkdir -p "$WORKSPACE_REAL/.claude"
     CLAUDE_HOOK="$WORKSPACE_REAL/.claude/settings.local.json"
+    # A Claude crewmate spawned before this guard existed carries the exact
+    # Stop-only settings file fm-spawn.sh used to write for this same task, and
+    # no .fm-worker-guard pointer, so the respawn-reclaim path above never runs.
+    # Recognize that one byte-exact legacy shape as firstmate-owned so a recovery
+    # or /updatefirstmate respawn survives the upgrade; every other project-owned
+    # local settings file is still refused rather than overwritten.
+    LEGACY_CLAUDE_TURNEND='{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '\'''"$TURNEND"''\''"}]}]}}'
     if [ -e "$CLAUDE_HOOK" ] || [ -L "$CLAUDE_HOOK" ]; then
       if ! { [ -f "$CLAUDE_HOOK" ] && [ ! -L "$CLAUDE_HOOK" ] \
-        && grep -Fq 'fm-worker-pretool-check.sh' "$CLAUDE_HOOK"; }; then
+        && { grep -Fq 'fm-worker-pretool-check.sh' "$CLAUDE_HOOK" \
+          || [ "$(cat "$CLAUDE_HOOK")" = "$LEGACY_CLAUDE_TURNEND" ]; }; }; then
         echo "error: existing Claude local settings are not an owned worker merge guard; refusing rather than overwriting project settings" >&2
         exit 1
       fi
@@ -293,11 +305,12 @@ PAYLOAD=$(cat 2>/dev/null || true)
 WORKSPACE=${GROK_WORKSPACE_ROOT:-}
 [ -n "$WORKSPACE" ] || exit 0
 POINTER="$WORKSPACE/.fm-worker-guard"
-[ -f "$POINTER" ] && [ ! -L "$POINTER" ] || exit 0
+[ -e "$POINTER" ] || [ -L "$POINTER" ] || exit 0
 AUTH=$(sed -n 's/^auth=//p' "$POINTER" 2>/dev/null | tail -1)
 CHECKER=$(sed -n 's/^checker=//p' "$AUTH" 2>/dev/null | tail -1)
+case "$CHECKER" in */fm-worker-pretool-check.sh) : ;; *) CHECKER= ;; esac
 if [ -z "$CHECKER" ] || [ ! -x "$CHECKER" ]; then
-  printf '%s\n' '{"decision":"deny","reason":"[worker-guard-unavailable] registered Firstmate worker merge guard is unavailable"}'
+  printf '%s\n' '{"decision":"deny","reason":"[worker-guard-unavailable] the registered Firstmate worker merge guard is unavailable or invalid; no shell command may run until firstmate repairs or relaunches this worker"}'
   exit 2
 fi
 printf '%s' "$PAYLOAD" | exec "$CHECKER" --workspace "$WORKSPACE"

@@ -5,9 +5,10 @@
 // fm-arm-command-policy.mjs, the single shell-classification owner.
 // This policy never executes, expands, or sources submitted command bytes.
 // It denies merge-shaped GitHub CLI operations in executed positions, including
-// path-qualified binaries, command/env wrappers, literal nested shells/eval,
-// command substitutions, same-command aliases, literal binary variables, and
-// gh alias creation whose expansion would reach a merge or cannot be read here.
+// path-qualified binaries, command/env wrappers, shell keyword positions,
+// generic exec wrappers, literal nested shells/eval, command substitutions,
+// same-command aliases, literal binary variables, and gh alias creation whose
+// expansion would reach a merge or cannot be read here.
 // Subcommand classification is option-aware because gh accepts its persistent
 // flags (-R/--repo and friends) between `pr` and the subcommand it runs.
 
@@ -108,12 +109,62 @@ function ghMergeShaped(args) {
   return hasPrMerge(args) || hasMergeApi(args) || ghAliasMergeShaped(args);
 }
 
+// Bash reserved words that introduce a command inside the same `;`/`|`-separated
+// node. The shared tokenizer classifies them as ordinary words, so `then gh pr
+// merge 792` would otherwise read as `then` invoked with merge-shaped arguments.
+// Matched by exact word value, never by basename, so /usr/bin/time stays a
+// binary and is unwrapped by EXEC_WRAPPERS instead.
+const SHELL_KEYWORDS = new Set(["!", "do", "elif", "else", "if", "then", "time", "until", "while"]);
+
+// Generic exec wrappers the shared commandPosition() deliberately does not model
+// because their option grammars differ. Rather than guess where each one's
+// options end, every following word is treated as a possible command position.
+const EXEC_WRAPPERS = new Set([
+  "chrt", "doas", "ionice", "nice", "script", "setsid", "stdbuf", "taskset", "time", "xargs",
+]);
+
+function effectivePosition(tokens) {
+  let current = tokens;
+  let position = commandPosition(current);
+  for (let guard = 0; guard < 8; guard += 1) {
+    const word = position.command;
+    if (!word || !word.literal || !SHELL_KEYWORDS.has(word.value)) break;
+    const at = current.indexOf(word);
+    if (at === -1) break;
+    const remainder = current.slice(at + 1);
+    if (remainder.length === 0) break;
+    current = remainder;
+    position = commandPosition(current);
+  }
+  return position;
+}
+
+function execWrapperMerge(position, variables, aliases, depth) {
+  if (!EXEC_WRAPPERS.has(executableName(resolveExecutable(position.command, variables)))) return false;
+  const rest = position.words.slice(position.index + 1);
+  let nestedShell = false;
+  for (let index = 0; index < rest.length; index += 1) {
+    const candidate = executableName(resolveExecutable(rest[index], variables));
+    if ((candidate === "gh" || candidate === "gh-axi")
+      && ghMergeShaped(rest.slice(index + 1).map((word) => word.value))) return true;
+    // `xargs -I{} sh -c '<program>'` carries its program as one word. Once a
+    // nested shell is in the wrapper's argument list, classify those words with
+    // the same tokenizer rather than guessing the wrapper's option arity; before
+    // one appears they are ordinary data and stay readable like any other text.
+    if (nestedShell && depth < 8 && /\s/.test(rest[index].value)
+      && decision(rest[index].value, { variables: new Map(variables), aliases: new Map(aliases), depth: depth + 1 }).decision === "deny") return true;
+    if (["sh", "bash", "zsh", "eval"].includes(candidate)) nestedShell = true;
+  }
+  return false;
+}
+
 function directMerge(position, variables, aliases, depth) {
   const resolved = resolveExecutable(position.command, variables);
   const name = executableName(resolved);
   const args = position.words.slice(position.index + 1).map((word) => word.value);
 
   if ((name === "gh" || name === "gh-axi") && ghMergeShaped(args)) return true;
+  if (execWrapperMerge(position, variables, aliases, depth)) return true;
 
   // A literal alias defined earlier in the same submitted shell program expands
   // before execution. Reclassify its body with the invocation arguments.
@@ -184,7 +235,7 @@ function decision(command, context = {}) {
 
   const program = splitProgram(lexed.tokens);
   for (const tokens of program.nodes) {
-    const position = commandPosition(tokens);
+    const position = effectivePosition(tokens);
 
     for (const payload of position.wrapperPayloads) {
       if (decision(payload, { variables: new Map(variables), aliases: new Map(aliases), depth: depth + 1 }).decision === "deny") return deny();

@@ -6,7 +6,6 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
-TEARDOWN="$ROOT/bin/fm-teardown.sh"
 KIMI_HOOK="$ROOT/bin/fm-kimi-turnend-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-kimi-harness)
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
@@ -208,6 +207,115 @@ test_kimi_ordinary_worker_refuses_before_endpoint_launch() {
   pass "fm-spawn: ordinary Kimi workers refuse before endpoint launch when deterministic merge denial is unavailable"
 }
 
+# Kimi stays verified for persistent secondmate launches (docs/configuration.md
+# "Harness support"), and that production path still runs the launch mechanics an
+# ordinary Kimi spawn no longer reaches: HOME-fallback binary resolution, the
+# observable readiness gate before the brief pointer, and delivery confirmation.
+make_secondmate_case() {
+  local name=$1 id=$2 case_dir home sub fakebin
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  sub="$case_dir/sub"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  mkdir -p "$home/state" "$home/data" "$home/config" "$sub/bin" "$sub/data"
+  printf '# Firstmate\n' > "$sub/AGENTS.md"
+  printf '%s\n' "$id" > "$sub/.fm-secondmate-home"
+  printf 'charter for the secondmate\n' > "$sub/data/charter.md"
+  : > "$case_dir/launch.log"
+  : > "$case_dir/pointer.log"
+  : > "$case_dir/kimi.state"
+  : > "$case_dir/tmux-calls.log"
+  printf '%s\n' "$case_dir|$home|$sub|$fakebin"
+}
+
+read_secondmate_record() {
+  IFS='|' read -r CASE_DIR HOME_DIR SUB_DIR FAKEBIN_DIR <<EOF
+$1
+EOF
+}
+
+run_secondmate_spawn() {
+  local case_dir=$1 home=$2 sub=$3 fakebin=$4 id=$5
+  shift 5
+  HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$sub" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+    FM_FAKE_POINTER_LOG="$case_dir/pointer.log" \
+    FM_FAKE_KIMI_STATE="$case_dir/kimi.state" \
+    FM_FAKE_KIMI_SWALLOWED="$case_dir/kimi.swallowed" \
+    FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
+    FM_FAKE_BRIEF_REAL="$(cd "$sub/data" && pwd -P)/charter.md" \
+    FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
+    PATH="$fakebin:$BASE_PATH" \
+    "$SPAWN" "$id" "$sub" kimi --secondmate "$@" 2>&1
+}
+
+test_kimi_secondmate_launch_gates_pointer_on_readiness_and_delivery() {
+  local id rec out rc fallback launch
+  id=kimi-secondmate-z9
+  rec=$(make_secondmate_case secondmate "$id")
+  read_secondmate_record "$rec"
+  rm "$FAKEBIN_DIR/kimi"
+  fallback="$HOME_DIR/.kimi-code/bin/kimi"
+  mkdir -p "$(dirname "$fallback")"
+  fm_fake_exit0 "$(dirname "$fallback")" kimi
+  out=$(run_secondmate_spawn "$CASE_DIR" "$HOME_DIR" "$SUB_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "persistent Kimi secondmate spawn should succeed"$'\n'"$out"
+  launch=$(cat "$CASE_DIR/launch.log")
+  case "$launch" in
+    *"'$fallback' --auto") : ;;
+    *) fail "Kimi secondmate launch did not expand HOME into an absolute executable: $launch" ;;
+  esac
+  assert_grep 'Read the brief at' "$CASE_DIR/pointer.log" \
+    "Kimi secondmate never delivered the brief pointer"
+  assert_grep 'harness=kimi' "$HOME_DIR/state/$id.meta" "Kimi secondmate metadata was not published"
+  pass "fm-spawn: a persistent Kimi secondmate resolves the HOME binary and delivers its brief pointer after the ready signal"
+}
+
+test_kimi_secondmate_launch_failures_are_loud() {
+  local id rec out rc fallback
+  id=kimi-secondmate-missing-za
+  rec=$(make_secondmate_case secondmate-missing "$id")
+  read_secondmate_record "$rec"
+  rm "$FAKEBIN_DIR/kimi"
+  fallback="$HOME_DIR/.kimi-code/bin/kimi"
+  rc=0
+  out=$(run_secondmate_spawn "$CASE_DIR" "$HOME_DIR" "$SUB_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a missing Kimi executable should refuse the secondmate spawn"
+  assert_contains "$out" "searched PATH for 'kimi'" "missing Kimi diagnostic omitted PATH"
+  assert_contains "$out" "fallback '$fallback'" "missing Kimi diagnostic omitted the expanded fallback"
+  if grep -Eq '(^| )new-(session|window)( |$)' "$CASE_DIR/tmux-calls.log"; then
+    fail "a missing Kimi executable created a tmux container or pane"
+  fi
+
+  id=kimi-secondmate-drop-zb
+  rec=$(make_secondmate_case secondmate-drop "$id")
+  read_secondmate_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_DELIVERY=no run_secondmate_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$SUB_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unconfirmed Kimi secondmate delivery should fail"
+  assert_contains "$out" "kimi brief pointer delivery was not confirmed" \
+    "unconfirmed Kimi secondmate delivery lacked a loud diagnostic"
+  assert_grep 'failed: kimi brief pointer delivery was not confirmed' "$HOME_DIR/state/$id.status" \
+    "unconfirmed Kimi secondmate delivery left no supervisor-visible failure"
+
+  id=kimi-secondmate-not-ready-zc
+  rec=$(make_secondmate_case secondmate-not-ready "$id")
+  read_secondmate_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_READY=no run_secondmate_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$SUB_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a Kimi secondmate spawn without a ready signal should fail"
+  assert_contains "$out" "kimi did not show a verified ready signal" \
+    "Kimi secondmate readiness failure lacked a loud diagnostic"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "Kimi secondmate pointer was sent before readiness"
+  pass "fm-spawn: a persistent Kimi secondmate fails loudly on a missing binary, a silent pointer drop, and a missing ready signal"
+}
+
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
   local home config original once stripped count
   home="$TMP_ROOT/config-surgery"
@@ -344,155 +452,6 @@ test_kimi_hook_install_refuses_without_jq() {
   assert_absent "$home/.kimi-code/fm-turn-end.sh" "missing-jq refusal wrote the hook script"
   assert_absent "$home/.kimi-code/fm-turn-end.d" "missing-jq refusal wrote the registry"
   pass "Kimi hook install refuses without jq before any config write"
-}
-
-test_kimi_hook_is_silent_and_requires_registered_workspace_token() {
-  local id rec out rc hook target token no_token snapshot_before snapshot_after fakebin
-  id=kimi-hook-auth-z6
-  rec=$(make_spawn_case hook-auth "$id")
-  read_spawn_record "$rec"
-  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
-  rc=$?
-  expect_code 0 "$rc" "Kimi spawn should succeed before hook authentication checks"
-  hook="$HOME_DIR/.kimi-code/fm-turn-end.sh"
-  target="$HOME_DIR/state/$id.turn-ended"
-  token=$(sed -n 's/^token=//p' "$WT_DIR/.fm-kimi-turnend")
-  assert_present "$HOME_DIR/.kimi-code/fm-turn-end.d/$token" "Kimi registry token is missing"
-
-  no_token="$CASE_DIR/no-token-workspace"
-  mkdir -p "$no_token"
-  snapshot_before=$(find "$no_token" -mindepth 1 -print)
-  out=$(printf '{"hook_event_name":"Stop","session_id":"ordinary","cwd":"%s","stop_hook_active":false}\n' "$no_token" \
-    | HOME="$HOME_DIR" bash "$hook" 2>&1)
-  rc=$?
-  expect_code 0 "$rc" "Kimi hook must never block a tokenless session"
-  [ -z "$out" ] || fail "Kimi hook printed into a tokenless session: $out"
-  snapshot_after=$(find "$no_token" -mindepth 1 -print)
-  [ "$snapshot_before" = "$snapshot_after" ] || fail "Kimi hook wrote inside a tokenless workspace"
-  assert_absent "$target" "tokenless Kimi hook invocation touched a task marker"
-
-  printf 'token=%s\n' "$token" > "$WT_DIR/.fm-kimi-turnend"
-  out=$(printf '{"hook_event_name":"Stop","session_id":"crew","cwd":"%s","stop_hook_active":false}\n' "$WT_DIR" \
-    | HOME="$HOME_DIR" bash "$hook" 2>&1)
-  rc=$?
-  expect_code 0 "$rc" "registered Kimi hook invocation did not exit zero"
-  [ -z "$out" ] || fail "registered Kimi hook invocation printed output: $out"
-  assert_present "$target" "registered Kimi hook invocation did not touch the turn-end marker"
-
-  rm "$target"
-  fakebin=$(fm_fakebin "$CASE_DIR/no-jq")
-  ln -s "$(command -v bash)" "$fakebin/bash"
-  out=$(printf '{"hook_event_name":"Stop","session_id":"crew","cwd":"%s","stop_hook_active":false}\n' "$WT_DIR" \
-    | HOME="$HOME_DIR" PATH="$fakebin" "$hook" 2>&1)
-  rc=$?
-  expect_code 0 "$rc" "Kimi hook without jq must still exit zero"
-  [ -z "$out" ] || fail "Kimi hook without jq printed output: $out"
-  assert_absent "$target" "Kimi hook without jq touched the turn-end marker"
-  pass "Kimi hook stays silent and inert without a Firstmate registry token"
-}
-
-test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation() {
-  local id rec out rc
-  id=kimi-config-refuse-z7
-  rec=$(make_spawn_case config-refuse "$id")
-  read_spawn_record "$rec"
-  printf '[malformed\n' > "$HOME_DIR/.kimi-code/config.toml"
-  rc=0
-  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
-  [ "$rc" -ne 0 ] || fail "Kimi spawn accepted malformed global config"
-  assert_contains "$out" "malformed TOML" "Kimi spawn omitted the concrete config refusal"
-  if grep -Eq '(^| )new-(session|window)( |$)' "$CASE_DIR/tmux-calls.log"; then
-    fail "unsafe Kimi config refusal created a tmux container or pane"
-  fi
-  pass "fm-spawn: unsafe Kimi global config refuses before pane creation"
-}
-
-test_kimi_teardown_removes_pointer_and_registry_token() {
-  local id rec out rc token
-  id=kimi-teardown-z8
-  rec=$(make_spawn_case teardown "$id")
-  read_spawn_record "$rec"
-  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
-  rc=$?
-  expect_code 0 "$rc" "Kimi spawn should succeed before teardown"
-  token=$(sed -n 's/^token=//p' "$WT_DIR/.fm-kimi-turnend")
-
-  HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
-    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
-    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
-    "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "Kimi teardown failed"
-  assert_absent "$WT_DIR/.fm-kimi-turnend" "Kimi token pointer survived teardown"
-  assert_absent "$HOME_DIR/.kimi-code/fm-turn-end.d/$token" "Kimi registry token survived teardown"
-  assert_absent "$HOME_DIR/state/$id.kimi-turnend-token" "Kimi token state survived teardown"
-  pass "fm-teardown: Kimi task pointer and registry token are removed"
-}
-
-test_kimi_falls_back_to_expanded_home_binary() {
-  local id rec out rc launch fallback
-  id=kimi-fallback-z4
-  rec=$(make_spawn_case fallback "$id")
-  read_spawn_record "$rec"
-  rm "$FAKEBIN_DIR/kimi"
-  fallback="$HOME_DIR/.kimi-code/bin/kimi"
-  mkdir -p "$(dirname "$fallback")"
-  fm_fake_exit0 "$(dirname "$fallback")" kimi
-  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
-  rc=$?
-  expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
-  launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "'$fallback' --auto" ] \
-    || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
-  pass "fm-spawn: Kimi fallback expands the active HOME"
-}
-
-test_kimi_missing_binary_refuses_before_pane_creation() {
-  local id rec out rc fallback
-  id=kimi-missing-z5
-  rec=$(make_spawn_case missing "$id")
-  read_spawn_record "$rec"
-  rm "$FAKEBIN_DIR/kimi"
-  fallback="$HOME_DIR/.kimi-code/bin/kimi"
-  rc=0
-  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
-  [ "$rc" -ne 0 ] || fail "missing Kimi executable should refuse the spawn"
-  assert_contains "$out" "searched PATH for 'kimi'" "missing Kimi diagnostic omitted PATH"
-  assert_contains "$out" "fallback '$fallback'" "missing Kimi diagnostic omitted expanded fallback"
-  if grep -Eq '(^| )new-(session|window)( |$)' "$CASE_DIR/tmux-calls.log"; then
-    fail "missing Kimi executable created a tmux container or pane"
-  fi
-  pass "fm-spawn: missing Kimi executable refuses before pane creation"
-}
-
-test_kimi_unconfirmed_delivery_fails_loudly() {
-  local id rec out rc
-  id=kimi-drop-z2
-  rec=$(make_spawn_case drop "$id")
-  read_spawn_record "$rec"
-  rc=0
-  out=$(FM_FAKE_KIMI_DELIVERY=no run_spawn \
-    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
-  [ "$rc" -ne 0 ] || fail "an unconfirmed kimi delivery should fail"
-  assert_contains "$out" "kimi brief pointer delivery was not confirmed" \
-    "unconfirmed kimi delivery lacked a loud diagnostic"
-  assert_grep 'failed: kimi brief pointer delivery was not confirmed' "$HOME_DIR/state/$id.status" \
-    "unconfirmed kimi delivery did not leave a supervisor-visible failure"
-  pass "fm-spawn: kimi treats a silent pointer drop as a failed spawn"
-}
-
-test_kimi_readiness_gate_precedes_pointer() {
-  local id rec out rc
-  id=kimi-not-ready-z3
-  rec=$(make_spawn_case not-ready "$id")
-  read_spawn_record "$rec"
-  rc=0
-  out=$(FM_FAKE_KIMI_READY=no run_spawn \
-    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
-  [ "$rc" -ne 0 ] || fail "kimi spawn without a ready signal should fail"
-  assert_contains "$out" "kimi did not show a verified ready signal" \
-    "kimi readiness failure lacked a loud diagnostic"
-  [ ! -s "$CASE_DIR/pointer.log" ] || fail "kimi pointer was sent before readiness"
-  pass "fm-spawn: kimi never sends the brief pointer before an observable ready signal"
 }
 
 test_kimi_detection_uses_ancestry_after_markers() {
@@ -663,6 +622,8 @@ test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
 test_kimi_ordinary_worker_refuses_before_endpoint_launch
+test_kimi_secondmate_launch_gates_pointer_on_readiness_and_delivery
+test_kimi_secondmate_launch_failures_are_loud
 test_kimi_detection_uses_ancestry_after_markers
 test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines

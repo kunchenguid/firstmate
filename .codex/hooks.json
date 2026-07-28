@@ -27,7 +27,7 @@
           },
           {
             "type": "command",
-            "command": "bash -lc 'payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || exit 0; root=$(pwd -P) || exit 0; [ -x \"$root/bin/fm-worker-pretool-check.sh\" ] || exit 0; printf \"%s\" \"$payload\" | \"$root/bin/fm-worker-pretool-check.sh\" --workspace \"$root\"'",
+            "command": "bash -lc 'payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || exit 0; root=$(pwd -P) || exit 0; pointer=\"$root/.fm-worker-guard\"; [ -e \"$pointer\" ] || [ -L \"$pointer\" ] || exit 0; auth=$(sed -n \"s/^auth=//p\" \"$pointer\" 2>/dev/null | tail -1); checker=$(sed -n \"s/^checker=//p\" \"$auth\" 2>/dev/null | tail -1); case \"$checker\" in */fm-worker-pretool-check.sh) : ;; *) checker= ;; esac; if [ -z \"$checker\" ] || [ ! -x \"$checker\" ]; then printf \"%s\\n\" \"{\\\"decision\\\":\\\"deny\\\",\\\"reason\\\":\\\"[worker-guard-unavailable] the registered Firstmate worker merge guard is unavailable or invalid; no shell command may run until firstmate repairs or relaunches this worker\\\"}\"; exit 2; fi; printf \"%s\" \"$payload\" | \"$checker\" --workspace \"$root\"'",
             "timeout": 10
           }
         ]
