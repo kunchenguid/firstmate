@@ -16,8 +16,10 @@ This skill owns the decision of which close applies and the handoff steps that m
 
 ## Choose the branch first
 
-Check whether work is under way in this home: any `state/<id>.meta` exists, an X-mode relay poll is armed, or a captain decision from this session is still unanswered.
+Check whether work is under way in this home: any `state/<id>.meta` for an ordinary task exists, an X-mode relay poll is armed, or a captain decision from this session is still unanswered.
+A `kind=secondmate` meta record is a permanent registration of a direct report rather than work under way, so an idle registered secondmate never by itself forces the handoff branch.
 No work under way means branch 1; anything under way means branch 2.
+Away mode is a separate check that applies on either branch: read "Away mode at close" below before treating the session as closable.
 
 ## Branch 1 - fleet empty: straight close
 
@@ -26,6 +28,7 @@ If this session produced durable knowledge that so far exists only in this conve
 Confirm to the captain that nothing is under way and the session can close cleanly, then stop.
 A numeric lock owner needs no action from anyone on this branch.
 The codex-thread case in the lock section below applies on this branch too: on a Codex-hosted session, ask the captain to actually close the old Codex window, and tell them the next session may ask them to confirm that window is closed.
+An active `state/.afk` also applies on this branch: an empty fleet does not make an away daemon self-clearing, so handle it through the away-mode section below before closing.
 
 ## Branch 2 - work under way: handoff before close
 
@@ -42,6 +45,7 @@ Complete every step below before treating the session as closable.
 3. **Leave running work and its monitoring alone.**
    Workers continue in their own endpoints and their delivery pipelines keep running; never stop, tear down, or discard work because the session is ending, and never kill the monitoring (`AGENTS.md` sections 1 and 8).
    Events the monitoring captures wait in the durable wake queue, and the next session start reads every task's records directly, so a lapsed monitoring chain loses signal freshness but not the work.
+   This session's own away daemon is not covered by that rule, because it supervises a pane that is about to disappear; the away-mode section below is where it is wound down.
 4. **Give the captain a closing summary.**
    State what is still under way and its current state (use `bin/fm-crew-state.sh <id>` where the live state matters), what awaits their decision, and that while no session is open the work keeps running but nothing responds to its reports or questions.
    State where it resumes: opening the next session replays the queued events and reconciles all running work automatically, and `/bearings` gives a readable catch-up at any point after that.
@@ -53,6 +57,14 @@ Do not invent a separate handoff file or checkpoint document; the backlog, task 
 There is deliberately no manual release step and no unconditional clear command; never hand-delete `state/.lock` (`bin/fm-lock.sh` header owns the mechanics).
 A numeric owner becomes provably stale when this session's harness process exits, and the next session start proves that and atomically reclaims the lock on its own.
 A codex-thread owner cannot be proven dead from the process table: ask the captain to actually close the old Codex window, and tell them the next session may ask them to confirm that window is closed before it can take over.
+
+## Away mode at close
+
+Check for an active `state/.afk` before closing: its presence means an away daemon is supervising this session, and closing leaves it pointed at a pane that is about to disappear.
+That daemon does not recover on its own from a gone target: it backs off and retries against it indefinitely, and it keeps holding the identity-backed daemon lock, so the next session's `/afk` re-entry reports the daemon as already running instead of starting a fresh one.
+Exit away mode through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
+If the captain wants away mode left set anyway, say in the closing summary that it stays set and name `bin/fm-afk-launch.sh stop` as the command that ends it.
+Winding the away daemon down ends this session's own supervision, which is exactly what closing means; it never stops, tears down, or unmonitors a worker's own running work.
 
 ## Close versus /afk
 

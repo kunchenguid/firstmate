@@ -210,6 +210,25 @@ test_session_close_owner_branches_and_hands_off() {
     assert_grep "$phrase" "$CLOSE" "session-close lost the conditional branch phrase '$phrase'"
   done
 
+  # A registered secondmate is a permanent record, so it must not make the
+  # straight-close branch unreachable in every secondmate-bearing home.
+  assert_grep 'any `state/<id>.meta` for an ordinary task exists' "$CLOSE" \
+    "session-close branch check must count only ordinary-task meta records as work under way"
+  assert_grep 'A `kind=secondmate` meta record is a permanent registration' "$CLOSE" \
+    "session-close lost the secondmate-registration exclusion from the branch check"
+
+  # Away mode is checked before closing on either branch; the away daemon does
+  # not survive its pane going away.
+  for phrase in \
+    '## Away mode at close' \
+    'Check for an active `state/.afk` before closing' \
+    'That daemon does not recover on its own from a gone target' \
+    'Exit away mode through `bin/fm-afk-launch.sh stop`' \
+    'Away mode is a separate check that applies on either branch' \
+    'An active `state/.afk` also applies on this branch'; do
+    assert_grep "$phrase" "$CLOSE" "session-close lost the away-mode close phrase '$phrase'"
+  done
+
   # Running work and how the next session finds it again.
   for phrase in \
     'never stop, tear down, or discard work because the session is ending, and never kill the monitoring' \
