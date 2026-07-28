@@ -34,6 +34,7 @@ Choose the delivery mode when adding or creating the project:
 - `direct-PR` pushes and opens a PR without the no-mistakes pipeline.
 - `local-only` has no required remote or PR and lands only through the approved local fast-forward path.
 
+Record the project's base branch in the same registry entry whenever the project is developed off a branch other than its repository default, so a freshly allocated task worktree does not start a worker on a stale tree.
 The optional `+yolo` posture changes routine approval authority but does not change the delivery mode.
 Default it off, and enable it only on the captain's explicit instruction.
 `AGENTS.md` section 7 owns the complete authority boundary and exceptions when it is on.

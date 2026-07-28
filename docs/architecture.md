@@ -187,8 +187,9 @@ The `data/secondmates.md` line contract is owned by the [`secondmate-provisionin
 
 ## Project modes are explicit
 
-`data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
+`data/projects.md` records each project's delivery mode, optional `+yolo` autonomy flag, and optional base branch.
 `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
+The recorded base branch is what a task worktree must start from, because a freshly allocated pool worktree otherwise lands on the repo's default branch, which is the wrong base for a project developed elsewhere; `bin/fm-spawn.sh` checks that branch out and refuses to launch a worker onto a base it cannot confirm.
 When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
 For target project repos shipped through their own no-mistakes pipeline, commits under `.no-mistakes/evidence/` are the pipeline's PR-viewable validation evidence and are expected to stay in the crew branch until the evidence-hosting design changes.
 The firstmate repo itself is the exception: its `.no-mistakes/` directory is local state, stays gitignored, and is rejected by CI if tracked.

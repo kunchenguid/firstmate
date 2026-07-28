@@ -85,6 +85,10 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   That worktree is then detached at the project's base branch - its base=
+#   record in data/projects.md (bin/fm-project-mode.sh), else the repo default
+#   branch - and the spawn is refused, naming expected branch, actual base, and
+#   the gap, when the resulting base cannot be confirmed correct.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -809,6 +813,9 @@ if [ "$KIND" = secondmate ]; then
   fi
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  # Registry key for this project: needed by the base-branch check below, well
+  # before the delivery-mode lookup at the end reuses it.
+  PROJ_NAME=$(basename "$PROJ_ABS")
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
@@ -860,6 +867,102 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
+  fi
+}
+
+# Base branch of a task worktree.
+#
+# A freshly allocated pool worktree lands on the repo's DEFAULT branch. For a
+# project that develops elsewhere that is silently the wrong base: task
+# jt-style-number-column audited a tree 1036 commits behind origin/develop and
+# correctly reported that nothing described in its brief existed. A REUSED slot
+# already sits on the right branch, which is why this only bites a cold slot.
+#
+# So the intended base is checked out first (the project's base= record in
+# data/projects.md, else the repo default branch as before), then asserted: a
+# worker is never launched onto a base that cannot be confirmed correct.
+# Detached, exactly like treehouse's own handoff - the branch is often already
+# checked out in the primary checkout, and the worker cuts its own branch here.
+spawn_expected_base_branch() {  # -> "<branch> recorded|default"; empty if unresolvable
+  local recorded ref
+  recorded=$("$FM_ROOT/bin/fm-project-mode.sh" --base "$PROJ_NAME" 2>/dev/null || true)
+  if [ -n "$recorded" ]; then
+    echo "$recorded recorded"
+    return 0
+  fi
+  ref=$(git -C "$WT" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -n "$ref" ]; then
+    echo "${ref#origin/} default"
+    return 0
+  fi
+  # No remote HEAD (a local-only project): the primary checkout's own branch is
+  # the closest thing to a default branch this repo has.
+  ref=$(git -C "$PROJ_ABS" symbolic-ref -q --short HEAD 2>/dev/null || true)
+  [ -n "$ref" ] && echo "$ref default"
+  return 0
+}
+
+# origin/<branch> is the fetched truth for a shared clone; a local branch of the
+# same name can itself be stale. Empty when the branch exists in neither form.
+spawn_base_ref() {  # <branch>
+  local branch=$1
+  if git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null 2>&1; then
+    echo "origin/$branch"
+  elif git -C "$WT" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1; then
+    echo "$branch"
+  fi
+  return 0
+}
+
+spawn_base_gap() {  # <from-ref> <to-ref> -> "<behind> behind, <ahead> ahead"
+  local counts behind ahead
+  counts=$(git -C "$WT" rev-list --left-right --count "$1...$2" 2>/dev/null || true)
+  [ -n "$counts" ] || { echo "gap unknown (unrelated histories)"; return 0; }
+  behind=$(echo "$counts" | awk '{print $1}')
+  ahead=$(echo "$counts" | awk '{print $2}')
+  echo "$behind behind, $ahead ahead"
+}
+
+ensure_spawn_base_branch() {
+  local resolved base source ref want head actual primary primary_ref behind
+  resolved=$(spawn_expected_base_branch)
+  if [ -z "$resolved" ]; then
+    echo "warning: no expected base branch could be resolved for $PROJ_NAME; launching $ID on the worktree's current base" >&2
+    return 0
+  fi
+  base=${resolved%% *}
+  source=${resolved##* }
+  ref=$(spawn_base_ref "$base")
+  if [ -z "$ref" ]; then
+    echo "error: expected base branch '$base' ($source) does not exist in $WT; refusing to launch $ID onto an unconfirmed base. Fetch that branch, or fix the base= record for $PROJ_NAME in data/projects.md." >&2
+    exit 1
+  fi
+  git -C "$WT" checkout --quiet --detach "$ref" 2>/dev/null || true
+
+  want=$(git -C "$WT" rev-parse "$ref")
+  head=$(git -C "$WT" rev-parse HEAD 2>/dev/null || true)
+  if [ "$head" != "$want" ]; then
+    actual=$(git -C "$WT" name-rev --name-only --always HEAD 2>/dev/null || echo unknown)
+    echo "error: $WT is not on its base branch and could not be moved there; refusing to launch $ID onto a stale tree. Expected $base ($ref, ${want:0:12}); actual base $actual (${head:-unknown}); $(spawn_base_gap "$ref" "HEAD"). Resolve the worktree by hand (uncommitted work, or a checkout conflict), then respawn." >&2
+    exit 1
+  fi
+
+  # No recorded base means the default branch was only assumed correct. The
+  # primary checkout's own branch is independent evidence: if the assumed base
+  # is strictly behind it, this is the incident above, so refuse rather than
+  # launch a worker a thousand commits in the past.
+  if [ "$source" = default ]; then
+    primary=$(git -C "$PROJ_ABS" symbolic-ref -q --short HEAD 2>/dev/null || true)
+    if [ -n "$primary" ] && [ "$primary" != "$base" ]; then
+      primary_ref=$(spawn_base_ref "$primary")
+      if [ -n "$primary_ref" ]; then
+        behind=$(git -C "$WT" rev-list --count "$ref..$primary_ref" 2>/dev/null || echo 0)
+        if [ "${behind:-0}" -gt 0 ]; then
+          echo "error: refusing to launch $ID onto a base that cannot be confirmed correct. Actual base '$base' (the repo default branch) is $behind commits behind '$primary', the branch $PROJ_ABS is on; expected base '$primary'. No base branch is recorded for $PROJ_NAME: record it in data/projects.md as \"[<mode> base=$primary]\", then respawn." >&2
+          exit 1
+        fi
+      fi
+    fi
   fi
 }
 
@@ -1288,6 +1391,11 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
+# Both worktree sources (treehouse and orca) have produced $WT by here, and no
+# harness has launched yet, so this is the one point where the base can still be
+# corrected. A secondmate home is a firstmate worktree, not a project one.
+[ "$KIND" = secondmate ] || ensure_spawn_base_branch
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -1425,7 +1533,6 @@ if [ "$KIND" = secondmate ]; then
   YOLO=off
   SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
 else
-  PROJ_NAME=$(basename "$PROJ_ABS")
   read -r MODE YOLO <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
