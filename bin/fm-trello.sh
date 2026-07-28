@@ -27,6 +27,10 @@
 # Lane names resolve to list ids dynamically from the board (GET
 # /1/boards/<shortlink>/lists); no id is ever hardcoded. Card ids are a shortLink
 # or a full card id.
+#
+# Every board mutation and binding change holds state/.trello-sync.lock through
+# its seen-marker update. The poller holds the same lock through each sweep, so
+# it cannot observe firstmate's mutation before the marker records that change.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -113,13 +117,31 @@ esac
 need_configured_or_noop
 need_tools
 
+# Serialize every board mutation or binding change with the poll sweep through
+# the repository's portable, stale-owner-safe lock implementation.
+# Read-only list/get/card-for commands do not need the lock.
+TRELLO_SYNC_LOCK=
+body=
+trello_cli_cleanup() {
+  [ -z "${body:-}" ] || rm -f "$body" 2>/dev/null || true
+  [ -z "$TRELLO_SYNC_LOCK" ] || fm_lock_release "$TRELLO_SYNC_LOCK"
+}
+case "$cmd" in
+  comment|move|describe|create-card|label|bind|unbind)
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$SCRIPT_DIR/fm-wake-lib.sh"
+    TRELLO_SYNC_LOCK="$STATE/.trello-sync.lock"
+    fm_lock_acquire_wait "$TRELLO_SYNC_LOCK"
+    ;;
+esac
+trap trello_cli_cleanup EXIT
+
 case "$cmd" in
   comment)
     [ $# -ge 2 ] || die "usage: fm-trello.sh comment <card> <text>"
     card=$1; text=$2
     trello_safe_cardid "$card" || die "trello: unsafe card id '$card'"
     body=$(mktemp "${TMPDIR:-/tmp}/fm-trello.XXXXXX") || die "trello: mktemp failed"
-    trap 'rm -f "$body"' EXIT
     code=$(trello_api POST "1/cards/$card/actions/comments" "$body" --data-urlencode "text=$text") \
       || die "trello: comment request failed (transport)"
     case "$code" in 200|201) ;; *) die "trello: comment failed (HTTP $code)" ;; esac
@@ -133,7 +155,6 @@ case "$cmd" in
     deny_captain_lane "$lane"
     list=$(resolve_lane "$lane") || exit 1
     body=$(mktemp "${TMPDIR:-/tmp}/fm-trello.XXXXXX") || die "trello: mktemp failed"
-    trap 'rm -f "$body"' EXIT
     code=$(trello_api PUT "1/cards/$card?fields=dateLastActivity,idList,labels,badges" "$body" --data-urlencode "idList=$list") \
       || die "trello: move request failed (transport)"
     case "$code" in 200) ;; *) die "trello: move failed (HTTP $code)" ;; esac
@@ -145,7 +166,6 @@ case "$cmd" in
     card=$1; text=$2
     trello_safe_cardid "$card" || die "trello: unsafe card id '$card'"
     body=$(mktemp "${TMPDIR:-/tmp}/fm-trello.XXXXXX") || die "trello: mktemp failed"
-    trap 'rm -f "$body"' EXIT
     code=$(trello_api PUT "1/cards/$card?fields=dateLastActivity,idList,labels,badges" "$body" --data-urlencode "desc=$text") \
       || die "trello: describe request failed (transport)"
     case "$code" in 200) ;; *) die "trello: describe failed (HTTP $code)" ;; esac
@@ -158,7 +178,6 @@ case "$cmd" in
     deny_captain_lane "$lane"
     list=$(resolve_lane "$lane") || exit 1
     body=$(mktemp "${TMPDIR:-/tmp}/fm-trello.XXXXXX") || die "trello: mktemp failed"
-    trap 'rm -f "$body"' EXIT
     code=$(trello_api POST "1/cards?fields=dateLastActivity,idList,labels,badges" "$body" --data-urlencode "idList=$list" --data-urlencode "name=$name") \
       || die "trello: create-card request failed (transport)"
     case "$code" in 200|201) ;; *) die "trello: create-card failed (HTTP $code)" ;; esac
@@ -172,7 +191,6 @@ case "$cmd" in
     card=$1; action=$2; label=$3
     trello_safe_cardid "$card" || die "trello: unsafe card id '$card'"
     body=$(mktemp "${TMPDIR:-/tmp}/fm-trello.XXXXXX") || die "trello: mktemp failed"
-    trap 'rm -f "$body"' EXIT
     # Resolve the label name to a board label id.
     lbcode=$(trello_api GET "1/boards/$TRELLO_BOARD/labels?fields=id,name" "$body") \
       || die "trello: label lookup failed (transport)"
@@ -194,7 +212,6 @@ case "$cmd" in
     [ $# -ge 1 ] || die "usage: fm-trello.sh list-cards <lane-name>"
     list=$(resolve_lane "$1") || exit 1
     body=$(mktemp "${TMPDIR:-/tmp}/fm-trello.XXXXXX") || die "trello: mktemp failed"
-    trap 'rm -f "$body"' EXIT
     code=$(trello_api GET "1/lists/$list/cards?fields=id,name" "$body") \
       || die "trello: list-cards request failed (transport)"
     [ "$code" = "200" ] || die "trello: list-cards failed (HTTP $code)"
@@ -205,7 +222,6 @@ case "$cmd" in
     card=$1
     trello_safe_cardid "$card" || die "trello: unsafe card id '$card'"
     body=$(mktemp "${TMPDIR:-/tmp}/fm-trello.XXXXXX") || die "trello: mktemp failed"
-    trap 'rm -f "$body"' EXIT
     code=$(trello_api GET "1/cards/$card?fields=id,name,idList,desc,dateLastActivity,labels" "$body") \
       || die "trello: get-card request failed (transport)"
     [ "$code" = "200" ] || die "trello: get-card failed (HTTP $code)"

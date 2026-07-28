@@ -34,6 +34,11 @@
 # Ready/Go and a fresh captain-applied `go` label outrank any task binding.
 # Binding affects only In Progress and Needs Input nudge/hold routing.
 #
+# Cross-process synchronization: the poll holds state/.trello-sync.lock through
+# its board read, classification, and marker update. Every fm-trello.sh board
+# mutation holds the same lock through its marker update, so firstmate's own
+# edit cannot be misclassified in the post-mutation/pre-marker window.
+#
 # Idempotency: a per-card seen marker state/.trello-seen-<cardid> records the
 # card's dateLastActivity, list id, go-label state, and comment count.
 # A card fires only when activity advanced past the marker (or the marker is
@@ -73,6 +78,20 @@ clear_error() { rm -f "$ERROR_FILE" 2>/dev/null || true; }
 command -v curl >/dev/null 2>&1 || { emit_error_once "missing curl"; exit 0; }
 command -v jq   >/dev/null 2>&1 || { emit_error_once "missing jq"; exit 0; }
 
+# The shared portable lock recovers stale owners and is safe on macOS Bash 3.2.
+# Acquire before any board read so a CLI mutation cannot interleave before the
+# emitted trigger or seen-marker update.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+TRELLO_SYNC_LOCK="$STATE/.trello-sync.lock"
+CARDS_FILE=
+trello_poll_cleanup() {
+  [ -z "$CARDS_FILE" ] || rm -f "$CARDS_FILE" 2>/dev/null || true
+  fm_lock_release "$TRELLO_SYNC_LOCK"
+}
+fm_lock_acquire_wait "$TRELLO_SYNC_LOCK"
+trap trello_poll_cleanup EXIT
+
 # Resolve the lanes we care about. A missing lane is not fatal - the board may
 # not have every lane yet - but Inbox and Ready are the captain-owned request and
 # decision lanes, so if neither resolves there is nothing to poll.
@@ -89,7 +108,6 @@ fi
 # One board-cards fetch gives lane, labels, and comment count for every open
 # card - enough to classify all four triggers without per-card round-trips.
 CARDS_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-trello-cards.XXXXXX") || exit 0
-trap 'rm -f "$CARDS_FILE"' EXIT
 CODE=$(trello_api GET "1/boards/$TRELLO_BOARD/cards?fields=id,name,idList,dateLastActivity,labels,badges" "$CARDS_FILE") \
   || { emit_error_once "cannot read board cards"; exit 0; }
 case "$CODE" in

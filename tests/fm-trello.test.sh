@@ -64,6 +64,17 @@ if [ -n "${FAKE_CURL_LOG:-}" ]; then
   { echo "argv=$argv"; echo "method=$method"; echo "url=$url"; echo "data=$data";
     [ -n "$cfg" ] && [ -f "$cfg" ] && cat "$cfg"; } >> "$FAKE_CURL_LOG"
 fi
+if [ -n "${FAKE_CURL_CALLED:-}" ]; then
+  : > "$FAKE_CURL_CALLED"
+fi
+case "$url" in
+  *"${FAKE_CURL_BLOCK_MATCH:-__no_match__}"*)
+    if [ -n "${FAKE_CURL_BLOCK_MATCH:-}" ]; then
+      : > "${FAKE_CURL_BLOCK_READY:?}"
+      while [ ! -e "${FAKE_CURL_BLOCK_RELEASE:?}" ]; do sleep 0.02; done
+    fi
+    ;;
+esac
 path=${url%%\?*}
 body="" code=200
 case "$path" in
@@ -226,6 +237,28 @@ test_cli_move_unknown_lane_fails() {
   [ "$rc" -ne 0 ] || fail "move to an unknown lane must fail"
   assert_grep "cannot resolve lane" "$err" "unknown lane must be reported clearly"
   pass "fm-trello.sh move fails cleanly on an unresolvable lane"
+}
+
+test_cli_refuses_captain_owned_lane_writes() {
+  local home fakebin log err rc
+  home="$TMP_ROOT/cli-captain-lanes"; mkdir -p "$home"
+  write_config "$home"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  err="$home/err.txt"
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FAKE_CURL_LOG="$log" \
+    "$ROOT/bin/fm-trello.sh" move card42 "Ready / Go" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "move must refuse the captain-owned Ready lane"
+  assert_grep "captain-owned lane" "$err" "Ready-lane refusal must explain the ownership boundary"
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FAKE_CURL_LOG="$log" \
+    "$ROOT/bin/fm-trello.sh" create-card Inbox "not allowed" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "create-card must refuse the captain-owned Inbox lane"
+  assert_grep "captain-owned lane" "$err" "Inbox-lane refusal must explain the ownership boundary"
+  assert_absent "$log" "captain-owned lane refusals must happen before any board request"
+
+  pass "fm-trello.sh enforces captain-only writes for Inbox and Ready"
 }
 
 test_cli_create_card_returns_id() {
@@ -587,6 +620,64 @@ test_poll_reports_error_once() {
   pass "fm-trello-poll.sh surfaces relay errors once and dedupes"
 }
 
+test_mutation_and_poll_marker_updates_are_synchronized() {
+  local home fakebin block_ready block_release poll_called cli_out cli_err poll_out
+  local mut_pid poll_pid mut_rc poll_rc blocked_before_release poll_alive
+  home="$TMP_ROOT/poll-mutation-lock"; mkdir -p "$home/state"
+  write_config "$home"
+  fakebin=$(make_fake_curl "$home")
+  block_ready="$home/comment-blocked"
+  block_release="$home/release-comment"
+  poll_called="$home/poll-called"
+  cli_out="$home/cli.out"
+  cli_err="$home/cli.err"
+  poll_out="$home/poll.out"
+  local card='{"id":"sync-card","name":"status","idList":"L-ip","dateLastActivity":"2026-07-15T10:00:00.000Z","labels":[],"badges":{"comments":2}}'
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" \
+    FAKE_CURL_BLOCK_MATCH='/actions/comments' \
+    FAKE_CURL_BLOCK_READY="$block_ready" \
+    FAKE_CURL_BLOCK_RELEASE="$block_release" \
+    FAKE_CARD_BODY="$card" \
+    "$ROOT/bin/fm-trello.sh" comment sync-card 'firstmate status' >"$cli_out" 2>"$cli_err" &
+  mut_pid=$!
+
+  i=0
+  while [ ! -e "$block_ready" ] && [ "$i" -lt 200 ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -e "$block_ready" ] || { : > "$block_release"; wait "$mut_pid" 2>/dev/null || true; fail "mutation fixture never reached the blocked REST call"; }
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" \
+    FAKE_CURL_CALLED="$poll_called" \
+    FAKE_LISTS_BODY="$LISTS_JSON" \
+    FAKE_CARDS_BODY="[$card]" \
+    "$ROOT/bin/fm-trello-poll.sh" >"$poll_out" 2>&1 &
+  poll_pid=$!
+
+  sleep 0.2
+  blocked_before_release=0
+  [ ! -e "$poll_called" ] && blocked_before_release=1
+  poll_alive=0
+  kill -0 "$poll_pid" 2>/dev/null && poll_alive=1
+  : > "$block_release"
+  wait "$mut_pid"; mut_rc=$?
+  wait "$poll_pid"; poll_rc=$?
+
+  expect_code 0 "$mut_rc" "serialized mutation exit"
+  expect_code 0 "$poll_rc" "serialized poll exit"
+  [ "$blocked_before_release" -eq 1 ] || fail "poll reached the board while a mutation still owned the Trello sync lock"
+  [ "$poll_alive" -eq 1 ] || fail "poll did not wait for the in-flight mutation"
+  assert_present "$poll_called" "poll did not resume after the mutation released the lock"
+  [ ! -s "$poll_out" ] || fail "firstmate's synchronized mutation must not self-wake the poll (got: $(cat "$poll_out"))"
+  assert_grep $'2026-07-15T10:00:00.000Z\tL-ip\t0\t2' \
+    "$home/state/.trello-seen-sync-card" \
+    "mutation must publish its seen marker before the poll resumes"
+
+  pass "Trello mutations and poll marker updates are cross-process synchronized"
+}
+
 # ---------------------------------------------------------------------------
 # bootstrap activation
 # ---------------------------------------------------------------------------
@@ -658,6 +749,7 @@ test_cli_arg_errors
 test_cli_comment_posts_and_hides_creds
 test_cli_move_resolves_lane_dynamically
 test_cli_move_unknown_lane_fails
+test_cli_refuses_captain_owned_lane_writes
 test_cli_create_card_returns_id
 test_cli_label_add_resolves_label
 test_cli_get_and_list_cards
@@ -676,6 +768,7 @@ test_poll_bound_in_progress_comment_preserves_nudge_routing
 test_poll_second_incident_sequence_ready_move_after_completed_binding
 test_poll_one_trigger_per_sweep
 test_poll_reports_error_once
+test_mutation_and_poll_marker_updates_are_synchronized
 test_bootstrap_activates_on_config
 test_bootstrap_inert_without_config
 test_bootstrap_opt_out_cleanup

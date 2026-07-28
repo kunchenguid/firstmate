@@ -88,6 +88,7 @@ The poll also resolves any legacy duplicate bindings deterministically by task i
 A per-card seen marker `state/.trello-seen-<cardid>` records the card's `dateLastActivity`, current list id, `go` label state, and comment count.
 A card fires only when activity advanced past the marker (or the marker is absent, for the inherently-new Inbox and Ready cases), so the same activity never wakes firstmate twice.
 Every `bin/fm-trello.sh` mutation bumps the marker to the card's post-change state, so firstmate's own edits never wake it - only a genuine captain edit advances `dateLastActivity` beyond the marker.
+The poll sweep and every board mutation or binding change hold the same portable `state/.trello-sync.lock` through their marker update, so another process cannot observe a firstmate edit in the post-mutation/pre-marker window.
 The poll distinguishes a per-task pause (a captain move back to Needs Input) from a nudge (a comment on a card firstmate already parked in Needs Input) using the marker's recorded prior list id.
 Legacy two-field markers remain readable and treat an existing `go` label as pre-existing rather than fresh.
 Cards in firstmate-owned lanes that are not bound leave no marker, so marker files stay bounded to relevant cards.
