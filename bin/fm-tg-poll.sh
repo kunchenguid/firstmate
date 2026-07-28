@@ -326,11 +326,11 @@ process_update() {  # <update-json>
   entry=$(jq -cn \
     --arg rid "$rid" --arg uid "$uid" --arg kind "$kind" \
     --arg unsupported "$unsupported" --arg text "$text" \
-    --arg label "$PEER_LABEL" --arg project "$PEER_PROJECT" \
+    --arg peer_label "$PEER_LABEL" --arg project "$PEER_PROJECT" \
     --argjson chat "$chat_id" --argjson msg "$(printf '%s' "$update" | jq -r '.message.message_id // 0')" \
     --argjson at "$NOW" \
     '{request_id:$rid, update_id:$uid, message_id:$msg, chat_id:$chat,
-      label:$label, project:$project, kind:$kind, received_at:$at}
+      label:$peer_label, project:$project, kind:$kind, received_at:$at}
      | if $kind == "text" then .text = $text
        elif $kind == "unsupported" then .unsupported = $unsupported
        else . end') || return 0

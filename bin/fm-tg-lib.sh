@@ -473,10 +473,10 @@ fmtg_pairing_set() {  # <label> <project> <code> <created> <expires> [expected-u
   if [ -n "$expect" ]; then
     fmtg_chat_id_valid "$expect" || return 1
   fi
-  jq -cn --arg label "$label" --arg project "$project" --arg salt "$salt" \
+  jq -cn --arg peer_label "$label" --arg project "$project" --arg salt "$salt" \
     --arg hash "$hash" --argjson created "$created" --argjson expires "$expires" \
     --argjson expect "$([ -n "$expect" ] && printf '%s' "$expect" || printf null)" \
-    '{label:$label, project:$project, salt:$salt, code_sha256:$hash,
+    '{label:$peer_label, project:$project, salt:$salt, code_sha256:$hash,
       created_at:$created, expires_at:$expires, attempts:0, attempts_by:{},
       user_id:$expect}' \
     | fm_private_artifact_publish_stdin "$dir" pairing.json 600
@@ -530,9 +530,9 @@ fmtg_pairing_attempt() {  # <user_id>
 fmtg_peer_set() {  # <label> <project> <user_id> <chat_id> <paired_at>
   local label=$1 project=$2 user=$3 chat=$4 at=$5 dir
   dir=$(fmtg_dir)
-  jq -cn --arg label "$label" --arg project "$project" \
+  jq -cn --arg peer_label "$label" --arg project "$project" \
     --argjson user "$user" --argjson chat "$chat" --argjson at "$at" \
-    '{label:$label, project:$project, user_id:$user, chat_id:$chat, paired_at:$at}' \
+    '{label:$peer_label, project:$project, user_id:$user, chat_id:$chat, paired_at:$at}' \
     | fm_private_artifact_publish_stdin "$dir" peer.json 600
 }
 
