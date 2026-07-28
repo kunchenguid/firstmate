@@ -492,7 +492,6 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
-    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     # Devin CLI: --prompt-file avoids shell interpolation of the brief, dangerous
     # is the unattended equivalent of the other adapters' bypass modes, and the
     # per-task config carries the Stop turn-end hook without touching project config.
