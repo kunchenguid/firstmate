@@ -58,6 +58,20 @@ test_ci_invokes_the_owner() {
   pass "CI lint job calls the one-owner script, not an inline command"
 }
 
+test_stock_bash_parse_uses_owner_inventory() {
+  local listed expected
+  listed=$("$LINT" --list-files)
+  expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
+  [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
+    || fail "fm-lint.sh --list-files did not return the complete canonical shell inventory"
+  # shellcheck disable=SC2016 # Literal assertion must remain unexpanded.
+  assert_grep 'bin/fm-lint.sh --list-files > "$shell_inventory"' "$CI" \
+    "stock macOS Bash parse sweep must consume fm-lint.sh's canonical inventory"
+  assert_no_grep 'for f in bin/*.sh bin/backends/*.sh tests/*.sh' "$CI" \
+    "stock macOS Bash parse sweep must not duplicate the canonical inventory"
+  pass "stock macOS Bash parse sweep consumes the canonical lint inventory"
+}
+
 test_nomistakes_invokes_the_owner() {
   grep -Fqx "  lint: 'bin/fm-lint.sh'" "$NM" || fail "no-mistakes commands.lint must map exactly to the one-owner script"
   pass "no-mistakes pre-push lint calls the one-owner script"
@@ -485,6 +499,7 @@ SH
 test_owner_exists_and_executable
 test_owner_defines_canonical_set
 test_ci_invokes_the_owner
+test_stock_bash_parse_uses_owner_inventory
 test_nomistakes_invokes_the_owner
 test_pins_an_explicit_version
 test_ci_installs_and_logs_the_pinned_version
