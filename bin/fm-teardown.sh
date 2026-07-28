@@ -19,8 +19,12 @@
 # up a merged PR whose head branch matches the worktree's branch, fetching its head
 # via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
 # by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
-# teardown refuses rather than risk discarding unlanded work.
+# A gh lookup error falls back to the content checks; if they are also inconclusive,
+# teardown refuses rather than risk discarding unlanded work. The exact-tree proof
+# runs first. When later default-branch edits make its 3-way merge conflict, a
+# conservative zero-context proof accepts only when the unique merge-base task delta
+# cannot still be applied forward and can be applied completely in reverse at its
+# original task locations against the default tree.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
@@ -383,40 +387,119 @@ pr_is_merged() {
   unpushed_patches_are_in_pr_head "$head"
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
+# Is the branch's content already present in the resolved default branch? A 3-way
+# merge of that ref with HEAD has the default tree when HEAD introduces nothing the
+# default branch does not already contain. This isolates branch-only changes, so
 # unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
+# "added". Returns 0 for an exact match, 2 for a merge conflict, and 1 otherwise.
 content_in_default() {
-  local name ref default_tree merged_tree
+  local ref=$1 default_tree merged_tree merge_rc
+  [ -n "$ref" ] || return 1
+  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
+  [ -n "$default_tree" ] || return 1
+  if merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null); then
+    :
+  else
+    merge_rc=$?
+    [ "$merge_rc" -eq 1 ] && return 2
+    return 1
+  fi
+  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
+  [ "$merged_tree" = "$default_tree" ]
+}
+
+unique_merge_base() {
+  local left=$1 right=$2 bases
+  bases=$(git -C "$WT" merge-base --all "$left" "$right" 2>/dev/null) || return 1
+  [ -n "$bases" ] || return 1
+  case "$bases" in
+    *$'\n'*) return 1 ;;
+  esac
+  printf '%s\n' "$bases"
+}
+
+reverse_patch_applies_at_task_locations() {
+  local proof_index=$1 proof_patch=$2 output
+  output=$(LC_ALL=C GIT_INDEX_FILE="$proof_index" git -C "$WT" apply \
+    --cached --reverse --check --verbose --unidiff-zero "$proof_patch" 2>&1) || return 1
+  [[ ! "$output" =~ offset[[:space:]]-?[1-9][0-9]*[[:space:]]lines? ]]
+}
+
+# Does the task's complete net delta already exist in an evolved default tree even
+# though later edits made the 3-way proof above conflict? Build a private temporary
+# index at the authoritative default ref, then require both sides of the proof:
+# the task delta must not still apply forward, and its exact zero-context form must
+# apply completely in reverse at its original task locations. Any unsupported diff,
+# ambiguous application, relocated hunk, or missing task hunk fails closed.
+content_delta_in_default() {
+  local ref=$1 base proof_dir proof_index proof_patch rc=1
+  [ -n "$ref" ] || return 1
+  base=$(unique_merge_base "$ref" HEAD) || return 1
+  if git -C "$WT" diff --quiet "$base" HEAD -- 2>/dev/null; then
+    return 0
+  fi
+
+  proof_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-teardown-content.XXXXXX") || return 1
+  proof_index="$proof_dir/index"
+  proof_patch="$proof_dir/task.patch"
+  if git -C "$WT" diff --no-ext-diff --no-textconv --binary --full-index \
+      --no-renames --unified=0 "$base" HEAD -- > "$proof_patch" 2>/dev/null \
+    && GIT_INDEX_FILE="$proof_index" git -C "$WT" read-tree "$ref" 2>/dev/null \
+    && ! GIT_INDEX_FILE="$proof_index" git -C "$WT" apply --cached --check \
+      --unidiff-zero "$proof_patch" >/dev/null 2>&1 \
+    && reverse_patch_applies_at_task_locations "$proof_index" "$proof_patch"; then
+    rc=0
+  fi
+  rm -f "$proof_index" "$proof_index.lock" "$proof_patch"
+  rmdir "$proof_dir" 2>/dev/null || true
+  return "$rc"
+}
+
+content_landed_in_ref() {
+  local ref=$1 content_rc
+  if content_in_default "$ref"; then
+    return 0
+  else
+    content_rc=$?
+  fi
+  [ "$content_rc" -eq 2 ] || return 1
+  content_delta_in_default "$ref"
+}
+
+# Local-only cleanup has historically required a real task change before treating
+# an unmerged commit as content-landed. Preserve that fail-closed boundary: an
+# empty or unreadable task delta is not enough to retire the only local copy.
+nonempty_content_landed_in_ref() {
+  local ref=$1 base diff_rc
+  base=$(git -C "$WT" merge-base "$ref" HEAD 2>/dev/null) || return 1
+  if git -C "$WT" diff --quiet "$base" HEAD -- 2>/dev/null; then
+    return 1
+  else
+    diff_rc=$?
+    [ "$diff_rc" -eq 1 ] || return 1
+  fi
+  content_landed_in_ref "$ref"
+}
+
+# Has the worktree's committed work actually LANDED, though its commits are not
+# reachable from any remote-tracking branch? True when a merged PR proves the
+# current local work is contained in the PR head, OR exact-tree or conservative
+# net-delta proof shows the content is already in the default branch. False only for
+# genuinely unlanded work or an inconclusive proof.
+work_is_landed() {
+  local branch=$1 name ref
+  pr_is_merged "$branch" && return 0
   name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+    git -C "$WT" fetch --quiet origin \
+      "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
   elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else
     return 1
   fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
-  [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
-  [ "$merged_tree" = "$default_tree" ]
-}
-
-# Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
-# current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
-work_is_landed() {
-  local branch=$1
-  pr_is_merged "$branch" && return 0
-  content_in_default
+  content_landed_in_ref "$ref"
 }
 
 backlog_refresh_reminder() {
@@ -703,7 +786,8 @@ validate_worktree_teardown_safety() {
       return 1
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
-    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
+    if [ -n "$dirty" ] \
+      || { [ -n "$unmerged" ] && ! nonempty_content_landed_in_ref "$DEFAULT"; }; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
