@@ -153,8 +153,8 @@ test_owner_and_always_loaded_boundary() {
   pass "quota-array-dispatch has one conditional owner and a concise always-loaded boundary"
 }
 
-test_owner_contains_acceptance_procedure() {
-  local phrase
+test_owner_contains_selection_procedure() {
+  local phrase lines words bytes
   for phrase in \
     'reservePercentPoints = percentRemaining - timeRemainingPercent' \
     'Negative reserve means usage is ahead of reset pace and creates conservation pressure' \
@@ -163,30 +163,39 @@ test_owner_contains_acceptance_procedure() {
     'effective pace status is `mixed` and any `aheadWindowIds` remain' \
     'prefer a candidate without ahead-of-reset conservation pressure over one with conservation pressure' \
     'even when the pressured candidate has somewhat higher raw remaining percentage' \
-    'Prefer the least-negative worst applicable reserve' \
-    'Use known behind/on-pace evidence plus raw headroom transparently' \
+    'prefer the least-negative worst applicable reserve' \
+    'use known behind/on-pace evidence plus raw headroom transparently' \
     'Do not collapse those facts into an opaque composite score' \
     '`unknown` is valid explicit uncertainty from quota-axi' \
     'Prefer known sustainable evidence over `unknown` pace when otherwise comparable' \
     'If the dispatch choice materially hinges on unresolved pace, report the uncertainty' \
-    'Do not crash, fabricate pace, or silently reinterpret absence as healthy' \
+    'do not crash, fabricate pace, or silently reinterpret absence as healthy' \
     'stop and report every tied candidate for captain choice' \
     'Do not select by array order, harness name, or another arbitrary identity ordering' \
-    'Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-specific policy'; do
+    'Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-specific policy' \
+    'Report duplicate concrete profiles as a configuration error' \
+    'Name the inspectable facts used for every candidate'; do
     assert_grep "$phrase" "$OWNER" "quota-array-dispatch procedure lost '$phrase'"
   done
 
+  # Expanded acceptance scenarios live in deterministic fixtures, not runtime prose.
   for phrase in \
     'Higher raw quota but materially ahead vs lower raw quota on/behind pace' \
-    'Mixed effective pace with an ahead bound' \
-    'Both candidates ahead with different worst reserves' \
-    'Known sustainable versus unknown' \
-    'Every candidate tight while strongest-reasoning applies' \
-    'Genuine tie without array-order or harness bias' \
-    'schemaVersion 2 or absent-pace compatibility'; do
-    assert_grep "$phrase" "$OWNER" "acceptance scenario missing: $phrase"
+    'Sanitized producer shape' \
+    '## When to load' \
+    '## Intake boundary this skill does not relax'; do
+    if grep -Fq -- "$phrase" "$OWNER"; then
+      fail "quota-array-dispatch should not keep removed runtime prose: $phrase"
+    fi
   done
-  pass "quota-array-dispatch owns the full pace procedure and acceptance scenarios"
+
+  lines=$(wc -l < "$OWNER" | tr -d ' ')
+  words=$(wc -w < "$OWNER" | tr -d ' ')
+  bytes=$(wc -c < "$OWNER" | tr -d ' ')
+  [ "$lines" -le 65 ] || fail "quota-array-dispatch skill is too long: $lines lines (want <= 65)"
+  [ "$words" -le 550 ] || fail "quota-array-dispatch skill is too wordy: $words words (want <= 550)"
+  [ "$bytes" -le 4600 ] || fail "quota-array-dispatch skill is too large: $bytes bytes (want <= 4600)"
+  pass "quota-array-dispatch owns the compact pace procedure ($lines lines, $words words, $bytes bytes)"
 }
 
 test_cross_references_stay_pointers() {
@@ -271,7 +280,7 @@ test_no_duplicate_procedure_in_agents() {
 }
 
 test_owner_and_always_loaded_boundary
-test_owner_contains_acceptance_procedure
+test_owner_contains_selection_procedure
 test_cross_references_stay_pointers
 test_schema_v3_shape_fixture
 test_deterministic_acceptance_cases
