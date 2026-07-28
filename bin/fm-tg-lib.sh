@@ -1011,15 +1011,25 @@ fmtg_publish_task_valid() {
 }
 
 fmtg_publish_arm() {  # <task-id> <project> <head> <code> <now> <expires>
-  local task=$1 project=$2 head=$3 code=$4 now=$5 expires=$6 dir salt hash
+  local task=$1 project=$2 head=$3 code=$4 now=$5 expires=$6 dir salt hash peer user chat
   fmtg_publish_task_valid "$task" || return 1
   salt=$(fmtg_random_code 16) || return 1
   hash=$(fmtg_code_hash "$salt" "$code") || return 1
+  # An approval is a statement by ONE identity, so the record says which. The
+  # landing gate then binds to the person as well as the project, instead of
+  # depending on re-pairing cleanup to have removed a previous person's
+  # authorization.
+  peer=$(fmtg_peer_get 2>/dev/null) || return 1
+  user=$(printf '%s' "$peer" | jq -r '.user_id // empty') || return 1
+  chat=$(printf '%s' "$peer" | jq -r '.chat_id // empty') || return 1
+  fmtg_chat_id_valid "$user" && fmtg_chat_id_valid "$chat" || return 1
   dir="$(fmtg_dir)/publish"
   jq -cn --arg task "$task" --arg project "$project" --arg head "$head" \
     --arg salt "$salt" --arg hash "$hash" \
+    --argjson user "$user" --argjson chat "$chat" \
     --argjson now "$now" --argjson expires "$expires" \
     '{task_id:$task, project:$project, head:$head, salt:$salt, code_sha256:$hash,
+      peer_user:$user, peer_chat:$chat,
       armed_at:$now, expires_at:$expires, consumed_at:null, attempts:0}' \
     | fm_private_artifact_publish_stdin "$dir" "$task.json" 600
 }
@@ -1068,7 +1078,8 @@ fmtg_meta_is_linked() {  # <meta-file>
 #   1 malformed input or a state write that did not become durable
 #   3 nothing armed for this task
 #   4 the confirmation expired before the change landed
-#   6 no pinned peer, or the task, record, or landing is outside the pinned project
+#   6 no pinned peer, a different person than the one who approved, or the task,
+#     record, or landing is outside the pinned project
 #   7 this authorization already landed something (replay)
 #   8 the person never confirmed: the record is armed but unconsumed
 #   9 the prepared revision moved since the person approved it
@@ -1080,6 +1091,7 @@ fmtg_meta_is_linked() {  # <meta-file>
 fmtg_landing_guard() {  # <task-id> <task-project> <landing-target> <actual-revision> <now>
   local task=$1 project=$2 target=$3 rev=$4 now=$5
   local dir record peer pinned consumed landed armed_head armed_project armed_target expires
+  local peer_user peer_chat armed_user armed_chat
   fmtg_publish_task_valid "$task" || { printf 'invalid-task'; return 1; }
   [ -n "$target" ] || { printf 'missing-landing-target'; return 1; }
   [ -n "$rev" ] || { printf 'unresolved-revision'; return 1; }
@@ -1089,10 +1101,19 @@ fmtg_landing_guard() {  # <task-id> <task-project> <landing-target> <actual-revi
   pinned=$(printf '%s' "$peer" | jq -r '.project // empty') || { printf 'bad-peer-record'; return 1; }
   [ -n "$pinned" ] || { printf 'bad-peer-record'; return 1; }
   [ "$(basename "${project:-}")" = "$pinned" ] || { printf 'task-project-mismatch'; return 6; }
+  peer_user=$(printf '%s' "$peer" | jq -r '.user_id // empty') || { printf 'bad-peer-record'; return 1; }
+  peer_chat=$(printf '%s' "$peer" | jq -r '.chat_id // empty') || { printf 'bad-peer-record'; return 1; }
 
   record=$(fmtg_publish_show "$task") || { printf 'no-armed-confirmation'; return 3; }
   armed_project=$(printf '%s' "$record" | jq -r '.project // ""') || { printf 'bad-record'; return 1; }
   [ "$armed_project" = "$pinned" ] || { printf 'record-project-mismatch'; return 6; }
+
+  # The person who approved must still be the person this channel answers to.
+  armed_user=$(printf '%s' "$record" | jq -r '.peer_user // empty') || { printf 'bad-record'; return 1; }
+  armed_chat=$(printf '%s' "$record" | jq -r '.peer_chat // empty') || { printf 'bad-record'; return 1; }
+  [ -n "$armed_user" ] && [ -n "$armed_chat" ] || { printf 'record-has-no-peer'; return 6; }
+  { [ "$armed_user" = "$peer_user" ] && [ "$armed_chat" = "$peer_chat" ]; } \
+    || { printf 'peer-changed'; return 6; }
 
   landed=$(printf '%s' "$record" | jq -r '.landed_at // "null"') || { printf 'bad-record'; return 1; }
   [ "$landed" = null ] || { printf 'already-landed'; return 7; }
@@ -1132,6 +1153,8 @@ fmtg_landing_refusal_text() {  # <reason> <task> <target>
     no-paired-peer) printf 'task %s is linked to a Telegram request but no peer is paired' "$task" ;;
     task-project-mismatch|record-project-mismatch)
       printf 'task %s is outside the project this bridge is paired for' "$task" ;;
+    peer-changed|record-has-no-peer)
+      printf 'the publish confirmation for task %s was given by a different person than the one this bridge is now paired with' "$task" ;;
     no-armed-confirmation)
       printf 'task %s is linked to a Telegram request but no publish confirmation was ever armed' "$task" ;;
     not-confirmed)

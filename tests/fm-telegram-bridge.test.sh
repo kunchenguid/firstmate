@@ -1620,8 +1620,9 @@ local_merge_case() {  # <name> <record-project> <consumed-at|null> <head-mode>
     > "$dir/state/telegram/peer.json"
   chmod 600 "$dir/state/telegram/peer.json"
   if [ "$record_project" != none ]; then
-    printf '{"task_id":"site","project":"%s","head":"%s","salt":"s","code_sha256":"h","armed_at":1,"expires_at":9999999999,"consumed_at":%s,"attempts":0}\n' \
-      "$record_project" "$head" "$consumed" > "$dir/state/telegram/publish/site.json"
+    printf '{"task_id":"site","project":"%s","head":"%s","salt":"s","code_sha256":"h","peer_user":%s,"peer_chat":%s,"armed_at":1,"expires_at":9999999999,"consumed_at":%s,"attempts":0}\n' \
+      "$record_project" "$head" "$PEER_ID" "$PEER_ID" "$consumed" \
+      > "$dir/state/telegram/publish/site.json"
     chmod 600 "$dir/state/telegram/publish/site.json"
   fi
   printf '%s\n' "$dir"

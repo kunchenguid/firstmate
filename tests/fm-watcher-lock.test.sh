@@ -154,7 +154,11 @@ test_guard_warnings() {
   printf 'project=x\n' > "$state/task.meta"
   : > "$dir/config/x-mode.env"
   CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
-  grep -F "source '$dir/config/x-mode.env' first" "$err" >/dev/null || fail "guard repair line did not source the X-mode cadence config"
+  # The repair line must NOT name a cadence file: nothing sources one, and the
+  # arm seatbelt denies a source node in any form, so naming one would hand the
+  # agent a command it cannot run.
+  ! grep -F "$dir/config/x-mode.env" "$err" >/dev/null \
+    || fail "guard repair line still tells the agent to source the X-mode cadence config"
 
   # (2) fresh watcher, empty queue -> silence.
   dir=$(make_case guard-fresh)

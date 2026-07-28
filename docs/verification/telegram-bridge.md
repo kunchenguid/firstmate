@@ -108,7 +108,8 @@ The migration exemption now has one owner (`channel_shim_exempt`) covering all f
 The two remaining X-only paths there, `x_shim_locked_scan_needed` and `refresh_v1_x_shim`, are correctly X-only: they migrate a legacy mode-0755 v1 shim, and the bridge shim has no v1 legacy.
 Each regression was verified to fail with only its own fix reverted, so none of them passes vacuously.
 
-**Runtime backends.** Not applicable, after inspecting the integration surface rather than assuming it. The bridge adds exactly two things to shared paths, and neither reaches a backend:
+**Runtime backends.** Not applicable, after inspecting the integration surface rather than assuming it.
+The bridge adds exactly two things to shared paths, and neither reaches a backend:
 
 - the check-sweep arm in `bin/fm-watch.sh` validates the shim's bytes and calls `run_check_capture` on a repository script - no endpoint, session, pane, or `fm_backend_*` call;
 - `fm_supervision_status` in `bin/fm-supervision-lib.sh` adds one `[ -f "$state/telegram-watch.check.sh" ]` test; `grep -c fm_backend bin/fm-supervision-lib.sh` returns 0.

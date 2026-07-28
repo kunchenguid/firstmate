@@ -313,8 +313,8 @@ test_parses_pr_url_for_gh_axi() {
 
 # Build a Telegram-linked case: a paired peer, a task in the pinned project, and
 # a publish record in whatever state the caller asks for. Echoes the case dir.
-make_telegram_case() {  # <name> <record-project> <record-head> <consumed-at|null>
-  local name=$1 record_project=$2 record_head=$3 consumed=$4 case_dir
+make_telegram_case() {  # <name> <record-project> <record-head> <consumed-at|null> [approving-user]
+  local name=$1 record_project=$2 record_head=$3 consumed=$4 approver=${5:-555001} case_dir
   case_dir=$(make_case "$name")
   mkdir -p "$case_dir/wt" "$case_dir/state/telegram/publish"
   chmod 700 "$case_dir/state/telegram" "$case_dir/state/telegram/publish"
@@ -331,8 +331,9 @@ make_telegram_case() {  # <name> <record-project> <record-head> <consumed-at|nul
     > "$case_dir/state/telegram/peer.json"
   chmod 600 "$case_dir/state/telegram/peer.json"
   if [ "$record_project" != none ]; then
-    printf '{"task_id":"task-x1","project":"%s","head":"%s","salt":"s","code_sha256":"h","armed_at":1,"expires_at":9999999999,"consumed_at":%s,"attempts":0}\n' \
-      "$record_project" "$record_head" "$consumed" > "$case_dir/state/telegram/publish/task-x1.json"
+    printf '{"task_id":"task-x1","project":"%s","head":"%s","salt":"s","code_sha256":"h","peer_user":%s,"peer_chat":%s,"armed_at":1,"expires_at":9999999999,"consumed_at":%s,"attempts":0}\n' \
+      "$record_project" "$record_head" "$approver" "$approver" "$consumed" \
+      > "$case_dir/state/telegram/publish/task-x1.json"
     chmod 600 "$case_dir/state/telegram/publish/task-x1.json"
   fi
   printf '%s\n' "$case_dir"
@@ -476,6 +477,15 @@ test_empty_telegram_link_does_not_bypass_the_gate() {
   pass "a present-but-empty Telegram link is linked-and-malformed, never an unlinked task"
 }
 
+# An approval is a statement by one identity. If the bridge is re-paired to a
+# different person, a confirmation the previous person gave must not land.
+test_telegram_linked_merge_refuses_a_confirmation_from_another_person() {
+  local case_dir
+  case_dir=$(make_telegram_case tg-other-person eren-pov-site "$TG_HEAD_SHA" 100 777002)
+  tg_merge_refused "$case_dir" "given by a different person" "tg-other-person"
+  pass "a publish confirmation from a person the bridge is no longer paired with never lands"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -494,3 +504,4 @@ test_telegram_linked_merge_refuses_when_the_revision_cannot_be_resolved
 test_telegram_linked_merge_lands_once_and_never_replays
 test_unlinked_task_is_unaffected_by_the_telegram_gate
 test_empty_telegram_link_does_not_bypass_the_gate
+test_telegram_linked_merge_refuses_a_confirmation_from_another_person
