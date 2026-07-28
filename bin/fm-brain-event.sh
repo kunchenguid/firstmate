@@ -96,18 +96,18 @@ bounded_event() {  # <command> [args...]
   esac
 }
 
-EVENT_STDERR=$(mktemp "${TMPDIR:-/tmp}/fm-brain-event-stderr.XXXXXX" 2>/dev/null) || EVENT_STDERR=""
-
 export BRAIN_AGENT=firstmate
-if ! bounded_event "$EVENT_COMMAND" "$TYPE" "$TEXT" \
+exec 3>&1
+ERR_TEXT=$(bounded_event "$EVENT_COMMAND" "$TYPE" "$TEXT" \
   --event-id "$EVENT_ID" \
   --source-kind firstmate \
   --task-id "$TASK_ID" \
   --project firstmate \
   --quiet \
-  "$@" 2>"${EVENT_STDERR:-/dev/stderr}"; then
-  ERR_TEXT=""
-  [ -z "$EVENT_STDERR" ] || ERR_TEXT=$(cat "$EVENT_STDERR" 2>/dev/null)
+  "$@" 2>&1 1>&3 3>&-)
+EVENT_RC=$?
+[ -z "$ERR_TEXT" ] || printf '%s\n' "$ERR_TEXT" >&2
+if [ "$EVENT_RC" -ne 0 ]; then
   # A narrow, literal match on the real client's own wording for this one
   # rejection reason: an identical retry, keyed on our derived event_id, that
   # the server already stored once. Any other wording - a different HTTP code
@@ -118,10 +118,8 @@ if ! bounded_event "$EVENT_COMMAND" "$TYPE" "$TEXT" \
   case "$ERR_TEXT" in
     *'(409):'*'"error":"event_conflict"'*) ;;
     *)
-      [ -z "$ERR_TEXT" ] || printf '%s\n' "$ERR_TEXT" >&2
       echo "warning: fm-brain-event: lifecycle event was not accepted (action=$ACTION task=$TASK_ID)" >&2
       ;;
   esac
 fi
-[ -z "$EVENT_STDERR" ] || rm -f "$EVENT_STDERR"
 exit 0

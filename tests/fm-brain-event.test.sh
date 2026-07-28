@@ -217,6 +217,7 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
+[ -n "$event_id" ] || { echo 'stub: bridge sent no --event-id' >&2; exit 3; }
 marker="$CONFLICT_STORE/$event_id"
 if [ -e "$marker" ]; then
   echo 'brain-event: server avviste hendelsen (409): {"error":"event_conflict","message":"event_id finnes allerede med annet innhold eller identitet"}' >&2
@@ -238,8 +239,11 @@ CONFLICT_STORE="$CONFLICT_STORE" FM_BRAIN_EVENT_COMMAND="$CONFLICTING" \
 RC=$?
 set -e
 [ "$RC" -eq 0 ] || fail "an identical retry changed the lifecycle outcome"
-[ ! -s "$CAPTURE.retry2.err" ] \
-  || fail "an identical retry of an already-stored event still warned: $(cat "$CAPTURE.retry2.err")"
+if grep -Fq 'lifecycle event was not accepted' "$CAPTURE.retry2.err"; then
+  fail "an identical retry of an already-stored event still warned: $(cat "$CAPTURE.retry2.err")"
+fi
+grep -Fq '"error":"event_conflict"' "$CAPTURE.retry2.err" \
+  || fail "the client's own diagnostic was swallowed instead of only the bridge warning"
 pass "fm-brain-event: an identical retry of an already-stored event is not a failure"
 
 # A real rejection - wrong credential, unknown type, malformed payload - also
@@ -262,4 +266,30 @@ set -e
 [ "$RC" -eq 0 ] || fail "a genuine rejection changed the lifecycle outcome"
 grep -Fq 'lifecycle event was not accepted' "$CAPTURE.rejected.err" \
   || fail "a genuine 401 rejection was silently swallowed"
+grep -Fq '"error":"invalid_token"' "$CAPTURE.rejected.err" \
+  || fail "a genuine rejection lost the client's own diagnostic"
 pass "fm-brain-event: a genuine rejection still warns"
+
+# Capturing stderr must not censor a client that delivers the event and still
+# has something to say - a degraded store, a locally queued event, a deprecation
+# notice.
+NOISY="$TMP_ROOT/noisy-brain-event"
+cat > "$NOISY" <<'SH'
+#!/usr/bin/env bash
+echo 'brain-event: brain er degradert, hendelsen ble koet lokalt' >&2
+SH
+chmod +x "$NOISY"
+
+set +e
+FM_BRAIN_EVENT_COMMAND="$NOISY" \
+  "$ROOT/bin/fm-brain-event.sh" spawn TASK_START task-11 stable safe \
+  > "$CAPTURE.noisy" 2> "$CAPTURE.noisy.err"
+RC=$?
+set -e
+[ "$RC" -eq 0 ] || fail "a delivered event with a client notice changed the lifecycle outcome"
+grep -Fq 'koet lokalt' "$CAPTURE.noisy.err" \
+  || fail "a successful delivery's own stderr was swallowed by the capture"
+if grep -Fq 'lifecycle event was not accepted' "$CAPTURE.noisy.err"; then
+  fail "a delivered event was reported as not accepted"
+fi
+pass "fm-brain-event: a delivered event's own diagnostics still reach the caller"
