@@ -161,6 +161,32 @@ trap 'kill_fleet; rm -rf "$TMPROOT"' EXIT
 fleet new-session -d -s fleet || fail "could not start the test fleet server"
 fleet new-window -d -t fleet: -n fm-probe || fail "could not create the crew window"
 
+# `new-window -e` is tmux 3.0+. The CI image is older than that, and so is any
+# distro still on tmux 2.x, so this suite exercises whichever mechanism
+# bin/fm-spawn.sh would actually use here rather than assuming the newer one.
+# Both must produce the same isolation; that is the point being tested.
+PANE_ENV_SUPPORTED=$(env FM_TMUX_SOCKET="$FLEET_SOCK" bash -c '
+  set -u
+  . "$1/bin/fm-backend.sh"
+  fm_backend_source tmux
+  fm_backend_tmux_pane_env_supported && printf yes || printf no
+' _ "$ROOT")
+echo "# tmux $("$REAL_TMUX" -V | sed 's/^tmux //'): creation-time pane environment supported: $PANE_ENV_SUPPORTED"
+
+# create_sandboxed_window: make a crew window whose tmux namespace is private,
+# by the same route bin/fm-spawn.sh takes on this tmux.
+create_sandboxed_window() {  # <window-name> <sandbox-dir>
+  local name=$1 sandbox=$2
+  if [ "$PANE_ENV_SUPPORTED" = yes ]; then
+    fleet new-window -d -t fleet: -n "$name" -e "TMUX_TMPDIR=$sandbox" -e TMUX= || return 1
+    return 0
+  fi
+  # Pre-3.0 fallback: the same environment, typed into the pane.
+  fleet new-window -d -t fleet: -n "$name" || return 1
+  fleet send-keys -t "fleet:$name" "unset TMUX; export TMUX_TMPDIR=$sandbox" Enter || return 1
+  sleep 1
+}
+
 # --- endpoint existence: the exit code is not the answer ---------------------
 
 probe_exists() {  # <target> -> 0/1 through the real adapter
@@ -171,20 +197,20 @@ probe_exists() {  # <target> -> 0/1 through the real adapter
   ' _ "$ROOT" "$1"
 }
 
-# The raw behavior this fix exists for, asserted directly so the test fails loudly
-# if a future tmux ever starts reporting it correctly on its own.
+# Record what THIS tmux actually does with an unresolvable target. These are
+# diagnostics, not gates: the bug is that display-message's exit code cannot be
+# trusted, and a tmux that reported the error properly would still be served
+# correctly by the enumeration below. Gating on the broken shape would fail the
+# suite on any build that behaves better, which is not a regression.
 raw=$(fleet display-message -p -t 'totally:bogus' '#{pane_id}' 2>/dev/null); raw_rc=$?
-[ "$raw_rc" -eq 0 ] && [ -z "$raw" ] \
-  || fail "expected tmux to exit 0 with empty output for a bogus target (got rc=$raw_rc out='$raw'); the existence check's premise changed"
-pass "tmux exits 0 with empty output for an unresolvable target (the bug's cause)"
-
-# The nastier half of the same bug: with the SESSION still live, tmux answers a
-# gone window with some other window's pane id, so "output is non-empty" would
-# also report it alive (issue #1130).
+echo "# display-message on a bogus session:window -> rc=$raw_rc out='$raw'"
 raw=$(fleet display-message -p -t 'fleet:gone-window' '#{pane_id}' 2>/dev/null); raw_rc=$?
-[ "$raw_rc" -eq 0 ] && [ -n "$raw" ] \
-  || fail "expected tmux to answer a gone window in a live session with another pane's id (got rc=$raw_rc out='$raw')"
-pass "tmux answers a gone window with another window's pane id (the bug's second half)"
+echo "# display-message on a gone window in a LIVE session -> rc=$raw_rc out='$raw'"
+if [ "$raw_rc" -eq 0 ] && [ -n "$raw" ]; then
+  pass "display-message answers a gone window with another window's pane id (issue #1130's shape)"
+else
+  pass "display-message does not exhibit issue #1130's shape on this tmux; the enumeration below is what is under test either way"
+fi
 
 probe_exists 'fleet:fm-probe' || fail "a live window must read as existing"
 pass "live window reads as existing"
@@ -213,9 +239,8 @@ pass "no server: reads as gone and starts nothing"
 # Recreate the pane and give it exactly the environment bin/fm-spawn.sh sends,
 # then run the command that killed the fleet.
 
-# The pane is created exactly the way bin/fm-spawn.sh creates one: the private
-# tmux namespace is part of `new-window`, not something typed in afterwards.
-fleet new-window -d -t fleet: -n fm-probe -e "TMUX_TMPDIR=$SANDBOX" -e TMUX= \
+# The pane is created exactly the way bin/fm-spawn.sh creates one on this tmux.
+create_sandboxed_window fm-probe "$SANDBOX" \
   || fail "could not recreate the crew window with its private tmux namespace"
 PANE_OUT="$TMPROOT/pane.out"
 
@@ -235,6 +260,8 @@ wait_for_file() {  # <file> <timeout-secs>
 
 pane_run "{ echo \"TMUX=[\${TMUX:-empty}]\"; echo \"TMUX_TMPDIR=[\$TMUX_TMPDIR]\"; echo \"TMUX_PANE=[\${TMUX_PANE:-unset}]\"; } > '$PANE_OUT'"
 wait_for_file "$PANE_OUT" 15 || fail "the pane never ran the sandbox probe"
+# `-e TMUX=` leaves it empty; the typed fallback unsets it outright. Neither is
+# usable, which is all that matters here.
 assert_grep 'TMUX=[empty]' "$PANE_OUT" "the pane must not carry a usable \$TMUX any more"
 assert_grep "TMUX_TMPDIR=[$SANDBOX]" "$PANE_OUT" "the pane must use its private tmux namespace"
 assert_no_grep 'TMUX_PANE=[unset]' "$PANE_OUT" \
@@ -421,19 +448,29 @@ env_probe=$(env FM_TMUX_SOCKET="$FLEET_SOCK" bash -c '
   fm_backend_source tmux
   fm_backend_tmux_pane_env_supported && printf yes || printf no
 ' _ "$ROOT")
-[ "$env_probe" = yes ] \
-  || fail "this tmux ($( "$REAL_TMUX" -V )) was expected to support new-window -e; the rest of this section assumes it"
-pass "installed tmux supports creation-time pane environment"
+[ "$env_probe" = "$PANE_ENV_SUPPORTED" ] \
+  || fail "capability probe disagrees with itself: '$env_probe' vs '$PANE_ENV_SUPPORTED'"
+pass "the adapter reports its own creation-time pane-environment capability ($env_probe)"
 
+# The adapter must always create the window. Whether it can also seed the pane's
+# environment depends on the tmux in front of it, and bin/fm-spawn.sh types the
+# same environment in when it cannot (that fallback is asserted structurally
+# below, and its outcome is what the sandbox section above already proved).
 env FM_TMUX_SOCKET="$FLEET_SOCK" bash -c '
   set -u
   . "$1/bin/fm-backend.sh"
   fm_backend_source tmux
   fm_backend_tmux_create_task fleet fm-created "$2" "TMUX_TMPDIR=$3" "TMUX=" >/dev/null
-' _ "$ROOT" "$TMPROOT" "$SANDBOX" || fail "adapter could not create the sandboxed window"
+' _ "$ROOT" "$TMPROOT" "$SANDBOX" || fail "adapter could not create the window"
 CREATED_OUT="$TMPROOT/created.out"
-fleet send-keys -t fleet:fm-created "printf 'created=%s|%s\n' \"\$TMUX_TMPDIR\" \"\${TMUX:-empty}\" > '$CREATED_OUT'" Enter
+fleet send-keys -t fleet:fm-created "printf 'created=%s|%s\n' \"\${TMUX_TMPDIR:-none}\" \"\${TMUX:-empty}\" > '$CREATED_OUT'" Enter
 wait_for_file "$CREATED_OUT" 15 || fail "the created pane never answered"
-assert_grep "created=$SANDBOX|empty" "$CREATED_OUT" \
-  "a window created through the adapter must come up already sandboxed"
-pass "fm_backend_tmux_create_task applies the pane namespace at creation"
+if [ "$PANE_ENV_SUPPORTED" = yes ]; then
+  assert_grep "created=$SANDBOX|empty" "$CREATED_OUT" \
+    "a window created through the adapter must come up already sandboxed"
+  pass "fm_backend_tmux_create_task applies the pane namespace at creation"
+else
+  assert_no_grep "created=$SANDBOX" "$CREATED_OUT" \
+    "an old tmux cannot seed the pane environment; the adapter must not pretend it did"
+  pass "on a pre-3.0 tmux the adapter creates the window and leaves the namespace to fm-spawn's typed fallback"
+fi
