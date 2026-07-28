@@ -26,6 +26,11 @@ test_script_parses() {
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
   expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
   [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
+  if [ -x /bin/bash ]; then
+    out=$(/bin/bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
+    expect_code 0 "$rc" "/bin/bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
+    [ -z "$out" ] || fail "/bin/bash -n bin/fm-brief.sh emitted unexpected output: $out"
+  fi
   pass "fm-brief.sh: bash -n succeeds"
 }
 
