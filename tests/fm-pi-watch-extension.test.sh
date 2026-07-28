@@ -14,8 +14,39 @@ export NODE_NO_WARNINGS=1
 
 install_pi_watch_extension_fixture() {
   local repo=$1
-  mkdir -p "$repo/.pi/extensions" "$repo/node_modules/typebox"
+  mkdir -p \
+    "$repo/.pi/extensions/lib" \
+    "$repo/node_modules/@earendil-works/pi-coding-agent" \
+    "$repo/node_modules/@earendil-works/pi-tui" \
+    "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  mkdir -p "$repo/bin"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  chmod +x "$repo/bin/fm-operational-input.sh"
+  cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
+{"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
+JSON
+  cat > "$repo/node_modules/@earendil-works/pi-coding-agent/index.js" <<'JS'
+export function getMarkdownTheme() { return {}; }
+export class UserMessageComponent {
+  render() { return []; }
+  invalidate() {}
+}
+JS
+  cat > "$repo/node_modules/@earendil-works/pi-tui/package.json" <<'JSON'
+{"name":"@earendil-works/pi-tui","type":"module","exports":"./index.js"}
+JSON
+  cat > "$repo/node_modules/@earendil-works/pi-tui/index.js" <<'JS'
+export class Box {
+  addChild() {}
+  clear() {}
+  setBgFn() {}
+}
+export class Container {}
+export class Text {}
+JS
   cat > "$repo/node_modules/typebox/package.json" <<'JSON'
 {"name":"typebox","type":"module","exports":"./index.js"}
 JSON
@@ -37,6 +68,7 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" "fm-watch-arm-pi" "tracked extension missing command name"
   assert_contains "$text" "fm-watch-arm.sh" "tracked extension missing watcher arm"
   assert_contains "$text" "sendUserMessage" "tracked extension missing Pi wake API"
+  assert_contains "$text" 'encodeFirstmateOperationalInput' "tracked extension does not construct typed synthetic user-role wakes"
   assert_contains "$text" "deliverAs: \"followUp\"" "tracked extension missing followUp delivery"
   assert_contains "$text" ".pi-watch-extension-loaded" "tracked extension missing loaded marker"
   assert_contains "$text" 'createHash("sha256").update(readFileSync(extensionFile)).digest("hex")' "tracked extension does not self-hash its own content for extensionVersion"
@@ -58,6 +90,9 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" "$expected_config_source" "tracked extension does not source the effective x-mode config"
   assert_contains "$text" "exec \\\"\$FM_WATCH_ARM_SCRIPT\\\" --restart" "tracked extension does not restart into a Pi-owned watcher child"
   assert_contains "$text" 'label: "Arm firstmate watcher"' "tracked extension tool is missing its human-readable label"
+  assert_not_contains "$text" "Always use this tool" "tracked extension kept broad tool-selection guidance"
+  assert_contains "$text" "only for the first required cycle or after a notification says the cycle is missing, failed, or unhealthy" "tracked extension tool metadata is missing the Pi first-cycle or explicit-repair rule"
+  assert_contains "$text" "Do not call it after ordinary work, turn completion, or ordinary signal, stale, check, or heartbeat handling" "tracked extension prompt guidance does not prevent redundant ordinary-notification calls"
   assert_contains "$text" 'parameters: Type.Object({})' "tracked extension tool is not using Pi's canonical TypeBox schema"
   assert_contains "$text" 'content: [{ type: "text", text: result.message }]' "tracked extension tool is missing Pi text content"
   assert_contains "$text" 'details: result' "tracked extension tool is missing structured result details"
@@ -132,6 +167,10 @@ if (!notification.includes("started Pi extension arm child")) {
 for (let i = 0; i < 250 && !prompt; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
+if (!prompt.startsWith("\u2063FIRSTMATE_OP: v1 watcher: ")) {
+  console.error(`untyped operational follow-up: ${prompt}`);
+  process.exit(1);
+}
 if (!prompt.includes("FIRSTMATE WATCHER WAKE")) {
   console.error(`missing follow-up prompt: ${prompt}`);
   process.exit(1);
@@ -183,6 +222,13 @@ mod.default(pi);
 if (!tool) throw new Error("Pi watch tool was not registered");
 if (tool.label !== "Arm firstmate watcher") throw new Error(`unexpected label: ${tool.label}`);
 if (tool.parameters?.type !== "object") throw new Error("tool parameters are not a TypeBox object schema");
+const metadata = [tool.description, tool.promptSnippet, ...(tool.promptGuidelines ?? [])].join("\n");
+if (metadata.includes("Always use this tool")) throw new Error(`broad tool-selection metadata remained visible: ${metadata}`);
+if (!tool.description.includes("first required Pi watcher cycle")) throw new Error(`tool description omitted the first-cycle condition: ${tool.description}`);
+if (!tool.promptSnippet.includes("ordinary re-arming is automatic")) throw new Error(`tool snippet omitted automatic continuation: ${tool.promptSnippet}`);
+if (!tool.promptGuidelines.some((guideline) => guideline.includes("ordinary signal, stale, check, or heartbeat handling"))) {
+  throw new Error(`tool guidelines omitted ordinary-notification prevention: ${tool.promptGuidelines}`);
+}
 const result = await tool.execute("tool-call-1", {}, undefined, undefined, {});
 if (!Array.isArray(result.content) || result.content[0]?.type !== "text") {
   throw new Error(`invalid tool content: ${JSON.stringify(result)}`);
@@ -190,15 +236,141 @@ if (!Array.isArray(result.content) || result.content[0]?.type !== "text") {
 if (!result.content[0].text.includes("started Pi extension arm child")) {
   throw new Error(`unexpected tool text: ${result.content[0].text}`);
 }
+if (!result.content[0].text.includes("future ordinary re-arms are automatic")) {
+  throw new Error(`initial tool result omitted automatic continuation guidance: ${result.content[0].text}`);
+}
+if (!result.content[0].text.includes("only after a later notification says the cycle is missing, failed, or unhealthy")) {
+  throw new Error(`initial tool result omitted the repair-only condition: ${result.content[0].text}`);
+}
 if (result.details?.ok !== true || result.details?.message !== result.content[0].text) {
   throw new Error(`invalid tool details: ${JSON.stringify(result.details)}`);
 }
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi custom tool must return Pi's AgentToolResult shape"
+  expect_code 0 "$status" "Pi custom tool must expose first-cycle or repair-only metadata and return Pi's AgentToolResult shape"
   [ -z "$out" ] || fail "Pi tool-result test printed output: $out"
-  pass "Pi custom tool returns text content and structured details"
+  pass "Pi custom tool exposes repair-only metadata and returns automatic-continuation guidance"
+}
+
+test_pi_redundant_tool_call_is_owned_noop() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-redundant-tool-root"
+  home="$TMP_ROOT/pi-redundant-tool-home"
+  log="$TMP_ROOT/pi-redundant-tool.log"
+  stop="$TMP_ROOT/pi-redundant-tool.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {},
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const initial = await tool.execute("tool-call-first", {}, undefined, undefined, {});
+if (!initial.content[0]?.text.includes("started Pi extension arm child")) {
+  throw new Error(`initial call did not start the arm child: ${initial.content[0]?.text}`);
+}
+const redundant = await tool.execute("tool-call-redundant", {}, undefined, undefined, {});
+if (!redundant.content[0]?.text.includes("Pi extension already owns an arm child; no manual re-arm needed")) {
+  throw new Error(`redundant call omitted ownership-based no-op guidance: ${redundant.content[0]?.text}`);
+}
+if (/^watcher: healthy\b/.test(redundant.content[0]?.text)) {
+  throw new Error(`redundant call overclaimed independent health: ${redundant.content[0]?.text}`);
+}
+if (!redundant.content[0]?.text.includes("only after a later notification says the cycle is missing, failed, or unhealthy")) {
+  throw new Error(`redundant call omitted the repair-only condition: ${redundant.content[0]?.text}`);
+}
+for (let i = 0; i < 100 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("initial arm child did not start");
+await new Promise((resolve) => setTimeout(resolve, 100));
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 1) throw new Error(`redundant call spawned ${rows.length} arm children`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi redundant tool call must remain an ownership-based no-op with repair-only guidance"
+  [ -z "$out" ] || fail "Pi redundant-call test printed output: $out"
+  pass "Pi redundant tool call returns ownership guidance and spawns no second child"
+}
+
+test_pi_scheduled_retry_call_is_owned_noop() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-scheduled-retry-root"
+  home="$TMP_ROOT/pi-scheduled-retry-home"
+  log="$TMP_ROOT/pi-scheduled-retry.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=10000 FM_WATCH_REARM_RETRY_MAX_MS=10000 node --input-type=module 2>&1 <<'EOF'
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {},
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-first", {}, undefined, undefined, {});
+let redundant = null;
+for (let i = 0; i < 100; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  redundant = await tool.execute("tool-call-during-retry", {}, undefined, undefined, {});
+  if (redundant.content[0]?.text.includes("scheduled continuity retry")) break;
+}
+if (!redundant?.content[0]?.text.includes("Pi extension already owns a scheduled continuity retry; no manual re-arm needed")) {
+  throw new Error(`scheduled retry did not return ownership-based no-op guidance: ${redundant?.content[0]?.text}`);
+}
+if (/^watcher: healthy\b/.test(redundant.content[0]?.text)) {
+  throw new Error(`scheduled retry call overclaimed independent health: ${redundant.content[0]?.text}`);
+}
+if (!redundant.content[0]?.text.includes("only after a later notification says the cycle is missing, failed, or unhealthy")) {
+  throw new Error(`scheduled retry call omitted the repair-only condition: ${redundant.content[0]?.text}`);
+}
+await new Promise((resolve) => setTimeout(resolve, 100));
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 1) throw new Error(`scheduled retry call spawned ${rows.length} arm children`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi scheduled-retry call must not duplicate the extension-owned retry"
+  [ -z "$out" ] || fail "Pi scheduled-retry test printed output: $out"
+  pass "Pi scheduled retry remains extension-owned after another tool call"
 }
 
 test_pi_actionable_close_starts_single_successor_before_delivery() {
@@ -869,6 +1041,7 @@ test_opencode_primary_watch_plugin_static_wiring() {
   assert_contains "$text" "session.idle" "OpenCode plugin does not listen for session.idle"
   assert_contains "$text" "fm-watch-arm.sh" "OpenCode plugin does not spawn the watcher arm"
   assert_contains "$text" "promptAsync" "OpenCode plugin does not wake with promptAsync"
+  assert_contains "$text" 'encodeFirstmateOperationalInput' "OpenCode plugin does not construct typed synthetic user-role wakes"
   assert_contains "$text" ".fm-secondmate-home" "OpenCode plugin does not scope out secondmate homes"
   assert_contains "$text" "rev-parse\", \"--git-dir" "OpenCode plugin does not check linked worktree scope"
   assert_contains "$text" "sessionOwnsLock" "OpenCode plugin does not gate arm attempts on the session lock"
@@ -881,10 +1054,11 @@ test_opencode_plugin_package_boundary_is_explicit_esm() {
   local fixture plugin out status
   fixture="$TMP_ROOT/opencode-esm-boundary/.opencode"
   plugin="$fixture/plugins/fm-primary-watch-arm.js"
-  mkdir -p "$fixture/plugins"
+  mkdir -p "$fixture/plugins/lib"
   printf '%s\n' '{"dependencies":{}}' > "$fixture/package.json"
   cp "$ROOT/.opencode/plugins/package.json" "$fixture/plugins/package.json"
   cp "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
+  cp "$ROOT/.opencode/plugins/lib/fm-operational-input.js" "$fixture/plugins/lib/fm-operational-input.js"
   out=$(PLUGIN="$plugin" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 await import(pathToFileURL(process.env.PLUGIN).href);
@@ -1828,6 +2002,8 @@ test_tracked_extension_present_and_self_hashing
 test_spawn_template_mentions_pi_watch_placeholder
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
+test_pi_redundant_tool_call_is_owned_noop
+test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry

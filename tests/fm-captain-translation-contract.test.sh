@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Static regression tests for the captain-facing plain-English translation
 # contract owned by AGENTS.md section 9.
+# shellcheck disable=SC2016
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -15,6 +16,8 @@ HARNESS="$ROOT/.agents/skills/harness-adapters/SKILL.md"
 CODEXAPP="$ROOT/.agents/skills/firstmate-codexapp/SKILL.md"
 FMX="$ROOT/.agents/skills/fmx-respond/SKILL.md"
 UPDATE="$ROOT/.agents/skills/updatefirstmate/SKILL.md"
+AHOY="$ROOT/.agents/skills/ahoy/SKILL.md"
+README="$ROOT/README.md"
 
 section_9() {
   awk '
@@ -100,6 +103,16 @@ test_verbatim_internal_evidence_is_rejected_from_chat() {
   pass "captain chat rejects verbatim internal evidence while private reports stay precise"
 }
 
+test_routine_no_action_response_is_event_scoped() {
+  local contract
+  contract=$(section_9)
+  assert_contains "$contract" 'reply exactly `Captain, shipshape.` without characterizing the visible session' \
+    "section 9 does not require the exact event-scoped routine no-action response"
+  assert_not_contains "$contract" 'Captain, no decision is needed.' \
+    "section 9 implies the visible session has no unrelated open decisions"
+  pass "routine no-action response is exact and scoped to its event"
+}
+
 test_outward_facing_skill_points_reference_section_9_owner() {
   assert_grep "using \`AGENTS.md\` section 9's captain-facing translation contract" "$BOOTSTRAP" \
     "bootstrap diagnostics do not reference section 9 at captain handoff"
@@ -138,10 +151,143 @@ test_section_9_owner_is_not_duplicated_into_skills() {
   pass "skills cross-reference section 9 instead of duplicating the mapping list"
 }
 
+test_ahoy_is_an_internal_user_invocable_skill() {
+  assert_present "$AHOY" "ahoy skill is missing"
+  assert_grep 'name: ahoy' "$AHOY" "ahoy skill metadata has the wrong name"
+  assert_grep 'user-invocable: true' "$AHOY" "ahoy skill is not user-invocable"
+  assert_grep '  internal: true' "$AHOY" "ahoy skill is not internal"
+  [ ! -e "$ROOT/skills/ahoy" ] || fail "ahoy must not exist in the public installer-facing skills directory"
+  pass "ahoy is internal, user-invocable, and absent from public skills"
+}
+
+test_ahoy_readme_uses_cross_harness_convention() {
+  assert_grep 'Claude and grok use the slash form shown here; codex uses the same names with `$`' "$README" \
+    "README lost the cross-harness slash and dollar convention"
+  assert_grep '| `/ahoy`' "$README" "README built-in skills table does not list /ahoy"
+  pass "README lists ahoy under the shared cross-harness invocation convention"
+}
+
+test_ahoy_owns_only_the_visible_session_recap() {
+  assert_grep '[`../bearings/SKILL.md`](../bearings/SKILL.md)' "$AHOY" \
+    "first-message fallback does not delegate to Bearings by relative pointer"
+  assert_grep 'If no prior real captain message exists' "$AHOY" \
+    "ahoy does not limit Bearings fallback to the first real captain message"
+  assert_grep 'Bearings alone owns its gathering, artifact, and response contract.' "$AHOY" \
+    "ahoy first-message fallback does not delegate to Bearings alone"
+  assert_grep 'A captain boundary is an ordinary user-role message unless it matches one of the narrow operational exclusions below.' "$AHOY" \
+    "ahoy lacks an explicit captain-authored boundary rule"
+  assert_grep 'Exclude messages that begin with the current U+2063 `FIRSTMATE_OP:` injection prefix.' "$AHOY" \
+    "ahoy does not exclude current marked operational injections"
+  assert_grep 'Exclude legacy bare-marker away-mode injections only when U+2063 is immediately followed by `Supervisor escalate (`.' "$AHOY" \
+    "ahoy does not narrowly exclude the legacy away-mode injection shape"
+  assert_grep 'Exclude the exact legacy unmarked session-start payload ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.``' "$AHOY" \
+    "ahoy does not exclude the legacy unmarked session-start payload"
+  assert_grep 'quotes or embeds a current operational message after ordinary captain text' "$AHOY" \
+    "ahoy lacks quoted-current near-miss protection"
+  assert_grep 'Apply the current exclusion only when U+2063 `FIRSTMATE_OP:` begins at the first character of the whole message' "$AHOY" \
+    "ahoy does not pin the current-prefix whole-message boundary"
+  assert_grep 'contains ASCII `FIRSTMATE_OP:` without a leading U+2063' "$AHOY" \
+    "ahoy lacks ASCII-only near-miss protection"
+  assert_grep 'Apply the legacy startup exclusion as a literal whole-message match: ``Captain quote: Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.`` is a captain boundary.' "$AHOY" \
+    "ahoy does not pin the altered-startup behavioral near miss"
+  assert_grep 'System, developer, tool, watcher, guard, away-mode, and other injected operational messages are not captain messages.' "$AHOY" \
+    "ahoy incorrectly treats synthetic operational messages as captain messages"
+  assert_grep 'The normal recap branch is session-history-only.' "$AHOY" \
+    "later ahoy invocation is not explicitly session-history-only"
+  assert_grep 'Do not call Bearings, shell commands, fleet snapshots, status readers, GitHub or browser APIs, tools, or file reads or writes.' "$AHOY" \
+    "normal recap does not prohibit fresh fleet, file, and tool reads"
+  assert_grep 'Create no report, persist nothing' "$AHOY" \
+    "normal recap does not prohibit artifacts and storage"
+  assert_grep 'do not guess current live state beyond the last visible event' "$AHOY" \
+    "normal recap may falsely claim a live snapshot"
+  assert_grep 'The current `/ahoy` message is outside the recap interval.' "$AHOY" \
+    "current ahoy invocation is not excluded from the recap interval"
+  assert_grep 'If context compaction makes the prior boundary unavailable' "$AHOY" \
+    "ahoy does not disclose an unavailable compacted boundary"
+  assert_grep 'summarize only visibly supported events' "$AHOY" \
+    "compacted fallback may invent unsupported events"
+  assert_no_grep 'fm-bearings-snapshot.sh' "$AHOY" \
+    "ahoy copied Bearings gathering mechanics instead of referencing its owner"
+  assert_no_grep "Captain's Call" "$AHOY" \
+    "ahoy copied Bearings response contract instead of referencing its owner"
+  pass "ahoy delegates first-message fallback and keeps later recaps visible-session-only"
+}
+
+test_ahoy_scans_visible_history_for_open_decisions() {
+  assert_grep 'preserve the ordinary recap interval: recap what happened after that message and before the current invocation.' "$AHOY" \
+    "ahoy no longer preserves its ordinary recap interval"
+  assert_grep 'inspect the entire session history visible to the current first mate before the current invocation for every explicit captain decision that remains unanswered' "$AHOY" \
+    "ahoy does not scan globally visible session history for open decisions"
+  assert_grep 'including decisions raised before the ordinary recap boundary.' "$AHOY" \
+    "ahoy does not include open decisions from before the recap boundary"
+  assert_grep 'A later unrelated captain message establishes a recap boundary but does not close an earlier decision.' "$AHOY" \
+    "ahoy lets unrelated captain messages close earlier decisions"
+  assert_grep 'Treat a decision as closed only when a later visible response substantively resolves it, chooses an option, declines it, grants or denies the requested approval, or otherwise directly addresses that decision.' "$AHOY" \
+    "ahoy lacks substantive-answer closure semantics"
+  assert_grep 'Include every visibly supported open decision once, and deduplicate by the decision' "$AHOY" \
+    "ahoy does not include and deduplicate visibly open decisions"
+  assert_grep "substance when the ordinary interval recap already represents it or its wording differs." "$AHOY" \
+    "ahoy deduplicates decisions by wording instead of substance"
+  assert_grep 'If no ordinary events occurred after the previous captain message but an older visibly open decision exists, report that decision instead of claiming nothing happened.' "$AHOY" \
+    "ahoy can incorrectly claim nothing happened while an older decision is open"
+  assert_grep 'Compacted history supports an open decision only when both its request and its still-unanswered status are visible' "$AHOY" \
+    "ahoy does not limit compacted decision reporting to visible support"
+  assert_grep 'report uncertainty instead of reconstructing hidden requests or answers.' "$AHOY" \
+    "ahoy may reconstruct hidden decision history after compaction"
+  pass "ahoy adds visibly open decisions without changing the ordinary recap boundary"
+}
+
+test_ahoy_user_role_injections_share_one_marker() {
+  local daemon grok_guard opencode_guard opencode_watch pi_guard pi_watch owner sessionstart spawn
+  daemon=$(cat "$ROOT/bin/fm-supervise-daemon.sh")
+  grok_guard=$(cat "$ROOT/bin/fm-turnend-guard-grok.sh")
+  opencode_guard=$(cat "$ROOT/.opencode/plugins/fm-primary-turnend-guard.js")
+  opencode_watch=$(cat "$ROOT/.opencode/plugins/fm-primary-watch-arm.js")
+  pi_guard=$(cat "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts")
+  pi_watch=$(cat "$ROOT/.pi/extensions/fm-primary-pi-watch.ts")
+  owner=$(cat "$ROOT/bin/fm-operational-input.sh")
+  sessionstart=$(cat "$ROOT/bin/fm-sessionstart-nudge.sh")
+  spawn=$(cat "$ROOT/bin/fm-spawn.sh")
+
+  assert_contains "$owner" 'FM_OPERATIONAL_PREFIX="${FM_OPERATIONAL_MARK}FIRSTMATE_OP: "' \
+    "canonical owner lost the landed Ahoy prefix"
+  assert_contains "$sessionstart" 'fm_operational_input_encode session-start' \
+    "session-start does not use the canonical typed constructor"
+  assert_contains "$daemon" 'fm_operational_input_encode away-supervisor' \
+    "away-mode does not use the canonical typed constructor"
+  assert_contains "$grok_guard" 'fm_operational_input_encode turn-end-guard' \
+    "Grok guard does not use the canonical typed constructor"
+  assert_contains "$opencode_guard" 'encodeFirstmateOperationalInput(' \
+    "OpenCode guard does not use the cross-language constructor"
+  assert_contains "$opencode_guard" '"turn-end-guard"' \
+    "OpenCode guard does not retain its exact current kind"
+  assert_contains "$opencode_watch" 'encodeFirstmateOperationalInput(paths.root, "watcher"' \
+    "OpenCode watcher does not retain its exact current kind"
+  assert_contains "$pi_guard" 'encodeFirstmateOperationalInput(' \
+    "Pi guard does not use the cross-language constructor"
+  assert_contains "$pi_guard" '"turn-end-guard"' \
+    "Pi guard does not retain its exact current kind"
+  assert_contains "$pi_watch" '"watcher"' \
+    "Pi watcher does not retain its exact current kind"
+  assert_contains "$spawn" 'encode launch-brief' \
+    "cross-harness launches do not use the canonical launch-instruction kind"
+  for producer in "$daemon" "$grok_guard" "$opencode_guard" "$opencode_watch" "$pi_guard" "$pi_watch" "$sessionstart" "$spawn"; do
+    assert_not_contains "$producer" 'FIRSTMATE_OP: ' \
+      "a current producer copied the canonical marker grammar"
+  done
+  pass "ahoy: one canonical owner constructs typed operational input for every Firstmate-controlled user-role producer"
+}
+
 test_section_9_owns_positive_translation_contract
 test_scout_remains_allowed_house_vocabulary
 test_compressed_safety_labels_have_plain_renderings
 test_mapping_list_covers_high_risk_internal_families
 test_verbatim_internal_evidence_is_rejected_from_chat
+test_routine_no_action_response_is_event_scoped
 test_outward_facing_skill_points_reference_section_9_owner
 test_section_9_owner_is_not_duplicated_into_skills
+test_ahoy_is_an_internal_user_invocable_skill
+test_ahoy_readme_uses_cross_harness_convention
+test_ahoy_owns_only_the_visible_session_recap
+test_ahoy_scans_visible_history_for_open_decisions
+test_ahoy_user_role_injections_share_one_marker

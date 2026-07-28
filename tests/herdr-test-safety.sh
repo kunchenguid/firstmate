@@ -10,8 +10,13 @@ set -u
 # which the no-mistakes gate runs from a gate worktree, must be exempt).
 export FM_GATE_REFUSE_BYPASS=1
 
+# Same reason for the brain-event bridge: these tests drive the real lifecycle
+# scripts, so without this they would emit durable events for fixture task ids
+# into a developer's real brain (see tests/lib.sh).
+export FM_BRAIN_EVENT_COMMAND=/usr/bin/true
+
 HERDR_TEST_SAFETY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=bin/fm-herdr-lab.sh
+# shellcheck source=/dev/null
 . "$HERDR_TEST_SAFETY_DIR/bin/fm-herdr-lab.sh"
 
 herdr_refuse_if_default() { # <session>

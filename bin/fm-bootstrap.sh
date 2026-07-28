@@ -15,7 +15,7 @@
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
-#                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed: <reason>",
+#                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
@@ -35,11 +35,12 @@
 #          diagnostics for divergent shared captain-preference copies;
 #          no-op/current and successful updates stay quiet.
 #          SECONDMATE_LIVENESS lines report only actionable failures from the
-#          deeper agent-liveness verdict (bin/fm-backend.sh's
-#          fm_backend_agent_alive, distinct from endpoint pane-presence):
-#          skipped means the probe could not confidently classify the endpoint,
-#          and respawn failed means relaunch did not complete. Already-live and
-#          successfully respawned secondmates are silent.
+#          recovery-grade state owned by bin/fm-backend.sh's
+#          fm_backend_agent_state: skipped distinguishes an existing ambiguous
+#          process, an unreadable target, and an unverified backend; respawn
+#          failed names whether the endpoint was missing or agent-less.
+#          Already-live and successfully relaunched secondmates are silent
+#          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -51,9 +52,8 @@
 #          lavish-axi). tasks-axi is also version and feature gated (0.1.1+
 #          with update --archive-body and mv [<id>...]); an installed but
 #          incompatible build reports MISSING like no-mistakes. A compatible
-#          tasks-axi default backend is silent. quota-axi is required because
-#          crew-dispatch quota-balanced may call it; fm-dispatch-select.sh still
-#          degrades at runtime when quota data is unavailable.
+#          tasks-axi default backend is silent. quota-axi is required for the
+#          agent-owned dispatch-profile array procedure in AGENTS.md section 4.
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
@@ -185,6 +185,8 @@ fleet_sync() {
 }
 
 secondmate_sync() {
+  # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
   # Local-HEAD secondmate sync: fast-forward every LIVE secondmate home
   # to the primary checkout's current default-branch commit. Purely LOCAL - no
   # fetch, no origin dependency: a linked-worktree home already holds the primary's
@@ -335,8 +337,13 @@ secondmate_sync() {
   # surface into every VALIDATED live secondmate home swept above.
   # FF_SEEN_HOMES is exactly that set, and fm-config-inherit-lib.sh owns the
   # declared config items plus data/captain-shared.md.
-  local id home home_real propagated_homes
+  # After a successful push that changes allowlisted config/* for an already-
+  # running home, send its literal-content reread instruction pointer so the
+  # live agent does not keep applying stale defaults. Spawn/respawn already
+  # re-reads at launch and needs no redundant nudge unless files changed after launch.
+  local id home home_real home_lock propagated_homes report reread_out reread_skip_pending
   propagated_homes=""
+  SECONDMATE_RESPAWNED_IDS=${SECONDMATE_RESPAWNED_IDS:-}
   while IFS='|' read -r id home _window _meta; do
     validate_secondmate_home "$id" "$home" || continue
     home_real="$VALIDATED_HOME"
@@ -348,46 +355,75 @@ secondmate_sync() {
       *" $home_real "*) continue ;;
     esac
     propagated_homes="$propagated_homes $home_real"
-    if ! propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
+    mkdir -p "$home_real/state" || {
+      echo "CONFIG_REREAD: secondmate $id: send failed: could not create state directory"
+      continue
+    }
+    home_lock=$(fm_config_inherit_lock_path "$home_real") || {
+      echo "CONFIG_REREAD: secondmate $id: send failed: could not resolve per-home lock"
+      continue
+    }
+    fm_lock_acquire_wait "$home_lock" || {
+      echo "CONFIG_REREAD: secondmate $id: send failed: could not acquire per-home lock"
+      continue
+    }
+    reread_skip_pending=0
+    case " $SECONDMATE_RESPAWNED_IDS " in
+      *" $id "*) reread_skip_pending=1 ;;
+    esac
+    if [ "$reread_skip_pending" -eq 0 ] \
+      && fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
+      fm_config_reread_retry_pending "$id" "$home_real" || true
+      if fm_config_reread_retry_queue_is_full "$FM_HOME" "$id"; then
+        echo "CONFIG_REREAD: secondmate $id: send failed: retry instruction queue is full"
+        fm_lock_release "$home_lock" || true
+        continue
+      fi
+    fi
+    report=$(mktemp "${TMPDIR:-/tmp}/fm-bootstrap-inherit.XXXXXX" 2>/dev/null) || {
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: inheritance failed"
+      fm_lock_release "$home_lock" || true
+      continue
+    }
+    if FM_CONFIG_INHERIT_REPORT="$report" \
+      propagate_secondmate_inheritance "$FM_HOME" "$home_real" "$CONFIG" "$DATA"; then
+      :
+    else
       echo "SECONDMATE_SYNC: secondmate $id: skipped: inheritance failed"
     fi
+    if ! reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+      FM_STATE_OVERRIDE="$STATE" \
+      FM_CONFIG_REREAD_SKIP_PENDING="$reread_skip_pending" \
+      fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
+      if [ -n "$reread_out" ]; then
+        printf '%s\n' "$reread_out"
+      else
+        echo "CONFIG_REREAD: secondmate $id: send failed: unknown error"
+      fi
+    elif [ -n "$reread_out" ]; then
+      printf '%s\n' "$reread_out"
+    fi
+    rm -f "$report"
+    fm_lock_release "$home_lock" || true
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
   return 0
 }
 
 secondmate_liveness_sweep() {
-  # Idempotent secondmate liveness guarantee - SESSION START ONLY. A
-  # secondmate agent that has exited leaves its backend endpoint alive as a
-  # bare shell; the session-start digest's "endpoint: alive" read
-  # (fm_backend_target_exists, pane-PRESENCE only) reports that shell as
-  # alive, so recovery never respawns it, and the watcher deliberately exempts
-  # secondmates from stale-pane detection (an idle secondmate pane is healthy
-  # by design). Evidence 2026-07-07: every secondmate in this fleet was found
-  # as a dead zsh shell, invisible to every existing check. This sweep closes
-  # the gap deterministically: for every LIVE secondmate meta (kind=secondmate
-  # with a recorded window=), run the deeper fm_backend_agent_alive probe
-  # (bin/fm-backend.sh) and act only on a CONFIDENT verdict:
-  #   alive   - no-op.
-  #   dead    - kill the stale endpoint first (best-effort; the tmux adapter
-  #             refuses to create a same-named window over a live one) then
-  #             respawn via the existing recovery path (bin/fm-spawn.sh <id>
-  #             --secondmate; secondmate-provisioning).
-  #   unknown - NEVER acted on. A false-dead reading would spin up a DUPLICATE
-  #             agent (two supervisors in one home); a false-alive reading
-  #             merely leaves today's bug unfixed for one more sweep. The
-  #             worse direction is guarded by never treating anything less
-  #             than a confident dead reading as license to respawn.
-  # A meta with no recorded window= at all is left to the existing "meta with
-  # no window" recovery path (AGENTS.md section 5 / secondmate-provisioning);
-  # there is no endpoint here for this probe to read.
-  # Naturally scoped to the primary: a secondmate's own state/ never holds
-  # kind=secondmate metas (secondmates never spawn secondmates), so this
-  # sweep is a silent no-op there, exactly like secondmate_sync above.
-  # Scope: session start (reboot/restart) only. A secondmate dying
-  # MID-SESSION is a harder follow-on needing a periodic liveness beacon -
-  # explicitly out of scope here.
+  # Idempotent secondmate liveness guarantee - SESSION START ONLY. The detailed
+  # state machine and its only recovery-authorizing states are owned by
+  # fm_backend_agent_state. A missing tmux pane is not enough: tmux must prove
+  # the window or session absent. This preserves duplicate prevention for
+  # existing ambiguous processes and every transiently unreadable target while
+  # adding the missing-session path the original bare-shell and Herdr-husk sweep
+  # lacked.
+  # A meta with no window remains owned by secondmate-provisioning recovery.
+  # Secondmate homes never contain kind=secondmate meta, so this is naturally a
+  # primary-only no-op there. Mid-session liveness remains explicitly out of
+  # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target verdict out
+  local meta id window harness backend target agent_state out cause
+  SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
@@ -398,24 +434,46 @@ secondmate_liveness_sweep() {
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
-    verdict=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null) || verdict="unknown"
+    agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
     case "$harness" in
-      claude|codex|opencode|pi|grok) ;;
-      *) [ "$verdict" = dead ] && verdict=unknown ;;
-    esac
-    case "$verdict" in
-      alive)
+      claude|codex|opencode|pi|grok|kimi) ;;
+      *)
+        case "$agent_state" in dead|missing) agent_state=unverified-harness ;; esac
         ;;
-      dead)
-        fm_backend_kill "$backend" "$target" 2>/dev/null || true
-        if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
-          :
-        else
-          echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed: $(first_line "$out")"
+    esac
+    case "$agent_state" in
+      alive)
+        if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+          echo "BOOTSTRAP_INFO: secondmate $id already live (backend=$backend)"
         fi
         ;;
+      dead|missing)
+        if [ "$agent_state" = dead ]; then
+          cause="confirmed agent absence on existing endpoint"
+          fm_backend_kill "$backend" "$target" 2>/dev/null || true
+        else
+          cause="recorded endpoint confidently missing"
+        fi
+        if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+          SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
+          if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+            echo "BOOTSTRAP_INFO: secondmate $id relaunched after $cause (backend=$backend)"
+          fi
+        else
+          echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
+        fi
+        ;;
+      ambiguous)
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: existing endpoint has ambiguous agent process (backend=$backend)"
+        ;;
+      unreadable)
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: endpoint probe unreadable (backend=$backend)"
+        ;;
+      unverified-harness)
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: recorded harness '$harness' is unverified for recovery (backend=$backend)"
+        ;;
       *)
-        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: liveness probe inconclusive (backend=$backend)"
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: agent recovery classifier unverified (backend=$backend)"
         ;;
     esac
   done
@@ -655,7 +713,7 @@ crew_dispatch_validate() {
     return 0
   fi
   err=$(jq -r '
-    def verified($h): ["claude","codex","opencode","pi","grok"] | index($h);
+    def verified($h): ["claude","codex","opencode","pi","grok","kimi"] | index($h);
     def effort_ok($h; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
@@ -663,17 +721,23 @@ crew_dispatch_validate() {
       elif $h == "codex" then (["low","medium","high","xhigh"] | index($e))
       elif $h == "grok" then (["low","medium","high"] | index($e))
       elif $h == "pi" then (["low","medium","high","xhigh","max"] | index($e))
-      elif $h == "opencode" then false
+      elif $h == "opencode" or $h == "kimi" then false
       else true
       end;
-    def use_profiles($u):
-      if ($u | type) == "array" then $u
-      elif ($u | type) == "object" then [$u]
+    def profiles($value):
+      if ($value | type) == "array" then $value
+      elif ($value | type) == "object" then [$value]
       else []
       end;
+    def configured_profiles:
+      ([(.rules // [])[]? | profiles(.use?)[]?]
+        + (if has("default") then [profiles(.default)[]?] else [] end));
+    def malformed_optional_fields($items):
+      ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
+      or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)));
     def bad_efforts:
-      ([(.rules // [])[]? | use_profiles(.use?)[]? | {h: .harness, e: .effort}]
-        + (if (.default? | type) == "object" then [{h: .default.harness, e: .default.effort}] else [] end))
+      configured_profiles
+      | map({h: .harness, e: .effort})
       | map(select(.e != null))
       | map(select((.h | type) == "string" and verified(.h)))
       | map(select(. as $p | effort_ok($p.h; $p.e) | not))
@@ -685,15 +749,20 @@ crew_dispatch_validate() {
     elif [(.rules // [])[]? | select((.when? | type) != "string" or (.when | length) == 0)] | length > 0 then "each rule needs non-empty when"
     elif [(.rules // [])[]? | select((.use? | type) != "object" and (.use? | type) != "array")] | length > 0 then "each rule needs use"
     elif [(.rules // [])[]? | select((.use? | type) == "array" and (.use | length) == 0)] | length > 0 then "each rule needs at least one use profile"
-    elif [(.rules // [])[]? | use_profiles(.use?)[]? | select(type != "object")] | length > 0 then "each use profile must be an object"
-    elif [(.rules // [])[]? | use_profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
+    elif [(.rules // [])[]? | profiles(.use?)[]? | select(type != "object")] | length > 0 then "each use profile must be an object"
+    elif [(.rules // [])[]? | profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
+    elif malformed_optional_fields([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile model and effort must be non-empty strings when present"
     elif [(.rules // [])[]? | select(has("select") and ((.select? | type) != "string" or (.select | length) == 0))] | length > 0 then "select must be a non-empty string"
     elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced")] | length > 0 then
       "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced") ] | unique | join(", "))
-    elif has("default") and (.default | type) != "object" then "default must be an object"
-    elif has("default") and ((.default.harness? | type) != "string" or (.default.harness | length) == 0) then "default needs harness when present"
+    elif has("default") and ((.default | type) != "object" and (.default | type) != "array") then "default must be a profile object or non-empty profile array"
+    elif has("default") and ((.default | type) == "array" and (.default | length) == 0) then "default needs at least one profile"
+    elif has("default") and ([profiles(.default)[]? | select(type != "object")] | length) > 0 then "each default profile must be an object"
+    elif has("default") and ([profiles(.default)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length) > 0 then "each default profile needs harness"
+    elif has("default") and malformed_optional_fields([profiles(.default)[]?]) then "default profile model and effort must be non-empty strings when present"
     else
-      ([(.rules // [])[]? | use_profiles(.use?)[]?.harness] + [.default?.harness?]
+      (configured_profiles
+        | map(.harness)
         | map(select(. != null))
         | map(select(. as $h | verified($h) | not))
         | unique) as $bad_harnesses
@@ -715,15 +784,14 @@ crew_dispatch_validate() {
          elif ($p.effort? != null) then "/default"
          else "" end)
       + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end);
-    def use_label($r):
-      if ($r.use | type) == "array" then
-        ((if ($r.select? != null) then ($r.select | tostring) else "first" end)
-          + "[" + ([$r.use[] | profile(.)] | join(", ")) + "]")
-      else profile($r.use)
+    def profile_set($value; $selector):
+      if ($value | type) == "array" then
+        (($selector // "quota-balanced") + "[" + ([$value[] | profile(.)] | join(", ")) + "]")
+      else profile($value)
       end;
     (["BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json"]
-      + [(.rules // [])[]? | "BOOTSTRAP_INFO: crew dispatch rule: " + (.when | tostring) + " -> " + use_label(.)]
-      + (if (.default? | type) == "object" then ["BOOTSTRAP_INFO: crew dispatch default: " + profile(.default)] else [] end))
+      + [(.rules // [])[]? | "BOOTSTRAP_INFO: crew dispatch rule: " + (.when | tostring) + " -> " + profile_set(.use; .select?)]
+      + (if has("default") then ["BOOTSTRAP_INFO: crew dispatch default: " + profile_set(.default; null)] else [] end))
     | .[]
   ' "$file"
   fi
@@ -800,8 +868,8 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   echo "BOOTSTRAP_INFO: tasks-axi available"
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
-  secondmate_sync
   secondmate_liveness_sweep
+  secondmate_sync
   x_mode_setup
   fleet_sync
 fi
