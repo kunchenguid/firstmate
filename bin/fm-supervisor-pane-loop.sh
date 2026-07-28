@@ -49,6 +49,7 @@ case "$STATE_REFRESH_SECS" in
 esac
 
 state_line=
+state_at=
 state_next=0
 
 while [ -f "$META" ]; do
@@ -66,6 +67,7 @@ while [ -f "$META" ]; do
         "$SCRIPT_DIR/fm-crew-state.sh" "$ID" 2>/dev/null || true
     )
     [ -n "$state_line" ] || state_line='state: unknown · source: unavailable'
+    state_at=$(date '+%H:%M:%S %Z')
     state_next=$((SECONDS + STATE_REFRESH_SECS))
   fi
   # FM_GUARD_READ_ONLY=1: this background pane is a non-owning guard caller.
@@ -94,8 +96,8 @@ while [ -f "$META" ]; do
   printf 'Kind: %s\n' "$kind"
   printf 'Backend: %s\n' "$backend"
   printf 'Project: %s\n' "$project"
-  printf 'Observed: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
-  printf '%s\n\n' "$state_line"
+  printf 'Peek observed: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+  printf '%s · run state as of %s\n\n' "$state_line" "$state_at"
   printf '%s\n' "$peek_out"
   sleep "$REFRESH_SECS"
 done

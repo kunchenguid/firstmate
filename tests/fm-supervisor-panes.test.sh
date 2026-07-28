@@ -138,10 +138,11 @@ SH
   printf '%s\n' "$bin"
 }
 
-run_pane_loop_briefly() {  # <bin> <state> <state-refresh-secs> <state-calls> <peek-calls>
-  local bin=$1 state=$2 state_refresh=$3 state_calls=$4 peek_calls=$5 pid i
+run_pane_loop_briefly() {  # <bin> <state> <state-refresh-secs> <state-calls> <peek-calls> [render]
+  local bin=$1 state=$2 state_refresh=$3 state_calls=$4 peek_calls=$5 render=${6:-/dev/null} pid i
   : > "$state_calls"
   : > "$peek_calls"
+  [ "$render" = /dev/null ] || : > "$render"
   fm_write_meta "$state/alpha.meta" "window=firstmate:11" "backend=zellij" "kind=ship"
   FM_ROOT_OVERRIDE="$(dirname "$bin")" \
     FM_HOME="$(dirname "$state")" \
@@ -150,7 +151,7 @@ run_pane_loop_briefly() {  # <bin> <state> <state-refresh-secs> <state-calls> <p
     FM_SUPERVISOR_STATE_REFRESH_SECS="$state_refresh" \
     FM_TEST_STATE_CALLS="$state_calls" \
     FM_TEST_PEEK_CALLS="$peek_calls" \
-    bash "$bin/fm-supervisor-pane-loop.sh" alpha >/dev/null 2>&1 &
+    bash "$bin/fm-supervisor-pane-loop.sh" alpha >"$render" 2>/dev/null &
   pid=$!
   sleep 3
   rm -f "$state/alpha.meta"
@@ -183,6 +184,29 @@ test_pane_loop_polls_run_state_on_its_own_slower_cadence() {
   pass "fm-supervisor-pane-loop: run-state lookups follow their own slower cadence"
 }
 
+# The redraw stamp is recomputed every cycle while the run-state line is
+# reused for a whole state interval, so the two must be stamped separately or
+# a minute-old `state: working` reads as current under a live timestamp.
+test_pane_loop_stamps_the_run_state_line_separately() {
+  local dir bin state render distinct frames
+  dir="$TMP_ROOT/pane-loop-stamps"; state="$dir/home/state"; mkdir -p "$state"
+  bin=$(make_pane_loop_fakebin "$dir")
+  render="$dir/render"
+
+  run_pane_loop_briefly "$bin" "$state" 3600 "$dir/state-calls" "$dir/peek-calls" "$render"
+  assert_grep 'Peek observed: ' "$render" \
+    "the redraw timestamp should say it stamps the peek, not everything below it"
+  assert_grep 'state: working · source: stub · run state as of ' "$render" \
+    "the run-state line should carry its own refresh timestamp"
+  frames=$(grep -c 'Peek observed: ' "$render" || true)
+  distinct=$(grep -o 'run state as of .*' "$render" | LC_ALL=C sort -u | grep -c . || true)
+  [ "$frames" -ge 2 ] \
+    || fail "the pane should have rendered more than one frame to compare stamps (got $frames)"
+  [ "$distinct" = "1" ] \
+    || fail "a cached run-state line must keep the timestamp of the lookup that produced it (got $distinct distinct stamps)"
+  pass "fm-supervisor-pane-loop: stamps the cached run-state line separately from the redraw"
+}
+
 test_pane_loop_peeks_in_guard_read_only_mode() {
   assert_grep 'FM_GUARD_READ_ONLY=1' "$ROOT/bin/fm-supervisor-pane-loop.sh" \
     "the supervisor pane loop must peek in guard read-only mode so it cannot claim the once-per-episode WATCHER DOWN banner"
@@ -193,4 +217,5 @@ test_active_zellij_crews_create_supervisor_tab_and_panes
 test_zero_active_zellij_crews_close_existing_supervisor_tab
 test_lifecycle_hooks_invoke_reconciler
 test_pane_loop_polls_run_state_on_its_own_slower_cadence
+test_pane_loop_stamps_the_run_state_line_separately
 test_pane_loop_peeks_in_guard_read_only_mode

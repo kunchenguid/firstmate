@@ -95,6 +95,7 @@ The supervisor tab is rebuilt by `bin/fm-supervisor-panes.sh` after successful s
 Each supervisor pane runs `bin/fm-supervisor-pane-loop.sh`, which refreshes `bin/fm-crew-state.sh` plus bounded `bin/fm-peek.sh` output until the task metadata disappears.
 These panes poll forever while their crew is alive, so the loop keeps two separate cadences: the redraw and its peek run on the refresh interval, while the much more expensive `bin/fm-crew-state.sh` lookup - a `no-mistakes axi status` in the crew worktree plus several git probes - runs on its own slower interval and its last line is reused in between.
 Steady-state cost per crew is therefore one pipeline-CLI run-state lookup a minute rather than one every redraw, at the price of a run-state line that can lag the peek output by up to one state interval.
+Because the two are not equally fresh, the pane labels each one with its own timestamp: `Peek observed:` stamps the redraw, and the run-state line carries a trailing `run state as of <time>` stamped when that lookup actually ran.
 Every supervisor pane is titled `fm-<id>`: later panes get that title from `new-pane --name`, and the seed pane is titled with a follow-up `rename-pane -p <pane-id>` because `new-tab --name` names the tab only (best-effort, since the title is cosmetic).
 When no active non-secondmate zellij crews remain, reconciliation closes the supervisor tab instead of leaving an empty surface behind.
 Other backends currently no-op for this feature.
