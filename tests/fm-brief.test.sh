@@ -73,27 +73,27 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
-test_faster_paths_use_configured_authority_without_stacked_review() {
+test_faster_paths_stop_at_the_captain_boundary_without_stacked_review() {
   local home id brief
-  home="$TMP_ROOT/configured-authority-home"
+  home="$TMP_ROOT/captain-boundary-home"
   write_registry "$home"
   id="brief-direct-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "The configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
-    "direct-PR brief lost configured merge authority"
-  assert_no_grep "The captain reviews and merges the PR" "$brief" \
-    "direct-PR brief hard-coded captain-only authority"
+  assert_grep "Never merge the PR; stop for captain approval" "$brief" \
+    "direct-PR brief lost the worker no-merge boundary"
+  assert_grep "Inspect every review submission and inline thread" "$brief" \
+    "direct-PR brief lost review-thread handling"
+  assert_grep "done: PR {full https://... URL} checks green" "$brief" \
+    "direct-PR brief lost its full green PR return point"
   id="brief-local-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path." "$brief" \
-    "local-only brief lost configured merge authority and guarded landing"
-  assert_no_grep "The captain approves the ready branch" "$brief" \
-    "local-only brief hard-coded captain-only authority"
+  assert_grep "Only firstmate performs the approved local merge after captain approval." "$brief" \
+    "local-only brief lost the firstmate-only landing boundary"
   assert_no_grep "Firstmate then reviews your branch diff" "$brief" \
     "local-only brief retained a personal review stacked on the selected delivery path"
-  pass "fm-brief.sh: faster paths use configured authority without stacked review"
+  pass "fm-brief.sh: faster paths stop at the captain boundary without stacked review"
 }
 
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
@@ -385,7 +385,7 @@ test_scout_and_secondmate_scaffold() {
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
-test_faster_paths_use_configured_authority_without_stacked_review
+test_faster_paths_stop_at_the_captain_boundary_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete

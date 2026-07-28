@@ -99,6 +99,7 @@
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
+#     __PIWORKERGUARD__ absolute path to the worker-only Pi PR-merge guard extension
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
@@ -235,6 +236,9 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+META_TMP=
+WORKER_GUARD_INSTALLED=0
+WORKER_GUARD_WORKSPACE=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -255,6 +259,14 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  [ -z "${META_TMP:-}" ] || rm -f "$META_TMP"
+  if [ "${WORKER_GUARD_INSTALLED:-0}" = 1 ]; then
+    WORKER_GUARD_INSTALLED=0
+    "$SCRIPT_DIR/fm-worker-guard-install.sh" --remove \
+      "$WORKER_GUARD_WORKSPACE" "$STATE" "$ID" >/dev/null 2>&1 || \
+      echo "warning: failed to remove an unpublished worker merge guard registration" >&2
+    [ -z "${TASK_TMP:-}" ] || rm -rf "$TASK_TMP"
+  fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -439,7 +451,7 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         printf '%s%s' "$harness" ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s%s' "$harness" ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s%s' "$harness" ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ -e __PIWORKERGUARD__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -460,7 +472,7 @@ launch_template() {
 }
 
 case "$ARG3" in
-  *' '*)  # raw launch command (unverified-adapter escape hatch)
+  *' '*)  # raw launch command; ordinary workers still require verified guard support
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -474,8 +486,8 @@ case "$ARG3" in
     # active. Resolving here on every spawn is what makes the split DURABLE - a
     # respawn (recovery, /updatefirstmate, restart) re-resolves, so
     # config/secondmate-harness keeps governing secondmate launches across restarts.
-    # The launch_template lookup below is the unverified-adapter guard for both
-    # kinds: a harness with no template aborts the spawn.
+    # The launch_template lookup below guards configured adapter names for both
+    # kinds, and ordinary workers receive a second blocking-hook preflight.
     if [ "$KIND" = secondmate ]; then
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
       harness_src='config/secondmate-harness (falling back to config/crew-harness)'
@@ -487,11 +499,11 @@ case "$ARG3" in
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
     fi
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no verified launch template for harness '$HARNESS' (from $harness_src or detection)" >&2; exit 1; }
     ;;
   *)
     HARNESS=$ARG3
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; verify the adapter and its worker merge guard before production use" >&2; exit 1; }
     ;;
 esac
 
@@ -505,6 +517,12 @@ esac
 if [ "$HARNESS" = pi-signed ] && ! command -v pi-signed >/dev/null 2>&1; then
   echo "error: pi-signed executable not found on PATH; install the signed Pi wrapper or select a different verified harness" >&2
   exit 1
+fi
+
+# Refuse unsupported harnesses and missing deterministic guard dependencies
+# before creating any ordinary worker runtime endpoint.
+if [ "$KIND" != secondmate ]; then
+  "$SCRIPT_DIR/fm-worker-guard-install.sh" --preflight "$HARNESS" || exit 1
 fi
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
@@ -1303,6 +1321,16 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+WORKER_GUARD_BIN=
+if [ "$KIND" != secondmate ]; then
+  WORKER_GUARD_BIN=$("$SCRIPT_DIR/fm-worker-guard-install.sh" \
+    "$HARNESS" "$WT" "$STATE_REAL" "$ID" "$TASK_TMP" "$TURNEND") || {
+      echo "error: worker PR-merge guard installation failed; no worker agent was launched" >&2
+      exit 1
+    }
+  WORKER_GUARD_INSTALLED=1
+  WORKER_GUARD_WORKSPACE=$WT
+fi
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -1313,11 +1341,7 @@ exclude_path() {
 if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     claude*)
-      mkdir -p "$WT/.claude"
-      cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
-EOF
-      exclude_path '.claude/settings.local.json'
+      # fm-worker-guard-install.sh writes one combined PreToolUse + Stop file.
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
@@ -1433,6 +1457,7 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+META_TMP=$(mktemp "$STATE/.fm-spawn-meta-$ID.XXXXXX") || exit 1
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
@@ -1443,6 +1468,7 @@ META_WINDOW=$T
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
+  [ -z "$WORKER_GUARD_BIN" ] || echo "worker_guard=pr-merge-v1"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   # backend= is written only for a non-default (non-tmux) backend, so the
@@ -1472,12 +1498,29 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$META_TMP"
+chmod 0600 "$META_TMP"
+if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+  [ ! -d "$STATE/$ID.meta" ] || echo "$STATE/$ID.meta: Is a directory" >&2
+  rm -f "$META_TMP"
+  META_TMP=
+  echo "error: task metadata path already exists at $STATE/$ID.meta" >&2
+  exit 1
+fi
+if ! mv "$META_TMP" "$STATE/$ID.meta"; then
+  rm -f "$META_TMP"
+  META_TMP=
+  echo "error: task metadata could not be published at $STATE/$ID.meta" >&2
+  exit 1
+fi
+META_TMP=
+WORKER_GUARD_INSTALLED=0
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+sq_piworkerguard=$(shell_quote "$STATE/$ID.worker-guard.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
@@ -1488,6 +1531,7 @@ LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+LAUNCH=${LAUNCH//__PIWORKERGUARD__/$sq_piworkerguard}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
@@ -1495,11 +1539,15 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
 fi
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
+# Export task-local process settings into the worker pane before launch.
+# The guarded PATH applies only to this worker and leaves firstmate's own merge
+# helper environment untouched.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 sleep 0.3
+if [ -n "$WORKER_GUARD_BIN" ]; then
+  spawn_send_text_line "$T" "export PATH=$(shell_quote "$WORKER_GUARD_BIN"):\$PATH"
+  sleep 0.3
+fi
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then

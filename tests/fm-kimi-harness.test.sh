@@ -25,7 +25,7 @@ test_existing_launch_templates_are_byte_pinned() {
   assert_source_line "        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c \"notify=[\\\"bash\\\",\\\"-c\\\",\\\"touch __TURNEND__\\\"]\" \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"'"
   assert_source_line "    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\\''{\"permission\":{\"*\":\"allow\"}}'\\'' opencode __MODELFLAG__--prompt \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"' ;;"
   assert_source_line "        printf '%s%s' \"\$harness\" ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"'"
-  assert_source_line "        printf '%s%s' \"\$harness\" ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"'"
+  assert_source_line "        printf '%s%s' \"\$harness\" ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ -e __PIWORKERGUARD__ \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"'"
   assert_source_line "    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__\"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"' ;;"
   pass "fm-spawn: the five pre-existing adapters' launch templates stay byte-pinned"
 }
@@ -192,37 +192,20 @@ $1
 EOF
 }
 
-test_kimi_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real meta
-  id=kimi-success-z1
-  rec=$(make_spawn_case success "$id")
+test_kimi_ordinary_worker_refuses_before_endpoint_launch() {
+  local id rec out rc
+  id=kimi-refusal-z1
+  rec=$(make_spawn_case refusal "$id")
   read_spawn_record "$rec"
-  out=$(FM_FAKE_KIMI_SWALLOW_FIRST=yes run_spawn \
-    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
-    --model kimi-code/k3 --effort high)
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
   rc=$?
-  expect_code 0 "$rc" "verified kimi launch-then-send should succeed"
-  assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
-
-  launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "'$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
-    || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
-  assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
-  assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
-  assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
-
-  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md"
-  pointer=$(cat "$CASE_DIR/pointer.log")
-  [ "$pointer" = "Read the brief at $brief_real and follow it exactly." ] \
-    || fail "kimi pointer was not the exact absolute-path-only instruction: $pointer"
-  meta="$HOME_DIR/state/$id.meta"
-  assert_grep 'model=kimi-code/k3' "$meta" "kimi meta lost the requested model"
-  assert_grep 'effort=high' "$meta" "kimi meta did not retain the unsupported effort axis"
-  assert_grep 'BEGIN FIRSTMATE KIMI TURN-END HOOK' "$HOME_DIR/.kimi-code/config.toml" \
-    "kimi spawn did not install its guarded global hook region"
-  assert_grep 'token=' "$WT_DIR/.fm-kimi-turnend" "kimi spawn did not write its token pointer"
-  assert_present "$HOME_DIR/state/$id.kimi-turnend-token" "kimi spawn did not record its token"
-  pass "fm-spawn: kimi launches, delivers its brief, and registers a guarded turn-end token"
+  [ "$rc" -ne 0 ] || fail "ordinary Kimi worker launched without a blocking shell-tool guard"
+  assert_contains "$out" "refusing ordinary Kimi worker spawn" "Kimi refusal did not name the worker boundary"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "Kimi refusal launched the agent"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "Kimi refusal published task metadata"
+  assert_no_grep 'BEGIN FIRSTMATE KIMI TURN-END HOOK' "$HOME_DIR/.kimi-code/config.toml" \
+    "Kimi refusal mutated global hook config before the guard decision"
+  pass "fm-spawn: ordinary Kimi workers refuse before endpoint launch when deterministic merge denial is unavailable"
 }
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
@@ -679,14 +662,7 @@ test_kimi_hook_install_is_surgical_idempotent_and_removable
 test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
-test_kimi_launch_then_send_is_verified
-test_kimi_hook_is_silent_and_requires_registered_workspace_token
-test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
-test_kimi_teardown_removes_pointer_and_registry_token
-test_kimi_falls_back_to_expanded_home_binary
-test_kimi_missing_binary_refuses_before_pane_creation
-test_kimi_unconfirmed_delivery_fails_loudly
-test_kimi_readiness_gate_precedes_pointer
+test_kimi_ordinary_worker_refuses_before_endpoint_launch
 test_kimi_detection_uses_ancestry_after_markers
 test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines

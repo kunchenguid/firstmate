@@ -34,7 +34,9 @@ The supervision knowledge lives here: busy signature, exit command, interrupt, d
 Never dispatch a crewmate or secondmate on an unverified adapter.
 If `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, tell the captain under `AGENTS.md` section 9 that the requested worker runtime is not verified yet, use firstmate's own verified runtime for current work, and ask only whether to verify the requested runtime before future use.
 Do not pause current work for that future-verification choice, and never launch an unverified adapter.
-If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
+If the captain asks for a new harness, propose verifying it first in a maintainer-owned scratch environment, including a blocking shell-tool hook, before adding it to `fm-worker-guard-install.sh` and the production spawn allowlist.
+Then confirm every adapter fact empirically and record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier, the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
+A raw production worker launch is no longer a guard bypass and must refuse until that support exists.
 
 ## Detection
 
@@ -68,6 +70,16 @@ The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, a
 `opencode`, `pi`, and `pi-signed` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
 The exact hook files, commands, output-shaping quirks (Claude Code only honors the deny when stdout is empty), and validation transcripts are owned by `docs/arm-pretool-check.md`.
 When changing any watcher-arm PreToolUse hook, validate the real harness behavior in a scratch project before trusting it, then update that doc.
+
+## Worker PR-merge guard
+
+Every ordinary worker spawn must pass `bin/fm-worker-guard-install.sh --preflight` before backend endpoint creation and complete full installation before the worker agent launches.
+Claude, Codex, OpenCode, Pi, pi-signed, and Grok have verified blocking shell-tool surfaces; the installer also adds task-local `gh` and `gh-axi` PATH wrappers, while the semantic hook catches absolute and nested forms.
+The full installer is independent of tmux, Herdr, Zellij, Orca, and cmux because `fm-spawn.sh` invokes it once after isolation and before worker agent launch.
+Kimi has only the verified global Stop lifecycle hook and no verified blocking shell-tool hook, so an ordinary Kimi worker or scout spawn must refuse before launch; Kimi remains available for a persistent secondmate, which owns Firstmate merge authority rather than worker authority.
+Do not silently route around this refusal or weaken the guard for a preferred model.
+`docs/architecture.md` "Project modes are explicit" and the worker-guard script headers own the exact contract and mechanics.
+
 ## Primary delegation-shape guard
 
 Claude exposes built-in delegation, scheduling, and worktree tools that a primary session can use to create work with no `state/<id>.meta`, which makes the whole guard stack inert because every guard counts that metadata.
@@ -359,7 +371,7 @@ Kimi Code CLI launches from the absolute path resolved from `PATH`, falling back
 | Fact | Value |
 |---|---|
 | Binary | Executable `kimi` from `PATH`, then executable `$HOME/.kimi-code/bin/kimi`; spawning refuses if neither exists. |
-| Launch | Bare interactive TUI with `--auto`, followed by readiness-gated pointer delivery; positional prompts are rejected. |
+| Launch | Persistent-secondmate use only: bare interactive TUI with `--auto`, followed by readiness-gated pointer delivery; ordinary worker and scout launch refuses before endpoint creation because no blocking shell-tool hook is verified. |
 | Models | `kimi-code/kimi-for-coding` (default), `kimi-code/kimi-for-coding-highspeed`, `kimi-code/k3`, and `kimi-code/k3-256k`. |
 | Busy-pane signature | A transient line with optional leading whitespace, a rotating moon-phase glyph, required whitespace on both sides of `·`, and optional trailing content; the line is absent when idle. |
 | Exit command | `/exit` |
@@ -372,7 +384,8 @@ Kimi Code CLI launches from the absolute path resolved from `PATH`, falling back
 | Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
 | Effort | No reasoning-effort flag exists, so requested effort is recorded in task metadata but omitted from launch. |
 
-`fm-spawn.sh` launches Kimi bare, waits for the composer box or `Welcome to Kimi Code!`, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires a cleared composer plus either the echoed `✨` submission or nonzero context before accepting delivery.
+For a persistent secondmate, `fm-spawn.sh` launches Kimi bare, waits for the composer box or `Welcome to Kimi Code!`, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires a cleared composer plus either the echoed `✨` submission or nonzero context before accepting delivery.
+Ordinary Kimi worker and scout launch refuses before endpoint creation because Kimi has no verified blocking shell-tool hook for the worker PR-merge guard.
 This launch-then-send shape is mandatory because Kimi rejects a positional brief as an unknown command.
 Sending before readiness was reproduced as a silent drop with a zero exit status, an empty composer, `context: 0%`, no echoed user message, and a healthy-looking idle pane.
 The brief path must be absolute because the brief lives outside the task worktree, and Kimi reads it there without `--add-dir`.
