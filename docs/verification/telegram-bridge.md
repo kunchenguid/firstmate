@@ -12,7 +12,7 @@ Recorded 2026-07-28 on macOS (Darwin 25.5.0, arm64), GNU bash 5.3.9, ShellCheck 
 bin/fm-test-run.sh --family telegram-bridge
 ```
 
-41 checks pass, covering: inert-by-default, token secrecy and file modes, pairing success/expiry/replay/wrong-code/wrong-identity/re-pair/revoke, exactly-once acceptance, duplicate delivery, both crash windows, offset confirmation, the recovery sweep, refusal of unpaired/group/channel/bot senders, unsupported and oversized payloads, injection inertness, rate limiting, project routing, the two-step publish gate, reply escaping/splitting/retry/final cleanup, bootstrap arm and disarm, supervision eligibility, cross-channel coexistence, sweep rotation, and home isolation.
+42 checks pass, covering: inert-by-default, token secrecy and file modes, pairing success/expiry/replay/wrong-code/wrong-identity/re-pair/revoke, exactly-once acceptance, duplicate delivery, both crash windows, offset confirmation, the recovery sweep, refusal of unpaired/group/channel/bot senders, unsupported and oversized payloads, injection inertness, rate limiting, project routing, the two-step publish gate, reply escaping/splitting/retry/final cleanup, bootstrap arm and disarm, supervision eligibility, cross-channel coexistence, sweep rotation, gate-agent refusal, and home isolation.
 
 The Bot API is served by the fake local server in `tests/telegram-helpers.sh`: a stateful implementation of `getUpdates` and `sendMessage` reached through the client's real `curl --config` transport.
 No socket is bound and no real token exists anywhere in the suite.
@@ -88,6 +88,19 @@ unknown    1
 The bridge spawns nothing and owns no endpoint, so tmux, herdr, zellij, orca, and cmux are unaffected.
 
 **Cross-channel.** `bin/fm-x-lib.sh` now sources the three extracted libraries instead of defining their contracts, so `bin/fm-test-run.sh` selects both the `pr-forge` and `telegram-bridge` families when any of them changes. `bin/fm-test-run.sh --family pr-forge` (which includes `tests/fm-x-mode.test.sh`, 102 checks) passes unchanged after the extraction.
+
+## Only firstmate reaches the channel
+
+`bin/fm-tg-reply.sh`, `bin/fm-tg-pair.sh`, and `bin/fm-tg-task.sh` call `fm_refuse_if_gate_agent` before anything else.
+A no-mistakes gate agent runs inside a firstmate checkout and auto-loads `AGENTS.md`, so it can read that this channel exists; the same capability-removal guard the fleet entrypoints use keeps it away from a channel that reaches someone outside the fleet.
+
+```sh
+$ NO_MISTAKES_GATE=1 bin/fm-tg-reply.sh x --text-file /dev/null; echo "exit=$?"
+error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)
+exit=3
+```
+
+`test_gate_agent_cannot_reach_the_channel` asserts the refusal for messaging, revoking, and arming a publish, and that no message was delivered.
 
 ## Sweep rotation is a real guard
 

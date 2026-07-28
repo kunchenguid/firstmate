@@ -44,6 +44,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-tg-lib.sh
 . "$SCRIPT_DIR/fm-tg-lib.sh"
+# shellcheck source=bin/fm-gate-refuse-lib.sh
+. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+
+# Arming and consuming a publish confirmation decides whether prepared work may
+# land; a no-mistakes gate agent inside a firstmate checkout must not reach it
+# (bin/fm-gate-refuse-lib.sh).
+fm_refuse_if_gate_agent
 
 usage() {
   sed -n '2,/^set -u$/p' "$0" | sed 's/^# \{0,1\}//; $d'

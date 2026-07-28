@@ -57,6 +57,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-tg-lib.sh
 . "$SCRIPT_DIR/fm-tg-lib.sh"
+# shellcheck source=bin/fm-gate-refuse-lib.sh
+. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+
+# Pairing and revocation are captain decisions; a no-mistakes gate agent running
+# inside a firstmate checkout must not make them (bin/fm-gate-refuse-lib.sh).
+fm_refuse_if_gate_agent
 
 usage() {
   sed -n '2,/^set -u$/p' "$0" | sed 's/^# \{0,1\}//; $d'

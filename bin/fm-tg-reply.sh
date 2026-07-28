@@ -51,6 +51,8 @@
 #
 # Exit: 0 sent (or previewed); 2 bad usage; 3 no pinned peer; 4 nothing to send;
 #       5 send failed with the record preserved for retry; 6 target mismatch.
+#       A no-mistakes gate agent is refused before any of that, with its own
+#       message (bin/fm-gate-refuse-lib.sh).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,6 +61,15 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-tg-lib.sh
 . "$SCRIPT_DIR/fm-tg-lib.sh"
+# shellcheck source=bin/fm-gate-refuse-lib.sh
+. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+
+# Only firstmate speaks to the paired person. A no-mistakes gate agent runs
+# inside a firstmate checkout, auto-loads AGENTS.md, and can therefore read that
+# this channel exists - so the same capability-removal guard the fleet
+# entrypoints use applies here, where the blast radius is a message to someone
+# outside the fleet (see bin/fm-gate-refuse-lib.sh).
+fm_refuse_if_gate_agent
 
 usage() {
   sed -n '2,/^set -u$/p' "$0" | sed 's/^# \{0,1\}//; $d'

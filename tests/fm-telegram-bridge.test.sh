@@ -855,6 +855,32 @@ test_watcher_rotates_between_always_on_channels() {
   pass "the check sweep rotates, so one always-on channel cannot starve another"
 }
 
+test_gate_agent_cannot_reach_the_channel() {
+  local out
+  paired_home gate
+  printf 'hallo\n' > "$HOME_DIR/reply.txt"
+  # A no-mistakes gate agent runs inside a firstmate checkout and auto-loads
+  # AGENTS.md, so it can read that this channel exists. The same guard the fleet
+  # entrypoints use must keep it away from a channel that reaches outside.
+  out=$(NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS='' tg_run "$HOME_DIR" "$FAKEBIN" \
+    "$REPLY" tg-1 --text-file "$HOME_DIR/reply.txt" 2>&1 || true)
+  assert_contains "$out" "gate agent must not drive the fleet" \
+    "a gate agent was allowed to message the paired person"
+  [ "$(tg_sent_count)" = 1 ] || fail "a gate agent delivered a message"
+
+  out=$(NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS='' tg_run "$HOME_DIR" "$FAKEBIN" \
+    "$PAIR" revoke --yes 2>&1 || true)
+  assert_contains "$out" "gate agent must not drive the fleet" \
+    "a gate agent was allowed to revoke the pairing"
+  assert_present "$HOME_DIR/state/telegram/peer.json" "a gate agent revoked the pairing"
+
+  out=$(NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS='' tg_run "$HOME_DIR" "$FAKEBIN" \
+    "$TGTASK" arm-publish site --head aaaa111 2>&1 || true)
+  assert_contains "$out" "gate agent must not drive the fleet" \
+    "a gate agent was allowed to arm a publish confirmation"
+  pass "a no-mistakes gate agent cannot message, unpair, or authorize a publish"
+}
+
 test_homes_cannot_read_each_other() {
   local dirA dirB homeA homeB fakebinA fakebinB out
   dirA="$TMP_ROOT/isoA"
@@ -923,4 +949,5 @@ test_supervision_is_required_for_a_bridged_home
 test_cadence_instruction_reaches_every_harness
 test_both_channels_coexist_in_one_home
 test_watcher_rotates_between_always_on_channels
+test_gate_agent_cannot_reach_the_channel
 test_homes_cannot_read_each_other
