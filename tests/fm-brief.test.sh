@@ -12,7 +12,8 @@
 # wrapper and eliminates the whole defect class regardless of future prose.
 # test_no_heredoc_in_command_substitution guards that structure directly.
 # Ambient `bash -n` here is Bash 5 and cannot see the bug, so the real
-# cross-version enforcement lives in the macos-stock-bash CI job.
+# cross-version enforcement lives in the macos-stock-bash CI job, plus the stock
+# /bin/bash 3.2 parse below whenever this machine actually has one.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -25,13 +26,29 @@ mkdir -p "$BRIEF_HOME/data"
 # The script itself must always parse under the ambient bash. That is Bash 5 in
 # CI and locally, where the issue #958/#1069 parser bug does not fire, so this
 # is a weak guard on its own; test_no_heredoc_in_command_substitution and the
-# macos-stock-bash CI job carry the real cross-version enforcement.
+# macos-stock-bash CI job carry the real cross-version enforcement. When a
+# genuine 3.x /bin/bash is present the parse runs against it too, so on stock
+# macOS the guard is no longer limited to the one interpreter that cannot
+# reproduce the bug.
 test_script_parses() {
-  local out rc
+  local out rc stock_version checked="bash"
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
   expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
   [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
-  pass "fm-brief.sh: bash -n succeeds"
+
+  stock_version=""
+  if [ -x /bin/bash ]; then
+    stock_version=$(/bin/bash -c 'printf "%s" "$BASH_VERSION"' 2>/dev/null || true)
+  fi
+  case "$stock_version" in
+    3.*)
+      out=$(/bin/bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
+      expect_code 0 "$rc" "/bin/bash $stock_version -n bin/fm-brief.sh must parse cleanly (got: $out)"
+      [ -z "$out" ] || fail "/bin/bash $stock_version -n bin/fm-brief.sh emitted unexpected output: $out"
+      checked="$checked, stock /bin/bash $stock_version"
+      ;;
+  esac
+  pass "fm-brief.sh: bash -n succeeds ($checked)"
 }
 
 # Structural class guard (issues #166, #958, #1069): never build a variable by
