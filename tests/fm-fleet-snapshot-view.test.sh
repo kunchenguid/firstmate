@@ -551,12 +551,12 @@ test_done_recent_history_survives_worker_cleanup_without_private_prose() {
 ## Done
 - [x] cleaned-ship - Ship completion https://github.com/kunchenguid/firstmate/pull/123 (repo: firstmate) (kind: ship) (merged 2026-07-15)
   PRIVATE TASK NOTE: do not expose.
-  /Users/yelen/private/task-worktree
+  /synthetic/private/task-worktree
 - [x] cleaned-local - Local completion (repo: firstmate) (kind: ship) (done 2026-07-16)
   local main
   PRIVATE DECISION BODY: do not expose.
-PRIVATE FREE-FORM DONE NOTE /Users/yelen/private/free-form
-  PRIVATE INDENTED DONE PROSE /Users/yelen/private/stranded-body
+PRIVATE FREE-FORM DONE NOTE /synthetic/private/free-form
+  PRIVATE INDENTED DONE PROSE /synthetic/private/stranded-body
 EOF
 
   out=$(FM_HOME="$home" "$SNAPSHOT" --json)
@@ -598,13 +598,13 @@ EOF
       and ((. | tostring) | contains("PRIVATE DECISION BODY") | not)
       and ((. | tostring) | contains("PRIVATE FREE-FORM DONE NOTE") | not)
       and ((. | tostring) | contains("PRIVATE INDENTED DONE PROSE") | not)
-      and ((. | tostring) | contains("/Users/yelen/private/") | not)
+      and ((. | tostring) | contains("/synthetic/private/") | not)
   ' >/dev/null || fail "cleaned-up worker Done history leaked private prose or lost structured outcome fields: $out"
   view=$(FM_HOME="$home" "$VIEW")
   assert_contains "$view" "| cleaned-local | Local completion | firstmate | ship | - | local main |" \
     "view should render the local-only artifact recorded as an indented tasks-axi note"
   case "$view" in
-    *"/Users/yelen/private/"*)
+    *"/synthetic/private/"*)
       fail "view rendered an absolute local path from a Done body: $view"
       ;;
   esac
