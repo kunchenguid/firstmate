@@ -393,6 +393,91 @@ test_pending_message_is_re_announced_after_a_lost_wake() {
   pass "a pending message whose wake was lost is re-announced by the bounded recovery sweep"
 }
 
+test_re_announcement_budget_retires_a_stuck_entry() {
+  local out i now entry
+  paired_home recovery-bound
+  tg_queue 1110 "$PEER_ID" "$PEER_ID" "anfrage"
+  tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
+  entry="$HOME_DIR/state/telegram/inbox/tg-1110.json"
+  now=$(date +%s)
+
+  # The agent never drains it - a reply that keeps failing leaves the entry in
+  # place on purpose. Each poll is a whole recovery window later, so every sweep
+  # is due and the entry would re-wake firstmate forever if it were unbounded.
+  i=1
+  while [ "$i" -le 3 ]; do
+    out=$(FMTG_NOW_OVERRIDE=$(( now + i * 1000 )) tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" 2>&1)
+    assert_contains "$out" "telegram-message tg-1110" "re-announcement $i of the budget never happened"
+    i=$(( i + 1 ))
+  done
+
+  out=$(FMTG_NOW_OVERRIDE=$(( now + 4000 )) tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" 2>&1)
+  assert_contains "$out" "telegram-error" "a stuck entry was retired without reporting it once"
+  assert_not_contains "$out" "telegram-message tg-1110" "the spent budget still produced a message wake"
+
+  out=$(FMTG_NOW_OVERRIDE=$(( now + 5000 )) tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" 2>&1)
+  [ -z "$out" ] || fail "a stuck entry kept waking firstmate after its budget was spent: $out"
+  assert_present "$entry" "an undelivered request was dropped instead of being kept for the agent"
+  pass "a stuck inbox entry is re-announced a bounded number of times, reported once, and never dropped"
+}
+
+test_long_poll_stays_inside_the_watcher_kill_budget() {
+  local line maxtime timeout
+  paired_home budget
+
+  # 45 is a documented-valid poll timeout, and the watcher's default per-check
+  # kill budget is 30 seconds. A check the watcher kills produces no output at
+  # all, which is indistinguishable from "nothing to report", so the request has
+  # to finish inside that budget rather than be honored as configured.
+  FM_TELEGRAM_POLL_TIMEOUT=45 tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
+  line=$(grep '^getUpdates ' "$FAKE_TG_DIR/budget.log" | tail -n1)
+  maxtime=${line#*max-time=}
+  maxtime=${maxtime%% *}
+  timeout=${line##*timeout=}
+  case "$maxtime$timeout" in ''|*[!0-9]*) fail "the request recorded no usable deadlines: $line" ;; esac
+  [ "$maxtime" -lt 30 ] \
+    || fail "the request deadline (${maxtime}s) is not inside the watcher's 30s kill budget"
+  [ "$timeout" -lt "$maxtime" ] \
+    || fail "the long poll (${timeout}s) outlives its own request deadline (${maxtime}s)"
+
+  # The ceiling follows the budget rather than replacing it: a bigger budget
+  # restores the configured poll.
+  FM_CHECK_TIMEOUT=60 FM_TELEGRAM_POLL_TIMEOUT=45 tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
+  line=$(grep '^getUpdates ' "$FAKE_TG_DIR/budget.log" | tail -n1)
+  timeout=${line##*timeout=}
+  [ "$timeout" = 45 ] \
+    || fail "a larger per-check budget did not restore the configured long poll (${timeout}s)"
+  pass "the long poll and its request deadline stay inside the watcher's per-check kill budget"
+}
+
+test_orphaned_publication_temps_are_swept() {
+  local temp fresh now
+  paired_home temps
+  tg_queue 1200 "$PEER_ID" "$PEER_ID" "anfrage"
+  tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
+  now=$(date +%s)
+
+  # What a poll killed between mktemp and its rename leaves behind: the message
+  # body under a name no *.json scan can see.
+  temp="$HOME_DIR/state/telegram/inbox/.tg-1201.json.fm-private.aBc123"
+  printf '{"text":"geheime nachricht"}\n' > "$temp"
+  chmod 600 "$temp"
+
+  tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
+  assert_present "$temp" "the sweep took a publication temporary that could still be in flight"
+
+  FMTG_NOW_OVERRIDE=$(( now + 4000 )) tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
+  assert_absent "$temp" "an orphaned publication temporary was left holding message content"
+
+  # Revoke reports that pending messages are gone, so it takes them at any age.
+  fresh="$HOME_DIR/state/telegram/inbox/.tg-1202.json.fm-private.XyZ987"
+  printf '{"text":"geheime nachricht"}\n' > "$fresh"
+  chmod 600 "$fresh"
+  tg_run "$HOME_DIR" "$FAKEBIN" "$PAIR" revoke --yes >/dev/null
+  assert_absent "$fresh" "revoke left a temporary holding message content behind"
+  pass "an orphaned publication temporary is swept, an in-flight one is left alone, and revoke takes both"
+}
+
 # --- who is refused ---------------------------------------------------------
 
 test_non_private_and_bot_senders_get_no_access() {
@@ -927,6 +1012,9 @@ test_crash_before_seen_claim_still_delivers_once
 test_drained_message_is_never_resurrected
 test_offset_advances_only_past_processed_updates
 test_pending_message_is_re_announced_after_a_lost_wake
+test_re_announcement_budget_retires_a_stuck_entry
+test_long_poll_stays_inside_the_watcher_kill_budget
+test_orphaned_publication_temps_are_swept
 test_non_private_and_bot_senders_get_no_access
 test_unsupported_media_and_oversized_text_are_bounded
 test_message_content_stays_inert_data

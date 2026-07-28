@@ -646,7 +646,13 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
       ;;
-    bin/fm-watch*|bin/fm-wake*|\
+    # The watcher's check sweep is also where the bridge's rotation guard lives,
+    # so a sweep change must re-run the suite that pins it.
+    bin/fm-watch*)
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' telegram-bridge
+      ;;
+    bin/fm-wake*|\
     bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
       ;;
@@ -664,9 +670,15 @@ families_for_changed_path() {
     bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*)
       printf '%s\n' secondmate
       ;;
-    bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
+    # Bootstrap and session start arm and disarm the bridge, and the gate-agent
+    # refusal is asserted against its scripts; the bridge suite pins all three.
+    bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-gate-refuse*)
+      printf '%s\n' session-bootstrap
+      printf '%s\n' telegram-bridge
+      ;;
+    bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-tangle*|bin/fm-update.sh|\
-    bin/fm-gate-refuse*|bin/fm-lock*)
+    bin/fm-lock*)
       printf '%s\n' session-bootstrap
       ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
@@ -696,9 +708,15 @@ families_for_changed_path() {
       # lane's contract coverage re-runs.
       printf '%s\n' real-herdr-gated
       ;;
+    # Supervision renders the bridge's cadence line and its arm command, which
+    # the bridge suite pins for every harness.
+    bin/fm-supervision*)
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' telegram-bridge
+      ;;
     bin/fm-lint.sh|bin/fm-install-shellcheck.sh|\
     bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\
-    bin/fm-decision-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
+    bin/fm-decision-hold.sh|bin/fm-transition-lib.sh|\
     bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
     bin/fm-primary-scope-lib.sh|bin/fm-project-mode.sh|bin/fm-promote.sh|\
     bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)

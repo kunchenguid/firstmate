@@ -29,6 +29,7 @@
 #              fmtg_random_code, fmtg_code_hash
 #   inbound    fmtg_offset_get/set, fmtg_seen_claim, fmtg_normalize_text_program,
 #              fmtg_rate_allow
+#   recovery   fmtg_announce_count, fmtg_announce_bump
 #   context    fmtg_context_set/get/clear/prune
 #   outbound   fmtg_send_text, fmtg_outbox_record
 #   task link  fmtg_meta_get, fmtg_meta_link_set, fmtg_meta_link_clear
@@ -50,6 +51,12 @@ FM_TG_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # phone cannot become a different valid code.
 FMTG_CODE_ALPHABET='23456789ABCDEFGHJKMNPQRSTUVWXYZ'
 
+# Seconds held back from the watcher's per-check budget, twice: once so curl's
+# deadline lands before the watcher's kill, and once more so Telegram closes the
+# long poll before curl's deadline. Sized for the slowest realistic tail of one
+# cycle's local work (a full batch of jq-normalized updates plus the prune).
+FMTG_BUDGET_RESERVE=5
+
 # --- config -----------------------------------------------------------------
 
 # Resolve the bridge settings. An explicit environment variable always wins over
@@ -60,6 +67,8 @@ FMTG_CODE_ALPHABET='23456789ABCDEFGHJKMNPQRSTUVWXYZ'
 #   FMTG_API          API base, default https://api.telegram.org
 #   FMTG_DRY          "1" in dry-run preview mode
 #   FMTG_POLL_TIMEOUT long-poll seconds held open per getUpdates call
+#   FMTG_CHECK_TIMEOUT   the watcher's per-check kill budget this poll runs under
+#   FMTG_REQUEST_TIMEOUT curl deadline for one API call, inside that budget
 #   FMTG_MAX_CHARS    per-message outbound budget
 #   FMTG_MAX_MESSAGES cap on one split reply
 #   FMTG_MAX_TEXT     inbound text bound, above which a message is "oversized"
@@ -67,6 +76,7 @@ FMTG_CODE_ALPHABET='23456789ABCDEFGHJKMNPQRSTUVWXYZ'
 #   FMTG_PAIR_TTL / FMTG_PAIR_ATTEMPTS pairing offer lifetime and attempt budget
 #   FMTG_PUBLISH_TTL  publish-confirmation lifetime
 #   FMTG_RECOVERY_SECS  age after which a still-pending inbox entry re-wakes
+#   FMTG_RECOVERY_MAX   re-announcements one stranded entry may ever cause
 # shellcheck disable=SC2034 # Every FMTG_* here is read by callers after sourcing.
 fmtg_load_config() {
   local env_file="${FM_TELEGRAM_ENV_FILE:-$FM_HOME/.env}" dry raw
@@ -108,6 +118,24 @@ fmtg_load_config() {
   [ "$raw" -ge 0 ] 2>/dev/null || raw=20
   [ "$raw" -le 45 ] 2>/dev/null || raw=45
   FMTG_POLL_TIMEOUT=$raw
+
+  # The long poll is bounded by the watcher's budget, not only by its own
+  # ceiling. bin/fm-watch.sh runs the poll as one *.check.sh under
+  # `timeout $FM_CHECK_TIMEOUT` and passes that budget down, and a check the
+  # watcher kills produces no output at all: no wake, no telegram-error, just a
+  # bridge that quietly stops delivering. So the request deadline reserves
+  # FMTG_BUDGET_RESERVE seconds of the budget for this cycle's own state work,
+  # and the long poll ends one further reserve earlier, so Telegram closes the
+  # connection before curl's deadline and curl returns before the kill.
+  raw=${FM_CHECK_TIMEOUT:-}
+  case "$raw" in ''|*[!0-9]*) raw=30 ;; esac
+  [ "$raw" -ge 10 ] 2>/dev/null || raw=10
+  FMTG_CHECK_TIMEOUT=$raw
+  FMTG_REQUEST_TIMEOUT=$(( FMTG_CHECK_TIMEOUT - FMTG_BUDGET_RESERVE ))
+  [ "$FMTG_REQUEST_TIMEOUT" -ge "$FMTG_BUDGET_RESERVE" ] || FMTG_REQUEST_TIMEOUT=$FMTG_BUDGET_RESERVE
+  raw=$(( FMTG_REQUEST_TIMEOUT - FMTG_BUDGET_RESERVE ))
+  [ "$raw" -ge 0 ] || raw=0
+  [ "$FMTG_POLL_TIMEOUT" -le "$raw" ] || FMTG_POLL_TIMEOUT=$raw
 
   # Telegram rejects a sendMessage body over 4096 UTF-16 code units. 3900 leaves
   # headroom for the numbering suffix and for characters that count as two units.
@@ -160,6 +188,12 @@ fmtg_load_config() {
   case "$raw" in ''|*[!0-9]*) raw=300 ;; esac
   [ "$raw" -ge 30 ] 2>/dev/null || raw=300
   FMTG_RECOVERY_SECS=$raw
+
+  raw=${FM_TELEGRAM_RECOVERY_MAX:-}
+  case "$raw" in ''|*[!0-9]*) raw=3 ;; esac
+  [ "$raw" -ge 1 ] 2>/dev/null || raw=3
+  [ "$raw" -le 20 ] 2>/dev/null || raw=20
+  FMTG_RECOVERY_MAX=$raw
 }
 
 # BotFather issues "<numeric bot id>:<opaque secret>". Anything else is refused
@@ -287,7 +321,7 @@ fmtg_api_call() {
   {
     printf 'url = "%s/bot%s/%s"\n' "$FMTG_API" "$FMTG_TOKEN" "$method"
     printf 'silent\n'
-    printf 'max-time = %s\n' "$(( FMTG_POLL_TIMEOUT + 10 ))"
+    printf 'max-time = %s\n' "${FMTG_REQUEST_TIMEOUT:-25}"
     printf 'output = "%s"\n' "$body"
     printf 'write-out = "%%{http_code}"\n'
     if [ "$payload" != - ]; then
@@ -472,6 +506,47 @@ fmtg_rate_allow() {  # <now>
   [ "$count" -le "${FMTG_RATE_MAX:-60}" ]
 }
 
+# --- bounded re-announcement -------------------------------------------------
+#
+# The recovery sweep re-announces an inbox entry whose wake was lost, and that
+# has to be bounded: an entry the agent cannot drain - a reply that keeps
+# failing, a turn interrupted between the seen claim and the reply - would
+# otherwise wake firstmate once per recovery window forever, which for an
+# unattended home is hundreds of turns off one stuck message.
+#
+# The budget is counted per request in its OWN record rather than inside the
+# inbox entry, because rewriting that entry would race the agent draining it and
+# could resurrect a message that was already answered. The record dies with the
+# entry it bounds (fmtg_prune), never on a timer, so a spent budget cannot
+# silently restore the wake loop.
+
+fmtg_announce_count() {  # <request_id>
+  local rid=$1 dir count
+  fmtg_request_id_valid "$rid" || { printf '0'; return 0; }
+  dir="$(fmtg_dir)/announce"
+  if ! fm_private_artifact_file_valid "$dir" "$rid.json" 600; then
+    printf '0'
+    return 0
+  fi
+  count=$(jq -r '.announces // 0' "$dir/$rid.json" 2>/dev/null) || count=0
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  printf '%s' "$count"
+}
+
+# Record one re-announcement and print the running count. Returns 1 when the
+# count cannot be made durable, so a caller never announces work it cannot bound.
+fmtg_announce_bump() {  # <request_id> <now>
+  local rid=$1 now=$2 dir count
+  fmtg_request_id_valid "$rid" || return 1
+  dir="$(fmtg_dir)/announce"
+  count=$(fmtg_announce_count "$rid")
+  count=$(( count + 1 ))
+  jq -cn --arg rid "$rid" --argjson n "$count" --argjson at "$now" \
+    '{request_id:$rid, announces:$n, last_announce_at:$at}' \
+    | fm_private_artifact_publish_stdin "$dir" "$rid.json" 600 || return 1
+  printf '%s' "$count"
+}
+
 # --- durable per-request reply context --------------------------------------
 #
 # The chat a reply must go back to is pinned at pairing time, but a request's
@@ -508,17 +583,26 @@ fmtg_context_clear() {  # <request_id>
 
 # Drop context and seen records past the retention window. Bounded retention is
 # what keeps an opted-in home from accumulating request metadata indefinitely.
+# Re-announce records are retained differently: they are bookkeeping for one
+# inbox entry, so each one lives exactly as long as the entry it bounds.
+# Orphaned publication temporaries go too - they carry message content, and no
+# scan that looks for published names can see them.
 fmtg_prune() {  # <now>
-  local now=$1 max_age dir sub file at device
+  local now=$1 max_age dir sub file at device inbox
   max_age=${FM_TELEGRAM_RETENTION_SECS:-604800}
   case "$max_age" in ''|*[!0-9]*) max_age=604800 ;; esac
   [ "$max_age" -le 2592000 ] 2>/dev/null || max_age=2592000
-  for sub in context seen; do
+  inbox="$(fmtg_dir)/inbox"
+  for sub in context seen announce; do
     dir="$(fmtg_dir)/$sub"
     device=$(fm_private_artifact_dir_device "$dir" 2>/dev/null) || continue
     while IFS= read -r -d '' file; do
       if ! fm_private_single_link_file_mode_valid "$file" 600 "$device"; then
         rm -f -- "$file" 2>/dev/null || true
+        continue
+      fi
+      if [ "$sub" = announce ]; then
+        [ -e "$inbox/${file##*/}" ] || rm -f -- "$file" 2>/dev/null || true
         continue
       fi
       at=$(jq -r '(.recorded_at // .seen_at // empty) | tostring' "$file" 2>/dev/null) || at=
@@ -528,6 +612,9 @@ fmtg_prune() {  # <now>
       fi
     done < <(find "$dir" -type f -name '*.json' -print0 2>/dev/null)
   done
+  # Far longer than any publish this home can still be running: the watcher kills
+  # a poll at FMTG_CHECK_TIMEOUT, so anything this old is provably abandoned.
+  fm_private_artifact_sweep_temps "$(fmtg_dir)" "$now" 600
   return 0
 }
 

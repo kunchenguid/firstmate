@@ -185,11 +185,16 @@ case "$COMMAND" in
     fi
     fmtg_peer_clear || die "cannot clear the pinned peer"
     fmtg_pairing_clear || die "cannot clear the pairing offer"
-    for sub in inbox context publish outbox; do
+    for sub in inbox context publish outbox announce; do
       [ -d "$TG_DIR/$sub" ] || continue
       find "$TG_DIR/$sub" -type f -name '*.json' -exec rm -f -- {} + 2>/dev/null || true
     done
     rm -f -- "$TG_DIR/recovery.json" "$TG_DIR/limits.json" "$TG_DIR/poll.error" 2>/dev/null || true
+    # A publish killed mid-write leaves a dot-prefixed temporary that still holds
+    # the message it was about to store, and no *.json sweep can see it. Revoke
+    # claims pending messages are gone, so it removes those too - with no age
+    # floor, because the captain is deliberately wiping the channel.
+    fm_private_artifact_sweep_temps "$TG_DIR" "$NOW" 0
     printf 'Revoked. The pinned peer, any open offer, pending messages, and armed publish confirmations are gone.\n'
     printf 'The update offset and duplicate-suppression markers were kept so nothing replays.\n'
     printf 'To go fully inert, remove FM_TELEGRAM_BOT_TOKEN from %s/.env and rerun bin/fm-session-start.sh.\n' "$FM_HOME"

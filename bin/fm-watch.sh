@@ -760,7 +760,12 @@ while :; do
       elif [ "$(basename "$c")" = telegram-watch.check.sh ]; then
         if fmtg_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-tg-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-tg-poll.sh" ]; then
-          FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-tg-poll.sh" || exit 1
+          # The bridge holds a Telegram long poll open, so it is the one check
+          # whose own timing has to fit this budget: a check killed here produces
+          # no output, which the sweep cannot tell from "nothing to report". Pass
+          # the effective budget down rather than letting the poll assume it.
+          FM_HOME="$FM_HOME" FM_CHECK_TIMEOUT="$CHECK_TIMEOUT" \
+            run_check_capture "$FM_ROOT/bin/fm-tg-poll.sh" || exit 1
           out=$FM_CHECK_RESULT
         else
           rejected_checks="$rejected_checks $c"

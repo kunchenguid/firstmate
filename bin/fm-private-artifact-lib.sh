@@ -32,6 +32,8 @@
 #         2 = unsafe path or publication failure
 #   fm_private_artifact_file_valid <dir> <base> <600|700>
 #       - validate an already-published artifact
+#   fm_private_artifact_sweep_temps <dir> <now> <min-age>
+#       - remove publication temporaries orphaned by a killed publish
 #
 # <base> must be a plain file name: no leading dot, no slash. <mode> must be
 # exactly 600 or 700. Both are rejected rather than sanitized, so a caller
@@ -177,4 +179,42 @@ fm_private_artifact_file_valid() {
   esac
   device=$(fm_private_artifact_dir_device "$dir") || return 1
   fm_private_single_link_file_mode_valid "$dir/$base" "$mode" "$device"
+}
+
+fm_private_artifact_mtime() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %m "$1" 2>/dev/null
+  else
+    stat -c %Y "$1" 2>/dev/null
+  fi
+}
+
+# Remove publication temporaries left under <dir> and its subdirectories.
+#
+# Publication writes ".<base>.fm-private.XXXXXX" next to its destination and
+# removes it on every failure path, but a process that is KILLED between mktemp
+# and the rename cannot - and the watcher does exactly that to a check that
+# outruns its budget. The leftover still holds the content that was about to be
+# published, and no <base>-shaped scan can see it, so nothing else would ever
+# clean it up.
+#
+# <min-age> in seconds protects a publication that is still running: only a
+# temporary older than that is removed. Pass 0 only from a caller that knows no
+# publish can be in flight, such as an explicit wipe. A temporary that is mid-
+# hard-link (two links) is skipped in every case, because it is already becoming
+# a real artifact.
+fm_private_artifact_sweep_temps() {  # <dir> <now> <min-age>
+  local dir=$1 now=$2 min_age=$3 file at cutoff
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  case "$min_age" in ''|*[!0-9]*) return 1 ;; esac
+  cutoff=$(( now - min_age ))
+  while IFS= read -r -d '' file; do
+    fm_private_single_link_file_valid "$file" || continue
+    at=$(fm_private_artifact_mtime "$file") || continue
+    case "$at" in ''|*[!0-9]*) continue ;; esac
+    [ "$at" -le "$cutoff" ] || continue
+    rm -f -- "$file" 2>/dev/null || true
+  done < <(find "$dir" -type f -name '.*.fm-private.*' -print0 2>/dev/null)
+  return 0
 }

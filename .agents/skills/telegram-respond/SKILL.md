@@ -3,7 +3,7 @@ name: telegram-respond
 description: >-
   Agent-only playbook for the private Telegram bridge, which connects one paired outside person to one paired project.
   Use on a "telegram-message <request_id>" check wake to read the stashed message, classify it, act within the paired project, and reply.
-  Also use on a "telegram-paired <label>" wake to report the new link to the captain, and on a "telegram-error ..." wake to report the bridge configuration blocker.
+  Also use on a "telegram-paired <label>" wake to report the new link to the captain, and on a "telegram-error ..." wake to report the bridge problem it names.
   Also use on milestone and terminal wakes for a Telegram-linked task, and before running the two-step publish confirmation.
   Loaded only when the bridge is configured and paired.
 user-invocable: false
@@ -161,6 +161,7 @@ Treat `state/telegram/inbox/` as the source of truth and process **every** file 
       Exit 0 means sent. Exit 5 means some messages were delivered and the rest are preserved; retry with `bin/fm-tg-reply.sh --retry <request_id>` and do **not** redo the work behind the reply.
    e. **On success, remove that inbox file** (`rm -f state/telegram/inbox/<request_id>.json`) and your temporary reply file. A cleared file is never answered twice.
    f. **On failure, leave the inbox file in place**, move to the next, and do not retry blindly. If a reply fails twice, tell the captain, including whether the underlying work was already done.
+      A file left there is re-announced only a few times before the bridge stops waking on it and reports it once as a `telegram-error`, so it stays waiting for you rather than looping - which is exactly why telling the captain is your job and not the watcher's.
 
 ## Milestone and final replies
 
@@ -183,6 +184,7 @@ If a task ends with nothing worth saying, still send one short closing message; 
 - `telegram-error <message>` - a bridge problem, not a message to answer. Report it to the captain as a blocker in plain terms.
   `another process is polling this bot` means two homes are sharing one bot token, which is a real misconfiguration: one bot belongs to one home.
   `message rate limit reached` means messages from the paired person were **dropped, not queued**: tell the captain, and once the window clears send that person one short message saying some of what they sent did not get through and asking them to resend it.
+  `<request_id> stayed undelivered` means that message is still in the inbox but has used up its re-announcements: the bridge will not wake you for it again, so handle it in this turn - answer it if you can, and tell the captain either way.
 
 ## Notes
 

@@ -441,8 +441,11 @@ Every check therefore reaches the front within one rotation, which is what keeps
 - `inbox/<request_id>.json` accepted messages awaiting handling; `context/<request_id>.json` per-request conversation context
 - `outbox/<request_id>.json` dry-run previews and unsent replies preserved for retry
 - `publish/<task-id>.json` armed publish confirmations; `limits.json`, `recovery.json`, `poll.error` bookkeeping
+- `announce/<request_id>.json` how often a stranded inbox entry has been re-announced
 
 `seen/` and `context/` records are pruned after `FM_TELEGRAM_RETENTION_SECS` (default seven days, capped at thirty).
+An `announce/` record is retained differently: it bounds one inbox entry, so it is dropped when that entry is drained rather than on a timer, which is what keeps a spent budget from silently resetting.
+Each prune also removes publication temporaries orphaned by a killed write (`.<name>.fm-private.*`, older than ten minutes); `bin/fm-tg-pair.sh revoke` removes them with no age floor, so the message content it reports as gone really is.
 
 ### Inbound delivery
 
@@ -450,6 +453,12 @@ Every check therefore reaches the front within one rotation, which is what keeps
 Telegram redelivers each update until an offset past it is confirmed, so per update the poll skips anything already in `seen/`, publishes the inbox entry with an atomic create-only claim, claims the seen marker, and only then prints the wake line - and the new offset is written only after the whole processed prefix is durable.
 A crash before the seen claim redelivers and finds its own entry already there; a crash after it drops the redelivery, so a message the agent already drained is never resurrected.
 A crash between the claim and the wake would strand a pending entry, so a bounded recovery sweep re-announces inbox entries older than `FM_TELEGRAM_RECOVERY_SECS` (default 300), at most once per window.
+That sweep is bounded per entry as well as per window: an entry the agent never drains - a reply that keeps failing, a turn interrupted after the claim - is re-announced at most `FM_TELEGRAM_RECOVERY_MAX` times (default 3), then reported once as a `telegram-error` and never again, so one stuck message cannot become a wake every five minutes forever.
+It is deliberately kept in the inbox rather than discarded: it still counts in `bin/fm-tg-pair.sh status` and is drained on the next wake for any other reason.
+
+The poll runs as one watcher check under `timeout $FM_CHECK_TIMEOUT`, and a killed check produces no output at all - which the sweep cannot distinguish from "nothing to report".
+The long poll is therefore bounded by that budget and not only by its own ceiling: the watcher passes the effective budget down, the `curl` deadline sits five seconds inside it, and the long poll itself ends five seconds before that.
+`FM_TELEGRAM_POLL_TIMEOUT` above what the budget allows is lowered rather than honored, so at the default `FM_CHECK_TIMEOUT` of 30 the usable long poll is 20 seconds; raising the poll timeout past that requires raising `FM_CHECK_TIMEOUT` too.
 
 Message bodies are untrusted data throughout.
 Text is normalized (CRLF and lone CR to LF; C0 controls other than tab and newline, plus DEL, removed; ends trimmed), bounded at `FM_TELEGRAM_MAX_TEXT` characters (default 4096), written to a private file as a JSON string by `jq`, and never interpolated into a shell command, a path, or a prompt.
@@ -532,7 +541,7 @@ FM_TELEGRAM_BOT_TOKEN=  # Telegram bridge bot token; .env opt-in, never printed,
 FM_TELEGRAM_API_URL=https://api.telegram.org   # optional Bot API base override, mainly for a local Bot API server
 FM_TELEGRAM_ENV_FILE=   # optional alternate .env file for direct bridge invocations; bootstrap still checks $FM_HOME/.env
 FM_TELEGRAM_DRY_RUN=    # preview replies without sending; same truthiness rule as FMX_DRY_RUN
-FM_TELEGRAM_POLL_TIMEOUT=20   # seconds a getUpdates long poll is held open (clamped to 0-45)
+FM_TELEGRAM_POLL_TIMEOUT=20   # seconds a getUpdates long poll is held open (clamped to 0-45, and further to FM_CHECK_TIMEOUT minus 10 so the watcher never kills the poll)
 FM_TELEGRAM_MAX_CHARS=3900    # per-message outbound budget (clamped to 100-3900, under Telegram's 4096)
 FM_TELEGRAM_MAX_MESSAGES=8    # cap on one split reply (clamped to 1-25)
 FM_TELEGRAM_MAX_TEXT=4096     # inbound bound; a longer message is recorded as oversized with no body
@@ -542,6 +551,7 @@ FM_TELEGRAM_PAIR_TTL=900      # pairing offer lifetime in seconds (clamped to 30
 FM_TELEGRAM_PAIR_ATTEMPTS=5   # guesses allowed per pairing offer and per publish confirmation (clamped to 1-20)
 FM_TELEGRAM_PUBLISH_TTL=86400 # publish confirmation lifetime in seconds
 FM_TELEGRAM_RECOVERY_SECS=300 # age at which a still-pending message is re-announced, at most once per window
+FM_TELEGRAM_RECOVERY_MAX=3    # re-announcements one stranded message may ever cause before a single telegram-error retires it (clamped to 1-20)
 FM_TELEGRAM_RETENTION_SECS=604800  # retention for seen and per-request context records (capped at 30 days)
 FMX_DRY_RUN=            # truthy previews X replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50

@@ -12,7 +12,7 @@ Recorded 2026-07-28 on macOS (Darwin 25.5.0, arm64), GNU bash 5.3.9, ShellCheck 
 bin/fm-test-run.sh --family telegram-bridge
 ```
 
-42 checks pass, covering: inert-by-default, token secrecy and file modes, pairing success/expiry/replay/wrong-code/wrong-identity/re-pair/revoke, exactly-once acceptance, duplicate delivery, both crash windows, offset confirmation, the recovery sweep, refusal of unpaired/group/channel/bot senders, unsupported and oversized payloads, injection inertness, rate limiting, project routing, the two-step publish gate, reply escaping/splitting/retry/final cleanup, bootstrap arm and disarm, supervision eligibility, cross-channel coexistence, sweep rotation, gate-agent refusal, and home isolation.
+45 checks pass, covering: inert-by-default, token secrecy and file modes, pairing success/expiry/replay/wrong-code/wrong-identity/re-pair/revoke, exactly-once acceptance, duplicate delivery, both crash windows, offset confirmation, the recovery sweep and its per-entry budget, the long poll's fit inside the watcher's kill budget, orphaned publication temporaries, refusal of unpaired/group/channel/bot senders, unsupported and oversized payloads, injection inertness, rate limiting, project routing, the two-step publish gate, reply escaping/splitting/retry/final cleanup, bootstrap arm and disarm, supervision eligibility, cross-channel coexistence, sweep rotation, gate-agent refusal, and home isolation.
 
 The Bot API is served by the fake local server in `tests/telegram-helpers.sh`: a stateful implementation of `getUpdates` and `sendMessage` reached through the client's real `curl --config` transport.
 No socket is bound and no real token exists anywhere in the suite.
@@ -51,6 +51,12 @@ Each case rewinds the confirmed offset the way a real crash would, then re-queue
 | after the inbox claim, before the seen marker | redelivered once, no duplicate entry | `test_crash_before_seen_claim_still_delivers_once` |
 | after the agent drained the entry | never resurrected | `test_drained_message_is_never_resurrected` |
 | after the seen marker, before the wake | re-announced by the bounded sweep | `test_pending_message_is_re_announced_after_a_lost_wake` |
+| the agent can never drain the entry | re-announced a bounded number of times, reported once, kept | `test_re_announcement_budget_retires_a_stuck_entry` |
+
+## The poll fits the budget it runs under
+
+The watcher runs the poll as one `*.check.sh` under `timeout $FM_CHECK_TIMEOUT` and a killed check produces no output at all, which the sweep cannot tell from "nothing to report" - so a long poll that outran the budget would stop delivering messages silently.
+`test_long_poll_stays_inside_the_watcher_kill_budget` asserts the deadlines the client actually sent, read back from the fake server: at the documented-valid `FM_TELEGRAM_POLL_TIMEOUT=45` under the default 30-second budget, the `curl` deadline is inside the budget and the long poll ends before that deadline; at `FM_CHECK_TIMEOUT=60` the configured 45-second poll is restored, so the ceiling follows the budget rather than replacing it.
 
 ## Silence to unpaired chats
 

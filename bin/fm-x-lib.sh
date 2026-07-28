@@ -304,12 +304,17 @@ fmx_context_registry_recorded_at() {
 fmx_context_registry_prune() {
   local state=$1 dir now max_age file recorded_at age dir_device
   dir="$state/x-context"
-  dir_device=$(fm_private_artifact_dir_device "$dir" 2>/dev/null) || return 0
   now=${FMX_NOW_OVERRIDE:-$(date +%s)}
   case "$now" in
     ''|*[!0-9]*) return 0 ;;
   esac
   [ "${#now}" -le 18 ] || return 0
+  # A client killed between mktemp and the rename leaves a dot-prefixed
+  # publication temporary that still holds the record it was writing, and that no
+  # published-name scan can see. This is the shared retention pass for X-mode
+  # state, so it is where those are collected too.
+  fm_private_artifact_sweep_temps "$state" "$now" 600
+  dir_device=$(fm_private_artifact_dir_device "$dir" 2>/dev/null) || return 0
   max_age=${FMX_FOLLOWUP_MAX_AGE_SECS:-604800}
   case "$max_age" in
     ''|*[!0-9]*) max_age=604800 ;;

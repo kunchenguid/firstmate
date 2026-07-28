@@ -44,7 +44,10 @@
 #   it, so an entry the agent already drained is never resurrected. A crash
 #   between (3) and (4) would leave a pending entry with no wake, so a bounded
 #   recovery sweep re-announces inbox entries that have gone unhandled for
-#   FM_TELEGRAM_RECOVERY_SECS, at most once per window.
+#   FM_TELEGRAM_RECOVERY_SECS, at most once per window and at most
+#   FM_TELEGRAM_RECOVERY_MAX times per entry. An entry that outlives that budget
+#   is reported once as a telegram-error and then never re-announced, but is
+#   kept in the inbox: a request that was never answered is not dropped.
 #
 # The message body is untrusted input at every step. It is normalized (see
 # fmtg_normalize_text_program), size-bounded, written to a private file as a JSON
@@ -327,8 +330,13 @@ if [ "$NEXT" != "$OFFSET" ]; then
 fi
 
 # Bounded recovery sweep: re-announce inbox entries that were claimed but whose
-# wake was lost (a crash between the seen claim and the wake line). At most one
-# sweep per recovery window, so a genuinely stuck drain cannot become a wake loop.
+# wake was lost (a crash between the seen claim and the wake line). Bounded
+# twice, so a genuinely stuck drain cannot become a wake loop: at most one sweep
+# per recovery window, and at most FMTG_RECOVERY_MAX re-announcements per entry
+# ever. An entry that survives its budget - a reply that keeps failing, a turn
+# interrupted after the claim - is reported once and then stays silent. It is
+# deliberately NOT deleted: an undelivered request is kept in the inbox, counted
+# by `fm-tg-pair.sh status`, and drained on the next wake for any other reason.
 recovery_due() {
   local last
   if fm_private_artifact_file_valid "$TG_DIR" recovery.json 600; then
@@ -341,22 +349,35 @@ recovery_due() {
 }
 
 if [ -z "$WAKE_LINES" ] && [ -d "$INBOX" ]; then
-  PENDING=
-  PENDING_N=0
+  STRANDED=
+  STRANDED_N=0
   for f in "$INBOX"/*.json; do
     [ -e "$f" ] || continue
-    [ "$PENDING_N" -lt 5 ] || break
+    [ "$STRANDED_N" -lt 5 ] || break
     AGE_AT=$(jq -r '.received_at // 0' "$f" 2>/dev/null) || continue
     case "$AGE_AT" in ''|*[!0-9]*) continue ;; esac
     [ $(( NOW - AGE_AT )) -ge "$FMTG_RECOVERY_SECS" ] || continue
     RID=$(jq -r '.request_id // empty' "$f" 2>/dev/null) || continue
     fmtg_request_id_valid "$RID" || continue
-    PENDING="${PENDING}telegram-message $RID
+    # An entry past its budget was already reported once and must never wake
+    # firstmate again; it stays in the inbox to be drained.
+    [ "$(fmtg_announce_count "$RID")" -le "$FMTG_RECOVERY_MAX" ] || continue
+    STRANDED="${STRANDED}$RID
 "
-    PENDING_N=$(( PENDING_N + 1 ))
+    STRANDED_N=$(( STRANDED_N + 1 ))
   done
-  if [ -n "$PENDING" ] && recovery_due; then
-    WAKE_LINES=$PENDING
+  # The budget is spent only when a sweep actually announces, so a cycle that
+  # finds nothing due leaves every entry's remaining attempts untouched.
+  if [ -n "$STRANDED" ] && recovery_due; then
+    while IFS= read -r RID; do
+      [ -n "$RID" ] || continue
+      N=$(fmtg_announce_bump "$RID" "$NOW") || continue
+      if [ "$N" -le "$FMTG_RECOVERY_MAX" ]; then
+        add_wake "telegram-message $RID"
+      else
+        add_wake "telegram-error $RID stayed undelivered across $FMTG_RECOVERY_MAX re-announcements; it is kept in the inbox but will not wake firstmate again"
+      fi
+    done < <(printf '%s' "$STRANDED")
   fi
 fi
 

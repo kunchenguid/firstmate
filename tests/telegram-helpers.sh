@@ -26,6 +26,9 @@
 #     argv.log         the shim's own argv, for asserting the token is absent
 #     token-seen.log   tokens the server received, proving transport still works
 #     calls.log        one "<method> <offset-or-->" line per request
+#     budget.log       one "<method> max-time=<s> timeout=<s>" line per request,
+#                      so the request's own deadlines can be asserted against the
+#                      watcher's per-check kill budget
 #
 #   Behavior knobs, all read fresh per call from the environment:
 #     FAKE_TG_GETUPDATES_CODE    HTTP status to return for getUpdates (default 200)
@@ -52,6 +55,7 @@ tg_fake_api() {
   : > "$FAKE_TG_DIR/argv.log"
   : > "$FAKE_TG_DIR/token-seen.log"
   : > "$FAKE_TG_DIR/calls.log"
+  : > "$FAKE_TG_DIR/budget.log"
   cat > "$fakebin/curl" <<'SH'
 #!/usr/bin/env bash
 # Fake local Telegram Bot API server (see tests/telegram-helpers.sh).
@@ -68,12 +72,13 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$cfg" ] || { printf '000'; exit 0; }
 
-url= ofile= payload=
+url= ofile= payload= maxtime=
 while IFS= read -r line; do
   case "$line" in
     'url = '*)        url=${line#url = } ;;
     'output = '*)     ofile=${line#output = } ;;
     'data-binary = '*) payload=${line#data-binary = } ;;
+    'max-time = '*)   maxtime=${line#max-time = } ;;
   esac
 done < "$cfg"
 strip_quotes() { local v=$1; v=${v#\"}; v=${v%\"}; printf '%s' "$v"; }
@@ -87,6 +92,10 @@ rest=${url#*/bot}
 token=${rest%%/*}
 method=${rest#*/}
 printf '%s\n' "$token" >> "$state/token-seen.log"
+
+long_poll=-
+[ -n "$payload" ] && [ -f "$payload" ] && long_poll=$(jq -r '.timeout // "-"' "$payload")
+printf '%s max-time=%s timeout=%s\n' "$method" "${maxtime:--}" "$long_poll" >> "$state/budget.log"
 
 case "$method" in
   getUpdates)
