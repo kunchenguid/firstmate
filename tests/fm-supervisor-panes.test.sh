@@ -59,7 +59,8 @@ test_active_zellij_crews_create_supervisor_tab_and_panes() {
   printf '[]\n' > "$dir/responses/1.out"
   printf '[]\n' > "$dir/responses/2.out"
   printf '21\n' > "$dir/responses/3.out"
-  printf 'terminal_44\n' > "$dir/responses/4.out"
+  printf '[{"id":43,"tab_id":21,"is_plugin":false}]\n' > "$dir/responses/4.out"
+  printf 'terminal_44\n' > "$dir/responses/6.out"
   fb=$(make_zellij_fakebin "$dir")
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
@@ -71,6 +72,8 @@ test_active_zellij_crews_create_supervisor_tab_and_panes() {
     "active zellij crews should create the supervisor tab with the home-scoped title"
   assert_contains "$log" "fm-supervisor-pane-loop.sh"$'\x1f''alpha' \
     "the first active zellij crew should seed the supervisor tab"
+  assert_contains "$log" $'\x1f''rename-pane'$'\x1f''-p'$'\x1f''43'$'\x1f''fm-alpha' \
+    "the seed supervisor pane should carry the same fm-<id> title as the later panes"
   assert_contains "$log" $'\x1f''new-pane'$'\x1f''--tab-id'$'\x1f''21' \
     "additional active zellij crews should create more panes on the supervisor tab"
   assert_contains "$log" "fm-supervisor-pane-loop.sh"$'\x1f''bravo' \

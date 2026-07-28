@@ -93,6 +93,7 @@ Zellij now owns one additional supervision-only tab per firstmate home when that
 The task runtime contract is unchanged: each task still executes in its own tab.
 The supervisor tab is rebuilt by `bin/fm-supervisor-panes.sh` after successful spawn, after teardown, and on the locked path during `bin/fm-session-start.sh`.
 Each supervisor pane runs `bin/fm-supervisor-pane-loop.sh`, which refreshes `bin/fm-crew-state.sh` plus bounded `bin/fm-peek.sh` output until the task metadata disappears.
+Every supervisor pane is titled `fm-<id>`: later panes get that title from `new-pane --name`, and the seed pane is titled with a follow-up `rename-pane -p <pane-id>` because `new-tab --name` names the tab only (best-effort, since the title is cosmetic).
 When no active non-secondmate zellij crews remain, reconciliation closes the supervisor tab instead of leaving an empty surface behind.
 Other backends currently no-op for this feature.
 

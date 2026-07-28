@@ -445,6 +445,18 @@ fm_backend_zellij_supervisor_reconcile() {  # <session> [task-id...]
       return 1
       ;;
   esac
+  # `new-tab --name` names the TAB only - it has no pane-name flag - so the
+  # seed pane would render its raw `env ...` allow-list command as its frame
+  # title while every later `new-pane --name` pane shows "fm-<id>". Title it
+  # explicitly by pane id (verified on zellij 0.44.3: `rename-pane -p <id>`
+  # produces the same pane title as `new-pane --name`). Cosmetic, so it is
+  # best-effort: a missing pane id or a failed rename never fails reconcile.
+  pane_name=$(fm_backend_zellij_supervisor_pane_name "$task_id")
+  new_pane_id=$(fm_backend_zellij_pane_for_tab "$session" "$new_tab_id")
+  case "$new_pane_id" in
+    ''|*[!0-9]*) ;;
+    *) fm_backend_zellij_cli "$session" action rename-pane -p "$new_pane_id" "$pane_name" >/dev/null 2>&1 || true ;;
+  esac
   shift
 
   # `zellij action <sub>` exits 0 even against a target that no longer exists

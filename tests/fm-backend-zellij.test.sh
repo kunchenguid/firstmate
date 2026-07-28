@@ -527,7 +527,8 @@ test_supervisor_reconcile_builds_tab_and_panes() {
   printf '[]\n' > "$dir/responses/1.out"
   printf '[]\n' > "$dir/responses/2.out"
   printf '8\n' > "$dir/responses/3.out"
-  printf 'terminal_31\n' > "$dir/responses/4.out"
+  printf '[{"id":30,"tab_id":8,"is_plugin":false}]\n' > "$dir/responses/4.out"
+  printf 'terminal_31\n' > "$dir/responses/6.out"
   fb=$(make_zellij_fakebin "$dir")
   PATH="$fb:$PATH" FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" \
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
@@ -539,6 +540,8 @@ test_supervisor_reconcile_builds_tab_and_panes() {
     "supervisor_reconcile did not create the supervisor tab with close-on-exit"
   assert_contains "$log" "fm-supervisor-pane-loop.sh"$'\x1f''alpha' \
     "supervisor_reconcile did not seed the supervisor tab with the first task pane command"
+  assert_contains "$log" $'\x1f''rename-pane'$'\x1f''-p'$'\x1f''30'$'\x1f''fm-alpha' \
+    "supervisor_reconcile should title the seed pane like the new-pane panes (new-tab names the tab only)"
   assert_contains "$log" $'\x1f''new-pane'$'\x1f''--tab-id'$'\x1f''8'$'\x1f''--cwd'$'\x1f'"$ROOT"$'\x1f''--name'$'\x1f''fm-bravo'$'\x1f''--close-on-exit' \
     "supervisor_reconcile did not create the additional supervisor pane on the new tab"
   assert_contains "$log" "fm-supervisor-pane-loop.sh"$'\x1f''bravo' \
