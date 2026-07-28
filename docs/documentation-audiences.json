@@ -256,6 +256,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/link-intake.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
     },
@@ -305,6 +309,10 @@
     },
     {
       "path": "docs/verification/runtime-backends.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/link-intake.md",
       "audience": "maintainer-verification"
     },
     {
