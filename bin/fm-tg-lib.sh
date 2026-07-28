@@ -770,14 +770,14 @@ fmtg_prune() {  # <now> [confirmed-offset]
   [ "$max_age" -le 2592000 ] 2>/dev/null || max_age=2592000
   case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
   budget=$FMTG_PRUNE_MAX
-  case "$budget" in ''|*[!0-9]*) budget=200 ;; esac
+  case "$budget" in ''|*[!0-9]*) budget=100 ;; esac
   inbox="$(fmtg_dir)/inbox"
-  # `outbox` and `reply` age out on the same schedule. A dry-run preview is
+  # `seen` is swept first because it is the only class that grows with traffic,
+  # so a cycle's budget is never spent on the small classes before reaching it.
+  # `outbox` and `reply` age out on the same schedule: a dry-run preview is
   # never retried and never cleaned by a send, and a staged body whose send was
-  # interrupted has no other owner, so without this both accumulate for as long
-  # as the home stays bridged.
-  # `seen` first because it is the only class that grows with traffic, so a
-  # cycle's budget is never spent on the small classes before reaching it.
+  # interrupted has no other owner, so without this both would accumulate for as
+  # long as the home stays bridged.
   for sub in seen context announce outbox reply; do
     [ "$budget" -gt 0 ] || break
     dir="$(fmtg_dir)/$sub"

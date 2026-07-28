@@ -70,7 +70,8 @@
 # Exit: 0 sent (or previewed); 2 bad usage; 3 no pinned peer; 4 no such request;
 #       5 send failed with durable progress preserved for retry; 6 target,
 #       project, or peer mismatch; 7 the request is already closed;
-#       9 AMBIGUOUS delivery - a chunk was accepted but progress is not durable.
+#       9 AMBIGUOUS delivery - a chunk was accepted but progress is not durable;
+#       10 nothing to send (the body was empty).
 #       A no-mistakes gate agent is refused before any of that, with its own
 #       message (bin/fm-gate-refuse-lib.sh).
 set -u
@@ -271,13 +272,21 @@ esac
 fmtg_reply_stage "$REQUEST" || die "cannot stage the reply body under bridge state"
 TEXT=$(fmtg_reply_staged_read "$REQUEST") || die "cannot read back the staged reply body"
 
+# Any path that gives up before sending drops the staged body with it, so an
+# abandoned attempt never leaves message content sitting in bridge state until
+# the retention window expires.
+give_up() {  # <exit-code> <message>
+  fmtg_reply_stage_clear "$REQUEST" >/dev/null 2>&1 || true
+  printf 'fm-tg-reply: %s\n' "$2" >&2
+  exit "$1"
+}
+
 CHUNKS=$(printf '%s' "$TEXT" | fm_message_split_thread "$FMTG_MAX_CHARS" "$FMTG_MAX_MESSAGES") \
-  || die "cannot split the reply"
+  || give_up 2 "cannot split the reply"
 N=$(printf '%s' "$CHUNKS" | jq -r 'length')
 case "$N" in ''|*[!0-9]*) N=0 ;; esac
 if [ "$N" -eq 0 ]; then
-  printf 'fm-tg-reply: the reply is empty; nothing was sent\n' >&2
-  exit 4
+  give_up 10 "the reply is empty; nothing was sent"
 fi
 
 RECORD=$(jq -cn --arg rid "$REQUEST" --arg task "$TASK" --argjson chat "$PEER_CHAT" \
@@ -285,9 +294,9 @@ RECORD=$(jq -cn --arg rid "$REQUEST" --arg task "$TASK" --argjson chat "$PEER_CH
   --argjson final "$([ "$FINAL" -eq 1 ] && printf true || printf false)" \
   --argjson dry "$([ -n "$FMTG_DRY" ] && printf true || printf false)" \
   '{request_id:$rid, task_id:$task, chat_id:$chat, chunks:$chunks, sent:0,
-    final:$final, dry_run:$dry, created_at:$at}') || die "cannot build the reply record"
+    final:$final, dry_run:$dry, created_at:$at}') || give_up 1 "cannot build the reply record"
 
-fmtg_outbox_record "$REQUEST" "$RECORD" || die "cannot record the outgoing reply"
+fmtg_outbox_record "$REQUEST" "$RECORD" || give_up 1 "cannot record the outgoing reply"
 
 if [ -n "$FMTG_DRY" ]; then
   printf 'DRY RUN: %s message(s) to the paired chat, recorded at %s\n' \

@@ -1688,6 +1688,22 @@ test_local_merge_is_unaffected_without_a_telegram_link() {
   pass "a local-only task with no Telegram link merges exactly as it did before the bridge existed"
 }
 
+# An abandoned attempt must not leave message content sitting in bridge state,
+# and "nothing to send" must be distinguishable from "that request was never
+# accepted here" - both used to exit 4.
+test_empty_reply_is_its_own_outcome_and_leaves_nothing_staged() {
+  local out
+  paired_home reply-empty
+  tg_queue 2800 "$PEER_ID" "$PEER_ID" "frage"
+  tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
+  out=$(printf '' | tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" tg-2800 2>&1 || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=10" "an empty reply did not report its own outcome"
+  assert_absent "$HOME_DIR/state/telegram/reply/tg-2800.txt" \
+    "an abandoned reply left its staged body in bridge state"
+  [ "$(tg_sent_count)" = 1 ] || fail "an empty reply still delivered a message"
+  pass "an empty reply is its own outcome and leaves no staged body behind"
+}
+
 test_absent_config_is_a_complete_no_op
 test_malformed_token_is_refused_without_echoing_it
 test_token_never_reaches_argv_or_state
@@ -1756,3 +1772,4 @@ test_local_merge_refuses_a_telegram_task_without_confirmation
 test_local_merge_refuses_an_unconsumed_or_moved_confirmation
 test_local_merge_lands_once_on_a_matching_confirmation
 test_local_merge_is_unaffected_without_a_telegram_link
+test_empty_reply_is_its_own_outcome_and_leaves_nothing_staged

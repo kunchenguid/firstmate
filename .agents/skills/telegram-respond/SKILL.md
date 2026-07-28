@@ -167,7 +167,7 @@ Treat `state/telegram/inbox/` as the source of truth and process **every** file 
 
       Exit 0 means sent. Exit 5 means some messages were delivered, the rest are durably preserved, and `bin/fm-tg-reply.sh --retry <request_id>` finishes them; do **not** redo the work behind the reply.
       Exit 9 means delivery is **ambiguous**: a message reached the person but the progress record did not survive, so a retry could repeat it. Do not retry blindly; tell the captain.
-      Exit 4 means the request id is not a real accepted message, exit 6 a peer or project mismatch, exit 7 an exchange already closed by a final reply.
+      Exit 4 means the request id is not a real accepted message, exit 6 a peer or project mismatch, exit 7 an exchange already closed by a final reply, exit 10 an empty body.
    e. **On success, remove that inbox file** (`rm -f state/telegram/inbox/<request_id>.json`) and your temporary reply file. A cleared file is never answered twice.
    f. **On failure, leave the inbox file in place**, move to the next, and do not retry blindly. If a reply fails twice, tell the captain, including whether the underlying work was already done.
       A file left there is re-announced only a few times before the bridge stops waking on it and reports it once as a `telegram-error`, so it stays waiting for you rather than looping - which is exactly why telling the captain is your job and not the watcher's.
