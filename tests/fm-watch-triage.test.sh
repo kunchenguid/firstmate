@@ -753,6 +753,80 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
 }
 
+# Same-hash busy flicker must not re-arm first-sight after a bare live-gate
+# surface. Production herdr reports agent working without changing pane text;
+# FM_BUSY_REGEX is flipped between arm cycles here so the capture hash stays
+# stable while window_is_busy toggles (the regex is only the test seam).
+test_same_hash_busy_does_not_resurface_live_gate() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid wakes bare
+  dir=$(make_case same-hash-busy-live-gate); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate.status"
+  window="test:fm-same-hash-busy"
+  printf 'idle external-decision gate static content\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\nbackend=tmux\n' "$window" > "$state/gate.meta"
+  printf 'captain-held [key=ci-unconfigured]: tracked by gate-decision-ci\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle external-decision gate static content")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '2\n' > "$state/.count-$key"
+
+  # P1: idle bare surface of the live captain-held gate.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=pi \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · idle at captain-held gate' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_REGEX='NEVER_MATCH_BUSY_MARKER' \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" 2>"$dir/err1" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "same-hash busy fixture: live gate did not bare-surface on first idle sight"
+  grep -Fx "stale: $window" "$out" >/dev/null \
+    || fail "same-hash busy fixture: missing bare stale surface on first idle sight"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] \
+    || fail "same-hash busy fixture: suppressor not set to the idle hash after surface"
+
+  # P2: same hash, busy observation (regex seam). Must retain the suppressor.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=pi \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · idle at captain-held gate' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_REGEX='external-decision' \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$dir/out2" 2>"$dir/err2" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "same-hash busy fixture: busy observation exited unexpectedly: $(cat "$dir/out2")"
+  fi
+  reap "$pid"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] \
+    || fail "same-hash busy fixture: busy observation erased the same-hash suppressor"
+
+  # P3: idle again, same hash, well inside PAUSE_RESURFACE_SECS - no second bare wake.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=pi \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · idle at captain-held gate' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_REGEX='NEVER_MATCH_BUSY_MARKER' \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$dir/out3" 2>"$dir/err3" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "same-hash busy fixture: second bare surface after busy flicker: $(cat "$dir/out3")"
+  fi
+  reap "$pid"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 1 ] || fail "same-hash busy fixture: expected 1 stale wake, got $wakes"
+  [ "$bare" -eq 1 ] || fail "same-hash busy fixture: expected 1 bare stale, got $bare"
+  pass "same-hash busy observation keeps the live-gate suppressor and does not bare-resurface inside PAUSE_RESURFACE_SECS"
+}
+
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1291,6 +1365,7 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_same_hash_busy_does_not_resurface_live_gate
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking

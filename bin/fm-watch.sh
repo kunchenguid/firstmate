@@ -959,9 +959,16 @@ EOF
         fi
       else
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping.
+        # Keep the same-hash stale suppressor. A busy observation (herdr agent
+        # working, or a transient busy footer) must not wipe .stale-$key for the
+        # hash still on screen - that re-armed first-sight every poll after a bare
+        # live captain-held/paused surface set .paused-$key (#743), producing a
+        # duplicate bare stale wake each arm cycle (firstmate-duplicate-stale-injection).
+        # Split pause-cadence cleanup from suppressor identity: drop only .paused-*
+        # here; a genuine hash change still clears the suppressor on the branch below.
         rm -f "$ssf" "$ewf"
         if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
-          clear_pause_tracking "$w"
+          clear_pause_state "$w"
         fi
       fi
     else
