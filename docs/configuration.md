@@ -460,6 +460,10 @@ The poll runs as one watcher check under `timeout $FM_CHECK_TIMEOUT`, and a kill
 The long poll is therefore bounded by that budget and not only by its own ceiling: the watcher passes the effective budget down, the `curl` deadline sits five seconds inside it, and the long poll itself ends five seconds before that.
 `FM_TELEGRAM_POLL_TIMEOUT` above what the budget allows is lowered rather than honored, so at the default `FM_CHECK_TIMEOUT` of 30 the usable long poll is 20 seconds; raising the poll timeout past that requires raising `FM_CHECK_TIMEOUT` too.
 
+The budget belongs to the check, not to a request, and one check can issue more than one call - a code redeemed inside the poll is answered with a pairing confirmation in the same cycle.
+Each call therefore gets what is *left* of the budget rather than a fresh full-length deadline, and the long poll is shortened by whatever the prune already spent, so the sum of a cycle's requests still lands before the kill.
+Clients the watcher does not run - replies, pairing, task commands - open no budget and keep the plain per-call deadline.
+
 Message bodies are untrusted data throughout.
 Text is normalized (CRLF and lone CR to LF; C0 controls other than tab and newline, plus DEL, removed; ends trimmed), bounded at `FM_TELEGRAM_MAX_TEXT` characters (default 4096), written to a private file as a JSON string by `jq`, and never interpolated into a shell command, a path, or a prompt.
 The wake payload carries only the request id, never message content.

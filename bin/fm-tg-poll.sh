@@ -98,6 +98,7 @@ command -v jq   >/dev/null 2>&1 || { emit_error_once "missing jq";   exit 0; }
 command -v curl >/dev/null 2>&1 || { emit_error_once "missing curl"; exit 0; }
 
 NOW=$(fmtg_now) || exit 0
+fmtg_budget_open "$NOW"
 fmtg_prune "$NOW"
 
 INBOX="$TG_DIR/inbox"
@@ -109,10 +110,18 @@ trap 'rm -f "$BODY_FILE" "$REQ_FILE"' EXIT
 
 OFFSET=$(fmtg_offset_get)
 
+# How long Telegram may hold this connection open. The configured value is a
+# ceiling, not an entitlement: whatever the prune already spent is gone from the
+# same check budget, so holding the connection for the full ceiling would push
+# curl's own deadline past the watcher's kill.
+POLL_SECS=$(( $(fmtg_budget_remaining) - FMTG_BUDGET_RESERVE ))
+[ "$POLL_SECS" -ge 0 ] || POLL_SECS=0
+[ "$POLL_SECS" -le "$FMTG_POLL_TIMEOUT" ] || POLL_SECS=$FMTG_POLL_TIMEOUT
+
 # allowed_updates pins the subscription to plain messages, so edited messages,
 # channel posts, callback queries, and every other update type are refused by
 # Telegram itself and never reach this client.
-jq -cn --argjson offset "$OFFSET" --argjson timeout "$FMTG_POLL_TIMEOUT" \
+jq -cn --argjson offset "$OFFSET" --argjson timeout "$POLL_SECS" \
   '{offset:$offset, limit:25, timeout:$timeout, allowed_updates:["message"]}' \
   > "$REQ_FILE" || exit 0
 

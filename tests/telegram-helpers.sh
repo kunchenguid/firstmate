@@ -35,6 +35,9 @@
 #     FAKE_TG_SENDMESSAGE_CODE   HTTP status to return for sendMessage (default 200)
 #     FAKE_TG_SEND_FAIL_FROM     fail sendMessage from the Nth delivery onward
 #     FAKE_TG_BODY_OVERRIDE      raw body to return for getUpdates instead of JSON
+#     FAKE_TG_GETUPDATES_DELAY   seconds getUpdates holds the connection before
+#                                answering, so a later call in the same check can
+#                                be observed spending what this one left
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -103,6 +106,9 @@ case "$method" in
     [ -n "$payload" ] && [ -f "$payload" ] && offset=$(jq -r '.offset // 0' "$payload")
     case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
     printf '%s %s\n' "$method" "$offset" >> "$state/calls.log"
+    if [ -n "${FAKE_TG_GETUPDATES_DELAY:-}" ]; then
+      sleep "$FAKE_TG_GETUPDATES_DELAY"
+    fi
     if [ -n "${FAKE_TG_BODY_OVERRIDE:-}" ]; then
       [ -n "$ofile" ] && printf '%s' "$FAKE_TG_BODY_OVERRIDE" > "$ofile"
       printf '%s' "${FAKE_TG_GETUPDATES_CODE:-200}"

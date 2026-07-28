@@ -450,6 +450,40 @@ test_long_poll_stays_inside_the_watcher_kill_budget() {
   pass "the long poll and its request deadline stay inside the watcher's per-check kill budget"
 }
 
+test_one_check_spends_one_budget_across_its_calls() {
+  local dir home fakebin code line poll_max send_max
+  dir="$TMP_ROOT/budget-shared"
+  mkdir -p "$dir"
+  tg_fake_api "$dir"
+  fakebin=$TG_FAKEBIN
+  home=$(tg_home "$dir" home "$TEST_TOKEN")
+  code=$(tg_run "$home" "$fakebin" "$PAIR" begin --label eren --project eren-pov-site \
+    | sed -n 's|^  /start ||p')
+  tg_queue 1300 "$PEER_ID" "$PEER_ID" "/start $code"
+
+  # Redeeming a code makes ONE check issue two calls: the long poll, and then the
+  # pairing confirmation. The watcher kills the check rather than the call, so a
+  # second call that started its own full-length deadline would be killed
+  # mid-request and the "telegram-paired" wake would be lost with it.
+  FAKE_TG_GETUPDATES_DELAY=2 tg_run "$home" "$fakebin" "$POLL" >/dev/null
+
+  line=$(grep '^getUpdates ' "$FAKE_TG_DIR/budget.log" | tail -n1)
+  poll_max=${line#*max-time=}
+  poll_max=${poll_max%% *}
+  line=$(grep '^sendMessage ' "$FAKE_TG_DIR/budget.log" | tail -n1)
+  send_max=${line#*max-time=}
+  send_max=${send_max%% *}
+  case "$poll_max$send_max" in ''|*[!0-9]*) fail "the check recorded no usable deadlines: $poll_max/$send_max" ;; esac
+
+  [ "$send_max" -le "$(( poll_max - 2 ))" ] \
+    || fail "the pairing confirmation took a fresh ${send_max}s deadline after the long poll had already spent 2s of the same ${poll_max}s budget"
+  [ "$send_max" -ge 2 ] \
+    || fail "the pairing confirmation was given a deadline (${send_max}s) too short to ever succeed"
+  assert_present "$home/state/telegram/peer.json" "the delayed poll never pinned the peer"
+  [ "$(tg_sent_count)" = 1 ] || fail "the pairing confirmation was not delivered"
+  pass "one watcher check spends one budget across every call it makes"
+}
+
 test_orphaned_publication_temps_are_swept() {
   local temp fresh now
   paired_home temps
@@ -1014,6 +1048,7 @@ test_offset_advances_only_past_processed_updates
 test_pending_message_is_re_announced_after_a_lost_wake
 test_re_announcement_budget_retires_a_stuck_entry
 test_long_poll_stays_inside_the_watcher_kill_budget
+test_one_check_spends_one_budget_across_its_calls
 test_orphaned_publication_temps_are_swept
 test_non_private_and_bot_senders_get_no_access
 test_unsupported_media_and_oversized_text_are_bounded

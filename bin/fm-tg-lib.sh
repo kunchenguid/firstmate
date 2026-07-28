@@ -22,6 +22,7 @@
 #
 # It defines, grouped by concern:
 #   config     fmtg_load_config, fmtg_active, fmtg_redact, fmtg_now
+#   budget     fmtg_budget_open, fmtg_budget_remaining
 #   arming     fmtg_poll_shim_content, fmtg_poll_shim_valid
 #   paths      fmtg_dir, fmtg_request_id_valid, fmtg_update_id_valid
 #   wire       fmtg_api_call <method> <payload-file|-> <body-file>
@@ -56,6 +57,10 @@ FMTG_CODE_ALPHABET='23456789ABCDEFGHJKMNPQRSTUVWXYZ'
 # long poll before curl's deadline. Sized for the slowest realistic tail of one
 # cycle's local work (a full batch of jq-normalized updates plus the prune).
 FMTG_BUDGET_RESERVE=5
+
+# Floor for a call issued when almost nothing is left: a sub-second deadline
+# would only guarantee failure, and this still lands inside the reserve.
+FMTG_BUDGET_MIN=2
 
 # --- config -----------------------------------------------------------------
 
@@ -126,7 +131,9 @@ fmtg_load_config() {
   # bridge that quietly stops delivering. So the request deadline reserves
   # FMTG_BUDGET_RESERVE seconds of the budget for this cycle's own state work,
   # and the long poll ends one further reserve earlier, so Telegram closes the
-  # connection before curl's deadline and curl returns before the kill.
+  # connection before curl's deadline and curl returns before the kill. These are
+  # the ceilings; what any single call actually gets is whatever is left of the
+  # budget the caller opened (fmtg_budget_open).
   raw=${FM_CHECK_TIMEOUT:-}
   case "$raw" in ''|*[!0-9]*) raw=30 ;; esac
   [ "$raw" -ge 10 ] 2>/dev/null || raw=10
@@ -252,6 +259,43 @@ fmtg_redact() {
   '
 }
 
+# --- budget -----------------------------------------------------------------
+#
+# The watcher kills the whole CHECK, not one request, so a cycle that issues more
+# than one call - the long poll, then a pairing confirmation for a code redeemed
+# inside it - has to spend ONE budget across all of them. A per-call deadline
+# would let the second call start a fresh full-length request just as the first
+# one used up the cycle, and the kill that follows destroys the wake rather than
+# the request.
+#
+# A caller the watcher runs therefore opens the budget once, and every call then
+# gets what is LEFT of it. A caller the watcher does not run - a reply, a pairing
+# command, a task command - never opens one and keeps the plain per-call
+# deadline, because nothing is going to kill it partway through.
+
+fmtg_budget_open() {  # <now>
+  local now=$1
+  case "$now" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  FMTG_BUDGET_DEADLINE=$(( now + ${FMTG_REQUEST_TIMEOUT:-25} ))
+}
+
+# Seconds a call started right now may run for.
+fmtg_budget_remaining() {
+  local now left max
+  max=${FMTG_REQUEST_TIMEOUT:-25}
+  if [ -z "${FMTG_BUDGET_DEADLINE:-}" ]; then
+    printf '%s' "$max"
+    return 0
+  fi
+  now=$(fmtg_now) || { printf '%s' "$FMTG_BUDGET_MIN"; return 0; }
+  left=$(( FMTG_BUDGET_DEADLINE - now ))
+  [ "$left" -le "$max" ] || left=$max
+  [ "$left" -ge "$FMTG_BUDGET_MIN" ] || left=$FMTG_BUDGET_MIN
+  printf '%s' "$left"
+}
+
 fmtg_now() {
   local now=${FMTG_NOW_OVERRIDE:-}
   if [ -z "$now" ]; then
@@ -321,7 +365,7 @@ fmtg_api_call() {
   {
     printf 'url = "%s/bot%s/%s"\n' "$FMTG_API" "$FMTG_TOKEN" "$method"
     printf 'silent\n'
-    printf 'max-time = %s\n' "${FMTG_REQUEST_TIMEOUT:-25}"
+    printf 'max-time = %s\n' "$(fmtg_budget_remaining)"
     printf 'output = "%s"\n' "$body"
     printf 'write-out = "%%{http_code}"\n'
     if [ "$payload" != - ]; then
