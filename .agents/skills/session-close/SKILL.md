@@ -47,8 +47,9 @@ Complete every step below before treating the session as closable.
    Events the monitoring captures wait in the durable wake queue, and the next session start reads every task's records directly, so a lapsed monitoring chain loses signal freshness but not the work.
    This session's own away daemon is not covered by that rule, because it supervises a pane that is about to disappear; the away-mode section below is where it is wound down.
 4. **Give the captain a closing summary.**
+   Give the whole summary in the outcome language of `AGENTS.md` section 9, which owns that translation, so none of the internal labels this skill uses reach the captain.
    State what is still under way and its current state (use `bin/fm-crew-state.sh <id>` where the live state matters), what awaits their decision, and that while no session is open the work keeps running but nothing responds to its reports or questions.
-   State where it resumes: opening the next session replays the queued events and reconciles all running work automatically, and `/bearings` gives a readable catch-up at any point after that unless a return catch-up gate is still pending.
+   State where it resumes: opening the next session replays the queued events and reconciles all running work automatically, and `/bearings` gives a readable catch-up at any point after that, unless the return from away mode is still unfinished and its listed blockers are waiting to be settled.
 
 Do not invent a separate handoff file or checkpoint document; the backlog, task metadata, status history, wake queue, and `data/` briefs and reports are already the complete handoff surface that session start consumes.
 
@@ -68,7 +69,7 @@ Winding the away daemon down ends this session's own supervision, which is exact
 
 That gate does not always clear before the close: an open blocker the captain will not resolve now, or a failed shutdown or wake drain, leaves `state/.afk-return-catchup` on disk, and the close then proceeds with the gate still pending.
 While that file exists `/bearings` refuses and prints the gate's blocker list instead of a report, and away-mode re-entry refuses to start a fresh daemon, so the promised catch-up path is closed until the gate clears.
-When the close proceeds with a pending gate, say so in the closing summary and name the blockers the gate still lists, because clearing them through the same return owner is the first thing the next session must do.
+When the close proceeds with that file still on disk, say so in the closing summary in `AGENTS.md` section 9 language: the return from away mode did not finish, the readable catch-up stays unavailable until the blockers it lists are settled, and settling them is the first thing the next session must do.
 
 ## Close versus /afk
 
