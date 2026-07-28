@@ -98,6 +98,51 @@ tests/fm-supervision-instructions.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 ```
 
+## Direct closeout and capacity refill
+
+The pure-upstream baseline `b29621ba19a4d15b688ae277ca06b67f80baa365` was audited on 2026-07-27.
+At that baseline, an ordinary terminal wake did not initiate a complete guarded landing, teardown, and ready-work refill transaction.
+Manual operator intervention could mask the missing transaction, while the visible unattended symptom was a completed metadata record retaining capacity and eligible work remaining unlaunched.
+The upstream renderer emitted no direct-lifecycle instruction for Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, or the unknown-harness fallback.
+The production scripts had no ordinary-terminal caller of `bin/fm-teardown.sh`, and their only non-batch caller of `bin/fm-spawn.sh` was bootstrap recovery for a secondmate.
+Either an existing cross-harness transaction instruction or an ordinary-terminal production caller would have disconfirmed the finding, but neither existed.
+
+The smallest current carry is commit `9d45f011cd17b45d4ed4d0f99ecd75bc0c4b2cdf`, which changes only `AGENTS.md`, `bin/fm-supervision-instructions.sh`, `docs/configuration.md`, and `tests/fm-supervision-instructions.test.sh`.
+It makes every mutable primary wake own one closeout-and-refill transaction, preserves read-only and ambiguous lanes, uses the existing guarded landing and teardown owners, and fails refill closed when an optional local capacity source is invalid.
+It does not add a coordinator, daemon, teardown implementation, migration, or runtime-backend mechanism.
+Per Firstmate's 2026-07-27 decision `[key=upstream-closeout-refill]` under the captain's pure-upstream rule, this commit is a temporary local carry required by the fleet and a queued upstream proposal, not a permanent fork delta.
+The clean contribution shape is a fresh topic from current upstream with this dependency-free commit plus the end-to-end regression, followed by the current changed-path and full validation gates.
+
+Focused verification commands:
+
+```sh
+bin/fm-test-run.sh \
+  tests/fm-supervision-instructions.test.sh \
+  tests/fm-instruction-owners.test.sh \
+  tests/fm-documentation-audiences.test.sh
+bin/fm-doc-audience-check.sh
+bin/fm-lint.sh
+git show 152b0fd:tests/fm-direct-lifecycle.test.sh |
+  sed '15s@.*@. "$PWD/tests/lib.sh"@' |
+  bash -s
+```
+
+Observed results:
+
+```text
+ok - every primary harness and fallback render one guarded closeout-and-refill transaction
+ok - direct lifecycle capacity accepts 1-64 and rejects invalid forms without diagnostics
+ok - all instruction-owner tests passed
+ok - all documentation-audience tests passed
+fm-doc-audience-check: ok surfaces=55 local_links=151
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+ok - routine PR work lands, cleans, and visibly refills in the same transaction
+ok - local-only work uses its guarded owner and refills configured capacity
+ok - unlanded work is preserved
+ok - captain-gated completed work is preserved
+ok - all direct lifecycle tests passed
+```
+
 ## Watcher continuity
 
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24, all against isolated project and home state.
