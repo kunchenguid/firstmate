@@ -964,8 +964,15 @@ test_teardown_conformance_old_vs_new() {
   expect_code 0 "$rc_new" "new fm-teardown.sh (scout, report present) should succeed"$'\n'"$out_new"
   assert_contains "$(cat "$log_new")" "treehouse"$'\x1f''return'$'\x1f''--force'$'\x1f'"$wt" \
     "teardown did not call treehouse return --force <worktree>"
-  assert_contains "$(cat "$log_old")" "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"firstmate:fm-$id" \
-    "legacy teardown fixture did not exercise tmux's permissive target selector"
+  # The legacy fixture's adapter comes from BASE_REF, so its selector form is
+  # whatever the merge-base carried: permissive while the exact-selector change
+  # was still on a branch, exact for every branch cut after it landed on main.
+  # Pinning the old form here would make this case pass once and then fail
+  # forever, so the '=' exactness markers are normalized away and the legacy run
+  # is only required to have reached tmux window cleanup for this task. The
+  # exact-selector contract belongs to the current script, asserted below.
+  assert_contains "$(tr -d '=' < "$log_old")" "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"firstmate:fm-$id" \
+    "legacy teardown fixture did not exercise tmux window cleanup for the task"
   assert_contains "$(cat "$log_new")" "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"=firstmate:=fm-$id" \
     "teardown did not call tmux kill-window with exact session and window selectors"
 
