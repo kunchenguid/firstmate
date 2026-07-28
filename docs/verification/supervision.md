@@ -449,6 +449,7 @@ The session-restart lifecycle correction was re-verified on 2026-07-28 with `tes
 
 Observed guarantee: a replacement session after `session_shutdown` armed one clean arm child with retry and restoration state reset instead of inheriting the retired session's scheduled retry.
 Each active session installed exactly one process-exit cleanup listener and dropped it when that session ended, and an extra binding that overlapped a still-live generation refused with `watcher: not armed - another live Pi session generation owns watcher supervision` rather than taking over the live arm child.
+Once that live owner shut down, the still-deferred binding refused with `watcher: not armed - this Pi session binding is inactive` instead of naming an owner that no longer existed, stayed unarmed, and armed only after its own session start.
 Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner; other primary harnesses are not applicable because they do not use this Pi extension lifecycle.
 
 Deterministic entry points:

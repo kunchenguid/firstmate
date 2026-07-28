@@ -1088,6 +1088,28 @@ if (!stillOwned.details?.ok || !String(stillOwned.details.message).includes("unc
   throw new Error(`ambiguous factory cleanup disturbed the live owner: ${JSON.stringify(stillOwned.details)}`);
 }
 
+// A binding deferred behind a live owner must not claim a live owner once that owner ends.
+const deferred = makePi();
+mod.default(deferred.pi);
+await deferred.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+const incumbentChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
+await current.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+await waitFor(() => !pidAlive(incumbentChild), "incumbent owner child exit");
+const orphaned = await deferred.getTool().execute("deferred-after-owner-end", {}, undefined, undefined, {});
+if (orphaned.details?.ok !== false || String(orphaned.details.message) !== "watcher: not armed - this Pi session binding is inactive and does not own watcher supervision; it stays idle until it receives its own session start") {
+  throw new Error(`deferred binding misreported a live owner after the incumbent ended: ${JSON.stringify(orphaned.details)}`);
+}
+if (liveArmPids().length !== 0) {
+  throw new Error(`deferred binding armed without ownership: ${liveArmPids().join(",")}`);
+}
+await deferred.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+const adopted = await deferred.getTool().execute("deferred-own-session-start", {}, undefined, undefined, {});
+if (!adopted.details?.ok || !String(adopted.details.message).includes("started Pi extension arm child")) {
+  throw new Error(`deferred binding could not arm through its own session start: ${JSON.stringify(adopted.details)}`);
+}
+await waitFor(() => liveArmPids().length === 1, "deferred binding own arm child");
+current = deferred;
+
 // Repeated transitions keep exactly one live cycle and never revive the refusal.
 for (const reason of ["resume", "fork", "new", "resume"]) {
   current = await replaceSession(current, reason);

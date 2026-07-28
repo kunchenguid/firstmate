@@ -9,9 +9,11 @@
 // (or a fresh factory bind) becomes the active live generation only once the previous
 // one has stopped, so monitoring can arm again without restarting Pi, while a bind
 // that overlaps a still-live generation defers instead of taking over and refuses to
-// arm. Terminal quit leaves the final generation stopped so late callbacks cannot
-// rearm. Stale callbacks from a prior generation are no-ops against the active
-// replacement.
+// arm. A deferred binding stays inactive once that owner ends and only becomes the
+// owner through its own later session_start, so its refusal names an inactive binding
+// rather than a live owner that no longer exists. Terminal quit leaves the final
+// generation stopped so late callbacks cannot rearm. Stale callbacks from a prior
+// generation are no-ops against the active replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -103,6 +105,7 @@ const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 100
 const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
 const notActiveOwnerMessage = "watcher: not armed - another live Pi session generation owns watcher supervision; this binding stays idle until that session ends";
+const inactiveBindingMessage = "watcher: not armed - this Pi session binding is inactive and does not own watcher supervision; it stays idle until it receives its own session start";
 
 let nextGenerationId = 0;
 let activeGeneration: SessionGeneration | null = null;
@@ -223,6 +226,12 @@ function activateGeneration(generation: SessionGeneration): void {
 
 function generationIsLive(generation: SessionGeneration): boolean {
   return activeGeneration === generation && !generation.stopping;
+}
+
+function refusalMessage(generation: SessionGeneration): string {
+  if (generation.stopping) return shuttingDownMessage;
+  if (activeGeneration && !activeGeneration.stopping) return notActiveOwnerMessage;
+  return inactiveBindingMessage;
 }
 
 function stopGeneration(generation: SessionGeneration): void {
@@ -390,9 +399,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function startArm(owner: SessionGeneration, predecessorArmPid = ""): ArmResult {
-    if (!generationIsLive(owner)) {
-      return { ok: false, message: owner.stopping ? shuttingDownMessage : notActiveOwnerMessage };
-    }
+    if (!generationIsLive(owner)) return { ok: false, message: refusalMessage(owner) };
     const ownership = lockOwnership();
     if (ownership === "other") return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
     if (ownership === "missing") {
