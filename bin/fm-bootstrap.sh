@@ -470,6 +470,8 @@ secondmate_liveness_sweep() {
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
+    # Probe the tmux server this secondmate recorded, not this process's own.
+    fm_backend_bind_meta "$backend" "$meta" || true
     verdict=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null) || verdict="unknown"
     case "$harness" in
       claude|codex|opencode|pi|grok|traex) ;;

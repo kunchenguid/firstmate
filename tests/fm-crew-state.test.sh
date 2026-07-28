@@ -83,6 +83,12 @@ SH
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  # Pane presence is read by enumerating live panes (bin/backends/tmux.sh's
+  # fm_backend_tmux_target_exists): tmux answers display-message for a gone
+  # window with another window's pane id, so its exit code cannot be trusted.
+  list-panes)
+    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 0
+    printf '%%1\n%s\n' "${FM_FAKE_TMUX_WINDOW:-}" ;;
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     printf '%%1\n' ;;
@@ -140,7 +146,10 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
-  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
+  # The fake tmux answers pane presence by enumeration now, so tell it which
+  # window this case recorded; every meta here uses the fm:fm-<id> shape.
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" FM_FAKE_TMUX_WINDOW="fm:fm-$2" \
+    "$CREW_STATE" "$2"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -1083,7 +1092,7 @@ SH
   fm_write_meta "$d/state/feat-timeout.meta" "window=fm:fm-feat-timeout" "worktree=$d/wt" "kind=ship"
   FM_FAKE_BUSY=1
   start=$SECONDS
-  out=$(FM_FAKE_NM_CALLS="$calls_file" PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" feat-timeout)
+  out=$(FM_FAKE_NM_CALLS="$calls_file" PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" FM_FAKE_TMUX_WINDOW=fm:fm-feat-timeout FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" feat-timeout)
   elapsed=$((SECONDS - start))
   assert_contains "$out" "state: working" "timed-out no-mistakes falls back to pane"
   assert_contains "$out" "source: pane" "timed-out no-mistakes -> pane source"

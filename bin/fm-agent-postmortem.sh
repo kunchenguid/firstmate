@@ -91,7 +91,8 @@ WIN_MINS=$(( (WIN_END - WIN_START) / 60 + 1 ))
 PANE_LINE=""
 EXIT_SIGNAL=unknown
 if [ "$BACKEND" = tmux ] && [ -n "$WINDOW" ]; then
-  pane=$(tmux capture-pane -p -t "$WINDOW" -S -100 2>/dev/null || true)
+  fm_tmux_bind_meta "$META"
+  pane=$(fm_tmux capture-pane -p -t "$WINDOW" -S -100 2>/dev/null || true)
   if [ -n "$pane" ]; then
     PANE_LINE=$(printf '%s\n' "$pane" | grep -iE 'killed|signal: |terminated|segmentation fault|abort trap|bus error|illegal instruction|out of memory' | tail -1 || true)
   fi

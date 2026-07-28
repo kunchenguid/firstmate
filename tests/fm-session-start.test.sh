@@ -191,15 +191,22 @@ SH
   chmod +x "$fakebin/ps"
 }
 
-# make_fake_tmux <fakebin> <live-target>: display-message succeeds only for
-# the given "session:window" target - the exact primitive
-# fm_backend_target_exists uses for a tmux endpoint liveness read.
+# make_fake_tmux <fakebin> <live-target>: only the given "session:window" target
+# exists - modelled the way fm_backend_target_exists actually reads a tmux
+# endpoint, by ENUMERATING live panes. display-message cannot answer that
+# question (it exits 0 for an unresolvable target and, when the session part
+# still resolves, returns another window's pane id), so it is kept here only for
+# callers that ask for a pane id outright.
 make_fake_tmux() {
   local fakebin=$1 live=$2
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
 case "\${1:-}" in
+  list-panes)
+    printf '%s\n' "$live"
+    exit 0
+    ;;
   display-message)
     target=""
     prev=""

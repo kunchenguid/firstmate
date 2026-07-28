@@ -29,6 +29,19 @@ for arg in "$@"; do
   prev=$arg
 done
 case "${1:-}" in
+  # Endpoint presence is read by ENUMERATING live panes, because tmux answers
+  # display-message for a gone window with another window's pane id
+  # (bin/backends/tmux.sh's fm_backend_tmux_target_exists). Every window this
+  # fixture records is present; the fake derives the list from the same metas
+  # the script reads, so a new case needs no fake change.
+  list-panes)
+    for m in "${FM_HOME:-}"/state/*.meta; do
+      [ -e "$m" ] || continue
+      w=$(grep '^window=' "$m" | tail -1 | cut -d= -f2-)
+      [ -n "$w" ] || continue
+      printf '%s\n' "$w"
+    done
+    exit 0 ;;
   display-message)
     case "$*" in
       *pane_current_command*)

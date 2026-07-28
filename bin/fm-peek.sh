@@ -22,4 +22,9 @@ N=${2:-40}
 BACKEND=$(fm_backend_of_selector "$RAW_TARGET" "$T" "$STATE")
 EXPECTED_LABEL=$(fm_backend_expected_label_of_selector "$RAW_TARGET" "$STATE")
 
+# Read from the tmux server the target's own metadata records. A selector with no
+# metadata (the explicit session:window escape hatch) resolves to the ambient
+# fleet socket, exactly as before (bin/fm-tmux-lib.sh's fm_tmux_socket_of_meta).
+fm_backend_bind_meta "$BACKEND" "$(fm_backend_meta_for_selector "$RAW_TARGET" "$STATE" 2>/dev/null || true)" || exit 1
+
 fm_backend_capture "$BACKEND" "$T" "$N" "$EXPECTED_LABEL"

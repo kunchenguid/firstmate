@@ -30,6 +30,12 @@ FM_SUPERVISOR_BACKEND_DEFAULT="tmux"
 # the home-ownership guard crew sessions already have.
 FM_SUPERVISOR_HOME_OPT="@firstmate-home"
 
+# The supervisor pane lives on the same tmux server as the rest of the fleet, and
+# is addressed through fm_tmux so the socket is named explicitly instead of
+# inherited (bin/fm-tmux-lib.sh owns the socket contract).
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-tmux-lib.sh"
+
 # supervisor_home_physical: this home's canonical physical path - the value the
 # ownership stamp stores and the guard compares against. Prints nothing and
 # returns 1 when FM_HOME cannot be resolved.
@@ -58,7 +64,7 @@ supervisor_target_default() {
 # returns 1 when the target is unreadable or the stamp is unset.
 supervisor_tmux_session_home() {  # <target>
   local target=$1 owner
-  owner=$(tmux display-message -p -t "$target" "#{$FM_SUPERVISOR_HOME_OPT}" 2>/dev/null) || return 1
+  owner=$(fm_tmux display-message -p -t "$target" "#{$FM_SUPERVISOR_HOME_OPT}" 2>/dev/null) || return 1
   [ -n "$owner" ] || return 1
   printf '%s' "$owner"
 }
@@ -74,9 +80,9 @@ supervisor_tmux_session_home() {  # <target>
 supervisor_tmux_stamp_own() {  # <target>
   local target=$1 home session
   home=$(supervisor_home_physical) || return 1
-  session=$(tmux display-message -p -t "$target" '#{session_name}' 2>/dev/null) || return 1
+  session=$(fm_tmux display-message -p -t "$target" '#{session_name}' 2>/dev/null) || return 1
   [ -n "$session" ] || return 1
-  tmux set-option -o -t "$session" "$FM_SUPERVISOR_HOME_OPT" "$home" 2>/dev/null || true
+  fm_tmux set-option -o -t "$session" "$FM_SUPERVISOR_HOME_OPT" "$home" 2>/dev/null || true
 }
 
 # supervisor_target_home_ok: the injection hard floor. Returns 0 ONLY when the

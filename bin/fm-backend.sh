@@ -133,7 +133,7 @@ fm_backend_is_known() {  # <name>
 #      tmux, where the tmux server reparents to launchd and the chain never
 #      reaches cmux - which is fine, because $TMUX already won there.
 # Callers needing the winning signal read FM_BACKEND_DETECT_SIGNAL (set to
-# TMUX, HERDR_ENV, CMUX_WORKSPACE_ID, bundle-id, or ancestry) and
+# TMUX, FM_TMUX_SOCKET, HERDR_ENV, CMUX_WORKSPACE_ID, bundle-id, or ancestry) and
 # FM_BACKEND_DETECTED after a direct (non-command-substitution) call.
 FM_BACKEND_CMUX_BUNDLE_ID="com.cmuxterm.app"
 
@@ -143,6 +143,19 @@ fm_backend_detect() {
   if [ -n "${TMUX:-}" ]; then
     FM_BACKEND_DETECTED=tmux
     FM_BACKEND_DETECT_SIGNAL=TMUX
+    printf 'tmux'
+    return 0
+  fi
+  # FM_TMUX_SOCKET is the SECOND tmux signal, and it carries exactly the same
+  # meaning. bin/fm-spawn.sh drops $TMUX from every pane it creates so a crewmate
+  # cannot reach the fleet's tmux server by accident, and hands a secondmate the
+  # fleet socket in this variable instead. A secondmate therefore runs inside
+  # tmux with no $TMUX to prove it, and without this arm it would fall through to
+  # the cmux ancestry/bundle-id fallback below and spawn its own crew onto the
+  # wrong backend. Checked immediately after $TMUX, keeping tmux innermost-first.
+  if [ -n "${FM_TMUX_SOCKET:-}" ]; then
+    FM_BACKEND_DETECTED=tmux
+    FM_BACKEND_DETECT_SIGNAL=FM_TMUX_SOCKET
     printf 'tmux'
     return 0
   fi
@@ -347,6 +360,23 @@ fm_backend_of_meta() {  # <meta-file>
   local v
   v=$(fm_meta_get "$1" backend)
   printf '%s' "${v:-tmux}"
+}
+
+# fm_backend_bind_meta: bind whatever per-task addressing this process needs
+# before it touches <meta-file>'s endpoint, for backends that have any.
+#
+# Only tmux does today: a task's meta records WHICH tmux server its window lives
+# on (`tmux_socket=`), and a reader must address that server rather than the one
+# it happens to be running in - otherwise a live endpoint reads as gone, or worse,
+# a same-named window on another server reads as this task's. Every other backend
+# is a no-op. Call it once per task, and again per task inside a loop: the tmux
+# binding always assigns, so it can never carry over between tasks.
+# An empty or missing meta-file is valid input and means "the ambient fleet
+# socket", which is what every reader used before the field existed.
+fm_backend_bind_meta() {  # <backend> <meta-file>
+  [ "$1" = tmux ] || return 0
+  fm_backend_source tmux || return 1
+  fm_tmux_bind_meta "${2:-}"
 }
 
 fm_backend_target_of_meta() {  # <meta-file>
@@ -674,7 +704,12 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
   case "$backend" in
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      # The adapter owns this: tmux exits 0 with EMPTY output for an
+      # unresolvable target, so the answer is the printed pane id, not the exit
+      # code (bin/backends/tmux.sh's fm_backend_tmux_target_exists records the
+      # empirical evidence).
+      fm_backend_source tmux || return 1
+      fm_backend_tmux_target_exists "$target"
       ;;
     herdr)
       fm_backend_source herdr || return 1

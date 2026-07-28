@@ -164,6 +164,10 @@ WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 BACKEND=$(fm_backend_of_meta "$META")
+# Address the tmux server this task's window actually lives on, not whichever one
+# this process happens to run in (bin/fm-tmux-lib.sh's fm_tmux_socket_of_meta).
+# Killing the right window matters more here than anywhere else.
+fm_backend_bind_meta "$BACKEND" "$META" || exit 1
 if [ "$BACKEND" = orca ]; then
   T_ORCA=$(grep '^terminal=' "$META" | tail -1 | cut -d= -f2- || true)
   [ -n "$T_ORCA" ] && T=$T_ORCA
@@ -1308,6 +1312,10 @@ cleanup_firstmate_home_children() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
+    # Rebind per child: a child's window may live on a different tmux server
+    # than its parent's, and fm_tmux_bind_meta always assigns, so no child can
+    # inherit the previous iteration's socket.
+    fm_backend_bind_meta "$child_backend" "$child_meta" || return 1
     if [ "$child_backend" = orca ]; then
       child_t=$(meta_value "$child_meta" terminal)
     else
@@ -1397,6 +1405,9 @@ fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH"
+  # That walk rebinds the tmux socket per child; restore THIS task's own before
+  # anything below touches its window.
+  fm_backend_bind_meta "$BACKEND" "$META" || exit 1
 fi
 
 if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
@@ -1548,6 +1559,25 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+# Stop any tmux server the crewmate started in its own sandbox namespace
+# (fm-spawn points the pane's TMUX_TMPDIR at <tasktmp>/tmux). Such a server
+# daemonizes, so closing the window does not end it and it would outlive the task
+# holding a deleted socket. Every socket killed here is strictly inside this
+# task's own temp root, and the fleet socket is explicitly excluded, so this can
+# only ever reach the task's own throwaway servers.
+cleanup_task_tmux_sandbox() {  # <task-tmp>
+  local root=$1 sock fleet='' active=''
+  [ -n "$root" ] && [ -d "$root/tmux" ] || return 0
+  command -v tmux >/dev/null 2>&1 || return 0
+  if [ "$BACKEND" = tmux ]; then fleet=$(fm_tmux_socket); active=${FM_TMUX_SOCKET:-}; fi
+  for sock in "$root"/tmux/*/* "$root"/tmux/*; do
+    [ -S "$sock" ] || continue
+    [ "$sock" != "$fleet" ] || continue
+    [ "$sock" != "$active" ] || continue
+    tmux -S "$sock" kill-server 2>/dev/null || true
+  done
+}
+cleanup_task_tmux_sandbox "$TASK_TMP"
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"

@@ -190,7 +190,7 @@ fm_afk_launch_close_terminal() {  # <backend> <target>
       ;;
     tmux)
       # target is the dedicated daemon session name - kill exactly it.
-      tmux kill-session -t "$target" 2>/dev/null
+      fm_tmux kill-session -t "$target" 2>/dev/null
       ;;
     none)
       return 0
@@ -216,7 +216,7 @@ fm_afk_launch_terminal_absent() {  # <backend> <target>
       [ "$code" = pane_not_found ]
       ;;
     tmux)
-      out=$(tmux has-session -t "$target" 2>&1)
+      out=$(fm_tmux has-session -t "$target" 2>&1)
       result=$?
       [ "$result" -eq 1 ] || return 1
       printf '%s' "$out" | grep -Eq "can't find session"
@@ -250,7 +250,7 @@ fm_afk_launch_terminal_alive() {  # <backend> <target>
       fm_backend_herdr_cli "$session" pane get "$pane" >/dev/null 2>&1
       ;;
     tmux)
-      tmux has-session -t "$target" 2>/dev/null
+      fm_tmux has-session -t "$target" 2>/dev/null
       ;;
     *) return 1 ;;
   esac
@@ -418,13 +418,16 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   nonce="$$-${RANDOM:-0}-$(date '+%s')"
   session="fm-afk-daemon-$hash-$nonce"
   entry=$(fm_afk_launch_entry_cmd)
-  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
-    "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
+  # FM_TMUX_SOCKET is handed over explicitly so the daemon addresses the SAME
+  # tmux server this launcher resolved, instead of re-deriving one from its own
+  # detached session's environment (bin/fm-tmux-lib.sh).
+  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_TMUX_SOCKET=%q %q' \
+    "$FM_HOME" "$captain_target" "$captain_backend" "$(fm_tmux_socket)" "$entry")
   if ! fm_afk_launch_record_write tmux "$session" ""; then
     fm_afk_launch_log "failed to persist planned tmux daemon session '$session'"
     return 1
   fi
-  if ! tmux new-session -d -s "$session" "$cmd" 2>/dev/null; then
+  if ! fm_tmux new-session -d -s "$session" "$cmd" 2>/dev/null; then
     fm_afk_launch_log "failed to create detached tmux daemon session '$session'"
     if ! rm -f "$FM_AFK_LAUNCH_RECORD"; then
       fm_afk_launch_log "failed to remove planned tmux daemon record after creation failure"

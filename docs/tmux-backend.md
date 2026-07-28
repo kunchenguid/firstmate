@@ -34,6 +34,58 @@ Each session carries an `@firstmate-home` option containing the physical `FM_HOM
 If another home with the same basename tries to reuse that session, firstmate reports the conflicting owner and refuses the spawn.
 An existing unstamped session is stamped on its first reuse so the historical `firstmate` session and all of its existing windows and task records remain valid.
 
+## Crew panes cannot reach the fleet's tmux server
+
+Firstmate runs its own tmux server and every crewmate window is a window on it, so one `tmux kill-server` ends the entire fleet.
+That is not hypothetical: on 2026-07-27 20:16 and again on 2026-07-28 00:47 this fleet vanished in about two seconds.
+The second time, `atop` process accounting (`atop -P PRG -r /var/log/atop/atop_20260728 -b 00:45 -e 00:50`) showed the tmux server (pid 588148) exiting with code **0** - a clean, voluntary exit, not a signal - and five agents exiting 0 right behind it after their SIGHUP.
+The last tmux command on the machine came from a crewmate pane at 00:47:18.
+Cgroup memory (`memory.failcnt=0`, `oom_kill=0`), logind (`KillUserProcesses=false`), and the Orca daemon log all cleared.
+The cause was structural, not one agent's mistake: every pane inherited `$TMUX`, so a bare `tmux` typed anywhere inside the fleet operated on the fleet's own server, and a crewmate that had been sent to study tmux behavior had no way to tell its own sandbox from the fleet's lifeline.
+
+Each spawned pane now gets a private tmux namespace, applied when the window is created:
+
+```sh
+tmux new-window -e TMUX_TMPDIR=/tmp/fm-<id>/tmux -e TMUX= ...
+```
+
+Emptying `$TMUX` detaches the pane from the fleet's server, and `TMUX_TMPDIR` moves tmux's socket directory, so a bare `tmux`, a `tmux -L <anything>`, and `tmux kill-server` all land on a throwaway per-task server.
+`bin/fm-teardown.sh` stops any server left in that directory and removes it with the rest of `/tmp/fm-<id>/`.
+Verified against a real server (`tests/fm-tmux-fleet-isolation.test.sh`): `tmux ls` inside the pane lists only the pane's own sessions, `tmux kill-server` returns 0, and the fleet's windows are all still there afterwards.
+
+Setting it at creation rather than typing `unset TMUX; export TMUX_TMPDIR=...` into the pane is deliberate.
+A shell-startup prompt can swallow the leading character of a sent line - the hazard `bin/fm-spawn.sh` already guards `treehouse get` against - and a sandbox that silently failed to apply would leave the pane holding the fleet's own server with nothing to show for it.
+`new-window -e` needs tmux 3.0 or newer; on an older tmux, firstmate warns and falls back to typing the same environment in.
+`-e TMUX=` sets the variable EMPTY rather than truly unsetting it (tmux's `-e` has no unset form), which is equivalent everywhere it matters: tmux itself treats the empty value as "not inside a server" - a nested `tmux new-session` inside such a pane succeeds instead of refusing - and every firstmate reader tests `$TMUX` for non-empty.
+
+`$TMUX_PANE` is deliberately left in place.
+It names a pane, not a server, so it cannot reach the fleet on its own, and a secondmate - a firstmate primary that lives in one of these panes - finds its own supervisor pane through it.
+A secondmate also needs to dispatch its own crew onto the shared server, so its pane (and only its pane) is additionally given `FM_TMUX_SOCKET=<fleet socket>`.
+
+This closes the accident, not every possible act: an agent that deliberately runs `tmux -S <absolute path to the fleet socket>` still reaches the server.
+A PATH-prefixed `tmux` wrapper was considered as a second layer and rejected - it is bypassed by an absolute path, so it buys no boundary, while adding an exec to every tmux call in every pane.
+The refusal that does hold is inside firstmate's own code: `fm_tmux` (`bin/fm-tmux-lib.sh`) rejects `kill-server` outright, so no future edit to a fleet-side script can reach it.
+
+## Which tmux server the fleet uses
+
+The fleet is always ONE tmux server, and by default it is the one firstmate is already running in - so `tmux attach` is unchanged and every crewmate stays in the same session and the same window list.
+`bin/fm-tmux-lib.sh` resolves it in this order:
+
+1. `FM_TMUX_SOCKET` - an explicit binding: a task's recorded socket, the value handed to a secondmate pane, or an operator override.
+2. `$TMUX`'s socket path - the server firstmate itself is running in.
+3. `${TMUX_TMPDIR:-/tmp}/tmux-<uid>/default` - tmux's own default socket, where a firstmate launched outside tmux has always put its fleet.
+
+A dedicated socket is available but is an operator choice, not a default.
+Start the primary inside `tmux -L firstmate` and rule 2 puts the whole fleet - crew windows, the away-mode daemon, everything - on that server.
+Attaching then becomes:
+
+```sh
+tmux -L firstmate attach -t <home-basename>
+```
+
+Each tmux task records `tmux_socket=` in `state/<id>.meta`, and every reader - peek, send, crew state, the watcher, teardown - addresses the server that field names.
+A meta written before the field existed has no `tmux_socket=` line; it resolves to the ambient fleet socket, which is exactly what every reader did before, so tasks spawned earlier keep resolving to the server they are actually on.
+
 ## Watching crew in tmux
 
 Attach to the session named after the active firstmate home:
@@ -76,6 +128,27 @@ ok - real tmux: an existing unstamped basename session is claimed without distur
 ```
 
 The test creates `firstmate` and `firstmate-life`, creates one task window in each, reads both ownership stamps, attempts a conflicting second `firstmate` home, and confirms a legacy unstamped session keeps its existing window while being claimed.
+
+## Endpoint existence: why `display-message` cannot answer it
+
+`display-message` never reports a missing target as an error, so it cannot be used to ask whether a window still exists.
+Verified on tmux 3.3a, 2026-07-28, against a private socket:
+
+```sh
+$ tmux -S "$S" display-message -p -t 'totally:bogus' '#{pane_id}'
+rc=0 out=[]
+# session `sess` live, its window `fm-x` killed:
+$ tmux -S "$S" display-message -p -t 'sess:fm-x' '#{pane_id}'
+rc=0 out=[%0]        # the session's CURRENT pane, not the window asked for
+```
+
+tmux resolves an unresolvable target against the current client/session instead of failing.
+The exit code is always 0, and the output is either empty or *some other window's* pane id.
+`fm_backend_target_exists` used to test only that exit code, so while any tmux server was reachable every long-dead window read back as `endpoint: alive` - which is what the session-start fleet digest reported for the entire fleet right after the 2026-07-28 incident wiped it (issue #1130).
+Checking that the output is non-empty is not enough either, because of the second case above.
+
+`fm_backend_tmux_target_exists` (`bin/backends/tmux.sh`) enumerates instead: one `list-panes -a` listing every live pane in each addressable form (`%id`, `@id`, session name, `session:window` by name or index, with or without a `.pane` suffix), and requires an exact match.
+It never starts a server - with none running, tmux exits non-zero with `error connecting to <socket>`.
 
 ## Agent liveness probe
 

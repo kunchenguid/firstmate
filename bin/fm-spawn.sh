@@ -1106,6 +1106,9 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   local meta=$1 old_backend old_target old_session old_pane old_state
   old_backend=$(fm_backend_of_meta "$meta")
   old_target=$(fm_backend_target_of_meta "$meta")
+  # Probe the endpoint on the server its own metadata records, so "is the old one
+  # still alive" is never answered by a same-named window on another server.
+  fm_backend_bind_meta "$old_backend" "$meta" || true
   [ -n "$old_target" ] || {
     echo "error: existing metadata for $ID has no endpoint; refusing duplicate launch while its herdr presentation journal is quarantined" >&2
     return 1
@@ -1175,6 +1178,17 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_remote_preflight_or_block
 fi
 
+# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
+# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
+# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
+# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
+# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
+# tmux/ is the pane's PRIVATE tmux namespace (TMUX_TMPDIR). Both exist before the
+# terminal is created, because the tmux pane is given that namespace at creation
+# time and tmux must find the directory already there.
+TASK_TMP="/tmp/fm-$ID"
+mkdir -p "$TASK_TMP/gotmp" "$TASK_TMP/tmux"
+
 W="fm-$ID"
 case "$BACKEND" in
   tmux)
@@ -1186,7 +1200,32 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    #
+    # The pane is created with a PRIVATE tmux namespace already in place.
+    #
+    # This is the fleet-isolation fix (incident 2026-07-28 00:47): a crewmate
+    # typing a bare `tmux` command in its own pane used to operate on the FLEET's
+    # tmux server, because the pane inherited $TMUX. One `kill-server` from an
+    # agent that was experimenting with tmux behavior took the whole fleet -
+    # primary, secondmate, every crewmate - down in 2.5 seconds.
+    #
+    # Emptying $TMUX detaches the pane from the fleet server, and TMUX_TMPDIR
+    # redirects tmux's socket directory, so a bare `tmux`, `tmux -L <anything>`,
+    # and `tmux kill-server` all land on a throwaway per-task server instead.
+    # Only an absolute `tmux -S <fleet socket>` can still reach the fleet, which
+    # is a deliberate act rather than the accident this closes.
+    #
+    # $TMUX_PANE is deliberately left alone: it names a pane, not a server, so it
+    # cannot reach the fleet on its own, and a secondmate - a firstmate primary
+    # living in one of these panes - discovers its own supervisor pane through it
+    # (bin/fm-supervisor-target-lib.sh's discover_supervisor_target).
+    #
+    # A secondmate also runs firstmate's own scripts and must still dispatch ITS
+    # crew onto the shared fleet server, so it alone is handed the socket.
+    # Ordinary crewmates are never told where the fleet server is.
+    SANDBOX_ENV=("TMUX_TMPDIR=$TASK_TMP/tmux" "TMUX=")
+    [ "$KIND" != secondmate ] || SANDBOX_ENV+=("FM_TMUX_SOCKET=$(fm_tmux_socket)")
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS" "${SANDBOX_ENV[@]}") || exit 1
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -1423,14 +1462,6 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
-mkdir -p "$TASK_TMP/gotmp"
-
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
 # they never block teardown's dirty check or leak into a commit.
@@ -1589,6 +1620,13 @@ meta_write_rc=0
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  # tmux_socket= records WHICH tmux server this window lives on, so every later
+  # reader addresses that server rather than whichever one it happens to be
+  # running in. A meta without the field predates it and therefore predates any
+  # socket move, so readers fall back to the ambient fleet socket - the exact
+  # behavior every reader had before (bin/fm-tmux-lib.sh's
+  # fm_tmux_socket_of_meta owns that compatibility rule).
+  [ "$BACKEND" != tmux ] || echo "tmux_socket=$(fm_tmux_socket)"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
@@ -1699,6 +1737,22 @@ LAUNCH=${LAUNCH//__PIBRIEFENV__/$PIBRIEFENV}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+fi
+# Old-tmux fallback for the pane sandbox.
+#
+# The private tmux namespace is normally set when the window is CREATED
+# (bin/backends/tmux.sh's fm_backend_tmux_create_task, `new-window -e`), which
+# needs tmux 3.0+ and leaves nothing to lose in transit. On an older tmux that
+# flag does not exist, so the same environment is typed into the pane instead -
+# the pre-3.0 behavior, with the sent-line risk that comes with it.
+if [ "$BACKEND" = tmux ] && ! fm_backend_tmux_pane_env_supported; then
+  echo "warning: this tmux is too old for 'new-window -e'; sending the pane's private tmux namespace as a typed line instead" >&2
+  spawn_send_text_line "$T" "unset TMUX; export TMUX_TMPDIR=$TASK_TMP/tmux"
+  sleep 0.3
+  if [ "$KIND" = secondmate ]; then
+    spawn_send_text_line "$T" "export FM_TMUX_SOCKET=$(fm_tmux_socket)"
+    sleep 0.3
+  fi
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so

@@ -176,9 +176,17 @@ LOG_VERB=$(status_line_verb "$LOG_LINE")
 TASK_BACKEND=$(fm_backend_of_meta "$META")
 BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
+# Bind this task's recorded tmux server before any pane read, so a task spawned
+# on a different socket is still read from the server it actually lives on
+# (bin/fm-tmux-lib.sh's fm_tmux_socket_of_meta).
+fm_backend_bind_meta "$TASK_BACKEND" "$META" || exit 1
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in
-    tmux) tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 ;;
+    # The tmux probe checks the printed pane id, not the exit code: tmux exits 0
+    # with empty output for a target that no longer resolves, so the exit code
+    # alone reports every dead window as readable (bin/backends/tmux.sh's
+    # fm_backend_tmux_target_exists).
+    tmux) fm_backend_tmux_target_exists "$1" ;;
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }
