@@ -11,8 +11,10 @@
 # This script is push-based: verified harness turn-end hooks invoke it every time
 # the primary is about to end a turn.
 # Claude and codex can block directly by preserving exit status 2 and stderr.
-# OpenCode, pi, and grok adapters use the same predicate and force one bounded
-# follow-up because their turn-end events are passive.
+# OpenCode and pi adapters use the same predicate and force one bounded
+# follow-up because their turn-end events are passive. Grok delegates native
+# blocking when its running Stop payload advertises that capability, with one
+# bounded resume fallback for payloads from pre-native processes.
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
 # and fail-open tradeoffs.
 #
@@ -26,10 +28,10 @@
 # primary checkout - the main home or a genuinely marked secondmate home - and
 # stay a silent, fast no-op inside child task worktrees.
 #
-# Loop-guard, codex (default) mode: never block twice in the same turn. Codex
-# Stop payloads carry stop_hook_active=true when the CURRENT stop attempt was
-# itself already forced by an earlier block this turn; on that signal we always
-# allow the stop, whether or not watcher supervision actually got resumed.
+# Loop-guard, codex/Grok (default) mode: never block twice in the same turn.
+# Codex uses stop_hook_active and Grok uses stopHookActive; typed camel-case
+# takes precedence when both spellings are present. A true value means the
+# current stop attempt already follows a block, so this guard always allows it.
 # Passive harness adapters provide their own one-follow-up guard before calling
 # this script.
 # That bounds those harnesses to at most one forced continuation per turn -
@@ -94,7 +96,15 @@ PAYLOAD=$(cat 2>/dev/null || true)
 # loop-guard field, so we must never block - fail open, not noisy.
 command -v jq >/dev/null 2>&1 || exit 0
 
-STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '.stop_hook_active // false' 2>/dev/null) || exit 0
+STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
+  if type != "object" then error("payload")
+  elif has("stopHookActive") then
+    if ((.stopHookActive | type) == "boolean") then .stopHookActive else error("stopHookActive") end
+  elif has("stop_hook_active") then
+    if ((.stop_hook_active | type) == "boolean") then .stop_hook_active else error("stop_hook_active") end
+  else false
+  end
+' 2>/dev/null) || exit 0
 if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
   exit 0
 fi

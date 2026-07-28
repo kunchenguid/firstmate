@@ -796,8 +796,11 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
   printf 'report\n' > "$data/zghost/report.md"
   fm_write_meta "$state/zghost.meta" \
     "window=firstmate:7" \
+    "endpoint_task_id=zghost" \
     "backend=zellij" \
+    "zellij_session=firstmate" \
     "zellij_tab_id=3" \
+    "zellij_pane_id=7" \
     "worktree=$dir/missing-worktree" \
     "project=$project" \
     "kind=scout" \
@@ -827,7 +830,11 @@ test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
   printf 'smz\n' > "$home/.fm-secondmate-home"
   fm_write_meta "$state/smz.meta" \
     "window=firstmate:99" \
+    "endpoint_task_id=smz" \
     "backend=zellij" \
+    "zellij_session=firstmate" \
+    "zellij_tab_id=99" \
+    "zellij_pane_id=99" \
     "worktree=$home" \
     "project=$home" \
     "kind=secondmate" \
@@ -835,8 +842,11 @@ test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
     "home=$home"
   fm_write_meta "$home/state/childz.meta" \
     "window=firstmate:7" \
+    "endpoint_task_id=childz" \
     "backend=zellij" \
+    "zellij_session=firstmate" \
     "zellij_tab_id=4" \
+    "zellij_pane_id=7" \
     "worktree=$dir/missing-child-worktree" \
     "project=$project" \
     "kind=scout"
