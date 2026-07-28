@@ -259,12 +259,15 @@ $HERDR_SECTION
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
-The worktree is your laboratory - install, run, edit, and make scratch commits freely.
+The worktree is your laboratory while you work - install, run, edit, and make scratch commits
+freely - but it is a borrowed lane, not yours to leave changed; rule 8 covers how to hand it back.
 The report is the only thing that leaves this worktree, so anything worth keeping must be in it.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`
+1. First action: create your branch and note where it started:
+   \`git checkout -b fm/$ID && git rev-parse HEAD\`
    Teardown holds the lane to that branch: it is how firstmate proves this worktree is yours,
-   and not another task's, before returning it to the pool.
+   and not another task's, before returning it to the pool. That starting commit is the state
+   you hand the lane back in (rule 8).
 
 # Rules
 1. Never push to any remote and never open a PR.
@@ -287,11 +290,16 @@ The report is the only thing that leaves this worktree, so anything worth keepin
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
-8. Your scratch is not discarded for you. Teardown applies the same uncommitted- and unlanded-work
-   refusals to this lane as to any other, and clearing it needs the captain's explicit approval.
-   So finish clean: put everything worth keeping in the report, then leave no uncommitted changes
-   behind. If scratch must stay in the worktree, say so in the report and why, so the captain can
-   decide rather than meet a refusal with no explanation.
+8. Your scratch is not discarded for you. Teardown applies the same uncommitted-, unpushed-, and
+   unmerged-work refusals to this lane as to any other, and you may not push or open a PR to
+   clear them, so a lane left holding your scratch stalls until the captain authorizes discarding
+   it. Hand the lane back instead, as the last thing you do before reporting done:
+   \`git reset --hard {the starting commit from Setup step 1} && git clean -fd\`
+   That leaves no uncommitted changes and no commits of your own, which is what teardown needs.
+   Everything you learned is already in the report by then; nothing in the worktree survives.
+   If the CODE is worth keeping rather than discarding, do not reset - say so in the report and
+   stop. Firstmate promotes this task to a ship task in place (\`bin/fm-promote.sh\`), which is how
+   scout findings become shipped work.
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.

@@ -831,11 +831,76 @@ test_scout_worktree_gets_ordinary_unlanded_work_check() {
   expect_code 1 "$rc" "scout-own-scratch: a scout worktree should get the ordinary unlanded-work check"
   assert_grep "has work not on any remote and not landed" "$case_dir/stderr" \
     "scout-own-scratch: refusal did not report the unlanded work"
+  assert_grep "bin/fm-promote.sh" "$case_dir/stderr" \
+    "scout-own-scratch: refusal did not offer promotion as the keep-the-code path"
+  assert_not_contains "$(cat "$case_dir/stderr")" "Push the branch" \
+    "scout-own-scratch: refusal told a scout to do what its brief forbids"
   [ ! -s "$case_dir/treehouse.log" ] \
     || fail "scout-own-scratch: refusal returned a worktree holding unlanded work"
   [ -f "$case_dir/state/task-x1.meta" ] \
     || fail "scout-own-scratch: teardown deleted metadata after refusing"
   pass "a scout worktree is not exempt from the ordinary dirty and unlanded-work checks"
+}
+
+# The local-only refusal's ship remedy is to merge the branch into the project's
+# default branch. For a scout lane that would land laboratory scratch in main -
+# the one thing firstmate must never do - so the scout gets its own remedies.
+test_local_only_scout_refusal_never_offers_merging_scratch_into_main() {
+  local case_dir rc
+  case_dir=$(make_case scout-local-only-scratch)
+  write_meta "$case_dir" local-only scout
+  wt_commit_file "$case_dir" scratch.txt scratch "scratch scout work"
+  printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/data/task-x1"
+  printf '%s\n' '# Scout report' > "$case_dir/data/task-x1/report.md"
+  add_compatible_tasks_axi "$case_dir"
+  add_lifecycle_call_logs "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "scout-local-only-scratch: teardown should refuse a scout lane holding scratch"
+  assert_not_contains "$(cat "$case_dir/stderr")" "fm-merge-local.sh" \
+    "scout-local-only-scratch: refusal offered to merge laboratory scratch into the default branch"
+  assert_grep "restore the lane to the commit its branch started at" "$case_dir/stderr" \
+    "scout-local-only-scratch: refusal did not offer the scout's own clean exit"
+  assert_grep "bin/fm-promote.sh" "$case_dir/stderr" \
+    "scout-local-only-scratch: refusal did not offer promotion as the keep-the-code path"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "scout-local-only-scratch: refusal returned a worktree holding scratch"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "scout-local-only-scratch: teardown deleted metadata after refusing"
+  pass "a local-only scout refusal never points laboratory scratch at the default branch"
+}
+
+# The reachable clean exit the scout brief now names: hand the lane back at the
+# commit the branch started from, and ordinary teardown takes it.
+test_scout_reset_to_start_commit_tears_down_cleanly() {
+  local case_dir rc start
+  case_dir=$(make_case scout-reset-to-start)
+  write_meta "$case_dir" no-mistakes scout
+  start=$(git -C "$case_dir/wt" rev-parse HEAD)
+  wt_commit_file "$case_dir" scratch.txt scratch "scratch scout work"
+  printf '%s\n' "leftover" > "$case_dir/wt/untracked.txt"
+  git -C "$case_dir/wt" reset --hard -q "$start"
+  git -C "$case_dir/wt" clean -fdq
+  printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/data/task-x1"
+  printf '%s\n' '# Scout report' > "$case_dir/data/task-x1/report.md"
+  add_compatible_tasks_axi "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "scout-reset-to-start: a lane handed back at its starting commit should tear down"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "scout-reset-to-start: teardown printed a REFUSED line"
+  [ -f "$case_dir/data/task-x1/report.md" ] \
+    || fail "scout-reset-to-start: teardown removed the scout's durable record"
+  pass "a scout that hands its lane back at the starting commit tears down without --force"
 }
 
 # A scout that died before its brief's first `git checkout -b` is still parked at
@@ -2404,6 +2469,8 @@ test_force_overrides_absent_worktree_refusal
 test_secondmate_carveout_skips_worktree_ownership_check
 test_scout_foreign_worktree_refuses_without_touching_owner
 test_scout_worktree_gets_ordinary_unlanded_work_check
+test_local_only_scout_refusal_never_offers_merging_scratch_into_main
+test_scout_reset_to_start_commit_tears_down_cleanly
 test_scout_detached_without_task_branch_allows
 test_foreign_branch_refuses_when_expected_branch_is_gone
 test_scout_absent_worktree_allows_metadata_cleanup

@@ -42,11 +42,14 @@
 # for the common case where there is no remote at all.
 # Scout tasks (kind=scout in meta) get those same worktree checks: a scout
 # worktree is a real pool lane holding real files, so it is not exempt from dirty
-# or unlanded-work refusals, and leftover scratch needs the captain's explicit
-# --force the same as any other unlanded work. The report at data/<task-id>/
-# report.md is the scout's work product for the backlog, not a licence to discard
-# the lane: teardown proceeds only once it exists and the shared
-# unresolved-decision completion gate verifies its captain-held inventory. An
+# or unlanded-work refusals. Its brief has it hand the lane back at the commit its
+# branch started from, which passes those checks; a lane still holding scratch is
+# refused, and because a scout may not push or open a PR, the refusal offers the
+# exits it can take - the report, restoring the lane, promotion through
+# bin/fm-promote.sh when the code should ship, or the captain's explicit --force.
+# The report at data/<task-id>/report.md is the scout's work product for the
+# backlog, not a licence to discard the lane: teardown proceeds only once it exists
+# and the shared unresolved-decision completion gate verifies its inventory. An
 # already-absent scout path is the one carve-out: there is no worktree to return
 # and no live lane to destroy, and the report teardown never touches is the
 # durable record, so refusing there would only dead-end metadata cleanup.
@@ -835,6 +838,22 @@ teardown_treehouse_return() {
   return 1
 }
 
+# Print the remedies for a lane that still holds work. The ship remedies passed in
+# are unfollowable for a scout: its brief forbids pushing and opening a PR, and
+# merging laboratory scratch into the default branch is the one thing firstmate
+# must never do outside an approved merge path. A scout gets the exits it can
+# actually take instead - the report, restoring the lane, or promotion when the
+# code itself should ship.
+print_unlanded_work_remedy() {
+  local ship_remedy=$1
+  if [ "$KIND" = scout ]; then
+    echo "The report is this scout's deliverable, not its worktree: put the findings in $DATA/$ID/report.md, then restore the lane to the commit its branch started at so nothing of yours is left in it." >&2
+    echo "If this code should ship instead of being discarded, promote the task with bin/fm-promote.sh rather than tearing it down. Otherwise get the captain's explicit OK to discard, then --force." >&2
+    return 0
+  fi
+  echo "$ship_remedy" >&2
+}
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ "$FORCE" != "--force" ] || return 0
@@ -887,13 +906,13 @@ validate_worktree_teardown_safety() {
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+      print_unlanded_work_remedy "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force."
       return 1
     fi
   elif [ -n "$dirty" ]; then
     echo "REFUSED: worktree $WT has uncommitted changes." >&2
     echo "uncommitted changes present" >&2
-    echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
+    print_unlanded_work_remedy "Commit them (or get the captain's explicit OK to discard, then --force)."
     return 1
   elif [ -n "$unpushed" ]; then
     branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
@@ -904,7 +923,7 @@ validate_worktree_teardown_safety() {
     if ! work_is_landed "$branch"; then
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
-      echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+      print_unlanded_work_remedy "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force."
       return 1
     fi
   fi

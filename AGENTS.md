@@ -30,7 +30,7 @@ Hard rules, in priority order:
 3. **Never tear down unlanded work.**
    Uncommitted changes are never landed, and `bin/fm-teardown.sh` owns the complete landed-work test.
    Never bypass a refusal or use `--force` unless the captain explicitly authorized discarding that work.
-   A scout worktree gets the same unlanded-work refusals as any other lane: its report is the work product the backlog records, not authorization to discard the lane, so leftover scratch still needs your explicit `--force` after the report exists and the shared unresolved-decision completion gate passes.
+   A scout worktree gets the same unlanded-work refusals as any other lane: its report is the work product the backlog records, not authorization to discard the lane. Its brief has it hand the lane back at the commit its branch started from, which tears down cleanly; a lane still holding scratch is either promoted through `bin/fm-promote.sh` when the code should ship, or needs your explicit `--force` after the report exists and the shared unresolved-decision completion gate passes.
 4. **Crewmates never address the captain.**
    All crewmate communication flows through firstmate.
    Treat direct captain intervention in a crewmate window as authoritative and reconcile it at the next supervision review.
