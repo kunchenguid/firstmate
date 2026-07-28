@@ -107,6 +107,11 @@
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# A confirmed launch also best-effort enrolls the new agent in Parlay's live chat
+# panel via `parlay listen --agent <task-id>`, backgrounded with its pid recorded to
+# state/<id>.parlay-listen-pid for fm-teardown.sh to stop. Parlay is optional
+# captain tooling, never load-bearing: an absent `parlay` binary or a failed call is
+# logged to stderr and never blocks or fails the spawn.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
@@ -1539,6 +1544,15 @@ if [ "$KIND" = secondmate ]; then
       echo "CONFIG_REREAD: secondmate $ID: cleanup failed; pre-relaunch generations were force-cleared where possible (destination=$PROJ_ABS source=$FM_HOME)" >&2
     fi
   fi
+fi
+
+# Best-effort Parlay chat-panel enrollment. Optional captain tooling, never
+# load-bearing: skip silently if `parlay` is not on PATH, and never let a launch
+# failure block or fail an already-confirmed spawn.
+if command -v parlay >/dev/null 2>&1; then
+  parlay listen --agent "$ID" >/dev/null 2>&1 &
+  echo $! > "$STATE/$ID.parlay-listen-pid" 2>/dev/null \
+    || echo "warning: could not record parlay listen pid for $ID (non-blocking)" >&2
 fi
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
