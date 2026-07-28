@@ -217,3 +217,4 @@ Contributions are welcome - see [CONTRIBUTING.md](CONTRIBUTING.md) for the workf
 ## License
 
 MIT - see [LICENSE](LICENSE).
+One bundled skill, `.agents/skills/watch/`, is vendored third-party code and stays under its own upstream MIT license in [`.agents/skills/watch/LICENSE`](.agents/skills/watch/LICENSE).
