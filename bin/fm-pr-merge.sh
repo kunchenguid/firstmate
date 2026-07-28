@@ -93,7 +93,8 @@ grep -qxF "pr=$URL" "$META" || {
 #
 # A task with no Telegram link is unaffected: the whole gate is skipped and the
 # merge behaves exactly as it did before the bridge existed.
-if TG_REQUEST=$(fmtg_meta_get "$META" tg_request); then
+if fmtg_meta_is_linked "$META"; then
+  TG_REQUEST=$(fmtg_meta_get "$META" tg_request) || TG_REQUEST='<malformed>'
   fmtg_load_config
   TG_NOW=$(fmtg_now) || { echo "error: cannot read the current time" >&2; exit 1; }
   TG_PROJECT=$(fmtg_meta_get "$META" project) || TG_PROJECT=

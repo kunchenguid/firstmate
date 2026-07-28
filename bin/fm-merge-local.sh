@@ -73,7 +73,8 @@ fi
 # unaffected.
 # shellcheck source=bin/fm-tg-lib.sh
 . "$FM_ROOT/bin/fm-tg-lib.sh"
-if TG_REQUEST=$(fmtg_meta_get "$META" tg_request); then
+if fmtg_meta_is_linked "$META"; then
+  TG_REQUEST=$(fmtg_meta_get "$META" tg_request) || TG_REQUEST='<malformed>'
   fmtg_load_config
   TG_NOW=$(fmtg_now) || { echo "error: cannot read the current time" >&2; exit 1; }
   TG_HEAD=$(git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH") || TG_HEAD=

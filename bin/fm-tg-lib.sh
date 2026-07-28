@@ -1039,6 +1039,19 @@ fmtg_publish_attempt() {  # <task-id>
   [ "$attempts" -le "${FMTG_PUBLISH_ATTEMPTS:-5}" ]
 }
 
+# Is this task answering a Telegram request?
+#
+# Linkage is decided by the PRESENCE of the key, not by its value. Reading the
+# value and treating "absent or empty" alike would make an empty `tg_request=`
+# line a silent bypass of the landing gate below, which is exactly the shape a
+# half-written or hand-edited record takes. A present-but-empty link is
+# therefore linked-and-malformed, and the gate refuses it rather than skipping.
+fmtg_meta_is_linked() {  # <meta-file>
+  local meta=$1
+  [ -f "$meta" ] || return 1
+  grep -qE '^tg_(request|chat)=' "$meta" 2>/dev/null
+}
+
 # --- landing authorization ----------------------------------------------------
 #
 # The two-step rule - a request authorizes preparing and previewing, never

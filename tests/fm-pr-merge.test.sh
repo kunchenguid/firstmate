@@ -455,6 +455,27 @@ test_unlinked_task_is_unaffected_by_the_telegram_gate() {
   pass "a task with no Telegram link merges exactly as it did before the bridge existed"
 }
 
+# Linkage is decided by the PRESENCE of the key, not its value. Reading the value
+# and treating "absent or empty" alike would make a half-written `tg_request=`
+# line a silent bypass of the whole gate.
+test_empty_telegram_link_does_not_bypass_the_gate() {
+  local case_dir rc
+  case_dir=$(make_case tg-empty-link)
+  mkdir -p "$case_dir/wt"
+  printf 'tg_request=\n' >> "$case_dir/state/task-x1.meta"
+  add_gh_mocks "$case_dir" "$TG_HEAD_SHA"
+  : > "$case_dir/gh-axi.log"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "tg-empty-link: an empty Telegram link bypassed the publish gate"
+  grep -q 'pr merge' "$case_dir/gh-axi.log" \
+    && fail "tg-empty-link: gh-axi pr merge ran despite a malformed Telegram link"
+  pass "a present-but-empty Telegram link is linked-and-malformed, never an unlinked task"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -472,3 +493,4 @@ test_telegram_linked_merge_refuses_a_wrong_project_confirmation
 test_telegram_linked_merge_refuses_when_the_revision_cannot_be_resolved
 test_telegram_linked_merge_lands_once_and_never_replays
 test_unlinked_task_is_unaffected_by_the_telegram_gate
+test_empty_telegram_link_does_not_bypass_the_gate
