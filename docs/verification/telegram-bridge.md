@@ -13,7 +13,7 @@ Recorded 2026-07-28 on macOS (Darwin 25.5.0, arm64), GNU bash 5.3.9, ShellCheck 
 bin/fm-test-run.sh --family telegram-bridge
 ```
 
-46 checks pass, covering: inert-by-default, token secrecy and file modes, pairing success/expiry/replay/wrong-code/wrong-identity/re-pair/revoke, exactly-once acceptance, duplicate delivery, both crash windows, offset confirmation, the recovery sweep and its per-entry budget, the long poll's fit inside the watcher's kill budget, one budget shared across a check's calls, orphaned publication temporaries, refusal of unpaired/group/channel/bot senders, unsupported and oversized payloads, injection inertness, rate limiting, project routing, the two-step publish gate, reply escaping/splitting/retry/final cleanup, bootstrap arm and disarm, supervision eligibility, cross-channel coexistence, sweep rotation, gate-agent refusal, home isolation, and the three channel-aware shared surfaces below.
+51 checks pass, covering: inert-by-default, token secrecy and file modes, pairing success/expiry/replay/wrong-code/wrong-identity/re-pair/revoke, exactly-once acceptance, duplicate delivery, both crash windows, offset confirmation, the recovery sweep and its per-entry budget, the long poll's fit inside the watcher's kill budget, one budget shared across a check's calls, orphaned publication temporaries, refusal of unpaired/group/channel/bot senders, unsupported and oversized payloads, injection inertness, rate limiting, project routing, the two-step publish gate, reply escaping/splitting/retry/final cleanup, bootstrap arm and disarm, supervision eligibility, cross-channel coexistence, sweep rotation, gate-agent refusal, home isolation, and the three channel-aware shared surfaces below.
 
 The Bot API is served by the fake local server in `tests/telegram-helpers.sh`: a stateful implementation of `getUpdates` and `sendMessage` reached through the client's real `curl --config` transport, read from the same stdin stream the client pipes.
 No socket is bound and no real token exists anywhere in the suite.
@@ -72,7 +72,7 @@ The budget is per check, and one check can issue two calls - the long poll, then
 
 ## Compatibility axes
 
-Both changed shared surfaces were inspected, not assumed.
+Every axis below was inspected rather than assumed.
 
 **Primary harnesses.** The bridge adds one cadence state line and one repair-line clause, rendered by `bin/fm-supervision-instructions.sh` for whichever snippet the harness selects. Every supported harness renders it, including `kimi`, which maps to the `unknown` snippet:
 

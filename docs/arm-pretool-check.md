@@ -96,11 +96,13 @@ Approved setup nodes are:
 
 - `cd <one path word>`.
 - `export NAME=<one shell word>` with no command substitution, process substitution, or redirection.
-- `source <x-mode path>` or `. <x-mode path>`.
-- `[ -f <x-mode path> ] && source <x-mode path>` and the equivalent dot form.
+- `source <cadence path>` or `. <cadence path>`.
+- `[ -f <cadence path> ] && source <cadence path>` and the equivalent dot form.
 
-The allowed x-mode paths are `config/x-mode.env`, `./config/x-mode.env`, and an absolute path that normalizes to `<active-firstmate-home>/config/x-mode.env`.
-An absolute x-mode path outside the active home is not an approved setup node.
+A cadence path is one always-on channel's generated watcher-cadence file: `config/x-mode.env` for X mode, or `config/telegram.env` for the Telegram bridge.
+Each is allowed as that relative path, as its `./` form, and as an absolute path that normalizes to the same file under the active firstmate home.
+An absolute cadence path outside the active home is not an approved setup node.
+A home may arm both channels, so an arm command may carry one such setup node per armed cadence file.
 
 Approved nodes may be separated by `;`, a real newline, or `&&`.
 `&&` is accepted after setup so a failed `cd`, `export`, or source prevents the protected call from running under the wrong setup.
