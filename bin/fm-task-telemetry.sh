@@ -62,6 +62,23 @@ difficulty_points() {
   esac
 }
 
+TELEMETRY_KEYWORDS=(
+  migration database schema security auth concurrency race deadlock refactor
+  architecture multi-project secondmate backend watcher teardown spawn dispatch
+  no-mistakes ci e2e integration browser performance telemetry token quota
+  recovery diagnose investigate audit design report
+)
+
+count_keywords() {
+  local brief=$1 keyword count=0
+  for keyword in "${TELEMETRY_KEYWORDS[@]}"; do
+    if grep -Eiq "(^|[^[:alnum:]])$keyword(s|es|d|ed|ing)?([^[:alnum:]]|$)" "$brief" 2>/dev/null; then
+      count=$((count + 1))
+    fi
+  done
+  printf '%s\n' "$count"
+}
+
 estimate_difficulty() {
   local brief=$1 words lines keyword_count score
   [ -f "$brief" ] || { printf 'unknown\n'; return 0; }
@@ -74,9 +91,7 @@ estimate_difficulty() {
     score=$((score + 1))
   fi
   [ "${lines:-0}" -gt 80 ] && score=$((score + 1))
-  keyword_count=$(grep -Eio \
-    'migration|database|schema|security|auth|concurrency|race|deadlock|refactor|architecture|multi-project|secondmate|backend|watcher|teardown|spawn|dispatch|no-mistakes|ci|e2e|integration|browser|performance|telemetry|token|quota|recovery|diagnose|investigate|audit|design|report' \
-    "$brief" 2>/dev/null | sort -u | wc -l | tr -d '[:space:]')
+  keyword_count=$(count_keywords "$brief")
   if [ "${keyword_count:-0}" -ge 5 ]; then
     score=$((score + 3))
   elif [ "${keyword_count:-0}" -ge 2 ]; then

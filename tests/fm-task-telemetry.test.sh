@@ -42,6 +42,29 @@ EOF
   pass "task telemetry estimates simple and complex briefs"
 }
 
+test_estimate_keywords_match_words_not_substrings() {
+  local home brief
+  home=$(make_home estimate-keywords)
+  brief="$home/benign.md"
+  : > "$brief"
+  for _ in $(seq 1 40); do
+    printf 'The decision requires the author to be specific about social policy.\n' >> "$brief"
+    printf 'Precise authority racing traces deliciously past the pricing sheet.\n' >> "$brief"
+  done
+  [ "$(run_telemetry "$home" estimate "$brief")" = simple ] \
+    || fail "benign prose must not count auth/ci/race inside ordinary words"
+
+  brief="$home/lifecycle.md"
+  : > "$brief"
+  for _ in $(seq 1 40); do
+    printf 'Update the dispatch and teardown migrations before the CI e2e run.\n' >> "$brief"
+    printf 'Record auth tokens so the watcher reports schema recovery cleanly.\n' >> "$brief"
+  done
+  [ "$(run_telemetry "$home" estimate "$brief")" = complex ] \
+    || fail "real lifecycle keywords, including plurals, must still count"
+  pass "task telemetry keyword scoring matches whole words only"
+}
+
 test_collect_explicit_usage_sidecar() {
   local home ledger summary
   home=$(make_home sidecar)
@@ -192,6 +215,7 @@ EOF
 }
 
 test_estimate_simple_and_complex
+test_estimate_keywords_match_words_not_substrings
 test_collect_explicit_usage_sidecar
 test_collect_codex_cumulative_session
 test_collect_uses_spawn_ref_after_meta_rewrite
