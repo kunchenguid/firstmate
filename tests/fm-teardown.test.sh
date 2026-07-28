@@ -529,7 +529,7 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
     || fail "teardown did not prompt tasks-axi ready: $out"
   printf '%s\n' "$out" | grep -F 'check date gates' >/dev/null \
     || fail "teardown did not preserve date-gate check: $out"
-  printf '%s\n' "$out" | grep -F 'keep Done to the configured recent history limit' >/dev/null \
+  printf '%s\n' "$out" | grep -F 'keep Done to the done_keep limit configured in .tasks.toml' >/dev/null \
     && fail "teardown kept manual Done pruning in compatible tasks-axi prompt: $out"
   pass "teardown prompts tasks-axi backlog refresh when compatible"
 }
@@ -545,7 +545,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
   out=$(run_teardown "$case_dir") || fail "teardown failed with manual backlog backend"
   printf '%s\n' "$out" | grep -F 'Update data/backlog.md - move task-x1 to Done' >/dev/null \
     || fail "teardown did not prompt manual backlog update under opt-out: $out"
-  printf '%s\n' "$out" | grep -F 'keep Done to the configured recent history limit' >/dev/null \
+  printf '%s\n' "$out" | grep -F 'keep Done to the done_keep limit configured in .tasks.toml' >/dev/null \
     || fail "teardown did not prompt configured manual Done retention under opt-out: $out"
   printf '%s\n' "$out" | grep -F 'tasks-axi done' >/dev/null \
     && fail "teardown prompted tasks-axi despite manual backend opt-out: $out"

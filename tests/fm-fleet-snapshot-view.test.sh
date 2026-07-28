@@ -541,7 +541,7 @@ EOF
 }
 
 test_done_recent_history_survives_worker_cleanup_without_private_prose() {
-  local home out
+  local home out view
   home=$(make_home cleaned-done)
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
@@ -552,12 +552,15 @@ test_done_recent_history_survives_worker_cleanup_without_private_prose() {
 - [x] cleaned-ship - Ship completion https://github.com/kunchenguid/firstmate/pull/123 (repo: firstmate) (kind: ship) (merged 2026-07-15)
   PRIVATE TASK NOTE: do not expose.
   /Users/yelen/private/task-worktree
+- [x] cleaned-local - Local completion (repo: firstmate) (kind: ship) (done 2026-07-16)
+  local main
+  PRIVATE DECISION BODY: do not expose.
 EOF
 
   out=$(FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .tasks == []
-      and (.backlog.records | length) == 1
+      and (.backlog.records | length) == 2
       and (.backlog.records[] | select(.id == "cleaned-ship")
         | .structured == true
           and .state == "done"
@@ -570,9 +573,26 @@ EOF
           and .links == ["https://github.com/kunchenguid/firstmate/pull/123"]
           and .body_lines == []
           and .body_excerpt == null)
+      and (.backlog.records[] | select(.id == "cleaned-local")
+        | .structured == true
+          and .state == "done"
+          and .title == "Local completion"
+          and .repo == "firstmate"
+          and .kind == "ship"
+          and .done == "2026-07-16"
+          and .completion == {verb:"done",date:"2026-07-16"}
+          and .pr_url == null
+          and .report_path == null
+          and .local_note == "local main"
+          and .body_lines == []
+          and .body_excerpt == null)
       and ((. | tostring) | contains("PRIVATE TASK NOTE") | not)
+      and ((. | tostring) | contains("PRIVATE DECISION BODY") | not)
       and ((. | tostring) | contains("/Users/yelen/private/task-worktree") | not)
   ' >/dev/null || fail "cleaned-up worker Done history leaked private prose or lost structured outcome fields: $out"
+  view=$(FM_HOME="$home" "$VIEW")
+  assert_contains "$view" "| cleaned-local | Local completion | firstmate | ship | - | local main |" \
+    "view should render the local-only artifact recorded as an indented tasks-axi note"
   pass "Done recent history survives worker cleanup as bounded structured outcome memory"
 }
 
