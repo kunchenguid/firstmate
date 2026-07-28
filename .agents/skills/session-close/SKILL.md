@@ -62,8 +62,8 @@ A codex-thread owner cannot be proven dead from the process table: ask the capta
 
 Check for an active `state/.afk` before closing: its presence means an away daemon is supervising this session, and closing leaves it pointed at a pane that is about to disappear.
 That daemon does not recover on its own from a gone target: it backs off and retries against it indefinitely, and it keeps holding the identity-backed daemon lock, so the next session's `/afk` re-entry reports the daemon as already running instead of starting a fresh one.
-Exit away mode through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
-If the captain wants away mode left set anyway, say in the closing summary that it stays set and name `bin/fm-afk-launch.sh stop` as the command that ends it.
+Away mode must be exited before the close proceeds, and it is exited only through the `/afk` skill's documented return procedure: `bin/fm-afk-return.sh` owns the ordered daemon shutdown, the durable wake drain, and the return catch-up gate.
+A close request while away mode is active is itself the return signal, so leave blocker handling and gate clearance to that owner and do not name or run any direct exit command here.
 Winding the away daemon down ends this session's own supervision, which is exactly what closing means; it never stops, tears down, or unmonitors a worker's own running work.
 
 ## Close versus /afk

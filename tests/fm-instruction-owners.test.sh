@@ -223,11 +223,14 @@ test_session_close_owner_branches_and_hands_off() {
     '## Away mode at close' \
     'Check for an active `state/.afk` before closing' \
     'That daemon does not recover on its own from a gone target' \
-    'Exit away mode through `bin/fm-afk-launch.sh stop`' \
+    'it is exited only through the `/afk` skill'"'"'s documented return procedure' \
+    '`bin/fm-afk-return.sh` owns the ordered daemon shutdown' \
     'Away mode is a separate check that applies on either branch' \
     'An active `state/.afk` also applies on this branch'; do
     assert_grep "$phrase" "$CLOSE" "session-close lost the away-mode close phrase '$phrase'"
   done
+  assert_no_grep 'bin/fm-afk-launch.sh' "$CLOSE" \
+    "session-close must defer away-mode exit to bin/fm-afk-return.sh, not name the inner shutdown command"
 
   # Running work and how the next session finds it again.
   for phrase in \
