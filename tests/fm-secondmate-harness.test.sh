@@ -36,6 +36,9 @@
 #      flags still win.
 set -u
 
+# Harness identity cases below provide their own markers and mocked ancestry.
+unset CODEX_THREAD_ID GROK_AGENT 2>/dev/null || true
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
@@ -174,7 +177,7 @@ SH
   [ "$got" = pi ] || fail "unrelated pi-signed-helper ancestry resolved '$got', expected pi"
 
   got=$(PATH="$fakebin:$BASE_PATH" bash -c \
-    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_verified_harness_ancestry_pid' "$ROOT")
   [ "$got" = 100 ] || fail "session-lock ancestry selected '$got', expected the inner Pi engine pid 100"
   PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 200' "$ROOT" \
