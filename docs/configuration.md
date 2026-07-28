@@ -246,6 +246,15 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Direct supervision capacity (config/supervision-capacity)
+
+`config/supervision-capacity` is the optional local, gitignored capacity source for the primary agent's direct closeout-and-refill transaction.
+It contains one decimal integer from 1 through 64 and is not inherited by secondmate homes.
+Every ordinary task metadata record occupies one slot until guarded teardown removes it, including terminal, parked, ambiguous, and captain-gated lanes.
+An absent file leaves section 7's no-arbitrary-cap rule and any explicit captain-recorded capacity in force.
+An unreadable, empty, non-integer, or out-of-range file blocks refill without authorizing cleanup or mutation of an existing lane.
+The capacity file provides only a bound; `AGENTS.md` section 8 owns the primary-agent lifecycle transaction, including work selection and launch.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
