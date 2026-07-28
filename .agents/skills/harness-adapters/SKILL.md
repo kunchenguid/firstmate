@@ -145,7 +145,7 @@ Natural language is acceptable if uncertain.
 
 | Fact | Value |
 |---|---|
-| Busy-pane signature | `esc to interrupt` |
+| Busy-pane signature | the spinner status line `<glyph> <Verb>… (<status>)`, e.g. `✻ Whatchamacalliting… (2s · thinking with high effort)`. Recorded on 2.1.207 and re-verified on 2.1.220 (2026-07-28): claude renders NO `esc to interrupt` hint at all, so the hint regex never fires on it, and the spinner shape in `bin/fm-tmux-lib.sh` is the only signature that sees a busy claude. |
 | Exit command | `/exit` |
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
@@ -162,6 +162,13 @@ As defense in depth for any pane that flag cannot reach, including the captain's
 Its broader dark-TRUECOLOR placeholder handling and dark-theme tradeoff are documented in `docs/herdr-backend.md`'s 2026-07-10 incident record.
 That styled capture is internal to the boolean detector only.
 `fm-peek` and every other human or LLM-facing capture path stays plain `tmux capture-pane` with no escape codes.
+
+**No-break space in the composer (verified 2026-07-28, Claude Code 2.1.220).**
+claude renders its bare composer prompt as `❯` followed by U+00A0 NO-BREAK SPACE, not an ASCII space (`tmux capture-pane -e | od -c` shows `342 235 257 302 240`).
+POSIX `[:space:]` does not cover U+00A0, so an ASCII-only trim left the row non-empty and every idle claude composer classified as pending input.
+That single misread broke both readers built on the composer verdict: `fm-send` exited non-zero with a false "Enter swallowed" for steers the target had already received, which invites the caller to re-send and dispatch the same instruction twice, and the away-mode injector read every idle claude pane as holding typed text.
+The fix is `fm_composer_trim` in the shared `bin/fm-composer-lib.sh`, which counts U+00A0 as whitespace for every adapter at once; regression coverage is in `tests/fm-composer-lib.test.sh` and `tests/fm-tmux-submit-busy.test.sh`.
+Sending to a BUSY claude relies on the same busy-queued-Enter fallback recorded under opencode below, which needed the widened busy signature in the table above before it could see a busy claude at all.
 
 **Primary-session guard fact (verified 2026-07-04, Claude Code 2.1.201; preserved 2026-07-08, Claude Code 2.1.204).**
 This is separate from the per-task crewmate turn-end hook above (that one just `touch`es a marker file in a task's own `.claude/settings.local.json`).
@@ -229,9 +236,14 @@ re-send), while an idle pane keeps `pending` as a genuine swallow. The herdr
 adapter observes the same opencode behavior but needs a separate fix; it is
 recorded as a known gap in `docs/herdr-backend.md` rather than patched here,
 so the tmux adapter does not paper over a herdr-specific shape.
+The fallback is harness-generic, but it is only as good as the busy signature
+it asks: a harness whose busy line the spinner regex misses reads idle, and the
+fallback silently stops rescuing it (that is exactly what happened to claude
+until 2026-07-28 - see the claude section above).
 Regression coverage: `tests/fm-tmux-submit-busy.test.sh` covers the four
-scenarios (busy + pending -> `empty`, idle + pending -> `pending`, busy +
-cleared -> `empty`, idle + cleared -> `empty`).
+opencode scenarios (busy + pending -> `empty`, idle + pending -> `pending`,
+busy + cleared -> `empty`, idle + cleared -> `empty`) plus claude's own cleared
+-> `empty` and idle-swallow -> `pending` cases.
 
 **Primary-session guard fact (verified 2026-07-08, OpenCode 1.17.6).**
 The firstmate PRIMARY's own `.opencode/plugins/fm-primary-turnend-guard.js` listens for `session.idle`.

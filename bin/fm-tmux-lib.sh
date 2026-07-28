@@ -244,10 +244,32 @@ FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
 # crew that was actively working, and fm-crew-state.sh's pane fallback reported
 # no positive working evidence for it.
 #
-# The pattern is the SHAPE of that line - a parenthesised elapsed-time counter
-# followed by a token counter - not the spinner glyph (locale-fragile) or the
-# verb (claude randomises it: Meandering/Simmering/Puttering/...).
-FM_TMUX_SPINNER_REGEX_DEFAULT='\([0-9]+[hms][^)]*token'
+# The pattern is the SHAPE of that line - not the spinner glyph (locale-fragile)
+# or the verb (claude randomises it: Meandering/Simmering/Puttering/...).
+#
+# Widened 2026-07-28 (task fm-send-busy-false-negative, claude 2.1.220): the
+# original shape required a parenthesised elapsed counter FOLLOWED BY a token
+# counter, and claude renders that only once it has started emitting output.
+# Sampled every 3s across a live thinking phase, the status line instead reads
+#
+#   ✻ Whatchamacalliting… (2s · thinking with high effort)
+#   ✢ Whatchamacalliting… (11s · still thinking with high effort)
+#   · Crystallizing… (running stop hooks… 4/5 · 52s · ↓ 87 tokens)
+#   · Metamorphosing… (0s · ↓ 4 tokens)          <- the only matched form
+#
+# so the old pattern matched 0 of 8 consecutive captures of a demonstrably busy
+# pane, and claude renders no interrupt hint either: `fm_pane_is_busy` reported
+# NOT busy for the whole thinking phase of every turn. That is why the
+# busy-queued-Enter fallback in fm_tmux_submit_enter_core, which rescues
+# opencode, could not rescue claude.
+#
+# The invariant across every observed form is the VERB'S ELLIPSIS immediately
+# followed by a parenthesised status, which is also how claude renders a running
+# tool's timer ("… (10s)") - both mean a turn is in flight. The original token
+# form is kept as an alternation so a pane that only shows the counter still
+# matches. The ellipsis anchor is what keeps this tight: displayed text
+# truncated with `…` ends the line there, so it is never followed by `(`.
+FM_TMUX_SPINNER_REGEX_DEFAULT='[[:alnum:]]…[[:space:]]*\(|\([0-9]+[hms][^)]*token'
 # Footer window for the hint scan. Deliberately narrow (the TUI footer area) so
 # busy-looking strings in DISPLAYED CONTENT cannot suppress stale detection.
 FM_TMUX_BUSY_TAIL_DEFAULT=6

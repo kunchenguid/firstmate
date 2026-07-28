@@ -38,6 +38,21 @@
 # byte-pattern check missed claude's own dim ghost (its prompt glyph is not
 # bold-wrapped) and no adapter covered grok's truecolor placeholder at all.
 #
+# NON-ASCII COMPOSER WHITESPACE is the third half (task
+# fm-send-busy-false-negative). claude 2.1.220 renders its bare composer prompt
+# as `❯` followed by U+00A0 NO-BREAK SPACE, not an ASCII space (verified live
+# 2026-07-28 with `tmux capture-pane -e | od -c`: `342 235 257 302 240`). POSIX
+# `[:space:]` does not cover U+00A0, so every ASCII-only trim left the NBSP
+# behind, the bare-`❯` glyph case never matched, and EVERY idle claude composer
+# classified as `pending` - as if a human had typed into it. Two things broke:
+# `fm-send` exited non-zero with "Enter swallowed" on steers the target had
+# actually received (the caller's natural response is to re-send, so one
+# instruction lands twice), and the away-mode injector read every idle claude
+# pane as holding pending input, the same shape as incident afk-invx-i5. The
+# verdict owner below now trims through fm_composer_trim, which counts U+00A0 as
+# whitespace, so a harness padding its prompt glyph with a no-break space cannot
+# be mistaken for typed content on ANY adapter.
+#
 # Each adapter still owns its own CAPTURE and structural row-finding, because
 # those use genuinely different primitives (tmux's cursor-row read, herdr's ANSI
 # tail scan, orca/cmux's plain read-screen). Once an adapter has a candidate
@@ -159,13 +174,40 @@ fm_composer_strip_ghost() {
   '
 }
 
+# Non-ASCII whitespace a harness may render inside an otherwise-empty composer
+# that POSIX [:space:] does not match. Only U+00A0 NO-BREAK SPACE is listed
+# because it is the only one observed live (claude 2.1.220's `❯ ` prompt row,
+# 2026-07-28); add a byte sequence here only with the same kind of evidence.
+FM_COMPOSER_NBSP=$'\302\240'
+
+# fm_composer_trim: strip leading and trailing whitespace from <text>, counting
+# BOTH POSIX [:space:] and the no-break space above. It loops until the value
+# stops changing so a mixed run trims completely, and it only ever removes
+# whitespace at the two ENDS, so a row carrying real typed content can never be
+# trimmed away to empty - the same safety argument as the ASCII-only trim it
+# replaces. Byte-literal, so it is locale-independent and bash 3.2 safe (no \u
+# escapes, no multibyte character classes).
+fm_composer_trim() {  # <text>
+  local s=$1 prev
+  while :; do
+    prev=$s
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    s=${s#"$FM_COMPOSER_NBSP"}
+    s=${s%"$FM_COMPOSER_NBSP"}
+    [ "$s" = "$prev" ] && break
+  done
+  printf '%s' "$s"
+}
+
 # fm_composer_classify_content: the single shared composer-content verdict.
 #   <bordered> 1 when <content> came from a genuine agent-composer container (a
 #              bordered composer box, or a structurally-identified bare AGENT
 #              prompt row); 0 for a bare, unstructured row (e.g. tmux's raw
 #              cursor line that carried no box border).
-#   <content>  the candidate composer content, already border-stripped and
-#              whitespace-trimmed by the caller.
+#   <content>  the candidate composer content, already border-stripped by the
+#              caller. The caller's own trim is ASCII-only, so this owner
+#              re-trims through fm_composer_trim before judging.
 #   [idle_re]  optional per-harness idle-placeholder regex (e.g. grok's
 #              "Type a message...") that reads as empty; matched both before and
 #              after a leading prompt glyph is stripped, so a pattern written
@@ -182,6 +224,10 @@ fm_composer_idle_matches() {
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}
+  # Re-trim here, in the verdict owner: each adapter's own trim is ASCII-only,
+  # and a harness may pad its prompt glyph with a no-break space.
+  content=$(fm_composer_trim "$content")
+  plain_content=$(fm_composer_trim "$plain_content")
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
       '❯'|'›') printf 'empty'; return 0 ;;
@@ -210,8 +256,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
     '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
     '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
   esac
-  content="${content#"${content%%[![:space:]]*}"}"
-  content="${content%"${content##*[![:space:]]}"}"
+  content=$(fm_composer_trim "$content")
   [ -n "$content" ] || { printf 'empty'; return 0; }
   # Known idle placeholder (matched again after the leading glyph was stripped,
   # e.g. "❯ Type a message...").
