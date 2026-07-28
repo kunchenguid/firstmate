@@ -322,7 +322,12 @@ jobs:
           esac
           /bin/bash --version | head -1
           command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
-          /bin/bash -n bin/fm-fleet-snapshot.sh
+          for script in bin/*.sh; do
+            /bin/bash -n "$script" || {
+              echo "::error::$script does not parse under stock macOS Bash"
+              exit 1
+            }
+          done
 
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"

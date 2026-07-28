@@ -34,6 +34,11 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Lifecycle tests must never auto-discover and call a developer's real
+# brain-event installation. Individual bridge tests override this with their
+# own capture or failure executable.
+export FM_BRAIN_EVENT_COMMAND=/usr/bin/true
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

@@ -1237,6 +1237,6 @@ TEARDOWN_EVENT_ARGS=()
 "$SCRIPT_DIR/fm-brain-event.sh" teardown TASK_DONE "$ID" \
   "$T|$WT|$KIND|$MODE|$PR_URL" \
   "teardown $ID complete kind=$KIND mode=$MODE${PR_URL:+ pr=$PR_URL}" \
-  "${TEARDOWN_EVENT_ARGS[@]+"${TEARDOWN_EVENT_ARGS[@]}"}"
+  "${TEARDOWN_EVENT_ARGS[@]+"${TEARDOWN_EVENT_ARGS[@]}"}" || true
 echo "teardown $ID complete (window $T, worktree $WT)"
 backlog_refresh_reminder

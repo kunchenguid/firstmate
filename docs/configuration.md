@@ -445,6 +445,8 @@ FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line onc
 FM_SEND_SLEEP=0.4       # seconds between fm-send submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful text submit; 0 disables
 FM_PENDING_REPLY_GRACE_SECS=120   # seconds after marked-request delivery before a completed turn without a correlated parent report is eligible for its one recovery repost
+FM_BRAIN_EVENT_COMMAND=  # optional explicit brain-event executable for the lifecycle-event bridge; unset discovers `brain-event` on PATH and then ~/.local/bin/brain-event, and finding neither is a silent no-op; the behavior-test runner pins it to /usr/bin/true so no suite writes into a real brain (bin/fm-brain-event.sh)
+FM_BRAIN_EVENT_TIMEOUT=10   # seconds allowed for one lifecycle event before it is abandoned with a warning; enforced through timeout, gtimeout, or a perl fallback, so a host with none of the three runs the event unbounded; blank, zero, or non-numeric values use 10
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; tmux/herdr only, otherwise detects $TMUX_PANE then HERDR_ENV/HERDR_PANE_ID before tmux fallback
 FM_SUPERVISOR_TARGET=              # optional supervisor pane target override; tmux target or herdr <session>:<pane-id>, otherwise auto-detected

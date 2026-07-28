@@ -6,8 +6,10 @@
 #
 # The caller supplies a stable, non-secret identity for the transition. This
 # helper hashes it into an idempotency key, so retries materialize once. Missing
-# brain-event is a supported no-op; a configured command that fails is surfaced
-# as a warning but never changes the Firstmate lifecycle outcome.
+# brain-event is a supported no-op; a configured command that fails or stalls is
+# surfaced as a warning but never changes the Firstmate lifecycle outcome. The
+# call is bounded by FM_BRAIN_EVENT_TIMEOUT seconds (default 10) wherever a
+# timeout utility exists.
 set -u
 
 if [ "$#" -lt 5 ]; then
@@ -69,9 +71,31 @@ else
   echo "warning: fm-brain-event: no SHA-256 utility available" >&2
   exit 0
 fi
-EVENT_ID="firstmate:${ACTION}:${DIGEST%"${DIGEST#????????????????????????????????}"}"
+EVENT_ID="firstmate:${ACTION}:${DIGEST:0:32}"
 
-if ! BRAIN_AGENT=firstmate "$EVENT_COMMAND" "$TYPE" "$TEXT" \
+EVENT_TIMEOUT=${FM_BRAIN_EVENT_TIMEOUT:-10}
+case "$EVENT_TIMEOUT" in
+  ''|*[!0-9]*) EVENT_TIMEOUT=10 ;;
+esac
+case "$EVENT_TIMEOUT" in
+  *[1-9]*) ;;
+  *) EVENT_TIMEOUT=10 ;;
+esac
+HAVE_TIMEOUT=none
+if command -v timeout >/dev/null 2>&1; then HAVE_TIMEOUT=timeout
+elif command -v gtimeout >/dev/null 2>&1; then HAVE_TIMEOUT=gtimeout
+elif command -v perl >/dev/null 2>&1; then HAVE_TIMEOUT=perl
+fi
+bounded_event() {  # <command> [args...]
+  case "$HAVE_TIMEOUT" in
+    timeout|gtimeout) "$HAVE_TIMEOUT" "$EVENT_TIMEOUT" "$@" ;;
+    perl) perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? & 127 ? 128 + ($? & 127) : $? >> 8)' "$EVENT_TIMEOUT" "$@" ;;
+    *)        "$@" ;;
+  esac
+}
+
+export BRAIN_AGENT=firstmate
+if ! bounded_event "$EVENT_COMMAND" "$TYPE" "$TEXT" \
   --event-id "$EVENT_ID" \
   --source-kind firstmate \
   --task-id "$TASK_ID" \

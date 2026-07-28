@@ -367,6 +367,12 @@ EOF
   printf 'verified: %s unresolved-decision inventory\n' "$origin"
 }
 
+emit_resolution_event() {  # <origin> <hold-id> <decision-digest> <routed-csv>
+  "$SCRIPT_DIR/fm-brain-event.sh" decision-resolved DECISION "$1" \
+    "$2|$3" \
+    "resolved captain decision hold $2 digest=$3 routed=$4" || true
+}
+
 command_resolve() {
   local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
@@ -397,9 +403,7 @@ command_resolve() {
     hold_show=$(task_show "$id")
     hold_body=$(show_field "$hold_show" body)
     verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
-    "$SCRIPT_DIR/fm-brain-event.sh" decision-resolved DECISION "$origin" \
-      "$id|$decision_digest" \
-      "resolved captain decision hold $id digest=$decision_digest routed=$routed_csv"
+    emit_resolution_event "$origin" "$id" "$decision_digest" "$routed_csv"
     printf 'resolved: %s\n' "$id"
     return 0
   fi
@@ -453,9 +457,7 @@ command_resolve() {
   done
   tasks_axi "done" "$id" >/dev/null || fail "could not close resolved captain hold $id"
   verify_hold_resolved "$id" || fail "captain hold $id did not retain its durable resolution record"
-  "$SCRIPT_DIR/fm-brain-event.sh" decision-resolved DECISION "$origin" \
-    "$id|$decision_digest" \
-    "resolved captain decision hold $id digest=$decision_digest routed=$routed_csv"
+  emit_resolution_event "$origin" "$id" "$decision_digest" "$routed_csv"
   printf 'resolved: %s -> %s\n' "$id" "$routed"
 }
 

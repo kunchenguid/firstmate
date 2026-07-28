@@ -241,6 +241,15 @@ Memory writes use inspect-then-update: read the current destination first, then 
 Task-scoped notes use `tasks-axi show <id> --full` followed by `tasks-axi update <id> --body-file <path>`, adding `--archive-body` when the prior body should remain recoverable.
 Generalizable firstmate knowledge goes to shared tracked docs through the normal PR pipeline; the firstmate-internal `/stow` deliberately never stores findings in either skill directory.
 
+## Optional lifecycle events
+
+`bin/fm-brain-event.sh` is a best-effort bridge from fleet lifecycle transitions to an installed `brain-event` command, so spawn, promotion, decision resolution, backlog handoff, PR merge, and completed teardown also leave durable events outside the fleet's own state.
+The bridge is opt-in by installation: with no `FM_BRAIN_EVENT_COMMAND` and no discoverable `brain-event`, every call is a silent no-op, so a machine that never opted in sees neither behavior change nor warning noise.
+Each call site passes a stable non-secret transition identity that the bridge hashes into a deterministic `firstmate:<action>:<digest>` event id, so a retried lifecycle command materializes one event instead of a duplicate.
+Events carry provenance only - the firstmate agent and source kind, the task id, and a summary line - and a resolved decision forwards its digest and routed task ids rather than the captain's decision prose.
+Delivery never owns the lifecycle outcome: every call site tolerates failure, the helper always exits 0, and a stalled event store is abandoned after `FM_BRAIN_EVENT_TIMEOUT` rather than hanging the lifecycle command.
+The behavior-test runner pins `FM_BRAIN_EVENT_COMMAND` suite-wide so no test emits fixture events into a developer's real brain, and the script header owns the exact validation, discovery, and bounding contract.
+
 ## Local clones stay fresh
 
 The locked session-start bootstrap step, PR-based teardown, and merged-PR wake handling refresh remote-backed project clones when the clone is safe to move.

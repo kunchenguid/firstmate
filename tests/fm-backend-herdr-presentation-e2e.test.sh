@@ -9,6 +9,11 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 
+# Sources neither tests/lib.sh nor tests/herdr-test-safety.sh, so it repeats
+# their brain-event guard: the real spawn and teardown it drives would otherwise
+# emit durable events for fixture task ids into a developer's real brain.
+export FM_BRAIN_EVENT_COMMAND=/usr/bin/true
+
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
