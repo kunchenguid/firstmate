@@ -83,6 +83,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - Kimi has no project-level hook configuration and remains outside the primary guard integrations above.
 - Captain-approved Kimi crew wake support uses `bin/fm-kimi-turnend-hook.sh` to edit only one marker-delimited Firstmate region in that global config and install a silent always-zero hook.
 - The Kimi CLI rewrites that global config and drops comments, so an unmarked region whose single hook table still matches Firstmate's own entry is re-identified structurally, re-owned, and re-marked in place instead of refusing or duplicating, while any hook table Firstmate does not own is still refused.
+- The remove action excises only the marker-delimited Firstmate region and removes Firstmate's own hook files, leaving every foreign config byte and any hook table Firstmate does not own untouched.
 - The hook remains inert unless the payload `cwd` contains a per-task token pointer that resolves through Firstmate's private registry to one `state/<id>.turn-ended` marker.
 - Installation refuses before writing unless `python3` with `tomllib` and `jq` are available.
 - If `jq` is removed after installation, the hook remains silent and exits 0, turn-end wakes stop, and Kimi crews fall back to idle detection.
