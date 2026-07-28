@@ -31,8 +31,11 @@ BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
 # The script itself must always parse. Note this runs under whatever bash the
-# test host provides, which on CI is bash 4+ and therefore cannot observe the
-# issue #166 breakage at all. The two checks after it carry that guarantee.
+# test host provides, which on the Linux lanes is bash 4+ and therefore cannot
+# observe the issue #166 breakage at all. The structural guard below carries
+# that guarantee under any bash, and the `macos-stock-bash` job in
+# .github/workflows/ci.yml syntax-checks bin/ and bin/backends/ on the real
+# bash 3.2.57 for every pull request.
 test_script_parses() {
   local out rc
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
@@ -41,8 +44,9 @@ test_script_parses() {
   pass "fm-brief.sh: bash -n succeeds"
 }
 
-# Structural guard, and the check that actually holds on Linux CI: it asserts a
-# property of the source text, so it is exact under every bash version.
+# Structural guard, and the check that holds on every lane regardless of host
+# bash: it asserts a property of the source text, so it is exact under every
+# bash version.
 #
 # fm-brief.sh builds its Definition-of-done and Herdr sections out of English
 # prose, where an apostrophe is only a matter of time. Rather than police the
@@ -52,7 +56,9 @@ test_script_parses() {
 # Scoped to fm-brief.sh deliberately. Other scripts (fm-fleet-snapshot.sh,
 # fm-bootstrap.sh) capture embedded jq and bash programs the same way and parse
 # fine today because that content is balanced; a repo-wide ban would be churn
-# for no safety gain. The bash 3.2 check below is what covers those files.
+# for no safety gain. The repo-wide bash 3.2 parse floor that covers those
+# files is enforced by the `macos-stock-bash` CI job and stated in
+# CONTRIBUTING.md.
 test_no_command_substitution_heredocs() {
   local hits
   # A command substitution that opens a here-document on the same line, e.g.
@@ -70,57 +76,6 @@ $hits"
   assert_grep 'capture_block HERDR_SECTION' "$ROOT/bin/fm-brief.sh" \
     "fm-brief.sh must build its Herdr section through capture_block"
   pass "fm-brief.sh: no here-document is captured by a command substitution"
-}
-
-# Echo the version <path> reports as its own $BASH_VERSION, or nothing when it
-# is not an executable that answers as a bash.
-bash_version_of() {
-  [ -n "$1" ] && [ -x "$1" ] || return 0
-  # shellcheck disable=SC2016  # single quotes are deliberate: BASH_VERSION must expand in the candidate shell, not this one
-  "$1" -c 'echo "$BASH_VERSION"' 2>/dev/null || true
-}
-
-# Real bash 3.2 parse check across every shipped script. This is the strongest
-# guarantee available, but only where a legacy bash exists - macOS developer
-# machines, and CI only if it installs one. It skips loudly rather than
-# silently so a green run never overstates what was verified.
-#
-# An explicit FM_TEST_BASH32 and the autodiscovered candidates are deliberately
-# not the same kind of thing. Discovery may come up empty and skip; a pin is an
-# operator asserting "run the strong check against this binary", so a pin that
-# cannot deliver fails instead of quietly degrading to the same skip the
-# operator would have seen had they never set it.
-test_all_bin_scripts_parse_under_legacy_bash() {
-  local candidate legacy='' legacy_ver='' ver failures='' f err
-  if [ -n "${FM_TEST_BASH32:-}" ]; then
-    ver=$(bash_version_of "$FM_TEST_BASH32")
-    case "$ver" in
-      3.*) legacy=$FM_TEST_BASH32; legacy_ver=$ver ;;
-      *) fail "FM_TEST_BASH32 is set to '$FM_TEST_BASH32', which is not an executable bash 3.x (reports: ${ver:-no bash version}); point it at a bash 3.2 binary or unset it" ;;
-    esac
-  else
-    for candidate in /bin/bash "$(command -v bash-3.2 || true)"; do
-      ver=$(bash_version_of "$candidate")
-      case "$ver" in
-        3.*) legacy=$candidate; legacy_ver=$ver; break ;;
-      esac
-    done
-  fi
-  if [ -z "$legacy" ]; then
-    skip "fm-brief.sh: bin/ parses under bash 3.x" \
-      "no bash 3.x found (set FM_TEST_BASH32 to a bash 3.2 binary); the structural guard still applies"
-    return
-  fi
-  # Report each failure with the line and message bash gives, since that
-  # breakage is invisible on the contributor's own CI.
-  for f in "$ROOT"/bin/*.sh "$ROOT"/bin/backends/*.sh; do
-    [ -f "$f" ] || continue
-    err=$("$legacy" -n "$f" 2>&1) && continue
-    failures="$failures
-  ${f#"$ROOT"/}: ${err:-no diagnostic emitted}"
-  done
-  [ -z "$failures" ] || fail "these scripts do not parse under $legacy (bash $legacy_ver):$failures"
-  pass "fm-brief.sh: every bin/ script parses under bash $legacy_ver"
 }
 
 test_help_includes_entire_header() {
@@ -478,7 +433,6 @@ test_scout_and_secondmate_scaffold() {
 
 test_script_parses
 test_no_command_substitution_heredocs
-test_all_bin_scripts_parse_under_legacy_bash
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review

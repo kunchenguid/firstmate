@@ -43,6 +43,9 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   A local `config/backend` file explicitly overrides runtime auto-detection for new task endpoints and stays gitignored; spawn-supported values are `tmux` plus experimental `herdr`, `zellij`, `orca`, and `cmux`, while `codex-app` is documented only in `docs/codex-app-backend.md`.
   It does not make `data/` tracked.
 - Helper scripts in `bin/` are plain bash.
+  Everything under `bin/` and `bin/backends/` must parse under bash 3.2.57, the version macOS still ships as `/bin/bash`, because firstmate is expected to run on a stock Mac.
+  The `macos-stock-bash` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) syntax-checks the whole toolbelt on that interpreter for every pull request, so a bash 4+ construct fails there even though it parsed fine on your machine and on the Linux lanes.
+  When you genuinely need newer syntax, keep it out of `bin/` and put that logic in a helper the script invokes through an explicitly newer interpreter, rather than raising the floor for the whole toolbelt.
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
   `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, and pinned shellcheck version), and both CI and the no-mistakes pre-push gate run it, so local and CI can never diverge.

@@ -322,7 +322,23 @@ jobs:
           esac
           /bin/bash --version | head -1
           command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
-          /bin/bash -n bin/fm-fleet-snapshot.sh
+
+          # Every shipped script must parse on the bash macOS ships, not just the
+          # snapshot ones: bash 3.2 reads a command substitution as a flat
+          # character stream, so a construct that is fine under bash 4+ can make a
+          # whole script unparseable here and nowhere else.
+          parse_failures=''
+          for script in bin/*.sh bin/backends/*.sh; do
+            [ -f "$script" ] || continue
+            if ! script_error=$(/bin/bash -n "$script" 2>&1); then
+              parse_failures="$parse_failures
+  $script: ${script_error:-no diagnostic emitted}"
+            fi
+          done
+          [ -z "$parse_failures" ] || {
+            echo "::error::these scripts do not parse under stock macOS Bash $BASH_VERSION:$parse_failures"
+            exit 1
+          }
 
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"
