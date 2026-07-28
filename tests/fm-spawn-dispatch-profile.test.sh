@@ -224,37 +224,25 @@ test_claude_threads_model_and_effort() {
   pass "claude receives --model and --effort profile flags"
 }
 
-test_codex_threads_model_and_effort() {
-  local rec id out status launch
-  id=profile-codex-z3
-  rec=$(make_spawn_case profile-codex codex "$id")
-  read_case_record "$rec"
+# Every level fm-spawn accepts must reach the codex launch command.
+# A level that is dropped here would leave the worker at codex's own default
+# effort with no error, which is a silent downgrade of what the caller asked for.
+test_codex_threads_every_accepted_effort_level() {
+  local rec id out status launch effort
+  for effort in low medium high xhigh max; do
+    id=profile-codex-$effort-z4
+    rec=$(make_spawn_case "profile-codex-$effort" codex "$id")
+    read_case_record "$rec"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort high)
-  status=$?
-  expect_code 0 "$status" "codex spawn with profile flags should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not thread model and reasoning effort config"
-  pass "codex receives --model and model_reasoning_effort profile flags"
-}
-
-test_codex_omits_invalid_max_effort() {
-  local rec id out status launch
-  id=profile-codex-max-z4
-  rec=$(make_spawn_case profile-codex-max codex "$id")
-  read_case_record "$rec"
-
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
-  status=$?
-  expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not preserve the model flag when max effort was omitted"
-  assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
-  pass "codex omits unsupported max effort instead of passing a bad config value"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort "$effort")
+    status=$?
+    expect_code 0 "$status" "codex spawn with $effort effort should succeed"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 "$effort"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"$effort\"' --dangerously-bypass-approvals-and-sandbox" \
+      "codex launch silently dropped the requested $effort effort"
+  done
+  pass "codex passes every accepted effort level through instead of silently downgrading"
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -461,8 +449,7 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
-test_codex_threads_model_and_effort
-test_codex_omits_invalid_max_effort
+test_codex_threads_every_accepted_effort_level
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

@@ -594,11 +594,13 @@ effort_flag_for_harness() {
       esac
       ;;
     codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
+      # The installed codex config schema uses model_reasoning_effort, and as of
+      # codex-cli 0.145.0 the catalog and API accept the whole shared effort
+      # vocabulary through max, so every accepted level is passed through.
+      # `ultra` is deliberately absent from that vocabulary: it fans work out to
+      # parallel agents, which does not belong inside firstmate supervision.
       case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        low|medium|high|xhigh|max) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
       ;;
     grok)
