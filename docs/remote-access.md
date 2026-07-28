@@ -9,25 +9,35 @@ This page owns the Mac-side setup for attaching to a server-resident Firstmate a
 
 - Every command, file, git worktree, and agent process stays on the server.
 - The Mac contributes a terminal and a browser and holds no project state.
-- The server keeps exactly one Firstmate primary agent on its own harness, and the launcher attaches to the existing named session whenever that agent is already running.
-- Attaching repeatedly from the Mac therefore joins the one primary rather than starting a second one, and it does not change which harness the primary runs.
+- The server keeps exactly one Firstmate primary agent on its own harness, and the launcher described under Terminal 1 is expected to attach to that agent's existing named session rather than start a second one.
+- That launcher is the operator's own script living outside this repository, so the attach behavior is a property of that launcher pattern rather than a guarantee this repository keeps.
+- With such a launcher in place, attaching repeatedly from the Mac joins the one primary, and it does not change which harness the primary runs.
 - Nothing here publishes a service to the public internet, and nothing here changes a firewall, a service bind address, an SSH server configuration, or a service's own authentication.
 - Browser-facing tools stay bound to server loopback and are reached only through an explicit SSH local forward that exists for as long as you keep its terminal open.
 
 ## Mac `~/.ssh/config`
 
 Add one block to `~/.ssh/config` on the Mac.
-The example uses the server's Tailscale MagicDNS name and its Linux user; substitute your own for another host.
+Angle-bracket values are placeholders for your own infrastructure; the table below names each one and where to read its real value.
 
 ```text
 Host shadowbyte-agent
-    HostName shadowbyte.tail46929b.ts.net
-    User chris
+    HostName <server-host>.<tailnet>.ts.net
+    User <server-user>
     ForwardAgent no
     ServerAliveInterval 30
     ServerAliveCountMax 3
     ExitOnForwardFailure yes
 ```
+
+| Placeholder | What it is | Where to read the real value |
+| --- | --- | --- |
+| `<server-host>.<tailnet>.ts.net` | The server's Tailscale MagicDNS name. | `tailscale status` on either device, or the machine's row in the tailnet admin console. |
+| `<server-user>` | The Linux account on the server that owns the Firstmate operational home. | `whoami` in a shell on the server. |
+| `<launcher-dir>` | The directory on the server holding the operator's own Firstmate launcher script used in Terminal 1. | Wherever you keep that script; it is not part of this repository. |
+| `<session-id>` | The id inside a Lavish session URL. | The `lavish-axi` session listing on the server. |
+
+`shadowbyte-agent` is not a placeholder; it is a local alias that exists only in the Mac's own `~/.ssh/config`, so any name works as long as the commands below use the same one.
 
 | Directive | Why it is here |
 | --- | --- |
@@ -54,21 +64,27 @@ Confirm which one is active by reading `RunSSH` in `tailscale debug prefs` on th
 | | Tailscale SSH | Host OpenSSH |
 | --- | --- | --- |
 | Authentication | Tailnet identity plus the tailnet SSH policy; a `check` rule adds a periodic browser approval | A public key installed in the remote user's `~/.ssh/authorized_keys` |
-| Local port forwarding | Permitted only when the matching policy rule allows it | Permitted unless the server disables TCP forwarding |
+| Local port forwarding | Carried by `tailscaled` itself once some rule matches; the policy file has no field that grants or denies forwarding | Permitted unless the server disables TCP forwarding |
 | Key needed on the Mac | None | Yes |
 
 Both are reached by the same `~/.ssh/config` entry and the same commands below; only the authentication step differs.
-On the server documented here, Tailscale SSH is enabled and answers the MagicDNS name, and the tailnet SSH policy matching the Mac permits local port forwarding, so the tunnel below works with no key on the Mac.
-A tailnet policy change can withdraw either of those, which surfaces as one of the authentication or forwarding failures under troubleshooting.
+The tailnet SSH policy gates one thing here: whether any `ssh` rule matches this device and user at all.
+Its rules carry action, src, dst, users, checkPeriod, acceptEnv, and srcPosture, and none of those govern TCP forwarding, so forwarding is `tailscaled`'s own behavior rather than an operator-settable policy knob.
+Current Tailscale releases carry local (`-L`) forwarding, which is what this page needs; remote (`-R`) forwarding is unsupported.
+A tailnet policy change can therefore withdraw access entirely by removing the rule that matches the Mac, which surfaces as the authentication failure under troubleshooting, but it cannot selectively withdraw forwarding from a session that authenticates.
+These Tailscale statements come from Tailscale's own policy-syntax reference and its current forwarding support rather than from this page's verification record, which exercises an OpenSSH server only.
 Before relying on the OpenSSH path as a fallback, verify that a usable public key is actually installed for the remote user, because installing one is a separate operator decision rather than part of this setup.
 
 ## Terminal 1: attach to Firstmate
 
 ```sh
-ssh -t shadowbyte-agent /home/chris/agentic-workstation/launch-firstmate.sh
+ssh -t shadowbyte-agent /home/<server-user>/<launcher-dir>/launch-firstmate.sh
 ```
 
+That launcher is the operator's own script on the server and is not tracked in this repository, so the path above is a placeholder for wherever yours lives.
 `-t` forces a terminal, which the launcher needs in order to attach you to the existing session rather than run headless.
+For the single-primary property under Boundaries to hold, the launcher must attach to the primary's existing named session whenever that agent is already running, rather than start a fresh one.
+A launcher that starts a second Firstmate against the same operational home instead of attaching cannot acquire the per-home session lock, so that session stays read-only.
 Leave this window open for as long as you want to watch or talk to Firstmate.
 Closing it detaches the view; the session and every worker keep running on the server.
 
@@ -78,10 +94,11 @@ Lavish serves review artifacts on server loopback `127.0.0.1:4387` and is not re
 Open a second Mac terminal and start the forward:
 
 ```sh
-ssh -N -L 4387:127.0.0.1:4387 shadowbyte-agent
+ssh -N -L 127.0.0.1:4387:127.0.0.1:4387 shadowbyte-agent
 ```
 
 `-N` runs no remote command, so this connection only carries the forward.
+The leading `127.0.0.1` pins the Mac-side listener to loopback explicitly, because a bare `-L 4387:...` follows whatever `GatewayPorts` the Mac's ssh config resolves to and would publish the forwarded tool to the local network if any `Host *` block or included file enabled it.
 It prints nothing while healthy.
 Leave it running for as long as you are reading artifacts, and end it with Ctrl-C.
 
@@ -113,11 +130,12 @@ The tool's own CLI already prints the current session URLs, and a wrapper would 
 The same shape reaches any future server-resident web tool:
 
 ```sh
-ssh -N -L LOCAL_PORT:127.0.0.1:REMOTE_PORT shadowbyte-agent
+ssh -N -L 127.0.0.1:LOCAL_PORT:127.0.0.1:REMOTE_PORT shadowbyte-agent
 ```
 
 `REMOTE_PORT` is the port the service listens on inside the server, and `LOCAL_PORT` is the port the Mac browser visits.
 Keep them equal whenever the tool prints absolute URLs containing its own port.
+Keep the explicit local `127.0.0.1` in every forward you add, for the same reason it is in the Lavish command above.
 
 ## What to forward, and what not to
 
@@ -142,7 +160,7 @@ Adding one to the routine setup means reviewing that service's own authenticatio
 
 `ssh: Could not resolve hostname` means the tailnet name is not resolvable from the Mac.
 Confirm the Mac is connected and the server is online with `tailscale status` on the Mac, and confirm MagicDNS is enabled for the tailnet.
-`tailscale ping <server-name>` proves tailnet reachability independently of SSH.
+`tailscale ping <server-host>` proves tailnet reachability independently of SSH.
 As a temporary check only, substituting the server's Tailscale IPv4 address for `HostName` isolates a DNS problem from a connectivity problem.
 
 ### Authentication fails or keeps re-prompting
@@ -152,6 +170,7 @@ Being asked to re-approve in a browser after that window expires is the configur
 Each terminal authenticates on its own, so an expired approval can stop a new tunnel from starting while an already-established attach keeps running.
 A permission-denied refusal under Tailscale SSH means no policy rule matched this device and user, which is a tailnet policy question rather than something to fix on the Mac.
 Under the host's OpenSSH server, the same refusal means the Mac's public key is not installed for the remote user.
+If authentication succeeds but the forward itself fails under Tailscale SSH, that is a `tailscaled` behavior or version question rather than a policy setting to change, because the tailnet policy has no forwarding field to toggle.
 
 ### The local port is already in use
 
@@ -167,7 +186,7 @@ Find the local process holding it with `lsof -nP -iTCP:4387 -sTCP:LISTEN` on the
 Either stop that process, or pick a free local port and visit that port in the browser instead:
 
 ```sh
-ssh -N -L 14387:127.0.0.1:4387 shadowbyte-agent
+ssh -N -L 127.0.0.1:14387:127.0.0.1:4387 shadowbyte-agent
 ```
 
 Then the artifact is at `http://127.0.0.1:14387/session/<session-id>`, with the session id unchanged.

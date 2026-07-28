@@ -31,12 +31,12 @@ ssh -F <config-file> -G shadowbyte-agent |
   grep -iE '^(host|hostname|user|forwardagent|serveralive|exitonforwardfailure|port) '
 ```
 
-Observed output:
+Observed output, with the real host and account rendered as the same placeholders [`../remote-access.md`](../remote-access.md) uses:
 
 ```text
 host shadowbyte-agent
-user chris
-hostname shadowbyte.tail46929b.ts.net
+user <server-user>
+hostname <server-host>.<tailnet>.ts.net
 port 22
 exitonforwardfailure yes
 serveralivecountmax 3
@@ -44,6 +44,7 @@ serveraliveinterval 30
 forwardagent no
 ```
 
+The check ran with concrete values in those two fields; only their spelling is substituted here, and every other line is as observed.
 Every documented directive survives expansion, and the alias resolves to the intended host and user.
 
 ## Forwarding harness
@@ -77,6 +78,7 @@ http_code=200 size=9810
 ```
 
 The same request sent directly to the server's non-loopback address before the forward existed failed to connect, confirming the service is loopback-only and the forward is what makes it reachable.
+These checks ran with the local bind address left implicit, which OpenSSH resolves to loopback under the default `GatewayPorts no`; the reader-facing page writes that bind address out as `127.0.0.1:LOCAL_PORT` so the result does not depend on a client setting this harness controlled and a Mac may not.
 
 ## `ExitOnForwardFailure yes` reports a busy local port and exits
 
@@ -96,7 +98,7 @@ Could not request local forwarding.
 exit=255
 ```
 
-The three message lines are quoted verbatim in the troubleshooting section, and the immediate non-zero exit is what makes the failure visible.
+The troubleshooting section reproduces these three message lines with the port substituted for the one it documents, and the immediate non-zero exit is what makes the failure visible.
 
 ## Without the directive, the same conflict is silent
 
