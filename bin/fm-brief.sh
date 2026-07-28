@@ -251,6 +251,10 @@ The report is the only thing that survives, so anything worth keeping must be in
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
+   Your pane summary is NOT a completion signal. With no \`done:\` or \`failed:\` line appended
+   here, a finished task is indistinguishable from a worker that stopped for an unknown reason,
+   and firstmate escalates it as a possible wedge instead of cleaning it up. The append is the
+   task's last action - do it after your closing summary, before you stop.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
    firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
@@ -363,6 +367,10 @@ $RULE1
    firstmate reads your pane for that.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
+   Your pane summary is NOT a completion signal. With no \`done:\` or \`failed:\` line appended
+   here, a finished task is indistinguishable from a worker that stopped for an unknown reason,
+   and firstmate escalates it as a possible wedge instead of cleaning it up. The append is the
+   task's last action - do it after your closing summary, before you stop.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
