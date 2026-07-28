@@ -444,6 +444,11 @@ tests/fm-pi-primary-types.test.sh
 
 Observed guarantee: after ordinary `session_shutdown` for `/new`, `/resume`, and `/fork`, plus same-instance shutdown-plus-start, the replacement generation armed again without a Pi restart and without the `watcher: not armed - Pi session is shutting down` refusal.
 Stale prior-generation tool callbacks could not mutate the active child, repeated transitions kept exactly one live arm cycle, and terminal `quit` still refused late rearm.
+
+The session-restart lifecycle correction was re-verified on 2026-07-28 with `tests/fm-pi-watch-extension.test.sh` on the same rebind harness; `tests/fm-pi-primary-types.test.sh` skipped its typecheck on that host because `tsc` was unavailable.
+
+Observed guarantee: a replacement session after `session_shutdown` armed one clean arm child with retry and restoration state reset instead of inheriting the retired session's scheduled retry.
+Each active session installed exactly one process-exit cleanup listener and dropped it when that session ended, and an extra binding that overlapped a still-live generation refused with `watcher: not armed - another live Pi session generation owns watcher supervision` rather than taking over the live arm child.
 Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner; other primary harnesses are not applicable because they do not use this Pi extension lifecycle.
 
 Deterministic entry points:
