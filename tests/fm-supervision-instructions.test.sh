@@ -112,6 +112,15 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_contains "$out" "foreground checkpoint" "codex recovery line lost its checkpoint repair"
   assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex recovery line lost the checkpoint command"
 
+  out=$("$RENDER" --harness copilot)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "mode=async" "Copilot ordinary-wake line lost tracked async execution"
+  assert_contains "$ordinary" "detach=false" "Copilot ordinary-wake line lost attached task ownership"
+  assert_contains "$ordinary" "bin/fm-watch-arm.sh" "Copilot ordinary-wake line lost the arm command"
+  out=$("$RENDER" --harness copilot --repair-line)
+  assert_contains "$out" "Copilot Bash task" "Copilot repair line lost its native task mechanism"
+  assert_contains "$out" "mode=async" "Copilot repair line lost async mode"
+
   pass "renderer preserves every harness ordinary-continuation and missing-cycle repair path"
 }
 

@@ -636,6 +636,20 @@ test_codex_hook_invokes_shared_guard() {
   pass ".codex/hooks.json: Stop hook invokes the shared primary guard"
 }
 
+test_copilot_hook_invokes_native_adapter() {
+  local hooks content
+  hooks="$ROOT/.github/hooks/fm-primary.json"
+  [ -f "$hooks" ] || fail "tracked Copilot hook config is missing"
+  content=$(cat "$hooks")
+  assert_contains "$content" '"agentStop"' "Copilot hook config does not register agentStop"
+  assert_contains "$content" 'fm-copilot-hook.sh agent-stop' "Copilot agentStop does not invoke its native adapter"
+  assert_contains "$(cat "$ROOT/bin/fm-copilot-hook.sh")" 'fm-turnend-guard.sh' \
+    "Copilot adapter does not invoke the shared guard"
+  assert_contains "$(cat "$ROOT/bin/fm-copilot-hook.sh")" "'{decision:\"block\",reason:\$reason}'" \
+    "Copilot adapter does not emit the native block decision"
+  pass ".github/hooks/fm-primary.json: agentStop invokes the Copilot shared-guard adapter"
+}
+
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
   local settings command dir expected_root outside payload out status
   settings="$ROOT/.codex/hooks.json"
@@ -1119,6 +1133,7 @@ test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
 test_settings_hook_uses_claude_project_dir
 test_codex_hook_invokes_shared_guard
+test_copilot_hook_invokes_native_adapter
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_forces_followup

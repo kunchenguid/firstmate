@@ -102,8 +102,8 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
                                       # turn-end hook) coalesce into one wake
 # Busy signatures are selected by recorded harness unless FM_BUSY_REGEX globally
 # overrides them.
-# claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
-# grok: "Ctrl+c:cancel". Claude's current spinner signature is matched only for
+# claude/codex: "esc to interrupt"; copilot/opencode: "esc interrupt";
+# pi: "Working..."; grok: "Ctrl+c:cancel". Claude's current spinner signature is matched only for
 # a recorded Claude task because an ellipsis followed by elapsed time is not a
 # safe shared signature for arbitrary harness output. Kimi's moon-plus-middot
 # spinner signature is likewise matched only for a recorded Kimi task.

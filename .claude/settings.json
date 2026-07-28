@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-sessionstart-nudge.sh"
+            "command": "if [ \"${COPILOT_CLI:-}\" = \"1\" ] && [ -z \"${CLAUDE_PROJECT_DIR:-}\" ]; then exit 0; fi; \"$CLAUDE_PROJECT_DIR\"/bin/fm-sessionstart-nudge.sh"
           }
         ]
       }
@@ -17,11 +17,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-arm-pretool-check.sh --claude"
+            "command": "if [ \"${COPILOT_CLI:-}\" = \"1\" ] && [ -z \"${CLAUDE_PROJECT_DIR:-}\" ]; then exit 0; fi; \"$CLAUDE_PROJECT_DIR\"/bin/fm-arm-pretool-check.sh --claude"
           },
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-cd-pretool-check.sh --claude"
+            "command": "if [ \"${COPILOT_CLI:-}\" = \"1\" ] && [ -z \"${CLAUDE_PROJECT_DIR:-}\" ]; then exit 0; fi; \"$CLAUDE_PROJECT_DIR\"/bin/fm-cd-pretool-check.sh --claude"
           }
         ]
       },
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-subagent-pretool-check.sh --claude"
+            "command": "if [ \"${COPILOT_CLI:-}\" = \"1\" ] && [ -z \"${CLAUDE_PROJECT_DIR:-}\" ]; then exit 0; fi; \"$CLAUDE_PROJECT_DIR\"/bin/fm-subagent-pretool-check.sh --claude"
           }
         ]
       }
@@ -40,11 +40,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-turnend-guard.sh --claude"
+            "command": "if [ \"${COPILOT_CLI:-}\" = \"1\" ] && [ -z \"${CLAUDE_PROJECT_DIR:-}\" ]; then exit 0; fi; \"$CLAUDE_PROJECT_DIR\"/bin/fm-turnend-guard.sh --claude"
           },
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-claude-stop-autoarm.sh",
+            "command": "if [ \"${COPILOT_CLI:-}\" = \"1\" ] && [ -z \"${CLAUDE_PROJECT_DIR:-}\" ]; then exit 0; fi; \"$CLAUDE_PROJECT_DIR\"/bin/fm-claude-stop-autoarm.sh",
             "asyncRewake": true,
             "timeout": 28800
           }

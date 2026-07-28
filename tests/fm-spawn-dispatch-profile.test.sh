@@ -42,7 +42,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse pi-signed
+  fm_fake_exit0 "$fakebin" treehouse pi-signed copilot
   printf '%s\n' "$fakebin"
 }
 
@@ -257,6 +257,32 @@ test_codex_omits_invalid_max_effort() {
   pass "codex omits unsupported max effort instead of passing a bad config value"
 }
 
+test_copilot_threads_model_effort_and_turnend_hook() {
+  local rec id out status launch hook
+  id=profile-copilot-z4b
+  rec=$(make_spawn_case profile-copilot copilot "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5.6-sol --effort max)
+  status=$?
+  expect_code 0 "$status" "Copilot spawn with model and max effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" copilot gpt-5.6-sol max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'$FAKEBIN_DIR/copilot' --allow-all --no-ask-user --model 'gpt-5.6-sol' --effort 'max' -i" \
+    "Copilot launch did not use the resolved binary, autonomy flags, model, and effort"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
+    "Copilot launch lost the canonical typed launch-brief envelope"
+  hook="$WT_DIR/.github/hooks/fm-firstmate-turn-end-$id.json"
+  assert_present "$hook" "Copilot spawn did not install its per-task agentStop hook"
+  jq -e '.hooks.agentStop[0].env.FM_TURNEND_PATH | endswith(".turn-ended")' "$hook" >/dev/null \
+    || fail "Copilot per-task hook did not bind the turn-end marker"
+  assert_grep ".github/hooks/fm-firstmate-turn-end-$id.json" \
+    "$(git -C "$WT_DIR" rev-parse --git-path info/exclude)" \
+    "Copilot per-task hook was not excluded from git"
+  pass "Copilot receives profile flags and a gitignored native turn-end hook"
+}
+
 test_grok_threads_model_and_reasoning_effort() {
   local rec id out status launch
   id=profile-grok-z5
@@ -463,6 +489,7 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
+test_copilot_threads_model_effort_and_turnend_hook
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

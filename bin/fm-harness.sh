@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|copilot|opencode|pi|pi-signed|grok|kimi|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -30,8 +30,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Only claude, pi, and grok set verified markers of their own; codex, opencode,
-  # and kimi are markerless, so a foreign marker retained in a terminal
+  # Claude, Copilot, Pi, and Grok set verified markers of their own; codex,
+  # opencode, and kimi are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
@@ -40,17 +40,33 @@ detect_own() {
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
     return
   fi
-  # grok sets GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
-  # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
-  # is unambiguous when firstmate runs natively on grok.
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # Copilot's marker is inherited by child tool processes, so require a live
+  # Copilot ancestor before accepting it. Explicit child-harness markers above
+  # win when a Copilot primary launches another verified harness.
+  if [ "${COPILOT_CLI:-}" = "1" ]; then
+    local marker_pid=$$ marker_comm marker_base
+    for _ in 1 2 3 4 5 6 7 8; do
+      marker_comm=$(ps -o comm= -p "$marker_pid" 2>/dev/null) || break
+      marker_base=${marker_comm##*/}
+      case "$marker_base" in
+        *copilot*) echo copilot; return ;;
+      esac
+      marker_pid=$(ps -o ppid= -p "$marker_pid" 2>/dev/null | tr -d ' ')
+      [ -n "$marker_pid" ] && [ "$marker_pid" -gt 1 ] || break
+    done
+  fi
+  # grok sets GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
+  # It does NOT set CLAUDECODE despite being Claude-Code-compatible.
   # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args
+  local pid=$$ comm comm_base args
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    case "$(basename "$comm")" in
+    comm_base=${comm##*/}
+    case "$comm_base" in
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
+      *copilot*) echo copilot; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
       kimi) echo kimi; return ;;
@@ -62,6 +78,7 @@ detect_own() {
         case "$args" in
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;
+          *copilot*) echo copilot; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
           *" pi "*|*/pi) echo pi; return ;;

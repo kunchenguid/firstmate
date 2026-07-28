@@ -477,8 +477,10 @@ test_claude_settings_pretool_hook_wired() {
   assert_contains "$command" 'CLAUDE_PROJECT_DIR' "claude pretool hook must anchor via CLAUDE_PROJECT_DIR"
   assert_contains "$command" 'fm-arm-pretool-check.sh' "claude pretool hook must invoke the shared checker"
   assert_contains "$command" '--claude' "claude pretool hook must pass --claude so stdout stays empty on deny"
-  [ "$command" = '"$CLAUDE_PROJECT_DIR"/bin/fm-arm-pretool-check.sh --claude' ] \
-    || fail "claude pretool hook must forward stdin directly with only --claude, got: $command"
+  case "$command" in
+    *'COPILOT_CLI'*'; "$CLAUDE_PROJECT_DIR"/bin/fm-arm-pretool-check.sh --claude') ;;
+    *) fail "claude pretool hook must step aside for Copilot then forward stdin directly with only --claude, got: $command" ;;
+  esac
   local matcher
   matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' "$settings")
   [ "$matcher" = "Bash" ] || fail "claude pretool hook must matcher-scope to Bash, got: $matcher"

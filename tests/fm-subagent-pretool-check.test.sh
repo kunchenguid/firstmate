@@ -263,10 +263,10 @@ test_claude_hook_registration_preserves_bash_seatbelts() {
   ' "$SETTINGS" >/dev/null || fail "the guard matcher must match all tools"
   jq -e '
     [.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[].command]
-      == [
-        "\"$CLAUDE_PROJECT_DIR\"/bin/fm-arm-pretool-check.sh --claude",
-        "\"$CLAUDE_PROJECT_DIR\"/bin/fm-cd-pretool-check.sh --claude"
-      ]
+      | length == 2
+      and all(contains("COPILOT_CLI"))
+      and any(endswith("\"$CLAUDE_PROJECT_DIR\"/bin/fm-arm-pretool-check.sh --claude"))
+      and any(endswith("\"$CLAUDE_PROJECT_DIR\"/bin/fm-cd-pretool-check.sh --claude"))
   ' "$SETTINGS" >/dev/null || fail "Claude Bash PreToolUse must retain only the arm-shape and persistent-cd seatbelts"
   jq -e '.hooks.Stop[0].hooks[0].command | contains("fm-turnend-guard.sh")' "$SETTINGS" >/dev/null \
     || fail "the Stop turn-end guard changed"

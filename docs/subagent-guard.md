@@ -171,11 +171,19 @@ Applicability turns on one question: does the harness expose built-in delegation
 
 | Harness | Delegation surface | Status |
 | --- | --- | --- |
+| Copilot | Built-in `task` and related agent tools | Scoped native `preToolUse` guard wired; `toolName=task` is covered deterministically. |
 | Claude | 18 known tools, listed above | Scoped guard wired and live-verified; untracked local deny list verified and recommended. |
 | Codex | none | Not applicable, verified empirically below. Codex 0.144.1 exposes no subagent, sub-task, or delegated-agent tool, so there is nothing to remove or intercept. `.codex/hooks.json` is unchanged. |
 | Grok | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | OpenCode | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | Pi | none reported | Not wired pending live verification. See below. |
+
+### Copilot, wired through native hooks
+
+Copilot CLI exposes built-in agent tools, including the `task` tool used for custom and built-in subagents.
+The tracked `.github/hooks/fm-primary.json` registers native `preToolUse` with matcher `.*` and forwards the camelCase payload to `bin/fm-subagent-pretool-check.sh` through `bin/fm-copilot-hook.sh`.
+The checker already reads `.toolName`, so the normalized `task` name matches the existing delegation-shaped stem and is denied only in a genuine Firstmate primary home.
+`tests/fm-copilot-harness.test.sh` proves that payload and scope path.
 
 ### Codex, verified not applicable
 

@@ -9,17 +9,18 @@
 # This file is sourced by scripts and has no side effects on source.
 
 # Known harness command names; extend when a new adapter is verified.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
+FM_HARNESS_RE='claude|codex|copilot|opencode|grok|kimi|^pi$|^pi-signed$'
 
 # Walk the current process ancestry (up to 8 hops) and print the first pid whose
 # command looks like a verified harness. The harness pid lives as long as the
 # session, unlike the transient subshell pid of any one tool call.
 fm_harness_ancestry_pid() {
-  local pid=$$ comm args
+  local pid=$$ comm comm_base args
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if printf '%s' "$(basename "$comm")" | grep -qE "$FM_HARNESS_RE"; then
+    comm_base=${comm##*/}
+    if printf '%s' "$comm_base" | grep -qE "$FM_HARNESS_RE"; then
       echo "$pid"; return 0
     fi
     # Bare interpreter (e.g. node): match the harness name in its script path.
@@ -34,10 +35,11 @@ fm_harness_ancestry_pid() {
 
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
-  local pid=$1 comm args
+  local pid=$1 comm comm_base args
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  if printf '%s' "$(basename "$comm")" | grep -qE "$FM_HARNESS_RE"; then
+  comm_base=${comm##*/}
+  if printf '%s' "$comm_base" | grep -qE "$FM_HARNESS_RE"; then
     return 0
   fi
   case "$comm" in

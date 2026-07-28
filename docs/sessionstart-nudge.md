@@ -21,6 +21,7 @@ Every path exits 0, including malformed state and adapter errors, because a Clau
 | Harness | Tracked transport | Current compatibility |
 | --- | --- | --- |
 | Claude | `.claude/settings.json` registers `SessionStart` for `startup`, `resume`, and `clear`, excludes `compact`, and invokes the wrapper through `CLAUDE_PROJECT_DIR`. | Native stdout context injection is supported. |
+| Copilot | `.github/hooks/fm-primary.json` registers native `sessionStart` and invokes `bin/fm-copilot-hook.sh`, which converts the wrapper line to `additionalContext`. | New and resumed interactive sessions are supported after folder trust. |
 | Codex | `.codex/hooks.json` anchors to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and executes the wrapper. | Native stdout context injection is supported. |
 | OpenCode | `.opencode/plugins/fm-primary-sessionstart-nudge.js` listens for `session.created`, runs once per session id, and calls `client.session.promptAsync` only when the wrapper prints a nudge. | Interactive TUI delivery is supported; headless `opencode run` is intentionally fail-open because the process can exit before the queued turn. |
 | Pi / pi-signed | `.pi/extensions/fm-primary-turnend-guard.ts` handles `session_start` reasons `startup`, `new`, and `resume`, then injects the wrapper output with `pi.sendMessage`. | The custom message reaches model context without racing an initial positional prompt. |
@@ -31,12 +32,15 @@ The watcher-arm and turn-end plugins run later on `session.idle`, and the guard 
 
 Grok's guaranteed-loading alternative is a global token-guarded hook like the pattern used by `bin/fm-spawn.sh`.
 That alternative expands trust and writes outside this repository, so Firstmate never installs it or grants folder trust automatically.
+Copilot also reads cross-tool `.claude/settings.json`.
+Every tracked Claude hook therefore exits silently when `COPILOT_CLI=1` and `CLAUDE_PROJECT_DIR` is absent, leaving the native Copilot hooks as the single owner while preserving Claude children launched from a Copilot primary.
 
 ## Regression coverage
 
 `tests/fm-sessionstart-nudge.test.sh` proves wrapper silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock.
 It proves exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output for a plain primary and a marked linked secondmate primary.
 It also verifies every tracked transport registration listed above.
+`tests/fm-copilot-harness.test.sh` proves the Copilot adapter's `additionalContext` translation.
 `tests/fm-captain-translation-contract.test.sh` proves Ahoy's current marker rule, narrow legacy compatibility exclusions, genuine captain-message near misses, and the shared marker on supported user-role operational injections.
 `tests/fm-pi-primary-live-e2e.test.sh` and `tests/fm-opencode-primary-live-e2e.test.sh` exercise native startup paths with first-message and later-message Ahoy regressions.
 `tests/fm-turnend-guard.test.sh`, `tests/fm-pi-watch-extension.test.sh`, and `tests/fm-daemon.test.sh` cover marked guard, monitoring, and away-mode delivery.

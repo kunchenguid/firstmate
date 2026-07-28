@@ -149,7 +149,7 @@ EOF
 }
 
 test_tracked_harness_registration() {
-  local command pi_plugin opencode_plugin
+  local command pi_plugin opencode_plugin copilot_hooks
   jq -e '.hooks.SessionStart | length == 1' "$ROOT/.claude/settings.json" >/dev/null \
     || fail "Claude SessionStart hook is not registered exactly once"
   jq -e '.hooks.SessionStart[0].matcher == "startup|resume|clear"' "$ROOT/.claude/settings.json" >/dev/null \
@@ -183,7 +183,11 @@ test_tracked_harness_registration() {
   assert_contains "$opencode_plugin" 'fm-sessionstart-nudge.sh' "OpenCode plugin does not invoke the wrapper"
   assert_contains "$opencode_plugin" 'promptAsync' "OpenCode plugin does not prompt the nudge turn"
 
-  pass "all five verified harnesses register the shared session-start nudge"
+  copilot_hooks=$(cat "$ROOT/.github/hooks/fm-primary.json")
+  assert_contains "$copilot_hooks" '"sessionStart"' "Copilot hooks do not register sessionStart"
+  assert_contains "$copilot_hooks" 'fm-copilot-hook.sh session-start' "Copilot sessionStart does not invoke its adapter"
+
+  pass "all six verified primary harnesses register the shared session-start nudge"
 }
 
 test_genuine_primary_nudges

@@ -59,7 +59,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|copilot|opencode|pi|pi-signed|grok|kimi)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
@@ -97,6 +97,8 @@
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
+#     __COPILOTBIN__ absolute Copilot CLI executable resolved from PATH or the
+#                  current primary session's process ancestry.
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
@@ -389,7 +391,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi)
+    ''|claude|codex|copilot|opencode|pi|pi-signed|grok|kimi)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -434,6 +436,7 @@ launch_template() {
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
+    copilot) printf '%s' '__COPILOTBIN__ --allow-all --no-ask-user __MODELFLAG____EFFORTFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     pi|pi-signed)
       if [ "$kind" = secondmate ]; then
@@ -574,11 +577,34 @@ resolve_kimi_binary() {
   return 1
 }
 
+resolve_copilot_binary() {
+  local candidate pid comm base
+  candidate=$(command -v copilot 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+    esac
+  fi
+  pid=$$
+  for _ in 1 2 3 4 5 6 7 8; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
+    base=${comm##*/}
+    if [ "$base" = copilot ] && [ -x "$comm" ]; then
+      printf '%s\n' "$comm"
+      return 0
+    fi
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
+  done
+  echo "error: copilot executable not found on PATH or in the current process ancestry" >&2
+  return 1
+}
+
 model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi)
+    claude|codex|copilot|opencode|pi|pi-signed|grok|kimi)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -599,6 +625,11 @@ effort_flag_for_harness() {
       # than passing an unsupported value.
       case "$effort" in
         low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+      esac
+      ;;
+    copilot)
+      case "$effort" in
+        low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     grok)
@@ -626,6 +657,10 @@ effort_flag_for_harness() {
 }
 
 case "$LAUNCH" in
+  *__COPILOTBIN__*)
+    COPILOT_BIN=$(resolve_copilot_binary) || exit 1
+    LAUNCH=${LAUNCH//__COPILOTBIN__/$(shell_quote "$COPILOT_BIN")}
+    ;;
   *__KIMIBIN__*)
     KIMI_BIN=$(resolve_kimi_binary) || exit 1
     LAUNCH=${LAUNCH//__KIMIBIN__/$(shell_quote "$KIMI_BIN")}
@@ -1329,6 +1364,19 @@ export const FmTurnEnd = async ({ \$ }) => ({
 })
 EOF
       exclude_path '.opencode/plugins/fm-turn-end.js'
+      ;;
+    copilot*)
+      COPILOT_HOOK_REL=".github/hooks/fm-firstmate-turn-end-$ID.json"
+      if [ -e "$WT/$COPILOT_HOOK_REL" ] || [ -L "$WT/$COPILOT_HOOK_REL" ]; then
+        echo "error: refusing Copilot spawn because $COPILOT_HOOK_REL already exists" >&2
+        exit 1
+      fi
+      mkdir -p "$WT/.github/hooks"
+      TURNEND_JSON=$(json_escape "$TURNEND")
+      cat > "$WT/$COPILOT_HOOK_REL" <<EOF
+{"version":1,"hooks":{"agentStop":[{"type":"command","bash":"touch \\"\$FM_TURNEND_PATH\\"","env":{"FM_TURNEND_PATH":"$TURNEND_JSON"},"timeoutSec":10}]}}
+EOF
+      exclude_path "$COPILOT_HOOK_REL"
       ;;
     pi|pi-signed)
       # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
