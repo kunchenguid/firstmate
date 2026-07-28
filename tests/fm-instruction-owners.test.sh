@@ -13,6 +13,8 @@ HARNESS="$ROOT/.agents/skills/harness-adapters/SKILL.md"
 CODING="$ROOT/.agents/skills/firstmate-coding-guidelines/SKILL.md"
 RECOVERY="$ROOT/.agents/skills/stuck-crewmate-recovery/SKILL.md"
 SECONDMATE="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
+WATCH="$ROOT/.agents/skills/watch/SKILL.md"
+WATCH_LICENSE="$ROOT/.agents/skills/watch/LICENSE"
 CONFIG="$ROOT/docs/configuration.md"
 AGENTS="$ROOT/AGENTS.md"
 BRIEF="$ROOT/bin/fm-brief.sh"
@@ -39,6 +41,34 @@ test_new_skill_metadata_and_triggers() {
   assert_grep '`project-management` - load before adding, creating, removing, or initializing a project.' "$ROOT/AGENTS.md" \
     "AGENTS.md lost the project-management trigger"
   pass "new internal skills have one precise AGENTS.md trigger each"
+}
+
+# The watch skill is vendored third-party material, so its redistribution terms and
+# its upstream base must survive every future edit or an upstream refresh becomes
+# guesswork. It is captain-invocable, so its trigger belongs in an operating
+# section rather than the agent-only reference list.
+test_vendored_watch_skill_keeps_license_and_upstream_pin() {
+  local count script
+  assert_present "$WATCH" "vendored watch skill is missing"
+  assert_present "$WATCH_LICENSE" "vendored watch skill lost its upstream LICENSE"
+  assert_grep 'MIT License' "$WATCH_LICENSE" "vendored watch LICENSE is no longer the upstream MIT terms"
+  assert_grep 'name: watch' "$WATCH" "watch skill metadata has the wrong name"
+  assert_grep 'user-invocable: true' "$WATCH" "watch skill must stay captain-invocable"
+  assert_grep '  internal: true' "$WATCH" "watch skill must be internal"
+  assert_grep '  vendored-from: "bradautomates/claude-video@' "$WATCH" \
+    "watch skill lost the upstream commit pin a refresh diffs against"
+  assert_grep 'To refresh: re-copy upstream skills/watch' "$WATCH" \
+    "watch skill lost the vendoring banner's refresh procedure"
+  for script in watch.py frames.py transcribe.py whisper.py download.py setup.py config.py; do
+    assert_present "$ROOT/.agents/skills/watch/scripts/$script" \
+      "vendored watch skill is missing scripts/$script"
+  done
+  [ -x "$ROOT/.agents/skills/watch/scripts/watch.py" ] || fail "scripts/watch.py is not executable"
+  count=$(grep -Fc -- 'Load the `watch` skill' "$AGENTS")
+  [ "$count" -eq 1 ] || fail "watch must have exactly one AGENTS.md trigger line, found $count"
+  assert_no_grep '- `watch` -' "$AGENTS" \
+    "captain-invocable watch must not be listed among the agent-only reference skills"
+  pass "vendored watch skill keeps its license, upstream pin, and single trigger"
 }
 
 test_diagnostic_owner_covers_causal_procedure() {
@@ -293,6 +323,7 @@ test_compressed_agents_retains_authority_and_supervision_safety() {
 }
 
 test_new_skill_metadata_and_triggers
+test_vendored_watch_skill_keeps_license_and_upstream_pin
 test_diagnostic_owner_covers_causal_procedure
 test_project_management_owner_covers_guarded_operations
 test_generic_effort_fallback_respects_precedence
