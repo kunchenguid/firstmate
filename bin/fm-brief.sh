@@ -262,6 +262,10 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Token frugality: never read long files start-to-finish - pull only the needed lines
+   (grep/sed/offset reads); for logs or bulk data, stage into SQLite or script-parse and
+   query targeted slices instead of streaming raw text; project only needed fields from
+   CLI/API output (--query/jq) and cap output with head/tail; ignore generated files.
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -325,7 +329,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
   Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
+- Avoid \`--yes\`: it would silently bypass the firstmate authority check and any required captain escalation.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
@@ -374,6 +378,11 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Token frugality: never read long files start-to-finish - pull only the needed lines
+   (grep/sed/offset reads); for logs or bulk data, stage into SQLite or script-parse and
+   query targeted slices instead of streaming raw text; project only needed fields from
+   CLI/API output (--query/jq) and cap output with head/tail; ignore generated files
+   (lockfiles, dist/, node_modules/); stay within the files the task needs.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

@@ -136,6 +136,29 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+test_token_frugality_rule_in_scout_and_ship() {
+  local home id brief
+  home="$TMP_ROOT/frugality-home"
+  mkdir -p "$home/data"
+
+  id="brief-frugality-scout-e1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_grep "Token frugality: never read long files start-to-finish" "$brief" \
+    "scout brief missing the token-frugality rule"
+
+  id="brief-frugality-ship-e2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "ship brief was not scaffolded"
+  assert_grep "Token frugality: never read long files start-to-finish" "$brief" \
+    "ship brief missing the token-frugality rule"
+  assert_grep "stay within the files the task needs" "$brief" \
+    "ship brief token-frugality rule lost its scope-discipline clause"
+  pass "fm-brief.sh: token-frugality rule renders in both scout and ship briefs"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -388,6 +411,7 @@ test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_token_frugality_rule_in_scout_and_ship
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
