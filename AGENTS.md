@@ -30,7 +30,8 @@ Hard rules, in priority order:
 3. **Never tear down unlanded work.**
    Uncommitted changes are never landed, and `bin/fm-teardown.sh` owns the complete landed-work test.
    Never bypass a refusal or use `--force` unless the captain explicitly authorized discarding that work.
-   A scout worktree gets the same unlanded-work refusals as any other lane: its report is the work product the backlog records, not authorization to discard the lane. Its brief has it hand the lane back at the commit its branch started from, which tears down cleanly; a lane still holding scratch is either promoted through `bin/fm-promote.sh` when the code should ship, or needs your explicit `--force` after the report exists and the shared unresolved-decision completion gate passes.
+   A scout worktree gets the same unlanded-work refusals as any other lane: its report is the work product the backlog records, not authorization to discard the lane.
+   Its brief has it hand the lane back at the commit its branch started from, which tears down cleanly; a lane still holding scratch is either promoted through `bin/fm-promote.sh` when the code should ship, or needs your explicit `--force` after the report exists and the shared unresolved-decision completion gate passes.
 4. **Crewmates never address the captain.**
    All crewmate communication flows through firstmate.
    Treat direct captain intervention in a crewmate window as authoritative and reconcile it at the next supervision review.
@@ -338,7 +339,7 @@ Retire one only on an explicit captain or main-firstmate decision, after loading
 
 ### Scout outcome and promotion
 
-A completed scout must leave a self-contained report before its scratch worktree can be discarded; read and relay its findings, record the report as the Done artifact, and re-evaluate the queue.
+A completed scout must leave a self-contained report before teardown; read and relay its findings, record the report as the Done artifact, and re-evaluate the queue.
 A report may recommend implementation but does not authorize it.
 Before treating the investigation or any visual review as complete, load `decision-hold-lifecycle`; teardown enforces that shared completion gate.
 When implementation is separately authorized, promote the existing scout through `bin/fm-promote.sh` rather than creating a duplicate task.
