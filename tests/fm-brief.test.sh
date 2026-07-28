@@ -286,6 +286,9 @@ test_herdr_lab_contract_is_explicit_and_complete() {
   home="$TMP_ROOT/herdr-lab-home"
   mkdir -p "$home/data"
 
+  assert_no_grep "HERDR_SECTION=\$(" "$ROOT/bin/fm-brief.sh" \
+    "Herdr lab section must not be built inside a Bash 3.2 command-substitution parse path"
+
   for kind in ship scout; do
     id="brief-herdr-$kind-d1"
     if [ "$kind" = scout ]; then
