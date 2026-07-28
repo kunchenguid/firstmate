@@ -270,6 +270,138 @@ EOF
   pass "Kimi hook install is idempotent and removal restores every foreign config byte"
 }
 
+strip_toml_comments() {
+  # Reproduce the Kimi CLI's own config.toml rewrite, which normalizes the TOML
+  # and drops every comment while leaving the hook table itself intact.
+  local target=$1 scratch
+  scratch="$target.stripped"
+  sed '/^[[:space:]]*#/d' "$target" > "$scratch"
+  mv "$scratch" "$target"
+}
+
+test_kimi_hook_reowns_its_region_after_a_comment_stripping_rewrite() {
+  local home config original marked count
+  home="$TMP_ROOT/config-comment-stripped"
+  config="$home/.kimi-code/config.toml"
+  original="$home/original.toml"
+  marked="$home/marked.toml"
+  mkdir -p "$home/.kimi-code"
+  cat > "$config" <<'EOF'
+default_model = "kimi-k2"
+
+[ui]
+theme = "night"
+
+[[hooks]]
+event = "Stop"
+command = "printf foreign"
+
+[providers.example]
+model = "some/model"
+EOF
+  cp "$config" "$original"
+
+  HOME="$home" "$KIMI_HOOK" install || fail "Kimi hook install refused a fresh config"
+  assert_grep '# BEGIN FIRSTMATE KIMI TURN-END HOOK' "$config" "fresh install wrote no Firstmate marker"
+
+  strip_toml_comments "$config"
+  assert_not_contains "$(cat "$config")" 'BEGIN FIRSTMATE' "the simulated Kimi rewrite left a comment marker"
+  assert_contains "$(cat "$config")" 'fm-turn-end.sh' "the simulated Kimi rewrite dropped the hook table itself"
+
+  HOME="$home" "$KIMI_HOOK" install \
+    || fail "Kimi hook install refused its own hook table after the Kimi rewrite stripped the markers"
+  assert_grep '# BEGIN FIRSTMATE KIMI TURN-END HOOK' "$config" "re-install did not re-mark the adopted region"
+  count=$(grep -c '^\[\[hooks\]\]' "$config")
+  [ "$count" -eq 2 ] || fail "re-install after a comment-stripping rewrite left $count hook tables, expected 2"
+  cp "$config" "$marked"
+  HOME="$home" "$KIMI_HOOK" install || fail "install after region adoption stopped being idempotent"
+  cmp -s "$marked" "$config" || fail "install after region adoption changed config bytes"
+
+  strip_toml_comments "$config"
+  HOME="$home" "$KIMI_HOOK" remove || fail "Kimi hook removal refused its own unmarked region"
+  cmp -s "$original" "$config" \
+    || fail "removal of an unmarked Firstmate region did not restore every foreign config byte"
+  pass "Kimi hook re-owns its region after a comment-stripping config rewrite without duplicating it"
+}
+
+test_kimi_hook_still_refuses_unmarked_foreign_hook_tables() {
+  local home config before out rc case_name
+  for case_name in other-path extra-key duplicated inline-array boolean-timeout float-timeout; do
+    home="$TMP_ROOT/config-foreign-$case_name"
+    config="$home/.kimi-code/config.toml"
+    before="$home/before.toml"
+    mkdir -p "$home/.kimi-code"
+    case "$case_name" in
+      other-path)
+        cat > "$config" <<'EOF'
+[[hooks]]
+event = "Stop"
+matcher = "^$"
+command = "bash /captain/elsewhere/fm-turn-end.sh"
+timeout = 1
+EOF
+        ;;
+      extra-key)
+        cat > "$config" <<'EOF'
+[[hooks]]
+event = "Stop"
+matcher = "^$"
+command = "bash \"$HOME/.kimi-code/fm-turn-end.sh\" >/dev/null 2>&1 || true"
+timeout = 1
+captain_owned = true
+EOF
+        ;;
+      duplicated)
+        cat > "$config" <<'EOF'
+[[hooks]]
+event = "Stop"
+matcher = "^$"
+command = "bash \"$HOME/.kimi-code/fm-turn-end.sh\" >/dev/null 2>&1 || true"
+timeout = 1
+
+[[hooks]]
+event = "Stop"
+matcher = "^$"
+command = "bash \"$HOME/.kimi-code/fm-turn-end.sh\" >/dev/null 2>&1 || true"
+timeout = 1
+EOF
+        ;;
+      inline-array)
+        cat > "$config" <<'EOF'
+hooks = [{ event = "Stop", matcher = "^$", command = "bash \"$HOME/.kimi-code/fm-turn-end.sh\" >/dev/null 2>&1 || true", timeout = 1 }]
+EOF
+        ;;
+      boolean-timeout)
+        cat > "$config" <<'EOF'
+[[hooks]]
+event = "Stop"
+matcher = "^$"
+command = "bash \"$HOME/.kimi-code/fm-turn-end.sh\" >/dev/null 2>&1 || true"
+timeout = true
+EOF
+        ;;
+      float-timeout)
+        cat > "$config" <<'EOF'
+[[hooks]]
+event = "Stop"
+matcher = "^$"
+command = "bash \"$HOME/.kimi-code/fm-turn-end.sh\" >/dev/null 2>&1 || true"
+timeout = 1.0
+EOF
+        ;;
+    esac
+    cp "$config" "$before"
+    rc=0
+    out=$(HOME="$home" "$KIMI_HOOK" install 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "install adopted an unowned hook table in the $case_name case"
+    assert_contains "$out" "outside the Firstmate-owned region" \
+      "the $case_name refusal lacked its concrete reason"
+    cmp -s "$before" "$config" || fail "the $case_name refusal changed config bytes"
+    assert_absent "$home/.kimi-code/fm-turn-end.sh" "the $case_name refusal wrote the hook script"
+  done
+  pass "Kimi hook install still refuses unmarked hook tables it does not own"
+}
+
 test_kimi_hook_remove_preserves_owned_newline_boundary() {
   local appended config expected home original
   home="$TMP_ROOT/config-owned-newline"
@@ -676,6 +808,8 @@ test_kimi_bordered_prompt_needs_no_override() {
 test_tracked_files_have_no_user_absolute_paths
 test_existing_launch_templates_are_byte_pinned
 test_kimi_hook_install_is_surgical_idempotent_and_removable
+test_kimi_hook_reowns_its_region_after_a_comment_stripping_rewrite
+test_kimi_hook_still_refuses_unmarked_foreign_hook_tables
 test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq

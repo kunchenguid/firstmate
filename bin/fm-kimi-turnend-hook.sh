@@ -7,6 +7,16 @@
 # and remove excises only that region. Missing, malformed, symlinked, partially
 # marked, or otherwise surprising config is refused without a config write.
 #
+# The Kimi CLI rewrites its own config.toml and drops comments, which erases the
+# region's comment markers while leaving the hook table itself intact. When the
+# markers are absent, the region is re-identified structurally: exactly one
+# [[hooks]] table whose parsed content equals Firstmate's own hook entry, whose
+# text span is confirmed by re-parsing the config with that span excised. That
+# span is then re-owned and re-marked in place, so repeated installs neither
+# refuse nor accumulate duplicate hook tables. A [[hooks]] table that references
+# fm-turn-end.sh but is not byte-for-byte Firstmate's own entry stays foreign and
+# is still refused.
+#
 # The installed Stop hook always exits 0 and stays silent. It reads cwd from the
 # hook payload, checks for a .fm-kimi-turnend pointer before registry work, and
 # touches a task turn-end marker only when the pointer names a Firstmate-created
@@ -69,6 +79,8 @@ BEGIN_OWNS_NEWLINE = BEGIN + b" (OWNS PRECEDING NEWLINE)"
 END = b"# END FIRSTMATE KIMI TURN-END HOOK"
 IDENTIFIER = b"FIRSTMATE KIMI TURN-END HOOK"
 HOOK_NAME = b"fm-turn-end.sh"
+HOOKS_HEADER = re.compile(rb"^[ \t]*\[\[[ \t]*hooks[ \t]*\]\][ \t]*(#.*)?$")
+TABLE_HEADER = re.compile(rb"^[ \t]*\[")
 TOKEN_NAME = re.compile(r"fm\.[A-Za-z0-9]{12}\Z")
 
 HOOK_BYTES = b'''#!/usr/bin/env bash
@@ -170,6 +182,96 @@ def block(marker: bytes) -> bytes:
     )
 
 
+def expected_entry() -> dict:
+    # The generated block is the single owner of the hook table's content; the
+    # structural fallback compares against whatever that block currently emits.
+    return tomllib.loads(block(BEGIN).decode("utf-8"))["hooks"][0]
+
+
+def type_strict_equal(left, right) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            type_strict_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            type_strict_equal(left_value, right_value)
+            for left_value, right_value in zip(left, right)
+        )
+    return left == right
+
+
+def line_spans(data: bytes):
+    spans = []
+    cursor = 0
+    total = len(data)
+    while cursor < total:
+        newline = data.find(b"\n", cursor)
+        if newline < 0:
+            spans.append((cursor, total, data[cursor:total]))
+            break
+        spans.append((cursor, newline + 1, data[cursor:newline]))
+        cursor = newline + 1
+    return spans
+
+
+def excision_matches(data: bytes, parsed: dict, start: int, end: int, index: int) -> bool:
+    # Confirm the located span really is that one hook table and nothing else:
+    # the config with the span removed must parse to the original document minus
+    # exactly that entry. Any scanning mistake fails this check instead of
+    # silently rewriting the captain's config.
+    try:
+        remainder = (data[:start] + data[end:]).decode("utf-8")
+        actual = tomllib.loads(remainder)
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return False
+    expected = dict(parsed)
+    survivors = [entry for position, entry in enumerate(parsed["hooks"]) if position != index]
+    if survivors:
+        expected["hooks"] = survivors
+    else:
+        expected.pop("hooks", None)
+    return type_strict_equal(actual, expected)
+
+
+def adopt_unmarked_region(data: bytes, parsed: dict):
+    # Recover ownership after a Kimi config rewrite dropped the comment markers.
+    hooks = parsed.get("hooks") or []
+    referencing = [
+        position
+        for position, entry in enumerate(hooks)
+        if isinstance(entry, dict)
+        and any(isinstance(value, str) and HOOK_NAME.decode("utf-8") in value for value in entry.values())
+    ]
+    if len(referencing) != 1:
+        return None
+    index = referencing[0]
+    if not type_strict_equal(hooks[index], expected_entry()):
+        return None
+    spans = line_spans(data)
+    headers = [position for position, span in enumerate(spans) if HOOKS_HEADER.match(span[2])]
+    if len(headers) != len(hooks):
+        return None
+    first = headers[index]
+    stop = len(spans)
+    for position in range(first + 1, len(spans)):
+        if TABLE_HEADER.match(spans[position][2]):
+            stop = position
+            break
+    last = first
+    for position in range(first + 1, stop):
+        body = spans[position][2].strip()
+        if body and not body.startswith(b"#"):
+            last = position
+    start = spans[first][0]
+    end = spans[last][1]
+    if not excision_matches(data, parsed, start, end, index):
+        return None
+    return start, end, BEGIN
+
+
 def without_region(data: bytes, region) -> bytes:
     prefix = data[: region[0]]
     suffix = data[region[1] :]
@@ -223,8 +325,10 @@ try:
     config_info = regular_not_symlink(CONFIG, "Kimi config")
     with open(CONFIG, "rb") as stream:
         original = stream.read()
-    parse_toml(original, "config.toml")
+    parsed = parse_toml(original, "config.toml")
     region = locate_region(original)
+    if region is None:
+        region = adopt_unmarked_region(original, parsed)
     outside = original if region is None else without_region(original, region)
     if HOOK_NAME in outside:
         refuse("config.toml references fm-turn-end.sh outside the Firstmate-owned region.")
