@@ -50,6 +50,10 @@ test_promoted_modes_share_the_canonical_contract() {
         assert_grep 'Never push to the default branch. Never merge a PR.' "$contract" "no-mistakes no-merge clause missing"
         assert_grep 'Green CI is the return point even when no-mistakes still reports merge/close monitoring as active.' "$contract" "green CI return point missing"
         assert_grep 'Inspect every review submission and inline thread' "$contract" "review-thread handling missing"
+        assert_grep 'never authorizes hand-edits while no-mistakes still owns the run' "$contract" \
+          "post-CI review handling did not exclude worker hand-edits during active pipeline ownership"
+        assert_grep 'route every valid finding back through the no-mistakes response flow' "$contract" \
+          "post-CI review handling did not route valid findings back through the pipeline"
         ;;
       direct)
         assert_grep 'Never merge a PR.' "$contract" "direct-PR no-merge clause missing"
@@ -130,7 +134,44 @@ test_custom_followup_cannot_replace_the_contract() {
   pass "fm-promote: custom follow-up scope cannot erase the durable contract"
 }
 
+# bash 3.2, the macOS system bash, cannot parse a literal apostrophe inside a
+# quoted heredoc nested in $( ) inside a case. The contract text therefore stays
+# apostrophe-free and substitutes the one it needs in afterwards; this pins both
+# halves so the macOS-only parse failure cannot be reintroduced silently.
+test_contract_text_stays_parseable_under_bash_32() {
+  local line inside=0 lineno=0 candidate version legacy="" file
+  while IFS= read -r line; do
+    lineno=$((lineno + 1))
+    case "$line" in
+      *"<<"*EOF*) inside=1; continue ;;
+      EOF) inside=0; continue ;;
+    esac
+    [ "$inside" -eq 1 ] || continue
+    case "$line" in
+      *"'"*) fail "bin/fm-delivery-contract-lib.sh line $lineno puts a literal apostrophe in a heredoc bash 3.2 cannot parse" ;;
+    esac
+  done < "$ROOT/bin/fm-delivery-contract-lib.sh"
+  assert_grep "printf '\\047'" "$ROOT/bin/fm-delivery-contract-lib.sh" \
+    "the apostrophe substitution that keeps bash 3.2 parsing is gone"
+
+  for candidate in /bin/bash bash; do
+    command -v "$candidate" >/dev/null 2>&1 || continue
+    # shellcheck disable=SC2016  # BASH_VERSINFO must expand in the candidate shell
+    version=$("$candidate" -c 'printf "%s" "${BASH_VERSINFO[0]}"' 2>/dev/null || printf '')
+    [ "$version" = 3 ] || continue
+    legacy=$candidate
+    break
+  done
+  if [ -n "$legacy" ]; then
+    for file in bin/fm-delivery-contract-lib.sh bin/fm-brief.sh bin/fm-promote.sh; do
+      "$legacy" -n "$ROOT/$file" || fail "$file does not parse under legacy bash 3.x"
+    done
+  fi
+  pass "delivery contract: the contract text and its apostrophe workaround stay bash 3.2 parseable"
+}
+
 test_promoted_modes_share_the_canonical_contract
 test_contract_has_one_authoritative_owner
 test_promotion_refuses_unverifiable_or_unassociable_contracts
 test_custom_followup_cannot_replace_the_contract
+test_contract_text_stays_parseable_under_bash_32

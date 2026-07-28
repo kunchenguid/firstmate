@@ -1500,11 +1500,15 @@ META_TMP=$(mktemp "$STATE/.fm-spawn-meta-$ID.XXXXXX") || exit 1
   fi
 } > "$META_TMP"
 chmod 0600 "$META_TMP"
-if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+# Recovery and herdr projection restarts republish metadata for the same locked
+# task, so an existing regular file is replaced atomically by the mv below.
+# Any other path type (symlink, directory, device) is refused rather than
+# followed, since publication must never write outside state/<id>.meta.
+if [ -L "$STATE/$ID.meta" ] || { [ -e "$STATE/$ID.meta" ] && [ ! -f "$STATE/$ID.meta" ]; }; then
   [ ! -d "$STATE/$ID.meta" ] || echo "$STATE/$ID.meta: Is a directory" >&2
   rm -f "$META_TMP"
   META_TMP=
-  echo "error: task metadata path already exists at $STATE/$ID.meta" >&2
+  echo "error: task metadata path is not a safe regular file at $STATE/$ID.meta" >&2
   exit 1
 fi
 if ! mv "$META_TMP" "$STATE/$ID.meta"; then

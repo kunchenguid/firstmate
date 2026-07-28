@@ -214,6 +214,33 @@ test_active_dispatch_profile_refuses_unguarded_raw_launch_command() {
   pass "active crew-dispatch profile refuses the unguarded raw launch-command escape hatch"
 }
 
+test_respawn_replaces_metadata_but_refuses_unsafe_paths() {
+  local rec id out status
+  id=profile-respawn-z16
+  rec=$(make_spawn_case profile-respawn claude "$id")
+  read_case_record "$rec"
+  printf 'window=stale-window\nharness=stale-harness\n' > "$HOME_DIR/state/$id.meta"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a recovery respawn over existing task metadata should succeed"
+  assert_contains "$out" "spawned $id harness=claude" "respawn did not report a launch"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
+  assert_no_grep 'window=stale-window' "$HOME_DIR/state/$id.meta" \
+    "respawn did not replace the stale task metadata"
+
+  id=profile-respawn-unsafe-z17
+  rec=$(make_spawn_case profile-respawn-unsafe claude "$id")
+  read_case_record "$rec"
+  ln -s "$HOME_DIR/state/elsewhere" "$HOME_DIR/state/$id.meta"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn published task metadata through a symlink"
+  assert_contains "$out" "not a safe regular file" "unsafe metadata-path refusal was not actionable"
+  [ ! -e "$HOME_DIR/state/elsewhere" ] || fail "spawn wrote task metadata through a symlink"
+  pass "fm-spawn: republishes metadata for a respawn while refusing unsafe metadata paths"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=profile-claude-z2
@@ -468,6 +495,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_refuses_unguarded_raw_launch_command
+test_respawn_replaces_metadata_but_refuses_unsafe_paths
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

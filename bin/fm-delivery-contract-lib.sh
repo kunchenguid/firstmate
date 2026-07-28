@@ -72,10 +72,15 @@ Two firstmate-specific rules layer on top of that guidance:
 After no-mistakes reports CI green, return to the PR.
 Inspect every review submission and inline thread, fix and reply to valid findings, and explain invalid findings against current code.
 Green CI is the return point even when no-mistakes still reports merge/close monitoring as active.
+That return never authorizes hand-edits while no-mistakes still owns the run: route every valid finding back through the no-mistakes response flow so the pipeline applies the fix, then reply on the thread once it lands.
 When current-code checks are green and every review thread is handled, append `done: PR {full https://... URL} checks green` and stop.
 Never merge the PR; stop for captain approval and let firstmate relay the outcome.
 EOF
 )
+      # bash 3.2 (the macOS system bash) mis-scans a literal apostrophe inside a
+      # quoted heredoc nested in $( ) inside a case and fails to parse the whole
+      # file, so every heredoc above stays apostrophe-free and any needed
+      # apostrophe is substituted in afterwards. Never type one into the text.
       FM_DELIVERY_DONE=${FM_DELIVERY_DONE/firstmate authority/firstmate"$(printf '\047')"s authority}
       ;;
   esac

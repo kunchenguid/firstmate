@@ -14,7 +14,9 @@
 # blocking shell-tool hook.
 set -eu
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Physical, so the recorded checker= binding matches the path the checker itself
+# derives with `pwd -P` even when firstmate is reached through a symlink.
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 preflight() {
   local harness=$1 required
   case "$harness" in
@@ -100,8 +102,12 @@ POINTER="$WORKSPACE_REAL/.fm-worker-guard"
 GUARD_BIN="$TASK_TMP/worker-guard-bin"
 PI_EXT="$STATE_REAL/$ID.worker-guard.pi-ext.ts"
 if [ -e "$POINTER" ] || [ -L "$POINTER" ]; then
-  echo "error: existing worker guard registration is ambiguous at $POINTER" >&2
-  exit 1
+  # A recovery or projection respawn reclaims only a registration this same
+  # locked task owns; --remove proves that binding before removing anything.
+  "$SCRIPT_DIR/fm-worker-guard-install.sh" --remove "$WORKSPACE_REAL" "$STATE_REAL" "$ID" 2>/dev/null || {
+    echo "error: existing worker guard registration is ambiguous at $POINTER" >&2
+    exit 1
+  }
 fi
 cleanup_failure() {
   local rc=$?
@@ -272,7 +278,7 @@ EOF
     chmod 0600 "$PI_EXT"
     ;;
   grok)
-    GROK_HOOKS="${HOME:?}/.grok/hooks"
+    GROK_HOOKS="${GROK_HOME:-${HOME:?}/.grok}/hooks"
     mkdir -p "$GROK_HOOKS"
     cat > "$GROK_HOOKS/fm-worker-pretool-check.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -291,8 +297,10 @@ fi
 printf '%s' "$PAYLOAD" | exec "$CHECKER" --workspace "$WORKSPACE"
 EOF
     chmod 0700 "$GROK_HOOKS/fm-worker-pretool-check.sh"
-    cat > "$GROK_HOOKS/fm-worker-pretool-check.json" <<'EOF'
-{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"bash -lc 'exec \"${HOME:?}/.grok/hooks/fm-worker-pretool-check.sh\"'","timeout":10}]}]}}
+    GROK_COMMAND="bash -lc 'exec \"\$0\"' $(shell_quote "$GROK_HOOKS/fm-worker-pretool-check.sh")"
+    GROK_COMMAND_JSON=$(printf '%s' "$GROK_COMMAND" | jq -Rs .)
+    cat > "$GROK_HOOKS/fm-worker-pretool-check.json" <<EOF
+{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":$GROK_COMMAND_JSON,"timeout":10}]}]}}
 EOF
     chmod 0600 "$GROK_HOOKS/fm-worker-pretool-check.json"
     ;;

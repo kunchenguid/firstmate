@@ -26,22 +26,38 @@ case "$TOOL" in gh|gh-axi) : ;; *) echo "fm-worker-github: invalid tool identity
 case "$REAL" in /*) [ -x "$REAL" ] || { echo "fm-worker-github: real $TOOL executable is unavailable" >&2; exit 126; } ;; *) echo "fm-worker-github: real executable must be absolute" >&2; exit 126 ;; esac
 
 merge_shaped=0
-previous=
-for argument in "$@"; do
-  if [ "$previous" = pr ] && [ "$argument" = merge ]; then
-    merge_shaped=1
-  fi
-  case "$argument" in
-    *'/pulls/'*'/merge'|*'/pulls/'*'/merge?'*|*mergePullRequest*) merge_shaped=1 ;;
-  esac
-  previous=$argument
-done
 
-# Prevent creating a gh CLI alias whose literal expansion reaches a merge.
+# gh accepts its persistent flags between `pr` and the subcommand it runs, so
+# the scan skips option words and stops at the first real subcommand instead of
+# testing the single word that follows `pr`.
+scan_words() {
+  local word scanning=0
+  for word in "$@"; do
+    if [ "$scanning" -eq 1 ]; then
+      case "$word" in
+        merge) merge_shaped=1; scanning=0 ;;
+        -*) : ;;
+        checkout|checks|close|comment|create|diff|edit|list|lock|ready|reopen|review|status|unlock|update-branch|view)
+          scanning=0 ;;
+        *) : ;;
+      esac
+    fi
+    [ "$word" != pr ] || scanning=1
+    case "$word" in
+      *'/pulls/'*'/merge'|*'/pulls/'*'/merge?'*|*mergePullRequest*) merge_shaped=1 ;;
+    esac
+  done
+}
+
+scan_words "$@"
+
+# Prevent creating a gh CLI alias whose literal expansion reaches a merge: the
+# alias body arrives as one word, so re-split it and classify it the same way.
 if [ "${1:-}" = alias ] && [ "${2:-}" = set ]; then
-  case "$*" in
-    *'pr merge'*|*'/pulls/'*'/merge'*|*mergePullRequest*) merge_shaped=1 ;;
-  esac
+  set -f
+  # shellcheck disable=SC2048,SC2086  # deliberate re-split of the alias body
+  scan_words $*
+  set +f
 fi
 
 if [ "$merge_shaped" -eq 1 ]; then

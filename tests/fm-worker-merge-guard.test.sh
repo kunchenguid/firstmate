@@ -33,6 +33,11 @@ alias land='gh pr merge'; land 792
 GH=/usr/bin/gh; "$GH" pr merge 792
 gh api PUT /repos/acme/api/pulls/792/merge
 gh api graphql -f query='mutation { mergePullRequest(input: {}) }'
+gh pr --repo acme/api merge 792 --squash
+gh-axi pr --repo acme/api merge 792
+gh pr -R acme/api merge 792
+gh --repo acme/api pr merge 792
+bash -lc 'gh pr --repo acme/api merge 792'
 EOF
   while IFS= read -r command; do
     policy_is allow "$command"
@@ -41,6 +46,8 @@ gh pr create --title merge
 gh pr view 792 --comments
 gh pr checks 792
 gh pr review 792 --comment
+gh pr --repo acme/api view 792
+gh pr -R acme/api create --title merge-fix
 gh api GET /repos/acme/api/pulls/792
 printf '%s\n' 'gh pr merge 792'
 bash -lc "printf '%s\n' 'gh pr merge 792'"
@@ -69,12 +76,18 @@ EOF
   printf '%s\n' "$fakebin"
 }
 
+run_installer() {
+  local base=$1 harness=$2 fakebin=$3
+  shift 3
+  PATH="$fakebin:$PATH" HOME="$base/home" GROK_HOME="${1-}" "$INSTALLER" "$harness" "$base/work" \
+    "$base/home/state" guard-task "$base/tasktmp" "$base/home/state/guard-task.turn-ended"
+}
+
 install_fixture() {
   local base=$1 harness=$2 fakebin=$3
   mkdir -p "$base/home/state" "$base/tasktmp"
   fm_git_init_commit "$base/work"
-  PATH="$fakebin:$PATH" HOME="$base/home" "$INSTALLER" "$harness" "$base/work" \
-    "$base/home/state" guard-task "$base/tasktmp" "$base/home/state/guard-task.turn-ended"
+  run_installer "$base" "$harness" "$fakebin"
 }
 
 test_harness_installation_and_safe_refusal() {
@@ -150,6 +163,22 @@ test_registered_transport_and_path_wrapper() {
   fi
   [ "$(wc -l < "$base/github-requests" | tr -d ' ')" = "$before" ] || fail "denied merge alias reached the fake GitHub CLI"
 
+  assert_grep 'fm-worker-github.sh' "$guardbin/gh" "the generated launcher does not exec the worker GitHub wrapper"
+  set +e
+  output=$("$guardbin/gh" pr --repo acme/api merge 792 --squash 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "PATH wrapper allowed a flag-interspersed gh pr merge"
+  assert_contains "$output" "worker-pr-merge" "flag-interspersed PATH denial lacked stable reason"
+  if "$guardbin/gh" alias set land 'pr --repo acme/api merge' >/dev/null 2>&1; then
+    fail "PATH wrapper allowed creation of a flag-interspersed merge alias"
+  fi
+  [ "$(wc -l < "$base/github-requests" | tr -d ' ')" = "$before" ] \
+    || fail "a flag-interspersed merge reached the fake GitHub CLI"
+  "$guardbin/gh" pr --repo acme/api view 792 >/dev/null || fail "PATH wrapper blocked a flag-interspersed PR read"
+  [ "$(wc -l < "$base/github-requests" | tr -d ' ')" -eq $((before + 1)) ] \
+    || fail "an allowed flag-interspersed PR read did not reach the real CLI"
+  before=$((before + 1))
+
   set +e
   output=$(printf '%s' '{"toolInput":{"command":"/opt/bin/gh pr merge 792"}}' \
     | "$CHECKER" --workspace "$base/work" 2>&1); rc=$?
@@ -221,9 +250,74 @@ test_production_spawn_is_backend_independent() {
   pass "worker merge guard: the central production spawn path is backend-independent"
 }
 
+test_grok_hook_follows_grok_home() {
+  local base fakebin grok_home
+  base="$TMP_ROOT/grok-home"
+  fakebin=$(make_fake_tools "$base")
+  grok_home="$base/relocated-grok"
+  mkdir -p "$base/home/state" "$base/tasktmp"
+  fm_git_init_commit "$base/work"
+  run_installer "$base" grok "$fakebin" "$grok_home" >/dev/null \
+    || fail "grok guard installation under GROK_HOME failed"
+  [ -x "$grok_home/hooks/fm-worker-pretool-check.sh" ] \
+    || fail "the grok merge-denial hook was not installed under GROK_HOME"
+  assert_grep "$grok_home/hooks/fm-worker-pretool-check.sh" \
+    "$grok_home/hooks/fm-worker-pretool-check.json" \
+    "the grok hook registration does not invoke the GROK_HOME hook script"
+  [ ! -e "$base/home/.grok/hooks/fm-worker-pretool-check.json" ] \
+    || fail "the grok hook was written where a relocated GROK_HOME never loads it"
+  pass "worker merge guard: the grok hook is installed where a relocated GROK_HOME loads it"
+}
+
+test_checker_binding_survives_a_symlinked_firstmate_path() {
+  local base fakebin linkbin output rc
+  base="$TMP_ROOT/symlinked-root"
+  fakebin=$(make_fake_tools "$base")
+  mkdir -p "$base/home/state" "$base/tasktmp"
+  fm_git_init_commit "$base/work"
+  linkbin="$base/link-bin"
+  ln -s "$ROOT/bin" "$linkbin"
+  PATH="$fakebin:$PATH" HOME="$base/home" GROK_HOME='' "$linkbin/fm-worker-guard-install.sh" pi \
+    "$base/work" "$base/home/state" guard-task "$base/tasktmp" \
+    "$base/home/state/guard-task.turn-ended" >/dev/null \
+    || fail "guard installation through a symlinked firstmate path failed"
+  "$CHECKER" --workspace "$base/work" --command 'gh pr checks 792' \
+    || fail "a symlinked firstmate path left the worker guard unavailable for ordinary commands"
+  set +e
+  output=$("$CHECKER" --workspace "$base/work" --command 'gh pr merge 792' 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a symlinked firstmate path stopped denying merges"
+  assert_contains "$output" "worker-pr-merge" "symlinked-path denial lacked the stable reason"
+  pass "worker merge guard: the checker binding survives a symlinked firstmate path"
+}
+
+test_respawn_reclaims_only_its_own_registration() {
+  local base fakebin guardbin output rc
+  base="$TMP_ROOT/respawn"
+  fakebin=$(make_fake_tools "$base")
+  install_fixture "$base" pi "$fakebin" >/dev/null || fail "first guard installation failed"
+  guardbin=$(run_installer "$base" pi "$fakebin") \
+    || fail "a recovery respawn could not reclaim its own registration"
+  [ -x "$guardbin/gh" ] || fail "the reclaimed installation did not rebuild the PATH guard"
+  [ -f "$base/work/.fm-worker-guard" ] || fail "the reclaimed installation left no registration"
+  "$CHECKER" --workspace "$base/work" --command 'gh pr checks 792' \
+    || fail "the reclaimed registration is not usable"
+
+  printf '%s\n' 'fm.zzzzzzzzzzzz' > "$base/home/state/guard-task.worker-guard-token"
+  set +e
+  output=$(run_installer "$base" pi "$fakebin" 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "installation overwrote a registration it could not prove it owns"
+  assert_contains "$output" "ambiguous" "unowned-registration refusal was not actionable"
+  pass "worker merge guard: respawn reclaims its own registration and refuses any other"
+}
+
 test_semantic_command_matrix
 test_harness_installation_and_safe_refusal
 test_registered_transport_and_path_wrapper
 test_unpublished_installation_cleanup
 test_green_review_lifecycle_stops_without_merge
+test_grok_hook_follows_grok_home
+test_checker_binding_survives_a_symlinked_firstmate_path
+test_respawn_reclaims_only_its_own_registration
 test_production_spawn_is_backend_independent

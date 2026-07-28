@@ -7,6 +7,8 @@
 // It denies merge-shaped GitHub CLI operations in executed positions, including
 // path-qualified binaries, command/env wrappers, literal nested shells/eval,
 // command substitutions, same-command aliases, and literal binary variables.
+// Subcommand classification is option-aware because gh accepts its persistent
+// flags (-R/--repo and friends) between `pr` and the subcommand it runs.
 
 import path from "node:path";
 import { realpathSync } from "node:fs";
@@ -56,9 +58,22 @@ function resolveExecutable(word, variables) {
   return variables.get(match[1] || match[2]) || word.value;
 }
 
+// Every `gh pr` subcommand except `merge`. A word that is neither an option nor
+// one of these is a flag value (`--repo owner/name`), so the scan continues.
+const PR_SUBCOMMANDS = new Set([
+  "checkout", "checks", "close", "comment", "create", "diff", "edit", "list",
+  "lock", "ready", "reopen", "review", "status", "unlock", "update-branch", "view",
+]);
+
 function hasPrMerge(args) {
-  for (let index = 0; index + 1 < args.length; index += 1) {
-    if (args[index] === "pr" && args[index + 1] === "merge") return true;
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] !== "pr") continue;
+    for (let scan = index + 1; scan < args.length; scan += 1) {
+      const arg = args[scan];
+      if (arg === "merge") return true;
+      if (arg.startsWith("-")) continue;
+      if (PR_SUBCOMMANDS.has(arg)) break;
+    }
   }
   return false;
 }
@@ -127,7 +142,8 @@ function recordAlias(position, aliases) {
 
 function rawLooksMergeShaped(command) {
   const normalized = command.replace(/\\\r?\n/g, "");
-  return /(?:^|[/\s'"`(])gh(?:-axi)?(?:[\s'"`]|$)[\s\S]*\bpr[\s'"`]+merge\b/i.test(normalized)
+  const words = normalized.split(/[\s'"`()]+/).filter(Boolean);
+  return (/(?:^|[/\s'"`(])gh(?:-axi)?(?:[\s'"`]|$)/i.test(normalized) && hasPrMerge(words))
     || /\bmergePullRequest\b/.test(normalized)
     || /\/pulls\/[^/\s'"`]+\/merge\b/.test(normalized);
 }
