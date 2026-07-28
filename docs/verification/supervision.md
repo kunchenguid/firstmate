@@ -121,7 +121,7 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 
-Pi same-process session-transition ownership was verified on 2026-07-28 against the tracked extension with a faithful in-process factory rebind (module cache retained, real arm children):
+Pi same-process session-transition ownership was verified on 2026-07-27 against the tracked extension with a faithful in-process factory rebind (module cache retained, real arm children):
 
 ```sh
 pi --version
