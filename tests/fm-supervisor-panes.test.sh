@@ -114,6 +114,75 @@ test_lifecycle_hooks_invoke_reconciler() {
   pass "lifecycle hooks invoke the zellij supervisor reconciler"
 }
 
+# Stand the pane loop up against stub helpers in a throwaway bin/ so the two
+# poll cadences can be measured directly: the loop resolves fm-backend.sh,
+# fm-crew-state.sh, and fm-peek.sh from its own directory.
+make_pane_loop_fakebin() {  # <dir> -> echoes bin dir
+  local dir=$1 bin="$1/bin"
+  mkdir -p "$bin"
+  cp "$ROOT/bin/fm-supervisor-pane-loop.sh" "$bin/fm-supervisor-pane-loop.sh"
+  cat > "$bin/fm-backend.sh" <<'SH'
+fm_meta_get() { grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true; }
+SH
+  cat > "$bin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'call\n' >> "${FM_TEST_STATE_CALLS:?}"
+printf 'state: working · source: stub\n'
+SH
+  cat > "$bin/fm-peek.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'call\n' >> "${FM_TEST_PEEK_CALLS:?}"
+printf 'stub peek output\n'
+SH
+  chmod +x "$bin/fm-crew-state.sh" "$bin/fm-peek.sh"
+  printf '%s\n' "$bin"
+}
+
+run_pane_loop_briefly() {  # <bin> <state> <state-refresh-secs> <state-calls> <peek-calls>
+  local bin=$1 state=$2 state_refresh=$3 state_calls=$4 peek_calls=$5 pid i
+  : > "$state_calls"
+  : > "$peek_calls"
+  fm_write_meta "$state/alpha.meta" "window=firstmate:11" "backend=zellij" "kind=ship"
+  FM_ROOT_OVERRIDE="$(dirname "$bin")" \
+    FM_HOME="$(dirname "$state")" \
+    FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISOR_REFRESH_SECS=1 \
+    FM_SUPERVISOR_STATE_REFRESH_SECS="$state_refresh" \
+    FM_TEST_STATE_CALLS="$state_calls" \
+    FM_TEST_PEEK_CALLS="$peek_calls" \
+    bash "$bin/fm-supervisor-pane-loop.sh" alpha >/dev/null 2>&1 &
+  pid=$!
+  sleep 3
+  rm -f "$state/alpha.meta"
+  for i in 1 2 3 4 5; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+test_pane_loop_polls_run_state_on_its_own_slower_cadence() {
+  local dir bin state state_calls peek_calls states peeks
+  dir="$TMP_ROOT/pane-loop-cadence"; state="$dir/home/state"; mkdir -p "$state"
+  bin=$(make_pane_loop_fakebin "$dir")
+  state_calls="$dir/state-calls"; peek_calls="$dir/peek-calls"
+
+  run_pane_loop_briefly "$bin" "$state" 3600 "$state_calls" "$peek_calls"
+  states=$(grep -c call "$state_calls" || true)
+  peeks=$(grep -c call "$peek_calls" || true)
+  [ "$states" = "1" ] \
+    || fail "the expensive run-state lookup should run once per state interval, not once per redraw (got $states)"
+  [ "$peeks" -ge 2 ] \
+    || fail "the pane should keep redrawing and peeking on the refresh interval (got $peeks)"
+
+  run_pane_loop_briefly "$bin" "$state" 1 "$state_calls" "$peek_calls"
+  states=$(grep -c call "$state_calls" || true)
+  [ "$states" -ge 2 ] \
+    || fail "a short FM_SUPERVISOR_STATE_REFRESH_SECS should poll the run state repeatedly (got $states)"
+  pass "fm-supervisor-pane-loop: run-state lookups follow their own slower cadence"
+}
+
 test_pane_loop_peeks_in_guard_read_only_mode() {
   assert_grep 'FM_GUARD_READ_ONLY=1' "$ROOT/bin/fm-supervisor-pane-loop.sh" \
     "the supervisor pane loop must peek in guard read-only mode so it cannot claim the once-per-episode WATCHER DOWN banner"
@@ -123,4 +192,5 @@ test_pane_loop_peeks_in_guard_read_only_mode() {
 test_active_zellij_crews_create_supervisor_tab_and_panes
 test_zero_active_zellij_crews_close_existing_supervisor_tab
 test_lifecycle_hooks_invoke_reconciler
+test_pane_loop_polls_run_state_on_its_own_slower_cadence
 test_pane_loop_peeks_in_guard_read_only_mode

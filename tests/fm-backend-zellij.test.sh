@@ -595,11 +595,14 @@ test_supervisor_command_argv_forwards_tuning_knobs() {
   local argv
   argv=$(FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" \
     FM_SUPERVISOR_REFRESH_SECS=30 FM_SUPERVISOR_PEEK_LINES=12 \
+    FM_SUPERVISOR_STATE_REFRESH_SECS=90 \
     bash -c '. "$0/bin/backends/zellij.sh"
       fm_backend_zellij_supervisor_command_argv alpha
       printf "%s\n" "${FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV[@]}"' "$ROOT")
   assert_contains "$argv" "FM_SUPERVISOR_REFRESH_SECS=30" \
     "the pane env allow-list should forward an operator-set refresh interval"
+  assert_contains "$argv" "FM_SUPERVISOR_STATE_REFRESH_SECS=90" \
+    "the pane env allow-list should forward an operator-set run-state interval"
   assert_contains "$argv" "FM_SUPERVISOR_PEEK_LINES=12" \
     "the pane env allow-list should forward an operator-set peek line count"
   argv=$(FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" \
@@ -608,9 +611,42 @@ test_supervisor_command_argv_forwards_tuning_knobs() {
       printf "%s\n" "${FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV[@]}"' "$ROOT")
   assert_not_contains "$argv" "FM_SUPERVISOR_REFRESH_SECS" \
     "an unset refresh interval should leave the loop defaults alone"
+  assert_not_contains "$argv" "FM_SUPERVISOR_STATE_REFRESH_SECS" \
+    "an unset run-state interval should leave the loop defaults alone"
   assert_not_contains "$argv" "FM_SUPERVISOR_PEEK_LINES" \
     "an unset peek line count should leave the loop defaults alone"
   pass "fm_backend_zellij_supervisor_command_argv: forwards the supervisor tuning knobs only when set"
+}
+
+# The reconciler discovers task ids from ${FM_STATE_OVERRIDE:-$FM_HOME/state},
+# so a hardcoded $FM_HOME/state in the pane allow-list would point every pane
+# at metadata that does not exist under an override-based home; each
+# --close-on-exit pane would then drain on its first loop guard.
+test_supervisor_command_argv_forwards_resolved_override_dirs() {
+  local argv
+  argv=$(FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE=/tmp/fm-override/state \
+    FM_DATA_OVERRIDE=/tmp/fm-override/data \
+    FM_PROJECTS_OVERRIDE=/tmp/fm-override/projects \
+    FM_CONFIG_OVERRIDE=/tmp/fm-override/config \
+    bash -c '. "$0/bin/backends/zellij.sh"
+      fm_backend_zellij_supervisor_command_argv alpha
+      printf "%s\n" "${FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV[@]}"' "$ROOT")
+  assert_contains "$argv" "FM_STATE_OVERRIDE=/tmp/fm-override/state" \
+    "the pane env allow-list should forward the caller-resolved state dir, not \$FM_HOME/state"
+  assert_contains "$argv" "FM_DATA_OVERRIDE=/tmp/fm-override/data" \
+    "the pane env allow-list should forward the caller-resolved data dir"
+  assert_contains "$argv" "FM_PROJECTS_OVERRIDE=/tmp/fm-override/projects" \
+    "the pane env allow-list should forward the caller-resolved projects dir"
+  assert_contains "$argv" "FM_CONFIG_OVERRIDE=/tmp/fm-override/config" \
+    "the pane env allow-list should forward the caller-resolved config dir"
+  argv=$(FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" \
+    bash -c '. "$0/bin/backends/zellij.sh"
+      fm_backend_zellij_supervisor_command_argv alpha
+      printf "%s\n" "${FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV[@]}"' "$ROOT")
+  assert_contains "$argv" "FM_STATE_OVERRIDE=$ROOT/state" \
+    "an unset state override should still fall back to the home-relative default"
+  pass "fm_backend_zellij_supervisor_command_argv: forwards the caller-resolved override dirs"
 }
 
 # --- capture / send_key / send_literal / current_path / kill -----------------
@@ -1147,6 +1183,7 @@ test_supervisor_reconcile_builds_tab_and_panes
 test_supervisor_reconcile_seed_rename_is_best_effort
 test_supervisor_reconcile_fails_when_new_pane_returns_no_pane_id
 test_supervisor_command_argv_forwards_tuning_knobs
+test_supervisor_command_argv_forwards_resolved_override_dirs
 test_capture_small_reads_use_viewport_and_trim
 test_capture_large_reads_use_full_scrollback_and_trim
 test_capture_fails_when_pane_absent

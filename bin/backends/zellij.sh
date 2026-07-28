@@ -376,7 +376,12 @@ fm_backend_zellij_active_tab_id() {  # <session>
 
 # fm_backend_zellij_supervisor_command_argv: the pane command runs under the
 # zellij SERVER process, not the shell that invoked the CLI, so every variable
-# the loop needs has to travel in this explicit `env` allow-list. The two
+# the loop needs has to travel in this explicit `env` allow-list. The directory
+# entries forward the CALLER-RESOLVED override values rather than hardcoded
+# $FM_HOME/... defaults: bin/fm-supervisor-panes.sh discovers task ids from
+# ${FM_STATE_OVERRIDE:-$FM_HOME/state}, so hardcoding would make an
+# override-based home render panes for ids whose metadata the loop then cannot
+# find, and every --close-on-exit pane would drain the instant it opened. The
 # operator tuning knobs are forwarded only when set, so the loop keeps its own
 # defaults otherwise.
 fm_backend_zellij_supervisor_command_argv() {  # <task-id>
@@ -384,13 +389,15 @@ fm_backend_zellij_supervisor_command_argv() {  # <task-id>
     env
     "FM_ROOT_OVERRIDE=$FM_ROOT"
     "FM_HOME=$FM_HOME"
-    "FM_STATE_OVERRIDE=$FM_HOME/state"
-    "FM_DATA_OVERRIDE=$FM_HOME/data"
-    "FM_PROJECTS_OVERRIDE=$FM_HOME/projects"
-    "FM_CONFIG_OVERRIDE=$FM_HOME/config"
+    "FM_STATE_OVERRIDE=${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+    "FM_DATA_OVERRIDE=${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+    "FM_PROJECTS_OVERRIDE=${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+    "FM_CONFIG_OVERRIDE=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
   )
   [ -z "${FM_SUPERVISOR_REFRESH_SECS:-}" ] \
     || FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV+=("FM_SUPERVISOR_REFRESH_SECS=$FM_SUPERVISOR_REFRESH_SECS")
+  [ -z "${FM_SUPERVISOR_STATE_REFRESH_SECS:-}" ] \
+    || FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV+=("FM_SUPERVISOR_STATE_REFRESH_SECS=$FM_SUPERVISOR_STATE_REFRESH_SECS")
   [ -z "${FM_SUPERVISOR_PEEK_LINES:-}" ] \
     || FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV+=("FM_SUPERVISOR_PEEK_LINES=$FM_SUPERVISOR_PEEK_LINES")
   FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV+=(

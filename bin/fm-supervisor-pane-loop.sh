@@ -28,29 +28,46 @@ esac
 
 ID=$1
 META="$STATE/$ID.meta"
-REFRESH_SECS=${FM_SUPERVISOR_REFRESH_SECS:-5}
+REFRESH_SECS=${FM_SUPERVISOR_REFRESH_SECS:-20}
 PEEK_LINES=${FM_SUPERVISOR_PEEK_LINES:-20}
+# Two cadences, not one: the redraw path (peek) is comparatively cheap, while
+# fm-crew-state.sh runs a `no-mistakes axi status` plus several git probes per
+# call. Polling both at the redraw rate costs every crew ~12 pipeline CLI
+# invocations a minute forever, against the same CLI the crews validate with,
+# so the run-state lookup gets its own much slower interval and its last value
+# is reused in between.
+STATE_REFRESH_SECS=${FM_SUPERVISOR_STATE_REFRESH_SECS:-60}
 
 case "$REFRESH_SECS" in
-  ''|*[!0-9]*|0) REFRESH_SECS=5 ;;
+  ''|*[!0-9]*|0) REFRESH_SECS=20 ;;
 esac
 case "$PEEK_LINES" in
   ''|*[!0-9]*|0) PEEK_LINES=20 ;;
 esac
+case "$STATE_REFRESH_SECS" in
+  ''|*[!0-9]*|0) STATE_REFRESH_SECS=60 ;;
+esac
+
+state_line=
+state_next=0
 
 while [ -f "$META" ]; do
   kind=$(fm_meta_get "$META" kind)
   backend=$(fm_meta_get "$META" backend)
   project=$(fm_meta_get "$META" project)
-  state_line=$(
-    FM_ROOT_OVERRIDE="$FM_ROOT" \
-      FM_HOME="$FM_HOME" \
-      FM_STATE_OVERRIDE="$STATE" \
-      FM_DATA_OVERRIDE="$DATA" \
-      FM_PROJECTS_OVERRIDE="$PROJECTS" \
-      FM_CONFIG_OVERRIDE="$CONFIG" \
-      "$SCRIPT_DIR/fm-crew-state.sh" "$ID" 2>/dev/null || true
-  )
+  if [ "$SECONDS" -ge "$state_next" ]; then
+    state_line=$(
+      FM_ROOT_OVERRIDE="$FM_ROOT" \
+        FM_HOME="$FM_HOME" \
+        FM_STATE_OVERRIDE="$STATE" \
+        FM_DATA_OVERRIDE="$DATA" \
+        FM_PROJECTS_OVERRIDE="$PROJECTS" \
+        FM_CONFIG_OVERRIDE="$CONFIG" \
+        "$SCRIPT_DIR/fm-crew-state.sh" "$ID" 2>/dev/null || true
+    )
+    [ -n "$state_line" ] || state_line='state: unknown · source: unavailable'
+    state_next=$((SECONDS + STATE_REFRESH_SECS))
+  fi
   # FM_GUARD_READ_ONLY=1: this background pane is a non-owning guard caller.
   # fm-peek.sh runs fm-guard.sh, and the mutating path would claim (or clear)
   # the once-per-episode WATCHER DOWN banner here, where no agent reads it,
@@ -69,7 +86,6 @@ while [ -f "$META" ]; do
   [ -n "$backend" ] || backend=tmux
   project=${project##*/}
   [ -n "$project" ] || project=-
-  [ -n "$state_line" ] || state_line='state: unknown · source: unavailable'
   [ -n "$peek_out" ] || peek_out='(no pane output available)'
 
   printf '\033[H\033[2J'

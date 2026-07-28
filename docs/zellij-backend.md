@@ -93,12 +93,15 @@ Zellij owns one additional supervision-only tab per firstmate home, titled `fm-s
 The task runtime contract is unchanged: each task still executes in its own tab.
 The supervisor tab is rebuilt by `bin/fm-supervisor-panes.sh` after successful spawn, after teardown, and on the locked path during `bin/fm-session-start.sh`.
 Each supervisor pane runs `bin/fm-supervisor-pane-loop.sh`, which refreshes `bin/fm-crew-state.sh` plus bounded `bin/fm-peek.sh` output until the task metadata disappears.
+These panes poll forever while their crew is alive, so the loop keeps two separate cadences: the redraw and its peek run on the refresh interval, while the much more expensive `bin/fm-crew-state.sh` lookup - a `no-mistakes axi status` in the crew worktree plus several git probes - runs on its own slower interval and its last line is reused in between.
+Steady-state cost per crew is therefore one pipeline-CLI run-state lookup a minute rather than one every redraw, at the price of a run-state line that can lag the peek output by up to one state interval.
 Every supervisor pane is titled `fm-<id>`: later panes get that title from `new-pane --name`, and the seed pane is titled with a follow-up `rename-pane -p <pane-id>` because `new-tab --name` names the tab only (best-effort, since the title is cosmetic).
 When no active non-secondmate zellij crews remain, reconciliation closes the supervisor tab instead of leaving an empty surface behind.
 Other backends currently no-op for this feature.
 
 The pane command runs under the zellij server process, so the reconciler passes everything the loop needs through an explicit `env` allow-list.
-`FM_SUPERVISOR_REFRESH_SECS` and `FM_SUPERVISOR_PEEK_LINES` tune the loop and are forwarded into that allow-list only when set in the environment of the command that triggers reconciliation; [`configuration.md`](configuration.md#environment-variables) owns their defaults and fallback handling.
+That allow-list forwards the caller-resolved `FM_STATE_OVERRIDE`, `FM_DATA_OVERRIDE`, `FM_PROJECTS_OVERRIDE`, and `FM_CONFIG_OVERRIDE` directories rather than hardcoded home-relative defaults, so the crews the reconciler discovers and the metadata each pane reads always come from the same home.
+`FM_SUPERVISOR_REFRESH_SECS`, `FM_SUPERVISOR_STATE_REFRESH_SECS`, and `FM_SUPERVISOR_PEEK_LINES` tune the loop and are forwarded into that allow-list only when set in the environment of the command that triggers reconciliation; [`configuration.md`](configuration.md#environment-variables) owns their defaults and fallback handling.
 The loop peeks with `FM_GUARD_READ_ONLY=1`: it is a non-owning guard caller, so it must never claim or clear `bin/fm-guard.sh`'s once-per-episode watcher-down banner from a background pane no agent is reading.
 
 ## Active limits
