@@ -1295,6 +1295,55 @@ EOF
   pass "OpenCode watcher plugin sources the effective config"
 }
 
+test_opencode_primary_watch_plugin_arms_trello_only_home() {
+  local plugin repo home log out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-trello-only-root"
+  home="$TMP_ROOT/opencode-trello-only-home"
+  log="$TMP_ROOT/opencode-trello-only.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  printf 'export FM_CHECK_INTERVAL=60\n' > "$home/config/trello-mode.env"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'interval=%s\n' "${FM_CHECK_INTERVAL:-missing}" >> "${FM_ARM_LOG:?}"
+printf 'watcher: healthy pid=1 (beacon 0s)\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) {
+  console.error("watch arm did not run");
+  process.exit(1);
+}
+const text = readFileSync(process.env.FM_ARM_LOG, "utf8");
+if (!text.includes("interval=60")) {
+  console.error(text);
+  process.exit(1);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode watch plugin must arm a Trello-only home and source its cadence"
+  [ -z "$out" ] || fail "OpenCode Trello-only test printed output: $out"
+  pass "OpenCode watcher plugin arms a Trello-only home"
+}
+
 test_opencode_primary_watch_plugin_requires_session_lock() {
   local plugin repo home log out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -2142,6 +2191,7 @@ test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_plugin_package_boundary_is_explicit_esm
 test_opencode_primary_watch_plugin_uses_effective_state_home
 test_opencode_primary_watch_plugin_sources_effective_config
+test_opencode_primary_watch_plugin_arms_trello_only_home
 test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake

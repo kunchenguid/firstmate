@@ -1216,6 +1216,30 @@ EOF
   pass "session start emits X-mode cadence guidance in the harness supervision block"
 }
 
+test_next_step_sources_trello_mode_cadence() {
+  local rec root home fakebin out
+  rec=$(new_world next-step-trello)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  fm_fake_exit0 "$fakebin" curl jq
+  mkdir -p "$home/config"
+  printf 'TRELLO_API_KEY=key\nTRELLO_TOKEN=token\nTRELLO_BOARD_SHORTLINK=board\n' \
+    > "$home/config/trello.env"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "TRELLO: control plane on" "bootstrap did not activate Trello mode"
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: claude" "supervision block missing"
+  assert_contains "$out" "- Trello mode: active" "supervision block did not mention Trello cadence"
+  assert_contains "$out" "$home/config/trello-mode.env" "supervision block did not render the Trello cadence path"
+  assert_contains "$out" "A control-plane polling mode is active" "next step did not retain Trello-only supervision"
+
+  pass "session start emits Trello cadence guidance for a Trello-only home"
+}
+
 test_next_step_afk_delegates_to_daemon() {
   local rec root home fakebin out
   rec=$(new_world next-step-afk)
@@ -1412,6 +1436,7 @@ test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
+test_next_step_sources_trello_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization

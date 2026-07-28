@@ -99,7 +99,7 @@ Approved setup nodes are:
 - `source <x-mode path>` or `. <x-mode path>`.
 - `[ -f <x-mode path> ] && source <x-mode path>` and the equivalent dot form.
 
-The allowed x-mode paths are `config/x-mode.env`, `./config/x-mode.env`, and an absolute path that normalizes to `<active-firstmate-home>/config/x-mode.env`.
+The allowed cadence paths are `config/x-mode.env`, `./config/x-mode.env`, `config/trello-mode.env`, `./config/trello-mode.env`, and absolute paths that normalize to either file under the active firstmate home's `config/` directory.
 An absolute x-mode path outside the active home is not an approved setup node.
 
 Approved nodes may be separated by `;`, a real newline, or `&&`.

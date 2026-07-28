@@ -25,6 +25,7 @@
   ],
   "readmeSetupTargets": [
     "docs/configuration.md",
+    "docs/trello-control-plane.md",
     "docs/wedge-alarm.md",
     "docs/tmux-backend.md",
     "docs/herdr-backend.md",
@@ -176,6 +177,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/trello/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -240,6 +245,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/trello.env",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/wedge-alarm",
       "audience": "operator-example"
     },
@@ -301,6 +310,10 @@
     },
     {
       "path": "docs/tmux-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/trello-control-plane.md",
       "audience": "operator-current"
     },
     {

@@ -85,6 +85,12 @@ case "$cmd" in
     # Arm the watcher so the poll runs even with no fleet work (Trello mode keeps
     # the watcher up, X-mode style). Best-effort; tests set FM_TRELLO_NO_ARM=1.
     if [ -z "${FM_TRELLO_NO_ARM:-}" ] && [ -x "$SCRIPT_DIR/fm-watch-arm.sh" ]; then
+      # Trello is sourced first and X last so a home running both control planes
+      # keeps the faster X-mode cadence.
+      # shellcheck source=/dev/null
+      [ -f "$FM_HOME/config/trello-mode.env" ] && . "$FM_HOME/config/trello-mode.env"
+      # shellcheck source=/dev/null
+      [ -f "$FM_HOME/config/x-mode.env" ] && . "$FM_HOME/config/x-mode.env"
       "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 || true
     fi
     exit 0

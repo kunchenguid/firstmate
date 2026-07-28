@@ -65,7 +65,9 @@ If the work turns out to be blocked, leave the card in In Progress (you own it n
 2. Move to In Progress, strip the `go` label, and comment the pickup, same as the Inbox handler (status block as a comment, description left intact).
 3. Act on the decision: if it approves an existing task's next step, steer that task (`fm-send`) or merge per the project's mode and the captain's standing rules; if it authorizes new work, dispatch it. Bind the card if a new task is spawned.
 
-A `go` label plus a comment is the same decision signal as the Ready lane; treat it identically. Stripping the `go` label on pickup matters: an unbound card that keeps a `go` label would re-fire `trello-ready` on the next comment, so removing it (plus binding the card) is what keeps later comments classified as nudges.
+A fresh `go` label transition plus a comment is the same decision signal as the Ready lane; treat it identically even when task metadata already binds the card.
+Stripping the `go` label on pickup matters because the seen marker distinguishes a fresh captain label transition from an old label on a bound In Progress card.
+Ready and fresh `go` commands are captain-authoritative; task bindings classify comments and hold transitions only while the card remains in In Progress or Needs Input.
 
 ### `trello-nudge <card> <task>` - extra input for a live task
 
@@ -91,6 +93,7 @@ The board is also a dashboard.
 When you drive a task through its lifecycle, keep its card in step with `bin/fm-trello.sh`: move it to In Review with the PR link when it is ready, to Done on merge, and post a fresh status block as a COMMENT on material state changes.
 For a captain-originated card (Inbox/Ready), never overwrite the description with `describe` - the description holds the captain's request text; the status block always goes in a comment. Reserve `describe` for a card firstmate itself created with `create-card`, whose description is firstmate's to own.
 Record the binding with `bin/fm-trello.sh bind <task-id> <card>` and drop it on teardown with `bin/fm-trello.sh unbind <task-id>`.
+Binding a card to a task removes the same card from any other task metadata, so one card has at most one authoritative task binding.
 Deep automatic mirroring wired into the spawn/status/teardown scripts is a planned fast-follow; until then this mirroring is your responsibility on captain-facing milestones.
 
 ## Pause, start, hibernate

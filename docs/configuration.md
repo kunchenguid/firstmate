@@ -447,7 +447,10 @@ Never describe this path as at-least-once, no-loss, or lossless.
 
 The Trello control plane makes a board both a fleet dashboard and a two-way command surface, opt-in via a non-empty, complete `config/trello.env`.
 `docs/trello-control-plane.md` is the single owner of the full contract - activation, bootstrap artifacts, lanes, the ownership model, poll triggers and idempotency, pause/hibernate, and webhooks-as-a-future-enhancement.
-Like X mode it is purely additive: bootstrap drops `state/trello-watch.check.sh` (a check shim running `bin/fm-trello-poll.sh`) and `config/trello-mode.env` (`FM_CHECK_INTERVAL=60`, once per minute) when the config is present, and removes them when it is absent or incomplete, without touching any watcher-backbone file.
+Like X mode it is purely additive: bootstrap drops and trust-registers `state/trello-watch.check.sh` (a check shim running `bin/fm-trello-poll.sh`) and writes `config/trello-mode.env` (`FM_CHECK_INTERVAL=60`, once per minute) when the config is present, and removes those artifacts when it is absent or incomplete, without touching any watcher-backbone file.
+Watcher startup, guard repair, session-start, and native harness arm paths source the generated cadence file.
+Trello-only configured homes remain supervision-eligible with no ordinary task metadata.
+When X mode is also active, its cadence file is sourced after Trello's so the faster X cadence wins.
 `api.trello.com` is an external host, reached only when the config is present; credentials are passed as query params through a `0600` `-K` curl config file so they never appear in argv.
 
 ## Environment variables

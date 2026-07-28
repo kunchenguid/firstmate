@@ -25,8 +25,8 @@
 #   trello_lane_name_for <list-id>     - resolve a list id back to its lane name
 #   trello_safe_cardid <id>            - 0 when id is a safe path slug
 #   trello_marker_path <cardid>        - state/.trello-seen-<cardid>
-#   trello_marker_read <cardid>        - print "<dateLastActivity>\t<idList>" or nothing
-#   trello_marker_write <cardid> <date> <list-id>
+#   trello_marker_read <cardid>        - print date/list/go/comment state or nothing
+#   trello_marker_write <cardid> <date> <list-id> [go-state] [comment-count]
 #   trello_bump_seen <cardid>          - fetch the card and record its current marker
 #   trello_meta_bind <taskid> <cardid> - write trello_card=<cardid> into the task meta
 #   trello_meta_unbind <taskid>        - remove the trello_card= line
@@ -163,7 +163,9 @@ trello_marker_path() {
   printf '%s/.trello-seen-%s' "${STATE:-${FM_HOME:-$FM_ROOT}/state}" "$1"
 }
 
-# Print the seen marker as "<dateLastActivity>\t<idList>" (or nothing when absent).
+# Print the seen marker as
+# "<dateLastActivity>\t<idList>\t<go-state>\t<comment-count>".
+# The last two fields are additive: readers accept legacy date/list-only markers.
 trello_marker_read() {
   local p; p=$(trello_marker_path "$1")
   [ -f "$p" ] || return 0
@@ -171,10 +173,13 @@ trello_marker_read() {
 }
 
 trello_marker_write() {
-  local p state; p=$(trello_marker_path "$1")
+  local p state go_state comments
+  p=$(trello_marker_path "$1")
   state=${STATE:-${FM_HOME:-$FM_ROOT}/state}
+  go_state=${4:-}
+  comments=${5:-}
   mkdir -p "$state" 2>/dev/null || return 1
-  printf '%s\t%s\n' "$2" "$3" > "$p" 2>/dev/null || return 1
+  printf '%s\t%s\t%s\t%s\n' "$2" "$3" "$go_state" "$comments" > "$p" 2>/dev/null || return 1
 }
 
 # Fetch the current card and record its dateLastActivity + list id as the seen
@@ -183,29 +188,46 @@ trello_marker_write() {
 # advances dateLastActivity past this marker. Best-effort: a fetch failure leaves
 # the marker as-is and returns non-zero.
 trello_bump_seen() {
-  local cardid=$1 body code date list
+  local cardid=$1 body code date list go_state comments
   trello_safe_cardid "$cardid" || return 1
   body=$(mktemp "${TMPDIR:-/tmp}/fm-trello-bump.XXXXXX") || return 1
-  code=$(trello_api GET "1/cards/$cardid?fields=dateLastActivity,idList" "$body") || { rm -f "$body"; return 1; }
+  code=$(trello_api GET "1/cards/$cardid?fields=dateLastActivity,idList,labels,badges" "$body") || { rm -f "$body"; return 1; }
   if [ "$code" != "200" ]; then rm -f "$body"; return 1; fi
   date=$(jq -r '.dateLastActivity // ""' "$body" 2>/dev/null)
   list=$(jq -r '.idList // ""' "$body" 2>/dev/null)
+  go_state=$(jq -r '
+    if any(.labels[]?; ((.name // "") | ascii_downcase | gsub("[^a-z0-9]"; "")) == "go")
+    then "1" else "0" end' "$body" 2>/dev/null)
+  comments=$(jq -r '.badges.comments // 0' "$body" 2>/dev/null)
   rm -f "$body"
-  trello_marker_write "$cardid" "$date" "$list"
+  trello_marker_write "$cardid" "$date" "$list" "$go_state" "$comments"
 }
 
 # Write/replace trello_card=<cardid> in the task meta. The meta is firstmate-owned
 # operational state; this is the single writer of the outbound binding the poll
 # reads to route per-task nudges and holds.
 trello_meta_bind() {
-  local taskid=$1 cardid=$2 meta tmp state
+  local taskid=$1 cardid=$2 meta other tmp state
   state=${STATE:-${FM_HOME:-$FM_ROOT}/state}
   meta="$state/$taskid.meta"
   [ -f "$meta" ] || return 1
-  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-trello-meta.XXXXXX") || return 1
+
+  # Establish the requested binding first, then remove this exact card from every
+  # other task. This makes bind the mutation-time owner of the one-card/one-task
+  # invariant without discarding unrelated card bindings.
+  tmp=$(mktemp "$state/.fm-trello-meta.XXXXXX") || return 1
   grep -v '^trello_card=' "$meta" > "$tmp" 2>/dev/null || true
   printf 'trello_card=%s\n' "$cardid" >> "$tmp"
   mv -f "$tmp" "$meta" 2>/dev/null || { rm -f "$tmp"; return 1; }
+
+  for other in "$state"/*.meta; do
+    [ -f "$other" ] || continue
+    [ "$other" != "$meta" ] || continue
+    grep -Fx "trello_card=$cardid" "$other" >/dev/null 2>&1 || continue
+    tmp=$(mktemp "$state/.fm-trello-meta.XXXXXX") || return 1
+    grep -v -F -x "trello_card=$cardid" "$other" > "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$other" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  done
 }
 
 trello_meta_unbind() {

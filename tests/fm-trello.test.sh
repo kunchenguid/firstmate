@@ -329,6 +329,29 @@ test_cli_bind_unbind_card_for() {
   pass "fm-trello.sh bind/unbind/card-for manage the task meta binding"
 }
 
+test_cli_rebind_enforces_one_authoritative_binding() {
+  local home fakebin out
+  home="$TMP_ROOT/cli-rebind"; mkdir -p "$home/state"
+  write_config "$home"
+  fakebin=$(make_fake_curl "$home")
+  fm_write_meta "$home/state/task-a.meta" "window=fm-task-a"
+  fm_write_meta "$home/state/task-b.meta" "window=fm-task-b"
+
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" \
+    FAKE_CARD_BODY='{"dateLastActivity":"2026-07-15T01:00:00.000Z","idList":"L-ip","labels":[],"badges":{"comments":0}}' \
+    "$ROOT/bin/fm-trello.sh" bind task-a card42 >/dev/null
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" \
+    FAKE_CARD_BODY='{"dateLastActivity":"2026-07-15T02:00:00.000Z","idList":"L-ip","labels":[],"badges":{"comments":0}}' \
+    "$ROOT/bin/fm-trello.sh" bind task-b card42)
+
+  [ "$out" = "card42" ] || fail "rebind must echo the card id"
+  assert_no_grep "trello_card=card42" "$home/state/task-a.meta" "rebind must remove the old authoritative binding"
+  assert_grep "trello_card=card42" "$home/state/task-b.meta" "rebind must record the new authoritative binding"
+  [ "$(grep -lFx 'trello_card=card42' "$home/state"/*.meta | wc -l | tr -d ' ')" = "1" ] \
+    || fail "one card must have exactly one authoritative task binding"
+  pass "fm-trello.sh bind atomically converges a card to one authoritative binding"
+}
+
 test_cli_pause_and_start() {
   local home fakebin out rc
   home="$TMP_ROOT/cli-pause"; mkdir -p "$home/state"
@@ -457,18 +480,44 @@ test_poll_ignores_firstmate_owned_lanes() {
   pass "poll ignores firstmate-owned lanes and leaves no markers for them"
 }
 
-test_poll_bound_card_never_refires_ready() {
+test_poll_ready_authority_outranks_stale_and_current_bindings() {
   local home out
-  # A card bound to a live task can NEVER re-fire trello-ready in any lane.
-  # (1) Bound card the captain moves INTO the Ready lane -> fires nothing.
-  home="$TMP_ROOT/poll-bound-ready"; mkdir -p "$home/state"
+  # A completed task's stale metadata cannot suppress a captain Ready move.
+  home="$TMP_ROOT/poll-stale-bound-ready"; mkdir -p "$home/state"
   write_config "$home"
-  fm_write_meta "$home/state/task-r.meta" "window=fm-task-r" "trello_card=crb"
-  printf '2026-07-15T09:00:00.000Z\tL-ip\n' > "$home/state/.trello-seen-crb"
-  local cards='[{"id":"crb","name":"bound","idList":"L-ready","dateLastActivity":"2026-07-15T10:00:00.000Z","labels":[],"badges":{"comments":1}}]'
+  fm_write_meta "$home/state/stale-task.meta" "window=fm-stale-task" "trello_card=crb"
+  printf 'done: original worker completed\n' > "$home/state/stale-task.status"
+  printf '2026-07-15T09:00:00.000Z\tL-ip\t0\t1\n' > "$home/state/.trello-seen-crb"
+  local cards='[{"id":"crb","name":"stale bound","idList":"L-ready","dateLastActivity":"2026-07-15T10:00:00.000Z","labels":[],"badges":{"comments":2}}]'
   out=$(run_poll "$home" "$cards")
-  [ -z "$out" ] || fail "a bound card moved into Ready must NOT fire trello-ready (got: $out)"
-  # (2) Bound In-Progress card carrying a stray go label + comment -> nudge, not ready.
+  [ "$out" = "trello-ready crb" ] || fail "a stale binding must not suppress a Ready move (got: $out)"
+
+  # A still-current binding cannot suppress the same captain-authoritative move.
+  home="$TMP_ROOT/poll-current-bound-ready"; mkdir -p "$home/state"
+  write_config "$home"
+  fm_write_meta "$home/state/current-task.meta" "window=fm-current-task" "trello_card=current-card"
+  printf 'working: active\n' > "$home/state/current-task.status"
+  printf '2026-07-15T09:00:00.000Z\tL-ip\t0\t1\n' > "$home/state/.trello-seen-current-card"
+  local current_cards='[{"id":"current-card","name":"current bound","idList":"L-ready","dateLastActivity":"2026-07-15T10:00:00.000Z","labels":[],"badges":{"comments":2}}]'
+  out=$(run_poll "$home" "$current_cards")
+  [ "$out" = "trello-ready current-card" ] || fail "a current binding must not suppress a Ready move (got: $out)"
+
+  # A fresh go-label transition with a comment is equally authoritative.
+  home="$TMP_ROOT/poll-current-bound-fresh-go"; mkdir -p "$home/state"
+  write_config "$home"
+  fm_write_meta "$home/state/go-task.meta" "window=fm-go-task" "trello_card=go-card"
+  printf '2026-07-15T09:00:00.000Z\tL-ip\t0\t1\n' > "$home/state/.trello-seen-go-card"
+  local go_cards='[{"id":"go-card","name":"approved","idList":"L-ip","dateLastActivity":"2026-07-15T10:00:00.000Z","labels":[{"name":"go"}],"badges":{"comments":2}}]'
+  out=$(run_poll "$home" "$go_cards")
+  [ "$out" = "trello-ready go-card" ] || fail "a fresh go label plus comment must outrank a current binding (got: $out)"
+
+  pass "Ready/Go and fresh go-label commands outrank stale and current task bindings"
+}
+
+test_poll_bound_in_progress_comment_preserves_nudge_routing() {
+  local home out
+  # A legacy marker cannot prove that a leftover go label was newly applied.
+  # A fresh comment therefore stays a nudge rather than becoming a pickup.
   home="$TMP_ROOT/poll-bound-golabel"; mkdir -p "$home/state"
   write_config "$home"
   fm_write_meta "$home/state/task-g.meta" "window=fm-task-g" "trello_card=cgb"
@@ -476,7 +525,27 @@ test_poll_bound_card_never_refires_ready() {
   local cards2='[{"id":"cgb","name":"bound go","idList":"L-ip","dateLastActivity":"2026-07-15T10:00:00.000Z","labels":[{"name":"go"}],"badges":{"comments":2}}]'
   out=$(run_poll "$home" "$cards2")
   [ "$out" = "trello-nudge cgb task-g" ] || fail "a bound In-Progress card with a stray go label must nudge, not re-fire ready (got: $out)"
-  pass "poll never re-fires trello-ready for a card bound to a live task"
+  pass "bound In-Progress comments preserve nudge routing when a go label is not proven fresh"
+}
+
+test_poll_second_incident_sequence_ready_move_after_completed_binding() {
+  local home out cards
+  home="$TMP_ROOT/poll-second-incident"; mkdir -p "$home/state"
+  write_config "$home"
+  fm_write_meta "$home/state/INV-15-builder.meta" \
+    "window=fm-INV-15-builder" \
+    "trello_card=6a67c7bb72d04ab85b4c9a18"
+  printf 'done: original worker completed\n' > "$home/state/INV-15-builder.status"
+  printf '2026-07-27T10:00:00.000Z\tL-ip\t0\t1\n' \
+    > "$home/state/.trello-seen-6a67c7bb72d04ab85b4c9a18"
+  cards='[{"id":"6a67c7bb72d04ab85b4c9a18","name":"INV-15","idList":"L-ready","dateLastActivity":"2026-07-27T10:01:00.000Z","labels":[],"badges":{"comments":2}}]'
+
+  out=$(run_poll "$home" "$cards")
+  [ "$out" = "trello-ready 6a67c7bb72d04ab85b4c9a18" ] \
+    || fail "the second-incident Ready move must emit immediately (got: $out)"
+  out=$(run_poll "$home" "$cards")
+  [ -z "$out" ] || fail "the repaired incident must remain idempotent after the first wake (got: $out)"
+  pass "second incident: a completed binding cannot swallow the captain's Ready move"
 }
 
 test_poll_one_trigger_per_sweep() {
@@ -530,6 +599,9 @@ test_bootstrap_activates_on_config() {
   assert_contains "$out" "TRELLO: control plane on" "bootstrap must announce the control plane"
   assert_present "$home/state/trello-watch.check.sh" "bootstrap must drop the check shim"
   [ -x "$home/state/trello-watch.check.sh" ] || fail "the check shim must be executable"
+  [ "$(stat -f %Lp "$home/state/trello-watch.check.sh" 2>/dev/null || stat -c %a "$home/state/trello-watch.check.sh")" = "700" ] \
+    || fail "the Trello check shim must be private and executable"
+  assert_present "$home/state/trello-watch.check-trust" "bootstrap must bind the custom Trello check to its bytes"
   assert_grep "fm-trello-poll.sh" "$home/state/trello-watch.check.sh" "the shim must exec the poll script"
   assert_present "$home/config/trello-mode.env" "bootstrap must drop the cadence config"
   assert_grep "export FM_CHECK_INTERVAL=60" "$home/config/trello-mode.env" "cadence must be 60s (once per minute)"
@@ -538,7 +610,7 @@ test_bootstrap_activates_on_config() {
   sum2=$(cat "$home/state/trello-watch.check.sh" "$home/config/trello-mode.env" | shasum)
   [ "$sum1" = "$sum2" ] || fail "bootstrap Trello setup must be idempotent"
   n=$(find "$home/state" -maxdepth 1 -name 'trello-watch*' | wc -l | tr -d ' ')
-  [ "$n" = "1" ] || fail "bootstrap must not duplicate the shim (found $n)"
+  [ "$n" = "2" ] || fail "bootstrap must keep exactly one shim and one trust binding (found $n)"
   pass "bootstrap activates the Trello control plane from config/trello.env, idempotently"
 }
 
@@ -569,6 +641,7 @@ test_bootstrap_opt_out_cleanup() {
   out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "TRELLO: control plane off" "opt-out must announce control plane off when it removed artifacts"
   assert_absent "$home/state/trello-watch.check.sh" "opt-out must remove the shim"
+  assert_absent "$home/state/trello-watch.check-trust" "opt-out must remove the check trust binding"
   assert_absent "$home/config/trello-mode.env" "opt-out must remove the cadence config"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_not_contains "$out" "TRELLO:" "steady-state off must be silent"
@@ -591,13 +664,16 @@ test_cli_get_and_list_cards
 test_cli_rejects_unsafe_card_id
 test_cli_http_error_fails_loudly
 test_cli_bind_unbind_card_for
+test_cli_rebind_enforces_one_authoritative_binding
 test_cli_pause_and_start
 test_poll_inbox_trigger_and_idempotency
 test_poll_ready_trigger_lane_and_go_label
 test_poll_nudge_on_bound_live_task_comment
 test_poll_hold_on_label_and_move_back
 test_poll_ignores_firstmate_owned_lanes
-test_poll_bound_card_never_refires_ready
+test_poll_ready_authority_outranks_stale_and_current_bindings
+test_poll_bound_in_progress_comment_preserves_nudge_routing
+test_poll_second_incident_sequence_ready_move_after_completed_binding
 test_poll_one_trigger_per_sweep
 test_poll_reports_error_once
 test_bootstrap_activates_on_config

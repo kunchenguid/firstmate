@@ -75,6 +75,7 @@ config/herdr-presentation-spaces  optional presence flag for Herdr's default-off
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
+config/trello-mode.env  generated Trello watcher cadence; LOCAL, gitignored; source before X mode when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         this home's domain-local captain preferences and working style; LOCAL, gitignored, canonical even if harness memory mirrors it, and updated with inspect-then-update
@@ -529,10 +530,12 @@ It ships inside this repo for every user but is **inert until opted in**, so a u
 The plane is off unless this home's gitignored `config/trello.env` supplies all three of `TRELLO_API_KEY`, `TRELLO_TOKEN`, and `TRELLO_BOARD_SHORTLINK` (copy `docs/examples/trello.env`; never commit a real token).
 Bootstrap wires the board poll automatically and purely additively from that presence, exactly like X mode; `docs/trello-control-plane.md` owns the full contract - activation, bootstrap artifacts, lanes, poll mechanics, and pause/hibernate - and `docs/configuration.md` "Trello control plane" has the env-var reference.
 The control plane is a reason to keep the watcher armed even with no fleet work, so a Trello-only user is still served.
+Every watcher arm and repair path sources the generated `config/trello-mode.env`; when X mode is also active, X cadence is sourced second and remains authoritative.
 
 **Ownership model (the conflict-avoidance rule that must survive here).**
 The captain owns exactly two moves: creating a card in 📥 Inbox (a new task request) and moving a card to 🟢 Ready / Go, or adding a `go` label, plus a comment (a decision given).
 Firstmate owns every other lane and drives cards through them, and NEVER places a card into Inbox or Ready, so any card there is unambiguously captain-driven.
+Captain-owned Ready and fresh `go` commands outrank any current or stale task binding; bindings classify only In Progress and Needs Input activity.
 On pickup, immediately move the card to 🔨 In Progress and comment "picked up - working".
 
 **Handling.**

@@ -18,8 +18,8 @@
 #
 # Triggers emitted (becomes the watcher's check: wake):
 #   trello-inbox <cardid>            a new/updated card in Inbox (= new task request)
-#   trello-ready <cardid>            an UNBOUND card in Ready/Go, or `go`-labeled +
-#                                    commented (= decision given)
+#   trello-ready <cardid>            a card in Ready/Go, or a freshly `go`-labeled
+#                                    card with a comment (= captain decision)
 #   trello-nudge <cardid> <taskid>   a new captain comment on a firstmate-owned card
 #                                    bound to a live task, in In Progress / Needs Input
 #                                    (= extra input; relay to the worker)
@@ -31,16 +31,17 @@
 # differing-arity trigger lines at once would collapse into an unparseable blob.
 # Any other firing-eligible card keeps its marker and fires on a later sweep.
 #
-# A card bound to a live task can only ever fire trello-nudge/trello-hold, never
-# re-fire trello-ready: the Ready/go pickup branches are scoped to unbound cards.
+# Ready/Go and a fresh captain-applied `go` label outrank any task binding.
+# Binding affects only In Progress and Needs Input nudge/hold routing.
 #
 # Idempotency: a per-card seen marker state/.trello-seen-<cardid> records the
-# card's dateLastActivity and list id. A card fires only when activity advanced
-# past the marker (or the marker is absent, for the inherently-new Inbox/Ready
-# cases). Every fm-trello.sh mutation bumps this marker, so firstmate's own edits
-# never wake it - only a genuine captain edit does. Distinguishing a per-task pause
-# (move back to Needs Input) from a nudge (comment) uses the marker's recorded
-# prior list id.
+# card's dateLastActivity, list id, go-label state, and comment count.
+# A card fires only when activity advanced past the marker (or the marker is
+# absent, for the inherently-new Inbox/Ready cases).
+# Every fm-trello.sh mutation bumps this marker, so firstmate's own edits never
+# wake it - only a genuine captain edit does.
+# Distinguishing a per-task pause (move back to Needs Input) from a nudge
+# (comment) uses the marker's recorded prior list id.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -113,7 +114,10 @@ done
 # Print the task id bound to a card id, or nothing.
 bound_task() {
   [ -n "$BOUND_MAP" ] || return 0
-  printf '%s' "$BOUND_MAP" | awk -F'\t' -v c="$1" '$1==c{print $2; exit}'
+  printf '%s' "$BOUND_MAP" \
+    | awk -F'\t' -v c="$1" '$1==c{print $2}' \
+    | LC_ALL=C sort \
+    | head -n1
 }
 
 has_label() {
@@ -132,27 +136,40 @@ jq -c '.[]' "$CARDS_FILE" 2>/dev/null | while IFS= read -r card; do
   labels=$(printf '%s' "$card" | jq -c '.labels // []')
   comments=$(printf '%s' "$card" | jq -r '.badges.comments // 0')
 
-  # Read prior seen marker: "<date>\t<listid>".
+  # Read prior seen marker:
+  # "<date>\t<listid>\t<go-state>\t<comment-count>".
+  # Legacy date/list-only markers remain valid and leave the new fields unknown.
   marker=$(trello_marker_read "$cardid")
-  prev_date=${marker%%$'\t'*}
-  prev_list=${marker#*$'\t'}
-  [ "$prev_list" = "$marker" ] && prev_list=
+  IFS=$'\t' read -r prev_date prev_list prev_go prev_comments <<EOF
+$marker
+EOF
   seen=0; [ -n "$marker" ] && seen=1
   changed=0; { [ "$seen" -eq 0 ] || [ "$date" != "$prev_date" ]; } && changed=1
+  current_go=0
+  has_label "$labels" "go" && current_go=1
+  fresh_go=0
+  if [ "$current_go" -eq 1 ] && [ "$comments" -gt 0 ] 2>/dev/null; then
+    if [ "$seen" -eq 0 ]; then
+      fresh_go=1
+    elif [ "$prev_go" = "0" ] \
+      && [ -n "$prev_comments" ] \
+      && [ "$comments" -gt "$prev_comments" ] 2>/dev/null; then
+      fresh_go=1
+    fi
+  fi
 
   taskid=$(bound_task "$cardid")
   fire=""
 
-  # A card bound to a live task can ONLY ever fire trello-nudge/trello-hold and
-  # NEVER re-fire trello-ready: the go-label and Ready-lane pickup branches are
-  # scoped to UNBOUND cards ([ -z "$taskid" ]), so a captain comment on a bound
-  # In-Progress card - even one carrying a leftover go label, or moved into the
-  # Ready lane - classifies as a nudge/hold or fires nothing, never a re-pickup.
+  # Captain-owned Ready/Go semantics outrank binding. A stale, completed, dead,
+  # duplicate, or still-current task meta cannot suppress an explicit Ready move.
+  # A fresh go-label transition is also authoritative; an old go label does not
+  # turn an ordinary bound In-Progress comment into a new pickup.
   if [ -n "$INBOX_ID" ] && [ "$idlist" = "$INBOX_ID" ]; then
     [ "$changed" -eq 1 ] && fire="trello-inbox $cardid"
-  elif [ -z "$taskid" ] && has_label "$labels" "go" && [ "$comments" -gt 0 ] 2>/dev/null; then
+  elif [ "$fresh_go" -eq 1 ]; then
     [ "$changed" -eq 1 ] && fire="trello-ready $cardid"
-  elif [ -z "$taskid" ] && [ -n "$READY_ID" ] && [ "$idlist" = "$READY_ID" ]; then
+  elif [ -n "$READY_ID" ] && [ "$idlist" = "$READY_ID" ]; then
     [ "$changed" -eq 1 ] && fire="trello-ready $cardid"
   elif [ -n "$taskid" ] && { [ "$idlist" = "$INPROGRESS_ID" ] || [ "$idlist" = "$NEEDSINPUT_ID" ]; }; then
     if [ "$changed" -eq 1 ]; then
@@ -176,7 +193,7 @@ jq -c '.[]' "$CARDS_FILE" 2>/dev/null | while IFS= read -r card; do
   # then stop; every other firing-eligible card keeps its existing marker
   # UNCHANGED and fires on a subsequent sweep, so no trigger is dropped.
   if [ -n "$fire" ]; then
-    trello_marker_write "$cardid" "$date" "$idlist" || true
+    trello_marker_write "$cardid" "$date" "$idlist" "$current_go" "$comments" || true
     printf '%s\n' "$fire"
     break
   fi

@@ -24,9 +24,11 @@ The Trello CLI and the Atlassian gateway cannot post comments, so the control pl
 ## Bootstrap wiring
 
 The locked session-start bootstrap step turns the config into local generated state, purely additively, without touching any watcher-backbone file.
-It writes `state/trello-watch.check.sh`, a check shim that runs `bin/fm-trello-poll.sh`, and `config/trello-mode.env`, which exports `FM_CHECK_INTERVAL=60` for watcher processes in that home.
+It writes `state/trello-watch.check.sh`, registers that shim in `state/trello-watch.check-trust`, and writes `config/trello-mode.env`, which exports `FM_CHECK_INTERVAL=60` for watcher processes in that home.
 The watcher runs every `*.check.sh` shim each check cycle and turns any stdout into a `check:` wake, so the poll needs no watcher edit.
 A Trello home polls once per minute instead of the default 300; only a Trello (or X) home speeds up because a non-Trello home has no `config/trello-mode.env`.
+Every watcher startup, guard repair, session-start next step, and native harness arm path sources `config/trello-mode.env` when present.
+When both control planes are active, Trello cadence is sourced first and X cadence is sourced second, so the faster X setting remains authoritative.
 `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` only at process start, so a cadence transition (opt-in while a watcher is already running, or opt-out) is applied by restarting the home-scoped watcher through the emitted harness protocol; bootstrap never restarts the watcher itself.
 When the config is removed or incomplete, the next locked session-start bootstrap step removes those artifacts; steady-state off is silent and writes nothing.
 Because Trello mode is a reason to keep the watcher armed even with no fleet work, a Trello-only user is still served.
@@ -70,20 +72,24 @@ One board-cards fetch (`GET /1/boards/<shortLink>/cards`) gives every open card'
 It emits at most ONE trigger line per sweep, which becomes the watcher's `check:` wake payload:
 
 - `trello-inbox <cardid>` - a new or updated card in Inbox (a new task request).
-- `trello-ready <cardid>` - an unbound card in Ready / Go, or an unbound `go`-labeled card that also has a comment (a decision given).
+- `trello-ready <cardid>` - any card in Ready / Go, or a card with a fresh captain-applied `go` label transition plus a comment (a decision given), regardless of task binding.
 - `trello-nudge <cardid> <taskid>` - a new captain comment on a firstmate-owned card that is bound to a live task and sits in In Progress or Needs Input (extra input; firstmate relays it to that task's worker without changing the lane).
 - `trello-hold <cardid> <taskid>` - a `hold` label on, or a captain move back to Needs Input of, a bound In-Progress card (a per-task pause; firstmate tells that worker to pause).
 
 Only ONE trigger is emitted per sweep, matching `fm-x-poll.sh`'s one-line-per-sweep contract: the watcher captures all of the shim's stdout as a single wake payload and `fm_wake_clean_field` flattens newlines to spaces, so emitting several differing-arity trigger lines at once would collapse into an unparseable blob. Any other firing-eligible card keeps its marker and fires on a later sweep, so no trigger is dropped.
 
-A card bound to a live task can only ever fire `trello-nudge`/`trello-hold`, never re-fire `trello-ready`: the Ready-lane and `go`-label pickup branches are scoped to unbound cards, so a captain comment on a bound In-Progress card - even one carrying a leftover `go` label, or moved into the Ready lane - classifies as a nudge/hold or fires nothing, never a wrong re-pickup. Only a card carrying a `trello_card=<cardid>` binding in some `state/<id>.meta` can fire a per-task nudge or hold; `bin/fm-trello.sh bind` records that binding, and the poll reads it.
+Captain-owned Ready and fresh `go` commands outrank task bindings, including current bindings and metadata left behind by completed or dead tasks.
+Bindings classify only firstmate-owned In Progress and Needs Input activity as `trello-nudge` or `trello-hold`, so a leftover `go` label on an already-seen bound card does not turn a later In Progress comment into a Ready command.
+`bin/fm-trello.sh bind` makes its target task the only authoritative metadata binding for a card by removing that exact card from other task metadata.
+The poll also resolves any legacy duplicate bindings deterministically by task id as a fail-safe read behavior.
 
 ### Idempotency
 
-A per-card seen marker `state/.trello-seen-<cardid>` records the card's `dateLastActivity` and current list id.
+A per-card seen marker `state/.trello-seen-<cardid>` records the card's `dateLastActivity`, current list id, `go` label state, and comment count.
 A card fires only when activity advanced past the marker (or the marker is absent, for the inherently-new Inbox and Ready cases), so the same activity never wakes firstmate twice.
 Every `bin/fm-trello.sh` mutation bumps the marker to the card's post-change state, so firstmate's own edits never wake it - only a genuine captain edit advances `dateLastActivity` beyond the marker.
 The poll distinguishes a per-task pause (a captain move back to Needs Input) from a nudge (a comment on a card firstmate already parked in Needs Input) using the marker's recorded prior list id.
+Legacy two-field markers remain readable and treat an existing `go` label as pre-existing rather than fresh.
 Cards in firstmate-owned lanes that are not bound leave no marker, so marker files stay bounded to relevant cards.
 
 ## `bin/fm-trello.sh`
