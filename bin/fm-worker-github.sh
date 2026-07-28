@@ -29,7 +29,9 @@ merge_shaped=0
 
 # gh accepts its persistent flags between `pr` and the subcommand it runs, so
 # the scan skips option words and stops at the first real subcommand instead of
-# testing the single word that follows `pr`.
+# testing the single word that follows `pr`. The subcommand list below must stay
+# identical to PR_SUBCOMMANDS in bin/fm-worker-command-policy.mjs so both layers
+# classify the same way; tests/fm-worker-merge-guard.test.sh fails when it drifts.
 scan_words() {
   local word scanning=0
   for word in "$@"; do
@@ -37,8 +39,7 @@ scan_words() {
       case "$word" in
         merge) merge_shaped=1; scanning=0 ;;
         -*) : ;;
-        checkout|checks|close|comment|create|diff|edit|list|lock|ready|reopen|review|status|unlock|update-branch|view)
-          scanning=0 ;;
+        checkout|checks|close|comment|create|diff|edit|list|lock|ready|reopen|revert|review|status|unlock|update-branch|view) scanning=0 ;;
         *) : ;;
       esac
     fi

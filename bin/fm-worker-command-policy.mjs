@@ -6,7 +6,8 @@
 // This policy never executes, expands, or sources submitted command bytes.
 // It denies merge-shaped GitHub CLI operations in executed positions, including
 // path-qualified binaries, command/env wrappers, literal nested shells/eval,
-// command substitutions, same-command aliases, and literal binary variables.
+// command substitutions, same-command aliases, literal binary variables, and
+// `gh alias set` bodies that would expand into a merge.
 // Subcommand classification is option-aware because gh accepts its persistent
 // flags (-R/--repo and friends) between `pr` and the subcommand it runs.
 
@@ -60,9 +61,12 @@ function resolveExecutable(word, variables) {
 
 // Every `gh pr` subcommand except `merge`. A word that is neither an option nor
 // one of these is a flag value (`--repo owner/name`), so the scan continues.
+// bin/fm-worker-github.sh carries the same list for the PATH layer; the two must
+// stay identical, and tests/fm-worker-merge-guard.test.sh fails when they drift.
 const PR_SUBCOMMANDS = new Set([
   "checkout", "checks", "close", "comment", "create", "diff", "edit", "list",
-  "lock", "ready", "reopen", "review", "status", "unlock", "update-branch", "view",
+  "lock", "ready", "reopen", "revert", "review", "status", "unlock",
+  "update-branch", "view",
 ]);
 
 function hasPrMerge(args) {
@@ -83,12 +87,25 @@ function hasMergeApi(args) {
     || args.some((arg) => /\bmergePullRequest\b/.test(arg));
 }
 
+// `gh alias set <name> <body>` carries the body as one word, so re-split it and
+// classify it the same way bin/fm-worker-github.sh does at the PATH layer.
+function ghAliasBodyWords(args) {
+  if (args[0] !== "alias" || args[1] !== "set") return null;
+  return args.flatMap((arg) => arg.split(/\s+/).filter(Boolean));
+}
+
+function ghMergeShaped(args) {
+  if (hasPrMerge(args) || hasMergeApi(args)) return true;
+  const alias = ghAliasBodyWords(args);
+  return alias !== null && (hasPrMerge(alias) || hasMergeApi(alias));
+}
+
 function directMerge(position, variables, aliases, depth) {
   const resolved = resolveExecutable(position.command, variables);
   const name = executableName(resolved);
   const args = position.words.slice(position.index + 1).map((word) => word.value);
 
-  if ((name === "gh" || name === "gh-axi") && (hasPrMerge(args) || hasMergeApi(args))) return true;
+  if ((name === "gh" || name === "gh-axi") && ghMergeShaped(args)) return true;
 
   // A literal alias defined earlier in the same submitted shell program expands
   // before execution. Reclassify its body with the invocation arguments.

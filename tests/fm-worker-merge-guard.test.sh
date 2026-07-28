@@ -38,6 +38,13 @@ gh-axi pr --repo acme/api merge 792
 gh pr -R acme/api merge 792
 gh --repo acme/api pr merge 792
 bash -lc 'gh pr --repo acme/api merge 792'
+gh alias set land 'pr merge'
+gh-axi alias set land 'pr merge'
+/usr/local/bin/gh alias set land 'pr merge'
+gh alias set land 'pr --repo acme/api merge'
+gh alias set land --shell 'gh pr merge $1'
+gh alias set land 'api PUT /repos/acme/api/pulls/792/merge --silent'
+gh alias set land 'api graphql -f query=mutation{mergePullRequest(input:{})}'
 EOF
   while IFS= read -r command; do
     policy_is allow "$command"
@@ -48,6 +55,10 @@ gh pr checks 792
 gh pr review 792 --comment
 gh pr --repo acme/api view 792
 gh pr -R acme/api create --title merge-fix
+gh pr revert 792
+gh pr revert 792 --body merge
+gh alias set prs 'pr list'
+gh alias set co 'pr checkout'
 gh api GET /repos/acme/api/pulls/792
 printf '%s\n' 'gh pr merge 792'
 bash -lc "printf '%s\n' 'gh pr merge 792'"
@@ -250,6 +261,67 @@ test_production_spawn_is_backend_independent() {
   pass "worker merge guard: the central production spawn path is backend-independent"
 }
 
+test_both_enforcement_layers_classify_identically() {
+  local base fakebin real
+  base="$TMP_ROOT/layer-parity"
+  mkdir -p "$base"
+  fakebin=$(fm_fakebin "$base")
+  fm_fake_exit0 "$fakebin" real-gh
+  real="$fakebin/real-gh"
+
+  layers_agree() {
+    local expected=$1 command=gh arg quoted policy wrapper
+    shift
+    for arg in "$@"; do
+      quoted=$(printf '%s' "$arg" | sed "s/'/'\\\\''/g")
+      command="$command '$quoted'"
+    done
+    policy=$(node "$POLICY" --command "$command" 2>&1 | cut -f1) \
+      || fail "policy crashed for: $command"
+    if "$ROOT/bin/fm-worker-github.sh" --tool gh --real "$real" -- "$@" >/dev/null 2>&1; then
+      wrapper=allow
+    else
+      wrapper=deny
+    fi
+    [ "$policy" = "$expected" ] || fail "semantic policy expected $expected for '$command', got $policy"
+    [ "$wrapper" = "$expected" ] || fail "PATH wrapper expected $expected for '$command', got $wrapper"
+  }
+
+  layers_agree deny pr merge 792
+  layers_agree deny pr --repo acme/api merge 792 --squash
+  layers_agree deny alias set land 'pr merge'
+  layers_agree deny alias set land 'pr --repo acme/api merge'
+  # shellcheck disable=SC2016  # the gh alias body is passed through unexpanded
+  layers_agree deny alias set land --shell 'gh pr merge $1'
+  layers_agree deny alias set land 'api PUT /repos/acme/api/pulls/792/merge --silent'
+  layers_agree deny api PUT /repos/acme/api/pulls/792/merge
+  layers_agree allow pr revert 792
+  layers_agree allow pr --repo acme/api view 792
+  layers_agree allow pr create --title merge
+  layers_agree allow alias set prs 'pr list'
+  pass "worker merge guard: the semantic policy and the PATH wrapper classify identically"
+}
+
+test_pr_subcommand_lists_stay_in_sync() {
+  local policy_list wrapper_list
+  policy_list=$(sed -n '/^const PR_SUBCOMMANDS/,/^]);/p' "$POLICY" \
+    | grep -oE '"[a-z][a-z-]*"' | tr -d '"' | LC_ALL=C sort)
+  wrapper_list=$(grep -oE '^ *checkout\|[a-z|-]*\)' "$ROOT/bin/fm-worker-github.sh" \
+    | tr -d ' )' | tr '|' '\n' | LC_ALL=C sort)
+  [ -n "$policy_list" ] || fail "the semantic policy no longer exposes a readable PR_SUBCOMMANDS list"
+  [ -n "$wrapper_list" ] || fail "fm-worker-github.sh no longer exposes a readable pr subcommand list"
+  [ "$policy_list" = "$wrapper_list" ] \
+    || fail "the pr subcommand lists drifted between the two enforcement layers"$'\n'"policy: $policy_list"$'\n'"wrapper: $wrapper_list"
+  case "$policy_list" in
+    *revert*) : ;;
+    *) fail "the real gh pr revert subcommand is missing, so revert work is denied" ;;
+  esac
+  case "$policy_list" in
+    *merge*) fail "merge must never be listed as a subcommand that stops the scan" ;;
+  esac
+  pass "worker merge guard: both layers share one gh pr subcommand list that excludes merge"
+}
+
 test_grok_hook_follows_grok_home() {
   local base fakebin grok_home
   base="$TMP_ROOT/grok-home"
@@ -317,6 +389,8 @@ test_harness_installation_and_safe_refusal
 test_registered_transport_and_path_wrapper
 test_unpublished_installation_cleanup
 test_green_review_lifecycle_stops_without_merge
+test_both_enforcement_layers_classify_identically
+test_pr_subcommand_lists_stay_in_sync
 test_grok_hook_follows_grok_home
 test_checker_binding_survives_a_symlinked_firstmate_path
 test_respawn_reclaims_only_its_own_registration
