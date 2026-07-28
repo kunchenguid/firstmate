@@ -352,7 +352,7 @@ The skill owns the daemon procedure; these safety facts remain inline:
 
 ### Session-close stub
 
-Load `session-close` when the captain says they are closing or ending the session, or asks what must happen before it can be closed.
+Load `session-close` when the captain says they are closing or ending the session, invokes `/session-close`, or asks what must happen before it can be closed.
 Closing with work under way requires that skill's handoff steps first; never stop, tear down, or unmonitor running work merely because the session is ending.
 Closing is distinct from `/afk`: away mode keeps supervision live, while closing ends it until the next session start.
 

@@ -43,6 +43,10 @@
 #   the owner is proven dead or missing after age:
 #     pid=$(cat state/.lock-reclaim/pid 2>/dev/null)
 #     if ! kill -0 "$pid" 2>/dev/null; then rm -rf state/.lock-reclaim; fi
+#   Emergency removal of a leftover flock-form (file) reclaim mutex on a host
+#   with no helper, only while state/.lock.acquire is absent, which proves no
+#   live holder because every reclaim-mutex holder holds that lock first:
+#     if [ ! -e state/.lock.acquire ]; then rm -f state/.lock-reclaim; fi
 #   Prefer re-running fm-lock.sh so the same proof runs automatically.
 #
 # The main session lock state/.lock deliberately stays a durable on-disk
