@@ -45,10 +45,14 @@ test_internal_skill_and_trigger() {
 test_cheapest_first_diagnosis() {
   local http_line leak_line listener_line browser_line
 
-  http_line=$(grep -nF '### 1. HTTP serving' "$SKILL" | cut -d: -f1)
-  leak_line=$(grep -nF '### 2. Live-channel listener leak' "$SKILL" | cut -d: -f1)
-  listener_line=$(grep -nF '### 3. Listener presence' "$SKILL" | cut -d: -f1)
-  browser_line=$(grep -nF '### 4. Browser boundary' "$SKILL" | cut -d: -f1)
+  http_line=$(grep -nF '### 1. HTTP serving' "$SKILL" | cut -d: -f1) ||
+    fail "HTTP diagnosis stage is missing"
+  leak_line=$(grep -nF '### 2. Live-channel listener leak' "$SKILL" | cut -d: -f1) ||
+    fail "live-channel diagnosis stage is missing"
+  listener_line=$(grep -nF '### 3. Listener presence' "$SKILL" | cut -d: -f1) ||
+    fail "listener-presence diagnosis stage is missing"
+  browser_line=$(grep -nF '### 4. Browser boundary' "$SKILL" | cut -d: -f1) ||
+    fail "browser diagnosis stage is missing"
   [ "$http_line" -lt "$leak_line" ] || fail "HTTP must be diagnosed before the live channel"
   [ "$leak_line" -lt "$listener_line" ] || fail "listener leak must be diagnosed before poll presence"
   [ "$listener_line" -lt "$browser_line" ] || fail "browser diagnosis must remain last"
