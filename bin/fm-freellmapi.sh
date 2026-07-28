@@ -59,6 +59,7 @@ FM_FREELLMAPI_STOP_TIMEOUT=${FM_FREELLMAPI_STOP_TIMEOUT:-10}
 
 LANE_HOME="$FM_HOME/data/freellmapi"
 APP_DIR="$LANE_HOME/app"
+SERVER_ENTRY="$APP_DIR/server/dist/index.js"
 DB_PATH="$LANE_HOME/db/freeapi.db"
 KEY_FILE="$LANE_HOME/encryption.key"
 CRED_FILE="$LANE_HOME/dashboard.credentials"
@@ -100,12 +101,14 @@ pid_alive() {
 }
 
 # The recorded pid must still be this lane's server before any signal is sent.
-# A recycled pid after a crash must never cause a kill of an unrelated process.
+# A recycled pid after a crash must never cause a kill of an unrelated process,
+# so the proof is the lane's absolute entry path (the server is launched with
+# it) and not the bare relative dist/index.js that any node service may show.
 pid_is_our_server() {
   local pid=$1 cmd
-  cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  cmd=$(ps -ww -p "$pid" -o command= 2>/dev/null || true)
   case "$cmd" in
-    *"dist/index.js"*) return 0 ;;
+    *"$SERVER_ENTRY"*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -247,7 +250,7 @@ cmd_start() {
   command -v lsof >/dev/null 2>&1 \
     || die "lsof is required to verify the localhost-only binding; refusing to start unverifiable"
 
-  [ -f "$APP_DIR/server/dist/index.js" ] \
+  [ -f "$SERVER_ENTRY" ] \
     || die "no built install at $APP_DIR; run: fm-freellmapi.sh install --accept-risks"
 
   if running_pid >/dev/null; then
@@ -266,7 +269,8 @@ cmd_start() {
   # It still lives in the node process env for the whole run; same-user tools
   # can inspect that. NODE_ENV=production makes upstream refuse to fall back to
   # any implicit dev key. The background command is a simple command so $! is
-  # the node pid itself, not a wrapping subshell.
+  # the node pid itself, not a wrapping subshell. The entry point is passed as
+  # an absolute path so ps shows a command line that proves lane ownership.
   (
     cd "$APP_DIR/server" || exit 1
     NODE_ENV=production \
@@ -275,7 +279,7 @@ cmd_start() {
     ENCRYPTION_KEY="$(cat "$KEY_FILE")" \
     FREEAPI_DB_PATH="$DB_PATH" \
     CATALOG_SYNC_DISABLED="$sync_disabled" \
-    nohup node dist/index.js >> "$LOG_FILE" 2>&1 &
+    nohup node "$SERVER_ENTRY" >> "$LOG_FILE" 2>&1 &
     printf '%s\n' "$!" > "$PID_FILE"
   ) || die "could not launch the server from $APP_DIR/server"
   chmod 600 "$PID_FILE" "$LOG_FILE" 2>/dev/null || true
@@ -307,7 +311,7 @@ cmd_start() {
 }
 
 cmd_status() {
-  local port=${FM_FREELLMAPI_PORT:-$FM_FREELLMAPI_DEFAULT_PORT} pid
+  local port=${FM_FREELLMAPI_PORT:-$FM_FREELLMAPI_DEFAULT_PORT} pid recorded
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --port) [ "$#" -ge 2 ] || die "--port requires a value"; port=$2; shift 2 ;;
@@ -317,6 +321,12 @@ cmd_status() {
   done
   validate_port "$port"
   if ! pid=$(running_pid); then
+    recorded=$(cat "$PID_FILE" 2>/dev/null || true)
+    case "$recorded" in ''|*[!0-9]*) recorded= ;; esac
+    if [ -n "$recorded" ] && pid_alive "$recorded" && ! pid_is_our_server "$recorded"; then
+      printf 'fm-freellmapi.sh: not running as far as this lane can prove; recorded pid %s is alive but does not run %s, which is also how a server started before this version looks (it was launched as a bare relative dist/index.js) - stop that one by hand before starting again\n' "$recorded" "$SERVER_ENTRY"
+      return 1
+    fi
     printf 'fm-freellmapi.sh: not running\n'
     return 1
   fi
@@ -459,7 +469,7 @@ cmd_stop() {
     return 0
   fi
   pid_is_our_server "$pid" \
-    || die "pid $pid is not this lane's server process; refusing to signal it (remove $PID_FILE by hand after checking)"
+    || die "pid $pid does not run $SERVER_ENTRY, so it is not provably this lane's server process; refusing to signal it. A server started before this version was launched as a bare relative dist/index.js and looks exactly like this: stop that one by hand. Otherwise the pid was recycled by an unrelated process. Either way, remove $PID_FILE by hand after checking."
   stop_pid "$pid"
   rm -f "$PID_FILE"
   printf 'fm-freellmapi.sh: stopped (pid %s)\n' "$pid"

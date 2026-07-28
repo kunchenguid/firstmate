@@ -491,6 +491,36 @@ EOF
   pass "mkdir fallback works without the flock helper and keeps typed results"
 }
 
+# A crash-leftover flock-form mutex file can neither be taken nor proven
+# abandoned by the mkdir fallback, so it must report the typed unavailable
+# result instead of a busy state that no retry could ever clear.
+test_fallback_flock_leftover_file_is_typed_unavailable() {
+  local rec home fakebin out rc=0
+  rec=$(new_home fallback-flock-leftover)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  make_ps_denied "$fakebin"
+  printf '999999\n' > "$home/state/.lock"
+  : > "$home/state/.lock-reclaim"
+
+  out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_LOCK_NO_FLOCK=1 FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
+  expect_code 12 "$rc" "stale reclaim over a flock-form mutex file without the helper"
+  assert_contains "$out" "LOCK_RESULT=IDENTITY_UNAVAILABLE" "leftover flock mutex file was reported as a retryable state"
+  assert_contains "$out" "state/.lock-reclaim" "the typed result did not name the unusable reclaim mutex"
+  assert_grep "999999" "$home/state/.lock" "the refused reclaim changed the session lock"
+
+  rc=0
+  rm -f "$home/state/.lock"
+  out=$(CODEX_THREAD_ID=current-thread FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    FM_LOCK_NO_FLOCK=1 FM_RECLAIM_BUSY_RETRIES=0 "$LOCK" 2>&1) || rc=$?
+  expect_code 12 "$rc" "free-lock claim over a flock-form mutex file without the helper"
+  assert_contains "$out" "LOCK_RESULT=IDENTITY_UNAVAILABLE" "free-lock claim lost the typed unavailable result"
+  [ ! -e "$home/state/.lock" ] || fail "free-lock claim published an owner through an unusable mutex"
+  pass "leftover flock mutex file without the helper is typed, never endlessly busy"
+}
+
 test_concurrent_acquisitions_admit_one_winner() {
   local rec home fakebin outdir i owned rc=0 winner
   rec=$(new_home concurrent-single-winner)
@@ -539,6 +569,7 @@ run_one() {
     flock-death-release) test_flock_reclaim_mutex_busy_then_released_by_death ;;
     flock-crash-leftovers) test_flock_crash_leftover_files_recover ;;
     fallback-no-flock) test_fallback_without_helper_recovers_and_stays_typed ;;
+    fallback-flock-leftover) test_fallback_flock_leftover_file_is_typed_unavailable ;;
     single-winner) test_concurrent_acquisitions_admit_one_winner ;;
     *) fail "unknown test selector: $1" ;;
   esac
@@ -564,5 +595,6 @@ else
   test_flock_reclaim_mutex_busy_then_released_by_death
   test_flock_crash_leftover_files_recover
   test_fallback_without_helper_recovers_and_stays_typed
+  test_fallback_flock_leftover_file_is_typed_unavailable
   test_concurrent_acquisitions_admit_one_winner
 fi
