@@ -234,6 +234,16 @@ SH
   pass "fm-lock recognizes Devin interpreter scripts"
 }
 
+test_busy_signature_is_scoped_to_devin() {
+  source "$ROOT/bin/fm-tmux-lib.sh"
+  printf '%s\n' 'Working (3s - esc to interrupt)' | fm_busy_lines_match devin \
+    || fail "Devin busy signature was not recognized"
+  if printf '%s\n' 'Working...' | fm_busy_lines_match devin; then
+    fail "Devin borrowed Pi's busy signature"
+  fi
+  pass "Devin busy detection uses its verified signature"
+}
+
 test_detection_marker
 test_primary_hook_wiring
 test_primary_pretool_hook_blocks
@@ -242,3 +252,4 @@ test_invalid_user_config_remains_recoverable
 test_lock_recognizes_devin_holder
 test_lock_rejects_unrelated_devin_argv
 test_lock_recognizes_devin_interpreter_script
+test_busy_signature_is_scoped_to_devin

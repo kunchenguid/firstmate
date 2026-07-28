@@ -827,10 +827,8 @@ array use without select is accepted^{"rules":[{"when":"big feature","use":[{"ha
 one-element array use is accepted^{"rules":[{"when":"focused feature","use":[{"harness":"claude"}]}]}^empty^
 default array is accepted^{"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5"},{"harness":"grok"}]}^empty^
 one-element default array is accepted^{"default":[{"harness":"codex"}]}^empty^
-devin profile is accepted^{"rules":[{"when":"devin work","use":{"harness":"devin","model":"swe-1.6"}}]}^grep^CREW_DISPATCH: active config/crew-dispatch.json
+devin profile is accepted^{"rules":[{"when":"devin work","use":{"harness":"devin","model":"swe-1.6"}}]}^empty^
 unsupported devin effort is flagged^{"rules":[{"when":"devin work","use":{"harness":"devin","model":"swe-1.6","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: devin:high
-array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^grep^CREW_DISPATCH: active config/crew-dispatch.json
-array use without select is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}]}]}^grep^CREW_DISPATCH: active config/crew-dispatch.json
 empty array use is flagged^{"rules":[{"when":"big feature","use":[]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each rule needs at least one use profile
 array profile without harness is flagged^{"rules":[{"when":"big feature","use":[{"model":"gpt-5.5"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each use profile needs harness
 array profile with malformed model is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","model":5}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile model and effort must be non-empty strings when present
