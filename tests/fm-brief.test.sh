@@ -528,6 +528,8 @@ test_ship_and_scout_carry_cwd_rule() {
       "brief did not state the cwd rule before the worker's first shell call"
     assert_grep 'git -C <dir>' "$brief" \
       "brief did not offer the scoped alternative to cd"
+    assert_grep '(cd <dir> && ...)' "$brief" \
+      "brief did not offer the scoped subshell form the guard allows"
   done
   pass "fm-brief.sh: ship and scout scaffolds carry the no-cd cwd rule"
 }

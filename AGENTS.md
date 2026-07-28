@@ -56,7 +56,7 @@ Never hand-edit or remove the watcher, wake-queue, auto-arm, or sub-supervisor c
 
 If you are reading this line, this file is already in your context; do not spend a tool call re-reading `AGENTS.md` or `CLAUDE.md`.
 Never `cd` in this checkout: the shell keeps its working directory across calls, so one stray `cd` silently relocates every later firstmate-owned command, and a guard denies it before it runs.
-Reach another directory with an absolute path or `git -C <dir>` instead.
+Reach another directory with an absolute path, `git -C <dir>`, or a scoped `(cd <dir> && ...)` subshell instead; `docs/cd-guard.md` owns the guard's exact allow list.
 
 A `state/<id>.status` line is a wake event, not current-state truth; `bin/fm-crew-state.sh` owns current-state reconciliation.
 Treat `data/captain.md` as the domain-local record of captain preferences, optional `data/captain-shared.md` as the main-authoritative shared captain-preference file for secondmate inheritance, and `data/learnings.md` as curated home-local knowledge, regardless of harness memory.

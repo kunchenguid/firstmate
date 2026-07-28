@@ -269,7 +269,7 @@ With no `config/crew-dispatch.json` present, every crewmate and scout launches a
 Activate it with one command run from the tracked code root, then let bootstrap validate it on the next session start:
 
 ```sh
-cp docs/examples/crew-dispatch.json "${FM_HOME:-.}/config/crew-dispatch.json"
+mkdir -p "${FM_HOME:-.}/config" && cp docs/examples/crew-dispatch.json "${FM_HOME:-.}/config/crew-dispatch.json"
 ```
 
 Tier the rules to the work rather than to the captain's own tier, and keep `AGENTS.md` section 4's precedence intact: an explicit per-task captain override still wins over any rule here.
