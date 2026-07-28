@@ -5,8 +5,10 @@
 #   fm-brain-event.sh <action> <type> <task-id> <identity> <text> [brain-event args...]
 #
 # The caller supplies a stable, non-secret identity for the transition. This
-# helper hashes it into an idempotency key, so retries materialize once. Missing
-# brain-event is a supported no-op; a configured command that fails or stalls is
+# helper hashes it into an idempotency key, so retries materialize once: an
+# identical retry that the server rejects as a duplicate (409 event_conflict)
+# is treated as delivered, not as a failure. Missing brain-event is a supported
+# no-op; a configured command that fails or stalls for any other reason is
 # surfaced as a warning but never changes the Firstmate lifecycle outcome. The
 # call is bounded by FM_BRAIN_EVENT_TIMEOUT seconds (default 10) wherever a
 # timeout utility exists.
@@ -95,13 +97,34 @@ bounded_event() {  # <command> [args...]
 }
 
 export BRAIN_AGENT=firstmate
-if ! bounded_event "$EVENT_COMMAND" "$TYPE" "$TEXT" \
+exec 3>&1
+ERR_TEXT=$(bounded_event "$EVENT_COMMAND" "$TYPE" "$TEXT" \
   --event-id "$EVENT_ID" \
   --source-kind firstmate \
   --task-id "$TASK_ID" \
   --project firstmate \
   --quiet \
-  "$@"; then
-  echo "warning: fm-brain-event: lifecycle event was not accepted (action=$ACTION task=$TASK_ID)" >&2
+  "$@" 2>&1 1>&3 3>&-)
+EVENT_RC=$?
+
+# A narrow, literal match on the real client's own wording for this one
+# rejection reason: an identical retry, keyed on our derived event_id, that the
+# server already stored once. Any other wording - a different HTTP code in the
+# parens, or no "event_conflict" field - falls through and still reports both
+# the client's own rejection text and the bridge's warning. If the server's
+# error text ever changes, this stops matching and reverts to always warning;
+# it can never start swallowing a wider class of failure than the one line it
+# names.
+ALREADY_DELIVERED=no
+if [ "$EVENT_RC" -ne 0 ]; then
+  case "$ERR_TEXT" in
+    *'(409):'*'"error":"event_conflict"'*) ALREADY_DELIVERED=yes ;;
+  esac
+fi
+
+if [ "$ALREADY_DELIVERED" = no ]; then
+  [ -z "$ERR_TEXT" ] || printf '%s\n' "$ERR_TEXT" >&2
+  [ "$EVENT_RC" -eq 0 ] \
+    || echo "warning: fm-brain-event: lifecycle event was not accepted (action=$ACTION task=$TASK_ID)" >&2
 fi
 exit 0

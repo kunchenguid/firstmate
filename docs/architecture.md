@@ -246,9 +246,10 @@ Generalizable firstmate knowledge goes to shared tracked docs through the normal
 `bin/fm-brain-event.sh` is a best-effort bridge from fleet lifecycle transitions to an installed `brain-event` command, so spawn, promotion, decision resolution, backlog handoff, PR merge, and completed teardown also leave durable events outside the fleet's own state.
 The bridge is opt-in by installation: with no `FM_BRAIN_EVENT_COMMAND` and no discoverable `brain-event`, every call is a silent no-op, so a machine that never opted in sees neither behavior change nor warning noise.
 Each call site passes a stable non-secret transition identity that the bridge hashes into a deterministic `firstmate:<action>:<digest>` event id, so a retried lifecycle command materializes one event instead of a duplicate.
+An event store that rejects such a repeat as a duplicate is confirming the first delivery, so the bridge counts that one rejection as delivered and stays quiet; every other rejection still surfaces the store's own error text and the bridge's warning.
 Events carry provenance only - the firstmate agent and source kind, the task id, and a summary line - and a resolved decision forwards its digest and routed task ids rather than the captain's decision prose.
 Delivery never owns the lifecycle outcome: every call site tolerates failure, the helper always exits 0, and a stalled event store is abandoned after `FM_BRAIN_EVENT_TIMEOUT` rather than hanging the lifecycle command.
-The behavior-test runner pins `FM_BRAIN_EVENT_COMMAND` suite-wide so no test emits fixture events into a developer's real brain, and the script header owns the exact validation, discovery, and bounding contract.
+The behavior-test runner pins `FM_BRAIN_EVENT_COMMAND` suite-wide so no test emits fixture events into a developer's real brain, and the script header owns the exact validation, discovery, bounding, and duplicate-rejection contract.
 
 ## Local clones stay fresh
 
