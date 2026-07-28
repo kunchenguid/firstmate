@@ -52,4 +52,4 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `FMX: X mode on ...` / `FMX: X mode off ...` - bootstrap confirmed or removed the local X-mode poll artifacts (`docs/configuration.md` "X mode (.env)").
   Only when a running watcher needs the cadence transition applied immediately, restart the home-scoped watcher through the emitted harness supervision protocol; bootstrap deliberately never restarts the watcher itself.
 - `TRELLO: control plane on ...` / `TRELLO: control plane off ...` - bootstrap confirmed or removed the local Trello control-plane board-poll artifacts (`docs/trello-control-plane.md`).
-  Same cadence-transition note as `FMX:`: restart the home-scoped watcher through the emitted harness supervision protocol only when a running watcher needs the 30s cadence applied immediately; bootstrap never restarts the watcher itself.
+  Same cadence-transition note as `FMX:`: restart the home-scoped watcher through the emitted harness supervision protocol only when a running watcher needs the 60s cadence applied immediately; bootstrap never restarts the watcher itself.

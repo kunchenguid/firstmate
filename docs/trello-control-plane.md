@@ -97,6 +97,7 @@ Cards in firstmate-owned lanes that are not bound leave no marker, so marker fil
 The REST wrapper is inert (a silent exit-0 no-op) for every subcommand when the config is absent; `--help` always works.
 Subcommands: `comment`, `move`, `describe`, `create-card`, `label add|remove`, `list-cards`, `get-card`, `bind`, `unbind`, `card-for`, `pause`, `start`.
 Lane names resolve to list ids dynamically; card ids are a shortLink or a full card id and are validated against a path-traversal guard.
+`move` and `create-card` refuse an Inbox or Ready target lane (`deny_captain_lane`), enforcing in code that firstmate never writes a card into a captain-owned lane.
 Mutating calls fail loudly (non-zero, stderr) on a non-2xx response.
 See the script header for the exact endpoints and argument shapes.
 
@@ -110,7 +111,8 @@ Auto-hibernate-after-idle is a documented follow-up, not yet implemented.
 
 ## Outbound mirror
 
-The outbound mirror (firstmate reflecting task state onto cards) is agent-driven: the `/trello` skill instructs firstmate to run `bin/fm-trello.sh` at lifecycle points (create/move a card, refresh its description block, move to Done on merge) and to record the `trello_card=` binding with `bin/fm-trello.sh bind`.
+The outbound mirror (firstmate reflecting task state onto cards) is agent-driven: the `/trello` skill instructs firstmate to run `bin/fm-trello.sh` at lifecycle points (create/move a card, post a fresh status block as a comment, move to Done on merge) and to record the `trello_card=` binding with `bin/fm-trello.sh bind`.
+`describe` is reserved for a card firstmate itself created with `create-card`; a captain-originated card's description holds the captain's request text and is never overwritten.
 Deep automatic mirroring wired directly into the spawn, status-change, and teardown scripts - so every task, not only board-originated ones, mirrors without an agent step - is a planned fast-follow.
 
 ## Webhooks (future enhancement)
