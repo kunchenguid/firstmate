@@ -100,7 +100,7 @@ CI owns broad regression across required portable parallel shards, the portable 
 That macOS lane parses every path `bin/fm-lint.sh --list` publishes through the real `/bin/bash` 3.2, requires an exact parsed-file count, and then runs the fleet snapshot/view and Bearings suites under the same interpreter.
 Use `bin/fm-test-run.sh --help` for lane names, `--jobs` rules, and required gate-skip flags when reproducing a lane locally.
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so pass one to `bin/fm-test-run.sh` to focus on a subject with canonical timing output.
-Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
+Tests that need a real optional backend, an external dependency the product itself requires, or an explicit opt-in (real herdr/zellij/cmux smoke tests, the Kimi turn-end harness's `python3` with `tomllib`, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
 The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the lane's isolation boundary, while [runtime backend verification](docs/verification/runtime-backends.md#herdr) owns active empirical evidence; live harness credential tests remain opt-in.
 
 ## Questions
