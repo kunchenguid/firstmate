@@ -7,7 +7,6 @@
 # preview mode without a token.
 #
 # This file is sourced, never executed. It defines:
-#   fmx_env_get <key> <file>   - read one KEY=VALUE from a .env-style file
 #   fmx_load_config            - resolve FMX_TOKEN, FMX_RELAY, FMX_DRY, FMX_MAX,
 #                                and FMX_THREAD_MAX (env wins over .env)
 #   fmx_auth_header_file       - write the bearer header to a 0600 temp file
@@ -31,7 +30,6 @@
 #   fmx_resolve_reply_context <state> <request_id> <allow-relay> - resolve reply
 #                                context through registry -> inbox -> relay
 #   fmx_reply_limit_for_platform <platform> <explicit-limit> - pick split budget
-#   fmx_split_thread <max> <cap> - split a reply (stdin) into a numbered thread
 #   fmx_image_payload_file <path> <client> <payload-file> - encode one image
 #                                attachment to a JSON file and print preview JSON
 #   fmx_reply_payload_json <request_id> <chunks> <n> [image-json-file]
@@ -47,25 +45,21 @@
 #   fmx_meta_followups_set <meta> <n> - rewrite just the follow-up counter
 #   fmx_meta_link_clear <meta> - remove the X-request link entirely
 # Callers must have FM_HOME set before calling fmx_load_config.
+#
+# Two contracts this client uses are owned elsewhere because the Telegram bridge
+# needs the same guarantees and a second copy would drift:
+#   bin/fm-private-artifact-lib.sh - fm_private_artifact_*, fm_private_single_link_file_*
+#   bin/fm-message-split-lib.sh    - fm_message_split_thread
+#   bin/fm-env-file-lib.sh         - fm_env_file_get
+# All three are sourced below.
 
-# Read the value of KEY from a .env-style file: last assignment wins; tolerates a
-# leading "export ", surrounding whitespace, and one layer of matching single or
-# double quotes. Prints nothing (and succeeds) when the file or key is absent, so
-# callers can treat empty output as "unset".
-fmx_env_get() {
-  local key=$1 file=$2 line val
-  [ -f "$file" ] || return 0
-  line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" 2>/dev/null | tail -n1) || return 0
-  [ -n "$line" ] || return 0
-  val=${line#*=}
-  val=${val#"${val%%[![:space:]]*}"}   # strip leading whitespace
-  val=${val%"${val##*[![:space:]]}"}   # strip trailing whitespace (incl. CR)
-  case "$val" in
-    \"*\") val=${val#\"}; val=${val%\"} ;;
-    \'*\') val=${val#\'}; val=${val%\'} ;;
-  esac
-  printf '%s' "$val"
-}
+FM_X_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-private-artifact-lib.sh
+. "$FM_X_LIB_DIR/fm-private-artifact-lib.sh"
+# shellcheck source=bin/fm-message-split-lib.sh
+. "$FM_X_LIB_DIR/fm-message-split-lib.sh"
+# shellcheck source=bin/fm-env-file-lib.sh
+. "$FM_X_LIB_DIR/fm-env-file-lib.sh"
 
 fmx_poll_shim_content() {
   local home=$1 root=$2
@@ -87,150 +81,8 @@ fmx_poll_shim_v1_content() {
     "exec $(printf '%q' "$root/bin/fm-x-poll.sh")"
 }
 
-fmx_single_link_file_valid() {
-  local file=$1 expected_device=${2-} links device
-  [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  if [ "$(uname)" = Darwin ]; then
-    links=$(stat -f %l "$file" 2>/dev/null) || return 1
-    device=$(stat -f %d "$file" 2>/dev/null) || return 1
-  else
-    links=$(stat -c %h "$file" 2>/dev/null) || return 1
-    device=$(stat -c %d "$file" 2>/dev/null) || return 1
-  fi
-  [ "$links" = 1 ] || return 1
-  [ -z "$expected_device" ] || [ "$device" = "$expected_device" ]
-}
-
-fmx_single_link_file_mode_valid() {
-  local file=$1 expected_mode=$2 expected_device=${3-} mode
-  fmx_single_link_file_valid "$file" "$expected_device" || return 1
-  if [ "$(uname)" = Darwin ]; then
-    mode=$(stat -f %Lp "$file" 2>/dev/null) || return 1
-  else
-    mode=$(stat -c %a "$file" 2>/dev/null) || return 1
-  fi
-  [ "$mode" = "$expected_mode" ]
-}
-
-fmx_private_artifact_dir_device() {
-  local dir=$1 mode device
-  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-  if [ "$(uname)" = Darwin ]; then
-    mode=$(stat -f %Lp "$dir" 2>/dev/null) || return 1
-    device=$(stat -f %d "$dir" 2>/dev/null) || return 1
-  else
-    mode=$(stat -c %a "$dir" 2>/dev/null) || return 1
-    device=$(stat -c %d "$dir" 2>/dev/null) || return 1
-  fi
-  [ "$mode" = 700 ] || return 1
-  printf '%s\n' "$device"
-}
-
-fmx_private_artifact_dir_prepare() {
-  local dir=$1 parent
-  parent=${dir%/*}
-  if [ "$parent" != "$dir" ]; then
-    if [ -e "$parent" ] || [ -L "$parent" ]; then
-      [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
-    else
-      (umask 077; mkdir -p "$parent" 2>/dev/null) || return 1
-      [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
-    fi
-  fi
-  if [ -e "$dir" ] || [ -L "$dir" ]; then
-    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-  else
-    (umask 077; mkdir -p "$dir" 2>/dev/null) || return 1
-  fi
-  fmx_private_artifact_dir_device "$dir"
-}
-
-fmx_private_artifact_publish_stdin() {
-  local dir=$1 base=$2 mode=$3 device tmp dest
-  case "$base" in
-    ''|.*|*/*) return 1 ;;
-  esac
-  case "$mode" in
-    600|700) ;;
-    *) return 1 ;;
-  esac
-  device=$(fmx_private_artifact_dir_prepare "$dir") || return 1
-  dest="$dir/$base"
-  tmp=$(umask 077; mktemp "$dir/.${base}.fm-x.XXXXXX" 2>/dev/null) || return 1
-  if ! cat > "$tmp" \
-    || ! chmod "$mode" "$tmp" 2>/dev/null \
-    || ! fmx_single_link_file_mode_valid "$tmp" "$mode" "$device"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  if { [ -e "$dest" ] || [ -L "$dest" ]; } \
-    && ! fmx_single_link_file_mode_valid "$dest" "$mode" "$device"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  if ! mv -f -- "$tmp" "$dest" 2>/dev/null; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  if ! fmx_single_link_file_mode_valid "$dest" "$mode" "$device"; then
-    rm -f -- "$dest"
-    return 1
-  fi
-}
-
-# Publish stdin as a new private artifact without replacing an existing path.
-# The hard-link claim is atomic within the prepared directory, so concurrent
-# callers cannot both create the destination. Returns 0 when this caller created
-# it, 1 when another valid private artifact already owns the path, and 2 on an
-# unsafe path or publication failure.
-fmx_private_artifact_publish_stdin_once() {
-  local dir=$1 base=$2 mode=$3 device tmp dest
-  case "$base" in
-    ''|.*|*/*) return 2 ;;
-  esac
-  case "$mode" in
-    600|700) ;;
-    *) return 2 ;;
-  esac
-  device=$(fmx_private_artifact_dir_prepare "$dir") || return 2
-  dest="$dir/$base"
-  tmp=$(umask 077; mktemp "$dir/.${base}.fm-x.XXXXXX" 2>/dev/null) || return 2
-  if ! cat > "$tmp" \
-    || ! chmod "$mode" "$tmp" 2>/dev/null \
-    || ! fmx_single_link_file_mode_valid "$tmp" "$mode" "$device"; then
-    rm -f -- "$tmp"
-    return 2
-  fi
-  if ln -- "$tmp" "$dest" 2>/dev/null; then
-    rm -f -- "$tmp"
-    if fmx_single_link_file_mode_valid "$dest" "$mode" "$device"; then
-      return 0
-    fi
-    rm -f -- "$dest"
-    return 2
-  fi
-  rm -f -- "$tmp"
-  if fmx_single_link_file_mode_valid "$dest" "$mode" "$device"; then
-    return 1
-  fi
-  return 2
-}
-
-fmx_private_artifact_file_valid() {
-  local dir=$1 base=$2 mode=$3 device
-  case "$base" in
-    ''|.*|*/*) return 1 ;;
-  esac
-  case "$mode" in
-    600|700) ;;
-    *) return 1 ;;
-  esac
-  device=$(fmx_private_artifact_dir_device "$dir") || return 1
-  fmx_single_link_file_mode_valid "$dir/$base" "$mode" "$device"
-}
-
 fmx_poll_shim_identity_valid() {
-  fmx_single_link_file_mode_valid "$1" "$2" "${3-}"
+  fm_private_single_link_file_mode_valid "$1" "$2" "${3-}"
 }
 
 fmx_poll_shim_private_identity_valid() {
@@ -262,19 +114,19 @@ fmx_load_config() {
   if [ -n "${FMX_PAIRING_TOKEN+x}" ]; then
     FMX_TOKEN=${FMX_PAIRING_TOKEN-}
   else
-    FMX_TOKEN=$(fmx_env_get FMX_PAIRING_TOKEN "$env_file")
+    FMX_TOKEN=$(fm_env_file_get FMX_PAIRING_TOKEN "$env_file")
   fi
   if [ -n "${FMX_RELAY_URL+x}" ]; then
     FMX_RELAY=${FMX_RELAY_URL-}
   else
-    FMX_RELAY=$(fmx_env_get FMX_RELAY_URL "$env_file")
+    FMX_RELAY=$(fm_env_file_get FMX_RELAY_URL "$env_file")
   fi
   [ -n "$FMX_RELAY" ] || FMX_RELAY="https://myfirstmate.io"
   FMX_RELAY=${FMX_RELAY%/}
   if [ -n "${FMX_DRY_RUN+x}" ]; then
     dry=${FMX_DRY_RUN-}
   else
-    dry=$(fmx_env_get FMX_DRY_RUN "$env_file")
+    dry=$(fm_env_file_get FMX_DRY_RUN "$env_file")
   fi
   # shellcheck disable=SC2034 # FMX_DRY is read by callers (fm-x-reply.sh) after sourcing.
   case "$(printf '%s' "$dry" | tr '[:upper:]' '[:lower:]')" in
@@ -285,18 +137,18 @@ fmx_load_config() {
   # Per-message character budgets for thread-splitting, and the maximum number
   # of messages in one auto-split thread (anti-spam cap).
   local maxraw discordraw threadraw
-  if [ -n "${FMX_X_REPLY_MAX_CHARS+x}" ]; then maxraw=${FMX_X_REPLY_MAX_CHARS-}; else maxraw=$(fmx_env_get FMX_X_REPLY_MAX_CHARS "$env_file"); fi
+  if [ -n "${FMX_X_REPLY_MAX_CHARS+x}" ]; then maxraw=${FMX_X_REPLY_MAX_CHARS-}; else maxraw=$(fm_env_file_get FMX_X_REPLY_MAX_CHARS "$env_file"); fi
   case "$maxraw" in ''|*[!0-9]*) maxraw=280 ;; esac
   [ "$maxraw" -ge 50 ] 2>/dev/null || maxraw=50
   # shellcheck disable=SC2034 # FMX_MAX is read by callers (fm-x-reply.sh) after sourcing.
   FMX_MAX=$maxraw
-  if [ -n "${FMX_DISCORD_REPLY_MAX_CHARS+x}" ]; then discordraw=${FMX_DISCORD_REPLY_MAX_CHARS-}; else discordraw=$(fmx_env_get FMX_DISCORD_REPLY_MAX_CHARS "$env_file"); fi
+  if [ -n "${FMX_DISCORD_REPLY_MAX_CHARS+x}" ]; then discordraw=${FMX_DISCORD_REPLY_MAX_CHARS-}; else discordraw=$(fm_env_file_get FMX_DISCORD_REPLY_MAX_CHARS "$env_file"); fi
   case "$discordraw" in ''|*[!0-9]*) discordraw=1900 ;; esac
   [ "$discordraw" -ge 50 ] 2>/dev/null || discordraw=50
   [ "$discordraw" -le 2000 ] 2>/dev/null || discordraw=1900
   # shellcheck disable=SC2034 # FMX_DISCORD_MAX is read by callers (fm-x-reply.sh) after sourcing.
   FMX_DISCORD_MAX=$discordraw
-  if [ -n "${FMX_X_THREAD_MAX+x}" ]; then threadraw=${FMX_X_THREAD_MAX-}; else threadraw=$(fmx_env_get FMX_X_THREAD_MAX "$env_file"); fi
+  if [ -n "${FMX_X_THREAD_MAX+x}" ]; then threadraw=${FMX_X_THREAD_MAX-}; else threadraw=$(fm_env_file_get FMX_X_THREAD_MAX "$env_file"); fi
   case "$threadraw" in ''|*[!0-9]*) threadraw=25 ;; esac
   [ "$threadraw" -ge 1 ] 2>/dev/null || threadraw=25
   # shellcheck disable=SC2034 # FMX_THREAD_MAX is read by callers (fm-x-reply.sh) after sourcing.
@@ -347,7 +199,7 @@ fmx_extract_reply_context() {
 # inbox file is absent. Thin wrapper over fmx_extract_reply_context.
 fmx_request_inbox_context() {
   local state=$1 rid=$2
-  if ! fmx_private_artifact_file_valid "$state/x-inbox" "$rid.json" 600; then
+  if ! fm_private_artifact_file_valid "$state/x-inbox" "$rid.json" 600; then
     printf '{"platform":"","reply_max_chars":""}\n'
     return 0
   fi
@@ -452,7 +304,7 @@ fmx_context_registry_recorded_at() {
 fmx_context_registry_prune() {
   local state=$1 dir now max_age file recorded_at age dir_device
   dir="$state/x-context"
-  dir_device=$(fmx_private_artifact_dir_device "$dir" 2>/dev/null) || return 0
+  dir_device=$(fm_private_artifact_dir_device "$dir" 2>/dev/null) || return 0
   now=${FMX_NOW_OVERRIDE:-$(date +%s)}
   case "$now" in
     ''|*[!0-9]*) return 0 ;;
@@ -465,7 +317,7 @@ fmx_context_registry_prune() {
   [ "${#max_age}" -le 18 ] || max_age=604800
   [ "$max_age" -le 604800 ] || max_age=604800
   while IFS= read -r -d '' file; do
-    if ! fmx_single_link_file_mode_valid "$file" 600 "$dir_device"; then
+    if ! fm_private_single_link_file_mode_valid "$file" 600 "$dir_device"; then
       rm -f -- "$file" 2>/dev/null || true
       continue
     fi
@@ -509,10 +361,10 @@ fmx_context_registry_set() {
     return 0
   fi
   dir="$state/x-context"
-  dir_device=$(fmx_private_artifact_dir_prepare "$dir") || return 1
+  dir_device=$(fm_private_artifact_dir_prepare "$dir") || return 1
   file="$dir/$rid.json"
   if { [ -e "$file" ] || [ -L "$file" ]; } \
-    && ! fmx_single_link_file_mode_valid "$file" 600 "$dir_device"; then
+    && ! fm_private_single_link_file_mode_valid "$file" 600 "$dir_device"; then
     return 1
   fi
   fmx_context_registry_prune "$state"
@@ -531,7 +383,7 @@ fmx_context_registry_set() {
   (set -o pipefail; jq -cn --arg rid "$rid" --arg platform "$platform" --arg max "$reply_max" \
     --argjson recorded_at "$recorded_at" \
     '{request_id:$rid, platform:$platform, reply_max_chars:$max, recorded_at:$recorded_at}' \
-    | fmx_private_artifact_publish_stdin "$dir" "$rid.json" 600) || return 1
+    | fm_private_artifact_publish_stdin "$dir" "$rid.json" 600) || return 1
 }
 
 # fmx_offer_registry_claim <state> <request_id>: atomically claim the durable
@@ -555,7 +407,7 @@ fmx_offer_registry_claim() {
     '{request_id:$rid, recorded_at:$recorded_at}') || return 2
   dir="$state/x-context"
   printf '%s\n' "$record" \
-    | fmx_private_artifact_publish_stdin_once "$dir" "$rid.offered.json" 600
+    | fm_private_artifact_publish_stdin_once "$dir" "$rid.offered.json" 600
   rc=$?
   return "$rc"
 }
@@ -570,7 +422,7 @@ fmx_context_registry_get() {
   esac
   dir="$state/x-context"
   file="$dir/$rid.json"
-  if ! fmx_private_artifact_file_valid "$dir" "$rid.json" 600; then
+  if ! fm_private_artifact_file_valid "$dir" "$rid.json" 600; then
     printf '{"platform":"","reply_max_chars":""}\n'
     return 0
   fi
@@ -645,89 +497,6 @@ fmx_reply_limit_for_platform() {
     discord) printf '%s\n' "${FMX_DISCORD_MAX:-1900}" ;;
     *) printf '%s\n' "${FMX_MAX:-280}" ;;
   esac
-}
-
-# Split a reply into a numbered thread of <=<max>-codepoint chunks, packing first
-# on fenced-code, paragraph, and line boundaries, then on word boundaries, and
-# hard-splitting only a single over-long unit. A reply that already fits in one
-# message is returned as a single UNNUMBERED chunk; longer replies get " (k/n)"
-# suffixes. At most <cap> messages are produced; if the reply would need more,
-# the last kept message is marked with an ellipsis. Reads the reply text on stdin
-# and prints a compact JSON array of chunks. Length is codepoint-based (via jq);
-# the relay remains the final authority and trims.
-fmx_split_thread() {
-  jq -Rsc --argjson limit "$1" --argjson cap "$2" '
-    def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
-    def fence_marker: test("^[[:space:]]*```");
-    def fence_count: ((split("```") | length) - 1);
-    def numbered($i; $n):
-      "(\($i + 1)/\($n))" as $mark
-      | if ((fence_count % 2) == 0) and (split("\n")[-1] | fence_marker)
-        then . + "\n" + $mark
-        else . + " " + $mark
-        end;
-    def hardsplit($b): . as $s | [range(0; ($s|length); $b) as $i | $s[$i:$i+$b]];
-    def wordsplit($b):
-      (gsub("[[:space:]]+"; " ") | trim) as $norm
-      | if ($norm | length) == 0 then []
-        else
-          [ $norm | split(" ")[] | if (length > $b) then hardsplit($b)[] else . end ] as $words
-          | (reduce $words[] as $w ({chunks: [], cur: ""};
-              (if .cur == "" then $w else .cur + " " + $w end) as $cand
-              | if ($cand | length) <= $b then .cur = $cand
-                else .chunks += (if .cur == "" then [] else [.cur] end) | .cur = $w end
-            )) as $st
-          | $st.chunks + (if $st.cur != "" then [$st.cur] else [] end)
-        end;
-    def split_units:
-      split("\n") as $lines
-      | (reduce $lines[] as $line ({units: [], cur: "", fence: false};
-          if .fence then
-            .cur = (if .cur == "" then $line else .cur + "\n" + $line end)
-            | if ($line | fence_marker) then .units += [.cur] | .cur = "" | .fence = false else . end
-          elif ($line | fence_marker) then
-            (if .cur != "" then .units += [.cur] | .cur = "" else . end)
-            | .cur = $line
-            | .fence = true
-          elif ($line | test("^[[:space:]]*$")) then
-            if .cur != "" then .units += [.cur] | .cur = "" else . end
-          else
-            ($line | trim) as $clean
-            | .cur = (if .cur == "" then $clean else .cur + " " + $clean end)
-          end
-        )) as $st
-      | ($st.units + (if $st.cur != "" then [$st.cur] else [] end))
-      | map(select((trim | length) > 0));
-    def pack_units($units; $b):
-      (reduce $units[] as $u ({chunks: [], cur: ""};
-        if ($u | length) > $b then
-          (if .cur != "" then .chunks += [.cur] | .cur = "" else . end)
-          | .chunks += ($u | wordsplit($b))
-        else
-          (if .cur == "" then $u else .cur + "\n\n" + $u end) as $cand
-          | if ($cand | length) <= $b then .cur = $cand
-            else .chunks += (if .cur == "" then [] else [.cur] end) | .cur = $u end
-        end
-      )) as $st
-      | $st.chunks + (if $st.cur != "" then [$st.cur] else [] end);
-    def split_thread($limit; $cap):
-      trim as $norm
-      | if ($norm | length) == 0 then []
-        elif ($norm | length) <= $limit then [$norm]
-        else
-          ($cap | tostring | length) as $digits
-          | (4 + 2 * $digits) as $suffixw
-          | (if ($limit - $suffixw - 1) < 1 then 1 else ($limit - $suffixw - 1) end) as $budget
-          | ($norm | split_units) as $units
-          | pack_units($units; $budget) as $raw
-          | (if ($raw | length) > $cap
-              then ($raw[0:$cap] | (.[($cap - 1)] += "…"))
-              else $raw end) as $kept
-          | ($kept | length) as $n
-          | [ range(0; $n) as $i | $kept[$i] | numbered($i; $n) ]
-        end;
-    split_thread($limit; $cap)
-  '
 }
 
 fmx_auth_header_file() {

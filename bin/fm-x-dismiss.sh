@@ -71,7 +71,7 @@ if [ -n "$FMX_DRY" ]; then
   OUTREC=$(printf '%s' "$PAYLOAD" | jq -c '. + {endpoint:"dismiss"}') || {
     echo "fm-x-dismiss: failed to build dry-run outbox record" >&2; exit 1; }
   printf '%s\n' "$OUTREC" \
-    | fmx_private_artifact_publish_stdin "$outbox_dir" "$REQ.json" 600 || {
+    | fm_private_artifact_publish_stdin "$outbox_dir" "$REQ.json" 600 || {
     echo "fm-x-dismiss: cannot write dry-run outbox: $outbox_dir/$REQ.json" >&2
     exit 1
   }

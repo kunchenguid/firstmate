@@ -44,33 +44,33 @@ CLAIM_ERROR_FILE="$STATE/x-poll.claim-error"
 
 emit_error_once() {
   local msg=$1
-  if fmx_private_artifact_file_valid "$STATE" "x-poll.error" 600 \
+  if fm_private_artifact_file_valid "$STATE" "x-poll.error" 600 \
     && [ "$(cat "$ERROR_FILE" 2>/dev/null)" = "$msg" ]; then
     return 0
   fi
   printf '%s\n' "$msg" \
-    | fmx_private_artifact_publish_stdin "$STATE" "x-poll.error" 600 2>/dev/null || true
+    | fm_private_artifact_publish_stdin "$STATE" "x-poll.error" 600 2>/dev/null || true
   printf 'x-mode-error %s\n' "$msg"
 }
 
 clear_error() {
-  fmx_private_artifact_dir_device "$STATE" >/dev/null 2>&1 || return 0
+  fm_private_artifact_dir_device "$STATE" >/dev/null 2>&1 || return 0
   rm -f "$ERROR_FILE" 2>/dev/null || true
 }
 
 emit_claim_error_once() {
   local msg=$1
-  if fmx_private_artifact_file_valid "$STATE" "x-poll.claim-error" 600 \
+  if fm_private_artifact_file_valid "$STATE" "x-poll.claim-error" 600 \
     && [ "$(cat "$CLAIM_ERROR_FILE" 2>/dev/null)" = "$msg" ]; then
     return 0
   fi
   printf '%s\n' "$msg" \
-    | fmx_private_artifact_publish_stdin "$STATE" "x-poll.claim-error" 600 2>/dev/null || true
+    | fm_private_artifact_publish_stdin "$STATE" "x-poll.claim-error" 600 2>/dev/null || true
   printf 'x-mode-error %s\n' "$msg"
 }
 
 clear_claim_error() {
-  fmx_private_artifact_dir_device "$STATE" >/dev/null 2>&1 || return 0
+  fm_private_artifact_dir_device "$STATE" >/dev/null 2>&1 || return 0
   rm -f "$CLAIM_ERROR_FILE" 2>/dev/null || true
 }
 
@@ -122,7 +122,7 @@ esac
 # successful answer or dismiss. Checking it before the inbox stash keeps both a
 # still-pending request and the relay's brief post-answer re-offer silent without
 # recreating a drained inbox. The startup prune above bounds marker retention.
-if fmx_private_artifact_file_valid "$STATE/x-context" "$REQ.offered.json" 600; then
+if fm_private_artifact_file_valid "$STATE/x-context" "$REQ.offered.json" 600; then
   clear_error
   clear_claim_error
   exit 0
@@ -132,7 +132,7 @@ INBOX="$STATE/x-inbox"
 # Stash the full mention object atomically so a concurrent reader never sees a
 # half-written file.
 if ! (set -o pipefail; jq '.' "$BODY_FILE" 2>/dev/null \
-  | fmx_private_artifact_publish_stdin "$INBOX" "$REQ.json" 600); then
+  | fm_private_artifact_publish_stdin "$INBOX" "$REQ.json" 600); then
   emit_error_once "cannot write inbox"
   exit 0
 fi

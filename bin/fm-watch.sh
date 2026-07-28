@@ -59,6 +59,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-tg-lib.sh
+. "$SCRIPT_DIR/fm-tg-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
 # Parent-owned secondmate missed-report guards: durable pending-reply
@@ -699,6 +701,41 @@ while :; do
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
 
+  # Fair check ordering.
+  #
+  # The sweep below wakes on the FIRST check that produces output and abandons
+  # the rest of the cycle, so a permanently chatty check early in the glob would
+  # keep a later one from ever running. That never mattered while at most one
+  # always-on channel existed, but a home can arm both X mode and the Telegram
+  # bridge, and one busy conversation must not silence the other. The sweep
+  # therefore starts just after whichever check last woke firstmate and wraps
+  # around, so every check reaches the front within one rotation. Per-cycle cost
+  # is unchanged: this reorders the same list, it does not run more checks.
+  FM_ROTATED_CHECKS=()
+  n=0
+  for c in "$STATE"/*.check.sh; do
+    [ -e "$c" ] || continue
+    FM_ROTATED_CHECKS[n]=$c
+    n=$((n + 1))
+  done
+  if [ "$n" -gt 1 ] && [ -f "$STATE/.last-check-woke" ]; then
+    last_woke=$(cat "$STATE/.last-check-woke" 2>/dev/null || true)
+    if [ -n "$last_woke" ]; then
+      start=-1
+      i=0
+      while [ "$i" -lt "$n" ]; do
+        if [ "$(basename "${FM_ROTATED_CHECKS[$i]}")" = "$last_woke" ]; then
+          start=$(( (i + 1) % n ))
+          break
+        fi
+        i=$((i + 1))
+      done
+      if [ "$start" -ge 0 ] && [ "$start" -gt 0 ]; then
+        FM_ROTATED_CHECKS=("${FM_ROTATED_CHECKS[@]:$start}" "${FM_ROTATED_CHECKS[@]:0:$start}")
+      fi
+    fi
+  fi
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
@@ -708,13 +745,22 @@ while :; do
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
-    for c in "$STATE"/*.check.sh; do
+    for c in ${FM_ROTATED_CHECKS[@]+"${FM_ROTATED_CHECKS[@]}"}; do
       [ -e "$c" ] || continue
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
           FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
+          out=$FM_CHECK_RESULT
+        else
+          rejected_checks="$rejected_checks $c"
+          continue
+        fi
+      elif [ "$(basename "$c")" = telegram-watch.check.sh ]; then
+        if fmtg_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
+          && [ -f "$FM_ROOT/bin/fm-tg-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-tg-poll.sh" ]; then
+          FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-tg-poll.sh" || exit 1
           out=$FM_CHECK_RESULT
         else
           rejected_checks="$rejected_checks $c"
@@ -755,9 +801,11 @@ while :; do
           fi
         fi
         touch "$STATE/.last-check"
+        printf '%s\n' "$(basename "$c")" > "$STATE/.last-check-woke" 2>/dev/null || true
         wake "$reason"
       fi
     done
+    rm -f "$STATE/.last-check-woke" 2>/dev/null || true
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1

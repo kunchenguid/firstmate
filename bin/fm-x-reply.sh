@@ -263,7 +263,7 @@ fi
 # Auto-split a long reply into a numbered thread using the target platform's
 # per-message budget. A reply that fits in one message stays single and
 # unnumbered.
-CHUNKS=$(printf '%s' "$TEXT" | fmx_split_thread "$REPLY_MAX" "$FMX_THREAD_MAX") || {
+CHUNKS=$(printf '%s' "$TEXT" | fm_message_split_thread "$REPLY_MAX" "$FMX_THREAD_MAX") || {
   echo "fm-x-reply: failed to split reply into a thread" >&2
   exit 1
 }
@@ -294,7 +294,7 @@ if [ -n "$FMX_DRY" ]; then
   OUTREC=$(fmx_reply_outbox_json "$REQ" "$CHUNKS" "$N" "$FOLLOWUP" "$IMAGE_PREVIEW") || {
     echo "fm-x-reply: failed to build dry-run outbox record" >&2; exit 1; }
   printf '%s\n' "$OUTREC" \
-    | fmx_private_artifact_publish_stdin "$outbox_dir" "$REQ.json" 600 || {
+    | fm_private_artifact_publish_stdin "$outbox_dir" "$REQ.json" 600 || {
     echo "fm-x-reply: cannot write dry-run outbox: $outbox_dir/$REQ.json" >&2
     exit 1
   }

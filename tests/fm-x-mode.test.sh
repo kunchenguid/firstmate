@@ -112,7 +112,7 @@ path_mode() {
 assert_no_private_artifact_temps() {
   local dir=$1 leftovers
   [ -d "$dir" ] || return 0
-  leftovers=$(find "$dir" -name '*.fm-x.*' -print 2>/dev/null)
+  leftovers=$(find "$dir" -name '*.fm-private.*' -print 2>/dev/null)
   [ -z "$leftovers" ] || fail "private artifact temp files were not cleaned up: $leftovers"
 }
 
@@ -1047,12 +1047,12 @@ test_split_thread_lib() {
   . "$ROOT/bin/fm-x-lib.sh"
   local out n last rejoin maxlen txt
   # A reply that fits one tweet stays a single, UNNUMBERED chunk.
-  out=$(printf 'Aye, all shipshape.' | fmx_split_thread 280 25)
+  out=$(printf 'Aye, all shipshape.' | fm_message_split_thread 280 25)
   [ "$(printf '%s' "$out" | jq 'length')" = "1" ] || fail "short reply must be one chunk"
   [ "$(printf '%s' "$out" | jq -r '.[0]')" = "Aye, all shipshape." ] || fail "short reply must be verbatim and unnumbered"
   # A long reply splits on word boundaries; every chunk within the limit; lossless.
   txt="alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november"
-  out=$(printf '%s' "$txt" | fmx_split_thread 30 25)
+  out=$(printf '%s' "$txt" | fm_message_split_thread 30 25)
   n=$(printf '%s' "$out" | jq 'length')
   [ "$n" -gt 1 ] || fail "a long reply must split into more than one chunk"
   maxlen=$(printf '%s' "$out" | jq 'map(length)|max')
@@ -1062,10 +1062,10 @@ test_split_thread_lib() {
   rejoin=$(printf '%s' "$out" | jq -r 'map(sub(" \\([0-9]+/[0-9]+\\)$";""))|join(" ")')
   [ "$rejoin" = "$txt" ] || fail "thread must rejoin losslessly (got: $rejoin)"
   # A single over-long word is hard-split so no chunk exceeds the limit.
-  out=$(printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' | fmx_split_thread 20 25)
+  out=$(printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' | fm_message_split_thread 20 25)
   [ "$(printf '%s' "$out" | jq 'map(length)|max')" -le 20 ] || fail "over-long word must hard-split within the limit"
   # The cap bounds the thread; a truncated thread is marked with an ellipsis.
-  out=$(printf 'one two three four five six seven eight nine ten' | fmx_split_thread 20 2)
+  out=$(printf 'one two three four five six seven eight nine ten' | fm_message_split_thread 20 2)
   [ "$(printf '%s' "$out" | jq 'length')" -le 2 ] || fail "thread must respect the cap"
   case "$(printf '%s' "$out" | jq -r '.[-1]')" in *…*) : ;; *) fail "a capped thread must mark truncation" ;; esac
   txt=$(cat <<'TXT'
@@ -1079,7 +1079,7 @@ printf '%s\n' "the marker must not land in here"
 Final paragraph also has enough words to make the reply split after the fenced block.
 TXT
 )
-  out=$(printf '%s' "$txt" | fmx_split_thread 120 25)
+  out=$(printf '%s' "$txt" | fm_message_split_thread 120 25)
   [ "$(printf '%s' "$out" | jq 'length')" -gt 1 ] || fail "fenced markdown reply must split"
   printf '%s' "$out" | jq -e \
     'all(.[]; (((gsub(" \\([0-9]+/[0-9]+\\)$"; "") | split("```") | length) - 1) % 2) == 0)' \
@@ -1090,7 +1090,7 @@ TXT
   printf '%s' "$out" | jq -e \
     'all(.[] | split("\n")[]; (test("^[[:space:]]*```.* \\([0-9]+/[0-9]+\\)$") | not))' \
     >/dev/null || fail "numbering markers must not be appended to fenced-code boundary lines"
-  pass "fmx_split_thread: word-boundary, fence-aware, within-limit, numbered, lossless, capped"
+  pass "fm_message_split_thread: word-boundary, fence-aware, within-limit, numbered, lossless, capped"
 }
 
 test_reply_single_no_texts() {
@@ -1719,7 +1719,7 @@ test_private_artifact_publisher_runs_under_system_bash() {
   home="$TMP_ROOT/private-publisher-system-bash"; mkdir -p "$home"
   [ -x /bin/bash ] || { pass "private artifact publisher compatibility check skipped without /bin/bash"; return 0; }
   out=$(/bin/bash -c \
-    '. "$1/bin/fm-x-lib.sh"; printf "%s\n" "{\"request_id\":\"req-bash\"}" | fmx_private_artifact_publish_stdin "$2/state/x-outbox" req-bash.json 600' \
+    '. "$1/bin/fm-x-lib.sh"; printf "%s\n" "{\"request_id\":\"req-bash\"}" | fm_private_artifact_publish_stdin "$2/state/x-outbox" req-bash.json 600' \
     _ "$ROOT" "$home"); rc=$?
   expect_code 0 "$rc" "private artifact publisher under /bin/bash"
   [ -z "$out" ] || fail "private artifact publisher must stay silent under /bin/bash"

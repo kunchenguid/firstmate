@@ -310,6 +310,8 @@ AFK_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_PRESENT=1
 X_MODE_PRESENT=0
 [ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
+TELEGRAM_PRESENT=0
+[ -f "$CONFIG/telegram.env" ] && TELEGRAM_PRESENT=1
 
 if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
   PI_EXT="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
@@ -330,7 +332,8 @@ fi
   --harness "$PRIMARY_HARNESS" \
   --read-only "$READ_ONLY" \
   --afk "$AFK_PRESENT" \
-  --x-mode "$X_MODE_PRESENT"
+  --x-mode "$X_MODE_PRESENT" \
+  --telegram "$TELEGRAM_PRESENT"
 
 # --- 4. context digest -----------------------------------------------------
 section "CONTEXT"
@@ -410,10 +413,10 @@ load /afk and ensure the daemon is running, because the daemon owns watcher
 supervision.
 
 EOF
-elif [ -f "$CONFIG/x-mode.env" ]; then
+elif [ "$X_MODE_PRESENT" -eq 1 ] || [ "$TELEGRAM_PRESENT" -eq 1 ]; then
   cat <<EOF
 Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
-X mode is active, so the emitted block's cadence instruction applies.
+An always-on channel is active, so the emitted block's cadence instruction applies.
 This script never starts supervision itself.
 
 EOF
