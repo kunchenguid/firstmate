@@ -1587,8 +1587,10 @@ fi
 
 # Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; the project-management skill and AGENTS.md task lifecycle).
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
-# branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
-# merge, so scout teardown ignores mode.
+# branch on them. Mode governs how a change ships, so it shapes the ship brief and
+# the ship delivery path; a scout's deliverable is a report, not a merge, but its
+# lane still holds real files, so scout teardown applies the same mode-aware
+# unlanded-work checks as any other worktree.
 if [ "$KIND" = secondmate ]; then
   MODE=secondmate
   YOLO=off
@@ -1612,14 +1614,14 @@ META_WINDOW=$T
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
-  # The branch a ship task owns its worktree through: the ship brief's mandatory
-  # first action is `git checkout -b fm/<id>`, so that is the branch fm-teardown
-  # can hold the worktree to. Recorded explicitly (rather than re-derived from the
-  # task id) so a future dispatch onto a different branch has one place to say so;
-  # teardown still falls back to fm/<id> for older metadata. Scouts and
-  # secondmates are excluded because neither contract creates a branch: a scout
-  # works detached on scratch it discards, and a secondmate has no worktree.
-  [ "$KIND" != ship ] || echo "resume_branch=fm/$ID"
+  # The branch this task owns its worktree through: the mandatory first action in
+  # every worktree brief, ship and scout alike, is `git checkout -b fm/<id>`, so
+  # that is the branch fm-teardown holds the lane to before returning it. Recorded
+  # explicitly (rather than re-derived from the task id) so a future dispatch onto
+  # a different branch has one place to say so; teardown still falls back to
+  # fm/<id> for older metadata. Only secondmates are excluded: their "worktree" is
+  # a seeded firstmate home, not a git worktree, so no branch owns it.
+  [ "$KIND" = secondmate ] || echo "resume_branch=fm/$ID"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"

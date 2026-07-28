@@ -838,9 +838,10 @@ test_scout_worktree_gets_ordinary_unlanded_work_check() {
   pass "a scout worktree is not exempt from the ordinary dirty and unlanded-work checks"
 }
 
-# A real scout works detached and never runs `git checkout -b`, so fm/<id> does
-# not exist and ownership cannot be proven either way. That must not dead-end at
-# --force: the content checks decide, and a scout holding nothing tears down.
+# A scout that died before its brief's first `git checkout -b` is still parked at
+# the lane's detached starting point, so fm/<id> does not exist and ownership
+# cannot be proven either way. That must not dead-end at --force: the content
+# checks decide, and a lane holding nothing tears down.
 test_scout_detached_without_task_branch_allows() {
   local case_dir rc
   case_dir=$(make_case scout-detached-no-branch)
@@ -862,6 +863,59 @@ test_scout_detached_without_task_branch_allows() {
   [ -f "$case_dir/data/task-x1/report.md" ] \
     || fail "scout-detached-no-branch: teardown removed the scout's durable record"
   pass "a detached scout with no fm/<id> branch is decided by content, not dead-ended at --force"
+}
+
+# The recycled-record case ownership exists for: a stale scout meta points at a
+# lane another task is live on, and that lane is in the state the content checks
+# cannot fault - clean tree, everything pushed. A branch that is not ours proves
+# the foreign owner even though our own fm/<id> is long gone, so teardown must
+# refuse rather than reset the lane and kill its agent.
+test_foreign_branch_refuses_when_expected_branch_is_gone() {
+  local case_dir rc head_before head_after branch_after porcelain_after
+  case_dir=$(make_case foreign-branch-expected-gone)
+  git -C "$case_dir/wt" checkout -q -b fm/other-task
+  wt_commit_file "$case_dir" live.txt owner "live owner commit"
+  git -C "$case_dir/wt" push -q origin fm/other-task
+  git -C "$case_dir/project" fetch -q origin
+  git -C "$case_dir/project" branch -D fm/task-x1 >/dev/null
+  write_meta "$case_dir" no-mistakes scout
+  printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/data/task-x1"
+  printf '%s\n' '# Scout report' > "$case_dir/data/task-x1/report.md"
+  add_compatible_tasks_axi "$case_dir"
+  add_lifecycle_call_logs "$case_dir"
+
+  head_before=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  head_after=$(git -C "$case_dir/wt" rev-parse HEAD)
+  branch_after=$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD)
+  porcelain_after=$(git -C "$case_dir/wt" status --porcelain)
+
+  expect_code 1 "$rc" "foreign-branch-expected-gone: teardown should refuse a lane owned by another branch"
+  assert_grep "recorded path: $case_dir/wt" "$case_dir/stderr" \
+    "foreign-branch-expected-gone: refusal did not name the recorded path"
+  assert_grep "found branch: fm/other-task" "$case_dir/stderr" \
+    "foreign-branch-expected-gone: refusal did not name the found branch"
+  assert_grep "expected branch: fm/task-x1" "$case_dir/stderr" \
+    "foreign-branch-expected-gone: refusal did not name the expected branch"
+  [ "$head_after" = "$head_before" ] \
+    || fail "foreign-branch-expected-gone: refusal changed the live owner's HEAD"
+  [ "$branch_after" = fm/other-task ] \
+    || fail "foreign-branch-expected-gone: refusal moved the live owner off its branch"
+  [ -z "$porcelain_after" ] \
+    || fail "foreign-branch-expected-gone: refusal dirtied the live owner's worktree"
+  [ ! -s "$case_dir/tmux.log" ] \
+    || fail "foreign-branch-expected-gone: refusal attempted to kill the live owner's process"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "foreign-branch-expected-gone: refusal attempted to return the live owner's worktree"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "foreign-branch-expected-gone: teardown deleted metadata after refusing"
+  pass "a foreign branch is proof of another owner even after our own task branch is gone"
 }
 
 test_scout_absent_worktree_allows_metadata_cleanup() {
@@ -2351,6 +2405,7 @@ test_secondmate_carveout_skips_worktree_ownership_check
 test_scout_foreign_worktree_refuses_without_touching_owner
 test_scout_worktree_gets_ordinary_unlanded_work_check
 test_scout_detached_without_task_branch_allows
+test_foreign_branch_refuses_when_expected_branch_is_gone
 test_scout_absent_worktree_allows_metadata_cleanup
 test_never_branched_worktree_allows_without_force
 test_never_branched_worktree_with_foreign_content_refuses

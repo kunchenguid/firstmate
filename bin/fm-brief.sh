@@ -259,8 +259,12 @@ $HERDR_SECTION
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
-The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
-The report is the only thing that survives, so anything worth keeping must be in it.
+The worktree is your laboratory - install, run, edit, and make scratch commits freely.
+The report is the only thing that leaves this worktree, so anything worth keeping must be in it.
+
+1. First action: create your branch: \`git checkout -b fm/$ID\`
+   Teardown holds the lane to that branch: it is how firstmate proves this worktree is yours,
+   and not another task's, before returning it to the pool.
 
 # Rules
 1. Never push to any remote and never open a PR.
@@ -283,6 +287,11 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Your scratch is not discarded for you. Teardown applies the same uncommitted- and unlanded-work
+   refusals to this lane as to any other, and clearing it needs the captain's explicit approval.
+   So finish clean: put everything worth keeping in the report, then leave no uncommitted changes
+   behind. If scratch must stay in the worktree, say so in the report and why, so the captain can
+   decide rather than meet a refusal with no explanation.
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.

@@ -26,25 +26,30 @@
 # worktree is inspectable and, when that can be decided at all, that it is not
 # owned by someone else. A missing or empty path refuses and preserves metadata
 # rather than treating an uninspectable landed-work check as safe. The owning
-# branch is resume_branch= from meta (written by fm-spawn for ship tasks) with
-# fm/<task-id> as the fallback for metadata written before that key existed. When
-# that branch exists, the worktree must be on it, or detached at exactly its tip;
-# any other branch or detached commit is a proven foreign owner and refuses. When
-# it does not exist at all - a scout, which works detached by contract, or a
-# crewmate that died before `git checkout -b` - nothing can be proven foreign, so
-# the verdict is left to the ordinary dirty, unpushed, unmerged, and landed-work
-# checks below, which protect this task's own work and any recycled lane's alike.
+# branch is resume_branch= from meta (written by fm-spawn for every task that has
+# a worktree) with fm/<task-id> as the fallback for metadata written before that
+# key existed. Every crewmate brief, ship and scout alike, makes creating that
+# branch the first action, so a lane that did any work is on it: the worktree must
+# be on the expected branch, or detached at exactly its tip. Any OTHER branch is a
+# proven foreign owner and refuses, whether or not our own branch still exists -
+# that is what stops a recycled record from returning another live lane. The one
+# undecidable state is a detached HEAD with no expected branch: every lane starts
+# there and a crewmate can die before branching, so the verdict passes to the
+# ordinary dirty, unpushed, unmerged, and landed-work checks below, which refuse on
+# content instead and protect this task's own work and any recycled lane's alike.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
 # Scout tasks (kind=scout in meta) get those same worktree checks: a scout
-# worktree is a real pool lane whose contents can be another task's, so it is not
-# exempt from dirty or unlanded-work refusals. Teardown proceeds only once the
-# report at data/<task-id>/report.md exists and the shared unresolved-decision
-# completion gate verifies its captain-held inventory. An already-absent scout
-# path is the one carve-out: there is no worktree to return and no live lane to
-# destroy, and the report teardown never touches is the durable record, so
-# refusing there would only dead-end metadata cleanup.
+# worktree is a real pool lane holding real files, so it is not exempt from dirty
+# or unlanded-work refusals, and leftover scratch needs the captain's explicit
+# --force the same as any other unlanded work. The report at data/<task-id>/
+# report.md is the scout's work product for the backlog, not a licence to discard
+# the lane: teardown proceeds only once it exists and the shared
+# unresolved-decision completion gate verifies its captain-held inventory. An
+# already-absent scout path is the one carve-out: there is no worktree to return
+# and no live lane to destroy, and the report teardown never touches is the
+# durable record, so refusing there would only dead-end metadata cleanup.
 # Before destructive cleanup, teardown validates task check artifacts and any
 # matching quarantine entries as ordinary single-link files on the state
 # device. It refuses and preserves task state when that proof fails; otherwise
@@ -622,17 +627,6 @@ require_recorded_worktree_ownership() {
     return 1
   fi
 
-  # No expected branch means no ref to compare against: a scout works detached by
-  # contract and never creates one, and a ship crewmate can die before its first
-  # `git checkout -b`. Nothing here can be proven foreign, and refusing would push
-  # both of those ordinary states to --force, so the verdict is left to the dirty,
-  # unpushed, unmerged, and landed-work checks that follow. They refuse on content
-  # rather than identity, which protects this task's own work and a recycled
-  # lane's work alike. Ownership stays unverified, so the post-cleanup recheck
-  # re-derives the same answer instead of inheriting an unproven pass.
-  expected_head=$(git -C "$WT" rev-parse --verify "$expected^{commit}" 2>/dev/null || true)
-  [ -n "$expected_head" ] || return 0
-
   found=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   if [ -z "$found" ]; then
     head=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null || true)
@@ -642,6 +636,17 @@ require_recorded_worktree_ownership() {
       echo "Cannot verify that the recorded worktree belongs to this task; preserving $META." >&2
       return 1
     fi
+    expected_head=$(git -C "$WT" rev-parse --verify "$expected^{commit}" 2>/dev/null || true)
+    # A detached HEAD with no expected branch to compare against is the one state
+    # nothing can decide by identity: every crewmate, ship or scout, starts here
+    # and can die before its first `git checkout -b`, and a lane still parked at
+    # that start holds nothing of anyone's. Refusing would push it to --force, so
+    # the verdict passes to the dirty, unpushed, unmerged, and landed-work checks,
+    # which refuse on content instead. Ownership stays unverified, so the
+    # post-cleanup recheck re-derives this rather than inheriting an unproven pass.
+    # A worktree sitting on a branch is never in this state: a branch that is not
+    # ours is proof of a foreign owner whether or not our own branch still exists.
+    [ -n "$expected_head" ] || return 0
     if [ "$head" = "$expected_head" ]; then
       TEARDOWN_WORKTREE_OWNERSHIP_VERIFIED=1
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$expected
