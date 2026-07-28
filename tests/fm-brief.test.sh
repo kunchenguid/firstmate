@@ -2,13 +2,25 @@
 # Behavior tests for bin/fm-brief.sh.
 #
 # Regression coverage for the heredoc-in-command-substitution parse bug (issue
-# #166): each ship-mode branch builds its Definition-of-done text with
-# `VAR=$(cat <<EOF ... EOF)`. Bash's lexer tracks quote state through the
-# heredoc body while it scans for the matching `)` of the command
-# substitution, so a single unescaped apostrophe anywhere in that body breaks
-# parsing of the *entire rest of the script* - `bash -n` fails, not just the
-# generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
-# is unaffected, so the secondmate charter block does not need this guard.
+# #166). Bash 3.2, which macOS still ships as /bin/bash, scans a command
+# substitution for its closing `)` as a flat character stream and does not
+# honour here-document boundaries, so the body of a `VAR=$(cat <<EOF ... EOF)`
+# is read as shell syntax. One unbalanced apostrophe, double quote, backtick,
+# or parenthesis anywhere in that body breaks parsing of the *entire* file -
+# `bash -n` fails, not just the generated brief. Bash 4+ parses it correctly,
+# so the breakage is invisible on Linux CI and hits every stock Mac.
+#
+# Two corrections to the original issue #166 diagnosis, both verified against
+# bash 3.2.57 on macOS:
+#   - Quoting the delimiter (`<<'EOF'`) does NOT help. It changes expansion of
+#     the body, which happens later than the scan that already failed.
+#   - The trigger is not apostrophes specifically. Any unbalanced quote,
+#     backtick, or parenthesis does it.
+# So the construct itself is the defect, not the text inside it, and the guard
+# below bans the construct rather than policing the prose.
+#
+# A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`) is unaffected,
+# so the secondmate charter block does not need this guard.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -18,15 +30,73 @@ TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
-# The script itself must always parse. This is the direct regression test for
-# issue #166: a stray apostrophe in any of the three DOD heredoc bodies
-# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
+# The script itself must always parse. Note this runs under whatever bash the
+# test host provides, which on CI is bash 4+ and therefore cannot observe the
+# issue #166 breakage at all. The two checks after it carry that guarantee.
 test_script_parses() {
   local out rc
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
   expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
   [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
   pass "fm-brief.sh: bash -n succeeds"
+}
+
+# Structural guard, and the check that actually holds on Linux CI: it asserts a
+# property of the source text, so it is exact under every bash version.
+#
+# fm-brief.sh builds its Definition-of-done and Herdr sections out of English
+# prose, where an apostrophe is only a matter of time. Rather than police the
+# prose, ban the construct that makes prose dangerous: no here-document in this
+# file may be captured by a command substitution. Use capture_block instead.
+#
+# Scoped to fm-brief.sh deliberately. Other scripts (fm-fleet-snapshot.sh,
+# fm-bootstrap.sh) capture embedded jq and bash programs the same way and parse
+# fine today because that content is balanced; a repo-wide ban would be churn
+# for no safety gain. The bash 3.2 check below is what covers those files.
+test_no_command_substitution_heredocs() {
+  local hits
+  # A command substitution that opens a here-document on the same line, e.g.
+  # `VAR=$(cat <<EOF` or `VAR=$(cat <<'EOF'`.
+  # Comment lines are stripped first: capture_block's own docstring names the
+  # banned construct in order to explain why it is banned.
+  # shellcheck disable=SC2016  # single quotes are deliberate: this is a literal grep pattern, not an expansion
+  hits=$(grep -vn '^[[:space:]]*#' "$ROOT/bin/fm-brief.sh" | grep '\$([^)]*<<' || true)
+  [ -z "$hits" ] || fail "fm-brief.sh captures a here-document with a command substitution, which fails to parse on bash 3.2 (use capture_block instead):
+$hits"
+  # ...and capture_block must still be the mechanism actually in use, so this
+  # guard cannot pass vacuously by the sections having been deleted.
+  assert_grep 'capture_block DOD' "$ROOT/bin/fm-brief.sh" \
+    "fm-brief.sh must build its Definition-of-done through capture_block"
+  assert_grep 'capture_block HERDR_SECTION' "$ROOT/bin/fm-brief.sh" \
+    "fm-brief.sh must build its Herdr section through capture_block"
+  pass "fm-brief.sh: no here-document is captured by a command substitution"
+}
+
+# Real bash 3.2 parse check across every shipped script. This is the strongest
+# guarantee available, but only where a legacy bash exists - macOS developer
+# machines, and CI only if it installs one. It skips loudly rather than
+# silently so a green run never overstates what was verified.
+test_all_bin_scripts_parse_under_legacy_bash() {
+  local candidate legacy='' legacy_ver='' ver failures='' f
+  for candidate in "${FM_TEST_BASH32:-}" /bin/bash "$(command -v bash-3.2 || true)"; do
+    [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+    # shellcheck disable=SC2016  # single quotes are deliberate: BASH_VERSION must expand in the candidate shell, not this one
+    ver=$("$candidate" -c 'echo "$BASH_VERSION"' 2>/dev/null || true)
+    case "$ver" in
+      3.*) legacy=$candidate; legacy_ver=$ver; break ;;
+    esac
+  done
+  if [ -z "$legacy" ]; then
+    skip "fm-brief.sh: bin/ parses under bash 3.x" \
+      "no bash 3.x found (set FM_TEST_BASH32 to a bash 3.2 binary); the structural guard still applies"
+    return
+  fi
+  for f in "$ROOT"/bin/*.sh "$ROOT"/bin/backends/*.sh; do
+    [ -f "$f" ] || continue
+    "$legacy" -n "$f" 2>/dev/null || failures="$failures ${f#"$ROOT"/}"
+  done
+  [ -z "$failures" ] || fail "these scripts do not parse under $legacy (bash $legacy_ver):$failures"
+  pass "fm-brief.sh: every bin/ script parses under bash $legacy_ver"
 }
 
 test_help_includes_entire_header() {
@@ -383,6 +453,8 @@ test_scout_and_secondmate_scaffold() {
 }
 
 test_script_parses
+test_no_command_substitution_heredocs
+test_all_bin_scripts_parse_under_legacy_bash
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review

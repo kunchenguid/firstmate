@@ -50,6 +50,14 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
+# skip <name> <reason>
+# For a check that cannot run here because the environment lacks something it
+# needs, rather than one that ran and succeeded. The reason is always printed,
+# so a check that silently stops covering anything is visible in the output.
+skip() {
+  printf 'ok - %s # SKIP %s\n' "$1" "$2"
+}
+
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
