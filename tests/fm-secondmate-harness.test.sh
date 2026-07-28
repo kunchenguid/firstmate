@@ -555,6 +555,50 @@ spawn_secondmate_capture() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$home" "$@" --secondmate
 }
 
+test_spawn_backend_precedence_over_inherited_config() {
+  local w sm meta launchlog out status
+  w="$TMP_ROOT/spawn-backend-env-precedence"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'herdr\n' > "$w/home/config/backend"
+  make_seeded_home "$sm" sm
+
+  out=$(FM_BACKEND=tmux spawn_secondmate_capture \
+    "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" \
+    "FM_BACKEND=tmux should beat inherited config/backend=herdr"$'\n'"$out"
+
+  meta="$w/home/state/sm.meta"
+  [ "$(cat "$sm/config/backend")" = herdr ] \
+    || fail "backend precedence fixture did not inherit config/backend=herdr"
+  assert_no_grep '^backend=' "$meta" \
+    "FM_BACKEND=tmux did not beat inherited config/backend=herdr"
+  pass "B5b spawn: FM_BACKEND wins over inherited config/backend"
+}
+
+test_spawn_explicit_backend_precedence_over_env_and_inherited_config() {
+  local w sm meta launchlog out status
+  w="$TMP_ROOT/spawn-backend-flag-precedence"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'herdr\n' > "$w/home/config/backend"
+  make_seeded_home "$sm" sm
+
+  out=$(FM_BACKEND=zellij spawn_secondmate_capture \
+    "$w" sm "$sm" "$launchlog" --backend tmux 2>&1); status=$?
+  expect_code 0 "$status" \
+    "explicit --backend tmux should beat FM_BACKEND=zellij and inherited config/backend=herdr"$'\n'"$out"
+
+  meta="$w/home/state/sm.meta"
+  [ "$(cat "$sm/config/backend")" = herdr ] \
+    || fail "explicit backend precedence fixture did not inherit config/backend=herdr"
+  assert_no_grep '^backend=' "$meta" \
+    "explicit --backend tmux did not beat FM_BACKEND=zellij and inherited config/backend=herdr"
+  pass "B5c spawn: explicit --backend wins over FM_BACKEND and inherited config/backend"
+}
+
 # A bare "<harness>" secondmate-harness file (today's format) must launch with
 # NO --model/--effort flag at all, and meta must keep recording model=default,
 # effort=default - the core backward-compat requirement of the new format.
@@ -2208,6 +2252,8 @@ test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins
 test_spawn_unverified_secondmate_harness_refused
+test_spawn_backend_precedence_over_inherited_config
+test_spawn_explicit_backend_precedence_over_env_and_inherited_config
 test_spawn_bare_harness_no_model_effort_flag
 test_spawn_secondmate_harness_model_token
 test_spawn_secondmate_harness_model_and_effort_tokens
