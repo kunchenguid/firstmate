@@ -35,6 +35,10 @@
 #   abandoned fallback mutex may be removed and retaken: the recorded owner
 #   PID is dead, or (legacy/no-pid) the directory age meets the mid-acquire
 #   threshold. A live owner is never overridden.
+#   A leftover flock-form mutex file is neither takeable nor provably abandoned
+#   on the fallback path, so that combination is reported as
+#   IDENTITY_UNAVAILABLE instead of a busy state that no retry could clear;
+#   restore the helper (perl on PATH, FM_LOCK_NO_FLOCK unset) to recover it.
 #   Emergency removal of a fallback (directory-form) reclaim mutex, only when
 #   the owner is proven dead or missing after age:
 #     pid=$(cat state/.lock-reclaim/pid 2>/dev/null)
@@ -69,6 +73,11 @@ RECLAIM_MUTEX_STALE_AFTER="${FM_RECLAIM_MUTEX_STALE_AFTER:-2}"
 # Short busy-mutex retries for free-claim and stale reclaim (not live takeover).
 RECLAIM_BUSY_RETRIES="${FM_RECLAIM_BUSY_RETRIES:-4}"
 RECLAIM_BUSY_SLEEP_SECS="${FM_RECLAIM_BUSY_SLEEP_SECS:-0.05}"
+
+# A flock-form mutex file left on disk by a crashed holder is unlocked and
+# harmless to the flock path, but the mkdir fallback can neither take it nor
+# prove it abandoned, so waiting can never resolve it.
+RECLAIM_MUTEX_UNUSABLE_DETAIL='state/.lock-reclaim is a flock-form mutex file but the flock(2) helper is unavailable; operate read-only until resolved'
 
 EXIT_LIVE_OTHER=10
 EXIT_STALE_RECLAIMABLE=11
@@ -514,7 +523,8 @@ release_reclaim_lock() {
   RECLAIM_LOCK_MODE=
 }
 
-# Returns 0 held, 1 busy (live or mid-acquire), after one abandon-and-retry.
+# Returns 0 held, 1 busy (live or mid-acquire), 2 a flock-form mutex file
+# occupies the path but the helper is unavailable, after one abandon-and-retry.
 # The flock(2) form is preferred; the mkdir form remains for a missing helper
 # and as the recovery path for a legacy directory-form mutex already on disk.
 acquire_reclaim_lock() {
@@ -550,6 +560,9 @@ acquire_reclaim_lock() {
       remove_reclaim_mutex
       return 1
     fi
+    if [ ! -L "$RECLAIM_LOCK" ] && [ -f "$RECLAIM_LOCK" ]; then
+      return 2
+    fi
     if reclaim_mutex_is_provably_abandoned; then
       remove_reclaim_mutex
       continue
@@ -559,12 +572,19 @@ acquire_reclaim_lock() {
   return 1
 }
 
+# Same return codes as acquire_reclaim_lock; 2 is returned immediately because
+# no amount of waiting can make the unusable mutex form resolvable.
 acquire_reclaim_lock_with_busy_retry() {
-  local attempt=0 max=$RECLAIM_BUSY_RETRIES
+  local attempt=0 max=$RECLAIM_BUSY_RETRIES rc
   case "$max" in ''|*[!0-9]*) max=4 ;; esac
   while [ "$attempt" -le "$max" ]; do
-    if acquire_reclaim_lock; then
+    rc=0
+    acquire_reclaim_lock || rc=$?
+    if [ "$rc" -eq 0 ]; then
       return 0
+    fi
+    if [ "$rc" -eq 2 ]; then
+      return 2
     fi
     attempt=$((attempt + 1))
     [ "$attempt" -le "$max" ] || break
@@ -661,9 +681,15 @@ prepare_mutation() {
   CLAIM_LOCK_HELD=1
 }
 
-# claim_free: 0 success, 2 lock appeared, 3 reclaim mutex busy, 1 other failure.
+# claim_free: 0 success, 2 lock appeared, 3 reclaim mutex busy, 4 reclaim mutex
+# unusable, 1 other failure.
 claim_free() {
-  if ! acquire_reclaim_lock_with_busy_retry; then
+  local reclaim_rc=0
+  acquire_reclaim_lock_with_busy_retry || reclaim_rc=$?
+  if [ "$reclaim_rc" -eq 2 ]; then
+    return 4
+  fi
+  if [ "$reclaim_rc" -ne 0 ]; then
     return 3
   fi
   if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
@@ -679,7 +705,7 @@ claim_free() {
 }
 
 reclaim_expected() {
-  local expected=$1 confirmed_closed=$2 initial_proof current
+  local expected=$1 confirmed_closed=$2 initial_proof current reclaim_rc
 
   if ! read_lock; then
     emit_result IDENTITY_UNAVAILABLE "reclaim refused; expected owner $expected but the lock is free"
@@ -719,7 +745,13 @@ reclaim_expected() {
   fi
   current=$CURRENT_OWNER
 
-  if ! acquire_reclaim_lock_with_busy_retry; then
+  reclaim_rc=0
+  acquire_reclaim_lock_with_busy_retry || reclaim_rc=$?
+  if [ "$reclaim_rc" -eq 2 ]; then
+    emit_result IDENTITY_UNAVAILABLE "$RECLAIM_MUTEX_UNUSABLE_DETAIL"
+    return "$EXIT_IDENTITY_UNAVAILABLE"
+  fi
+  if [ "$reclaim_rc" -ne 0 ]; then
     emit_result RECLAIM_BUSY "another reclaim operation holds state/.lock-reclaim"
     return "$EXIT_RECLAIM_BUSY"
   fi
@@ -797,6 +829,10 @@ acquire_default() {
         3)
           emit_result RECLAIM_BUSY "cannot acquire the reclaim mutex for a free lock"
           return "$EXIT_RECLAIM_BUSY"
+          ;;
+        4)
+          emit_result IDENTITY_UNAVAILABLE "$RECLAIM_MUTEX_UNUSABLE_DETAIL"
+          return "$EXIT_IDENTITY_UNAVAILABLE"
           ;;
         *)
           emit_result IDENTITY_UNAVAILABLE "failed to write a free lock owner"

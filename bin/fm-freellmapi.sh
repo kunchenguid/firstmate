@@ -59,6 +59,7 @@ FM_FREELLMAPI_STOP_TIMEOUT=${FM_FREELLMAPI_STOP_TIMEOUT:-10}
 
 LANE_HOME="$FM_HOME/data/freellmapi"
 APP_DIR="$LANE_HOME/app"
+SERVER_ENTRY="$APP_DIR/server/dist/index.js"
 DB_PATH="$LANE_HOME/db/freeapi.db"
 KEY_FILE="$LANE_HOME/encryption.key"
 CRED_FILE="$LANE_HOME/dashboard.credentials"
@@ -100,12 +101,14 @@ pid_alive() {
 }
 
 # The recorded pid must still be this lane's server before any signal is sent.
-# A recycled pid after a crash must never cause a kill of an unrelated process.
+# A recycled pid after a crash must never cause a kill of an unrelated process,
+# so the proof is the lane's absolute entry path (the server is launched with
+# it) and not the bare relative dist/index.js that any node service may show.
 pid_is_our_server() {
   local pid=$1 cmd
-  cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  cmd=$(ps -ww -p "$pid" -o command= 2>/dev/null || true)
   case "$cmd" in
-    *"dist/index.js"*) return 0 ;;
+    *"$SERVER_ENTRY"*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -247,7 +250,7 @@ cmd_start() {
   command -v lsof >/dev/null 2>&1 \
     || die "lsof is required to verify the localhost-only binding; refusing to start unverifiable"
 
-  [ -f "$APP_DIR/server/dist/index.js" ] \
+  [ -f "$SERVER_ENTRY" ] \
     || die "no built install at $APP_DIR; run: fm-freellmapi.sh install --accept-risks"
 
   if running_pid >/dev/null; then
@@ -266,7 +269,8 @@ cmd_start() {
   # It still lives in the node process env for the whole run; same-user tools
   # can inspect that. NODE_ENV=production makes upstream refuse to fall back to
   # any implicit dev key. The background command is a simple command so $! is
-  # the node pid itself, not a wrapping subshell.
+  # the node pid itself, not a wrapping subshell. The entry point is passed as
+  # an absolute path so ps shows a command line that proves lane ownership.
   (
     cd "$APP_DIR/server" || exit 1
     NODE_ENV=production \
@@ -275,7 +279,7 @@ cmd_start() {
     ENCRYPTION_KEY="$(cat "$KEY_FILE")" \
     FREEAPI_DB_PATH="$DB_PATH" \
     CATALOG_SYNC_DISABLED="$sync_disabled" \
-    nohup node dist/index.js >> "$LOG_FILE" 2>&1 &
+    nohup node "$SERVER_ENTRY" >> "$LOG_FILE" 2>&1 &
     printf '%s\n' "$!" > "$PID_FILE"
   ) || die "could not launch the server from $APP_DIR/server"
   chmod 600 "$PID_FILE" "$LOG_FILE" 2>/dev/null || true

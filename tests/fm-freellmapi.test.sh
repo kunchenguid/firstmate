@@ -480,6 +480,39 @@ EOF
   pass "stop refuses a foreign pid"
 }
 
+# `node dist/index.js` is a common invocation, so a recycled pid running some
+# other service under that relative path must never satisfy the lane guard.
+test_stop_refuses_unrelated_dist_index_pid() {
+  local root home fakebin cap impostor pid code alive
+  root=$(fm_test_tmproot fm-freellmapi)
+  read -r home fakebin <<EOF
+$(fresh_home "$root")
+EOF
+  cap="$root/cap"
+  server_fakes "$fakebin" "$cap"
+  impostor="$root/impostor.sh"
+  cat > "$impostor" <<'SH'
+#!/usr/bin/env bash
+i=0
+while [ "$i" -lt 120 ]; do sleep 1; i=$((i + 1)); done
+SH
+  chmod +x "$impostor"
+  bash "$impostor" dist/index.js &
+  pid=$!
+  mkdir -p "$home/data/freellmapi/run"
+  printf '%s\n' "$pid" > "$home/data/freellmapi/run/server.pid"
+  run_tool "$home" "$fakebin" stop
+  code=$CODE
+  alive=0
+  kill -0 "$pid" 2>/dev/null && alive=1
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$code" -ne 0 ] || fail "stop must refuse an unrelated dist/index.js process"
+  [ "$alive" -eq 1 ] || fail "stop must not signal an unrelated dist/index.js process"
+  assert_contains "$OUT" "refusing to signal" "refusal must be explicit"
+  pass "stop refuses an unrelated dist/index.js pid"
+}
+
 test_stop_without_pid_record() {
   local root home fakebin cap
   root=$(fm_test_tmproot fm-freellmapi)
@@ -511,6 +544,7 @@ test_status_reports_not_running
 test_status_warns_on_non_loopback_without_stopping
 test_stop_gracefully_terminates
 test_stop_refuses_foreign_pid
+test_stop_refuses_unrelated_dist_index_pid
 test_stop_without_pid_record
 
 echo "fm-freellmapi tests passed"

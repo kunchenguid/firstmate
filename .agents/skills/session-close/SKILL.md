@@ -23,7 +23,9 @@ No work under way means branch 1; anything under way means branch 2.
 
 No handoff is needed.
 If this session produced durable knowledge that so far exists only in this conversation, run the `/stow` sweep first so it lands on disk.
-Confirm to the captain that nothing is under way and the session can close cleanly, then stop; the lock facts below need no action from anyone on this branch.
+Confirm to the captain that nothing is under way and the session can close cleanly, then stop.
+A numeric lock owner needs no action from anyone on this branch.
+The codex-thread case in the lock section below applies on this branch too: on a Codex-hosted session, ask the captain to actually close the old Codex window, and tell them the next session may ask them to confirm that window is closed.
 
 ## Branch 2 - work under way: handoff before close
 
@@ -32,7 +34,8 @@ Complete every step below before treating the session as closable.
 
 1. **Reconcile the durable records with reality.**
    Update the backlog for every in-flight and queued item so its recorded state matches what the work is actually doing (`AGENTS.md` section 10).
-   File each unanswered captain decision as its own captain-gated work item with `tasks-axi hold <id> --reason "<reason>" --kind captain`, so it survives as a tracked item rather than only as chat history.
+   An unanswered decision that came from an investigation or a visual review is already owned by `.agents/skills/decision-hold-lifecycle/SKILL.md` and registered through `bin/fm-decision-hold.sh`; leave it under that owner rather than filing it again here.
+   File every other unanswered captain decision from a main-side thread as its own captain-gated work item with `tasks-axi hold <id> --reason "<reason>" --kind captain`, so it survives as a tracked item rather than only as chat history.
    Relay any finished result or finding that has not yet reached the captain, in the outcome language of `AGENTS.md` section 9.
 2. **Run the `/stow` sweep.**
    It owns routing conversation-only knowledge to disk; do not re-derive its routing here.
