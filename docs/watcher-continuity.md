@@ -15,6 +15,15 @@ A numeric session-lock owner that fails the shared `fm_harness_pid_alive` predic
 The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
 While supervision is still needed and away mode remains inactive, an actionable close or typed failure wakes the idle session through exit 2.
 
+## Session-owner fence
+
+Normal-mode supervision belongs to the live verified harness process recorded in the home's `state/.lock`.
+The shared fence in `bin/fm-session-lock-lib.sh` is enforced before watcher startup and every watcher cycle, and before an arm may start, restart, retain, or attach to a watcher.
+If a different live harness owns the session lock, the old watcher stands down within one poll and releases the singleton, while arm operations return a typed nonzero `watcher: FAILED - session-owner fence: ...` result without disturbing the new owner's watcher.
+Restart serializes the ownership recheck with watcher termination through `state/.lock.acquire`, so a session handoff cannot race a stale arm into stopping the successor session's watcher.
+Missing, malformed, dead-owner, and non-harness session locks remain recovery cases rather than fences, and stable process identity prevents a reused owner PID from being trusted.
+While `state/.afk` exists, the fence is intentionally bypassed because the away-mode daemon owns supervision without descending from the interactive harness.
+
 ## Actionable wake ordering
 
 After an actionable Pi or OpenCode child close, the adapter starts and verifies one singleton successor before it delivers the original wake.

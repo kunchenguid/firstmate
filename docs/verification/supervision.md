@@ -176,11 +176,14 @@ Observed guarantee: after ordinary `session_shutdown` for `/new`, `/resume`, and
 Stale prior-generation tool callbacks could not mutate the active child, repeated transitions kept exactly one live arm cycle, and terminal `quit` still refused late rearm.
 Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner; other primary harnesses are not applicable because they do not use this Pi extension lifecycle.
 
+`tests/fm-session-owner-fence.test.sh` verifies direct watcher and arm refusal under a foreign live owner, serialized restart isolation, process-identity reuse rejection, attached-successor rechecks, cross-harness handoff, dead-owner recovery, and the away-mode exemption.
+
 Deterministic entry points:
 
 ```sh
 tests/fm-pi-watch-extension.test.sh
 tests/fm-pi-primary-types.test.sh
+tests/fm-session-owner-fence.test.sh
 tests/fm-watcher-lock.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh

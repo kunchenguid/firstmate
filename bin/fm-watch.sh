@@ -66,6 +66,10 @@ mkdir -p "$STATE"
 # cheap when no records exist and never scrapes secondmate conversation.
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# Session-owner fence (fm_session_owner_fence): supervision here must belong to
+# the harness session holding state/.lock. Sourcing is side-effect free.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -623,6 +627,16 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
 
+# Session-owner fence, at startup: a watcher whose process does not descend
+# from the harness session holding this home's state/.lock must not start.
+# Without this, an arm surviving from a previous harness session could take the
+# singleton and absorb wakes no live conversation ever reads. The typed FAILED
+# line goes to stdout so fm-watch-arm.sh and fm-watch-checkpoint.sh propagate it.
+if ! fm_session_owner_fence "$STATE"; then
+  echo "watcher: FAILED - session-owner fence: home session lock is held by live harness pid $FM_SESSION_OWNER_FOREIGN_PID outside this process's session; not starting"
+  exit 1
+fi
+
 # Before acquiring the watcher lock or enumerating any runnable check, replace
 # or quarantine checks created by older versions. The migration compares bytes
 # and reads data only; it never invokes legacy check files through Bash.
@@ -687,6 +701,15 @@ while :; do
   # and doubling every wake.
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" != "$WATCHER_PID" ]; then
     exit 0
+  fi
+
+  # Session-owner fence, per cycle: if the home's session lock moved to another
+  # live harness session (a harness transition happened under this watcher),
+  # stand down so the new session's own supervision can take the singleton
+  # within one poll. The EXIT trap releases this process's lock on the way out.
+  if ! fm_session_owner_fence "$STATE"; then
+    echo "watcher: FAILED - session-owner fence: home session lock moved to live harness pid $FM_SESSION_OWNER_FOREIGN_PID outside this process's session; standing down"
+    exit 1
   fi
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
