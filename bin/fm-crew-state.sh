@@ -593,6 +593,24 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
+  # A crew whose run has FINISHED (done/failed) but which has since declared an
+  # external-wait pause (paused:) or a captain-held transfer is genuinely paused
+  # NOW, not terminal: the finished run is usually the PRECONDITION of the pause
+  # ("checks green, now waiting for the maintainer to merge"). Honor that current
+  # declared intent so the supervisor reads a distinct pause (and its reason) and
+  # absorbs the idle pane, instead of a terminal state that classifies as a
+  # wedge-suspect idle. NEVER when a captain decision is still open in the durable
+  # keyed fold (a real gate is never silenced by a pause; status_open_decisions),
+  # and only for done/failed - working/parked (active run, open gate) keep their
+  # run-step precedence untouched above.
+  case "$RUN_STATE" in
+    done|failed)
+      if status_is_paused_or_captain_held "$LOG_LINE" && [ -z "$(status_open_decisions "$LOG")" ]; then
+        emit paused status-log "$(status_line_note "$LOG_LINE")"
+      fi
+      ;;
+  esac
+
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 

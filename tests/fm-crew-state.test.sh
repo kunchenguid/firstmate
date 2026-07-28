@@ -283,6 +283,19 @@ outcome: failed
 EOF
 }
 
+run_checks_passed() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "abc1234"
+  pr: "https://github.com/o/r/pull/1"
+  findings: none
+outcome: checks-passed
+EOF
+}
+
 run_ci_monitoring() {  # <branch>
   cat <<EOF
 run:
@@ -674,6 +687,87 @@ test_terminal_failed() {
   assert_contains "$out" "state: failed" "failed run -> failed"
   assert_contains "$out" "source: run-step" "failed -> run-step source"
   pass "terminal failed run is authoritative"
+}
+
+# (d') A TERMINAL run (checks-passed/failed) that the crew has SINCE declared a
+# pause upon must read as paused, not terminal: the finished run is the
+# precondition of the pause (checks green, now awaiting the external maintainer).
+# This is the fm-crew-state half of the parked-crew stale-misclassification fix -
+# without it crew_absorb_class reads `none` and the watcher storms the idle pane.
+test_terminal_checks_passed_honors_declared_pause() {
+  reset_fakes
+  local d; d=$(new_case terminal-paused-checks)
+  make_repo_on_branch "$d/wt" fm/feat-paused-checks
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-paused-checks.meta" "window=fm:fm-feat-paused-checks" "worktree=$d/wt" "kind=ship"
+  printf 'paused: awaiting the external maintainer to merge the PR\n' > "$d/state/feat-paused-checks.status"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-paused-checks)"
+  local out; out=$(run_crew_state "$d" feat-paused-checks)
+  assert_contains "$out" "state: paused" "terminal checks-passed + paused: -> paused"
+  assert_contains "$out" "source: status-log" "terminal-but-paused reads from the status log"
+  assert_contains "$out" "awaiting the external maintainer" "the pause reason is carried in the detail"
+  assert_not_contains "$out" "state: done" "a declared pause is not masked by the finished run"
+  pass "a terminal checks-passed run declared paused reads paused, not done"
+}
+
+test_terminal_failed_honors_declared_pause() {
+  reset_fakes
+  local d; d=$(new_case terminal-paused-failed)
+  make_repo_on_branch "$d/wt" fm/feat-paused-failed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-paused-failed.meta" "window=fm:fm-feat-paused-failed" "worktree=$d/wt" "kind=ship"
+  printf 'paused: waiting on a rate-limit reset before retrying\n' > "$d/state/feat-paused-failed.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-paused-failed)"
+  local out; out=$(run_crew_state "$d" feat-paused-failed)
+  assert_contains "$out" "state: paused" "terminal failed + paused: -> paused"
+  assert_contains "$out" "source: status-log" "terminal-but-paused reads from the status log"
+  assert_contains "$out" "rate-limit reset" "the pause reason is carried in the detail"
+  assert_not_contains "$out" "state: failed" "a declared pause is not masked by the failed run"
+  pass "a terminal failed run declared paused reads paused, not failed"
+}
+
+# An OPEN captain decision in the durable keyed fold WINS over a later paused:
+# line: a real gate is never silenced by a pause, so the terminal run-step state
+# stands and the decision keeps surfacing.
+test_terminal_open_decision_beats_declared_pause() {
+  reset_fakes
+  local d; d=$(new_case terminal-open-decision)
+  make_repo_on_branch "$d/wt" fm/feat-open-decision
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-open-decision.meta" "window=fm:fm-feat-open-decision" "worktree=$d/wt" "kind=ship"
+  # An open captain decision, then a later paused: line that must NOT silence it.
+  printf 'needs-decision [key=q1]: pick storage backend\npaused: awaiting the maintainer\n' \
+    > "$d/state/feat-open-decision.status"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-open-decision)"
+  local out; out=$(run_crew_state "$d" feat-open-decision)
+  assert_contains "$out" "state: done" "an open captain decision keeps the terminal run-step state"
+  assert_contains "$out" "source: run-step" "open-decision case stays run-step sourced"
+  assert_not_contains "$out" "state: paused" "a later paused: must not mask an open captain decision"
+
+  # The failed variant behaves the same: the open decision still wins.
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-open-decision)"
+  out=$(run_crew_state "$d" feat-open-decision)
+  assert_contains "$out" "state: failed" "an open captain decision keeps a failed run-step state"
+  assert_not_contains "$out" "state: paused" "a later paused: must not mask an open decision on a failed run"
+  pass "an open captain decision beats a later declared pause on a terminal run"
+}
+
+# Invariant 1 (active-run precedence): a crew that appended paused: then STARTED a
+# run still reads working - the active run overrides the stale pause. The
+# terminal-run pause honoring above must NOT bleed into a working/parked run.
+test_active_run_overrides_stale_pause() {
+  reset_fakes
+  local d; d=$(new_case active-over-pause)
+  make_repo_on_branch "$d/wt" fm/feat-active-pause
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-active-pause.meta" "window=fm:fm-feat-active-pause" "worktree=$d/wt" "kind=ship"
+  printf 'paused: awaiting the maintainer\n' > "$d/state/feat-active-pause.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-active-pause)"
+  local out; out=$(run_crew_state "$d" feat-active-pause)
+  assert_contains "$out" "state: working" "an active run overrides a stale paused: line"
+  assert_contains "$out" "source: run-step" "active-run precedence stays run-step sourced"
+  assert_not_contains "$out" "state: paused" "a stale pause must not mask an active run"
+  pass "an active run overrides a stale declared pause (invariant 1)"
 }
 
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
@@ -1252,6 +1346,10 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
+test_terminal_checks_passed_honors_declared_pause
+test_terminal_failed_honors_declared_pause
+test_terminal_open_decision_beats_declared_pause
+test_active_run_overrides_stale_pause
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
