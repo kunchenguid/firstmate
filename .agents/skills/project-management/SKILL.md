@@ -43,7 +43,7 @@ Destructive, irreversible, and security-sensitive decisions still require captai
 Confirm the source URL, local project name, delivery mode, and autonomy posture.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
 A `no-mistakes` project must have an `origin` remote and must complete the initialization procedure below.
-A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
+A `direct-PR` project needs an `origin` remote and must complete the same initialization, for the reason the Initialize section gives.
 A `local-only` project may have no remote and skips no-mistakes initialization.
 
 ## Create a project
@@ -58,11 +58,17 @@ The captain's request to create that local project authorizes this local initial
 
 ## Initialize
 
-Run no-mistakes initialization only for `no-mistakes` projects:
+Run no-mistakes initialization for both `no-mistakes` and `direct-PR` projects, and skip it only for `local-only`:
 
 ```sh
 cd projects/<name> && no-mistakes init && no-mistakes doctor
 ```
+
+A `direct-PR` project needs this even though it never runs the pipeline.
+Firstmate's own post-delivery CI monitor for a direct-PR task is `no-mistakes watch`, armed by `bin/fm-nm-watch.sh`, and that command refuses an uninitialized repository with `repo not initialized (run 'no-mistakes init' first)`.
+Skipping initialization therefore leaves every direct-PR PR with no CI monitoring at all, which is how a red check reached the captain unannounced on 2026-07-28.
+This is not the pipeline arriving through the back door: initialization only configures the local gate, running it never runs a pipeline, and the watch it enables uses no worktree, calls no agent, and consumes no session quota (`bin/fm-nm-watch.sh`'s header owns that contract).
+Choosing `direct-PR` to save quota costs nothing here.
 
 Initialization configures the local gate and does not vendor a no-mistakes skill into the project.
 Do not create a commit merely because initialization ran.

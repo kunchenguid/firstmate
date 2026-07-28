@@ -141,6 +141,13 @@ fm_poll_parked_detail() {  # <run-id>
 # run in, not the task's own. A run id that is not on record is the definitive
 # gone answer; a status this vocabulary does not know is left undecided rather
 # than guessed, because a wrong "gone" makes firstmate re-arm a healthy watch.
+#
+# A SKIPPED watch step is checked before the status word because it is the more
+# precise answer and the status word alone under-reports it. Run
+# 01KYJY370CPPE9DRV9NPEPFKAD (2026-07-28, MR 43) ended 2ms after it was armed
+# with `watch,skipped,0,2` and `outcome: passed` - a run that never polled the
+# PR, reported as a pass. "Skipped its watch step" is what a caller has to hear
+# to know the PR is uncovered rather than approved.
 fm_poll_watch_state() {  # <run-id> <git-dir>
   local run=$1 dir=$2 nm=${FM_NM_BIN:-no-mistakes} out rc status
   command -v "$nm" >/dev/null 2>&1 || return 1
@@ -151,6 +158,10 @@ fm_poll_watch_state() {  # <run-id> <git-dir>
       *"not found"*) printf 'gone|no run %s on record\n' "$run"; return 0 ;;
       *) return 1 ;;
     esac
+  fi
+  if printf '%s\n' "$out" | grep -qE '^[[:space:]]*watch,[[:space:]]*"?skipped"?[[:space:]]*,'; then
+    printf 'gone|run %s skipped its watch step, so it never polled the PR\n' "$run"
+    return 0
   fi
   status=$(printf '%s\n' "$out" | awk -F': ' '/^[[:space:]]*status:/ { gsub(/"/, "", $2); print $2; exit }')
   [ -n "$status" ] || return 1

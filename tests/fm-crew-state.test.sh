@@ -283,6 +283,24 @@ outcome: failed
 EOF
 }
 
+# The 2026-07-28 false green, verbatim in shape: an escalate-only watch run that
+# ended 2ms after it was armed with its single step skipped, reporting
+# outcome: passed for an MR that was open with a failing check.
+run_skipped_watch() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUNSKIP"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://code.byted.org/o/r/merge_requests/43"
+  findings: none
+  steps[1]{step,status,findings,duration_ms}:
+    watch,skipped,0,2
+outcome: passed
+EOF
+}
+
 run_ci_monitoring() {  # <branch>
   cat <<EOF
 run:
@@ -661,6 +679,35 @@ test_terminal_passed() {
   assert_contains "$out" "state: done" "passed run -> done"
   assert_contains "$out" "source: run-step" "passed -> run-step source"
   pass "terminal passed run is authoritative"
+}
+
+# (d2) a run that executed NOTHING is not evidence, however it labels itself.
+# Regression for the 2026-07-28 incident: firstmate armed an escalate-only watch
+# on MR 43, the run finished 2ms later with `watch,skipped,0,2` and
+# `outcome: passed`, and this helper reported "state: done - run passed: PR
+# merged/closed" for an MR that had neither merged nor closed and whose CI was
+# red. The runs list deliberately carries the same run as `completed` here: the
+# coarse fallback must not re-attribute from the status word alone once the
+# steps table has disqualified the run.
+test_skipped_run_is_not_evidence() {
+  reset_fakes
+  local d short; d=$(new_case skippedrun)
+  make_repo_on_branch "$d/wt" fm/feat-skip
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-skip.meta" "window=fm:fm-feat-skip" "worktree=$d/wt" "kind=ship"
+  printf 'working: opened the MR\n' > "$d/state/feat-skip.status"
+  FM_FAKE_AXI_STATUS="$(run_skipped_watch fm/feat-skip)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  completed  fm/feat-skip ${short}  2026-07-28 22:05  https://code.byted.org/o/r/merge_requests/43
+EOF
+)"
+  local out; out=$(run_crew_state "$d" feat-skip)
+  assert_not_contains "$out" "state: done" "a run that skipped every step still reported the task done"
+  assert_not_contains "$out" "PR merged/closed" "a run that never polled the PR still claimed it merged or closed"
+  assert_not_contains "$out" "source: run-step" "a run that executed nothing was still treated as authoritative"
+  assert_contains "$out" "every step skipped" "the ignored run was not disclosed in the line"
+  pass "a run that executed nothing is not attributed and never claims the PR landed"
 }
 
 test_terminal_failed() {
@@ -1251,6 +1298,7 @@ test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
+test_skipped_run_is_not_evidence
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row

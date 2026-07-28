@@ -298,6 +298,8 @@ For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports
 Run `bin/fm-pr-check.sh <id> <PR url>` to record the canonical PR/MR and authoritative head when available and to atomically arm merge monitoring.
 For a direct-PR task it also arms the escalate-only no-mistakes watch, which is firstmate's own post-delivery monitor rather than a crew-owned run, so its parks arrive as `nm-park-<run>` keyed status events and are firstmate decisions under the configured authority.
 Answering one ends that watch, so re-arm it with `bin/fm-nm-watch.sh` while the PR is still open.
+Before relaying any PR as ready, read its current CI conclusion from the provider itself with `gh-axi` or `bytedcli`, and relay a failing or unreadable result as exactly that.
+An open PR on the right base, a worker's own report, and an armed monitor are each claims about the PR, never evidence that its checks passed.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine authority.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
@@ -464,7 +466,7 @@ It performs guarded fast-forward updates of firstmate and registered secondmate 
 
 These skills are not captain-invocable; load them only at their precise triggers.
 
-- `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `BACKLOG_ORPHAN:`, `CREW_DISPATCH: invalid`, `HARNESS_OVERRIDES: invalid`, `FLEET_SYNC:`, `PR_CHECK_MIGRATION:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `NM_INCOMPATIBLE:`, `NM_ORPHAN:`, `NUDGE_SECONDMATES:`, or `FMX:`); silence and `BOOTSTRAP_INFO:` need no load.
+- `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `BACKLOG_ORPHAN:`, `CREW_DISPATCH: invalid`, `HARNESS_OVERRIDES: invalid`, `FLEET_SYNC:`, `PR_CHECK_MIGRATION:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `NM_INCOMPATIBLE:`, `NM_ORPHAN:`, `NM_UNWATCHED:`, `NUDGE_SECONDMATES:`, or `FMX:`); silence and `BOOTSTRAP_INFO:` need no load.
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `firstmate-orca` - load before switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.

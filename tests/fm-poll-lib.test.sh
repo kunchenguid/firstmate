@@ -25,6 +25,7 @@
 #   (e) ANOTHER run's park is never reported - the captain's own no-mistakes
 #       work is not firstmate's to read, report, or answer
 #   (f) a watch run that is gone wakes once, with the re-arm instruction
+#   (f2) a run that skipped its watch step is gone, not a pass
 #   (g) a run status the vocabulary does not know is not reported as gone
 #   (h) a watch lookup that cannot answer fails closed with the broken
 #       diagnostic, never as a signal
@@ -446,6 +447,31 @@ test_gone_watch_wakes_once_with_the_rearm() {
   pass "a watch run that is gone or ended wakes firstmate once with the re-arm instruction"
 }
 
+# A run whose watch step was SKIPPED never polled the PR, whatever its status
+# word says. Run 01KYJY370CPPE9DRV9NPEPFKAD (2026-07-28) is the case: armed on
+# MR 43, finished 2ms later with `watch,skipped,0,2` and `outcome: passed`. The
+# poll has to call that gone and say why, or a PR nothing is watching keeps
+# looking watched.
+test_skipped_watch_step_is_gone() {
+  local case_dir out
+  case_dir=$(make_case watch-skipped)
+  arm_poll "$case_dir"
+  watch_run "$case_dir" "$MY_RUN"
+  run_record "$case_dir" "$MY_RUN" completed
+  cat >> "$case_dir/run-$MY_RUN.toon" <<'TOON'
+  steps[1]{step,status,findings,duration_ms}:
+    watch,skipped,0,2
+outcome: passed
+TOON
+
+  out=$(run_poll "$case_dir")
+  assert_contains "$out" "watch gone" \
+    "watch-skipped: a run that skipped its watch step must wake firstmate to re-arm"
+  assert_contains "$out" "skipped its watch step" \
+    "watch-skipped: the wake did not say the run never polled the PR"
+  pass "a watch run that skipped its watch step is reported gone, not as a pass"
+}
+
 test_unknown_status_is_not_reported_as_gone() {
   local case_dir out
   case_dir=$(make_case watch-unknown)
@@ -635,6 +661,7 @@ test_park_wakes_once
 test_park_clearing_rearms_the_one_shot
 test_another_runs_park_is_never_reported
 test_gone_watch_wakes_once_with_the_rearm
+test_skipped_watch_step_is_gone
 test_unknown_status_is_not_reported_as_gone
 test_watch_lookup_failure_fails_closed
 test_no_recorded_run_asks_no_watch_question
