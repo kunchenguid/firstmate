@@ -70,6 +70,9 @@ make_fake_root() {
   # fm-path-lib.sh: teardown sources it for the device+inode worktree-identity
   # fallback in worktree_registered_for_project; a newly required sibling.
   ln -s "$ROOT/bin/fm-path-lib.sh" "$fake/bin/fm-path-lib.sh"
+  # fm-treehouse-lib.sh: teardown sources it to hand `treehouse return` the pool's
+  # own spelling of the worktree path; a newly required sibling.
+  ln -s "$ROOT/bin/fm-treehouse-lib.sh" "$fake/bin/fm-treehouse-lib.sh"
   # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
@@ -179,6 +182,9 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # fm-path-lib.sh: teardown sources it for the device+inode worktree-identity
   # fallback in worktree_registered_for_project; a newly required sibling.
   ln -s "$ROOT/bin/fm-path-lib.sh" "$fake/bin/fm-path-lib.sh"
+  # fm-treehouse-lib.sh: teardown sources it to hand `treehouse return` the pool's
+  # own spelling of the worktree path; a newly required sibling.
+  ln -s "$ROOT/bin/fm-treehouse-lib.sh" "$fake/bin/fm-treehouse-lib.sh"
   # fm-gate-refuse-lib.sh: teardown sources it before any fleet mutation.
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
