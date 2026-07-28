@@ -114,7 +114,9 @@ test_no_mistakes_dod_wording() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`help`' "$brief" \
     "no-mistakes DOD must render literal backticks around help"
-  assert_no_grep "no-mistakes' own guidance" "$brief" \
+  assert_grep "the authority check enforced by firstmate and any required captain escalation" "$brief" \
+    "no-mistakes DOD lost the authority-check policy wording"
+  assert_no_grep "firstmate's authority check" "$brief" \
     "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
