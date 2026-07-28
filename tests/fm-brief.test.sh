@@ -376,53 +376,58 @@ test_scout_and_secondmate_load_decision_hold_policy() {
 }
 
 test_every_scaffold_carries_access_verify_gate() {
-  local home brief rule8
+  local home brief flat rule8
   home="$TMP_ROOT/access-verify-home"
   mkdir -p "$home/data"
   for kind in ship scout secondmate; do
     brief=$(render_brief_kind "$home" "brief-access-verify-$kind" "$kind" paused)
-    assert_grep "A permission or credential boundary is a hypothesis until an identity check or a concrete denied" "$brief" \
+    # Assert against a whitespace-flattened render: the gate is hard-wrapped source text
+    # that is also re-indented into the numbered rule lists, so pinning assertions to the
+    # rendered line breaks would report a wording-neutral reflow as a policy regression.
+    flat="$home/data/brief-access-verify-$kind/brief.flat"
+    tr '\n\t' '  ' <"$brief" | tr -s ' ' >"$flat"
+    assert_grep "A permission or credential boundary is a hypothesis until an identity check or a concrete denied operation with its exact error proves it." "$flat" \
       "$kind brief missing the access-boundary-is-a-hypothesis rule"
     # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
-    assert_grep 'operation with its exact error proves it. Before appending `blocked:`, `paused:`, or' "$brief" \
+    assert_grep 'Before appending `blocked:`, `paused:`,' "$flat" \
       "$kind brief does not gate the paused verb behind the identity check"
     # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
-    assert_grep '`needs-decision:` for a credential, permission, or access reason, run the identity check' "$brief" \
+    assert_grep '`needs-decision:` for a credential, permission, or access reason, run the identity check for that system first' "$flat" \
       "$kind brief does not gate needs-decision behind the identity check"
     # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
-    assert_grep 'system first (e.g. `az account show`, `aws sts get-caller-identity`, `gh auth status`,' "$brief" \
+    assert_grep '(e.g. `az account show`, `aws sts get-caller-identity`, `gh auth status`, `vercel whoami`, `flyctl auth whoami`)' "$flat" \
       "$kind brief missing the identity-check examples"
-    assert_grep "If that identity check surfaces the captain's own account, treat it as a completed check for" "$brief" \
+    assert_grep "If that identity check surfaces the captain's own account, treat it as a completed check for read-only diagnosis" "$flat" \
       "$kind brief does not resolve the identity check landing on the captain's own account"
-    assert_grep "read-only diagnosis, not as permission to act. Never acquire or act as his identity: no interactive" "$brief" \
+    assert_grep "not as permission to act. Never acquire or act as his identity: no interactive sign-in as him" "$flat" \
       "$kind brief missing the read-versus-act distinction or the interactive-sign-in prohibition"
-    assert_grep "including an MFA or authenticator push" "$brief" \
+    assert_grep "including an MFA or authenticator push" "$flat" \
       "$kind brief missing the forbidden approval-prompt acquisition pattern"
-    assert_grep "and no write, send, or state change run under" "$brief" \
+    assert_grep "no write, send, or state change run under his account" "$flat" \
       "$kind brief missing the prohibition on acting under the captain's account"
     # The blanket clause below forbade reading under an ambient credential too, which made the
     # mandatory identity check itself unrunnable; the rule now separates reads from acts.
-    assert_no_grep "never reach for an ambient credential" "$brief" \
+    assert_no_grep "never reach for an ambient credential" "$flat" \
       "$kind brief regressed to the blanket ambient-credential prohibition that also barred reads"
-    assert_grep "A credential deliberately provisioned for your own work, with known scope and attributed," "$brief" \
+    assert_grep "A credential deliberately provisioned for your own work, with known scope and attributed, reviewable use, is yours to run under." "$flat" \
       "$kind brief missing the provisioned-credential permission"
     # The absolute clause below forbade the fleet's own provisioned sessions along with the
     # captain's identity, so the rule was rewritten around acquisition instead of reuse.
-    assert_no_grep "or session for any purpose, reads included" "$brief" \
+    assert_no_grep "or session for any purpose, reads included" "$flat" \
       "$kind brief regressed to the absolute reads-included token/session prohibition"
-    assert_no_grep "or session to make a change" "$brief" \
+    assert_no_grep "or session to make a change" "$flat" \
       "$kind brief regressed to the write-scoped token qualifier"
-    assert_grep "that is itself the escalation" "$brief" \
+    assert_grep "that is itself the escalation" "$flat" \
       "$kind brief missing the captain-identity-only escalation instruction"
-    assert_grep "A successful read never establishes permission to write" "$brief" \
+    assert_grep "A successful read never establishes permission to write" "$flat" \
       "$kind brief missing the read-does-not-authorize-write rule"
-    assert_grep "do not probe the write path to test that" "$brief" \
+    assert_grep "do not probe the write path to test that" "$flat" \
       "$kind brief missing the explicit prohibition on write-path probing"
-    assert_no_grep "check the write path before declaring it unreachable" "$brief" \
+    assert_no_grep "check the write path before declaring it unreachable" "$flat" \
       "$kind brief regressed to the write-probing sentence"
-    assert_grep "report the identity you verified, the" "$brief" \
+    assert_grep "report the identity you verified, the exact change that is needed, and that you did not make it." "$flat" \
       "$kind brief missing the no-capability-claim escalation wording"
-    assert_no_grep "verified you could make it" "$brief" \
+    assert_no_grep "verified you could make it" "$flat" \
       "$kind brief regressed to the forbidden capability claim"
     # The gate is injected as a hardcoded `8.` into two independently maintained rule
     # lists. If either list ever grows its own rule 8, the brief renders two of them.

@@ -546,6 +546,7 @@ SH
 # A fixed sleep here measured macOS process scheduling rather than the runner's
 # refill decision: under load the runner launched the replacement immediately,
 # but the OS did not schedule its process until after the fixed sleep expired.
+: "${SCHED_EVIDENCE:?slow fixture needs SCHED_EVIDENCE to keep its sentinels inside the test root}"
 attempt=0
 while [ ! -e "$SCHED_EVIDENCE/replacement-started" ] && [ "$attempt" -lt 500 ]; do
   sleep 0.01
@@ -554,7 +555,6 @@ done
 if [ ! -e "$SCHED_EVIDENCE/replacement-started" ]; then
   touch "$SCHED_EVIDENCE/slow-timed-out"
 fi
-touch "$SCHED_EVIDENCE/slow-done"
 echo "ok - slow fixture"
 SH
   cat >"$repo/$b" <<'SH'
@@ -564,6 +564,7 @@ echo "ok - fast fixture"
 SH
   cat >"$repo/$c" <<'SH'
 #!/usr/bin/env bash
+: "${SCHED_EVIDENCE:?replacement fixture needs SCHED_EVIDENCE to keep its sentinels inside the test root}"
 if [ -e "$SCHED_EVIDENCE/slow-timed-out" ]; then
   echo "not ok - scheduler waited for oldest worker"
   exit 1
@@ -613,7 +614,7 @@ echo "not ok - deliberate proven-set fail"
 exit 1
 SH
   chmod +x "$repo/$b"
-  rm -f "$evidence/slow-done"
+  touch "$evidence/replacement-started"
   set +e
   SCHED_EVIDENCE="$evidence" "$runner" --jobs 2 "$a" "$b" >"$tmp/out4" 2>"$tmp/err4"
   rc=$?
