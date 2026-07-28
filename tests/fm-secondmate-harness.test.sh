@@ -314,6 +314,25 @@ test_propagate_lib() {
     || fail "unprovenanced backend gained provenance after primary changed"
   printf 'herdr\n' > "$src/backend"
 
+  mkdir -p "$d/home4/config" "$d/home4/state"
+  printf 'tmux\n' > "$d/home4/local-backend"
+  ln -s ../local-backend "$d/home4/config/backend"
+  report="$d/symlink-unprovenanced.report"
+  : > "$report"
+  FM_CONFIG_INHERIT_REPORT="$report" propagate_inheritable_config "$src" "$d/home4/config"
+  [ -L "$d/home4/config/backend" ] || fail "unprovenanced backend symlink was replaced"
+  [ "$(cat "$d/home4/config/backend")" = tmux ] || fail "unprovenanced backend symlink target changed"
+  assert_grep $'backend\tskipped\tpreserving deliberate local override' "$report" \
+    "unprovenanced backend symlink should be preserved with primary present"
+  rm -f "$src/backend"
+  : > "$report"
+  FM_CONFIG_INHERIT_REPORT="$report" propagate_inheritable_config "$src" "$d/home4/config"
+  [ -L "$d/home4/config/backend" ] || fail "unprovenanced backend symlink was removed"
+  [ "$(cat "$d/home4/config/backend")" = tmux ] || fail "unprovenanced backend symlink target changed on primary absence"
+  assert_grep $'backend\tskipped\tpreserving deliberate local override' "$report" \
+    "unprovenanced backend symlink should be preserved with primary absent"
+  printf 'herdr\n' > "$src/backend"
+
   # 5b. deliberate local backend override is preserved across present and absent primary
   report="$d/deliberate.report"
   printf 'tmux\n' > "$d/home2/config/backend"
@@ -1157,7 +1176,7 @@ test_bootstrap_sweep_no_inheritance_is_noop() {
 # config/backend: present/changed/absent convergence, deliberate override
 # preservation, ABSENT reread token, and stronger FM_BACKEND/--backend axes.
 test_backend_inheritance_override_and_stronger_selectors() {
-  local w head out err status instruction resolved
+  local w head out err status instruction resolved spawn_world spawn_home spawn_meta launchlog
   w=$(new_world backend-inherit)
   head=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$head"
@@ -1231,19 +1250,21 @@ test_backend_inheritance_override_and_stronger_selectors() {
     FM_BACKEND_CONFIG_DIR="$1" fm_backend_name
   ' "$ROOT" "$w/sm/config")
   [ "$resolved" = zellij ] || fail "local config/backend should win without FM_BACKEND (got $resolved)"
-  # fm-spawn resolves explicit --backend before fm_backend_name; keep that order here.
-  resolved=$(bash -c '
-    BACKEND_ARG=herdr
-    if [ -n "${BACKEND_ARG:-}" ]; then
-      printf "%s" "$BACKEND_ARG"
-      exit 0
-    fi
-    # shellcheck source=/dev/null
-    . "$0/bin/fm-backend.sh"
-    unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier FM_BACKEND
-    FM_BACKEND_CONFIG_DIR="$1" fm_backend_name
-  ' "$ROOT" "$w/sm/config")
-  [ "$resolved" = herdr ] || fail "explicit --backend stand-in should beat local config/backend"
+
+  spawn_world="$TMP_ROOT/backend-explicit-spawn"
+  spawn_home="$spawn_world/sm"
+  launchlog="$spawn_world/launch.log"
+  mkdir -p "$spawn_world/home/config"
+  printf 'zellij\n' > "$spawn_world/home/config/backend"
+  make_seeded_home "$spawn_home" sm
+  out=$(FM_BACKEND= spawn_secondmate_capture "$spawn_world" sm "$spawn_home" "$launchlog" \
+    --harness claude --backend tmux 2>&1); status=$?
+  expect_code 0 "$status" "explicit --backend tmux should beat inherited config/backend=zellij"
+  [ "$(cat "$spawn_home/config/backend")" = zellij ] \
+    || fail "explicit-backend spawn did not establish the conflicting inherited local default"
+  spawn_meta="$spawn_world/home/state/sm.meta"
+  assert_no_grep '^backend=' "$spawn_meta" \
+    "real fm-spawn did not honor explicit --backend tmux over inherited config/backend=zellij"
   pass "B12b backend inheritance: present/changed/absent, deliberate override, ABSENT reread, stronger selectors"
 }
 

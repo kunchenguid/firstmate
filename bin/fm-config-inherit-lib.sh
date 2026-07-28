@@ -417,11 +417,14 @@ fm_inherit_backend_provenance_path() {
 # preserve. Matching provenance means the copy is still inherited state.
 fm_inherit_backend_is_deliberate() {
   local dest=$1 provenance=$2
-  [ -f "$dest" ] && [ ! -L "$dest" ] || return 1
+  [ -e "$dest" ] || [ -L "$dest" ] || return 1
   if [ ! -f "$provenance" ] || [ -L "$provenance" ]; then
     return 0
   fi
-  ! cmp -s "$dest" "$provenance"
+  if [ -f "$dest" ] && [ ! -L "$dest" ] && cmp -s "$dest" "$provenance"; then
+    return 1
+  fi
+  return 0
 }
 
 fm_inherit_backend_write_provenance() {
