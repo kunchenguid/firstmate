@@ -47,6 +47,33 @@
 # Refuses to overwrite an existing brief.
 set -eu
 
+# Re-exec under bash 5+ when env resolves to macOS /bin/bash 3.2. Ship-mode DOD
+# heredocs inside command substitution are unparseable on 3.2; this block runs
+# before that syntax is ever parsed.
+if [ "${FM_BASH_REEXEC:-}" = 1 ] && [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
+  echo "error: fm-brief.sh: FM_BASH_REEXEC guard tripped — re-exec under a modern bash failed or looped" >&2
+  echo "error: install bash 5+ with: brew install bash" >&2
+  exit 1
+fi
+if [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
+  modern_bash=
+  # shellcheck disable=SC2086  # deliberate word-split on FM_BASH_REEXEC_CANDIDATES
+  for candidate in ${FM_BASH_REEXEC_CANDIDATES:-/opt/homebrew/bin/bash /usr/local/bin/bash}; do
+    if [ -x "$candidate" ]; then
+      modern_bash=$candidate
+      break
+    fi
+  done
+  if [ -z "$modern_bash" ]; then
+    echo "error: fm-brief.sh requires bash 5+ but env bash is ${BASH_VERSION} (${BASH:-unknown})" >&2
+    echo "error: no modern bash found in /opt/homebrew/bin/bash or /usr/local/bin/bash" >&2
+    echo "error: install with: brew install bash" >&2
+    exit 1
+  fi
+  export FM_BASH_REEXEC=1
+  exec "$modern_bash" "$0" "$@"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
@@ -103,48 +130,6 @@ shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
-}
-
-fm_brief_dod_direct_pr() {
-  cat <<'EOF'
-# Definition of done
-This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with `gh-axi`, then append `done: PR {url}` to the status file and stop.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
-EOF
-}
-
-fm_brief_dod_local_only() {
-  cat <<EOF
-# Definition of done
-This project ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
-EOF
-}
-
-fm_brief_dod_no_mistakes() {
-  cat <<'EOF'
-# Definition of done
-The task is complete only when committed on your branch.
-When you believe it is complete, append `done: {summary}` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
-
-You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and `no-mistakes axi run --help` plus the `help` lines in each `axi` response are authoritative and version-matched to the installed binary.
-Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
-
-Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
-  Firstmate applies the authority contract in its `AGENTS.md` and obtains any required captain decision.
-  When the decision comes back, feed it to the gate with `no-mistakes axi respond` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid `--yes`: it would silently bypass firstmate's authority check and any required captain escalation.
-
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append `done: PR {url} checks green` and stop. You are finished.
-EOF
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
@@ -323,29 +308,55 @@ read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
 
-# Build delivery-mode Definition-of-done text via functions. Bash 3.2's lexer
-# mishandles `VAR=$(cat <<EOF ... EOF)` when a later outer `cat > file <<EOF`
-# follows; function-returned heredocs avoid that parse bug.
-DOD_DIRECT_PR=$(fm_brief_dod_direct_pr)
-DOD_LOCAL_ONLY=$(fm_brief_dod_local_only)
-DOD_NO_MISTAKES=$(fm_brief_dod_no_mistakes)
-
 case "$MODE" in
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-    DOD="$DOD_DIRECT_PR"
+    DOD=$(cat <<EOF
+# Definition of done
+This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
+The task is complete only when committed on your branch.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+EOF
+)
     ;;
   local-only)
     SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
-    DOD="$DOD_LOCAL_ONLY"
+    DOD=$(cat <<EOF
+# Definition of done
+This project ships **local-only**: no remote, no PR, no pipeline.
+The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
+Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
+The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
+EOF
+)
     ;;
   *)  # no-mistakes (default)
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
-    DOD="$DOD_NO_MISTAKES"
+    DOD=$(cat <<EOF
+# Definition of done
+The task is complete only when committed on your branch.
+When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+
+You drive no-mistakes by responding to its gates, not by implementing fixes.
+Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
+
+Two firstmate-specific rules layer on top of that guidance:
+- ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
+  Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision.
+  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
+- Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
+
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+EOF
+)
     ;;
 esac
 

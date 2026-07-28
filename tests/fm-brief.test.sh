@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-brief.sh.
 #
-# Regression coverage for the heredoc-in-command-substitution parse bug (issue
-# #166): each ship-mode branch builds its Definition-of-done text with
-# `VAR=$(cat <<EOF ... EOF)`. Bash's lexer tracks quote state through the
-# heredoc body while it scans for the matching `)` of the command
-# substitution, so a single unescaped apostrophe anywhere in that body breaks
-# parsing of the *entire rest of the script* - `bash -n` fails, not just the
-# generated brief. A plain `cat > file <<EOF ... EOF` (not wrapped in `$(...)`)
-# is unaffected, so the secondmate charter block does not need this guard.
+# Regression coverage for macOS /bin/bash 3.2: ship-mode DOD heredocs inside
+# command substitution are unparseable on 3.2 when env resolves PATH to /bin.
+# bin/fm-brief.sh re-execs under bash 5+ before that syntax is parsed; tests
+# here assert the prologue, re-exec success under a /bin-first PATH, and the
+# loud install-bash error when no modern candidate exists.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -18,20 +15,80 @@ TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
-# The script itself must always parse. This is the direct regression test for
-# issue #166: a stray apostrophe in any of the three DOD heredoc bodies
-# (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
-test_script_parses() {
-  local out rc
-  out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
-  expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
-  [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
-  if [ -x /bin/bash ]; then
-    out=$(/bin/bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
-    expect_code 0 "$rc" "/bin/bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
-    [ -z "$out" ] || fail "/bin/bash -n bin/fm-brief.sh emitted unexpected output: $out"
+# Modern bash must parse the full script. Default `bash` on macOS is 3.2, so use
+# an explicit 5+ candidate when present; skip when no modern bash is installed.
+test_script_parses_under_modern_bash() {
+  local out rc modern
+  modern=
+  for candidate in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    if [ -x "$candidate" ]; then
+      modern=$candidate
+      break
+    fi
+  done
+  if [ -z "$modern" ]; then
+    pass "fm-brief.sh: no modern bash installed — skip full-script parse check"
+    return 0
   fi
-  pass "fm-brief.sh: bash -n succeeds"
+  out=$("$modern" -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
+  expect_code 0 "$rc" "$modern -n bin/fm-brief.sh must parse cleanly (got: $out)"
+  [ -z "$out" ] || fail "$modern -n bin/fm-brief.sh emitted unexpected output: $out"
+  pass "fm-brief.sh: modern bash -n succeeds"
+}
+
+test_reexec_prologue_parses_under_bin_bash() {
+  local out rc prologue
+  if ! [ -x /bin/bash ]; then
+    pass "fm-brief.sh: /bin/bash absent — skip prologue parse check"
+    return 0
+  fi
+  prologue=$(awk '/^set -eu$/ {found=1} found {print} /^SCRIPT_DIR=/ {exit}' "$ROOT/bin/fm-brief.sh")
+  out=$(printf '%s\n' "$prologue" | /bin/bash -n 2>&1); rc=$?
+  expect_code 0 "$rc" "/bin/bash -n on re-exec prologue must parse cleanly (got: $out)"
+  [ -z "$out" ] || fail "/bin/bash -n on re-exec prologue emitted unexpected output: $out"
+  pass "fm-brief.sh: re-exec prologue parses under /bin/bash"
+}
+
+test_reexec_succeeds_when_path_prefers_bin_bash() {
+  local home id brief modern rc
+  if ! [ -x /bin/bash ]; then
+    pass "fm-brief.sh: /bin/bash absent — skip PATH re-exec check"
+    return 0
+  fi
+  modern=
+  for candidate in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    if [ -x "$candidate" ] && [ "${candidate##*/}" = bash ]; then
+      modern=$candidate
+      break
+    fi
+  done
+  if [ -z "$modern" ]; then
+    pass "fm-brief.sh: no modern bash installed — skip PATH re-exec check"
+    return 0
+  fi
+  home="$TMP_ROOT/reexec-home"
+  mkdir -p "$home/data"
+  id="brief-reexec-e1"
+  PATH="/bin:/usr/bin:/usr/sbin:/sbin" FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1; rc=$?
+  expect_code 0 "$rc" "fm-brief.sh must scaffold via re-exec when PATH prefers /bin/bash"
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "re-exec scaffold did not write a brief"
+  pass "fm-brief.sh: re-execs under modern bash when env resolves to /bin/bash"
+}
+
+test_reexec_errors_when_no_modern_bash() {
+  local out rc
+  if ! [ -x /bin/bash ]; then
+    pass "fm-brief.sh: /bin/bash absent — skip no-modern-bash error check"
+    return 0
+  fi
+  out=$(FM_BASH_REEXEC_CANDIDATES=/nonexistent/bash \
+    /bin/bash "$ROOT/bin/fm-brief.sh" test-id test-repo 2>&1); rc=$?
+  expect_code 1 "$rc" "fm-brief.sh must exit 1 when no modern bash candidate exists"
+  assert_contains "$out" "brew install bash" \
+    "no-modern-bash error must tell the operator to install bash"
+  pass "fm-brief.sh: loud error when no modern bash is available"
 }
 
 test_help_includes_entire_header() {
@@ -387,7 +444,10 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
-test_script_parses
+test_script_parses_under_modern_bash
+test_reexec_prologue_parses_under_bin_bash
+test_reexec_succeeds_when_path_prefers_bin_bash
+test_reexec_errors_when_no_modern_bash
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
