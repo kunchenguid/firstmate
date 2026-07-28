@@ -16,6 +16,13 @@
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
+# That receipt is state/<id>.pr-poll-retirement, a mode-0600 record carrying the
+# format tag, the task id, the provider-tagged PR identity, the data, template,
+# and registration hashes and inode identities, and the literal result merged.
+# It is written only for one exact validated merged observation, is never
+# overwritten in place, and is removed once its poll artifacts have retired, so
+# a receipt present at startup means a crashed retirement to finish rather than
+# a poll still to run.
 
 FM_PR_PROVIDER=
 FM_PR_URL=

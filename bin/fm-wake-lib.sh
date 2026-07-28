@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
 # Shared durable wake queue and portable lock helpers.
+#
+# This file owns the durable wake queue under state/ and its record layout.
+# state/.wake-queue holds one tab-separated record per queued wake:
+#   epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
+# epoch is the append time in seconds, seq is the monotonic counter kept in
+# state/.wake-queue.seq, kind is one of signal|stale|check|heartbeat, and key
+# and payload are the wake's subject and reason with tabs, carriage returns,
+# and newlines flattened to spaces so a record is always exactly five fields on
+# one line. state/.wake-queue.lock serializes append and drain.
+# bin/fm-wake-drain.sh prints these raw records verbatim as the first work
+# queue of every wake-handling turn.
 
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"

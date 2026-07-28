@@ -104,6 +104,12 @@ Firstmate cannot reset its own session, so the captain performs the reset.
 Once the sweep passes, tell the captain in plain outcome language that everything durable is on disk and the session is safe to restart, then keep supervising normally until they do it.
 Tell them to end this session before starting the replacement, because the session lock refuses a second acquire while a different live process still holds it, and the new session would otherwise come up read-only with no ability to spawn, steer, merge, or drain queued wakes.
 Do not stop supervising, tear anything down, or hold new work back while waiting.
+
+That announcement is a claim about the moment it is made, and continuing to supervise re-accumulates exactly the conversation-only state conditions 2 and 3 guard.
+So the safe-point test stays live for as long as the announcement stands: re-run it at the end of every wake-handling turn after announcing, and again immediately before the reset if the captain says when they are about to do it.
+When a re-test fails, retract the announcement in the same turn rather than letting the captain reset on a stale guarantee.
+Retracting means telling the captain plainly that the session is no longer safe to restart, naming the specific item that changed - the correction still only in this conversation, the unrelayed decision, the unsent escalation - then carrying that item to a resting point on disk, and re-announcing only after the whole test passes again.
+Because the captain may reset at any moment once told it is safe, keep the window small while the announcement stands: file each new steer, decision, and escalation to its durable destination as it happens rather than deferring it to a later sweep.
 While away mode is active the captain is not present to reset, so complete the sweep, keep supervising, and raise the reset when they return.
 
 ## Scope exclusion: no skill storage

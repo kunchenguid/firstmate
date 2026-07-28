@@ -7,6 +7,18 @@
 # quarantined for private review. A current X-mode shim is preserved by exact
 # content, while the recognized older byte-static shim is refreshed in place.
 # Usage: fm-pr-check-migrate.sh [--checks-safe]
+#
+# State this script owns under state/:
+#   .pr-check-quarantine/   mode-0700 private storage for checks this migration
+#                           neutralized; its contents are never runnable and
+#                           never re-armed automatically, and its diagnostic
+#                           entries record each unfinished obligation.
+#   .pr-check-migration-scan-v1  mode-0600 marker proving the non-executing scan
+#                           completed and disabled every unsafe legacy check.
+#   .pr-check-migration-v1  mode-0600 marker recording that the private repairs
+#                           themselves completed; both markers carry their own
+#                           name as their content and gate re-running the pass.
+#   .pr-check-migration.log per-task outcomes for the pass (docs/gitlab-merge-watch.md).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
