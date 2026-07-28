@@ -17,6 +17,12 @@
 # history.
 #
 # The database is opened with SQLite's read-only mode and PRAGMA query_only.
+# Baby Menu keeps its database in WAL mode, so the open follows the writer:
+# with a live `-wal` or `-shm` sidecar present the plain read-only open is used,
+# and with neither sidecar present the open adds `immutable=1`, which is the
+# only way to read a closed WAL database without a read-only open creating the
+# sidecars itself. A sidecar appearing during that immutable read means a writer
+# arrived and the reading is dropped rather than trusted.
 # Usage:
 #   fm-quota-fallback.sh <claude|codex|grok|kimi> <stale|auth_required> [database]
 set -u
@@ -116,4 +122,24 @@ query="
   FROM aged_row
   WHERE saved_at IS NOT NULL AND age_seconds IS NOT NULL AND age_seconds >= 0;"
 
-sqlite3 -readonly -batch -noheader "$database" "$query" 2>/dev/null || true
+has_writer_sidecar() {
+  [ -e "$database-wal" ] || [ -e "$database-shm" ]
+}
+
+if has_writer_sidecar; then
+  sqlite3 -readonly -batch -noheader "$database" "$query" 2>/dev/null || true
+  exit 0
+fi
+
+uri=$database
+uri=${uri//%/%25}
+uri=${uri//\?/%3F}
+uri=${uri//\#/%23}
+uri=${uri// /%20}
+
+reading=$(sqlite3 -readonly -batch -noheader "file:$uri?immutable=1" "$query" 2>/dev/null || true)
+if has_writer_sidecar || [ -z "$reading" ]; then
+  exit 0
+fi
+
+printf '%s\n' "$reading"

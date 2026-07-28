@@ -56,6 +56,25 @@ file_signature() {
   shasum -a 256 "$path" | awk '{print $1}'
 }
 
+wal_signature() {
+  local path=$1
+  if [ -e "$path" ]; then
+    printf 'present:%s:%s\n' \
+      "$(wc -c < "$path" | tr -d '[:space:]')" \
+      "$(shasum -a 256 "$path" | awk '{print $1}')"
+  else
+    printf 'absent\n'
+  fi
+}
+
+shm_presence() {
+  if [ -e "$1" ]; then
+    printf 'present\n'
+  else
+    printf 'absent\n'
+  fi
+}
+
 test_fresh_primary_is_unchanged() {
   local fakebin marker out status
   fakebin=$(fm_fakebin "$TMP_ROOT/fresh")
@@ -139,6 +158,37 @@ test_unusable_saved_timestamp_is_not_reported_as_young() {
   pass "future-dated and unparseable snapshot timestamps produce no reading"
 }
 
+test_closed_writer_wal_database_is_read_without_creating_sidecars() {
+  local dir="$TMP_ROOT/closed-writer" db out status
+  mkdir -p "$dir"
+  db="$dir/baby-menu.db"
+  sqlite3 "$db" >/dev/null <<'SQL'
+PRAGMA journal_mode=WAL;
+CREATE TABLE claude_code_quota_snapshot (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  snapshot TEXT NOT NULL,
+  saved_at TEXT NOT NULL
+);
+INSERT INTO claude_code_quota_snapshot
+  VALUES (1, '{"windows":[{"id":"five_hour","percentUsed":41}]}', datetime('now', '-2 minutes'));
+PRAGMA wal_checkpoint(TRUNCATE);
+SQL
+  rm -f "$db-wal" "$db-shm"
+
+  out=$("$FALLBACK" claude stale "$db")
+  status=$?
+  expect_code 0 "$status" "closed-writer WAL database"
+  printf '%s\n' "$out" | jq -e '
+    .source == "baby-menu-sqlite"
+    and .sourceTable == "claude_code_quota_snapshot"
+    and .ageSeconds >= 115
+    and .snapshot.windows[0].id == "five_hour"
+  ' >/dev/null || fail "a WAL database with no live sidecars produced no usable reading: $out"
+  assert_absent "$db-wal" "fallback created a write-ahead log beside a closed Baby Menu database"
+  assert_absent "$db-shm" "fallback created a shared-memory index beside a closed Baby Menu database"
+  pass "a WAL database whose writer has closed is read without creating sidecars"
+}
+
 test_missing_or_unopenable_database_preserves_primary_behavior() {
   local out status locked="$TMP_ROOT/locked.db"
   out=$("$FALLBACK" claude stale "$TMP_ROOT/missing.db")
@@ -157,17 +207,20 @@ test_missing_or_unopenable_database_preserves_primary_behavior() {
 }
 
 test_database_is_never_written() {
-  local before after wal_before wal_after out
+  local before after wal_before wal_after shm_before shm_after out
   before=$(file_signature "$DB")
-  wal_before=''
-  [ -f "$DB-wal" ] && wal_before=$(file_signature "$DB-wal")
+  wal_before=$(wal_signature "$DB-wal")
+  shm_before=$(shm_presence "$DB-shm")
   chmod 444 "$DB"
   out=$("$FALLBACK" kimi stale "$DB")
   after=$(file_signature "$DB")
-  wal_after=''
-  [ -f "$DB-wal" ] && wal_after=$(file_signature "$DB-wal")
+  wal_after=$(wal_signature "$DB-wal")
+  shm_after=$(shm_presence "$DB-shm")
   [ "$before" = "$after" ] || fail "fallback changed the database bytes, size, or mtime"
-  [ "$wal_before" = "$wal_after" ] || fail "fallback changed the write-ahead log of a WAL database"
+  [ "$wal_before" = "$wal_after" ] \
+    || fail "fallback changed or created the write-ahead log: $wal_before -> $wal_after"
+  [ "$shm_before" = "$shm_after" ] \
+    || fail "fallback created or removed the shared-memory index: $shm_before -> $shm_after"
   printf '%s\n' "$out" | jq -e '
     .source == "baby-menu-sqlite"
     and .sourceTable == "kimi_quota_cache"
@@ -183,5 +236,6 @@ test_fresh_primary_is_unchanged
 test_stale_and_auth_required_emit_sourced_aged_snapshots
 test_absent_sqlite3_preserves_primary_behavior
 test_unusable_saved_timestamp_is_not_reported_as_young
+test_closed_writer_wal_database_is_read_without_creating_sidecars
 test_missing_or_unopenable_database_preserves_primary_behavior
 test_database_is_never_written
