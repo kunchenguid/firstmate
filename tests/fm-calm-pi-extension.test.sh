@@ -26,6 +26,21 @@ require_pi_compat_version() {
   esac
 }
 
+# `pi` is not an exclusive binary name: unrelated CLIs install one too, and a
+# shadowing binary must gate-skip the E2E cases rather than be version-checked
+# as if it were the coding agent. Print the version only when the `pi` on PATH
+# is the installed @earendil-works/pi-coding-agent CLI.
+pi_agent_cli_version() {
+  local package_version path_version
+  command -v pi >/dev/null 2>&1 || return 1
+  [ -f "$PI_PACKAGE_DIR/package.json" ] || return 1
+  package_version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version" 2>/dev/null) || return 1
+  path_version=$(pi --version 2>/dev/null || true)
+  [ -n "$package_version" ] || return 1
+  [ "$path_version" = "$package_version" ] || return 1
+  printf '%s\n' "$path_version"
+}
+
 cleanup() {
   if command -v tmux >/dev/null 2>&1; then
     tmux -L "$TMUX_SOCKET" kill-server 2>/dev/null || true
@@ -890,11 +905,14 @@ JS
 
 test_operational_followup_turn_e2e() {
   local project home config sessions version label case_name calm_state expected_notifications session_file pane i captain_line handled_line geometry_gap exact_session
-  if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
-    echo "skip: pi or tmux not found for Pi operational follow-up E2E"
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "skip: tmux not found for Pi operational follow-up E2E"
     return 0
   fi
-  version=$(pi --version 2>/dev/null || true)
+  if ! version=$(pi_agent_cli_version); then
+    echo "skip: installed @earendil-works/pi-coding-agent CLI not on PATH for Pi operational follow-up E2E"
+    return 0
+  fi
   require_pi_compat_version "$version" "Pi operational follow-up E2E"
 
   project="$TMP_ROOT/followup-project"
@@ -1243,11 +1261,14 @@ JS
 test_hidden_block_geometry_e2e() {
   local project home config sessions session_file snapshot expanded_snapshot calm_off_snapshot restarted_snapshot
   local version skill_line final_line gap i
-  if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
-    echo "skip: pi or tmux not found for Pi Calm hidden-block geometry E2E"
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "skip: tmux not found for Pi Calm hidden-block geometry E2E"
     return 0
   fi
-  version=$(pi --version 2>/dev/null || true)
+  if ! version=$(pi_agent_cli_version); then
+    echo "skip: installed @earendil-works/pi-coding-agent CLI not on PATH for Pi Calm hidden-block geometry E2E"
+    return 0
+  fi
   require_pi_compat_version "$version" "Pi Calm hidden-block geometry E2E"
 
   project="$TMP_ROOT/geometry-project"
@@ -1483,11 +1504,14 @@ TS
 
 test_interactive_terminal_e2e() {
   local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait
-  if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
-    echo "skip: pi or tmux not found for Pi calm interactive E2E"
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "skip: tmux not found for Pi calm interactive E2E"
     return 0
   fi
-  version=$(pi --version 2>/dev/null || true)
+  if ! version=$(pi_agent_cli_version); then
+    echo "skip: installed @earendil-works/pi-coding-agent CLI not on PATH for Pi calm interactive E2E"
+    return 0
+  fi
   require_pi_compat_version "$version" "Pi calm interactive E2E"
 
   project="$TMP_ROOT/e2e-project"
