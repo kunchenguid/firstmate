@@ -12,6 +12,7 @@ PROJECT="$ROOT/.agents/skills/project-management/SKILL.md"
 HARNESS="$ROOT/.agents/skills/harness-adapters/SKILL.md"
 CODING="$ROOT/.agents/skills/firstmate-coding-guidelines/SKILL.md"
 RECOVERY="$ROOT/.agents/skills/stuck-crewmate-recovery/SKILL.md"
+CLOSE="$ROOT/.agents/skills/session-close/SKILL.md"
 SECONDMATE="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
 CONFIG="$ROOT/docs/configuration.md"
 AGENTS="$ROOT/AGENTS.md"
@@ -190,6 +191,94 @@ test_secondmate_registry_contract_stays_concise() {
   pass "secondmate registry guidance keeps concise routes and points to the charter"
 }
 
+test_session_close_owner_branches_and_hands_off() {
+  local stub count
+  assert_present "$CLOSE" "session-close skill is missing"
+  assert_grep "name: session-close" "$CLOSE" "session-close skill metadata has the wrong name"
+  assert_grep "user-invocable: true" "$CLOSE" "session-close must stay captain-invocable"
+  assert_grep "  internal: true" "$CLOSE" "session-close must be internal"
+
+  # The close instruction is conditional: an empty fleet closes straight away,
+  # live work must pass the handoff first.
+  for phrase in \
+    'Check whether work is under way in this home' \
+    'No work under way means branch 1; anything under way means branch 2.' \
+    '## Branch 1 - fleet empty: straight close' \
+    'No handoff is needed.' \
+    '## Branch 2 - work under way: handoff before close' \
+    'Complete every step below before treating the session as closable.'; do
+    assert_grep "$phrase" "$CLOSE" "session-close lost the conditional branch phrase '$phrase'"
+  done
+
+  # Running work and how the next session finds it again.
+  for phrase in \
+    'never stop, tear down, or discard work because the session is ending, and never kill the monitoring' \
+    'Events the monitoring captures wait in the durable wake queue' \
+    'the next session start reads every task' \
+    'Update the backlog for every in-flight and queued item' \
+    'tasks-axi hold <id> --reason "<reason>" --kind captain' \
+    'Do not invent a separate handoff file or checkpoint document'; do
+    assert_grep "$phrase" "$CLOSE" "session-close handoff lost '$phrase'"
+  done
+
+  # Lock release: described, never a manual step.
+  for phrase in \
+    'There is deliberately no manual release step and no unconditional clear command; never hand-delete `state/.lock`' \
+    'A numeric owner becomes provably stale when this session' \
+    'atomically reclaims the lock on its own' \
+    'A codex-thread owner cannot be proven dead from the process table' \
+    'the next session may ask them to confirm that window is closed'; do
+    assert_grep "$phrase" "$CLOSE" "session-close lock section lost '$phrase'"
+  done
+
+  # What the captain is told at close.
+  for phrase in \
+    'State what is still under way and its current state' \
+    'what awaits their decision' \
+    'nothing responds to its reports or questions' \
+    'State where it resumes: opening the next session replays the queued events'; do
+    assert_grep "$phrase" "$CLOSE" "session-close closing summary lost '$phrase'"
+  done
+
+  # Close versus /afk stays an explicit contrast, not an alias.
+  for phrase in \
+    '## Close versus /afk' \
+    '`/afk` keeps this session and its supervision live while the captain is away' \
+    'Closing ends this session' \
+    'offer `/afk` instead of closing'; do
+    assert_grep "$phrase" "$CLOSE" "session-close lost the /afk distinction phrase '$phrase'"
+  done
+
+  # One owner: AGENTS.md carries a minimal trigger stub only, and no public or
+  # neighbouring skill grows a second close procedure.
+  count=$(grep -c 'session-close' "$AGENTS")
+  [ "$count" -eq 1 ] || fail "AGENTS.md must reference session-close exactly once, found $count"
+  stub=$(awk '
+    /^### Session-close stub$/ { found = 1; next }
+    found && /^### / { exit }
+    found && NF { print }
+  ' "$AGENTS")
+  count=$(printf '%s\n' "$stub" | grep -c .)
+  [ "$count" -eq 3 ] || fail "AGENTS.md session-close stub must stay three lines, found $count"
+  assert_contains "$stub" 'Load `session-close` when the captain says they are closing or ending the session' \
+    "AGENTS.md lost the session-close load trigger"
+  assert_contains "$stub" 'never stop, tear down, or unmonitor running work merely because the session is ending' \
+    "AGENTS.md session-close stub lost the running-work safety fact"
+  assert_contains "$stub" 'away mode keeps supervision live, while closing ends it until the next session start' \
+    "AGENTS.md session-close stub lost the /afk contrast"
+  assert_absent "$ROOT/skills/session-close/SKILL.md" \
+    "session-close must not become a public installer-facing skill"
+  assert_no_grep 'closing or ending the session' "$ROOT/.agents/skills/stow/SKILL.md" \
+    "stow grew a competing session-close instruction"
+  assert_no_grep 'closing or ending the session' "$ROOT/.agents/skills/afk/SKILL.md" \
+    "afk grew a competing session-close instruction"
+  assert_grep '| `/session-close`' "$ROOT/README.md" \
+    "README built-in skills table does not list /session-close"
+  assert_grep '".agents/skills/session-close/SKILL.md"' "$ROOT/docs/documentation-audiences.json" \
+    "session-close is missing from the documentation audience inventory"
+  pass "session-close owns a conditional close with a lock-safe, captain-facing handoff"
+}
+
 test_state_startup_and_ordinary_recovery_placement() {
   assert_grep "single owner of the top-level operational-home layout" "$CONFIG" \
     "configuration docs do not own the operational state layout"
@@ -297,6 +386,7 @@ test_generic_effort_fallback_respects_precedence
 test_agent_owned_quota_array_dispatch_contract
 test_shared_authoring_requirements_are_owned
 test_secondmate_registry_contract_stays_concise
+test_session_close_owner_branches_and_hands_off
 test_state_startup_and_ordinary_recovery_placement
 test_compressed_agents_owner_map
 test_intake_reuses_evidence_and_parallelizes_safe_work
