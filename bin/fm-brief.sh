@@ -244,6 +244,9 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+   Do not \`cd\`: your shell keeps its working directory across calls, so one stray \`cd\` silently relocates
+   every later command, and in a firstmate home checkout a guard denies it before it runs.
+   Reach another directory with an absolute path or \`git -C <dir>\` instead.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -355,6 +358,9 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
+   Do not \`cd\`: your shell keeps its working directory across calls, so one stray \`cd\` silently relocates
+   every later command, and in a firstmate home checkout a guard denies it before it runs.
+   Reach another directory with an absolute path or \`git -C <dir>\` instead.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`

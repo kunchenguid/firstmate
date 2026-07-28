@@ -18,6 +18,11 @@ The tracked code root contains the shared instruction, skill, documentation, wor
 The producing PR and X helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 Wake, watcher, away-mode, and X-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 
+Every child file is owned by the script that produces it, and that script's header is where its exact name, fields, and mutation rules live.
+`bin/fm-brief.sh` owns the per-task brief and the scout report under `data/<id>/`; `bin/fm-spawn.sh` and `bin/fm-teardown.sh` own a task's metadata, turn-end marker, harness hook-registry tokens, and scratch; `bin/fm-check-register.sh` and `bin/fm-pr-check.sh` own registered custom checks and the PR merge poll with its sidecars; `bin/fm-watch.sh` and `bin/fm-watch-arm.sh` own the wake queue, watcher locks, liveness beacon, absorbed-wake log, and suppression markers; `bin/fm-turnend-guard.sh` owns the Claude auto-arm and guard-budget records; `bin/fm-supervise-daemon.sh` owns the away-mode records; and `bin/fm-x-lib.sh` owns the generated X-mode artifacts.
+Firstmate reads those records, but only their owning scripts create, advance, and retire them, so a watcher, wake-queue, auto-arm, or sub-supervisor coordination record is never hand-edited or removed to fix a symptom.
+`AGENTS.md` deliberately keeps only the four top-level directories, their read/write posture, and that hand-editing prohibition, because a per-file tree there would be a second copy of this section.
+
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.
 `docs/sessionstart-nudge.md` owns the native session-open adapter mechanics that nudge the digest command.
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
@@ -242,12 +247,33 @@ An omitted model or effort means the selected harness uses its own default for t
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
-See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
+See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`; the cost tiers it encodes are described at the end of this section.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
 Malformed JSON, an empty or malformed rule/default array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
+
+### Cost tiers in the shipped example
+
+With no `config/crew-dispatch.json` present, every crewmate and scout launches at the primary's own harness and model, so routine work is billed at whatever tier the captain happens to run firstmate on.
+[`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) is a worked starting point that tiers that spend instead, and its `why` fields carry the reasoning firstmate reads at intake.
+
+| Tier | Rule class | Profile in the example | Why |
+|---|---|---|---|
+| Cheap | Trivial mechanical edits: rote renames, formatting sweeps, targeted typo fixes, simple file gathering | `claude` / `haiku` / `low` | The work is narrow and unambiguous, so a strong model changes nothing about the outcome and costs several times as much per turn. |
+| Mid | Routine implementation: clear acceptance criteria, no design ambiguity, an existing test seam to extend | `claude` / `claude-sonnet-5` / `medium` or `codex` / `gpt-5.5` / `medium` | The cheapest tier that still drives a full validation pipeline end to end. Most ship tasks belong here, and the example's `default` is the same tier so unmatched work does not fall back to the strongest class. |
+| Strong | Big or ambiguous multi-file features, risky refactors, work holding many moving parts at once | `claude` / `claude-sonnet-5` / `high` or `codex` / `gpt-5.5` / `high` | Ambiguity is where reasoning capacity actually changes the result, so this is where the spend belongs. |
+| Specialist | Work whose core input is fresh news, current events, or live public facts | `grok` | Selected for current web-connected context rather than for cost. |
+
+Activate it with one command run from the tracked code root, then let bootstrap validate it on the next session start:
+
+```sh
+cp docs/examples/crew-dispatch.json "${FM_HOME:-.}/config/crew-dispatch.json"
+```
+
+Tier the rules to the work rather than to the captain's own tier, and keep `AGENTS.md` section 4's precedence intact: an explicit per-task captain override still wins over any rule here.
+Reserving the strongest class for genuinely ambiguous work is a cost choice, not a quality one; section 4 still forbids silently downgrading that class purely to conserve quota when the work needs it.
 
 ## Toolchain
 

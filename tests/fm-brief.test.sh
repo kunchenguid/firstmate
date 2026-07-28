@@ -507,6 +507,31 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# Every crewmate scaffold must carry the cwd rule before the worker's first
+# shell call, so a stray persistent `cd` is avoided rather than discovered by
+# being denied. Asserted on the generated brief - what the crewmate actually
+# reads - not on the script's internals.
+test_ship_and_scout_carry_cwd_rule() {
+  local home ship scout
+  home="$TMP_ROOT/cwd-rule-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" cwd-rule-ship sample >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  ship="$home/data/cwd-rule-ship/brief.md"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" cwd-rule-scout sample --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  scout="$home/data/cwd-rule-scout/brief.md"
+  for brief in "$ship" "$scout"; do
+    assert_grep "Do not \`cd\`: your shell keeps its working directory across calls" "$brief" \
+      "brief did not state the cwd rule before the worker's first shell call"
+    assert_grep 'git -C <dir>' "$brief" \
+      "brief did not offer the scoped alternative to cd"
+  done
+  pass "fm-brief.sh: ship and scout scaffolds carry the no-cd cwd rule"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -542,4 +567,5 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_ship_and_scout_carry_cwd_rule
 test_scout_and_secondmate_scaffold
