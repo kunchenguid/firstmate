@@ -390,7 +390,7 @@ The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch
 
 ## Zellij
 
-The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.
+The current compatibility floor is Zellij 0.44.0, verified with `jq` on macOS aarch64; the supervisor-pane shapes below were verified separately on Zellij 0.44.3 with `jq` on Linux x86_64 on 2026-07-28.
 All real tests use a uniquely named session and `tests/zellij-test-safety.sh`; they never touch a session named `firstmate` or call all-session deletion.
 
 | Guarantee | Command shape | Result |
@@ -408,6 +408,30 @@ All real tests use a uniquely named session and `tests/zellij-test-safety.sh`; t
 `pane_cwd` stayed frozen when a foreground subshell changed directory.
 The marker-delimited `pwd` probe returned the live nested cwd and is covered by the real smoke.
 The focus mitigation restored the previously active tab after `new-tab`, with the unavoidable narrow race documented in the operator guide.
+
+### Supervisor pane shapes
+
+The supervisor tab reconciler depends on three further command shapes, measured on Zellij 0.44.3:
+
+| Guarantee | Command shape | Result |
+| --- | --- | --- |
+| Tab discovery | `zellij action list-tabs --json` | Returned an array whose entries carry `tab_id`, `name`, and `active`, so the reconciler can find its own tab by exact name and read the focused tab. |
+| Add pane to a known tab | `zellij action new-pane --tab-id <id> --cwd <dir> --name <title> --close-on-exit -- <argv>` | Echoed the pane id in `terminal_<id>` form, not the bare integer `list-panes --json` reports as `id`. |
+| Pane title | `zellij action rename-pane -p <pane-id> <title>` | Exited 0 with no output and set the same `title` field a pane created with `new-pane --name` reports. |
+
+Observed pane titles on one probe tab, before and after the seed-pane rename:
+
+```text
+{"id":1,"title":"env PROBE=1 sleep 120"}
+{"id":1,"title":"fm-seed"}
+{"id":2,"title":"fm-later"}
+```
+
+`new-tab --name` names the tab only and has no pane-name flag, so an unrenamed seed pane keeps its raw command line as its title while every later `new-pane --name` pane shows the intended name.
+
+With no client attached, no tab reported `active: true`, so the reconciler's focus restore is a no-op on a headless session rather than a wrong-target jump.
+
+The exit-0 rule above held for `new-pane --tab-id <missing>` and `close-tab-by-id <missing>`, which both returned exit 0 with empty output; `rename-pane -p <missing>` was the one measured exception and returned exit 2 with `Pane with id Terminal(999) not found`. Shape validation of the echoed id therefore remains required, and the best-effort rename stays safe either way.
 
 ```sh
 tests/fm-backend-zellij.test.sh
