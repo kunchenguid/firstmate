@@ -15,7 +15,7 @@ bin/fm-test-run.sh --family telegram-bridge
 
 46 checks pass, covering: inert-by-default, token secrecy and file modes, pairing success/expiry/replay/wrong-code/wrong-identity/re-pair/revoke, exactly-once acceptance, duplicate delivery, both crash windows, offset confirmation, the recovery sweep and its per-entry budget, the long poll's fit inside the watcher's kill budget, one budget shared across a check's calls, orphaned publication temporaries, refusal of unpaired/group/channel/bot senders, unsupported and oversized payloads, injection inertness, rate limiting, project routing, the two-step publish gate, reply escaping/splitting/retry/final cleanup, bootstrap arm and disarm, supervision eligibility, cross-channel coexistence, sweep rotation, gate-agent refusal, home isolation, and the three channel-aware shared surfaces below.
 
-The Bot API is served by the fake local server in `tests/telegram-helpers.sh`: a stateful implementation of `getUpdates` and `sendMessage` reached through the client's real `curl --config` transport.
+The Bot API is served by the fake local server in `tests/telegram-helpers.sh`: a stateful implementation of `getUpdates` and `sendMessage` reached through the client's real `curl --config` transport, read from the same stdin stream the client pipes.
 No socket is bound and no real token exists anywhere in the suite.
 
 ## Inert by default
@@ -40,6 +40,9 @@ The Bot API carries the token in the URL path, so the risk is real rather than t
 
 - positive control - the fake server's `token-seen.log` **does** contain the token, proving the request was actually made and carried it;
 - the negative - the shim's recorded `argv.log` does **not** contain it, and neither does any file under `state/` or `config/`, and neither does `bin/fm-tg-pair.sh status`.
+
+`test_a_killed_poll_leaves_no_token_on_disk` covers the path the watcher actually takes: the fake server holds the long poll open, the poll is `SIGKILL`ed mid-call, and no cleanup can run.
+It asserts both halves too - the fake server's `token-seen.log` shows the killed call really carried the token, the kill really did strand temporaries in `TMPDIR`, and none of those temporaries contains the token.
 
 ## Exactly-once delivery across crashes
 

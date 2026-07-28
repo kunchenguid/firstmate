@@ -701,41 +701,6 @@ while :; do
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
 
-  # Fair check ordering.
-  #
-  # The sweep below wakes on the FIRST check that produces output and abandons
-  # the rest of the cycle, so a permanently chatty check early in the glob would
-  # keep a later one from ever running. That never mattered while at most one
-  # always-on channel existed, but a home can arm both X mode and the Telegram
-  # bridge, and one busy conversation must not silence the other. The sweep
-  # therefore starts just after whichever check last woke firstmate and wraps
-  # around, so every check reaches the front within one rotation. Per-cycle cost
-  # is unchanged: this reorders the same list, it does not run more checks.
-  FM_ROTATED_CHECKS=()
-  n=0
-  for c in "$STATE"/*.check.sh; do
-    [ -e "$c" ] || continue
-    FM_ROTATED_CHECKS[n]=$c
-    n=$((n + 1))
-  done
-  if [ "$n" -gt 1 ] && [ -f "$STATE/.last-check-woke" ]; then
-    last_woke=$(cat "$STATE/.last-check-woke" 2>/dev/null || true)
-    if [ -n "$last_woke" ]; then
-      start=-1
-      i=0
-      while [ "$i" -lt "$n" ]; do
-        if [ "$(basename "${FM_ROTATED_CHECKS[$i]}")" = "$last_woke" ]; then
-          start=$(( (i + 1) % n ))
-          break
-        fi
-        i=$((i + 1))
-      done
-      if [ "$start" -gt 0 ]; then
-        FM_ROTATED_CHECKS=("${FM_ROTATED_CHECKS[@]:$start}" "${FM_ROTATED_CHECKS[@]:0:$start}")
-      fi
-    fi
-  fi
-
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
@@ -744,6 +709,42 @@ while :; do
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
+    # Fair check ordering.
+    #
+    # The sweep below wakes on the FIRST check that produces output and abandons
+    # the rest of the cycle, so a permanently chatty check early in the glob
+    # would keep a later one from ever running. That never mattered while at
+    # most one always-on channel existed, but a home can arm both X mode and the
+    # Telegram bridge, and one busy conversation must not silence the other. The
+    # sweep therefore starts just after whichever check last woke firstmate and
+    # wraps around, so every check reaches the front within one rotation.
+    # Per-cycle cost is unchanged: this reorders the same list, it does not run
+    # more checks, and it is built only on a cycle that actually sweeps.
+    FM_ROTATED_CHECKS=()
+    n=0
+    for c in "$STATE"/*.check.sh; do
+      [ -e "$c" ] || continue
+      FM_ROTATED_CHECKS[n]=$c
+      n=$((n + 1))
+    done
+    if [ "$n" -gt 1 ] && [ -f "$STATE/.last-check-woke" ]; then
+      last_woke=$(cat "$STATE/.last-check-woke" 2>/dev/null || true)
+      if [ -n "$last_woke" ]; then
+        start=-1
+        i=0
+        while [ "$i" -lt "$n" ]; do
+          if [ "$(basename "${FM_ROTATED_CHECKS[$i]}")" = "$last_woke" ]; then
+            start=$(( (i + 1) % n ))
+            break
+          fi
+          i=$((i + 1))
+        done
+        if [ "$start" -gt 0 ]; then
+          FM_ROTATED_CHECKS=("${FM_ROTATED_CHECKS[@]:$start}" "${FM_ROTATED_CHECKS[@]:0:$start}")
+        fi
+      fi
+    fi
+
     rejected_checks=
     for c in ${FM_ROTATED_CHECKS[@]+"${FM_ROTATED_CHECKS[@]}"}; do
       [ -e "$c" ] || continue

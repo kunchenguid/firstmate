@@ -247,7 +247,7 @@ It also makes "sendMessage only after pairing" structural: `bin/fm-tg-reply.sh` 
 
 **The token never enters an argument vector.**
 The Bot API carries the token in the URL path, so a plain `curl` invocation would expose it to any local process through `ps`.
-Every request goes through a mode-0600 `curl --config` file written and deleted per call, and the token is shape-validated before it can be interpolated.
+Every request goes through a `curl --config` stream piped on stdin, so the token is never written to disk at all - the watcher SIGKILLs a check that outruns its budget, and a temporary file would survive that - and the token is shape-validated before it can be interpolated.
 
 **Delivery is exactly-once across crashes.**
 Telegram redelivers an update until an offset past it is confirmed, so the poll claims the inbox entry and its duplicate-suppression marker before the wake, and confirms the offset only after the whole processed prefix is durable.

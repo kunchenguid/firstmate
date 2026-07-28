@@ -9,11 +9,11 @@
 # THE FAKE SERVER
 #   It is a real, stateful implementation of the two Bot API methods the bridge
 #   uses, reached through the same transport the client actually speaks: a `curl`
-#   shim that parses the mode-0600 `curl --config` file bin/fm-tg-lib.sh writes.
+#   shim that parses the `curl --config` stream bin/fm-tg-lib.sh pipes on stdin.
 #   No socket is opened and no port is bound, so the suite stays hermetic and
 #   cannot flake on a busy port, while still exercising the exact request the
 #   client builds - including the fact that the bot token travels in that config
-#   file and never in an argument vector.
+#   stream and never in an argument vector or a file.
 #
 #   getUpdates implements Telegram's real offset contract: confirming an offset
 #   permanently deletes every update below it, and only updates at or above the
@@ -76,14 +76,24 @@ done
 [ -n "$cfg" ] || { printf '000'; exit 0; }
 
 url= ofile= payload= maxtime=
-while IFS= read -r line; do
-  case "$line" in
-    'url = '*)        url=${line#url = } ;;
-    'output = '*)     ofile=${line#output = } ;;
-    'data-binary = '*) payload=${line#data-binary = } ;;
-    'max-time = '*)   maxtime=${line#max-time = } ;;
-  esac
-done < "$cfg"
+parse_config() {
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      'url = '*)        url=${line#url = } ;;
+      'output = '*)     ofile=${line#output = } ;;
+      'data-binary = '*) payload=${line#data-binary = } ;;
+      'max-time = '*)   maxtime=${line#max-time = } ;;
+    esac
+  done
+}
+# "--config -" is real curl syntax for reading the config from stdin, which is
+# how the client keeps the token off disk entirely.
+if [ "$cfg" = - ]; then
+  parse_config
+else
+  parse_config < "$cfg"
+fi
 strip_quotes() { local v=$1; v=${v#\"}; v=${v%\"}; printf '%s' "$v"; }
 url=$(strip_quotes "$url")
 ofile=$(strip_quotes "$ofile")

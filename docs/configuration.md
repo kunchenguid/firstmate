@@ -411,7 +411,8 @@ What a message may cause, what must be escalated, and how replies are kept safe 
 ### Token handling
 
 The Bot API puts the token in the URL path, which would place it in `curl`'s argument vector where any local process can read it.
-Every request is therefore issued through a mode-0600 `curl --config` file that is written and deleted per call, so the token never enters argv, a log line, an error message, or any state file.
+Every request is therefore issued through a `curl --config` stream piped on stdin, so the token never enters argv, a log line, an error message, any state file, or the filesystem at all.
+Streaming it rather than writing a temporary is what makes that hold for a killed poll: the watcher SIGKILLs a check that outruns its budget, and no cleanup can run after that.
 The token is validated against BotFather's `<id>:<secret>` shape before use; a malformed value is refused and reported without echoing it.
 
 **Rotating the token of the same bot** (BotFather `/revoke`, then `/token`) keeps the pairing valid, because the peer is pinned by numeric ids rather than by the token: update `.env` and rerun session start.

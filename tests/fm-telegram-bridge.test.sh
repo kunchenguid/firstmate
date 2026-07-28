@@ -604,7 +604,69 @@ test_rate_limit_bounds_a_flood() {
   [ "$(count_files "$HOME_DIR/state/telegram/inbox")" = 2 ] \
     || fail "the accept rate limit did not bound the flood"
   assert_contains "$out" "telegram-error" "the rate limit was hit without telling firstmate"
-  pass "a flood is bounded by the accept rate limit and reported once"
+
+  # The flood continues into the next poll cycle. That poll's getUpdates answers
+  # 200, which proves the transport recovered and nothing else - re-arming the
+  # rate report on it would cost one wake per cycle for the rest of the window,
+  # which is exactly the amplification the limiter exists to prevent.
+  i=0
+  while [ "$i" -lt 5 ]; do
+    tg_queue "$(( 1510 + i ))" "$PEER_ID" "$PEER_ID" "noch eine $i"
+    i=$(( i + 1 ))
+  done
+  out=$(FM_TELEGRAM_RATE_MAX=2 tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" 2>&1)
+  [ -z "$out" ] || fail "a continuing flood woke firstmate again on the next poll cycle: $out"
+  [ "$(count_files "$HOME_DIR/state/telegram/inbox")" = 2 ] \
+    || fail "the rate limit stopped bounding the flood on a later cycle"
+
+  # A reopened window is the one thing that does re-arm the report, so a second
+  # flood later is not silently swallowed.
+  i=0
+  while [ "$i" -lt 5 ]; do
+    tg_queue "$(( 1520 + i ))" "$PEER_ID" "$PEER_ID" "spaeter $i"
+    i=$(( i + 1 ))
+  done
+  out=$(FMTG_NOW_OVERRIDE=$(( $(date +%s) + 4000 )) FM_TELEGRAM_RATE_MAX=2 \
+    tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" 2>&1)
+  assert_contains "$out" "rate limit" "a flood in a fresh window was never reported"
+  pass "a flood costs one wake per window, not one per poll cycle, and a new window reports again"
+}
+
+# The watcher TERMs and then KILLs a check that outruns its budget, and the long
+# poll is the widest window inside that budget, so no cleanup path can be relied
+# on: the token must never be written anywhere a kill could strand it.
+test_a_killed_poll_leaves_no_token_on_disk() {
+  local tmp pid i leaked
+  paired_home killed
+  tg_queue 1700 "$PEER_ID" "$PEER_ID" "anfrage"
+  tmp="$TMP_ROOT/killed/tmp"
+  mkdir -p "$tmp"
+  : > "$FAKE_TG_DIR/token-seen.log"
+
+  PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    TMPDIR="$tmp" FAKE_TG_GETUPDATES_DELAY=5 "$POLL" >/dev/null 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$FAKE_TG_DIR/token-seen.log" ]; do
+    sleep 0.1
+    i=$(( i + 1 ))
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  # Both halves, so neither can pass vacuously: the killed call really did carry
+  # the token to the transport, and the kill really did strand temporaries.
+  assert_grep "$TEST_TOKEN" "$FAKE_TG_DIR/token-seen.log" \
+    "the killed call never carried a token, so the on-disk assertion proves nothing"
+  [ "$(count_files "$HOME_DIR/state/telegram/inbox")" = 0 ] \
+    || fail "the poll ran to completion instead of being killed mid-call"
+  [ -n "$(find "$tmp" -type f 2>/dev/null)" ] \
+    || fail "the kill stranded no temporary at all, so nothing was proven"
+
+  leaked=$(grep -rl "$TEST_TOKEN" "$tmp" 2>/dev/null || true)
+  [ -z "$leaked" ] || fail "a killed poll left the bot token on disk: $leaked"
+  pass "a killed poll strands temporaries but never one holding the bot token"
 }
 
 test_conflicting_poller_is_reported() {
@@ -638,6 +700,31 @@ test_routing_is_pinned_to_the_paired_project() {
   out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" arm-publish wrong --head abc1234 2>&1 || printf 'rc=%s' "$?")
   assert_contains "$out" "rc=6" "arming a publish in another project was not refused"
   pass "task links and publish arming are refused outside the paired project"
+}
+
+# An operator reading `show` has to be able to tell an unlinked task from one
+# linked to an empty value, so an absent meta key must not read as a blank.
+test_show_names_an_absent_link_rather_than_printing_a_blank() {
+  local out
+  paired_home show
+  tg_queue 1650 "$PEER_ID" "$PEER_ID" "anfrage"
+  tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
+  fm_write_meta "$HOME_DIR/state/site.meta" "project=$HOME_DIR/projects/eren-pov-site" "window=t:1"
+  fm_write_meta "$HOME_DIR/state/bare.meta" "window=t:2"
+
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" show site 2>&1)
+  assert_contains "$out" "linked request: <none>" "an unlinked task printed a blank instead of <none>"
+  assert_contains "$out" "linked chat: <none>" "an unlinked task printed a blank chat instead of <none>"
+
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" show bare 2>&1)
+  assert_contains "$out" "project: <none>" "a task with no project line printed a blank project"
+
+  tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" link site tg-1650 >/dev/null \
+    || fail "linking a task in the paired project was refused"
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" show site 2>&1)
+  assert_contains "$out" "linked request: tg-1650" "show did not report a real link"
+  assert_not_contains "$out" "linked request: <none>" "a linked task still read as unlinked"
+  pass "show distinguishes an absent link from a linked value instead of printing a blank"
 }
 
 # --- two-step publish -------------------------------------------------------
@@ -1148,8 +1235,10 @@ test_non_private_and_bot_senders_get_no_access
 test_unsupported_media_and_oversized_text_are_bounded
 test_message_content_stays_inert_data
 test_rate_limit_bounds_a_flood
+test_a_killed_poll_leaves_no_token_on_disk
 test_conflicting_poller_is_reported
 test_routing_is_pinned_to_the_paired_project
+test_show_names_an_absent_link_rather_than_printing_a_blank
 test_publish_needs_a_matching_confirmation
 test_bare_agreement_is_not_a_confirmation
 test_stale_confirmation_is_refused

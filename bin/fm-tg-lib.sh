@@ -13,9 +13,11 @@
 # Token handling, which the rest of this file depends on:
 #   - The Bot API puts the token in the URL PATH, so the token would land in
 #     `curl`'s argv and be readable by any local process through `ps`. Every
-#     request is therefore issued through a mode-0600 `curl --config` file that
-#     this library writes and deletes; the token never appears in an argument
-#     vector, a log line, an error message, or any state file.
+#     request is therefore issued through a `curl --config` stream piped on
+#     stdin, so the token never appears in an argument vector, on disk, in a log
+#     line, in an error message, or in any state file. It is streamed rather
+#     than written to a temporary because the watcher SIGKILLs a check that
+#     outruns its budget, and no cleanup can run after that.
 #   - The token is validated against BotFather's shape before use, so a
 #     malformed value is refused rather than interpolated into a config file.
 #   - fmtg_redact scrubs the token from anything a caller is about to print.
@@ -352,17 +354,17 @@ fmtg_sha256() {
 
 # Issue one Bot API call. <payload-file> is a JSON file to POST, or "-" for a
 # bodyless GET-style call. The response body is written to <body-file> and the
-# HTTP status is printed. The token reaches curl only through a mode-0600 config
-# file that is removed before returning, so it never enters argv.
+# HTTP status is printed. The token reaches curl only through the config stream
+# on stdin, so it never enters argv and never exists as a file that a killed
+# call could strand.
 fmtg_api_call() {
-  local method=$1 payload=$2 body=$3 cfg code rc=0
+  local method=$1 payload=$2 body=$3 code rc=0
   fmtg_active || return 1
   case "$method" in
     ''|*[!A-Za-z]*) return 1 ;;
   esac
   command -v curl >/dev/null 2>&1 || return 1
-  cfg=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-tg-req.XXXXXX") || return 1
-  {
+  code=$({
     printf 'url = "%s/bot%s/%s"\n' "$FMTG_API" "$FMTG_TOKEN" "$method"
     printf 'silent\n'
     printf 'max-time = %s\n' "$(fmtg_budget_remaining)"
@@ -373,10 +375,7 @@ fmtg_api_call() {
       printf 'header = "Content-Type: application/json"\n'
       printf 'data-binary = "@%s"\n' "$payload"
     fi
-  } > "$cfg" || { rm -f -- "$cfg"; return 1; }
-  chmod 600 "$cfg" 2>/dev/null || { rm -f -- "$cfg"; return 1; }
-  code=$(curl --config "$cfg" 2>/dev/null) || rc=$?
-  rm -f -- "$cfg"
+  } | curl --config - 2>/dev/null) || rc=$?
   [ "$rc" -eq 0 ] || return 1
   case "$code" in
     ''|*[!0-9]*) return 1 ;;
@@ -714,10 +713,16 @@ fmtg_copy_mode() {  # <src> <dest>
   chmod "$mode" "$dest" 2>/dev/null || true
 }
 
+# Print the value of the last "key=value" line in <meta-file>. Returns non-zero
+# and prints nothing when the file, the key, or the value is missing, so a caller
+# can tell "not linked" from "linked to something" instead of reading both as an
+# empty line.
 fmtg_meta_get() {  # <meta-file> <key>
-  local meta=$1 key=$2
+  local meta=$1 key=$2 value
   [ -f "$meta" ] || return 1
-  grep -E "^${key}=" "$meta" 2>/dev/null | tail -n1 | cut -d= -f2-
+  value=$(grep -E "^${key}=" "$meta" 2>/dev/null | tail -n1 | cut -d= -f2-) || return 1
+  [ -n "$value" ] || return 1
+  printf '%s\n' "$value"
 }
 
 # Record which Telegram request a task answers, so milestone and final replies

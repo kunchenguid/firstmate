@@ -173,7 +173,8 @@ case "$COMMAND" in
     fi
     printf 'pending messages: %s\n' "$PENDING"
     if fm_private_artifact_file_valid "$TG_DIR" poll.error 600; then
-      printf 'last error: %s\n' "$(cat "$TG_DIR/poll.error" 2>/dev/null | fmtg_redact)"
+      # Line 1 is the dedup class the poll tracks; the operator wants the rest.
+      printf 'last error: %s\n' "$(sed -n '2,$p' "$TG_DIR/poll.error" 2>/dev/null | fmtg_redact)"
     else
       printf 'last error: none\n'
     fi

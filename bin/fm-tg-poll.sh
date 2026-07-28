@@ -69,33 +69,51 @@ fmtg_load_config
 TG_DIR=$(fmtg_dir)
 ERROR_FILE="$TG_DIR/poll.error"
 
-emit_error_once() {
-  local msg=$1
+# The dedup marker records WHICH class of problem it is suppressing on its first
+# line, and the operator-facing message on the rest. A recovery only ever proves
+# that its own class recovered - a getUpdates that answers 200 says nothing about
+# the accept rate limit or about a state directory that cannot be written - so
+# clearing the marker for any other class would re-arm that class's report and
+# turn one flood into one wake per cycle.
+#
+# Classes: config (token shape, missing tools), api (transport and response
+# shape), rate (accept rate limit), state (a durable local write failed).
+emit_error_once() {  # <class> <message>
+  local class=$1 msg=$2
   if fm_private_artifact_file_valid "$TG_DIR" poll.error 600 \
-    && [ "$(cat "$ERROR_FILE" 2>/dev/null)" = "$msg" ]; then
+    && [ "$(sed -n 1p "$ERROR_FILE" 2>/dev/null)" = "$class" ] \
+    && [ "$(sed -n '2,$p' "$ERROR_FILE" 2>/dev/null)" = "$msg" ]; then
     return 0
   fi
-  printf '%s\n' "$msg" \
+  printf '%s\n%s\n' "$class" "$msg" \
     | fm_private_artifact_publish_stdin "$TG_DIR" poll.error 600 2>/dev/null || true
   printf 'telegram-error %s\n' "$msg"
 }
 
-clear_error() {
+clear_error() {  # <class>...
+  local stored class
   fm_private_artifact_dir_device "$TG_DIR" >/dev/null 2>&1 || return 0
-  rm -f -- "$ERROR_FILE" 2>/dev/null || true
+  [ -f "$ERROR_FILE" ] || return 0
+  stored=$(sed -n 1p "$ERROR_FILE" 2>/dev/null) || return 0
+  for class in "$@"; do
+    if [ "$stored" = "$class" ]; then
+      rm -f -- "$ERROR_FILE" 2>/dev/null || true
+      return 0
+    fi
+  done
 }
 
 # A malformed token is a configuration problem worth one report; an absent token
 # is the inert default and must stay completely silent.
 if ! fmtg_active; then
   if [ -n "${FMTG_TOKEN_BAD:-}" ]; then
-    emit_error_once "bot token is not in BotFather's <id>:<secret> form"
+    emit_error_once config "bot token is not in BotFather's <id>:<secret> form"
   fi
   exit 0
 fi
 
-command -v jq   >/dev/null 2>&1 || { emit_error_once "missing jq";   exit 0; }
-command -v curl >/dev/null 2>&1 || { emit_error_once "missing curl"; exit 0; }
+command -v jq   >/dev/null 2>&1 || { emit_error_once config "missing jq";   exit 0; }
+command -v curl >/dev/null 2>&1 || { emit_error_once config "missing curl"; exit 0; }
 
 NOW=$(fmtg_now) || exit 0
 fmtg_budget_open "$NOW"
@@ -128,20 +146,23 @@ jq -cn --argjson offset "$OFFSET" --argjson timeout "$POLL_SECS" \
 CODE=$(fmtg_api_call getUpdates "$REQ_FILE" "$BODY_FILE") || exit 0
 case "$CODE" in
   200) ;;
-  401|403) emit_error_once "Telegram rejected the bot token"; exit 0 ;;
-  404) emit_error_once "Telegram bot API returned HTTP 404"; exit 0 ;;
+  401|403) emit_error_once api "Telegram rejected the bot token"; exit 0 ;;
+  404) emit_error_once api "Telegram bot API returned HTTP 404"; exit 0 ;;
   # 409 means another process is already long-polling this same bot. Two homes
   # sharing one token is a real misconfiguration, not a transient error.
-  409) emit_error_once "another process is polling this bot; one bot token belongs to one home"; exit 0 ;;
+  409) emit_error_once api "another process is polling this bot; one bot token belongs to one home"; exit 0 ;;
   429) exit 0 ;;
   *) exit 0 ;;
 esac
 
 jq -e '.ok == true and (.result | type == "array")' "$BODY_FILE" >/dev/null 2>&1 || {
-  emit_error_once "Telegram bot API returned an unexpected response"
+  emit_error_once api "Telegram bot API returned an unexpected response"
   exit 0
 }
-clear_error
+# A well-formed 200 proves the transport recovered, and that jq, curl, and the
+# token shape are all fine. It proves nothing about the accept rate limit or
+# about a local write, so those classes keep their markers.
+clear_error api config
 
 PEER=$(fmtg_peer_get 2>/dev/null) || PEER=
 PEER_USER=
@@ -270,9 +291,11 @@ process_update() {  # <update-json>
 
   if ! fmtg_rate_allow "$NOW"; then
     fmtg_seen_claim "$uid" "$NOW" >/dev/null 2>&1
-    emit_error_once "message rate limit reached; later messages are being dropped this window"
+    emit_error_once rate "message rate limit reached; later messages are being dropped this window"
     return 0
   fi
+  # An accepted message is the only proof the window actually reopened.
+  clear_error rate
 
   rid="tg-$uid"
   fmtg_request_id_valid "$rid" || return 0
@@ -296,9 +319,10 @@ process_update() {  # <update-json>
   printf '%s\n' "$entry" | fm_private_artifact_publish_stdin_once "$INBOX" "$rid.json" 600
   rc=$?
   if [ "$rc" -eq 2 ]; then
-    emit_error_once "cannot write the message inbox"
+    emit_error_once state "cannot write the message inbox"
     return 1
   fi
+  clear_error state
   fmtg_context_set "$rid" "$chat_id" \
     "$(printf '%s' "$update" | jq -r '.message.message_id // 0')" "$NOW" 2>/dev/null || true
   fmtg_seen_claim "$uid" "$NOW" >/dev/null 2>&1
@@ -335,7 +359,11 @@ done
 
 # The offset is confirmed only after the whole processed prefix is durable.
 if [ "$NEXT" != "$OFFSET" ]; then
-  fmtg_offset_set "$TG_DIR" "$NEXT" || emit_error_once "cannot record the Telegram update offset"
+  if fmtg_offset_set "$TG_DIR" "$NEXT"; then
+    clear_error state
+  else
+    emit_error_once state "cannot record the Telegram update offset"
+  fi
 fi
 
 # Bounded recovery sweep: re-announce inbox entries that were claimed but whose
