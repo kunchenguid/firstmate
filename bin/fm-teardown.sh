@@ -22,6 +22,10 @@
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
+# Before non-force cleanup of a task worktree, teardown verifies the recorded
+# worktree is inspectable and owned by this task's recorded branch. A missing,
+# empty, or foreign worktree refuses and preserves metadata rather than treating
+# an uninspectable landed-work check as safe.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -234,6 +238,13 @@ default_branch() {
 meta_value() {
   local meta=$1 key=$2
   fm_meta_get "$meta" "$key"
+}
+
+expected_worktree_branch() {
+  local branch
+  branch=$(meta_value "$META" resume_branch)
+  [ -n "$branch" ] || branch="fm/$ID"
+  printf '%s\n' "$branch"
 }
 
 require_orca_worktree_id() {
@@ -580,6 +591,55 @@ inspectable_git_worktree() {
   git -C "$top" rev-parse --git-dir >/dev/null 2>&1
 }
 
+require_recorded_worktree_ownership() {
+  local expected found recorded_path head expected_head
+  [ "${TEARDOWN_WORKTREE_OWNERSHIP_VERIFIED:-0}" != 1 ] || return 0
+  expected=$(expected_worktree_branch)
+  recorded_path=${WT:-<missing>}
+
+  if ! inspectable_git_worktree "$WT"; then
+    echo "REFUSED: task $ID has no inspectable git worktree at recorded path $recorded_path." >&2
+    echo "expected branch: $expected" >&2
+    echo "Cannot inspect landed work or verify that the recorded worktree belongs to this task; preserving $META." >&2
+    echo "Restore the task worktree path, correct the metadata pointer, or get the captain's explicit OK to discard, then --force." >&2
+    return 1
+  fi
+
+  found=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  if [ -z "$found" ]; then
+    head=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null || true)
+    if [ -z "$head" ]; then
+      echo "REFUSED: cannot determine branch for recorded worktree path $recorded_path." >&2
+      echo "expected branch: $expected" >&2
+      echo "Cannot verify that the recorded worktree belongs to this task; preserving $META." >&2
+      return 1
+    fi
+    expected_head=$(git -C "$WT" rev-parse --verify "$expected^{commit}" 2>/dev/null || true)
+    if [ -n "$expected_head" ] && [ "$head" = "$expected_head" ]; then
+      TEARDOWN_WORKTREE_OWNERSHIP_VERIFIED=1
+      TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$expected
+      return 0
+    fi
+    found=HEAD
+  fi
+
+  if [ "$found" != "$expected" ]; then
+    echo "REFUSED: recorded worktree path does not belong to task $ID." >&2
+    echo "recorded path: $recorded_path" >&2
+    echo "found branch: $found" >&2
+    echo "expected branch: $expected" >&2
+    if [ "$found" = HEAD ]; then
+      echo "found commit: $head" >&2
+      echo "expected branch tip: ${expected_head:-<missing>}" >&2
+    fi
+    echo "Correct $META to point at the task's real worktree, or get the captain's explicit OK to discard, then --force." >&2
+    return 1
+  fi
+
+  TEARDOWN_WORKTREE_OWNERSHIP_VERIFIED=1
+  TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$found
+}
+
 canonical_existing_dir() {
   local target=$1
   [ -n "$target" ] || return 1
@@ -745,11 +805,12 @@ teardown_treehouse_return() {
 
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
-  [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
-    secondmate|scout) return 0 ;;
+    secondmate) return 0 ;;
   esac
+  require_recorded_worktree_ownership || return 1
+  [ "$KIND" != scout ] || return 0
 
   if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
@@ -1387,7 +1448,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+if [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
   else

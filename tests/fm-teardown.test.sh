@@ -72,7 +72,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -144,6 +144,10 @@ if [ "${1:-}" = update ] && [ "${2:-}" = --help ]; then
 fi
 if [ "${1:-}" = mv ] && [ "${2:-}" = --help ]; then
   printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
+  exit 0
+fi
+if [ "${1:-}" = hold ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi hold <id> --reason <reason> --kind captain'
   exit 0
 fi
 exit 0
@@ -493,9 +497,339 @@ run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
+}
+
+add_lifecycle_call_logs() {
+  local case_dir=$1
+  : > "$case_dir/treehouse.log"
+  : > "$case_dir/tmux.log"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/tmux.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse" "$case_dir/fakebin/tmux"
+}
+
+test_task_branch_ownership_happy_path_allows() {
+  local case_dir rc
+  case_dir=$(make_case task-branch-owner-happy)
+  write_meta "$case_dir" no-mistakes ship
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "task-branch-owner-happy: teardown should succeed on the task branch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "task-branch-owner-happy: teardown printed a REFUSED line"
+  pass "worktree checked out to the task branch still tears down cleanly"
+}
+
+test_recycled_worktree_foreign_branch_refuses_without_touching_owner() {
+  local case_dir rc head_before head_after branch_before branch_after porcelain_before porcelain_after
+  case_dir=$(make_case recycled-foreign-owner)
+  write_meta "$case_dir" no-mistakes ship
+  git -C "$case_dir/wt" checkout -q -b fm/live-owner
+  wt_commit_file "$case_dir" live.txt owner "live owner commit"
+  printf '%s\n' "dirty live owner" > "$case_dir/wt/live.txt"
+  add_lifecycle_call_logs "$case_dir"
+
+  head_before=$(git -C "$case_dir/wt" rev-parse HEAD)
+  branch_before=$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD)
+  porcelain_before=$(git -C "$case_dir/wt" status --porcelain)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  head_after=$(git -C "$case_dir/wt" rev-parse HEAD)
+  branch_after=$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD)
+  porcelain_after=$(git -C "$case_dir/wt" status --porcelain)
+
+  expect_code 1 "$rc" "recycled-foreign-owner: teardown should refuse a recycled worktree"
+  assert_grep "recorded path: $case_dir/wt" "$case_dir/stderr" \
+    "recycled-foreign-owner: refusal did not name the recorded path"
+  assert_grep "found branch: fm/live-owner" "$case_dir/stderr" \
+    "recycled-foreign-owner: refusal did not name the found branch"
+  assert_grep "expected branch: fm/task-x1" "$case_dir/stderr" \
+    "recycled-foreign-owner: refusal did not name the expected branch"
+  [ "$head_after" = "$head_before" ] \
+    || fail "recycled-foreign-owner: refusal changed the live owner's HEAD"
+  [ "$branch_after" = "$branch_before" ] \
+    || fail "recycled-foreign-owner: refusal changed the live owner's branch"
+  [ "$porcelain_after" = "$porcelain_before" ] \
+    || fail "recycled-foreign-owner: refusal changed the live owner's porcelain"
+  [ ! -s "$case_dir/tmux.log" ] \
+    || fail "recycled-foreign-owner: refusal attempted to kill the live owner's process"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "recycled-foreign-owner: refusal attempted to return the live owner's worktree"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "recycled-foreign-owner: teardown deleted metadata after refusing"
+  pass "recycled recorded path on another branch refuses without touching the live owner"
+}
+
+test_absent_recorded_worktree_refuses_without_deleting_meta() {
+  local case_dir rc missing
+  case_dir=$(make_case absent-recorded-worktree)
+  missing="$case_dir/missing-wt"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$missing" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  add_lifecycle_call_logs "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "absent-recorded-worktree: teardown should refuse a missing recorded path"
+  assert_grep "no inspectable git worktree at recorded path $missing" "$case_dir/stderr" \
+    "absent-recorded-worktree: refusal did not distinguish an absent path"
+  assert_grep "expected branch: fm/task-x1" "$case_dir/stderr" \
+    "absent-recorded-worktree: refusal did not name the expected branch"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "absent-recorded-worktree: teardown deleted metadata after refusing"
+  [ ! -s "$case_dir/tmux.log" ] \
+    || fail "absent-recorded-worktree: refusal attempted to kill the recorded process"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "absent-recorded-worktree: refusal attempted to return a missing worktree"
+  pass "missing recorded worktree path refuses instead of silently deleting task metadata"
+}
+
+test_empty_recorded_worktree_refuses_without_deleting_meta() {
+  local case_dir rc
+  case_dir=$(make_case empty-recorded-worktree)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  add_lifecycle_call_logs "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "empty-recorded-worktree: teardown should refuse an empty recorded path"
+  assert_grep "no inspectable git worktree at recorded path <missing>" "$case_dir/stderr" \
+    "empty-recorded-worktree: refusal did not distinguish an empty path"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "empty-recorded-worktree: teardown deleted metadata after refusing"
+  [ ! -s "$case_dir/tmux.log" ] \
+    || fail "empty-recorded-worktree: refusal attempted to kill the recorded process"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "empty-recorded-worktree: refusal attempted to return a missing worktree"
+  pass "empty recorded worktree path refuses instead of silently deleting task metadata"
+}
+
+test_resume_branch_preferred_over_task_id_fallback() {
+  local case_dir rc
+  case_dir=$(make_case resume-branch-owner)
+  write_meta "$case_dir" no-mistakes ship
+  git -C "$case_dir/wt" branch -m fm/resumed-task
+  printf '%s\n' 'resume_branch=fm/resumed-task' >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "resume-branch-owner: teardown should accept resume_branch over fm/task-x1"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "resume-branch-owner: teardown printed a REFUSED line"
+  pass "resume_branch metadata is preferred over the fm/<id> branch fallback"
+}
+
+test_detached_head_at_expected_branch_tip_allows() {
+  local case_dir rc
+  case_dir=$(make_case detached-expected-tip)
+  write_meta "$case_dir" no-mistakes ship
+  git -C "$case_dir/wt" checkout --detach -q
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "detached-expected-tip: teardown should accept detached HEAD at the expected branch tip"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "detached-expected-tip: teardown printed a REFUSED line"
+  pass "detached HEAD is accepted when it exactly matches the expected branch tip"
+}
+
+test_detached_head_not_at_expected_branch_tip_refuses() {
+  local case_dir rc head_before head_after branch_after porcelain_before porcelain_after
+  case_dir=$(make_case detached-wrong-tip)
+  write_meta "$case_dir" no-mistakes ship
+  git -C "$case_dir/wt" checkout -q -b fm/live-owner
+  wt_commit_file "$case_dir" live.txt owner "live owner commit"
+  printf '%s\n' "dirty live owner" > "$case_dir/wt/live.txt"
+  git -C "$case_dir/wt" checkout --detach -q
+  add_lifecycle_call_logs "$case_dir"
+
+  head_before=$(git -C "$case_dir/wt" rev-parse HEAD)
+  porcelain_before=$(git -C "$case_dir/wt" status --porcelain)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  head_after=$(git -C "$case_dir/wt" rev-parse HEAD)
+  branch_after=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  porcelain_after=$(git -C "$case_dir/wt" status --porcelain)
+
+  expect_code 1 "$rc" "detached-wrong-tip: teardown should refuse detached HEAD away from the expected branch tip"
+  assert_grep "found branch: HEAD" "$case_dir/stderr" \
+    "detached-wrong-tip: refusal did not identify detached HEAD"
+  assert_grep "expected branch: fm/task-x1" "$case_dir/stderr" \
+    "detached-wrong-tip: refusal did not name the expected branch"
+  assert_grep "expected branch tip:" "$case_dir/stderr" \
+    "detached-wrong-tip: refusal did not name the expected branch tip"
+  [ "$head_after" = "$head_before" ] \
+    || fail "detached-wrong-tip: refusal changed the live owner's HEAD"
+  [ "$branch_after" = HEAD ] \
+    || fail "detached-wrong-tip: refusal changed the detached state"
+  [ "$porcelain_after" = "$porcelain_before" ] \
+    || fail "detached-wrong-tip: refusal changed the live owner's porcelain"
+  [ ! -s "$case_dir/tmux.log" ] \
+    || fail "detached-wrong-tip: refusal attempted to kill the live owner's process"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "detached-wrong-tip: refusal attempted to return the live owner's worktree"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "detached-wrong-tip: teardown deleted metadata after refusing"
+  pass "detached HEAD away from the expected branch tip refuses without touching the owner"
+}
+
+test_force_overrides_absent_worktree_refusal() {
+  local case_dir rc missing
+  case_dir=$(make_case force-absent-worktree)
+  missing="$case_dir/missing-wt"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$missing" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "force-absent-worktree: --force should override missing worktree refusal"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "force-absent-worktree: REFUSED printed despite --force"
+  [ ! -f "$case_dir/state/task-x1.meta" ] \
+    || fail "force-absent-worktree: --force did not remove task metadata"
+  pass "--force explicitly overrides an absent recorded worktree"
+}
+
+test_secondmate_carveout_skips_worktree_ownership_check() {
+  local case_dir home rc
+  case_dir=$(make_case secondmate-carveout)
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$home" \
+    "project=$case_dir/project" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$home"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "secondmate-carveout: teardown should not apply ordinary worktree ownership checks"
+  assert_no_grep "no inspectable git worktree" "$case_dir/stderr" \
+    "secondmate-carveout: secondmate hit the ordinary ownership check"
+  [ ! -e "$home" ] || fail "secondmate-carveout: secondmate home was not removed"
+  pass "secondmate teardown retains its carve-out from ordinary worktree ownership checks"
+}
+
+test_scout_foreign_worktree_refuses_without_touching_owner() {
+  local case_dir rc head_before head_after branch_before branch_after porcelain_before porcelain_after
+  case_dir=$(make_case scout-foreign-owner)
+  git -C "$case_dir/wt" checkout -q -b fm/scout-live-owner
+  wt_commit_file "$case_dir" live.txt owner "live owner commit"
+  printf '%s\n' "dirty live owner" > "$case_dir/wt/live.txt"
+  write_meta "$case_dir" no-mistakes scout
+  printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/data/task-x1"
+  printf '%s\n' '# Scout report' > "$case_dir/data/task-x1/report.md"
+  add_compatible_tasks_axi "$case_dir"
+  add_lifecycle_call_logs "$case_dir"
+
+  head_before=$(git -C "$case_dir/wt" rev-parse HEAD)
+  branch_before=$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD)
+  porcelain_before=$(git -C "$case_dir/wt" status --porcelain)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  head_after=$(git -C "$case_dir/wt" rev-parse HEAD)
+  branch_after=$(git -C "$case_dir/wt" symbolic-ref --quiet --short HEAD)
+  porcelain_after=$(git -C "$case_dir/wt" status --porcelain)
+
+  expect_code 1 "$rc" "scout-foreign-owner: teardown should refuse a scout whose worktree was recycled"
+  assert_grep "recorded path: $case_dir/wt" "$case_dir/stderr" \
+    "scout-foreign-owner: refusal did not name the recorded path"
+  assert_grep "found branch: fm/scout-live-owner" "$case_dir/stderr" \
+    "scout-foreign-owner: refusal did not name the found branch"
+  assert_grep "expected branch: fm/task-x1" "$case_dir/stderr" \
+    "scout-foreign-owner: refusal did not name the expected branch"
+  [ "$head_after" = "$head_before" ] \
+    || fail "scout-foreign-owner: refusal changed the live owner's HEAD"
+  [ "$branch_after" = "$branch_before" ] \
+    || fail "scout-foreign-owner: refusal changed the live owner's branch"
+  [ "$porcelain_after" = "$porcelain_before" ] \
+    || fail "scout-foreign-owner: refusal changed the live owner's porcelain"
+  [ ! -s "$case_dir/tmux.log" ] \
+    || fail "scout-foreign-owner: refusal attempted to kill the live owner's process"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "scout-foreign-owner: refusal attempted to return the live owner's worktree"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "scout-foreign-owner: teardown deleted metadata after refusing"
+  pass "scout teardown refuses a recycled worktree without touching the live owner"
+}
+
+test_scout_own_worktree_skips_landed_work_check() {
+  local case_dir rc
+  case_dir=$(make_case scout-own-scratch)
+  write_meta "$case_dir" no-mistakes scout
+  wt_commit_file "$case_dir" scratch.txt scratch "scratch scout work"
+  printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/data/task-x1"
+  printf '%s\n' '# Scout report' > "$case_dir/data/task-x1/report.md"
+  add_compatible_tasks_axi "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "scout-own-scratch: teardown should skip landed-work checks for the scout's own scratch branch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "scout-own-scratch: teardown printed a REFUSED line"
+  pass "scout teardown still skips landed-work checks after ownership is verified"
 }
 
 test_local_only_fork_remote_allows() {
@@ -1824,6 +2158,17 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   pass "herdr projection teardown retains every record when post-close presence is unknown"
 }
 
+test_task_branch_ownership_happy_path_allows
+test_recycled_worktree_foreign_branch_refuses_without_touching_owner
+test_absent_recorded_worktree_refuses_without_deleting_meta
+test_empty_recorded_worktree_refuses_without_deleting_meta
+test_resume_branch_preferred_over_task_id_fallback
+test_detached_head_at_expected_branch_tip_allows
+test_detached_head_not_at_expected_branch_tip_refuses
+test_force_overrides_absent_worktree_refusal
+test_secondmate_carveout_skips_worktree_ownership_check
+test_scout_foreign_worktree_refuses_without_touching_owner
+test_scout_own_worktree_skips_landed_work_check
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
