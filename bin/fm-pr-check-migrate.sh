@@ -16,8 +16,9 @@
 #   .pr-check-migration-scan-v1  mode-0600 marker proving the non-executing scan
 #                           completed and disabled every unsafe legacy check.
 #   .pr-check-migration-v1  mode-0600 marker recording that the private repairs
-#                           themselves completed; both markers carry their own
-#                           name as their content and gate re-running the pass.
+#                           themselves completed; each marker's content is its
+#                           own name prefixed with fm-, and both gate re-running
+#                           the pass.
 #   .pr-check-migration.log per-task outcomes for the pass (docs/gitlab-merge-watch.md).
 set -u
 
