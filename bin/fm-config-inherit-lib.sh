@@ -12,12 +12,6 @@
 # captain-preference file, data/captain-shared.md, into each secondmate home's
 # data/ as a read-only copy.
 #
-# config/backend is special among allowlisted items: a private per-home provenance
-# marker under state/.fm-inherited-backend records the last inherited bytes so a
-# deliberately set local config/backend that diverges from that marker is preserved
-# across present-value and primary-absence convergence. Explicit per-spawn
-# --backend and FM_BACKEND remain stronger than every home's local config/backend.
-#
 # Usage: . bin/fm-config-inherit-lib.sh   (no FM_* setup required)
 #
 # Why this is separate from the tracked-files fast-forward (fm-ff-lib.sh): config/
@@ -37,18 +31,13 @@
 # convergence point inherits it - no other change needed. config/secondmate-harness
 # is deliberately NOT in the list: it is the primary's own setting for launching
 # secondmates, and a secondmate never spawns secondmates, so it must not flow
-# downstream. backend keeps the shared copy path but uses the provenance marker
-# below so deliberate per-home overrides survive primary convergence.
+# downstream.
 
 # The one shared data file in this inheritance contract. There is deliberately
 # no shared learnings file.
 FM_SHARED_CAPTAIN_FILE="captain-shared.md"
 FM_SHARED_CAPTAIN_REL="data/$FM_SHARED_CAPTAIN_FILE"
 FM_SHARED_CAPTAIN_MODE="444"
-
-# Private secondmate-home marker holding the exact bytes last inherited for
-# config/backend. Inspectable operational state; never an operator-facing knob.
-FM_INHERITED_BACKEND_PROVENANCE_REL="state/.fm-inherited-backend"
 
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
@@ -401,174 +390,6 @@ propagate_secondmate_inheritance() {
   return "$rc"
 }
 
-# Resolve the private provenance path for config/backend under the destination
-# home that owns dest_config. Live callers pass <home>/config; tests may pass any
-# destination config dir whose parent is the home root.
-fm_inherit_backend_provenance_path() {
-  local dest_config=$1 dest_home
-  [ -n "$dest_config" ] || return 1
-  dest_home=${dest_config%/*}
-  [ -n "$dest_home" ] && [ "$dest_home" != "$dest_config" ] || return 1
-  printf '%s/%s\n' "$dest_home" "$FM_INHERITED_BACKEND_PROVENANCE_REL"
-}
-
-# True when destination backend bytes look deliberately local rather than the
-# last inherited value. No provenance, or dest bytes that differ from it, means
-# preserve. Matching provenance means the copy is still inherited state.
-fm_inherit_backend_is_deliberate() {
-  local dest=$1 provenance=$2
-  [ -e "$dest" ] || [ -L "$dest" ] || return 1
-  if [ ! -f "$provenance" ] || [ -L "$provenance" ]; then
-    return 0
-  fi
-  if [ -f "$dest" ] && [ ! -L "$dest" ] && cmp -s "$dest" "$provenance"; then
-    return 1
-  fi
-  return 0
-}
-
-fm_inherit_backend_write_provenance() {
-  local src=$1 provenance=$2 parent
-  [ -f "$src" ] || return 1
-  [ -n "$provenance" ] || return 1
-  parent=${provenance%/*}
-  [ -n "$parent" ] && [ "$parent" != "$provenance" ] || return 1
-  mkdir -p "$parent" 2>/dev/null || return 1
-  copy_inheritable_file "$src" "$provenance" || return 1
-  chmod 0600 "$provenance" 2>/dev/null || return 1
-}
-
-fm_inherit_backend_snapshot_source() {
-  local src=$1 provenance=$2 parent snapshot
-  [ -f "$src" ] || return 1
-  parent=${provenance%/*}
-  [ -n "$parent" ] && [ "$parent" != "$provenance" ] || return 1
-  mkdir -p "$parent" 2>/dev/null || return 1
-  snapshot=$(mktemp "$parent/.fm-inherited-backend.snapshot.XXXXXX" 2>/dev/null) || return 1
-  if cp "$src" "$snapshot" 2>/dev/null; then
-    printf '%s\n' "$snapshot"
-    return 0
-  fi
-  rm -f "$snapshot" 2>/dev/null || true
-  return 1
-}
-
-fm_inherit_backend_publish_snapshot() {
-  local snapshot=$1 dest=$2 provenance=$3
-  if ! copy_inheritable_file "$snapshot" "$dest"; then
-    rm -f "$snapshot" 2>/dev/null || true
-    return 1
-  fi
-  if ! fm_inherit_backend_write_provenance "$snapshot" "$provenance"; then
-    rm -f "$snapshot" 2>/dev/null || true
-    return 1
-  fi
-  rm -f "$snapshot" 2>/dev/null
-}
-
-fm_inherit_backend_clear_provenance() {
-  local provenance=$1
-  [ -n "$provenance" ] || return 0
-  rm -f "$provenance" 2>/dev/null || return 1
-}
-
-# backend item: primary-authoritative for inherited state, with deliberate local
-# override preservation via the private provenance marker. Returns 0 on handled
-# success/skip, 1 on real error.
-propagate_inheritable_backend_item() {
-  local src_config=$1 dest_config=$2 src dest provenance snapshot reason
-  src="$src_config/backend"
-  dest="$dest_config/backend"
-  provenance=$(fm_inherit_backend_provenance_path "$dest_config") || {
-    reason="could not resolve backend provenance path"
-    warn_inheritable_config_error backend "$dest_config" "$reason"
-    record_inheritable_config_result backend error "$reason"
-    return 1
-  }
-
-  if [ -f "$src" ]; then
-    if ! destination_allows_inherited_item "$dest_config" backend; then
-      reason=$(inheritable_config_skip_reason)
-      warn_inheritable_config_skip backend "$dest_config" "$reason"
-      record_inheritable_config_result backend skipped "$reason"
-      return 0
-    fi
-    if fm_inherit_backend_is_deliberate "$dest" "$provenance"; then
-      reason="preserving deliberate local override"
-      record_inheritable_config_result backend skipped "$reason"
-      return 0
-    fi
-    snapshot=$(fm_inherit_backend_snapshot_source "$src" "$provenance") || {
-      reason="failed to snapshot primary backend"
-      warn_inheritable_config_error backend "$src" "$reason"
-      record_inheritable_config_result backend error "$reason"
-      return 1
-    }
-    if [ -f "$dest" ] && [ ! -L "$dest" ] && cmp -s "$snapshot" "$dest"; then
-      if ! rm -f "$snapshot" 2>/dev/null; then
-        reason="failed to clear backend snapshot"
-        warn_inheritable_config_error backend "$snapshot" "$reason"
-        record_inheritable_config_result backend error "$reason"
-        return 1
-      fi
-      record_inheritable_config_result backend unchanged ""
-      return 0
-    fi
-    if fm_inherit_backend_publish_snapshot "$snapshot" "$dest" "$provenance"; then
-      record_inheritable_config_result backend pushed ""
-      return 0
-    fi
-    reason="failed to publish backend snapshot"
-    warn_inheritable_config_error backend "$dest" "$reason"
-    record_inheritable_config_result backend error "$reason"
-    return 1
-  fi
-
-  if [ -e "$dest" ] || [ -L "$dest" ]; then
-    if ! destination_allows_inherited_item "$dest_config" backend; then
-      reason=$(inheritable_config_skip_reason)
-      warn_inheritable_config_skip backend "$dest_config" "$reason"
-      record_inheritable_config_result backend skipped "$reason"
-      return 0
-    fi
-    if fm_inherit_backend_is_deliberate "$dest" "$provenance"; then
-      reason="preserving deliberate local override"
-      record_inheritable_config_result backend skipped "$reason"
-      return 0
-    fi
-    # Inherited state (or non-file leftover such as a replaced symlink that still
-    # matches provenance handling above): mirror primary absence.
-    if rm -f "$dest" 2>/dev/null; then
-      if fm_inherit_backend_clear_provenance "$provenance"; then
-        record_inheritable_config_result backend pushed "mirrored primary absence"
-        return 0
-      fi
-      reason="failed to clear backend provenance"
-      warn_inheritable_config_error backend "$provenance" "$reason"
-      record_inheritable_config_result backend error "$reason"
-      return 1
-    fi
-    reason="failed to remove"
-    warn_inheritable_config_error backend "$dest" "$reason"
-    record_inheritable_config_result backend error "$reason"
-    return 1
-  fi
-
-  # Both sides absent: drop any orphaned provenance marker.
-  if [ -e "$provenance" ] || [ -L "$provenance" ]; then
-    if fm_inherit_backend_clear_provenance "$provenance"; then
-      record_inheritable_config_result backend unchanged ""
-      return 0
-    fi
-    reason="failed to clear backend provenance"
-    warn_inheritable_config_error backend "$provenance" "$reason"
-    record_inheritable_config_result backend error "$reason"
-    return 1
-  fi
-  record_inheritable_config_result backend unchanged ""
-  return 0
-}
-
 propagate_inheritable_config() {
   local src_config=$1 dest_config=$2 item src dest reason rc
   [ -n "$src_config" ] || return 1
@@ -578,12 +399,6 @@ propagate_inheritable_config() {
     case "$item" in
       ''|/*|.|..|../*|*/../*|*/..) return 1 ;;
     esac
-    if [ "$item" = backend ]; then
-      if ! propagate_inheritable_backend_item "$src_config" "$dest_config"; then
-        rc=1
-      fi
-      continue
-    fi
     src="$src_config/$item"
     dest="$dest_config/$item"
     if [ -f "$src" ]; then
