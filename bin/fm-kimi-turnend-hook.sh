@@ -3,8 +3,8 @@
 #
 # This command is the sole owner of the text-level edit to
 # $HOME/.kimi-code/config.toml. It validates the existing TOML but never
-# serializes it: install adds or replaces one marker-delimited Firstmate region,
-# and remove excises only that region. Missing, malformed, symlinked, partially
+# serializes it: install adds or replaces one Firstmate-owned region, and remove
+# excises only that region. Missing, malformed, symlinked, partially
 # marked, or otherwise surprising config is refused without a config write.
 #
 # The Kimi CLI rewrites its own config.toml and drops comments, which erases the
@@ -14,7 +14,7 @@
 # text span is confirmed by re-parsing the config with that span excised. That
 # span is then re-owned and re-marked in place, so repeated installs neither
 # refuse nor accumulate duplicate hook tables. A [[hooks]] table that references
-# fm-turn-end.sh but is not byte-for-byte Firstmate's own entry stays foreign and
+# fm-turn-end.sh but does not parse to Firstmate's exact entry stays foreign and
 # is still refused.
 #
 # The installed Stop hook always exits 0 and stays silent. It reads cwd from the

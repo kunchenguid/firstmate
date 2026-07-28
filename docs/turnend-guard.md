@@ -81,11 +81,12 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - OpenCode headless mode and untrusted Grok project hooks remain fail-open at the host boundary.
 - Kimi Code CLI 0.29.1 exposes only global `[[hooks]]` configuration in `~/.kimi-code/config.toml`, including a `Stop` event with snake_case payload fields `hook_event_name`, `session_id`, `cwd`, and `stop_hook_active`.
 - Kimi has no project-level hook configuration and remains outside the primary guard integrations above.
-- Captain-approved Kimi crew wake support uses `bin/fm-kimi-turnend-hook.sh` to edit only one marker-delimited Firstmate region in that global config and install a silent always-zero hook.
-- The Kimi CLI rewrites that global config and drops comments, so an unmarked region whose single hook table still matches Firstmate's own entry is re-identified structurally, re-owned, and re-marked in place instead of refusing or duplicating, while any hook table Firstmate does not own is still refused.
-- The remove action excises only the marker-delimited Firstmate region and removes Firstmate's own hook files, leaving every foreign config byte and any hook table Firstmate does not own untouched.
+- Captain-approved Kimi crew wake support uses `bin/fm-kimi-turnend-hook.sh` to install a silent always-zero hook in one Firstmate-owned region of that global config.
+- The command requires an existing regular non-symlink config and `python3` with `tomllib`, while installation additionally requires `jq`; it validates but never serializes the captain's TOML and refuses without a config write when the config is missing, malformed, symlinked, partially marked, or otherwise surprising or when a required tool is unavailable.
+- The Kimi CLI rewrites that global config and drops comments, so an unmarked `[[hooks]]` table is re-identified structurally only when it is the sole hook entry referencing `fm-turn-end.sh`, its parsed content exactly matches Firstmate's own entry, and excising its text span yields the original document minus that entry.
+- Install then re-marks that recovered region in place instead of refusing or duplicating, while remove excises either the recovered unmarked region or the marker-delimited region and removes Firstmate's own hook files.
+- Multiple hook entries referencing `fm-turn-end.sh` or one that does not parse to Firstmate's exact entry are refused as foreign; unrelated hook tables and every other foreign config byte remain untouched.
 - The hook remains inert unless the payload `cwd` contains a per-task token pointer that resolves through Firstmate's private registry to one `state/<id>.turn-ended` marker.
-- Installation refuses before writing unless `python3` with `tomllib` and `jq` are available.
 - If `jq` is removed after installation, the hook remains silent and exits 0, turn-end wakes stop, and Kimi crews fall back to idle detection.
 - Unreadable hook input remains fail-open.
 - No harness adapter uses a shell ampersand to manufacture supervision.
