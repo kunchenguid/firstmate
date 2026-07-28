@@ -584,7 +584,8 @@ test_absent_recorded_worktree_refuses_without_deleting_meta() {
   case_dir=$(make_case absent-recorded-worktree)
   missing="$case_dir/missing-wt"
   fm_write_meta "$case_dir/state/task-x1.meta" \
-    "window=fm-task-x1" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
     "worktree=$missing" \
     "project=$case_dir/project" \
     "kind=ship" \
@@ -614,7 +615,8 @@ test_empty_recorded_worktree_refuses_without_deleting_meta() {
   local case_dir rc
   case_dir=$(make_case empty-recorded-worktree)
   fm_write_meta "$case_dir/state/task-x1.meta" \
-    "window=fm-task-x1" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
     "worktree=" \
     "project=$case_dir/project" \
     "kind=ship" \
@@ -627,7 +629,10 @@ test_empty_recorded_worktree_refuses_without_deleting_meta() {
   set -e
 
   expect_code 1 "$rc" "empty-recorded-worktree: teardown should refuse an empty recorded path"
-  assert_grep "no inspectable git worktree at recorded path <missing>" "$case_dir/stderr" \
+  # An empty worktree= never reaches the ownership check: the metadata-only
+  # endpoint validation that runs before fm-guard and every mutation already
+  # refuses an empty worktree identity, which is the stricter of the two.
+  assert_grep "empty, or ambiguous worktree identity" "$case_dir/stderr" \
     "empty-recorded-worktree: refusal did not distinguish an empty path"
   [ -f "$case_dir/state/task-x1.meta" ] \
     || fail "empty-recorded-worktree: teardown deleted metadata after refusing"
@@ -720,7 +725,8 @@ test_force_overrides_absent_worktree_refusal() {
   case_dir=$(make_case force-absent-worktree)
   missing="$case_dir/missing-wt"
   fm_write_meta "$case_dir/state/task-x1.meta" \
-    "window=fm-task-x1" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
     "worktree=$missing" \
     "project=$case_dir/project" \
     "kind=ship" \
@@ -745,7 +751,8 @@ test_secondmate_carveout_skips_worktree_ownership_check() {
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
   printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
   fm_write_meta "$case_dir/state/task-x1.meta" \
-    "window=fm-task-x1" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
     "worktree=$home" \
     "project=$case_dir/project" \
     "kind=secondmate" \
@@ -988,7 +995,8 @@ test_scout_absent_worktree_allows_metadata_cleanup() {
   case_dir=$(make_case scout-absent-worktree)
   missing="$case_dir/missing-wt"
   fm_write_meta "$case_dir/state/task-x1.meta" \
-    "window=fm-task-x1" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
     "worktree=$missing" \
     "project=$case_dir/project" \
     "kind=scout" \
