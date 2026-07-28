@@ -252,7 +252,8 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 ### Cost tiers in the shipped example
 
-With no `config/crew-dispatch.json` present, every crewmate and scout launches at the primary's own harness and model, so routine work is billed at whatever tier the captain happens to run firstmate on.
+With no `config/crew-dispatch.json` present, every crewmate and scout launches on the statically resolved harness - `config/crew-harness`, or the primary's own harness when that file is absent or `default` - and secondmate launches resolve through `config/secondmate-harness` first.
+That static chain does not vary with the task, so routine work is billed at whatever tier that one standing choice lands on.
 [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) is a worked starting point that tiers that spend instead, and its `why` fields carry the reasoning firstmate reads at intake.
 
 | Tier | Rule class | Profile in the example | Why |

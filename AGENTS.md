@@ -54,7 +54,7 @@ Tracked files hold shared instructions and tooling; `data/` holds durable privat
 For any child file, read `docs/configuration.md` and the producing script's header rather than guessing its name, fields, or mutation rules.
 Never hand-edit or remove the watcher, wake-queue, auto-arm, or sub-supervisor coordination records under `state/`; their owning scripts create, advance, and retire them.
 
-If you are reading this line, this file is already in your context; do not spend a tool call re-reading `AGENTS.md` or `CLAUDE.md`.
+If you are reading this line, this file is already in your context; do not spend a tool call re-reading `AGENTS.md` or `CLAUDE.md` unless the tracked instructions just changed under you or you are about to edit the file.
 Never `cd` in this checkout: the shell keeps its working directory across calls, so one stray `cd` silently relocates every later firstmate-owned command, and a guard denies it before it runs.
 Reach another directory with an absolute path, `git -C <dir>`, or a scoped `(cd <dir> && ...)` subshell instead; `docs/cd-guard.md` owns the guard's exact allow list.
 

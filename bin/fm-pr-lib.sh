@@ -18,7 +18,8 @@
 # lets a restart finish fixed-path removal without executing state-file bytes.
 # That receipt is state/<id>.pr-poll-retirement, a mode-0600 record carrying the
 # format tag, the task id, the provider-tagged PR identity, the data, template,
-# and registration hashes and inode identities, and the literal result merged.
+# and registration hashes, the data, check, and registration inode identities,
+# and the literal result merged.
 # It is written only for one exact validated merged observation, is never
 # overwritten in place, and is removed once its poll artifacts have retired, so
 # a receipt present at startup means a crashed retirement to finish rather than
