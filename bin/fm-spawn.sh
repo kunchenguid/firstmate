@@ -1336,10 +1336,10 @@ effort_flag_for_harness() {
       ;;
     codex)
       # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
+      # bundled model catalog now includes max for models such as gpt-5.6-luna,
+      # so thread the shared codex-supported vocabulary through unchanged.
       case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        low|medium|high|xhigh|max) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
       ;;
     grok)
