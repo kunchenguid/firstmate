@@ -4,16 +4,17 @@
 // Pi emits session_shutdown for ordinary same-process replacements (/new, /resume,
 // /fork, reload) as well as terminal quit. This extension binds one generation per
 // session activation. Only the active live generation may start, stop, rearm, or
-// clear the arm child, and the process-exit cleanup fallback is installed for exactly
-// that one generation. Activation is first-owner-wins: a replacement session_start
-// (or a fresh factory bind) becomes the active live generation only once the previous
-// one has stopped, so monitoring can arm again without restarting Pi, while a bind
-// that overlaps a still-live generation defers instead of taking over and refuses to
-// arm. A deferred binding stays inactive once that owner ends and only becomes the
-// owner through its own later session_start, so its refusal names an inactive binding
-// rather than a live owner that no longer exists. Terminal quit leaves the final
-// generation stopped so late callbacks cannot rearm. Stale callbacks from a prior
-// generation are no-ops against the active replacement.
+// clear the arm child, and exactly one process-exit cleanup fallback stays installed
+// for that generation and is dropped once it ends. Activation is first-owner-wins:
+// a replacement session_start (or a fresh factory bind) becomes the active live
+// generation only once the previous one has stopped, so monitoring can arm again
+// without restarting Pi, while a bind that overlaps a still-live generation defers
+// instead of taking over and refuses to arm. A deferred binding stays inactive once
+// that owner ends and only becomes the owner through its own later session_start, so
+// its refusal names an inactive binding rather than a live owner that no longer
+// exists. Terminal quit leaves the final generation stopped so late callbacks cannot
+// rearm. Stale callbacks from a prior generation are no-ops against the active
+// replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
