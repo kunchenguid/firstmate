@@ -1,13 +1,15 @@
 # Telegram topic board
 
-The topic board gives the captain a real-time Telegram forum channel with one project stream per topic.
-It uses a dedicated board bot (`@example_board_bot` in the examples below) in a dedicated forum group.
+The topic board gives approved senders real-time Telegram forum channels with one project stream per topic.
+It uses one dedicated board bot (`@example_board_bot` in the examples below) across one or more configured forum groups.
 It never uses the direct-message bot's token (`@example_direct_bot` in the examples below) or changes that bot's direct-message plugin poller.
 
 ## Architecture
 
 `bin/fm-topic-listener.sh` runs continuously as a systemd user service and uses Telegram `getUpdates` long polling with a default 25 second timeout.
 Each accepted update is written atomically to a deterministic `update-<id>.json` inbox file before the durable Telegram offset advances.
+The record carries the originating `chat_id`, configured `group`, `from_id`, and `message_thread_id`.
+Routing reads the matching chat's topic map, while replies read the durable item origin rather than any default chat.
 If the listener stops after writing the item but before advancing the offset, Telegram redelivers the update and the deterministic filename makes that replay idempotent.
 If the listener stops after advancing the offset but before notifying firstmate, the retained inbox item is found again and notification is retried.
 
@@ -19,7 +21,8 @@ The listener repeats unanswered notifications on a bounded default 300 second ca
 
 `bin/fm-topic-inbox.sh` lists, shows, claims, and releases individual items.
 Claiming records ownership but leaves the item in the inbox until a successful initial answer.
-`bin/fm-topic-reply.sh` sends through Telegram `sendMessage` with the item's recorded `message_thread_id`, so the response lands in the originating topic.
+`bin/fm-topic-reply.sh` sends through Telegram `sendMessage` with the item's recorded `chat_id` and `message_thread_id`, so the response lands in the originating group and topic.
+A new reply intent repeats that origin and refuses reuse if its origin no longer matches the durable item.
 A successful initial answer moves only that item into `answered/` and never bulk-deletes the inbox.
 
 Telegram does not provide an idempotency key for `sendMessage`.
@@ -32,16 +35,16 @@ Telegram permits only one `getUpdates` consumer per bot token.
 Pointing this service at the direct-message bot (`@example_direct_bot`) would compete with the direct-message plugin and could steal the captain's private messages.
 The separate board-bot token (`@example_board_bot`) gives the project board its own single consumer and keeps the direct-message lifeline isolated.
 Configuration validation compares against the direct-message plugin token when it is locally available and refuses if the two tokens match.
-The group bot must have privacy mode disabled through BotFather so normal topic messages are visible to it.
+The group bot must have privacy mode disabled through BotFather so normal topic messages are visible to it in every configured group.
 
 ## Local data
 
 All runtime data is gitignored under `$FM_HOME/data/fm-telegram-topics/`.
 
 ```text
-config.env                 private bot token and captain user id, mode 0600
+config.env                 private bot token, captain user id, and optional additional sender ids, mode 0600
 test-bot-token.txt         accepted legacy prototype credential filename
-topic-map.json             chat, topic, project, and route map
+topic-map.json             per-chat sender, topic, project, and route map
 .poll-offset               next Telegram update id to request
 .last-wake                 last successfully signaled notification epoch
 inbox/update-<id>.json     unanswered or claimed messages
@@ -55,12 +58,45 @@ The credential file accepts the following exact unquoted keys.
 ```dotenv
 FM_TOPIC_BOT_TOKEN=<dedicated-topic-bot-token>
 FM_TOPIC_CAPTAIN_ID=<captain-telegram-user-id>
+FM_TOPIC_APPROVED_SENDER_IDS=<optional-comma-separated-additional-user-ids>
 ```
 
 The legacy prototype keys `TEST_BOT_TOKEN` and `CAPTAIN_CHAT_ID` remain accepted so the existing private token file can be used without copying its secret.
+`FM_TOPIC_CAPTAIN_ID` remains required and is always part of the bot-wide approved set.
+`FM_TOPIC_APPROVED_SENDER_IDS` adds zero or more ids to that set without changing the direct-message configuration contract.
+Every id must match `^[0-9]+$` exactly, with commas and no spaces between additional ids.
+The listener refuses the complete configuration if any credential id or per-chat id is malformed, if a per-chat id is absent from the credential set, or if Telegram's anonymous-admin sender id `1087968824` is listed.
 The listener refuses a credential file that is a symlink or exposes any group or other permission bits.
 
-The current project map is represented locally with this schema.
+The multi-chat map uses a `chats` object keyed by the exact Telegram chat id.
+Each chat owns its display name, approved sender scope, and topic map.
+
+```json
+{
+  "bot": {"id": "<BOARD_BOT_ID>", "username": "@example_board_bot"},
+  "chats": {
+    "<FIRST_BOARD_CHAT_ID>": {
+      "group": "Example Dev Group",
+      "approved_sender_ids": ["<CAPTAIN_USER_ID>"],
+      "topics": {
+        "3": {"name": "AlphaDev", "project": "Alpha", "route": "alpha-mate"},
+        "5": {"name": "DevOps", "project": "General DevOps", "route": "main"}
+      }
+    },
+    "<SECOND_BOARD_CHAT_ID>": {
+      "group": "Second Example Group",
+      "approved_sender_ids": ["<CAPTAIN_USER_ID>", "<SECOND_USER_ID>"],
+      "topics": {}
+    }
+  }
+}
+```
+
+The modern `chats` shape does not mix legacy top-level `chat_id`, `group`, or `topics` keys into the same file.
+A sender approved in the credential file but omitted from a chat's `approved_sender_ids` is rejected in that chat.
+An unknown chat, an unapproved sender, and Telegram's anonymous-admin sender are all rejected and logged.
+
+The original single-chat object remains valid without any edits.
 
 ```json
 {
@@ -68,15 +104,12 @@ The current project map is represented locally with this schema.
   "group": "Example Dev Group",
   "bot": "@example_board_bot",
   "topics": {
-    "3": {"name": "AlphaDev", "project": "Alpha", "route": "alpha-mate"},
-    "2": {"name": "BetaDev", "project": "Beta", "route": "beta-mate"},
-    "4": {"name": "GammaDev", "project": "Gamma", "route": "main"},
-    "5": {"name": "DevOps", "project": "General DevOps", "route": "main"},
-    "9": {"name": "MiscDev", "project": "Misc", "route": "main"}
+    "3": {"name": "AlphaDev", "project": "Alpha", "route": "alpha-mate"}
   }
 }
 ```
 
+In the legacy shape, the credential-level approved sender set applies to its one chat.
 Messages in an unknown thread are retained with route `main` and an explicit unmapped-topic label.
 They are never silently discarded because the map is stale.
 

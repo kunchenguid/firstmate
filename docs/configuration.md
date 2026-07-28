@@ -351,7 +351,7 @@ These paths need `jq` to build the JSON payload, but they run before token and n
 
 The optional Telegram topic board is enabled when the effective home contains private credentials at `data/fm-telegram-topics/config.env` or the legacy prototype path `data/fm-telegram-topics/test-bot-token.txt`.
 Its durable offset, inbox, answered archive, keyed reply intents, and singleton locks remain under that same gitignored data directory.
-The local `topic-map.json` binds one Telegram group and its thread ids to project names and firstmate routes.
+The local `topic-map.json` binds one or more Telegram groups, their scoped approved senders, and their thread ids to project names and firstmate routes.
 The tracked [topic-board guide](topic-board.md) owns activation, the systemd service, the lifeline-safety boundary, migration from the prototype check, and the operator runbook.
 The producing scripts' headers and help own exact item and reply-state mechanics.
 

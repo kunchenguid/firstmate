@@ -32,7 +32,9 @@ case "$command" in
         .project,
         .route,
         (.claimed_by // "-"),
-        (.text | gsub("[\\t\\r\\n]"; " "))
+        (.text | gsub("[\\t\\r\\n]"; " ")),
+        (.group // "-"),
+        (.from_id // "-")
       ] | @tsv' "$item"
     done | sort -n -k1,1
     ;;

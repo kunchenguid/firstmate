@@ -10,7 +10,7 @@ metadata:
 # Telegram topic board
 
 Load this skill on a `check: topic-board: topic-message ...` wake and before acting on a worker return that names a `topic-item`.
-The durable item and its local topic map are authoritative for origin and routing.
+The durable item's chat, group, sender, and thread fields are authoritative for origin, while its retained route is authoritative for routing.
 A `check: topic-board: ... direct message ...` wake belongs to the separate direct-message line (docs/dm-line.md), which reuses this inbox contract through `bin/fm-dm-inbox.sh` and `bin/fm-dm-reply.sh` with route `main`.
 
 ## Intake

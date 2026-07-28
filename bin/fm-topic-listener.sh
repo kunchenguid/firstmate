@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Long-poll Telegram with the dedicated topic-board bot and durably queue captain messages before advancing the offset.
+# Long-poll Telegram with the dedicated topic-board bot and durably queue approved messages before advancing the offset.
 #
 # Usage:
 #   fm-topic-listener.sh
@@ -149,22 +149,32 @@ message_content_type() {
   '
 }
 
-persist_captain_message() {
-  local update_id=$1 message=$2 chat_id sender_id thread_id message_id topic_record topic project route text content_type destination existing_rc
+persist_approved_message() {
+  local update_id=$1 message=$2 chat_id sender_id chat_record group thread_id message_id topic_record topic project route text content_type destination existing_rc
   chat_id=$(printf '%s' "$message" | jq -r '.chat.id | tostring') || return 1
   sender_id=$(printf '%s' "$message" | jq -r '.from.id | tostring') || return 1
-  [ "$sender_id" = "$FM_TOPIC_CAPTAIN_ID" ] || {
-    fm_topic_log "ignored update ${update_id} from non-captain sender ${sender_id}"
+  [ "$sender_id" != "$FM_TOPIC_ANONYMOUS_ADMIN_ID" ] || {
+    fm_topic_log "ignored update ${update_id} from Telegram anonymous-admin sender ${sender_id}"
     return 2
   }
-  [ "$chat_id" = "$(jq -r '.chat_id | tostring' "$FM_TOPIC_MAP")" ] || {
-    fm_topic_log "ignored captain update ${update_id} from unconfigured chat ${chat_id}"
+  chat_record=$(fm_topic_chat_record "$chat_id") || return 1
+  [ -n "$chat_record" ] || {
+    fm_topic_log "ignored update ${update_id} from unconfigured chat ${chat_id}"
     return 2
   }
+  fm_topic_sender_is_approved "$sender_id" || {
+    fm_topic_log "ignored update ${update_id} from unapproved sender ${sender_id} in chat ${chat_id}"
+    return 2
+  }
+  fm_topic_sender_is_approved_for_record "$sender_id" "$chat_record" || {
+    fm_topic_log "ignored update ${update_id} from sender ${sender_id} not approved for chat ${chat_id}"
+    return 2
+  }
+  group=$(printf '%s' "$chat_record" | jq -r '.group') || return 1
 
   thread_id=$(printf '%s' "$message" | jq -r '.message_thread_id // "null"') || return 1
   case "$thread_id" in null|*[!0-9]*) [ "$thread_id" = null ] || return 1 ;; esac
-  topic_record=$(jq -c --arg thread "$thread_id" '.topics[$thread] // empty' "$FM_TOPIC_MAP") || return 1
+  topic_record=$(printf '%s' "$chat_record" | jq -c --arg thread "$thread_id" '.topics[$thread] // empty') || return 1
   if [ -n "$topic_record" ]; then
     topic=$(printf '%s' "$topic_record" | jq -r '.name')
     project=$(printf '%s' "$topic_record" | jq -r '.project')
@@ -173,7 +183,7 @@ persist_captain_message() {
     topic="Unmapped topic ${thread_id}"
     project=Unmapped
     route=main
-    fm_topic_log "captain update ${update_id} uses an unmapped thread ${thread_id}; retained for main routing"
+    fm_topic_log "approved update ${update_id} in chat ${chat_id} uses an unmapped thread ${thread_id}; retained for main routing"
   fi
 
   item_already_persisted "$update_id"
@@ -189,10 +199,11 @@ persist_captain_message() {
   destination="$FM_TOPIC_INBOX/$(fm_topic_item_filename "$update_id")"
 
   jq -n \
-    --argjson version 1 \
+    --argjson version 2 \
     --argjson update_id "$update_id" \
     --argjson message_id "$message_id" \
     --arg chat_id "$chat_id" \
+    --arg group "$group" \
     --arg thread_id "$thread_id" \
     --arg topic "$topic" \
     --arg project "$project" \
@@ -207,6 +218,7 @@ persist_captain_message() {
       update_id: $update_id,
       message_id: $message_id,
       chat_id: $chat_id,
+      group: $group,
       thread_id: (if $thread_id == "null" then null else ($thread_id | tonumber) end),
       topic: $topic,
       project: $project,
@@ -251,7 +263,7 @@ poll_once() {
       fm_topic_log "ignored non-message update ${update_id}"
       continue
     fi
-    persist_captain_message "$update_id" "$message"
+    persist_approved_message "$update_id" "$message"
     persist_rc=$?
     case "$persist_rc" in
       0) new=$((new + 1)) ;;

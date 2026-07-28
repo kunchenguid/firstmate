@@ -54,11 +54,34 @@ case "$reply_key" in ''|*[!A-Za-z0-9._-]*) echo 'error: reply key must use lette
 fm_topic_check_config
 fm_topic_prepare_storage
 item=$(fm_topic_any_item "$item_id") || { echo "error: topic item not found: $item_id" >&2; exit 1; }
+fm_topic_validate_item_origin "$item" || {
+  printf 'error: topic item has an invalid or unsafe origin: %s\n' "$item_id" >&2
+  exit 1
+}
 update_id=$(jq -r '.update_id' "$item")
+chat_id=$(jq -r '.chat_id' "$item")
+thread_id=$(jq -r '.thread_id // "null"' "$item")
+group=$(jq -r '.group // ""' "$item")
+from_id=$(jq -r '.from_id // ""' "$item")
 intent="$FM_TOPIC_OUTBOX/update-${update_id}-${reply_key}.json"
 if [ -L "$intent" ] || { [ -e "$intent" ] && [ ! -f "$intent" ]; }; then
   printf 'error: reply intent path is not a regular non-symlink file: %s\n' "$intent" >&2
   exit 1
+fi
+if [ -f "$intent" ] && jq -e 'has("origin")' "$intent" >/dev/null 2>&1; then
+  jq -e \
+    --arg chat_id "$chat_id" \
+    --arg thread_id "$thread_id" \
+    --arg group "$group" \
+    --arg from_id "$from_id" '
+    .origin.chat_id == $chat_id
+    and ((.origin.thread_id | if . == null then "null" else tostring end) == $thread_id)
+    and ((.origin.group // "") == $group)
+    and ((.origin.from_id // "") == $from_id)
+  ' "$intent" >/dev/null 2>&1 || {
+    printf 'error: reply intent origin does not match topic item %s\n' "$update_id" >&2
+    exit 1
+  }
 fi
 reply_lock="$FM_TOPIC_LOCKS/reply-${update_id}-${reply_key}.lock"
 if ! fm_lock_try_acquire "$reply_lock"; then
@@ -153,11 +176,15 @@ if [ -f "$intent" ]; then
   esac
 else
   jq -n \
-    --argjson version 1 \
+    --argjson version 2 \
     --argjson update_id "$update_id" \
     --arg reply_key "$reply_key" \
     --arg text "$text" \
     --arg text_sha256 "$text_hash" \
+    --arg chat_id "$chat_id" \
+    --arg thread_id "$thread_id" \
+    --arg group "$group" \
+    --arg from_id "$from_id" \
     --arg prepared_at "$(fm_topic_now)" \
     '{
       version: $version,
@@ -165,6 +192,12 @@ else
       reply_key: $reply_key,
       text: $text,
       text_sha256: $text_sha256,
+      origin: {
+        chat_id: $chat_id,
+        thread_id: (if $thread_id == "null" then null else ($thread_id | tonumber) end),
+        group: (if $group == "" then null else $group end),
+        from_id: (if $from_id == "" then null else $from_id end)
+      },
       prepared_at: $prepared_at,
       changed_at: $prepared_at,
       status: "prepared"
@@ -172,8 +205,6 @@ else
 fi
 
 mark_intent sending
-chat_id=$(jq -r '.chat_id' "$item")
-thread_id=$(jq -r '.thread_id // "null"' "$item")
 CURL_BIN=${FM_TOPIC_CURL_BIN:-curl}
 API="https://api.telegram.org/bot${FM_TOPIC_BOT_TOKEN}"
 curl_args=(

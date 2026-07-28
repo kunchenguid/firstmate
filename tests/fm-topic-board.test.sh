@@ -35,6 +35,38 @@ EOF
   printf '%s\n' "$home"
 }
 
+make_multi_home() {
+  local home data
+  home=$(make_home "$1")
+  data="$home/data/fm-telegram-topics"
+  cat > "$data/config.env" <<'EOF'
+FM_TOPIC_BOT_TOKEN=123456:test_topic_token
+FM_TOPIC_CAPTAIN_ID=700000001
+FM_TOPIC_APPROVED_SENDER_IDS=700000002,700000003
+EOF
+  chmod 600 "$data/config.env"
+  cat > "$data/topic-map.json" <<'EOF'
+{
+  "bot": {"id": "7654321000", "username": "@example_board_bot"},
+  "chats": {
+    "-1001234567890": {
+      "group": "Example Dev Group",
+      "approved_sender_ids": ["700000001", "700000003"],
+      "topics": {
+        "3": {"name": "AlphaDev", "project": "Alpha's Place", "route": "alpha-mate"}
+      }
+    },
+    "-1009876543210": {
+      "group": "Second Example Group",
+      "approved_sender_ids": ["700000001", "700000002"],
+      "topics": {}
+    }
+  }
+}
+EOF
+  printf '%s\n' "$home"
+}
+
 make_fake_curl() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -97,6 +129,8 @@ test_listener_is_lossless_and_topic_aware() {
   assert_present "$data/inbox/update-12.json" "unmapped captain item was silently dropped"
   [ "$(jq -r '.route' "$data/inbox/update-10.json")" = alpha-mate ] || fail "mapped topic did not retain its secondmate route"
   [ "$(jq -r '.topic' "$data/inbox/update-10.json")" = AlphaDev ] || fail "mapped topic name was not retained"
+  [ "$(jq -r '.group' "$data/inbox/update-10.json")" = "Example Dev Group" ] || fail "legacy map item did not retain its group identity"
+  [ "$(jq -r '.from_id' "$data/inbox/update-10.json")" = 700000001 ] || fail "legacy map item did not retain its sender"
   [ "$(jq -r '.route' "$data/inbox/update-12.json")" = main ] || fail "unmapped topic did not fall back to main"
   [ "$(jq -r '.content_type' "$data/inbox/update-12.json")" = photo ] || fail "non-text captain message metadata was not retained"
   count=$(find "$data/inbox" -type f -name 'update-*.json' | wc -l | tr -d '[:space:]')
@@ -120,6 +154,74 @@ test_listener_is_lossless_and_topic_aware() {
   [ "$status" -ne 0 ] || fail "listener accepted the direct-message bot token for topic polling"
   assert_contains "$out" 'refusing to risk the captain lifeline' "same-token refusal did not explain the safety boundary"
   pass "listener persists before offset, survives replay exactly once, and retains mapped or unmapped captain content"
+}
+
+test_multi_chat_sender_scope_and_origin_reply() {
+  local home fakebin response send_response log data out
+  home=$(make_multi_home multi-chat)
+  fakebin=$(make_fake_curl "$home")
+  response="$home/updates.json"
+  send_response="$home/send.json"
+  log="$home/curl.log"
+  data="$home/data/fm-telegram-topics"
+  : > "$log"
+  write_updates "$response" \
+    '{"update_id":60,"message":{"message_id":601,"message_thread_id":77,"from":{"id":700000002},"chat":{"id":-1009876543210},"text":"second group request"}}' \
+    '{"update_id":61,"message":{"message_id":602,"message_thread_id":3,"from":{"id":42},"chat":{"id":-1001234567890},"text":"unapproved sender"}}' \
+    '{"update_id":62,"message":{"message_id":603,"message_thread_id":3,"from":{"id":700000001},"chat":{"id":-1005555555555},"text":"unknown group"}}' \
+    '{"update_id":63,"message":{"message_id":604,"message_thread_id":77,"from":{"id":700000003},"chat":{"id":-1009876543210},"text":"approved only in group A"}}' \
+    '{"update_id":64,"message":{"message_id":605,"message_thread_id":77,"from":{"id":1087968824},"chat":{"id":-1009876543210},"text":"anonymous admin"}}'
+
+  out=$(listener_once "$home" "$fakebin" "$response" "$log" 2>&1) || fail "multi-chat listener rejected its configured second group: $out"
+  assert_present "$data/inbox/update-60.json" "second configured chat message was not retained"
+  assert_absent "$data/inbox/update-61.json" "unapproved sender reached the inbox"
+  assert_absent "$data/inbox/update-62.json" "unconfigured chat reached the inbox"
+  assert_absent "$data/inbox/update-63.json" "sender scoped only to group A reached group B"
+  assert_absent "$data/inbox/update-64.json" "anonymous-admin sender reached the inbox"
+  assert_contains "$out" 'unapproved sender 42' "unapproved sender rejection was not logged"
+  assert_contains "$out" 'unconfigured chat -1005555555555' "unconfigured chat rejection was not logged"
+  assert_contains "$out" 'not approved for chat -1009876543210' "per-chat sender rejection was not logged"
+  assert_contains "$out" 'anonymous-admin sender 1087968824' "anonymous-admin rejection was not logged distinctly"
+  [ "$(jq -r '.group' "$data/inbox/update-60.json")" = "Second Example Group" ] || fail "second-chat item lost its group identity"
+  [ "$(jq -r '.from_id' "$data/inbox/update-60.json")" = 700000002 ] || fail "second approved sender was not retained"
+  [ "$(jq -r '.route' "$data/inbox/update-60.json")" = main ] || fail "unmapped second-chat topic did not route to main"
+  [ "$(jq -r '.topic' "$data/inbox/update-60.json")" = "Unmapped topic 77" ] || fail "unmapped second-chat topic lost its explicit label"
+
+  printf '%s\n' '{"ok":true,"result":{"message_id":901,"message_thread_id":77,"chat":{"title":"Second Example Group"}}}' > "$send_response"
+  printf 'Reply to the second group.' | PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_FAKE_CURL_LOG="$log" FM_FAKE_SEND_RESPONSE="$send_response" "$REPLY" 60 >/dev/null \
+    || fail "reply to the second configured chat failed"
+  assert_grep 'chat_id=-1009876543210' "$log" "reply did not use the item's originating second chat"
+  assert_grep 'message_thread_id=77' "$log" "reply did not use the item's originating second-chat thread"
+  [ "$(jq -r '.origin.chat_id' "$data/outbox/update-60-initial.json")" = -1009876543210 ] || fail "reply intent did not retain the originating second chat"
+  [ "$(jq -r '.origin.group' "$data/outbox/update-60-initial.json")" = "Second Example Group" ] || fail "reply intent did not retain the originating group identity"
+  [ "$(jq -r '.origin.from_id' "$data/outbox/update-60-initial.json")" = 700000002 ] || fail "reply intent did not retain the originating sender"
+  pass "multi-chat intake scopes senders per group, retains origin, and replies to the originating chat"
+}
+
+test_multi_sender_config_validation_fails_closed() {
+  local home data out status
+  home=$(make_multi_home invalid-senders)
+  data="$home/data/fm-telegram-topics"
+
+  sed -i 's/700000002,700000003/700000002,not-an-id/' "$data/config.env"
+  set +e
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$LISTENER" --check-config 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "malformed credential sender allowlist was accepted"
+  assert_contains "$out" 'approved Telegram sender ids' "malformed sender allowlist refusal was not explicit"
+
+  sed -i 's/700000002,not-an-id/700000002,700000003/' "$data/config.env"
+  jq '.chats["-1009876543210"].approved_sender_ids += ["not-an-id"]' "$data/topic-map.json" > "$data/topic-map.bad"
+  mv "$data/topic-map.bad" "$data/topic-map.json"
+  set +e
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$LISTENER" --check-config 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "malformed per-chat sender allowlist was accepted"
+  assert_contains "$out" 'topic map has an invalid schema' "malformed map sender refusal was not explicit"
+  pass "credential and per-chat sender allowlists fail closed on malformed ids"
 }
 
 test_boundary_offset_and_failed_persistence() {
@@ -375,6 +477,8 @@ EOF
   pass "systemd persistence refuses poller races and every primary supervision path stays active for the topic board"
 }
 
+test_multi_chat_sender_scope_and_origin_reply
+test_multi_sender_config_validation_fails_closed
 test_listener_is_lossless_and_topic_aware
 test_boundary_offset_and_failed_persistence
 test_fast_wake_signals_only_verified_home_watcher

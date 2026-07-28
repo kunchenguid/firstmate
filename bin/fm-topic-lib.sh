@@ -15,6 +15,7 @@ FM_TOPIC_LOCKS="$FM_TOPIC_DATA_DIR/locks"
 FM_TOPIC_OFFSET_FILE="${FM_TOPIC_OFFSET_FILE:-$FM_TOPIC_DATA_DIR/.poll-offset}"
 # shellcheck disable=SC2034 # Shared with fm-topic-listener.sh after sourcing.
 FM_TOPIC_LAST_WAKE="$FM_TOPIC_DATA_DIR/.last-wake"
+FM_TOPIC_ANONYMOUS_ADMIN_ID=1087968824
 
 fm_topic_log() {
   printf '%s fm-topic: %s\n' "$(date -Is)" "$*" >&2
@@ -75,7 +76,8 @@ fm_topic_select_config() {
 }
 
 fm_topic_load_credentials() {
-  local config line key value token='' captain=''
+  local config line key value token='' captain='' additional_senders='' approved sender
+  local -a sender_ids=()
   config=$(fm_topic_select_config)
   fm_topic_require_private_file "$config" || return 1
 
@@ -94,6 +96,7 @@ fm_topic_load_credentials() {
     case "$key" in
       FM_TOPIC_BOT_TOKEN|TEST_BOT_TOKEN) token=$value ;;
       FM_TOPIC_CAPTAIN_ID|CAPTAIN_CHAT_ID) captain=$value ;;
+      FM_TOPIC_APPROVED_SENDER_IDS) additional_senders=$value ;;
       *)
         printf 'error: unsupported key in topic-board credential file: %s\n' "$key" >&2
         return 1
@@ -109,11 +112,39 @@ fm_topic_load_credentials() {
     printf 'error: captain Telegram user id is missing or malformed in %s\n' "$config" >&2
     return 1
   }
+  [ "$captain" != "$FM_TOPIC_ANONYMOUS_ADMIN_ID" ] || {
+    printf 'error: Telegram anonymous-admin sender id %s cannot be approved in %s\n' "$captain" "$config" >&2
+    return 1
+  }
+  if [ -n "$additional_senders" ]; then
+    [[ "$additional_senders" =~ ^[0-9]+(,[0-9]+)*$ ]] || {
+      printf 'error: approved Telegram sender ids are malformed in %s\n' "$config" >&2
+      return 1
+    }
+    IFS=',' read -r -a sender_ids <<< "$additional_senders"
+  fi
+
+  approved=$captain
+  for sender in "${sender_ids[@]}"; do
+    [[ "$sender" =~ ^[0-9]+$ ]] || {
+      printf 'error: approved Telegram sender ids are malformed in %s\n' "$config" >&2
+      return 1
+    }
+    [ "$sender" != "$FM_TOPIC_ANONYMOUS_ADMIN_ID" ] || {
+      printf 'error: Telegram anonymous-admin sender id %s cannot be approved in %s\n' "$sender" "$config" >&2
+      return 1
+    }
+    case ",$approved," in
+      *",$sender,"*) ;;
+      *) approved="${approved},${sender}" ;;
+    esac
+  done
 
   FM_TOPIC_BOT_TOKEN=$token
   FM_TOPIC_CAPTAIN_ID=$captain
+  FM_TOPIC_APPROVED_SENDER_IDS=$approved
   FM_TOPIC_CONFIG_EFFECTIVE=$config
-  export FM_TOPIC_BOT_TOKEN FM_TOPIC_CAPTAIN_ID FM_TOPIC_CONFIG_EFFECTIVE
+  export FM_TOPIC_BOT_TOKEN FM_TOPIC_CAPTAIN_ID FM_TOPIC_APPROVED_SENDER_IDS FM_TOPIC_CONFIG_EFFECTIVE
 }
 
 fm_topic_assert_lifeline_separate() {
@@ -145,18 +176,99 @@ fm_topic_validate_map() {
     printf 'error: topic map is missing, not regular, or a symlink: %s\n' "$FM_TOPIC_MAP" >&2
     return 1
   }
-  jq -e '
-    (.chat_id | type == "string" or type == "number")
-    and (.topics | type == "object")
-    and all(.topics[];
-      (.name | type == "string" and length > 0)
-      and (.project | type == "string" and length > 0)
-      and (.route | type == "string" and length > 0)
-    )
+  jq -e \
+    --arg approved ",${FM_TOPIC_APPROVED_SENDER_IDS}," \
+    --arg anonymous "$FM_TOPIC_ANONYMOUS_ADMIN_ID" '
+    def valid_topics:
+      type == "object"
+      and all(.[];
+        (.name | type == "string" and length > 0)
+        and (.project | type == "string" and length > 0)
+        and (.route | type == "string" and length > 0)
+      );
+    def valid_sender:
+      . as $sender
+      | type == "string"
+        and test("^[0-9]+$")
+        and . != $anonymous
+        and ($approved | contains("," + $sender + ","));
+    if has("chats") then
+      (has("chat_id") | not)
+      and (has("group") | not)
+      and (has("topics") | not)
+      and (.chats | type == "object" and length > 0)
+      and all(.chats | to_entries[];
+        (.key | test("^-?[0-9]+$"))
+        and (.value.group | type == "string" and length > 0)
+        and (.value.approved_sender_ids | type == "array" and length > 0)
+        and all(.value.approved_sender_ids[]; valid_sender)
+        and (.value.topics | valid_topics)
+      )
+    else
+      (.chat_id | (type == "string" or type == "number") and (tostring | test("^-?[0-9]+$")))
+      and ((has("group") | not) or (.group | type == "string" and length > 0))
+      and (.topics | valid_topics)
+    end
   ' "$FM_TOPIC_MAP" >/dev/null 2>&1 || {
     printf 'error: topic map has an invalid schema: %s\n' "$FM_TOPIC_MAP" >&2
     return 1
   }
+}
+
+fm_topic_sender_is_approved() {
+  local sender_id=$1
+  [[ "$sender_id" =~ ^[0-9]+$ ]] || return 1
+  [ "$sender_id" != "$FM_TOPIC_ANONYMOUS_ADMIN_ID" ] || return 1
+  case ",${FM_TOPIC_APPROVED_SENDER_IDS}," in
+    *",$sender_id,"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_topic_chat_record() {
+  local chat_id=$1
+  jq -c --arg chat "$chat_id" '
+    if has("chats") then
+      .chats[$chat] // empty
+    elif (.chat_id | tostring) == $chat then
+      {
+        group: (.group // ("Telegram chat " + $chat)),
+        approved_sender_ids: null,
+        topics: .topics
+      }
+    else
+      empty
+    end
+  ' "$FM_TOPIC_MAP"
+}
+
+fm_topic_sender_is_approved_for_record() {
+  local sender_id=$1 chat_record=$2
+  printf '%s' "$chat_record" | jq -e --arg sender "$sender_id" '
+    .approved_sender_ids == null or (.approved_sender_ids | index($sender) != null)
+  ' >/dev/null 2>&1
+}
+
+fm_topic_validate_item_origin() {
+  jq -e '
+    (.chat_id | type == "string" and test("^-?[0-9]+$"))
+    and (
+      .thread_id == null
+      or (
+        (.thread_id | type == "number")
+        and .thread_id >= 0
+        and .thread_id == (.thread_id | floor)
+      )
+    )
+    and (
+      (has("from_id") | not)
+      or (.from_id | type == "string" and test("^[0-9]+$"))
+    )
+    and (
+      (has("group") | not)
+      or (.group | type == "string" and length > 0)
+    )
+  ' "$1" >/dev/null 2>&1
 }
 
 fm_topic_check_config() {

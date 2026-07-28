@@ -92,7 +92,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-x-link.sh`           | Link a spawned task to its originating X-mode mention in task meta                   |
 | `fm-x-followup.sh`       | Detect, post, and cap completion follow-ups for an X-mode-linked task                |
 | `fm-topic-lib.sh`        | Shared paths, validation, atomic persistence, and item lookup for the Telegram topic board |
-| `fm-topic-listener.sh`   | Long-poll Telegram with the dedicated topic-board bot and durably queue captain messages before advancing the offset |
+| `fm-topic-listener.sh`   | Long-poll Telegram with the dedicated topic-board bot and durably queue approved messages before advancing the offset |
 | `fm-topic-inbox.sh`      | Inspect and claim durable Telegram topic-board inbox items without deleting them     |
 | `fm-topic-reply.sh`      | Send an idempotently keyed reply into an item's originating Telegram topic and archive it after its initial answer |
 | `fm-topic-service.sh`    | Install and manage the persistent systemd user service for the Telegram topic-board listener |
