@@ -11,6 +11,11 @@ KIMI_HOOK="$ROOT/bin/fm-kimi-turnend-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-kimi-harness)
 KIMI_RUNTIME_TASK_TMP=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
+# The Kimi turn-end hook validates config.toml with tomllib, so it fails closed
+# on a python3 older than 3.11. That refusal is the product's contract, not a
+# regression: gate the suite the way the other optional-dependency tests do.
+"$PYTHON_BIN" -c 'import tomllib' >/dev/null 2>&1 \
+  || { echo "skip: python3 lacks tomllib (required by fm-kimi-turnend-hook.sh; needs Python 3.11+)"; exit 0; }
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
