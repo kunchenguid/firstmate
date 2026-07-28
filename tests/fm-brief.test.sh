@@ -2,15 +2,17 @@
 # Behavior tests for bin/fm-brief.sh.
 #
 # Regression coverage for the heredoc-in-command-substitution parse bug (issues
-# #166, #958, #1069). Building a variable with `VAR=$(cat <<EOF ... EOF)` is
-# unsafe on Bash 3.2 (macOS /bin/bash): the lexer scans for the matching `)` of
-# the command substitution textually and tracks quote state through the heredoc
-# body, so a single apostrophe, unbalanced quote, or unbalanced paren anywhere
-# in that body breaks parsing of the *entire rest of the script* - `bash -n`
-# fails, not just the generated brief. The DOD and Herdr-section builders now
-# use `IFS= read -r -d '' VAR <<EOF || true` instead, which removes the `$(...)`
-# wrapper and eliminates the whole defect class regardless of future prose.
-# test_no_heredoc_in_command_substitution guards that structure directly.
+# #166, #958, #1069, #1179). Building a variable with `VAR=$(cat <<EOF ... EOF)`
+# is unsafe on Bash 3.2 (macOS /bin/bash): the lexer scans for the matching `)`
+# of the command substitution textually and tracks quote state through the
+# heredoc body, so a single apostrophe, unbalanced quote, or unbalanced paren
+# anywhere in that body breaks parsing of the *entire rest of the script* -
+# `bash -n` fails, not just the generated brief. The DOD and Herdr-section
+# builders now use `IFS= read -r -d '' VAR <<EOF || true` instead, which removes
+# the `$(...)` wrapper and eliminates the whole defect class regardless of
+# future prose. test_no_heredoc_in_command_substitution guards that structure
+# directly, and test_no_apostrophe_in_cmdsubst_heredoc is a version-portable
+# static scan that flags the offending apostrophe everywhere.
 # Ambient `bash -n` here is Bash 5 and cannot see the bug, so the real
 # cross-version enforcement lives in the macos-stock-bash CI job.
 set -u
