@@ -42,7 +42,10 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse pi-signed
+  # fm-spawn.sh refuses to launch when it cannot resolve the axi agent tool
+  # directory, so every case here supplies it; the cases that sanitize PATH would
+  # otherwise trip that refusal instead of the behavior they are pinning.
+  fm_fake_exit0 "$fakebin" treehouse pi-signed tasks-axi gh-axi chrome-devtools-axi lavish-axi
   printf '%s\n' "$fakebin"
 }
 

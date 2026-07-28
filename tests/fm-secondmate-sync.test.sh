@@ -715,6 +715,9 @@ test_spawn_fast_forwards_before_launch() {
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  # fm-spawn.sh refuses to launch when no axi agent tool resolves, and BASE_PATH
+  # deliberately excludes the toolchain they live in.
+  fm_fake_exit0 "$fakebin" tasks-axi gh-axi chrome-devtools-axi lavish-axi
 
   PATH="$fakebin:$BASE_PATH" TMUX='' \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
@@ -749,6 +752,9 @@ test_spawn_warns_when_sync_skipped_before_launch() {
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  # fm-spawn.sh refuses to launch when no axi agent tool resolves, and BASE_PATH
+  # deliberately excludes the toolchain they live in.
+  fm_fake_exit0 "$fakebin" tasks-axi gh-axi chrome-devtools-axi lavish-axi
 
   PATH="$fakebin:$BASE_PATH" TMUX='' \
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \

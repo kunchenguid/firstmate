@@ -73,6 +73,14 @@
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
+#   Every spawn exports the axi agent tool directory into the agent's shell, so a
+#   worker keeps tasks-axi, gh-axi, chrome-devtools-axi, and lavish-axi even when its
+#   project selects a different Node toolchain and resolves away from them. The
+#   directory is resolved dynamically from where the tools actually live, never from a
+#   hardcoded Node version, and it is APPENDED to PATH so a project's own pinned
+#   node/npm still wins. When NO axi tool resolves the spawn is refused before any
+#   endpoint is created; an individually uninstalled tool warns instead
+#   (bin/fm-axi-path-lib.sh owns that fail-closed contract).
 #   A --secondmate spawn also propagates the primary's declared inherited local
 #   material, so the secondmate's OWN crewmates inherit primary config and the
 #   secondmate receives the primary's read-only shared captain-preference file
@@ -115,7 +123,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,86p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -141,6 +149,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-axi-path-lib.sh
+. "$SCRIPT_DIR/fm-axi-path-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -196,6 +206,15 @@ case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
+
+# Resolve the axi agent tool directory in FIRSTMATE's environment, where the
+# tools do resolve, so it can be exported into the agent's shell below. A
+# crewmate's project directory can select a different Node toolchain and lose
+# them from PATH (bin/fm-axi-path-lib.sh owns the mechanism and the fail-closed
+# contract). Resolved HERE, before any endpoint is created, so an unresolvable
+# tool directory refuses the spawn instead of leaving a half-created endpoint
+# behind or launching a worker that was told to use tools it cannot run.
+AXI_PATH_SUFFIX=$(fm_axi_path_suffix) || exit 1
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
@@ -1498,6 +1517,12 @@ fi
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+sleep 0.3
+# Same reason, for the axi agent tools: append the directory firstmate resolved
+# them from so they survive a project toolchain that resolves away from it. $PATH
+# stays literal so the pane's own shell expands it; the resolved directory is
+# quoted so nothing in the path is expanded or word-split.
+spawn_send_text_line "$T" "export PATH=\"\$PATH\":$(shell_quote "$AXI_PATH_SUFFIX")"
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3

@@ -170,6 +170,13 @@ jobs:
           command -v tar >/dev/null || { echo "::error::tar is required"; exit 1; }
           jq --version
           python3 --version
+      - name: Install tasks-axi
+        # fm-spawn.sh refuses to launch when it cannot resolve the axi agent tool
+        # directory, so the spawning Herdr lane needs it on PATH.
+        run: |
+          set -eu
+          npm install -g tasks-axi
+          tasks-axi --version
       - name: Install pinned Herdr
         run: |
           set -eu

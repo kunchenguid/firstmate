@@ -213,6 +213,9 @@ make_fake_spawn_toolchain() {
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  # fm-spawn.sh refuses to launch when no axi agent tool resolves, and BASE_PATH
+  # deliberately excludes the toolchain they live in.
+  fm_fake_exit0 "$fakebin" tasks-axi gh-axi chrome-devtools-axi lavish-axi
   printf '%s\n' "$fakebin"
 }
 
