@@ -1064,7 +1064,6 @@ current = await replaceSession(current, "fork");
 // Same bound instance: ordinary shutdown then session_start without a fresh factory.
 const sameInstanceChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
 await current.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
-await waitFor(() => !pidAlive(sameInstanceChild), "same-instance previous child exit");
 await current.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
 const sameInstanceArm = await current.getTool().execute("same-instance", {}, undefined, undefined, {});
 if (!sameInstanceArm.details?.ok || String(sameInstanceArm.details.message).includes("shutting down")) {
@@ -1075,6 +1074,7 @@ await waitFor(() => {
   const child = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
   return child !== sameInstanceChild && pidAlive(child);
 }, "same-instance replacement child");
+await waitFor(() => !pidAlive(sameInstanceChild), "same-instance previous child exit");
 if (liveArmPids().length !== 1) {
   throw new Error(`same-instance expected one live arm child, got ${liveArmPids().join(",")}`);
 }
@@ -1147,15 +1147,19 @@ if (process.listenerCount("exit") !== before + 1) {
   throw new Error("Pi extension did not install exactly one process-exit fallback");
 }
 await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
-if (process.listenerCount("exit") !== before) {
-  throw new Error("session_shutdown did not remove the process-exit fallback");
+if (process.listenerCount("exit") !== before + 1) {
+  throw new Error("session_shutdown removed the process-lifetime exit fallback");
+}
+await handlers.get("session_start")?.({ type: "session_start" }, {});
+if (process.listenerCount("exit") !== before + 1) {
+  throw new Error("replacement activation duplicated the process-exit fallback");
 }
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi cleanup fallback listener must install once and unregister on session shutdown"
+  expect_code 0 "$status" "Pi cleanup fallback listener must remain singular across session replacement"
   [ -z "$out" ] || fail "Pi listener-lifecycle test printed output: $out"
-  pass "Pi process-exit cleanup listener has a bounded lifecycle"
+  pass "Pi process-exit cleanup listener remains singular across session replacement"
 }
 
 test_pi_process_exit_cleanup_stops_arm_child() {
@@ -1169,18 +1173,21 @@ test_pi_process_exit_cleanup_stops_arm_child() {
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
-trap 'printf "cleaned\n" > "$FM_CLEANUP_LOG"; exit 0' TERM
+trap 'printf "%s\n" "$$" >> "$FM_CLEANUP_LOG"; exit 0' TERM
 printf '%s\n' "$$" > "$FM_CHILD_PID_FILE"
 while :; do sleep 1; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_CLEANUP_LOG="$cleanup_log" FM_CHILD_PID_FILE="$pid_file" node --input-type=module 2>&1 <<'EOF'
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 let tool = null;
+const handlers = new Map();
 const pi = {
-  on() {},
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
   registerCommand() {},
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
@@ -1195,19 +1202,31 @@ for (let i = 0; i < 250 && !existsSync(process.env.FM_CHILD_PID_FILE); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 if (!existsSync(process.env.FM_CHILD_PID_FILE)) throw new Error("arm child did not start");
+const firstChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
+await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
+await handlers.get("session_start")?.({ type: "session_start" }, {});
+await tool.execute("tool-call-replacement", {}, undefined, undefined, {});
+for (let i = 0; i < 250; i += 1) {
+  const currentChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
+  if (currentChild !== firstChild) break;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim() === firstChild) {
+  throw new Error("replacement arm child did not start");
+}
 process.exit(0);
 EOF
 )
   status=$?
   expect_code 0 "$status" "Pi process exit must run the watcher cleanup fallback"
   [ -z "$out" ] || fail "Pi process-exit cleanup test printed output: $out"
+  pid=$(cat "$pid_file")
   i=0
-  while [ "$i" -lt 250 ] && [ ! -f "$cleanup_log" ]; do
+  while [ "$i" -lt 250 ] && ! grep -qx "$pid" "$cleanup_log" 2>/dev/null; do
     sleep 0.02
     i=$((i + 1))
   done
-  [ -f "$cleanup_log" ] || fail "Pi process-exit fallback did not deliver TERM to the arm child"
-  pid=$(cat "$pid_file")
+  grep -qx "$pid" "$cleanup_log" 2>/dev/null || fail "Pi process-exit fallback did not deliver TERM to the replacement arm child"
   if kill -0 "$pid" 2>/dev/null; then
     kill -TERM "$pid" 2>/dev/null || true
     fail "Pi arm child $pid survived process-exit cleanup"
