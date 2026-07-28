@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 # tests/fm-tmux-submit-busy.test.sh - regression: busy pane + pending composer
 # after Enter retries must return "empty" (message queued), not "pending".
+#
+# Two harness shapes are covered, both live-verified:
+#   opencode 1.18.4 - a busy pane keeps the typed text visible in the composer,
+#     so only the fm_pane_is_busy fallback can tell a queued Enter from a
+#     swallowed one.
+#   claude 2.1.220  - the composer DOES clear, so the acknowledgement must land
+#     with no fallback at all. Task fm-send-busy-false-negative: claude pads its
+#     bare `❯` prompt with U+00A0 NO-BREAK SPACE, an ASCII-only trim left it
+#     behind, the cleared row read as real typed text, and `fm-send` reported
+#     "Enter swallowed" for messages the target had already received - five
+#     times in one night, each one an invitation to re-send the same steer.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -12,11 +23,20 @@ set -u
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-tmux-submit-busy.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
+# claude's real composer row: the prompt glyph plus a NO-BREAK SPACE, then the
+# harness's own reverse-video cursor cell (verified 2026-07-28 against a live
+# claude 2.1.220 pane with `tmux capture-pane -e | od -c`).
+NBSP=$'\302\240'
+CLAUDE_EMPTY_ROW="❯$NBSP "
+CLAUDE_TYPED_ROW="❯${NBSP}fix findings 1 and 3"
+
 # Override fm_pane_is_busy for testing: FM_FAKE_PANE_BUSY=1 means busy.
 fm_pane_is_busy() {
   [ "${FM_FAKE_PANE_BUSY:-0}" = 1 ]
 }
 
+# FM_FAKE_CLEARED sets the composer row a successful Enter leaves behind, so a
+# test can pick the harness shape it is reproducing.
 make_submit_mock() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
@@ -40,7 +60,7 @@ case "${1:-}" in
       if [ -n "${FM_FAKE_SWALLOW:-}" ] && [ -f "$FM_FAKE_SWALLOW" ]; then
         [ "${FM_FAKE_PERSIST_SWALLOW:-0}" = 1 ] || rm -f "$FM_FAKE_SWALLOW"
       else
-        printf '│ > │\n' > "$COMPOSER"
+        printf '%s\n' "${FM_FAKE_CLEARED:-│ > │}" > "$COMPOSER"
       fi
     fi
     exit 0 ;;
@@ -122,7 +142,62 @@ test_idle_pane_composer_clears_first_try() {
   pass "fm_tmux_submit_enter_core: idle pane clears composer on first Enter - returns empty as before"
 }
 
+# --- claude path (task fm-send-busy-false-negative) --------------------------
+
+test_claude_cleared_composer_is_acknowledged_without_the_busy_fallback() {
+  local dir fakebin composer vfile
+  dir="$TMP_ROOT/claude-clear"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  vfile="$dir/verdict"
+  printf '%s\n' "$CLAUDE_TYPED_ROW" > "$composer"
+  # The pane reads IDLE on purpose: claude clears its composer as soon as the
+  # message lands, so the acknowledgement must not depend on the busy fallback.
+  # This is the case that fired on all five live occurrences.
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_CLEARED="$CLAUDE_EMPTY_ROW" \
+    FM_FAKE_PANE_BUSY=0 \
+    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = empty ] \
+    || fail "claude's cleared '❯<NBSP>' composer must acknowledge the submit, got '$(cat "$vfile")'"
+  pass "fm_tmux_submit_enter_core: claude's NBSP-padded cleared composer reads as a landed submit"
+}
+
+test_claude_busy_pane_pending_returns_empty() {
+  local dir fakebin composer vfile
+  dir="$TMP_ROOT/claude-busy"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  vfile="$dir/verdict"
+  printf '%s\n' "$CLAUDE_TYPED_ROW" > "$composer"
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_CLEARED="$CLAUDE_EMPTY_ROW" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=1 \
+    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = empty ] \
+    || fail "claude busy-pane pending should return empty, got '$(cat "$vfile")'"
+  pass "fm_tmux_submit_enter_core: claude row + busy pane keeps the queued-Enter verdict"
+}
+
+test_claude_idle_pane_swallow_still_fails() {
+  local dir fakebin composer vfile
+  dir="$TMP_ROOT/claude-swallow"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  vfile="$dir/verdict"
+  printf '%s\n' "$CLAUDE_TYPED_ROW" > "$composer"
+  touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_CLEARED="$CLAUDE_EMPTY_ROW" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_FAKE_PANE_BUSY=0 \
+    fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = pending ] \
+    || fail "claude idle-pane swallow must stay pending, got '$(cat "$vfile")'"
+  pass "fm_tmux_submit_enter_core: claude row + idle pane still reports a genuine swallow"
+}
+
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
 test_busy_pane_composer_clears_first_try
 test_idle_pane_composer_clears_first_try
+test_claude_cleared_composer_is_acknowledged_without_the_busy_fallback
+test_claude_busy_pane_pending_returns_empty
+test_claude_idle_pane_swallow_still_fails

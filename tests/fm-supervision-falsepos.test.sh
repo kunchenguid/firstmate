@@ -39,6 +39,16 @@
 #              not cost wedge detection
 #         (3c) parked run + busy pane -> absorbed as working; parked + idle pane
 #              -> still surfaces
+#         (3d) claude 2.1.220's THINKING-phase status line reads busy. The
+#              signature written for 2.1.207 keyed on a parenthesised elapsed
+#              counter followed by a token counter, which claude renders only
+#              once it starts emitting output. Sampled every 3s across a live
+#              thinking phase on 2026-07-28, that pattern matched 0 of 8
+#              consecutive captures of a demonstrably busy pane, so
+#              `fm_pane_is_busy` read NOT busy for the whole thinking phase of
+#              every turn - and the busy-queued-Enter fallback in
+#              `fm_tmux_submit_enter_core`, which rescues opencode, could not
+#              rescue claude (task fm-send-busy-false-negative).
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -104,6 +114,51 @@ pass "(3b) a frozen spinner frame is not busy (wedge detection preserved)"
 fm_pane_text_advanced "$busy_pane" "$(claude_busy_pane '5m 48s')" \
   || fail "(3b) a live spinner (advancing timer) must count as an advancing pane"
 pass "(3b) a live spinner is busy"
+
+# --- (3d) claude 2.1.220's thinking-phase status lines ----------------------
+#
+# Sampled live on 2026-07-28, one capture every 3s, from a claude 2.1.220 pane
+# asked to think without tools. None of these carries an interrupt hint either,
+# so the spinner signature is the only thing that can see them.
+claude_2_1_220_busy_lines() {
+  cat <<'EOF'
+✻ Whatchamacalliting… (2s · thinking with high effort)
+✢ Whatchamacalliting… (11s · still thinking with high effort)
+* Whatchamacalliting… (23s · thinking more with high effort)
+· Crystallizing… (running stop hooks… 4/5 · 52s · ↓ 87 tokens)
+✽ Crystallizing… (running stop hooks… 4/5 · 8s · ↓ 3 tokens · thought for 1s)
+· Metamorphosing… (0s · ↓ 4 tokens)
+EOF
+}
+
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  fm_busy_hint_in_text "$line" \
+    && fail "(3d) claude 2.1.220 renders no interrupt hint - the fixture is wrong: $line"
+  fm_spinner_in_text "$line" \
+    || fail "(3d) a live claude 2.1.220 thinking-phase status line must read busy: $line"
+done <<EOF
+$(claude_2_1_220_busy_lines)
+EOF
+pass "(3d) every live claude 2.1.220 busy status line matches the spinner signature"
+
+# The companion: the widened signature must not turn an idle claude footer busy,
+# or the wedge detection it feeds would stop escalating a stopped crew. These are
+# the exact idle rows of the same live pane, including the ones that DO carry an
+# ellipsis (a truncated line ends at the `…`, so it is never followed by `(`).
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  fm_spinner_in_text "$line" \
+    && fail "(3d) an idle claude 2.1.220 footer row must not read busy: $line"
+done <<'EOF'
+    Opus 5 (1M context)  ctx 4% (44k)  session 55% (resets 10:40)
+    session-id 870ecb16-95f4-4851-8153-340f626ad6e8
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+│   Opus 5 (1M context) with high… · Claude Max ·    │
+✻ Crunched for 1m 12s
+❯ Press up to edit queued messages
+EOF
+pass "(3d) an idle claude 2.1.220 footer stays not-busy (wedge detection preserved)"
 
 # The hint signature keeps working for the harnesses that still render it.
 fm_busy_hint_in_text "$(printf 'building...\n(esc to interrupt)\n')" \

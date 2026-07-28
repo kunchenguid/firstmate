@@ -13,6 +13,11 @@
 #      agent composer either way, bordered or bare.
 #   4. Real unsubmitted text reads `pending`; a known idle placeholder reads
 #      `empty`.
+#
+# Task fm-send-busy-false-negative adds the fifth rule: whitespace the trims
+# must recognise is not only POSIX `[:space:]`. claude 2.1.220 pads its bare `❯`
+# prompt with U+00A0 NO-BREAK SPACE, so an ASCII-only trim left the row
+# non-empty and every idle claude composer read `pending`.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -114,6 +119,56 @@ test_idle_placeholder_case_mode_is_explicit() {
   pass "fm_composer_classify_content: idle matching preserves the caller's case mode"
 }
 
+# --- No-break space padding (task fm-send-busy-false-negative) --------------
+#
+# The exact bytes of a live idle claude 2.1.220 composer row, read with
+# `tmux capture-pane -e -p -S <cursor_y> -E <cursor_y> | od -c` on 2026-07-28:
+#   342 235 257  302 240  033 [ 7 m  ' '  033 [ 0 m ...
+# that is `❯`, U+00A0, then the harness's own reverse-video cursor cell.
+
+test_nbsp_padded_agent_glyph_is_empty() {
+  local nb=$'\302\240' out
+  out=$(classify 0 "❯$nb")
+  [ "$out" = empty ] \
+    || fail "claude's '❯<NBSP>' idle composer row must read empty, got '$out'"
+  out=$(classify 0 "$nb❯$nb ")
+  [ "$out" = empty ] \
+    || fail "an agent glyph wrapped in mixed ASCII/NBSP whitespace must read empty, got '$out'"
+  pass "fm_composer_classify_content: an agent glyph padded with U+00A0 reads empty, not pending"
+}
+
+test_nbsp_padding_does_not_hide_real_text() {
+  local nb=$'\302\240' out
+  out=$(classify 0 "❯${nb}fix findings 1 and 3")
+  [ "$out" = pending ] \
+    || fail "claude's '❯<NBSP><text>' row must stay pending, got '$out'"
+  out=$(classify 0 "${nb}deploy staging now$nb")
+  [ "$out" = pending ] \
+    || fail "NBSP-wrapped real text must stay pending, got '$out'"
+  pass "fm_composer_classify_content: NBSP trimming never turns real typed text into empty"
+}
+
+test_nbsp_padded_shell_glyph_stays_unknown() {
+  local nb=$'\302\240' g out
+  for g in '>' '$' '%' '#'; do
+    out=$(classify 0 "$g$nb")
+    [ "$out" = unknown ] \
+      || fail "a bare shell glyph padded with NBSP must stay unknown, got '$out' for '$g'"
+  done
+  pass "fm_composer_classify_content: NBSP trimming preserves the bare-shell-glyph safety verdict"
+}
+
+test_composer_trim_handles_mixed_whitespace() {
+  local nb=$'\302\240' out
+  out=$(fm_composer_trim "  $nb  text $nb ")
+  [ "$out" = text ] || fail "fm_composer_trim should strip mixed ASCII/NBSP runs at both ends, got '$out'"
+  out=$(fm_composer_trim "$nb$nb")
+  [ -z "$out" ] || fail "fm_composer_trim should reduce an all-NBSP row to empty, got '$out'"
+  out=$(fm_composer_trim "a${nb}b")
+  [ "$out" = "a${nb}b" ] || fail "fm_composer_trim must not touch an interior NBSP, got '$out'"
+  pass "fm_composer_trim: trims ASCII and NBSP at both ends only, never inside"
+}
+
 # --- Real text is pending ---------------------------------------------------
 
 test_real_text_is_pending() {
@@ -133,4 +188,8 @@ test_agent_glyphs_are_empty_bordered_and_bare
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
+test_nbsp_padded_agent_glyph_is_empty
+test_nbsp_padding_does_not_hide_real_text
+test_nbsp_padded_shell_glyph_stays_unknown
+test_composer_trim_handles_mixed_whitespace
 test_real_text_is_pending
