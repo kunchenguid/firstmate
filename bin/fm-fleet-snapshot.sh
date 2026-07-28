@@ -14,7 +14,9 @@
 #   backlog: {path,present,records[]} where records are ordered as written in
 #     data/backlog.md and cover In flight, Queued, and Done.
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
-#     those sections are preserved as unstructured records.
+#     those sections are preserved as unstructured records, except in Done where
+#     the record is kept but its raw prose is replaced by a fixed redaction
+#     marker.
 #     Structured rows preserve captain-hold metadata such as hold_kind and
 #     hold_reason when tasks-axi emits it. They also carry normalized current_role,
 #     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids, and
@@ -29,7 +31,10 @@
 #     That keeps task notes, decision bodies, report prose, and absolute local
 #     paths written under a Done item out of every consumer. A `local main` body
 #     line is the recorded artifact of a local-only merge, so it is lifted into
-#     local_note before those bodies are dropped.
+#     local_note before those bodies are dropped. Unstructured Done lines carry no
+#     admitted fields at all, so their raw prose is redacted to the fixed marker
+#     `(unstructured done line)`; the record itself stays in place and in order so
+#     consumers still see that a hand-written line exists there.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
@@ -382,6 +387,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
           (if .structured and .local_note == null and (.body_lines | any(. == "local main"))
            then .local_note = "local main"
            else . end)
+          | (if .structured then . else .raw = "(unstructured done line)" end)
           | .body_lines = [] | .body_excerpt = null
         elif (.body_lines | length) > 0 then
           .body_excerpt = ((.body_lines | join(" "))[:240])
