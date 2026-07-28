@@ -406,19 +406,19 @@ SH
 # Drop every harness env marker from bin/fm-harness.sh detect_own so the
 # surrounding interactive shell cannot leak past the suite's fake ps harness.
 # Markers today: CLAUDECODE (claude), PI_CODING_AGENT plus FM_PI_HARNESS
-# (Pi family), GROK_AGENT (grok).
-# Markers today: CLAUDECODE (claude), PI_CODING_AGENT (pi), GROK_AGENT (grok), DEVIN_CLI (devin).
+# (Pi family), GROK_AGENT (grok), DEVIN_CLI (devin).
 # codex and opencode have no env markers (ancestry only). Without this, a local
 # claude/pi/grok/devin session fails cases that pin a different fake harness while CI
 # (no ambient markers) still passes.
 run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
-    env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+    env -u CLAUDECODE -u GROK_AGENT -u DEVIN_CLI \
+      PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   else
-    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT -u DEVIN_CLI \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   fi
@@ -508,10 +508,6 @@ run_session_start_herdr_secondmate() {
   FM_BACKEND=herdr FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
     FM_FAKE_SECOND_MATE_ID="$SESSION_START_HERDR_SECOND_MATE_ID" \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH"
-  local home=$1 root=$2 path=$3
-  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u DEVIN_CLI \
-    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
-    "$SESSION_START"
 }
 
 hash_file_for_test() {
