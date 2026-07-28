@@ -6,9 +6,17 @@
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
 # rule #1 "never run state-changing git in projects/", and it is narrow: it only
 # runs for mode=local-only tasks, only after the captain approves (or yolo=on
-# auto-approves), and only as a clean fast-forward - it refuses a diverged branch
-# and tells you to have the crewmate rebase. See AGENTS.md prime directives,
-# project management, and task lifecycle.
+# auto-approves), and only as a fast-forward. A dirty default-branch checkout is
+# allowed only when every dirty path is resolved: tracked working-tree and staged
+# content must match the incoming blob bytes and tree mode, while
+# tracked-to-untracked conversions and untracked files must be ignored by the
+# target head's .gitignore rules; info/exclude and global excludes do not count.
+# Every unresolved path is diagnosed before advancing. Proven ignored files are
+# retained on disk, then every previously dirty path is verified clean. A
+# preservation or cleanliness failure after the fast-forward is reported without
+# attempting rollback. Diverged branches still refuse and require the crewmate
+# to rebase. See AGENTS.md prime directives, project management, and task
+# lifecycle.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
@@ -46,12 +54,360 @@ git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { e
 
 DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 
-# The project's main checkout must be on its default branch and clean, so the
+# The project's main checkout must be on its default branch so the
 # fast-forward lands predictably (firstmate never writes here otherwise).
 cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
 [ "$cur" = "$DEFAULT" ] || { echo "error: $PROJ is on '$cur', expected default branch '$DEFAULT'; cannot merge safely" >&2; exit 1; }
-if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then
-  echo "error: $PROJ has a dirty working tree; refusing to merge into it" >&2
+
+TARGET_VIEW_ROOT=
+TARGET_VIEW_TREE=
+TARGET_VIEW_INDEX=
+TARGET_VIEW_GIT_DIR=
+TARGET_GIT_DIR=
+PRESERVE_TEMP_ROOT=
+MOVED_PATHS=()
+MOVED_RESTORED=()
+
+cleanup_target_view() {
+  if [ -n "$TARGET_VIEW_ROOT" ] && [ -d "$TARGET_VIEW_ROOT" ]; then
+    rm -rf -- "$TARGET_VIEW_ROOT"
+  fi
+}
+
+restore_moved_paths() {
+  local i path saved destination parent failed=0
+  for ((i = 0; i < ${#MOVED_PATHS[@]}; i++)); do
+    [ "${MOVED_RESTORED[$i]}" -eq 0 ] || continue
+    path=${MOVED_PATHS[$i]}
+    saved="$PRESERVE_TEMP_ROOT/files/$path"
+    destination="$PROJ/$path"
+    if [ ! -e "$saved" ] && [ ! -L "$saved" ]; then
+      if [ -e "$destination" ] || [ -L "$destination" ]; then
+        MOVED_RESTORED[i]=1
+        continue
+      fi
+      printf 'error: preserved path %q is missing from both the checkout and %q\n' \
+        "$path" "$saved" >&2
+      failed=1
+      continue
+    fi
+    if [ -e "$destination" ] || [ -L "$destination" ]; then
+      printf 'error: cannot restore preserved path %q because the destination now exists; saved copy remains at %q\n' \
+        "$path" "$saved" >&2
+      failed=1
+      continue
+    fi
+    parent=${destination%/*}
+    if ! mkdir -p "$parent" || ! mv -- "$saved" "$destination"; then
+      printf 'error: could not restore preserved path %q; saved copy remains at %q\n' \
+        "$path" "$saved" >&2
+      failed=1
+      continue
+    fi
+    MOVED_RESTORED[i]=1
+  done
+  [ "$failed" -eq 0 ]
+}
+
+cleanup_merge_temps() {
+  local rc=$? restore_failed=0
+  if ! restore_moved_paths; then
+    restore_failed=1
+  fi
+  cleanup_target_view
+  if [ -n "$PRESERVE_TEMP_ROOT" ] && [ -d "$PRESERVE_TEMP_ROOT" ]; then
+    if [ "$restore_failed" -eq 0 ]; then
+      rm -rf -- "$PRESERVE_TEMP_ROOT"
+    else
+      printf 'error: preserved files require manual recovery from %q\n' \
+        "$PRESERVE_TEMP_ROOT" >&2
+    fi
+  fi
+  return "$rc"
+}
+trap cleanup_merge_temps EXIT
+
+init_target_view() {
+  local empty_template tree_paths path
+  TARGET_VIEW_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-merge-local.XXXXXX") || return 1
+  TARGET_VIEW_TREE="$TARGET_VIEW_ROOT/tree"
+  TARGET_VIEW_INDEX="$TARGET_VIEW_ROOT/index"
+  empty_template="$TARGET_VIEW_ROOT/empty-template"
+  tree_paths="$TARGET_VIEW_ROOT/tree-paths"
+  TARGET_GIT_DIR=$(git -C "$PROJ" rev-parse --absolute-git-dir) || return 1
+  mkdir -p "$TARGET_VIEW_TREE" "$empty_template" || return 1
+  git -c init.defaultBranch=fm-target-view init -q \
+    --template="$empty_template" "$TARGET_VIEW_TREE" || return 1
+  TARGET_VIEW_GIT_DIR="$TARGET_VIEW_TREE/.git"
+  GIT_INDEX_FILE="$TARGET_VIEW_INDEX" git -C "$PROJ" read-tree "$BRANCH" || return 1
+  git -C "$PROJ" ls-tree -r -z --name-only "$BRANCH" >"$tree_paths" || return 1
+
+  while IFS= read -r -d '' path; do
+    case "$path" in
+      .gitignore|*/.gitignore)
+        GIT_DIR="$TARGET_GIT_DIR" \
+        GIT_WORK_TREE="$TARGET_VIEW_TREE" \
+        GIT_INDEX_FILE="$TARGET_VIEW_INDEX" \
+        GIT_LITERAL_PATHSPECS=1 \
+          git -C "$TARGET_VIEW_TREE" checkout-index -- "$path" || return 1
+        ;;
+    esac
+  done <"$tree_paths"
+}
+
+branch_ignores_path() {
+  GIT_CONFIG_NOSYSTEM=1 \
+  GIT_CONFIG_GLOBAL=/dev/null \
+  GIT_DIR="$TARGET_VIEW_GIT_DIR" \
+  GIT_WORK_TREE="$TARGET_VIEW_TREE" \
+  GIT_INDEX_FILE="$TARGET_VIEW_INDEX" \
+    git -c core.excludesFile=/dev/null \
+      -C "$TARGET_VIEW_TREE" check-ignore --quiet -- "$1"
+}
+
+branch_blob_metadata() {
+  GIT_LITERAL_PATHSPECS=1 git -C "$PROJ" ls-tree "$BRANCH" -- "$1" \
+    | awk 'NR == 1 { print $1, $2, $3 }'
+}
+
+index_blob_metadata() {
+  GIT_LITERAL_PATHSPECS=1 git -C "$PROJ" ls-files --stage -- "$1" \
+    | awk '$3 == 0 { print $1, $2; exit }'
+}
+
+working_tree_mode() {
+  local mode path=$1
+  mode=$(
+    GIT_LITERAL_PATHSPECS=1 git -c core.fileMode=true \
+      -C "$PROJ" diff-files --raw --no-abbrev -- "$path" \
+      | awk 'NR == 1 { sub(/^:/, "", $1); print $2 }'
+  ) || return 1
+  if [ -z "$mode" ]; then
+    mode=$(index_blob_metadata "$path") || return 1
+    mode=${mode%% *}
+  fi
+  [ -n "$mode" ] && [ "$mode" != "000000" ] || return 1
+  printf '%s\n' "$mode"
+}
+
+staged_state_matches_worktree() {
+  local current_mode current_oid index_meta index_mode index_oid path=$1
+  index_meta=$(index_blob_metadata "$path") || return 1
+  if [ ! -e "$PROJ/$path" ] && [ ! -L "$PROJ/$path" ]; then
+    [ -z "$index_meta" ]
+    return
+  fi
+  [ -n "$index_meta" ] || return 1
+  index_mode=${index_meta%% *}
+  index_oid=${index_meta##* }
+  current_oid=$(git -C "$PROJ" hash-object -- "$path" 2>/dev/null) || return 1
+  current_mode=$(working_tree_mode "$path") || return 1
+  [ "$index_oid" = "$current_oid" ] && [ "$index_mode" = "$current_mode" ]
+}
+
+DIRTY_PATHS=()
+DIRTY_STATES=()
+while IFS= read -r -d '' record; do
+  state=${record:0:2}
+  path=${record:3}
+  DIRTY_PATHS+=("$path")
+  DIRTY_STATES+=("$state")
+  case "$state" in
+    *R*|*C*)
+      if IFS= read -r -d '' source_path; then
+        DIRTY_PATHS+=("$source_path")
+        DIRTY_STATES+=("rename-source")
+      fi
+      ;;
+  esac
+done < <(git -C "$PROJ" status --porcelain=v1 -z --untracked-files=all)
+while IFS= read -r -d '' path; do
+  DIRTY_PATHS+=("$path")
+  DIRTY_STATES+=("!!")
+done < <(
+  git -C "$PROJ" ls-files --others --ignored --exclude-standard -z
+)
+
+UNRESOLVED_PATHS=()
+UNRESOLVED_REASONS=()
+RESOLVED_PATHS=()
+RESOLVED_ACTIONS=()
+RESOLVED_MODES=()
+RESOLVED_OIDS=()
+PRESERVE_PATHS=()
+PRESERVE_KINDS=()
+PRESERVE_OIDS=()
+
+add_unresolved() {
+  UNRESOLVED_PATHS+=("$1")
+  UNRESOLVED_REASONS+=("$2")
+}
+
+remember_preserved_path() {
+  local path=$1 oid
+  if oid=$(git -C "$PROJ" hash-object -- "$path" 2>/dev/null); then
+    PRESERVE_PATHS+=("$path")
+    PRESERVE_KINDS+=("blob")
+    PRESERVE_OIDS+=("$oid")
+  elif [ ! -e "$PROJ/$path" ] && [ ! -L "$PROJ/$path" ]; then
+    PRESERVE_PATHS+=("$path")
+    PRESERVE_KINDS+=("absent")
+    PRESERVE_OIDS+=("")
+  else
+    return 1
+  fi
+}
+
+move_preserved_path_out_of_merge() {
+  local path=$1 saved parent index
+  if [ ! -e "$PROJ/$path" ] && [ ! -L "$PROJ/$path" ]; then
+    return 0
+  fi
+  if [ -z "$PRESERVE_TEMP_ROOT" ]; then
+    PRESERVE_TEMP_ROOT=$(mktemp -d "$TARGET_GIT_DIR/fm-merge-local-preserve.XXXXXX") \
+      || return 1
+  fi
+  saved="$PRESERVE_TEMP_ROOT/files/$path"
+  parent=${saved%/*}
+  mkdir -p "$parent" || return 1
+  index=${#MOVED_PATHS[@]}
+  MOVED_PATHS+=("$path")
+  MOVED_RESTORED+=("0")
+  if ! mv -- "$PROJ/$path" "$saved"; then
+    if [ -e "$PROJ/$path" ] || [ -L "$PROJ/$path" ]; then
+      MOVED_RESTORED[index]=1
+    fi
+    return 1
+  fi
+}
+
+if [ "${#DIRTY_PATHS[@]}" -gt 0 ]; then
+  if ! init_target_view; then
+    echo "error: could not construct the $BRANCH ignore view; refusing to merge a dirty checkout" >&2
+    exit 1
+  fi
+
+  for ((i = 0; i < ${#DIRTY_PATHS[@]}; i++)); do
+    path=${DIRTY_PATHS[$i]}
+    state=${DIRTY_STATES[$i]}
+
+    case "$state" in
+      rename-source|*R*|*C*)
+        add_unresolved "$path" "rename or copy state '$state' is not a supported resolved form"
+        continue
+        ;;
+    esac
+
+    set +e
+    branch_ignores_path "$path"
+    ignore_rc=$?
+    set -e
+    case "$ignore_rc" in
+      0)
+        if [ "$state" != "??" ] && [ "$state" != "!!" ] \
+          && [ "${state:0:1}" != " " ] \
+          && ! staged_state_matches_worktree "$path"; then
+          add_unresolved "$path" "staged content or mode does not match the working-tree copy preserved by the branch-head ignore rule"
+          continue
+        fi
+        if ! remember_preserved_path "$path"; then
+          add_unresolved "$path" "ignored path is neither absent nor hashable as a file"
+          continue
+        fi
+        RESOLVED_PATHS+=("$path")
+        RESOLVED_MODES+=("")
+        RESOLVED_OIDS+=("")
+        if [ "$state" = "??" ] || [ "$state" = "!!" ]; then
+          RESOLVED_ACTIONS+=("keep-untracked")
+        else
+          RESOLVED_ACTIONS+=("remove-index")
+        fi
+        continue
+        ;;
+      1)
+        ;;
+      *)
+        add_unresolved "$path" "could not evaluate branch-head ignore rules"
+        continue
+        ;;
+    esac
+
+    if [ "$state" = "??" ] || [ "$state" = "!!" ]; then
+      add_unresolved "$path" "untracked path is not ignored at the branch head"
+      continue
+    fi
+    case "$state" in
+      *U*|*D*|AA)
+        add_unresolved "$path" "status '$state' is not modified or added tracked content"
+        continue
+        ;;
+      *M*|*A*)
+        ;;
+      *)
+        add_unresolved "$path" "status '$state' is not a supported resolved form"
+        continue
+        ;;
+    esac
+
+    blob_meta=$(branch_blob_metadata "$path")
+    if [ -z "$blob_meta" ]; then
+      add_unresolved "$path" "the branch head has no entry for the modified or added path"
+      continue
+    fi
+    target_mode=${blob_meta%% *}
+    blob_meta=${blob_meta#* }
+    target_type=${blob_meta%% *}
+    target_oid=${blob_meta##* }
+    if [ "$target_type" != "blob" ]; then
+      add_unresolved "$path" "the branch-head entry is '$target_type', not a file blob"
+      continue
+    fi
+    if [ "${state:0:1}" != " " ]; then
+      index_meta=$(index_blob_metadata "$path")
+      if [ -z "$index_meta" ]; then
+        add_unresolved "$path" "staged content has no ordinary index entry"
+        continue
+      fi
+      index_mode=${index_meta%% *}
+      index_oid=${index_meta##* }
+      if [ "$index_oid" != "$target_oid" ]; then
+        add_unresolved "$path" "staged content does not match the branch-head blob"
+        continue
+      fi
+      if [ "$index_mode" != "$target_mode" ]; then
+        add_unresolved "$path" "staged mode $index_mode does not match branch-head mode $target_mode"
+        continue
+      fi
+    fi
+    if ! current_oid=$(git -C "$PROJ" hash-object -- "$path" 2>/dev/null); then
+      add_unresolved "$path" "working-tree content cannot be hashed as a file"
+      continue
+    fi
+    if [ "$current_oid" != "$target_oid" ]; then
+      add_unresolved "$path" "working-tree content does not match the branch-head blob"
+      continue
+    fi
+    if ! current_mode=$(working_tree_mode "$path"); then
+      add_unresolved "$path" "working-tree mode cannot be determined"
+      continue
+    fi
+    if [ "$current_mode" != "$target_mode" ]; then
+      add_unresolved "$path" "working-tree mode $current_mode does not match branch-head mode $target_mode"
+      continue
+    fi
+
+    RESOLVED_PATHS+=("$path")
+    RESOLVED_ACTIONS+=("set-index")
+    RESOLVED_MODES+=("$target_mode")
+    RESOLVED_OIDS+=("$target_oid")
+  done
+fi
+
+if [ "${#UNRESOLVED_PATHS[@]}" -gt 0 ]; then
+  echo "error: $PROJ has dirty paths not resolved by $BRANCH; refusing to merge:" >&2
+  for ((i = 0; i < ${#UNRESOLVED_PATHS[@]}; i++)); do
+    printf '  - %q: %s\n' "${UNRESOLVED_PATHS[$i]}" "${UNRESOLVED_REASONS[$i]}" >&2
+  done
   exit 1
 fi
 
@@ -62,7 +418,63 @@ if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
   exit 1
 fi
 
+for ((i = 0; i < ${#RESOLVED_PATHS[@]}; i++)); do
+  path=${RESOLVED_PATHS[$i]}
+  case "${RESOLVED_ACTIONS[$i]}" in
+    set-index)
+      git -C "$PROJ" update-index --add \
+        --cacheinfo "${RESOLVED_MODES[$i]},${RESOLVED_OIDS[$i]},$path"
+      ;;
+    remove-index)
+      git -C "$PROJ" update-index --force-remove -- "$path"
+      move_preserved_path_out_of_merge "$path"
+      ;;
+    keep-untracked)
+      ;;
+  esac
+done
+
 before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
+if ! restore_moved_paths; then
+  printf 'error: fast-forward completed, but preserved files require manual recovery from %q\n' \
+    "$PRESERVE_TEMP_ROOT" >&2
+  exit 1
+fi
+
+for ((i = 0; i < ${#PRESERVE_PATHS[@]}; i++)); do
+  path=${PRESERVE_PATHS[$i]}
+  if [ "${PRESERVE_KINDS[$i]}" = "absent" ]; then
+    if [ -e "$PROJ/$path" ] || [ -L "$PROJ/$path" ]; then
+      printf 'error: fast-forward completed, but ignored path %q was absent before the merge and now exists\n' "$path" >&2
+      exit 1
+    fi
+    continue
+  fi
+  if ! preserved_oid=$(git -C "$PROJ" hash-object -- "$path" 2>/dev/null); then
+    printf 'error: fast-forward completed, but ignored path %q was blob %s before the merge and is now absent or unreadable\n' \
+      "$path" "${PRESERVE_OIDS[$i]}" >&2
+    exit 1
+  fi
+  if [ "$preserved_oid" != "${PRESERVE_OIDS[$i]}" ]; then
+    printf 'error: fast-forward completed, but ignored path %q changed from blob %s to blob %s\n' \
+      "$path" "${PRESERVE_OIDS[$i]}" "$preserved_oid" >&2
+    exit 1
+  fi
+done
+
+if [ "${#DIRTY_PATHS[@]}" -gt 0 ]; then
+  POST_PATHS=()
+  for path in "${DIRTY_PATHS[@]}"; do
+    POST_PATHS+=(":(literal)$path")
+  done
+  post_status=$(git -C "$PROJ" status --porcelain=v1 --untracked-files=all -- "${POST_PATHS[@]}")
+  if [ -n "$post_status" ]; then
+    echo "error: fast-forward completed, but previously dirty resolved paths are not clean:" >&2
+    printf '%s\n' "$post_status" >&2
+    exit 1
+  fi
+fi
+
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
