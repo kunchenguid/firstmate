@@ -172,6 +172,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/telegram-respond/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -309,6 +313,10 @@
     },
     {
       "path": "docs/verification/supervision.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/telegram-bridge.md",
       "audience": "maintainer-verification"
     },
     {

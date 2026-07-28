@@ -51,7 +51,7 @@ When only an owned child's current classification is unavailable, the home class
 A bounded direct-report terminal tail can help diagnose a mismatch by showing that historical parent wording is still visible, but it is untrusted supplemental evidence because scrollback, prompts, copied output, idle shells, and agent prose are not durable state.
 The snapshot strips control sequences, retains only capture metadata and literal event-corroboration flags, and never lets terminal evidence override a valid structured classification.
 The default path remains local-only; live GitHub enrichment exists only behind the bearings `--include-prs` opt-in.
-Optional X mode integrates with the watcher only after explicit opt-in; [configuration.md](configuration.md#x-mode-env) owns its generated-artifact and dispatch mechanics.
+Optional X mode and the optional Telegram bridge integrate with the watcher only after explicit opt-in; [configuration.md](configuration.md#x-mode-env) and [configuration.md](configuration.md#telegram-bridge-env) own their generated-artifact and dispatch mechanics.
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
 That block owns the live wait shape for the running primary harness: Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked primary extensions, and OpenCode uses its TUI plugin.
@@ -224,6 +224,52 @@ If an image is attached to a split reply, the relay puts it on the first/opener 
 For preview testing, `FMX_DRY_RUN` makes `fm-x-reply.sh` and `fm-x-dismiss.sh` skip the public post or dismiss call and record the would-be payload under `state/x-outbox/`, including `texts` when the reply would be a thread and an `endpoint` marker when the preview is a completion follow-up or dismiss, while the rest of the poll -> compose -> would-post loop still succeeds.
 Attached images are recorded as compact `{media_type, bytes, source_path}` metadata in dry-run instead of base64 bytes.
 X mode remains layered on top of the existing check mechanism without changing its request-handling behavior.
+
+## Optional Telegram bridge
+
+The Telegram bridge is opt-in presence for a **private, paired** channel, and it is deliberately not a second X mode.
+X mode's relay is owner-only, so a mention there is the captain speaking; the bridge exists precisely so someone who is **not** the captain can reach firstmate within a scope the captain granted.
+Every design difference below follows from that one fact, and the reason it is a separate implementation rather than a parameter on the X client.
+
+A home enables it by putting `FM_TELEGRAM_BOT_TOKEN` in its gitignored `.env` and completing a pairing; the [Telegram bridge configuration reference](configuration.md#telegram-bridge-env) owns activation, generated artifacts, wire behavior, state schema, tunables, and opt-out.
+Without both, nothing is written, no host is contacted, and behavior is unchanged, so a home that never opts in sees no difference.
+
+**Authority is pinned, not inferred.**
+Pairing records Telegram's immutable numeric user and chat ids plus one label and one project.
+Usernames and display names are never read and never stored, so identity cannot be changed by renaming an account or asserted by message content.
+The pinned project is checked by `bin/fm-tg-task.sh` on every task-scoped operation rather than remembered by the agent, so a message can only move work in the project it was paired for.
+The single-peer record is what bounds the channel to one person: there is no roster to widen.
+
+**Refusal is silence.**
+Nothing is ever sent to an unpaired chat, including a failed pairing attempt.
+That removes the two failure modes a friendlier error would introduce - an oracle telling a stranger whether an offer is open or what the bot is for, and an outbound-message amplifier reachable by anyone who finds the bot.
+It also makes "sendMessage only after pairing" structural: `bin/fm-tg-reply.sh` resolves its destination from the pinned peer, so there is no code path that addresses anyone else.
+
+**The token never enters an argument vector.**
+The Bot API carries the token in the URL path, so a plain `curl` invocation would expose it to any local process through `ps`.
+Every request goes through a mode-0600 `curl --config` file written and deleted per call, and the token is shape-validated before it can be interpolated.
+
+**Delivery is exactly-once across crashes.**
+Telegram redelivers an update until an offset past it is confirmed, so the poll claims the inbox entry and its duplicate-suppression marker before the wake, and confirms the offset only after the whole processed prefix is durable.
+A crash before the marker redelivers into an idempotent create-only claim; a crash after it drops the redelivery, so a drained message is never resurrected; a crash between the marker and the wake is healed by a bounded recovery sweep.
+This is the part that could not be borrowed from X mode, whose relay owns re-offer semantics on the server side.
+
+**A request is not permission to publish.**
+`bin/fm-tg-task.sh` arms a one-time confirmation against the exact prepared revision and refuses a confirmation that is late, guessed, replayed, over budget, or aimed at a preview that has since been rebuilt.
+Binding the confirmation to the revision is what makes "they approved what they actually saw" checkable rather than assumed.
+Landing remains the project's own delivery path, and anything that reaches a live host, a domain, or an outside audience stays a captain decision.
+
+**Shared contracts are extracted, not duplicated.**
+Three things both channels need now live in one owner each: [`fm-private-artifact-lib.sh`](../bin/fm-private-artifact-lib.sh) for owner-only file guarantees, [`fm-message-split-lib.sh`](../bin/fm-message-split-lib.sh) for outbound splitting, and [`fm-env-file-lib.sh`](../bin/fm-env-file-lib.sh) for reading the home's `.env`.
+Two copies of a file-permission or splitting contract would drift the moment only one was edited.
+
+**Coexistence is a scheduling property.**
+Both channels arm their own byte-static poll shim and their own cadence file, and the supervision block names every active one.
+The watcher's check sweep wakes on the first producing check and abandons the cycle, which was harmless with one always-on channel and became a starvation hazard with two, so the sweep now starts just after whichever check last woke firstmate and wraps around.
+Every check reaches the front within one rotation at unchanged per-cycle cost.
+`fm_supervision_needed` treats an armed bridge like an armed X mode, so a bridged home keeps its supervision cycle with no fleet work at all.
+
+Message policy - what a message may cause, what must be escalated, and what a reply may contain - is owned by the agent-only `telegram-respond` skill, not by any script.
 
 ## Project memory belongs to projects
 

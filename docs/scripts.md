@@ -93,3 +93,11 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-x-dismiss.sh`        | Dismiss a skipped X-mode mention at the relay without replying                       |
 | `fm-x-link.sh`           | Link a spawned task to its originating X-mode mention in task meta                   |
 | `fm-x-followup.sh`       | Detect, post, and cap completion follow-ups for an X-mode-linked task                |
+| `fm-tg-lib.sh`           | Shared Telegram bridge config, wire, pairing, inbound, reply, and publish-gate helpers |
+| `fm-tg-pair.sh`          | Open, inspect, or revoke the bridge's single one-time pairing                        |
+| `fm-tg-poll.sh`          | One bounded Telegram long-poll: claim new messages exactly once and emit their wake  |
+| `fm-tg-reply.sh`         | Send, split, retry, or dry-run preview a reply to the one paired chat                |
+| `fm-tg-task.sh`          | Link a task to its Telegram request and run the two-step publish confirmation        |
+| `fm-private-artifact-lib.sh` | Shared owner-only file guarantees for generated local state                     |
+| `fm-message-split-lib.sh` | Shared outbound-message splitting for firstmate's chat channels                     |
+| `fm-env-file-lib.sh`     | Shared reader for the home's gitignored .env                                         |

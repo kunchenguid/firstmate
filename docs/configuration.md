@@ -363,6 +363,129 @@ In dry-run, `fm-x-dismiss.sh` records `{request_id, endpoint:"dismiss"}` to the 
 The live answer and follow-up bodies intentionally stay the same shape, including optional `image`; the relay distinguishes them by endpoint, and dismiss stays `{request_id}`.
 These paths need `jq` to build the JSON payload, but they run before token and network checks, so they need neither `FMX_PAIRING_TOKEN` nor `curl`.
 
+## Telegram bridge (.env)
+
+The Telegram bridge connects exactly one outside person to exactly one project, so they can send requests about that project and get replies and previews back directly instead of relaying every message through you.
+It is off unless the home's gitignored `.env` contains a non-empty `FM_TELEGRAM_BOT_TOKEN` **and** a pairing has been completed; with neither, nothing is written, no host is contacted, and no behavior changes.
+It is independent of X mode: either, both, or neither may be armed in one home.
+
+### Setup
+
+1. Open Telegram, talk to `@BotFather`, send `/newbot`, and follow the prompts.
+   BotFather replies with a token shaped like `123456789:AA...`.
+2. Put that token, and nothing else, in this home's gitignored `.env`:
+
+   ```sh
+   FM_TELEGRAM_BOT_TOKEN=123456789:AA-your-token-here
+   ```
+
+3. Run `bin/fm-session-start.sh`.
+   The locked bootstrap step arms the bridge and prints an `FMTG:` line.
+4. Open the pairing for the one person who may use it:
+
+   ```sh
+   bin/fm-tg-pair.sh begin --label eren --project eren-pov-site
+   ```
+
+   It prints a short single-use code.
+5. Give them that code out of band, and have them open a private chat with the bot and send `/start <code>`.
+   They get one bare confirmation message, and firstmate is told the link is live.
+
+`bin/fm-tg-pair.sh status` reports the current state without ever printing the token or a code.
+
+### Identity, scope, and refusal
+
+Pairing pins Telegram's immutable numeric `user_id` **and** `chat_id`, plus the label and project.
+Usernames and display names are never read, so renaming or impersonating an account changes nothing, and the stored message record deliberately carries no name at all.
+A message is accepted only from a private chat, from a non-bot sender, whose numeric user id and chat id both equal the pinned pair.
+Unpaired private chats, groups, supergroups, channels, and other bots get no access and no reply.
+
+A failed, expired, or replayed `/start` code is answered with **silence**, never a message.
+The bridge sends nothing to an unpaired chat, so an invalid attempt cannot be used to probe whether an offer is open, whether a label exists, or what the bot is for, and it cannot be amplified into outbound traffic.
+Each offer allows `FM_TELEGRAM_PAIR_ATTEMPTS` guesses (default 5) within `FM_TELEGRAM_PAIR_TTL` seconds (default 900); a spent budget locks the offer out even against the correct code.
+Only a salted SHA-256 digest of the code is stored, so a reader of the state directory cannot replay it.
+
+The pinned project is the only project the bridge may act in: `bin/fm-tg-task.sh` refuses any task whose recorded project differs.
+What a message may cause, what must be escalated, and how replies are kept safe are owned by the agent-only `telegram-respond` skill.
+
+### Token handling
+
+The Bot API puts the token in the URL path, which would place it in `curl`'s argument vector where any local process can read it.
+Every request is therefore issued through a mode-0600 `curl --config` file that is written and deleted per call, so the token never enters argv, a log line, an error message, or any state file.
+The token is validated against BotFather's `<id>:<secret>` shape before use; a malformed value is refused and reported without echoing it.
+
+**Rotating the token of the same bot** (BotFather `/revoke`, then `/token`) keeps the pairing valid, because the peer is pinned by numeric ids rather than by the token: update `.env` and rerun session start.
+**Moving to a different bot** is a new bot, so run `bin/fm-tg-pair.sh begin --replace` and pair again.
+
+**Complete opt-out**: run `bin/fm-tg-pair.sh revoke --yes`, remove `FM_TELEGRAM_BOT_TOKEN` from `.env`, and rerun session start.
+Bootstrap then removes the poll shim and the cadence file and the home returns to exactly its pre-Telegram behavior; delete `state/telegram/` to erase the remaining local records.
+
+### Generated state and cadence
+
+The locked session-start bootstrap step turns the token into local generated state, mirroring X mode:
+
+- `state/telegram-watch.check.sh` - a byte-static identity shim; the watcher accepts it only when its bytes match the expected content, then invokes the trusted `bin/fm-tg-poll.sh` directly rather than executing a state file.
+- `config/telegram.env` - exports `FM_CHECK_INTERVAL=30`, so a bridged home checks often enough for a chat.
+
+Both are gitignored and idempotent, and both are removed on opt-out.
+Like X mode, bootstrap never restarts the watcher itself: a cadence transition is applied by restarting the home-scoped watcher through the emitted harness protocol.
+When both channels are armed, the supervision block names both cadence files and the arm command sources both.
+
+The watcher's check sweep wakes on the first check that produces output and abandons the rest of the cycle, so the sweep now starts just after whichever check last woke firstmate (recorded in `state/.last-check-woke`) and wraps around.
+Every check therefore reaches the front within one rotation, which is what keeps one busy always-on channel from silencing another; the per-cycle cost is unchanged.
+
+`state/telegram/` is an owner-only (0700) directory of mode-0600 files, rooted in this home's state, so one firstmate home can never read or drain another's bridge:
+
+- `peer.json` the pinned pairing; `pairing.json` an open offer
+- `offset` the confirmed Bot API update offset; `seen/<update_id>.json` duplicate-suppression markers
+- `inbox/<request_id>.json` accepted messages awaiting handling; `context/<request_id>.json` per-request conversation context
+- `outbox/<request_id>.json` dry-run previews and unsent replies preserved for retry
+- `publish/<task-id>.json` armed publish confirmations; `limits.json`, `recovery.json`, `poll.error` bookkeeping
+
+`seen/` and `context/` records are pruned after `FM_TELEGRAM_RETENTION_SECS` (default seven days, capped at thirty).
+
+### Inbound delivery
+
+`bin/fm-tg-poll.sh` calls `getUpdates` with `allowed_updates:["message"]`, so Telegram itself refuses to send edited messages, channel posts, callback queries, and every other update type.
+Telegram redelivers each update until an offset past it is confirmed, so per update the poll skips anything already in `seen/`, publishes the inbox entry with an atomic create-only claim, claims the seen marker, and only then prints the wake line - and the new offset is written only after the whole processed prefix is durable.
+A crash before the seen claim redelivers and finds its own entry already there; a crash after it drops the redelivery, so a message the agent already drained is never resurrected.
+A crash between the claim and the wake would strand a pending entry, so a bounded recovery sweep re-announces inbox entries older than `FM_TELEGRAM_RECOVERY_SECS` (default 300), at most once per window.
+
+Message bodies are untrusted data throughout.
+Text is normalized (CRLF and lone CR to LF; C0 controls other than tab and newline, plus DEL, removed; ends trimmed), bounded at `FM_TELEGRAM_MAX_TEXT` characters (default 4096), written to a private file as a JSON string by `jq`, and never interpolated into a shell command, a path, or a prompt.
+The wake payload carries only the request id, never message content.
+Text-only at v1: a message with a photo, document, voice note, video, or any other attachment is recorded as `"kind": "unsupported"` with the attachment kind and no body, and nothing is downloaded - no `getFile` call is ever made and no file id is stored.
+An over-long message is recorded as `"kind": "oversized"` and carries no text at all.
+Accepted messages are bounded at `FM_TELEGRAM_RATE_MAX` per `FM_TELEGRAM_RATE_WINDOW` seconds (default 60 per hour); crossing that reports one deduplicated `telegram-error` rather than one wake per message.
+
+HTTP 409 from `getUpdates` means another process is already long-polling the same bot, which is reported as the misconfiguration it is: one bot token belongs to one home.
+
+### Replies
+
+`bin/fm-tg-reply.sh` sends to the pinned peer's chat and only that chat; a request or task whose recorded chat no longer matches the pinned peer is refused rather than delivered elsewhere, and with no pinned peer nothing is ever sent.
+That is what makes "sendMessage only after pairing" structural rather than a matter of discipline.
+
+No `parse_mode` is ever set.
+That is the whole escaping contract: with no markup parser enabled, Telegram delivers the body literally, so text containing `*`, `_`, `[`, a backtick, or a stray backslash arrives exactly as written and can neither be reinterpreted as markup nor rejected as an unbalanced entity.
+
+A reply longer than `FM_TELEGRAM_MAX_CHARS` (default 3900, below Telegram's 4096 limit) is split deterministically on fenced-code, paragraph, line, and word boundaries into at most `FM_TELEGRAM_MAX_MESSAGES` numbered messages (default 8), by the same splitter X mode uses (`bin/fm-message-split-lib.sh`).
+Before the first send the whole plan is written to `outbox/<request_id>.json`, and each delivered chunk advances its `sent` counter, so a failure preserves exactly what is left: `bin/fm-tg-reply.sh --retry <request_id>` resumes at the first undelivered chunk without repeating a delivered message and without re-running whatever produced the text.
+`--final` marks a terminal outcome and clears the task's link after the last chunk lands, but deliberately keeps the per-request context record as evidence of which conversation the task answered.
+`FM_TELEGRAM_DRY_RUN` previews without sending, recording the would-be payload to the same outbox path with `"dry_run": true`.
+
+### Publishing needs a second, matching confirmation
+
+A message authorizes preparing and previewing a change, never making it public.
+`bin/fm-tg-task.sh arm-publish <task-id> --head <rev>` records the exact prepared revision and prints a one-time code to include in the preview; `confirm-publish <task-id> --head <rev> --message-file <path>` accepts only a reply carrying that code while the prepared revision is still the one previewed.
+The reply is read from a file and only the code alphabet is scanned out of it, so no other part of that untrusted text is interpreted.
+A confirmation is refused when it is late, guessed, replayed, over its attempt budget, or aimed at a preview that has since been rebuilt; the script's `--help` owns the exact exit codes.
+
+### What this is not
+
+Messages arrive only while this machine is awake and firstmate's supervision cycle is running.
+Telegram retains undelivered updates for about 24 hours, so a message sent while the machine is off arrives when polling resumes within that window and is lost after it.
+This is therefore a convenience bridge for a machine that is usually on, **not** a guaranteed always-on service; making it one would need a separate hosted deployment, which this deliberately does not attempt.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
@@ -405,6 +528,21 @@ FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state r
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct X client invocations; bootstrap still checks $FM_HOME/.env
+FM_TELEGRAM_BOT_TOKEN=  # Telegram bridge bot token; .env opt-in, never printed, never copied out of .env
+FM_TELEGRAM_API_URL=https://api.telegram.org   # optional Bot API base override, mainly for a local Bot API server
+FM_TELEGRAM_ENV_FILE=   # optional alternate .env file for direct bridge invocations; bootstrap still checks $FM_HOME/.env
+FM_TELEGRAM_DRY_RUN=    # preview replies without sending; same truthiness rule as FMX_DRY_RUN
+FM_TELEGRAM_POLL_TIMEOUT=20   # seconds a getUpdates long poll is held open (clamped to 0-45)
+FM_TELEGRAM_MAX_CHARS=3900    # per-message outbound budget (clamped to 100-3900, under Telegram's 4096)
+FM_TELEGRAM_MAX_MESSAGES=8    # cap on one split reply (clamped to 1-25)
+FM_TELEGRAM_MAX_TEXT=4096     # inbound bound; a longer message is recorded as oversized with no body
+FM_TELEGRAM_RATE_MAX=60       # accepted messages per window before the bridge drops and reports once
+FM_TELEGRAM_RATE_WINDOW=3600  # seconds in that accept window
+FM_TELEGRAM_PAIR_TTL=900      # pairing offer lifetime in seconds (clamped to 30-3600)
+FM_TELEGRAM_PAIR_ATTEMPTS=5   # guesses allowed per pairing offer and per publish confirmation (clamped to 1-20)
+FM_TELEGRAM_PUBLISH_TTL=86400 # publish confirmation lifetime in seconds
+FM_TELEGRAM_RECOVERY_SECS=300 # age at which a still-pending message is re-announced, at most once per window
+FM_TELEGRAM_RETENTION_SECS=604800  # retention for seen and per-request context records (capped at 30 days)
 FMX_DRY_RUN=            # truthy previews X replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900

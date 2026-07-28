@@ -170,6 +170,9 @@ family_for_basename() {
     fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
+    fm-telegram-bridge.test.sh)
+      printf '%s\n' telegram-bridge
+      ;;
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
       printf '%s\n' afk
       ;;
@@ -211,6 +214,7 @@ session-bootstrap
 live-harness-optin
 backend-dispatch
 pr-forge
+telegram-bridge
 afk
 snapshot-bearings
 cmux
@@ -668,6 +672,15 @@ families_for_changed_path() {
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
+      ;;
+    bin/fm-tg-*)
+      printf '%s\n' telegram-bridge
+      ;;
+    # Contracts shared by both always-on channels: a change to either must re-run
+    # both channels' suites, not just the one that happens to be edited.
+    bin/fm-private-artifact-lib.sh|bin/fm-message-split-lib.sh|bin/fm-env-file-lib.sh)
+      printf '%s\n' pr-forge
+      printf '%s\n' telegram-bridge
       ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
