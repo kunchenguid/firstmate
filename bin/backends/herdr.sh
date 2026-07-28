@@ -2333,8 +2333,16 @@ fm_backend_herdr_events_capable() {  # <session>
   case "$protocol" in ''|*[!0-9]*) return 1 ;; esac
   [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL" ] || return 1
   schema=$(herdr api schema --json 2>/dev/null) || return 1
-  printf '%s' "$schema" | grep -Fq 'events.subscribe' || return 1
-  printf '%s' "$schema" | grep -Fq 'pane.agent_status_changed' || return 1
+  # Herestrings, not `printf ... | grep`: `grep -q` exits at the first matching
+  # LINE, closing the pipe while printf still has most of the ~220KB schema
+  # unwritten. Under a parent that ignores SIGPIPE (the watcher's launch
+  # environment does), that write fails with EPIPE instead of killing printf
+  # silently, and bash reports `printf: write error: Broken pipe` on the
+  # watcher's stderr every arm cycle. A herestring has no concurrent writer
+  # process, so there is nothing to receive SIGPIPE. Regression:
+  # tests/fm-backend-herdr-schema-probe.test.sh.
+  grep -Fq 'events.subscribe' <<<"$schema" || return 1
+  grep -Fq 'pane.agent_status_changed' <<<"$schema" || return 1
   return 0
 }
 
