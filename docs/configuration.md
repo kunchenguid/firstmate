@@ -33,8 +33,8 @@ This preference is local to each Firstmate home and is not part of secondmate in
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
-The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with an archive at `data/done-archive.md` and a `done_keep` Done-retention limit.
-That file is the single owner of the limit's current value, so this section, `AGENTS.md`, and the teardown backlog nudge name the `done_keep` setting instead of restating a number that would drift silently.
+The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 50` and an archive at `data/done-archive.md`.
+`.tasks.toml` stays the single owner of that limit: this section quotes its current value, and every other surface, including `AGENTS.md` and the teardown backlog nudge, names the `done_keep` setting instead of restating the value.
 Pruning moves only the items past that limit into the archive, so the retained window is also the fleet's bounded recent-completion memory: `bin/fm-fleet-snapshot.sh` reads Done rows from `data/backlog.md` and never from the archive, which keeps finished work visible after a torn-down worker's live state is gone.
 When the default backend is selected and compatible `tasks-axi` is on `PATH`, firstmate uses its verbs for routine backlog mutations.
 Secondmate handoffs are separate and unconditional: `fm-backlog-handoff.sh` keeps only its own fleet-level validation and always delegates the item move to `tasks-axi mv`, the single owner of the backlog format.
