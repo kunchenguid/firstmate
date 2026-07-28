@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, BACKLOG_ORPHAN, CREW_DISPATCH invalid, HARNESS_OVERRIDES invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NM_INCOMPATIBLE, NM_ORPHAN, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, BACKLOG_ORPHAN, CREW_DISPATCH invalid, HARNESS_OVERRIDES invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NM_INCOMPATIBLE, NM_ORPHAN, NM_UNWATCHED, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO capability fact, means no skill load.
 user-invocable: false
 metadata:
@@ -48,6 +48,10 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `NM_ORPHAN: no-mistakes ... run parked ... - no live task in this home owns it ...` - a no-mistakes watch run THIS home armed (via `bin/fm-nm-watch.sh`, recorded in `data/nm-armed-runs`) is parked, but the task that armed it is gone (cancelled or torn down), so the reminder cascade re-sends into silence with nobody to answer.
   The line names the run id, the branch, and the gate; it is scoped by this home's own ledger, so a run this home never armed - the captain's own no-mistakes work or another firstmate home's task - never appears here.
   Escalate it to the captain as a stuck review that needs a call: answer the run with `no-mistakes axi respond --run <id>` (approve/skip only - an externally opened PR refuses `fix`) or cancel the run; do not merge a red PR to clear it.
+- `NM_UNWATCHED: <id>: <pr-url> has no CI monitoring - <reason> ...` - this task has a recorded PR and `bin/fm-nm-watch.sh` could not put a watch on it, so nothing is polling that PR's checks, review threads, or mergeability.
+  The line exists because the refusal itself prints once, mid-run, and reads like a note; it is a coverage hole, and it repeats every session start until it is closed.
+  Treat any PR carrying this line as unverified regardless of what the worker reported: read its CI conclusion from the provider yourself (`gh-axi` for GitHub, `bytedcli` for Codebase) before relaying or merging it.
+  Then fix the cause the reason names - most often an uninitialized project clone, which the `project-management` skill's Initialize section owns - and re-arm with the printed `bin/fm-nm-watch.sh <id> <pr-url>`, which clears the line only when the run's own record confirms it is watching.
 - `PR_CHECK_MIGRATION: canonical polls rebuilt and armed; resume supervision for this home` - the non-executing migration rebuilt canonical task polls from validated metadata, and those polls are already armed.
   Independently verify the private per-task outcome record, then resume the emitted supervision protocol after finishing the session-start wake handling.
 - `PR_CHECK_MIGRATION: validated replacement polls armed; resume supervision for this home` - a retry proved canonical publication provenance, metadata identity binding, and single-link integrity for a replacement poll resolving an earlier ambiguous migration outcome.

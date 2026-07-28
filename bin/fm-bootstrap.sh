@@ -15,6 +15,7 @@
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
 #                 "NM_ORPHAN: no-mistakes ... run parked ... - no live task in this home owns it ...",
+#                 "NM_UNWATCHED: <id>: <pr-url> has no CI monitoring - <reason> ...",
 #                 "BACKLOG_ORPHAN: <id> is In flight in data/backlog.md but has no state/<id>.meta ...",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
@@ -752,6 +753,26 @@ nm_orphan_scan() {
     "$SCRIPT_DIR/fm-nm-orphan-scan.sh" 2>/dev/null || true
 }
 
+# A recorded PR whose CI watch could not be armed. bin/fm-nm-watch.sh prints its
+# refusal once, in the middle of a PR-record run, and until it also recorded
+# nm_watch_unarmed= nothing ever said it again: on 2026-07-28 MR 43 sat with a
+# failing check and no monitoring, and the captain found it before firstmate did.
+# An unmonitored PR is a standing hole, not a moment, so it belongs to the sweep
+# that runs at every session start. Purely local - it reads state/*.meta and
+# queries no provider - so it costs nothing and works offline.
+nm_unwatched_prs() {
+  local meta id pr reason
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    reason=$(grep '^nm_watch_unarmed=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ -n "$reason" ] || continue
+    pr=$(grep '^pr=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ -n "$pr" ] || continue
+    id=$(basename "$meta" .meta)
+    echo "NM_UNWATCHED: $id: $pr has no CI monitoring - $reason; read that PR's CI yourself before relaying it, then re-arm with bin/fm-nm-watch.sh $id $pr"
+  done
+}
+
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -1029,6 +1050,7 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   echo "BOOTSTRAP_INFO: tasks-axi available"
 fi
 nm_orphan_scan
+nm_unwatched_prs
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_liveness_sweep
   secondmate_sync

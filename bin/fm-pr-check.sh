@@ -6,6 +6,10 @@
 # shell source. GitHub PRs, GitLab MRs, and Codebase MRs are accepted.
 # For direct-PR tasks this also arms the richer no-mistakes watch; --no-watch
 # skips that second watch for a caller that is about to merge immediately.
+# A watch that could not be armed still never fails the PR record - the poll is
+# the more important half - but it is no longer only a printed line either:
+# bin/fm-nm-watch.sh records it in the task meta and bin/fm-bootstrap.sh reports
+# the PR as unmonitored at every session start until it is armed for real.
 # Usage: fm-pr-check.sh <task-id> <pr-url> [--no-watch]
 set -eu
 

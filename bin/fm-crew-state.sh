@@ -28,6 +28,10 @@
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). Local work that advanced past the run head, or
 #      diverged from it, invalidates attribution.
+#      A run that matched but executed nothing - every step skipped - is not
+#      attributed either: its outcome reports on the run, not on the code or the
+#      PR. See nm_run_did_no_work for the incident that made that distinction
+#      load-bearing.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -98,10 +102,18 @@ kill_note() {
     "$(grep '^verdict=' "$pm" 2>/dev/null | cut -d= -f2-)" "$pm"
 }
 
+# Set when a run matched this crew by branch and code identity but did no work at
+# all, so its verdict is not evidence about anything (see nm_run_did_no_work).
+# Carried in EVERY emitted line, like kill_note: the state then comes from the
+# pane or status log, and a reader must be able to see that a run exists and was
+# deliberately not believed.
+UNUSABLE_RUN_NOTE=
+
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2" kn
   [ -n "${3:-}" ] && line="$line${SEP}$3"
+  [ -n "$UNUSABLE_RUN_NOTE" ] && line="$line${SEP}$UNUSABLE_RUN_NOTE"
   kn=$(kill_note)
   [ -n "$kn" ] && line="$line${SEP}$kn"
   printf '%s\n' "$line"
@@ -473,6 +485,27 @@ nm_coarse_head_matches_worktree() {  # <short-sha>
   return 1
 }
 
+# 0 when the run's steps table exists and EVERY step was skipped: a run that
+# executed nothing, whose outcome therefore reports on nothing.
+#
+# The 2026-07-28 false green: firstmate armed an escalate-only watch on MR 43,
+# the run ended 2ms later with its single step `watch,skipped,0,2` and
+# `outcome: passed`, and this script - which reads `outcome: passed` as "PR
+# merged/closed" - reported `state: done · source: run-step · run passed: PR
+# merged/closed` for a task whose MR was open with red CI. The outcome word was
+# accurate about the RUN and said nothing about the PR; only the steps table
+# distinguishes the two. A run that skipped everything is not evidence, so it is
+# not attributed at all, and state falls back to the pane and status log as if
+# no run existed. Deliberately narrow: one completed, failed, or running step
+# anywhere makes the run real again, so no genuine pipeline run is discarded.
+nm_run_did_no_work() {
+  local rows
+  rows=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*[a-z_]+,[[:space:]]*"?[a-z_]+"?[[:space:]]*,[[:space:]]*[0-9]+[[:space:]]*,' || true)
+  [ -n "$rows" ] || return 1
+  printf '%s\n' "$rows" | grep -qvE '^[[:space:]]*[a-z_]+,[[:space:]]*"?skipped"?[[:space:]]*,' && return 1
+  return 0
+}
+
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
 # $RUN_OUT is real `axi status` TOON with step/gate detail; "coarse" means only
@@ -487,7 +520,15 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
-      HAVE_RUN=1
+      if nm_run_did_no_work; then
+        # Matched, and deliberately not believed. Do NOT fall through to the
+        # coarse runs-list fallback below: it would re-attribute this same run
+        # from its status word alone, with the steps table that disqualified it
+        # no longer visible.
+        UNUSABLE_RUN_NOTE="run $(strip_quotes "$(nm_field id)") ignored: every step skipped, so it observed nothing"
+      else
+        HAVE_RUN=1
+      fi
     else
       # The active-or-most-recent run is for another branch, or same branch with
       # a rewritten/diverged head (the CLI is alive and answered; only the

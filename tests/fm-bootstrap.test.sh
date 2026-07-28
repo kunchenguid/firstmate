@@ -898,6 +898,49 @@ MD
   pass "bootstrap reports In-flight backlog rows whose task meta is gone"
 }
 
+# An unmonitored PR is a standing hole, so it has to be re-surfaced rather than
+# printed once at arm time. On 2026-07-28 MR 43's failing check reached the
+# captain before firstmate, because `watch not armed` had scrolled past inside a
+# PR-record run and nothing said it again. Only a task with BOTH a recorded PR
+# and a recorded arm failure counts: a PR with a live watch, and a failed arm on
+# a task that has no PR yet, are both silent.
+test_unwatched_pr_is_reported() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/nm-unwatched"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/data" "$case_dir/home/state"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fm_write_meta "$case_dir/home/state/blind-task.meta" \
+    "window=fm-blind-task" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=direct-PR" \
+    "pr=https://code.byted.org/o/r/merge_requests/43" \
+    "nm_watch_unarmed=repo not initialized (run 'no-mistakes init' first)"
+  fm_write_meta "$case_dir/home/state/watched-task.meta" \
+    "window=fm-watched-task" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=direct-PR" \
+    "pr=https://code.byted.org/o/r/merge_requests/44" \
+    "nm_watch_run=01KWATCHING"
+  fm_write_meta "$case_dir/home/state/no-pr-yet.meta" \
+    "window=fm-no-pr-yet" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=direct-PR" \
+    "nm_watch_unarmed=no-mistakes is not on PATH"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  printf '%s\n' "$out" | grep -F 'NM_UNWATCHED: blind-task: https://code.byted.org/o/r/merge_requests/43 has no CI monitoring' >/dev/null \
+    || fail "a recorded PR with no CI monitoring was not reported: $out"
+  printf '%s\n' "$out" | grep -F "repo not initialized" >/dev/null \
+    || fail "the report did not carry the reason the watch could not be armed: $out"
+  printf '%s\n' "$out" | grep -F 'bin/fm-nm-watch.sh blind-task' >/dev/null \
+    || fail "the report gave no re-arm command: $out"
+  printf '%s\n' "$out" | grep -F 'NM_UNWATCHED: watched-task' >/dev/null \
+    && fail "a PR with a live watch was reported as unmonitored: $out"
+  printf '%s\n' "$out" | grep -F 'NM_UNWATCHED: no-pr-yet' >/dev/null \
+    && fail "a task with no PR yet was reported as an unmonitored PR: $out"
+  pass "bootstrap re-surfaces a recorded PR whose CI watch was never armed"
+}
+
 test_crew_dispatch_validation() {
   local label body expect mode case_dir fakebin out n
   n=0
@@ -1045,5 +1088,6 @@ test_bootstrap_info_is_no_load_and_actionable_lines_trigger
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
 test_backlog_orphan_rows_are_reported
+test_unwatched_pr_is_reported
 test_harness_overrides_variants_validation
 test_crew_dispatch_launch_cross_file_check

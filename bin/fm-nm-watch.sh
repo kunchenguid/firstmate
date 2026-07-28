@@ -45,6 +45,20 @@
 # pipeline-owned watcher (with its QA node and fix rounds) with an escalate-only
 # external one.
 #
+# `no-mistakes watch` needs the repo it runs in to be initialized, so a direct-PR
+# project has to be initialized too even though it never runs the pipeline. The
+# project-management skill owns that rule and the reason it is not a contradiction.
+#
+# ARMED IS NOT WATCHING, and this script must never report the first as the
+# second. On 2026-07-28 `watch` returned run 01KYJY370CPPE9DRV9NPEPFKAD on MR 43
+# and the run ended 2ms later - `axi status --run` shows its one step as
+# `watch,skipped,0,2` with `outcome: passed` - while that MR's CI was red and it
+# had neither merged nor closed. A false "armed" is worse than no watch at all:
+# it tells firstmate the PR is covered. Every arm is therefore verified against
+# the run's own record before it is reported or recorded, and only a confident
+# not-watching reading demotes it; an unreadable verification says so in the line
+# rather than being resolved either way.
+#
 # Usage: fm-nm-watch.sh <task-id> <pr-url> [--branch <name>]
 #   --branch  source branch of the PR; defaults to the task worktree's current
 #             branch, then to fm/<task-id>. The branch keys the watcher's
@@ -52,7 +66,11 @@
 #
 # Prints one line either way and exits 0 when armed, 1 when it is not, so a
 # caller can relay the outcome without deciding whether the PR record failed.
-# On success it appends nm_watch_run=<id> to state/<task-id>.meta.
+# On success it records nm_watch_run=<id> in state/<task-id>.meta and clears any
+# nm_watch_unarmed=. A direct-PR task left with no watch records the reason as
+# nm_watch_unarmed=<reason> instead, because the printed line scrolls past inside
+# a PR-record run and nothing else would ever re-surface an unmonitored PR;
+# bin/fm-bootstrap.sh reads that field back as its NM_UNWATCHED diagnostic.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -75,10 +93,15 @@ Arm a no-mistakes escalate-only watch run on a direct-PR task's PR/MR.
   --branch <name>  source branch of the PR (default: the task worktree's
                    current branch, then fm/<task-id>)
 
-Exit 0 and print "watch armed: ..." when the run started; exit 1 and print
-"watch not armed: <reason>" otherwise. Re-run to re-arm (the new run replaces
-the branch's previous watcher), which is also how a watch is restored after a
-park is answered.
+Exit 0 and print "watch armed: ..." when the run started AND its own record
+confirms it is watching. Exit 1 otherwise: "watch not armed - this PR has no CI
+monitoring: <reason>" when a direct-PR task's PR is left unmonitored (also
+recorded as nm_watch_unarmed= in the task meta), or plain "watch not armed:
+<reason>" for a by-design refusal that costs no monitoring, such as a task whose
+own pipeline already owns a watcher.
+
+Re-run to re-arm (the new run replaces the branch's previous watcher), which is
+also how a watch is restored after a park is answered.
 EOF
 }
 
@@ -112,14 +135,50 @@ done
 
 # shellcheck source=bin/fm-scm-lib.sh
 . "$SCRIPT_DIR/fm-scm-lib.sh"
+# For fm_poll_watch_state, the single owner of "is this run still watching".
+# shellcheck source=bin/fm-poll-lib.sh
+. "$SCRIPT_DIR/fm-poll-lib.sh"
 
+# A refusal that costs no monitoring: bad input, or a task whose own pipeline
+# already owns a watcher. Nothing is lost, so nothing is recorded.
 not_armed() {
   echo "watch not armed: $1"
   exit 1
 }
 
+# A direct-PR task's PR left with NO CI monitoring at all. Distinct from
+# not_armed because the two read identically and the difference is the whole
+# point: this one is a hole in the fleet's coverage, so it is stated as such and
+# recorded durably for bin/fm-bootstrap.sh to re-surface at every session start.
+unwatched() {
+  record_unarmed "$1"
+  echo "watch not armed - this PR has no CI monitoring: $1"
+  exit 1
+}
+
 meta_field() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+# Replace <key>= in the task meta, or drop the key when the value is empty.
+# Rewrites through a temp file beside it so a crash cannot leave a half-written
+# meta, and stays best effort: a meta this cannot rewrite must not fail the arm,
+# which is the part that actually protects the PR.
+meta_set() {  # <key> <value-or-empty>
+  local key=$1 value=$2 tmp
+  [ -f "$META" ] || return 0
+  tmp=$(mktemp "$STATE/.fm-nm-watch.XXXXXX" 2>/dev/null) || return 0
+  chmod 0600 "$tmp" 2>/dev/null || true
+  grep -v "^$key=" "$META" >> "$tmp" 2>/dev/null || true
+  if [ -n "$value" ]; then
+    printf '%s=%s\n' "$key" "$value" >> "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+  fi
+  mv -f "$tmp" "$META" 2>/dev/null || rm -f "$tmp"
+}
+
+# Record why this task's PR has no watch, on one line so the meta stays parseable.
+record_unarmed() {  # <reason>
+  meta_set nm_watch_unarmed "$(printf '%s' "$1" | tr '\t\r\n' '   ')"
 }
 
 # Append "<epoch> <run-id> <task-id> <branch>" to the per-home ledger, unless
@@ -145,24 +204,34 @@ META="$STATE/$ID.meta"
 MODE=$(meta_field "$META" mode)
 case "$MODE" in
   direct-PR) ;;
-  '') not_armed "state/$ID.meta records no delivery mode" ;;
+  '') unwatched "state/$ID.meta records no delivery mode" ;;
   *) not_armed "task mode is $MODE, not direct-PR (a no-mistakes-mode task gets its watch run from its own pipeline handoff)" ;;
 esac
 
+# Every checkout worth trying, in preference order. `watch --pr <url>` targets
+# the PR by URL, so the checkout only decides whose no-mistakes config answers -
+# which makes the project clone a real second chance rather than a duplicate
+# attempt, and a disposable task worktree the likelier of the two to be missing
+# initialization. The old code picked the first READABLE candidate and stopped,
+# so a failure in the task copy ended the arm without the project clone ever
+# being asked.
 WT=$(meta_field "$META" worktree)
 PROJECT=$(meta_field "$META" project)
-DIR=
+DIRS=()
 for candidate in "$WT" "$PROJECT"; do
   [ -n "$candidate" ] || continue
   [ -d "$candidate" ] || continue
   git -C "$candidate" rev-parse --is-inside-work-tree >/dev/null 2>&1 || continue
-  DIR=$candidate
-  break
+  # Only two candidates, so the only possible duplicate is the first one.
+  if [ "${#DIRS[@]}" -gt 0 ] && [ "${DIRS[0]}" = "$candidate" ]; then
+    continue
+  fi
+  DIRS+=("$candidate")
 done
-[ -n "$DIR" ] || not_armed "neither the task worktree nor its project clone is a readable git checkout"
+[ "${#DIRS[@]}" -gt 0 ] || unwatched "neither the task worktree nor its project clone is a readable git checkout"
 
 if [ -z "$BRANCH" ]; then
-  BRANCH=$(git -C "$DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  BRANCH=$(git -C "${DIRS[0]}" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 fi
 # A detached or default-branch checkout says nothing about the PR's source
 # branch; the task's own branch name is the better answer than a wrong one.
@@ -170,19 +239,40 @@ if [ -z "$BRANCH" ] || [ "$BRANCH" = "HEAD" ]; then
   BRANCH="fm/$ID"
 fi
 
-command -v "$NM_BIN" >/dev/null 2>&1 || not_armed "$NM_BIN is not on PATH"
+command -v "$NM_BIN" >/dev/null 2>&1 || unwatched "$NM_BIN is not on PATH"
 
-out=$(cd "$DIR" && "$NM_BIN" watch --pr "$URL" --branch "$BRANCH" 2>&1)
-rc=$?
-if [ "$rc" -ne 0 ]; then
+# One candidate's failure reason, normalized to a single line.
+arm_failure_reason() {  # <output> <exit-code>
+  local out=$1 rc=$2 detail
   case "$out" in
     *'unknown command "watch"'*)
-      not_armed "the installed $NM_BIN has no 'watch' command; update it to a build that carries the external watch entry"
+      printf 'the installed %s has no '"'"'watch'"'"' command; update it to a build that carries the external watch entry\n' "$NM_BIN"
+      return 0
       ;;
   esac
   detail=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | head -1)
-  not_armed "${detail:-$NM_BIN watch exited $rc}"
-fi
+  printf '%s\n' "${detail:-$NM_BIN watch exited $rc}"
+}
+
+out=
+rc=0
+DIR=
+REASONS=
+for candidate in "${DIRS[@]}"; do
+  out=$(cd "$candidate" && "$NM_BIN" watch --pr "$URL" --branch "$BRANCH" 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    DIR=$candidate
+    break
+  fi
+  reason=$(arm_failure_reason "$out" "$rc")
+  case "$REASONS" in
+    '') REASONS=$reason ;;
+    *"$reason"*) ;;
+    *) REASONS="$REASONS; $reason" ;;
+  esac
+done
+[ -n "$DIR" ] || unwatched "$REASONS"
 
 # `watch` prints "  <mark> Watching <pr-url> <run-id>"; take the run id from the
 # Watching line rather than the whole output, which also carries the branch and
@@ -192,12 +282,27 @@ case "$RUN" in
   ''|*[!A-Za-z0-9]*) RUN= ;;
 esac
 
-if [ -n "$RUN" ]; then
-  if [ "$(meta_field "$META" nm_watch_run)" != "$RUN" ]; then
-    echo "nm_watch_run=$RUN" >> "$META"
-  fi
-  record_armed_run "$RUN"
-  echo "watch armed: run $RUN on $BRANCH watching $URL (escalate-only)"
+# No run id means no way to ask the run whether it is watching, and no way for
+# the poll to ask later either - so the PR is unmonitored in every way firstmate
+# can observe. This used to be reported as armed.
+[ -n "$RUN" ] || unwatched "$NM_BIN watch reported no run id, so nothing can be verified or polled for this PR"
+
+# Verify against the run's own record before claiming the PR is covered.
+# fm_poll_watch_state owns the alive/gone vocabulary (including the skipped
+# watch step that produced the 2026-07-28 false green); a lookup that cannot
+# answer is left undecided here exactly as it is there.
+VERIFY_NOTE=
+if watch_state=$(fm_poll_watch_state "$RUN" "$DIR"); then
+  case "$watch_state" in
+    gone\|*) unwatched "run $RUN is not watching: ${watch_state#gone|} (re-arm once the repo can start a real watch)" ;;
+    alive) ;;
+    *) VERIFY_NOTE="; not verified: run $RUN reported no status this script recognizes" ;;
+  esac
 else
-  echo "watch armed: $BRANCH watching $URL (escalate-only; run id not reported, so state/$ID.meta records none)"
+  VERIFY_NOTE="; not verified: could not read run $RUN back from $NM_BIN"
 fi
+
+meta_set nm_watch_run "$RUN"
+meta_set nm_watch_unarmed ""
+record_armed_run "$RUN"
+echo "watch armed: run $RUN on $BRANCH watching $URL (escalate-only$VERIFY_NOTE)"
