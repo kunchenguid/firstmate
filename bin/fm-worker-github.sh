@@ -52,14 +52,37 @@ scan_words() {
 
 scan_words "$@"
 
-# Prevent creating a gh CLI alias whose literal expansion reaches a merge: the
-# alias body arrives as one word, so re-split it and classify it the same way.
-if [ "${1:-}" = alias ] && [ "${2:-}" = set ]; then
-  set -f
-  # shellcheck disable=SC2048,SC2086  # deliberate re-split of the alias body
-  scan_words $*
-  set +f
-fi
+# An alias expands into a full gh command later, so the whole `gh alias`
+# namespace is closed here, mirroring bin/fm-worker-command-policy.mjs. `set`
+# carries its body as one word, which is re-split and classified; `list` and
+# `delete` create nothing; every other alias-creating form (`import` reads a
+# YAML file or stdin) supplies bytes this wrapper cannot see, so it is refused.
+classify_alias() {
+  local word seen=0 first='' subcommand=''
+  for word in "$@"; do
+    case "$word" in -*) continue ;; esac
+    seen=$((seen + 1))
+    if [ "$seen" -eq 1 ]; then
+      first=$word
+    else
+      subcommand=$word
+      break
+    fi
+  done
+  [ "$first" = alias ] || return 0
+  case "$subcommand" in
+    ''|list|delete) return 0 ;;
+    set)
+      set -f
+      # shellcheck disable=SC2048,SC2086  # deliberate re-split of the alias body
+      scan_words $*
+      set +f
+      ;;
+    *) merge_shaped=1 ;;
+  esac
+}
+
+classify_alias "$@"
 
 if [ "$merge_shaped" -eq 1 ]; then
   echo "[worker-pr-merge] workers never merge PRs; report the full green PR URL and stop for captain approval" >&2

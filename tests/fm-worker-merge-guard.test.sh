@@ -45,6 +45,12 @@ gh alias set land 'pr --repo acme/api merge'
 gh alias set land --shell 'gh pr merge $1'
 gh alias set land 'api PUT /repos/acme/api/pulls/792/merge --silent'
 gh alias set land 'api graphql -f query=mutation{mergePullRequest(input:{})}'
+gh alias import -
+gh alias import merges.yml
+gh-axi alias import -
+/usr/local/bin/gh alias import -
+printf 'land: pr merge\n' | gh alias import -
+bash -lc 'gh alias import merges.yml'
 EOF
   while IFS= read -r command; do
     policy_is allow "$command"
@@ -59,6 +65,9 @@ gh pr revert 792
 gh pr revert 792 --body merge
 gh alias set prs 'pr list'
 gh alias set co 'pr checkout'
+gh alias list
+gh alias delete land
+gh alias --help
 gh api GET /repos/acme/api/pulls/792
 printf '%s\n' 'gh pr merge 792'
 bash -lc "printf '%s\n' 'gh pr merge 792'"
@@ -185,6 +194,22 @@ test_registered_transport_and_path_wrapper() {
   fi
   [ "$(wc -l < "$base/github-requests" | tr -d ' ')" = "$before" ] \
     || fail "a flag-interspersed merge reached the fake GitHub CLI"
+
+  set +e
+  output=$(printf 'land: pr merge\n' | "$guardbin/gh" alias import - 2>&1); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "PATH wrapper allowed a stdin alias import"
+  assert_contains "$output" "worker-pr-merge" "alias-import PATH denial lacked stable reason"
+  if "$guardbin/gh" alias import merges.yml >/dev/null 2>&1; then
+    fail "PATH wrapper allowed a file alias import"
+  fi
+  if "$guardbin/gh-axi" alias import - >/dev/null 2>&1; then
+    fail "PATH wrapper allowed a gh-axi alias import"
+  fi
+  [ "$(wc -l < "$base/github-requests" | tr -d ' ')" = "$before" ] \
+    || fail "a denied alias import reached the fake GitHub CLI"
+  "$guardbin/gh" alias list >/dev/null || fail "PATH wrapper blocked reading existing aliases"
+
   "$guardbin/gh" pr --repo acme/api view 792 >/dev/null || fail "PATH wrapper blocked a flag-interspersed PR read"
   [ "$(wc -l < "$base/github-requests" | tr -d ' ')" -eq $((before + 1)) ] \
     || fail "an allowed flag-interspersed PR read did not reach the real CLI"
@@ -295,10 +320,14 @@ test_both_enforcement_layers_classify_identically() {
   layers_agree deny alias set land --shell 'gh pr merge $1'
   layers_agree deny alias set land 'api PUT /repos/acme/api/pulls/792/merge --silent'
   layers_agree deny api PUT /repos/acme/api/pulls/792/merge
+  layers_agree deny alias import -
+  layers_agree deny alias import merges.yml
   layers_agree allow pr revert 792
   layers_agree allow pr --repo acme/api view 792
   layers_agree allow pr create --title merge
   layers_agree allow alias set prs 'pr list'
+  layers_agree allow alias list
+  layers_agree allow alias delete land
   pass "worker merge guard: the semantic policy and the PATH wrapper classify identically"
 }
 

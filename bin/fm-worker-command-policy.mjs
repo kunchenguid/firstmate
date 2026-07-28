@@ -7,7 +7,7 @@
 // It denies merge-shaped GitHub CLI operations in executed positions, including
 // path-qualified binaries, command/env wrappers, literal nested shells/eval,
 // command substitutions, same-command aliases, literal binary variables, and
-// `gh alias set` bodies that would expand into a merge.
+// gh alias creation whose expansion would reach a merge or cannot be read here.
 // Subcommand classification is option-aware because gh accepts its persistent
 // flags (-R/--repo and friends) between `pr` and the subcommand it runs.
 
@@ -87,17 +87,25 @@ function hasMergeApi(args) {
     || args.some((arg) => /\bmergePullRequest\b/.test(arg));
 }
 
-// `gh alias set <name> <body>` carries the body as one word, so re-split it and
-// classify it the same way bin/fm-worker-github.sh does at the PATH layer.
-function ghAliasBodyWords(args) {
-  if (args[0] !== "alias" || args[1] !== "set") return null;
-  return args.flatMap((arg) => arg.split(/\s+/).filter(Boolean));
+// An alias expands into a full gh command later, so the whole `gh alias`
+// namespace is closed here. `set` carries its body as one word, which is
+// re-split and classified; `list` and `delete` create nothing; every other
+// alias-creating form (`import` reads a YAML file or stdin) supplies bytes this
+// boundary cannot see, so it is refused. bin/fm-worker-github.sh mirrors this.
+const ALIAS_NON_CREATING = new Set(["list", "delete"]);
+
+function ghAliasMergeShaped(args) {
+  const words = args.filter((arg) => !arg.startsWith("-"));
+  if (words[0] !== "alias") return false;
+  const subcommand = words[1];
+  if (subcommand === undefined || ALIAS_NON_CREATING.has(subcommand)) return false;
+  if (subcommand !== "set") return true;
+  const body = args.flatMap((arg) => arg.split(/\s+/).filter(Boolean));
+  return hasPrMerge(body) || hasMergeApi(body);
 }
 
 function ghMergeShaped(args) {
-  if (hasPrMerge(args) || hasMergeApi(args)) return true;
-  const alias = ghAliasBodyWords(args);
-  return alias !== null && (hasPrMerge(alias) || hasMergeApi(alias));
+  return hasPrMerge(args) || hasMergeApi(args) || ghAliasMergeShaped(args);
 }
 
 function directMerge(position, variables, aliases, depth) {
