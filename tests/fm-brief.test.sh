@@ -78,9 +78,14 @@ test_reexec_succeeds_when_path_prefers_bin_bash() {
 }
 
 test_reexec_errors_when_no_modern_bash() {
-  local out rc
+  local out rc bin_bash_major
   if ! [ -x /bin/bash ]; then
     pass "fm-brief.sh: /bin/bash absent — skip no-modern-bash error check"
+    return 0
+  fi
+  bin_bash_major=$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"')
+  if [ "$bin_bash_major" -ge 5 ]; then
+    pass "fm-brief.sh: /bin/bash is already 5+ — skip no-modern-bash error check"
     return 0
   fi
   out=$(FM_BASH_REEXEC_CANDIDATES=/nonexistent/bash \
