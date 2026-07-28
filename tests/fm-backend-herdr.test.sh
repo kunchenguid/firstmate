@@ -1241,6 +1241,47 @@ test_presentation_lock_malformed_socket_falls_back() {
   pass "herdr presentation lock: malformed socket metadata degrades to flat"
 }
 
+test_presentation_recovery_lock_budget_covers_recovery_wave() {
+  local lock_source default_attempts recovery_attempts out
+  lock_source=$(sed -n '/^spawn_herdr_presentation_order_lock_acquire()/,/^spawn_herdr_presentation_order_lock_release()/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
+  default_attempts=$(sed -n 's/^HERDR_PRESENTATION_ORDER_LOCK_ATTEMPTS=//p' "$ROOT/bin/fm-spawn.sh")
+  recovery_attempts=$(sed -n 's/^HERDR_PRESENTATION_RECOVERY_LOCK_ATTEMPTS=//p' "$ROOT/bin/fm-spawn.sh")
+  out=$(LOCK_SOURCE="$lock_source" DEFAULT_ATTEMPTS="$default_attempts" RECOVERY_ATTEMPTS="$recovery_attempts" \
+    bash -c '
+      HERDR_PRESENTATION_ORDER_LOCK=
+      HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+      eval "$LOCK_SOURCE"
+      fm_backend_herdr_presentation_session_lock_path() { printf "%s" /tmp/fm-herdr-budget.lock; }
+      sleep() { :; }
+      tries=0
+      owner=
+      fm_lock_try_acquire() {
+        tries=$((tries + 1))
+        if [ "$tries" -le 600 ]; then
+          owner=/tmp/fm-herdr-budget.lock.owner.first
+          return 1
+        fi
+        if [ "$tries" -le 1200 ]; then
+          owner=/tmp/fm-herdr-budget.lock.owner.second
+          return 1
+        fi
+        return 0
+      }
+      fm_lock_link_owner() { printf "%s\n" "$owner"; }
+      if spawn_herdr_presentation_order_lock_acquire fmtest "$DEFAULT_ATTEMPTS"; then
+        exit 1
+      fi
+      printf "%s " "$tries"
+      tries=0
+      owner=
+      spawn_herdr_presentation_order_lock_acquire fmtest "$RECOVERY_ATTEMPTS" 1 || exit 1
+      printf "%s %s" "$tries" "$HERDR_PRESENTATION_ORDER_LOCK_HELD"
+    ')
+  [ "$out" = "50 1201 1" ] \
+    || fail "recovery lock budget did not drain two complete predecessor handoffs: $out"
+  pass "herdr presentation lock: recovery drains progressing predecessor waves while fresh projection stays best-effort"
+}
+
 test_projection_order_rejects_malformed_socket() {
   local dir log resp fb mover out status
   dir="$TMP_ROOT/projection-order-malformed-socket"; mkdir -p "$dir/responses"
@@ -3026,6 +3067,7 @@ test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
 test_presentation_session_lock_path_rejects_malformed_socket
 test_presentation_lock_malformed_socket_falls_back
+test_presentation_recovery_lock_budget_covers_recovery_wave
 test_projection_order_rejects_malformed_socket
 test_presentation_lock_insecure_namespace_falls_back
 test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication

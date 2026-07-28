@@ -38,14 +38,17 @@
 #   authority, and every ambiguous recovery stays on the flat fallback after
 #   duplicate-agent risk is independently absent. Treehouse allocation and task
 #   metadata are unchanged.
-#   A clean projected create or exact resume makes one bounded attempt to hold
-#   the one session-scoped presentation-order lock (keyed by named session plus
-#   canonical socket, outside any home's state/) through launch handoff. Lock
-#   contention warns and falls back to the ordinary flat layout before any
-#   projection mutation. The exact response-derived new workspace is inserted
-#   immediately after its owning parent (firstmate or 2ndmate-<id>) contiguous
-#   child block. Ordering never authorizes lifecycle cleanup, and any
-#   unavailable, ambiguous, or failed move warns while the spawn continues.
+#   A clean projected create makes one short bounded attempt to hold the
+#   session-scoped presentation-order lock (keyed by named session plus
+#   canonical socket, outside any home's state/) through launch handoff.
+#   Contention warns and falls back to the ordinary flat layout before any
+#   projection mutation. Exact recovery instead grants each distinct lock owner
+#   one longer bounded handoff budget and refuses the concurrent resume if the
+#   progressing owner wave does not drain. The exact response-derived new
+#   workspace is inserted immediately after its owning parent (firstmate or
+#   2ndmate-<id>) contiguous child block. Ordering never authorizes lifecycle
+#   cleanup, and any unavailable, ambiguous, or failed move warns while the
+#   spawn continues.
 #   Every projected create, prune, and move captures and verifies the named
 #   session's exact active workspace and tab. A detected focus change restores
 #   only that exact tab id; an ambiguous pre-operation snapshot refuses the
@@ -231,6 +234,12 @@ HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+# Fresh best-effort projection gives a contended session lock five seconds
+# before falling back to the ordinary flat layout.
+HERDR_PRESENTATION_ORDER_LOCK_ATTEMPTS=50
+# Exact recovery gives each distinct lock owner enough time for its permitted
+# 60-second Treehouse handoff plus bounded projection and launch-settle work.
+HERDR_PRESENTATION_RECOVERY_LOCK_ATTEMPTS=700
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
@@ -317,15 +326,34 @@ trap spawn_abort_cleanup EXIT
 # <session> is required so secondmate and primary spawns serialize against the
 # same session without writing any other home's state directory.
 spawn_herdr_presentation_order_lock_acquire() {
-  local session=${1:-} attempt lock_path
+  local session=${1:-} max_attempts=${2:-$HERDR_PRESENTATION_ORDER_LOCK_ATTEMPTS}
+  local reset_on_owner_change=${3:-0} attempt lock_path owner observed_owner
   [ -n "$session" ] || session=$(fm_backend_herdr_session)
+  case "$max_attempts" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$max_attempts" -gt 0 ] || return 1
+  case "$reset_on_owner_change" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
   lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
   HERDR_PRESENTATION_ORDER_LOCK="$lock_path"
   attempt=0
-  while [ "$attempt" -lt 50 ]; do
+  observed_owner=
+  while [ "$attempt" -lt "$max_attempts" ]; do
     if fm_lock_try_acquire "$HERDR_PRESENTATION_ORDER_LOCK"; then
       HERDR_PRESENTATION_ORDER_LOCK_HELD=1
       return 0
+    fi
+    if [ "$reset_on_owner_change" = 1 ]; then
+      owner=$(fm_lock_link_owner "$HERDR_PRESENTATION_ORDER_LOCK" 2>/dev/null || true)
+      if [ -n "$owner" ]; then
+        if [ -n "$observed_owner" ] && [ "$owner" != "$observed_owner" ]; then
+          attempt=0
+        fi
+        observed_owner=$owner
+      fi
     fi
     sleep 0.1
     attempt=$((attempt + 1))
@@ -979,7 +1007,8 @@ case "$BACKEND" in
           echo "error: herdr presentation recovery could not ensure its exact named session" >&2
           exit 1
         }
-        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+        spawn_herdr_presentation_order_lock_acquire \
+          "$HERDR_SES" "$HERDR_PRESENTATION_RECOVERY_LOCK_ATTEMPTS" 1 || {
           echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
           exit 1
         }

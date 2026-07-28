@@ -193,6 +193,42 @@ ok - real Herdr lab: missing, renamed, and duplicate tokens trigger zero destruc
 ok - real Herdr lab validation completed on Herdr 0.7.5 with the default-session tripwire intact
 ```
 
+The concurrent recovery stress gate was repeated on 2026-07-27 against Herdr 0.7.3 protocol 16 after an isolated baseline reproduced a five-second session-lock refusal.
+The causal boundary was a second exact recovery holding the shared presentation lock through its permitted 60-second Treehouse handoff, while the peer exhausted the fresh projection's shorter best-effort lock budget.
+The recovery-only budget was extended per distinct lock owner so a progressing wave can drain without changing the fresh projection fallback.
+
+The following guarded command was run three times after the change:
+
+```sh
+# HERDR_LAB_HELPER is the Firstmate-owned helper supplied by the guarded brief.
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-pure-kun-herdr-validation)
+trap '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' EXIT
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
+HERDR_LAB_HELPER="$HERDR_LAB_HELPER" \
+  tests/fm-backend-herdr-presentation-e2e.test.sh
+"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"
+trap - EXIT
+```
+
+All three post-change runs observed:
+
+```text
+ok - real Herdr lab: concurrent cross-home recoveries replace exact husks under one session lock with no focus drift
+ok - real Herdr lab validation completed on Herdr 0.7.3 with the default-session tripwire intact
+```
+
+The deterministic counterfactual kept the fresh path at 50 attempts, modeled two consecutive 600-attempt predecessors with distinct lock ownership, and acquired the recovery path on attempt 1201:
+
+```sh
+tests/fm-backend-herdr.test.sh
+```
+
+Observed regression:
+
+```text
+ok - herdr presentation lock: recovery drains progressing predecessor waves while fresh projection stays best-effort
+```
+
 The restored-shell session-start cleanup ran on 2026-07-24 against Herdr 0.7.5 protocol 17:
 
 ```sh
