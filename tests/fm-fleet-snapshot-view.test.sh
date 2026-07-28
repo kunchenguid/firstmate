@@ -540,6 +540,42 @@ EOF
   pass "snapshot parses tasks-axi rows and respects operational overrides"
 }
 
+test_done_recent_history_survives_worker_cleanup_without_private_prose() {
+  local home out
+  home=$(make_home cleaned-done)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+- [x] cleaned-ship - Ship completion https://github.com/kunchenguid/firstmate/pull/123 (repo: firstmate) (kind: ship) (merged 2026-07-15)
+  PRIVATE TASK NOTE: do not expose.
+  /Users/yelen/private/task-worktree
+EOF
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks == []
+      and (.backlog.records | length) == 1
+      and (.backlog.records[] | select(.id == "cleaned-ship")
+        | .structured == true
+          and .state == "done"
+          and .title == "Ship completion"
+          and .repo == "firstmate"
+          and .kind == "ship"
+          and .merged == "2026-07-15"
+          and .completion == {verb:"merged",date:"2026-07-15"}
+          and .pr_url == "https://github.com/kunchenguid/firstmate/pull/123"
+          and .links == ["https://github.com/kunchenguid/firstmate/pull/123"]
+          and .body_lines == []
+          and .body_excerpt == null)
+      and ((. | tostring) | contains("PRIVATE TASK NOTE") | not)
+      and ((. | tostring) | contains("/Users/yelen/private/task-worktree") | not)
+  ' >/dev/null || fail "cleaned-up worker Done history leaked private prose or lost structured outcome fields: $out"
+  pass "Done recent history survives worker cleanup as bounded structured outcome memory"
+}
+
 test_view_renders_snapshot() {
   local home fakebin view
   home=$(make_home view)
@@ -768,5 +804,6 @@ test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
+test_done_recent_history_survives_worker_cleanup_without_private_prose
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status

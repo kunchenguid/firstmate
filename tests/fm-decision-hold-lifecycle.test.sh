@@ -550,6 +550,32 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+test_tasks_axi_default_done_keep_archives_oldest_at_51() {
+  local home n key count
+  home=$(make_home default-done-retention)
+  for n in $(seq 1 51); do
+    key=$(printf 'recent-%02d' "$n")
+    tasks_in "$home" add "$key" "Recent outcome $n" --kind ship --repo sample >/dev/null \
+      || fail "could not create retention fixture $key"
+    tasks_in "$home" "done" "$key" --note "local main" >/dev/null \
+      || fail "could not close retention fixture $key"
+  done
+
+  count=$(grep -cE '^- \[x\] recent-[0-9][0-9] -' "$home/data/backlog.md")
+  [ "$count" = 50 ] || fail "tracked done_keep did not retain exactly 50 Done rows: $count"
+  ! grep -E '^- \[x\] recent-01 -' "$home/data/backlog.md" >/dev/null \
+    || fail "oldest Done item remained in bounded backlog"
+  grep -E '^- \[x\] recent-02 -' "$home/data/backlog.md" >/dev/null \
+    || fail "newest retained window lost recent-02"
+  grep -E '^- \[x\] recent-51 -' "$home/data/backlog.md" >/dev/null \
+    || fail "newest retained window lost recent-51"
+  grep -E '^- \[x\] recent-01 -' "$home/data/done-archive.md" >/dev/null \
+    || fail "oldest Done item was not archived"
+  ! grep -E '^- \[x\] recent-02 -' "$home/data/done-archive.md" >/dev/null \
+    || fail "archive received an item inside the retained 50-item window"
+  pass "tasks-axi default Done retention archives the oldest item at 51 and keeps newest 50"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -560,3 +586,4 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
+test_tasks_axi_default_done_keep_archives_oldest_at_51

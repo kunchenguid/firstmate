@@ -368,7 +368,9 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
          | .records += [{order:.order,state:.section,structured:false,id:null,raw:$line,body_lines:[],body_excerpt:null}]
        end)
     | .records |= map(
-        if (.body_lines | length) > 0 then
+        if .state == "done" then
+          .body_lines = [] | .body_excerpt = null
+        elif (.body_lines | length) > 0 then
           .body_excerpt = ((.body_lines | join(" "))[:240])
         else . end)
     | .records as $records
