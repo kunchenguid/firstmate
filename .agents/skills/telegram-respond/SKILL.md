@@ -180,7 +180,9 @@ If a task ends with nothing worth saying, still send one short closing message; 
 ## Other wakes
 
 - `telegram-paired <label>` - a pairing code was just redeemed. The bridge already sent that person a bare confirmation. Tell the captain the link is live, and nothing more happens until a message arrives.
-- `telegram-error <message>` - a bridge configuration or API problem, not a message to answer. Report it to the captain as a blocker in plain terms. `another process is polling this bot` means two homes are sharing one bot token, which is a real misconfiguration: one bot belongs to one home.
+- `telegram-error <message>` - a bridge problem, not a message to answer. Report it to the captain as a blocker in plain terms.
+  `another process is polling this bot` means two homes are sharing one bot token, which is a real misconfiguration: one bot belongs to one home.
+  `message rate limit reached` means messages from the paired person were **dropped, not queued**: tell the captain, and once the window clears send that person one short message saying some of what they sent did not get through and asking them to resend it.
 
 ## Notes
 

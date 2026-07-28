@@ -730,7 +730,7 @@ while :; do
         fi
         i=$((i + 1))
       done
-      if [ "$start" -ge 0 ] && [ "$start" -gt 0 ]; then
+      if [ "$start" -gt 0 ]; then
         FM_ROTATED_CHECKS=("${FM_ROTATED_CHECKS[@]:$start}" "${FM_ROTATED_CHECKS[@]:0:$start}")
       fi
     fi

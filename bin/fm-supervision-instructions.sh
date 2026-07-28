@@ -116,17 +116,14 @@ fi
 # file, and a home may arm either, both, or neither. Everything downstream reads
 # this one ordered list instead of naming a specific channel, so adding or
 # removing a channel never means teaching each harness snippet about it.
-cadence_files=
 cadence_files_sh=
 cadence_source_sh=
 add_cadence_file() {
   local path=$1 quoted
   quoted=$(shell_quote "$path")
-  if [ -z "$cadence_files" ]; then
-    cadence_files=$path
+  if [ -z "$cadence_files_sh" ]; then
     cadence_files_sh=$quoted
   else
-    cadence_files="$cadence_files and $path"
     cadence_files_sh="$cadence_files_sh and $quoted"
   fi
   cadence_source_sh="${cadence_source_sh}[ -f $quoted ] && . $quoted; "
