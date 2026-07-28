@@ -149,11 +149,18 @@ add_wake() {
 "
 }
 
-# Redeem a one-time pairing code from an unpaired private chat. Silence is the
-# only response to any failure, so nothing here can confirm or deny that an offer
-# is open, that a label exists, or that this bot belongs to anything.
+# Redeem a one-time pairing code from an unpaired private chat. Sets PAIRED_LABEL
+# and the pinned-peer variables on success and returns 0; returns 1 otherwise.
+# Deliberately not a command substitution: a subshell would discard the pinned
+# peer, leaving the rest of this batch and the confirmation without a target.
+#
+# Silence is the only response to any failure, so nothing here can confirm or
+# deny that an offer is open, that a label exists, or that this bot belongs to
+# anything.
+PAIRED_LABEL=
 try_pairing() {  # <code> <user_id> <chat_id>
   local code=$1 user=$2 chat=$3 offer expires salt want got label project
+  PAIRED_LABEL=
   offer=$(fmtg_pairing_get 2>/dev/null) || return 1
   expires=$(printf '%s' "$offer" | jq -r '.expires_at // 0')
   case "$expires" in ''|*[!0-9]*) return 1 ;; esac
@@ -174,7 +181,7 @@ try_pairing() {  # <code> <user_id> <chat_id>
   PEER_CHAT=$chat
   PEER_LABEL=$label
   PEER_PROJECT=$project
-  printf '%s' "$label"
+  PAIRED_LABEL=$label
 }
 
 process_update() {  # <update-json>
@@ -202,17 +209,14 @@ process_update() {  # <update-json>
 
   if [ -z "$PEER_USER" ]; then
     # Unpaired. The only thing an unknown chat can do is redeem a code.
-    local label
+    PAIRED_LABEL=
     case "$text" in
-      /start\ *)
-        label=$(try_pairing "${text#/start }" "$from_id" "$chat_id") || label=
-        ;;
-      *) label= ;;
+      /start\ *) try_pairing "${text#/start }" "$from_id" "$chat_id" || PAIRED_LABEL= ;;
     esac
     fmtg_seen_claim "$uid" "$NOW" >/dev/null 2>&1
-    if [ -n "$label" ]; then
+    if [ -n "$PAIRED_LABEL" ]; then
       send_pairing_confirmation
-      add_wake "telegram-paired $label"
+      add_wake "telegram-paired $PAIRED_LABEL"
     fi
     return 0
   fi

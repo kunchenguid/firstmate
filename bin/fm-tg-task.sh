@@ -200,13 +200,17 @@ case "$COMMAND" in
     RC=5
     while IFS= read -r CANDIDATE; do
       [ -n "$CANDIDATE" ] || continue
-      if fmtg_publish_confirm "$TASK" "$CANDIDATE" "$HEAD_REV" "$NOW"; then
+      CODE_RC=0
+      fmtg_publish_confirm "$TASK" "$CANDIDATE" "$HEAD_REV" "$NOW" || CODE_RC=$?
+      if [ "$CODE_RC" -eq 0 ]; then
         RC=0
         break
       fi
-      CODE_RC=$?
       # A non-matching candidate keeps scanning; any other refusal is final.
-      [ "$CODE_RC" -eq 5 ] || { RC=$CODE_RC; break; }
+      if [ "$CODE_RC" -ne 5 ]; then
+        RC=$CODE_RC
+        break
+      fi
     done <<EOF
 $CANDIDATES
 EOF
