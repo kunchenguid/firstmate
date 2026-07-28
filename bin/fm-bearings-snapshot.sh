@@ -37,13 +37,16 @@
 # The default landed baseline is balanced across homes: each home keeps its internal
 # newest-first ordering, homes iterate in deterministic id order, sparse homes do not
 # waste capacity, and --all-landed switches back to the complete global newest-first
-# order.
+# order. Landed rows stay structured identity plus artifact: the canonical snapshot
+# carries no bodies on Done records, so completed work remains bounded prose-free
+# memory here too.
 #
 # Flags:
 #   (default)        compact projection, TOON, local-only
 #   --json           the same projected model as JSON (machine/debug; parity form)
 #   --include-prs    ALSO do live open-PR discovery + checks (the only network path)
 #   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints
+#                    (bodies reveals QUEUED item bodies only; Done rows have none)
 #   --all-in-flight  include every in-flight task
 #   --all-decisions  include every open decision
 #   --all-secondmates include every aggregated secondmate record
@@ -119,6 +122,8 @@ For every registered secondmate, readable structured facts from its own home are
 Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
   --all-decisions, --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
   --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
+--fields bodies reveals queued item bodies only; Done records carry no bodies in
+  the canonical snapshot, so landed work stays structured identity plus artifact.
 Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
 EOF
 }

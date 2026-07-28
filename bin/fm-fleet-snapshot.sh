@@ -20,6 +20,16 @@
 #     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids, and
 #     captain_actionable fields. Repeated blocker tokens remain ordered; a blocker
 #     resolves only when its structured record is Done, and missing ids stay open.
+#     In flight and Queued rows keep their indented body_lines plus a bounded
+#     body_excerpt. Done rows do not: they are the fleet's completion memory once
+#     a finished worker's meta, status log, and endpoint have been cleaned up, so
+#     they carry only their own title line and its structured fields - id, title,
+#     repo, kind, completion verb/date, and the admitted artifact (pr_url,
+#     report_path, or local_note) - with body_lines emptied and body_excerpt null.
+#     That keeps task notes, decision bodies, report prose, and absolute local
+#     paths written under a Done item out of every consumer. A `local main` body
+#     line is the recorded artifact of a local-only merge, so it is lifted into
+#     local_note before those bodies are dropped.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
