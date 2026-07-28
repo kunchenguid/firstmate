@@ -542,7 +542,18 @@ exit 1
 SH
   cat >"$repo/$a" <<'SH'
 #!/usr/bin/env bash
-sleep 0.5
+# Keep the oldest worker alive until the replacement worker actually starts.
+# A fixed sleep here measured macOS process scheduling rather than the runner's
+# refill decision: under load the runner launched the replacement immediately,
+# but the OS did not schedule its process until after the fixed sleep expired.
+attempt=0
+while [ ! -e "$SCHED_EVIDENCE/replacement-started" ] && [ "$attempt" -lt 500 ]; do
+  sleep 0.01
+  attempt=$((attempt + 1))
+done
+if [ ! -e "$SCHED_EVIDENCE/replacement-started" ]; then
+  touch "$SCHED_EVIDENCE/slow-timed-out"
+fi
 touch "$SCHED_EVIDENCE/slow-done"
 echo "ok - slow fixture"
 SH
@@ -553,10 +564,11 @@ echo "ok - fast fixture"
 SH
   cat >"$repo/$c" <<'SH'
 #!/usr/bin/env bash
-if [ -e "$SCHED_EVIDENCE/slow-done" ]; then
+if [ -e "$SCHED_EVIDENCE/slow-timed-out" ]; then
   echo "not ok - scheduler waited for oldest worker"
   exit 1
 fi
+touch "$SCHED_EVIDENCE/replacement-started"
 echo "ok - replacement fixture started before slow fixture finished"
 SH
   chmod +x "$runner" "$repo/$a" "$repo/$b" "$repo/$c" "$fake_bin/stat"
