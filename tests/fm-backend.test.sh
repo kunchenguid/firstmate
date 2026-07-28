@@ -110,9 +110,11 @@ resolve_permissive_tmux_kill_ref() {
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
     body=$(git -C "$ROOT" show "$commit:bin/backends/tmux.sh" 2>/dev/null) || continue
+    # shellcheck disable=SC2016
     case "$body" in
       *'tmux kill-window -t "=$session:=$window"'*) continue ;;
     esac
+    # shellcheck disable=SC2016
     case "$body" in
       *'tmux kill-window -t "$1"'*|*'tmux kill-window -t "$target"'*)
         printf '%s\n' "$commit"
@@ -966,15 +968,18 @@ test_permissive_tmux_kill_ref_stays_historical() {
     || fail "could not read historical tmux adapter at $ref"
   body_head=$(cat "$ROOT/bin/backends/tmux.sh")
 
+  # shellcheck disable=SC2016
   case "$body_hist" in
     *'tmux kill-window -t "=$session:=$window"'*)
       fail "resolve_permissive_tmux_kill_ref returned exact selectors at $ref"
       ;;
   esac
+  # shellcheck disable=SC2016
   case "$body_hist" in
     *'tmux kill-window -t "$1"'*|*'tmux kill-window -t "$target"'*) ;;
     *) fail "historical tmux adapter at $ref lacks a permissive kill-window target" ;;
   esac
+  # shellcheck disable=SC2016
   case "$body_head" in
     *'tmux kill-window -t "=$session:=$window"'*) ;;
     *) fail "current tmux adapter lost exact kill-window selectors" ;;
