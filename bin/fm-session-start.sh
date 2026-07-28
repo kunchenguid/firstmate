@@ -290,7 +290,9 @@ fi
 # below. The read-only path never touches the queue because it lacks mutation
 # authority, and another session may be actively draining it. It still runs
 # fm-guard.sh directly with non-mutating advisory text, so the same alarms
-# surface without repair commands.
+# surface without repair commands. The locked path also rebuilds the
+# zellij-only supervisor tab here, after the queue mutation and before the
+# bulk digest, so active crews are surfaced again on session start.
 subsection "WAKE QUEUE"
 if [ "$READ_ONLY" -eq 1 ]; then
   QLEN=0
@@ -305,6 +307,7 @@ else
   else
     printf '(no queued wakes)\n'
   fi
+  "$SCRIPT_DIR/fm-supervisor-panes.sh" >/dev/null 2>&1 || true
 fi
 
 # --- 4. supervision operating instructions ----------------------------------

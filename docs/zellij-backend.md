@@ -87,6 +87,15 @@ Closing a pane leaves an empty tab.
 Cleanup resolves and verifies the owning tab, then uses `close-tab-by-id` so both the task pane and tab disappear.
 Real test cleanup uses only an isolated non-`firstmate` session and the guard in `tests/zellij-test-safety.sh`; it never calls all-session deletion commands.
 
+## Supervisor surface
+
+Zellij now owns one additional supervision-only tab per firstmate home when that home has active non-secondmate zellij crews.
+The task runtime contract is unchanged: each task still executes in its own tab.
+The supervisor tab is rebuilt by `bin/fm-supervisor-panes.sh` after successful spawn, after teardown, and on the locked path during `bin/fm-session-start.sh`.
+Each supervisor pane runs `bin/fm-supervisor-pane-loop.sh`, which refreshes `bin/fm-crew-state.sh` plus bounded `bin/fm-peek.sh` output until the task metadata disappears.
+When no active non-secondmate zellij crews remain, reconciliation closes the supervisor tab instead of leaving an empty surface behind.
+Other backends currently no-op for this feature.
+
 ## Active limits
 
 - Zellij is experimental and explicit-only.

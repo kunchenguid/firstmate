@@ -1691,5 +1691,6 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
+"$FM_ROOT/bin/fm-supervisor-panes.sh" >/dev/null 2>&1 || true
 echo "teardown $ID complete (window $T, worktree $WT)"
 backlog_refresh_reminder

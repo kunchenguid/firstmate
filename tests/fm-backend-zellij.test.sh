@@ -520,6 +520,31 @@ test_create_task_no_restore_when_new_tab_was_already_active() {
   pass "fm_backend_zellij_create_task: skips the restore call when there was no previously-active tab"
 }
 
+test_supervisor_reconcile_builds_tab_and_panes() {
+  local dir fb title log
+  dir="$TMP_ROOT/supervisor-reconcile"; mkdir -p "$dir/responses"
+  title="fm-supervisor-$(zellij_expected_home_label "$ROOT" "$ROOT")"
+  printf '[]\n' > "$dir/responses/1.out"
+  printf '[]\n' > "$dir/responses/2.out"
+  printf '8\n' > "$dir/responses/3.out"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_supervisor_reconcile firstmate alpha bravo' "$ROOT" \
+    || fail "supervisor_reconcile should build a new supervisor tab and pane set"
+  log=$(cat "$dir/log")
+  assert_contains "$log" $'\x1f''new-tab'$'\x1f''--cwd'$'\x1f'"$ROOT"$'\x1f''--name'$'\x1f'"$title"$'\x1f''--close-on-exit' \
+    "supervisor_reconcile did not create the supervisor tab with close-on-exit"
+  assert_contains "$log" "fm-supervisor-pane-loop.sh"$'\x1f''alpha' \
+    "supervisor_reconcile did not seed the supervisor tab with the first task pane command"
+  assert_contains "$log" $'\x1f''new-pane'$'\x1f''--tab-id'$'\x1f''8'$'\x1f''--cwd'$'\x1f'"$ROOT"$'\x1f''--name'$'\x1f''fm-bravo'$'\x1f''--close-on-exit' \
+    "supervisor_reconcile did not create the additional supervisor pane on the new tab"
+  assert_contains "$log" "fm-supervisor-pane-loop.sh"$'\x1f''bravo' \
+    "supervisor_reconcile did not launch the pane-loop helper for the added pane"
+  pass "fm_backend_zellij_supervisor_reconcile: builds the supervisor tab and pane commands for active crews"
+}
+
 # --- capture / send_key / send_literal / current_path / kill -----------------
 
 test_capture_small_reads_use_viewport_and_trim() {
@@ -1050,6 +1075,7 @@ test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
 test_create_task_restores_previously_active_tab
 test_create_task_no_restore_when_new_tab_was_already_active
+test_supervisor_reconcile_builds_tab_and_panes
 test_capture_small_reads_use_viewport_and_trim
 test_capture_large_reads_use_full_scrollback_and_trim
 test_capture_fails_when_pane_absent

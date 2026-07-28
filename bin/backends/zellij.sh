@@ -354,6 +354,104 @@ fm_backend_zellij_create_task() {  # <session> <label> <cwd>
   printf '%s %s' "$tab_id" "$pane_id"
 }
 
+fm_backend_zellij_supervisor_tab_title() {
+  printf 'fm-supervisor-%s' "$(fm_backend_zellij_home_label)"
+}
+
+fm_backend_zellij_supervisor_pane_name() {  # <task-id>
+  printf 'fm-%s' "$1"
+}
+
+fm_backend_zellij_tabs_by_name() {  # <session> <name>
+  local session=$1 name=$2 tabs
+  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 0
+  printf '%s' "$tabs" | jq -r --arg want "$name" '.[]? | select(.name == $want) | .tab_id' 2>/dev/null || true
+}
+
+fm_backend_zellij_active_tab_id() {  # <session>
+  local session=$1 tabs
+  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 0
+  printf '%s' "$tabs" | jq -r '.[]? | select(.active == true) | .tab_id' 2>/dev/null | head -1
+}
+
+fm_backend_zellij_supervisor_command_argv() {  # <task-id>
+  FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV=(
+    env
+    "FM_ROOT_OVERRIDE=$FM_ROOT"
+    "FM_HOME=$FM_HOME"
+    "FM_STATE_OVERRIDE=$FM_HOME/state"
+    "FM_DATA_OVERRIDE=$FM_HOME/data"
+    "FM_PROJECTS_OVERRIDE=$FM_HOME/projects"
+    "FM_CONFIG_OVERRIDE=$FM_HOME/config"
+    bash
+    "$FM_ROOT/bin/fm-supervisor-pane-loop.sh"
+    "$1"
+  )
+}
+
+fm_backend_zellij_supervisor_reconcile() {  # <session> [task-id...]
+  local session=$1
+  shift
+  local title prev_active restore_target new_tab_id task_id old_id
+  local old_ids=()
+  command -v zellij >/dev/null 2>&1 || {
+    [ "$#" -eq 0 ] && return 0
+    echo "error: zellij CLI not found; cannot reconcile supervisor panes" >&2
+    return 1
+  }
+  fm_backend_zellij_session_exists "$session" || return 0
+  title=$(fm_backend_zellij_supervisor_tab_title)
+  prev_active=$(fm_backend_zellij_active_tab_id "$session")
+  mapfile -t old_ids < <(fm_backend_zellij_tabs_by_name "$session" "$title")
+  for old_id in "${old_ids[@]}"; do
+    [ -n "$old_id" ] || continue
+    fm_backend_zellij_cli "$session" action close-tab-by-id "$old_id" >/dev/null 2>&1 || true
+  done
+  [ "$#" -gt 0 ] || {
+    for old_id in "${old_ids[@]}"; do
+      [ "$prev_active" = "$old_id" ] && return 0
+    done
+    [ -z "$prev_active" ] || fm_backend_zellij_cli "$session" action go-to-tab-by-id "$prev_active" >/dev/null 2>&1 || true
+    return 0
+  }
+
+  task_id=$1
+  fm_backend_zellij_supervisor_command_argv "$task_id"
+  new_tab_id=$(fm_backend_zellij_cli \
+    "$session" action new-tab \
+    --cwd "$FM_ROOT" \
+    --name "$title" \
+    --close-on-exit \
+    -- "${FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV[@]}" 2>/dev/null | tr -d '[:space:]')
+  case "$new_tab_id" in
+    ''|*[!0-9]*)
+      echo "error: zellij supervisor tab did not return a numeric tab id for '$title' (got '$new_tab_id')" >&2
+      return 1
+      ;;
+  esac
+  shift
+
+  for task_id in "$@"; do
+    fm_backend_zellij_supervisor_command_argv "$task_id"
+    fm_backend_zellij_cli \
+      "$session" action new-pane \
+      --tab-id "$new_tab_id" \
+      --cwd "$FM_ROOT" \
+      --name "$(fm_backend_zellij_supervisor_pane_name "$task_id")" \
+      --close-on-exit \
+      -- "${FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV[@]}" >/dev/null 2>&1 || return 1
+  done
+
+  restore_target=$prev_active
+  for old_id in "${old_ids[@]}"; do
+    if [ "$prev_active" = "$old_id" ]; then
+      restore_target=$new_tab_id
+      break
+    fi
+  done
+  [ -z "$restore_target" ] || fm_backend_zellij_cli "$session" action go-to-tab-by-id "$restore_target" >/dev/null 2>&1 || true
+}
+
 # fm_backend_zellij_parse_target: split "<session>:<pane_id>" on the FIRST
 # colon (the pane id is a bare integer with no embedded colon, so this is
 # simpler than herdr's equivalent but kept structurally parallel). Sets
