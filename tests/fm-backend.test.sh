@@ -12,7 +12,10 @@
 #      binaries and fixtures as the REFACTORED versions in this checkout, then
 #      diffs the two command logs byte-for-byte - the report's P1 checklist
 #      item "run current main scripts and refactored scripts against the same
-#      fake tools and compare command logs".
+#      fake tools and compare command logs". The teardown old-vs-new case also
+#      overlays a content-historical permissive tmux kill fixture: after the
+#      exact-selector change lands on the default branch, merge-base with main
+#      collapses to HEAD and can no longer supply that baseline.
 #   3. Asserts the `--backend`/`FM_BACKEND` selection refuses unknown backends
 #      and the blocked `codex-app` backend loudly.
 #
@@ -80,6 +83,9 @@ SH
 }
 
 # The commit this branch started from - the P1 "current main" baseline.
+# Suitable for byte-identical old-vs-new checks while a branch still diverges
+# from main. After a squash lands, merge-base(HEAD, main) collapses to HEAD, so
+# callers that need a true pre-change fixture must not rely on this alone.
 resolve_base_ref() {
   local ref base
   for ref in main refs/heads/main origin/main refs/remotes/origin/main origin/HEAD refs/remotes/origin/HEAD; do
@@ -94,6 +100,30 @@ resolve_base_ref() {
 }
 BASE_REF=$(resolve_base_ref) \
   || fail "fm-backend baseline requires local main or origin/main; fetch the default branch before running this test"
+
+# Newest first-parent revision whose bin/backends/tmux.sh still uses the
+# pre-exact permissive kill-window target. Content-addressed from history so the
+# fixture stays historical on default-branch CI and on branches cut after the
+# exact-selector change, where merge-base with main is self-referential.
+resolve_permissive_tmux_kill_ref() {
+  local commit body
+  while IFS= read -r commit; do
+    [ -n "$commit" ] || continue
+    body=$(git -C "$ROOT" show "$commit:bin/backends/tmux.sh" 2>/dev/null) || continue
+    # shellcheck disable=SC2016
+    case "$body" in
+      *'tmux kill-window -t "=$session:=$window"'*) continue ;;
+    esac
+    # shellcheck disable=SC2016
+    case "$body" in
+      *'tmux kill-window -t "$1"'*|*'tmux kill-window -t "$target"'*)
+        printf '%s\n' "$commit"
+        return 0
+        ;;
+    esac
+  done < <(git -C "$ROOT" log --first-parent --format='%H' HEAD -- bin/backends/tmux.sh)
+  return 1
+}
 
 # --- shared: a pre-refactor bin/ shim --------------------------------------
 #
@@ -929,10 +959,52 @@ run_teardown_case() {
     "$script" "$id"
 }
 
+test_permissive_tmux_kill_ref_stays_historical() {
+  local ref body_hist body_head head
+  head=$(git -C "$ROOT" rev-parse HEAD)
+  ref=$(resolve_permissive_tmux_kill_ref) \
+    || fail "unable to locate a historical bin/backends/tmux.sh with permissive kill-window selectors"
+  body_hist=$(git -C "$ROOT" show "$ref:bin/backends/tmux.sh") \
+    || fail "could not read historical tmux adapter at $ref"
+  body_head=$(cat "$ROOT/bin/backends/tmux.sh")
+
+  # shellcheck disable=SC2016
+  case "$body_hist" in
+    *'tmux kill-window -t "=$session:=$window"'*)
+      fail "resolve_permissive_tmux_kill_ref returned exact selectors at $ref"
+      ;;
+  esac
+  # shellcheck disable=SC2016
+  case "$body_hist" in
+    *'tmux kill-window -t "$1"'*|*'tmux kill-window -t "$target"'*) ;;
+    *) fail "historical tmux adapter at $ref lacks a permissive kill-window target" ;;
+  esac
+  # shellcheck disable=SC2016
+  case "$body_head" in
+    *'tmux kill-window -t "=$session:=$window"'*) ;;
+    *) fail "current tmux adapter lost exact kill-window selectors" ;;
+  esac
+  [ "$ref" != "$head" ] \
+    || fail "permissive tmux baseline collapsed to HEAD; fixture is no longer historical"
+
+  pass "historical permissive tmux kill baseline stays distinct from current exact selectors"
+}
+
 test_teardown_conformance_old_vs_new() {
-  local old_bin fb proj wt id
+  local old_bin fb proj wt id old_tmux_ref saved_base_ref
   local state_old state_new config_old config_new data log_old log_new out_old out_new rc_old rc_new
+  # Force the post-squash topology inside this case: merge-base with main may
+  # equal HEAD on default-branch CI, and that must not make the legacy kill
+  # fixture self-referential. build_old_bin still uses BASE_REF for entrypoints;
+  # only the tmux kill adapter is pinned to the content-historical permissive ref.
+  saved_base_ref=$BASE_REF
+  BASE_REF=$(git -C "$ROOT" rev-parse HEAD)
+  old_tmux_ref=$(resolve_permissive_tmux_kill_ref) \
+    || { BASE_REF=$saved_base_ref; fail "unable to locate a historical bin/backends/tmux.sh with permissive kill-window selectors"; }
   old_bin=$(build_old_bin teardown-old)
+  git -C "$ROOT" show "$old_tmux_ref:bin/backends/tmux.sh" > "$old_bin/bin/backends/tmux.sh" \
+    || { BASE_REF=$saved_base_ref; fail "could not materialize historical tmux adapter from $old_tmux_ref"; }
+  BASE_REF=$saved_base_ref
   proj="$TMP_ROOT/teardown-project"; wt="$TMP_ROOT/teardown-wt"
   id="teardownconform1"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -1106,6 +1178,7 @@ test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
+test_permissive_tmux_kill_ref_stays_historical
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag
