@@ -110,6 +110,8 @@
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
+# A successful launch also best-effort enrolls the agent in Parlay's chat panel
+# (bin/fm-parlay-lib.sh); a missing/unreachable parlay CLI never fails the spawn.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -141,6 +143,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-parlay-lib.sh
+. "$SCRIPT_DIR/fm-parlay-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1540,5 +1544,9 @@ if [ "$KIND" = secondmate ]; then
     fi
   fi
 fi
+
+# Best-effort: enroll this agent in Parlay's chat panel (bin/fm-parlay-lib.sh);
+# never blocks or fails the spawn when parlay is absent or unreachable.
+fm_parlay_listen "$ID" "$STATE"
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
