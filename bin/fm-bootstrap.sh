@@ -238,6 +238,7 @@ TREEHOUSE_AUDIT_SEEN_SLOTS=""
 # Emit one raw record per dirty idle slot: "<slot>|<path>|<trailing detail>".
 # Each pool is scanned inside its own bounded background job, so this cannot own
 # the cross-pool dedup - it reports what it saw and the parent decides.
+# shellcheck disable=SC2329 # Invoked indirectly: passed by name to bootstrap_run_bounded below.
 treehouse_pool_dirty_idle_scan() {  # <repo>
   local repo=$1 out line slot state path rest
   out=$( (cd "$repo" 2>/dev/null && treehouse status) 2>/dev/null ) || return 0
