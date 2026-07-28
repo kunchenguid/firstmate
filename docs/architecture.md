@@ -107,6 +107,8 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
+It then re-validates the leased pool slot itself, so a pool that handed out a reused slot cannot become someone else's base: the slot must be clean, and its HEAD must already be contained in a default-branch tip (`origin/<default>` or the local branch, trying the resolved default plus `main` and `master`).
+A dirty or divergent slot refuses the spawn and deliberately keeps the lease held so the unlanded work stays inspectable; a clone with no resolvable default tip warns and launches instead of blocking every dispatch.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
@@ -235,8 +237,10 @@ Generalizable firstmate knowledge goes to shared tracked docs through the normal
 
 The locked session-start bootstrap step, PR-based teardown, and merged-PR wake handling refresh remote-backed project clones when the clone is safe to move.
 Wake-time refreshes can target a single clone by project name, so the primary home also catches up when a secondmate reports a merge from its own home.
-Clean default-branch clones fast-forward to `origin/<default>`, and a clean detached HEAD that holds no unique commits is re-attached to the default branch before the same fast-forward path runs.
-Dirty clones, non-default branches, detached HEADs with unique commits, diverged defaults, and default branches checked out in another worktree are reported as `STUCK:` with their behind count and left untouched.
+Clean default-branch clones fast-forward to `origin/<default>`, and a clean off-default checkout that strands nothing is re-attached to the default branch before the same fast-forward path runs: a detached HEAD that holds no unique commits, or a named branch whose commits are all already on a remote.
+Re-attaching is a plain `checkout` of the default branch plus a fast-forward; nothing is ever forced, stashed, discarded, or deleted, so a recovered named branch keeps its ref.
+Dirty clones, named branches with unpushed commits, detached HEADs with unique commits, diverged defaults, and default branches checked out in another worktree are reported as `STUCK:` with their behind count and left untouched.
+A lone untracked root `treehouse.toml` is a pool worktree's own treehouse config, so every firstmate path that judges a pool worktree's cleanliness - this refresh, spawn's lease check, teardown, and the quota-wall rehome - treats it as clean through the shared predicates in `bin/fm-pool-lib.sh` and preserves the file.
 Fetches blocked by an orphaned `.git/packed-refs.lock` use bounded retries and remove the lock only when the shared staleness proof can prove it abandoned; [configuration.md](configuration.md#toolchain) owns the recovery details and tuning knobs.
 Local-only projects, clones without an origin remote, and fetch failures remain benign skips.
 The refresh also prunes local branches whose remote is gone and that no worktree still needs.
