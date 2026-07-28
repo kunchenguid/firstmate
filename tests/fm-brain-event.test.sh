@@ -239,11 +239,8 @@ CONFLICT_STORE="$CONFLICT_STORE" FM_BRAIN_EVENT_COMMAND="$CONFLICTING" \
 RC=$?
 set -e
 [ "$RC" -eq 0 ] || fail "an identical retry changed the lifecycle outcome"
-if grep -Fq 'lifecycle event was not accepted' "$CAPTURE.retry2.err"; then
-  fail "an identical retry of an already-stored event still warned: $(cat "$CAPTURE.retry2.err")"
-fi
-grep -Fq '"error":"event_conflict"' "$CAPTURE.retry2.err" \
-  || fail "the client's own diagnostic was swallowed instead of only the bridge warning"
+[ ! -s "$CAPTURE.retry2.err" ] \
+  || fail "an identical retry of an already-stored event still looked like a failure: $(cat "$CAPTURE.retry2.err")"
 pass "fm-brain-event: an identical retry of an already-stored event is not a failure"
 
 # A real rejection - wrong credential, unknown type, malformed payload - also

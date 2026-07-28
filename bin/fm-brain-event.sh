@@ -106,20 +106,25 @@ ERR_TEXT=$(bounded_event "$EVENT_COMMAND" "$TYPE" "$TEXT" \
   --quiet \
   "$@" 2>&1 1>&3 3>&-)
 EVENT_RC=$?
-[ -z "$ERR_TEXT" ] || printf '%s\n' "$ERR_TEXT" >&2
+
+# A narrow, literal match on the real client's own wording for this one
+# rejection reason: an identical retry, keyed on our derived event_id, that the
+# server already stored once. Any other wording - a different HTTP code in the
+# parens, or no "event_conflict" field - falls through and still reports both
+# the client's own rejection text and the bridge's warning. If the server's
+# error text ever changes, this stops matching and reverts to always warning;
+# it can never start swallowing a wider class of failure than the one line it
+# names.
+ALREADY_DELIVERED=no
 if [ "$EVENT_RC" -ne 0 ]; then
-  # A narrow, literal match on the real client's own wording for this one
-  # rejection reason: an identical retry, keyed on our derived event_id, that
-  # the server already stored once. Any other wording - a different HTTP code
-  # in the parens, or no "event_conflict" field - falls through and still
-  # warns. If the server's error text ever changes, this stops matching and
-  # reverts to always warning; it can never start swallowing a wider class of
-  # failure than the one line it names.
   case "$ERR_TEXT" in
-    *'(409):'*'"error":"event_conflict"'*) ;;
-    *)
-      echo "warning: fm-brain-event: lifecycle event was not accepted (action=$ACTION task=$TASK_ID)" >&2
-      ;;
+    *'(409):'*'"error":"event_conflict"'*) ALREADY_DELIVERED=yes ;;
   esac
+fi
+
+if [ "$ALREADY_DELIVERED" = no ]; then
+  [ -z "$ERR_TEXT" ] || printf '%s\n' "$ERR_TEXT" >&2
+  [ "$EVENT_RC" -eq 0 ] \
+    || echo "warning: fm-brain-event: lifecycle event was not accepted (action=$ACTION task=$TASK_ID)" >&2
 fi
 exit 0
