@@ -93,14 +93,14 @@ fm_fakebin() {
 # absent from PATH even when the host machine has it installed (e.g. parlay).
 fm_path_without() {
   local cmd=$1 dir
-  local -a out=()
+  local -a kept_dirs=()
   local IFS=:
   # shellcheck disable=SC2086
   for dir in $PATH; do
     [ -x "$dir/$cmd" ] && continue
-    out+=("$dir")
+    kept_dirs+=("$dir")
   done
-  printf '%s\n' "${out[*]}"
+  printf '%s\n' "${kept_dirs[*]}"
 }
 
 fm_fake_exit0() {
