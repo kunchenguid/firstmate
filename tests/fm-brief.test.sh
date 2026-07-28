@@ -307,6 +307,9 @@ test_plan_flag_injects_binding_block() {
     "--plan block did not declare the plan binding"
   assert_grep 'list EVERY one in the PR body under "Deviations from approved plan"' "$brief" \
     "--plan block lost the minor-deviation disclosure rule"
+  # The backticks are literal Markdown from the brief, matched by grep -F; single
+  # quotes are required so the shell does not command-substitute them.
+  # shellcheck disable=SC2016
   assert_grep 'append `needs-decision: plan deviation - {summary}`' "$brief" \
     "--plan block lost the material-deviation stop rule"
   # The block sits between the Task section and the Herdr declaration.
