@@ -59,6 +59,7 @@ test_active_zellij_crews_create_supervisor_tab_and_panes() {
   printf '[]\n' > "$dir/responses/1.out"
   printf '[]\n' > "$dir/responses/2.out"
   printf '21\n' > "$dir/responses/3.out"
+  printf 'terminal_44\n' > "$dir/responses/4.out"
   fb=$(make_zellij_fakebin "$dir")
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
@@ -110,6 +111,13 @@ test_lifecycle_hooks_invoke_reconciler() {
   pass "lifecycle hooks invoke the zellij supervisor reconciler"
 }
 
+test_pane_loop_peeks_in_guard_read_only_mode() {
+  assert_grep 'FM_GUARD_READ_ONLY=1' "$ROOT/bin/fm-supervisor-pane-loop.sh" \
+    "the supervisor pane loop must peek in guard read-only mode so it cannot claim the once-per-episode WATCHER DOWN banner"
+  pass "fm-supervisor-pane-loop: peeks in guard read-only mode"
+}
+
 test_active_zellij_crews_create_supervisor_tab_and_panes
 test_zero_active_zellij_crews_close_existing_supervisor_tab
 test_lifecycle_hooks_invoke_reconciler
+test_pane_loop_peeks_in_guard_read_only_mode

@@ -96,6 +96,10 @@ Each supervisor pane runs `bin/fm-supervisor-pane-loop.sh`, which refreshes `bin
 When no active non-secondmate zellij crews remain, reconciliation closes the supervisor tab instead of leaving an empty surface behind.
 Other backends currently no-op for this feature.
 
+The pane command runs under the zellij server process, so the reconciler passes everything the loop needs through an explicit `env` allow-list.
+`FM_SUPERVISOR_REFRESH_SECS` (default 5) and `FM_SUPERVISOR_PEEK_LINES` (default 20) tune the loop and are forwarded into that allow-list only when set in the environment of the command that triggers reconciliation.
+The loop peeks with `FM_GUARD_READ_ONLY=1`: it is a non-owning guard caller, so it must never claim or clear `bin/fm-guard.sh`'s once-per-episode watcher-down banner from a background pane no agent is reading.
+
 ## Active limits
 
 - Zellij is experimental and explicit-only.
@@ -113,6 +117,7 @@ Other backends currently no-op for this feature.
 ```sh
 tests/fm-backend-zellij.test.sh
 tests/fm-backend-zellij-smoke.test.sh
+tests/fm-supervisor-panes.test.sh
 ```
 
 The real smoke test uses a unique session and guarded deletion.

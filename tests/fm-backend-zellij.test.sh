@@ -527,6 +527,7 @@ test_supervisor_reconcile_builds_tab_and_panes() {
   printf '[]\n' > "$dir/responses/1.out"
   printf '[]\n' > "$dir/responses/2.out"
   printf '8\n' > "$dir/responses/3.out"
+  printf 'terminal_31\n' > "$dir/responses/4.out"
   fb=$(make_zellij_fakebin "$dir")
   PATH="$fb:$PATH" FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" \
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
@@ -543,6 +544,45 @@ test_supervisor_reconcile_builds_tab_and_panes() {
   assert_contains "$log" "fm-supervisor-pane-loop.sh"$'\x1f''bravo' \
     "supervisor_reconcile did not launch the pane-loop helper for the added pane"
   pass "fm_backend_zellij_supervisor_reconcile: builds the supervisor tab and pane commands for active crews"
+}
+
+test_supervisor_reconcile_fails_when_new_pane_returns_no_pane_id() {
+  local dir fb err
+  dir="$TMP_ROOT/supervisor-reconcile-nopane"; mkdir -p "$dir/responses"
+  printf '[]\n' > "$dir/responses/1.out"
+  printf '[]\n' > "$dir/responses/2.out"
+  printf '9\n' > "$dir/responses/3.out"
+  fb=$(make_zellij_fakebin "$dir")
+  err=$(PATH="$fb:$PATH" FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_supervisor_reconcile firstmate alpha bravo' "$ROOT" 2>&1 >/dev/null) \
+    && fail "supervisor_reconcile should fail when new-pane returns no terminal pane id"
+  assert_contains "$err" "did not return a terminal pane id" \
+    "supervisor_reconcile should report the unusable new-pane output instead of trusting exit 0"
+  pass "fm_backend_zellij_supervisor_reconcile: refuses a new-pane that returned no terminal pane id"
+}
+
+test_supervisor_command_argv_forwards_tuning_knobs() {
+  local argv
+  argv=$(FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_SUPERVISOR_REFRESH_SECS=30 FM_SUPERVISOR_PEEK_LINES=12 \
+    bash -c '. "$0/bin/backends/zellij.sh"
+      fm_backend_zellij_supervisor_command_argv alpha
+      printf "%s\n" "${FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV[@]}"' "$ROOT")
+  assert_contains "$argv" "FM_SUPERVISOR_REFRESH_SECS=30" \
+    "the pane env allow-list should forward an operator-set refresh interval"
+  assert_contains "$argv" "FM_SUPERVISOR_PEEK_LINES=12" \
+    "the pane env allow-list should forward an operator-set peek line count"
+  argv=$(FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" \
+    bash -c '. "$0/bin/backends/zellij.sh"
+      fm_backend_zellij_supervisor_command_argv alpha
+      printf "%s\n" "${FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV[@]}"' "$ROOT")
+  assert_not_contains "$argv" "FM_SUPERVISOR_REFRESH_SECS" \
+    "an unset refresh interval should leave the loop defaults alone"
+  assert_not_contains "$argv" "FM_SUPERVISOR_PEEK_LINES" \
+    "an unset peek line count should leave the loop defaults alone"
+  pass "fm_backend_zellij_supervisor_command_argv: forwards the supervisor tuning knobs only when set"
 }
 
 # --- capture / send_key / send_literal / current_path / kill -----------------
@@ -1076,6 +1116,8 @@ test_create_task_creates_and_parses_ids
 test_create_task_restores_previously_active_tab
 test_create_task_no_restore_when_new_tab_was_already_active
 test_supervisor_reconcile_builds_tab_and_panes
+test_supervisor_reconcile_fails_when_new_pane_returns_no_pane_id
+test_supervisor_command_argv_forwards_tuning_knobs
 test_capture_small_reads_use_viewport_and_trim
 test_capture_large_reads_use_full_scrollback_and_trim
 test_capture_fails_when_pane_absent

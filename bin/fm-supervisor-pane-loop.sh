@@ -10,9 +10,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
-meta_value() {  # <meta-file> <key>
-  grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
-}
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
 usage() {
   cat <<'EOF'
@@ -40,9 +39,9 @@ case "$PEEK_LINES" in
 esac
 
 while [ -f "$META" ]; do
-  kind=$(meta_value "$META" kind)
-  backend=$(meta_value "$META" backend)
-  project=$(meta_value "$META" project)
+  kind=$(fm_meta_get "$META" kind)
+  backend=$(fm_meta_get "$META" backend)
+  project=$(fm_meta_get "$META" project)
   state_line=$(
     FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_HOME="$FM_HOME" \
@@ -52,6 +51,10 @@ while [ -f "$META" ]; do
       FM_CONFIG_OVERRIDE="$CONFIG" \
       "$SCRIPT_DIR/fm-crew-state.sh" "$ID" 2>/dev/null || true
   )
+  # FM_GUARD_READ_ONLY=1: this background pane is a non-owning guard caller.
+  # fm-peek.sh runs fm-guard.sh, and the mutating path would claim (or clear)
+  # the once-per-episode WATCHER DOWN banner here, where no agent reads it,
+  # downgrading the supervising agent's next fleet command to a one-liner.
   peek_out=$(
     FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_HOME="$FM_HOME" \
@@ -59,6 +62,7 @@ while [ -f "$META" ]; do
       FM_DATA_OVERRIDE="$DATA" \
       FM_PROJECTS_OVERRIDE="$PROJECTS" \
       FM_CONFIG_OVERRIDE="$CONFIG" \
+      FM_GUARD_READ_ONLY=1 \
       "$SCRIPT_DIR/fm-peek.sh" "$ID" "$PEEK_LINES" 2>&1 || true
   )
   [ -n "$kind" ] || kind=ship

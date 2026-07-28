@@ -374,6 +374,11 @@ fm_backend_zellij_active_tab_id() {  # <session>
   printf '%s' "$tabs" | jq -r '.[]? | select(.active == true) | .tab_id' 2>/dev/null | head -1
 }
 
+# fm_backend_zellij_supervisor_command_argv: the pane command runs under the
+# zellij SERVER process, not the shell that invoked the CLI, so every variable
+# the loop needs has to travel in this explicit `env` allow-list. The two
+# operator tuning knobs are forwarded only when set, so the loop keeps its own
+# defaults otherwise.
 fm_backend_zellij_supervisor_command_argv() {  # <task-id>
   FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV=(
     env
@@ -383,6 +388,12 @@ fm_backend_zellij_supervisor_command_argv() {  # <task-id>
     "FM_DATA_OVERRIDE=$FM_HOME/data"
     "FM_PROJECTS_OVERRIDE=$FM_HOME/projects"
     "FM_CONFIG_OVERRIDE=$FM_HOME/config"
+  )
+  [ -z "${FM_SUPERVISOR_REFRESH_SECS:-}" ] \
+    || FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV+=("FM_SUPERVISOR_REFRESH_SECS=$FM_SUPERVISOR_REFRESH_SECS")
+  [ -z "${FM_SUPERVISOR_PEEK_LINES:-}" ] \
+    || FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV+=("FM_SUPERVISOR_PEEK_LINES=$FM_SUPERVISOR_PEEK_LINES")
+  FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV+=(
     bash
     "$FM_ROOT/bin/fm-supervisor-pane-loop.sh"
     "$1"
@@ -393,6 +404,7 @@ fm_backend_zellij_supervisor_reconcile() {  # <session> [task-id...]
   local session=$1
   shift
   local title prev_active restore_target new_tab_id task_id old_id
+  local pane_name new_pane_id pane_digits
   local old_ids=()
   command -v zellij >/dev/null 2>&1 || {
     [ "$#" -eq 0 ] && return 0
@@ -402,13 +414,17 @@ fm_backend_zellij_supervisor_reconcile() {  # <session> [task-id...]
   fm_backend_zellij_session_exists "$session" || return 0
   title=$(fm_backend_zellij_supervisor_tab_title)
   prev_active=$(fm_backend_zellij_active_tab_id "$session")
-  mapfile -t old_ids < <(fm_backend_zellij_tabs_by_name "$session" "$title")
-  for old_id in "${old_ids[@]}"; do
+  # bash 3.2 baseline: no mapfile, and an empty "${arr[@]}" is an unbound-variable
+  # error before bash 4.4, so accumulate by read loop and guard every expansion.
+  while IFS= read -r old_id; do
     [ -n "$old_id" ] || continue
+    old_ids+=("$old_id")
+  done < <(fm_backend_zellij_tabs_by_name "$session" "$title")
+  for old_id in ${old_ids[@]+"${old_ids[@]}"}; do
     fm_backend_zellij_cli "$session" action close-tab-by-id "$old_id" >/dev/null 2>&1 || true
   done
   [ "$#" -gt 0 ] || {
-    for old_id in "${old_ids[@]}"; do
+    for old_id in ${old_ids[@]+"${old_ids[@]}"}; do
       [ "$prev_active" = "$old_id" ] && return 0
     done
     [ -z "$prev_active" ] || fm_backend_zellij_cli "$session" action go-to-tab-by-id "$prev_active" >/dev/null 2>&1 || true
@@ -431,19 +447,34 @@ fm_backend_zellij_supervisor_reconcile() {  # <session> [task-id...]
   esac
   shift
 
+  # `zellij action <sub>` exits 0 even against a target that no longer exists
+  # (file header, "Failure exit"), so validate the SHAPE of what new-pane
+  # echoed - its documented "terminal_<id>" pane id - exactly as the new-tab
+  # id is validated above, instead of trusting the exit status.
   for task_id in "$@"; do
     fm_backend_zellij_supervisor_command_argv "$task_id"
-    fm_backend_zellij_cli \
+    pane_name=$(fm_backend_zellij_supervisor_pane_name "$task_id")
+    new_pane_id=$(fm_backend_zellij_cli \
       "$session" action new-pane \
       --tab-id "$new_tab_id" \
       --cwd "$FM_ROOT" \
-      --name "$(fm_backend_zellij_supervisor_pane_name "$task_id")" \
+      --name "$pane_name" \
       --close-on-exit \
-      -- "${FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV[@]}" >/dev/null 2>&1 || return 1
+      -- "${FM_BACKEND_ZELLIJ_SUPERVISOR_ARGV[@]}" 2>/dev/null | tr -d '[:space:]')
+    pane_digits=
+    case "$new_pane_id" in
+      terminal_*) pane_digits=${new_pane_id#terminal_} ;;
+    esac
+    case "$pane_digits" in
+      ''|*[!0-9]*)
+        echo "error: zellij supervisor pane '$pane_name' did not return a terminal pane id on tab $new_tab_id (got '$new_pane_id')" >&2
+        return 1
+        ;;
+    esac
   done
 
   restore_target=$prev_active
-  for old_id in "${old_ids[@]}"; do
+  for old_id in ${old_ids[@]+"${old_ids[@]}"}; do
     if [ "$prev_active" = "$old_id" ]; then
       restore_target=$new_tab_id
       break

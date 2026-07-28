@@ -47,5 +47,11 @@ case "${1:-}" in
 esac
 
 ZELLIJ_SESSION=$(fm_backend_zellij_session)
-mapfile -t TASK_IDS < <(discover_zellij_task_ids)
-fm_backend_zellij_supervisor_reconcile "$ZELLIJ_SESSION" "${TASK_IDS[@]}"
+# bash 3.2 baseline: no mapfile, and an empty "${arr[@]}" is an unbound-variable
+# error before bash 4.4, so accumulate by read loop and guard the expansion.
+TASK_IDS=()
+while IFS= read -r task_id; do
+  [ -n "$task_id" ] || continue
+  TASK_IDS+=("$task_id")
+done < <(discover_zellij_task_ids)
+fm_backend_zellij_supervisor_reconcile "$ZELLIJ_SESSION" ${TASK_IDS[@]+"${TASK_IDS[@]}"}
