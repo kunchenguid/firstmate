@@ -104,6 +104,30 @@ test_estimate_ignores_scaffold_boilerplate() {
   pass "task telemetry estimates scaffold briefs from task content only"
 }
 
+test_estimate_ignores_unknown_scaffold_sections() {
+  local home ship marked
+  home=$(make_home estimate-new-section)
+  ship=$(scaffold_brief "$home" scaffold-new-section)
+  marked=$(grep -c 'fm-brief:task-begin' "$ship" || true)
+  [ "$marked" = 1 ] || fail "ship scaffold must delimit the firstmate-filled task text"
+
+  # A generated section fm-task-telemetry.sh has never heard of: the markers, not
+  # a duplicated heading list, must keep it out of the score.
+  {
+    printf '\n# Deployment rollout and observability contract\n'
+    for _ in $(seq 1 40); do
+      printf 'Run the backend migration, watch schema recovery, audit auth and CI e2e dispatch telemetry.\n'
+    done
+  } >> "$ship"
+  [ "$(run_telemetry "$home" estimate "$ship")" = simple ] \
+    || fail "a new generated scaffold section must not score as task content"
+
+  ship=$(fill_task "$ship" 'Fix the broken relative link in the README quickstart section.')
+  [ "$(run_telemetry "$home" estimate "$ship")" = simple ] \
+    || fail "a small filled task must stay simple despite a new generated section"
+  pass "task telemetry scores marked task text, not new scaffold sections"
+}
+
 test_collect_explicit_usage_sidecar() {
   local home ledger summary
   home=$(make_home sidecar)
@@ -284,17 +308,80 @@ EOF
   HOME=$old_home
   export HOME
   ledger=$(cat "$home/data/task-telemetry.tsv")
-  assert_contains "$ledger" $'\t70\t30\t100\t2\t50\tcodex' \
-    "generic fallback did not run for a harness log without token events"
+  assert_contains "$ledger" $'\t70\t30\t100\t2\t50\tcodex-generic' \
+    "generic fallback did not run, or wore the plain harness label"
   assert_no_grep "usage_source=unavailable" "$home/state/tokens-fallback-a5.meta" \
     "usage-shaped JSON should not report an unavailable source"
   pass "task telemetry falls back to generic usage parsing"
 }
 
+test_generic_fallback_does_not_double_count_sibling_usage() {
+  local home codex_dir session ledger old_home
+  home=$(make_home generic-siblings)
+  codex_dir="$home/codex/.codex/sessions/2026/07/24"
+  mkdir -p "$codex_dir"
+  fm_write_meta "$home/state/tokens-sib-a6.meta" \
+    "window=fm-tokens-sib-a6" \
+    "worktree=$home/wt" \
+    "project=$home/project" \
+    "harness=codex" \
+    "model=gpt-5" \
+    "effort=medium" \
+    "difficulty=simple" \
+    "kind=ship"
+  : > "$home/state/tokens-sib-a6.spawn-ref"
+  sleep 1
+  session="$codex_dir/rollout.jsonl"
+  # A cumulative total beside a per-turn delta, under a payload type the codex
+  # parser does not recognize; only the cumulative sibling may be counted.
+  cat > "$session" <<EOF
+{"type":"session_meta","payload":{"cwd":"$home/wt"}}
+{"type":"event_msg","payload":{"type":"turn_summary","info":{"total_token_usage":{"input_tokens":40,"output_tokens":8,"total_tokens":48},"last_token_usage":{"input_tokens":30,"output_tokens":3,"total_tokens":33}}}}
+EOF
+
+  old_home=$HOME
+  HOME="$home/codex"
+  export HOME
+  run_telemetry "$home" collect tokens-sib-a6 \
+    || fail "collect via the generic fallback failed"
+  HOME=$old_home
+  export HOME
+  ledger=$(cat "$home/data/task-telemetry.tsv")
+  assert_contains "$ledger" $'\t40\t8\t48\t1\t48\tcodex-generic' \
+    "generic fallback summed a cumulative total together with its per-turn delta"
+  pass "task telemetry generic fallback counts one usage object per record"
+}
+
+test_generic_fallback_excludes_cache_read() {
+  local home ledger
+  home=$(make_home generic-cache)
+  fm_write_meta "$home/state/tokens-cache-a7.meta" \
+    "window=fm-tokens-cache-a7" \
+    "worktree=$home/wt" \
+    "project=$home/project" \
+    "harness=claude" \
+    "model=opus" \
+    "effort=high" \
+    "difficulty=simple" \
+    "kind=ship"
+  printf '%s\n' \
+    '{"usage":{"input_tokens":10,"cache_creation_input_tokens":100,"cache_read_input_tokens":9000,"output_tokens":20}}' \
+    > "$home/state/tokens-cache-a7.usage.json"
+
+  run_telemetry "$home" collect tokens-cache-a7 || fail "collect from cache-shaped sidecar failed"
+  ledger=$(cat "$home/data/task-telemetry.tsv")
+  assert_contains "$ledger" $'\t110\t20\t130\t1\t130\tgeneric' \
+    "generic reading inflated the prompt total with cache_read"
+  pass "task telemetry generic reading excludes cache_read from prompt totals"
+}
+
 test_estimate_simple_and_complex
 test_estimate_keywords_match_words_not_substrings
 test_estimate_ignores_scaffold_boilerplate
+test_estimate_ignores_unknown_scaffold_sections
 test_generic_fallback_for_harness_log_without_token_events
+test_generic_fallback_does_not_double_count_sibling_usage
+test_generic_fallback_excludes_cache_read
 test_collect_explicit_usage_sidecar
 test_collect_codex_cumulative_session
 test_collect_uses_spawn_ref_after_meta_rewrite

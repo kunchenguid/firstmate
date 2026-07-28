@@ -23,10 +23,13 @@ Wake, watcher, away-mode, and X-specific state mechanics remain with their named
 `fm-spawn.sh` estimates task difficulty from the launch brief before handoff and records `difficulty=simple`, `difficulty=intermediate`, `difficulty=complex`, or `difficulty=unknown` beside the selected `harness=`, `model=`, and `effort=` fields in `state/<id>.meta`.
 The heuristic is intentionally local and deterministic: brief size, lifecycle keywords, investigation language, and explicit "small" wording determine the bucket.
 Only the task-specific part of a brief is scored, so the generated `fm-brief.sh` scaffold sections cannot decide the bucket on their own.
+`bin/fm-brief.sh` owns the `<!-- fm-brief:task-begin -->` and `<!-- fm-brief:task-end -->` markers that delimit the firstmate-filled text a scaffolded brief is scored on.
 The exact scoring and usage-log mechanics live in `bin/fm-task-telemetry.sh`, which is the owner of this telemetry contract.
-`fm-teardown.sh` runs `fm-task-telemetry.sh collect <id>` before volatile task state or worktree files are removed.
+`fm-spawn.sh` also drops an empty `state/<id>.spawn-ref` marker at launch; its mtime is the stable lower bound for the task's own harness session logs, because `state/<id>.meta` is rewritten later by helpers such as `fm-pr-check.sh`.
+`fm-teardown.sh` runs `fm-task-telemetry.sh collect <id>` before volatile task state or worktree files are removed, and removes the marker with the rest of that task's state.
 Collection is best-effort and never blocks cleanup.
 It reads explicit per-task usage sidecars when present, Codex JSONL `token_count` events for sessions whose cwd matches the task worktree, and Claude JSONL assistant-message usage for the encoded task worktree path.
+A harness log that carries usage-shaped JSON but no harness-specific token events falls back to a generic reading, recorded as `source=<harness>-generic` so a lower-fidelity number is never mistaken for a normalized harness reading.
 Unsupported harnesses, missing `jq`, absent logs, or unreadable transcripts produce a durable row with `source=unavailable` rather than failing the task lifecycle.
 The completed-task ledger is local and gitignored at `data/task-telemetry.tsv`.
 Rows record task id, completion timestamp, kind, difficulty, harness, model, effort, prompt tokens, completion tokens, total tokens, difficulty points, tokens per difficulty point, and usage source.

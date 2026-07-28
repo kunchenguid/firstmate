@@ -6,11 +6,13 @@
 #   fm-task-telemetry.sh summary
 #
 # Spawn records the estimate in state/<id>.meta as difficulty=<simple|intermediate|complex|unknown>.
-# `estimate` scores only task-specific brief content: for an fm-brief.sh scaffold it
-# drops the fixed preamble, the `{TASK}` placeholder, and the generated Setup, Rules,
-# Herdr, project-memory, definition-of-done, and secondmate operating sections, so
-# template text alone cannot decide the bucket. A brief that is not a scaffold is
-# scored whole.
+# `estimate` scores only task-specific brief content, so template text alone cannot
+# decide the bucket. bin/fm-brief.sh owns the `<!-- fm-brief:task-begin -->` and
+# `<!-- fm-brief:task-end -->` markers that delimit the firstmate-filled text, and
+# those markers are preferred whenever present. A brief scaffolded before the
+# markers existed falls back to dropping the fixed preamble and the generated
+# section headings; a brief that is not a scaffold at all is scored whole. The
+# `{TASK}` placeholder never contributes either way.
 # Teardown calls `collect` before volatile task state and worktree files are removed.
 # `collect` appends usage_* fields to the live meta for immediate inspection, then
 # upserts one durable TSV row in data/task-telemetry.tsv:
@@ -31,6 +33,12 @@
 #     the total stays comparable to Codex cumulative usage instead of inflating
 #     with turn count; input_tokens plus cache_creation_input_tokens (the newly
 #     supplied prompt each turn) is counted.
+#   - a generic usage-object reading of any of the above when the harness-specific
+#     parser finds nothing. It takes at most one usage object per record, favouring
+#     a cumulative-looking key over a sibling per-turn delta, and excludes
+#     cache_read_input_tokens like the Claude parser. It cannot tell cumulative
+#     totals from deltas across records, so its rows are labelled
+#     `<harness>-generic` rather than as a normalized harness reading.
 # Unknown or unsupported harness logs still get a durable row with source=unavailable.
 set -u
 
@@ -78,14 +86,24 @@ TELEMETRY_KEYWORDS=(
   recovery diagnose investigate audit design report
 )
 
+TASK_MARKER_BEGIN='<!-- fm-brief:task-begin -->'
+TASK_MARKER_END='<!-- fm-brief:task-end -->'
+
+# Heading fallback for briefs scaffolded before fm-brief.sh emitted the markers.
 SCAFFOLD_SECTIONS='^# (Herdr |(Setup|Rules|Project memory|Project clones|Operating model|Requests from the main firstmate|Escalation to main firstmate|Definition of done)[[:space:]]*$)'
 
 # Task-specific brief text: the scaffold's own boilerplate carries enough size and
-# lifecycle vocabulary to saturate the score on its own, so a recognized scaffold is
-# reduced to the sections firstmate fills in before dispatch.
+# lifecycle vocabulary to saturate the score on its own, so only the text firstmate
+# fills in is scored. bin/fm-brief.sh owns the markers that delimit that region.
 scored_content() {
   local brief=$1
-  if grep -Eq '^# (Task|Charter)[[:space:]]*$' "$brief" 2>/dev/null; then
+  if grep -Fq "$TASK_MARKER_BEGIN" "$brief" 2>/dev/null; then
+    awk -v begin="$TASK_MARKER_BEGIN" -v end="$TASK_MARKER_END" '
+      index($0, begin) { inside = 1; next }
+      index($0, end) { inside = 0; next }
+      inside
+    ' "$brief"
+  elif grep -Eq '^# (Task|Charter)[[:space:]]*$' "$brief" 2>/dev/null; then
     awk -v boilerplate="$SCAFFOLD_SECTIONS" '
       BEGIN { skip = 1 }
       /^# / { skip = ($0 ~ boilerplate) ? 1 : 0; next }
@@ -146,15 +164,31 @@ json_usage_generic() {
   command -v jq >/dev/null 2>&1 || return 1
   jq -rs '
     def n($v): if ($v | type) == "number" then $v else 0 end;
-    def usageish:
-      .. | objects
-      | select(
-          has("input_tokens") or has("prompt_tokens") or
-          has("cache_creation_input_tokens") or has("cache_read_input_tokens") or
-          has("output_tokens") or has("completion_tokens") or has("total_tokens")
-        );
-    reduce usageish as $u ({prompt:0, completion:0, total:0};
-      .prompt += (n($u.input_tokens?) + n($u.prompt_tokens?) + n($u.cache_creation_input_tokens?) + n($u.cache_read_input_tokens?))
+    def shaped:
+      (type == "object") and (
+        has("input_tokens") or has("prompt_tokens") or
+        has("cache_creation_input_tokens") or has("cache_read_input_tokens") or
+        has("output_tokens") or has("completion_tokens") or has("total_tokens")
+      );
+    # One usage object per record: a record often carries a cumulative total
+    # beside a per-turn delta (codex info.total_token_usage vs last_token_usage),
+    # and summing both double-counts. Take the shallowest usage object, breaking
+    # ties toward the cumulative-looking key.
+    def pick:
+      . as $rec
+      | if ($rec | shaped) then $rec
+        else
+          [ paths(objects) as $p | select($rec | getpath($p) | shaped) | $p ] as $found
+          | if ($found | length) == 0 then empty
+            else
+              ($found | map(length) | min) as $depth
+              | [ $found[] | select(length == $depth) ] as $top
+              | ([ $top[] | select(.[-1] | tostring | test("total|cumulative"; "i")) ] | first) as $preferred
+              | $rec | getpath($preferred // $top[0])
+            end
+        end;
+    reduce (.[] | pick) as $u ({prompt:0, completion:0, total:0};
+      .prompt += (n($u.input_tokens?) + n($u.prompt_tokens?) + n($u.cache_creation_input_tokens?))
       | .completion += (n($u.output_tokens?) + n($u.completion_tokens?))
       | .total += n($u.total_tokens?)
     )
@@ -252,25 +286,32 @@ candidate_files() {
 
 usage_from_file() {
   local source=$1 file=$2 result=''
+  local effective=$source
   # A harness-specific filter that matches nothing still exits 0 with empty
   # output, so the generic fallback keys off emptiness rather than exit status.
   case "$source" in
     codex) result=$(json_usage_codex "$file" || true) ;;
     claude) result=$(json_usage_claude "$file" || true) ;;
   esac
-  [ -n "$result" ] || result=$(json_usage_generic "$file" || true)
+  if [ -z "$result" ]; then
+    result=$(json_usage_generic "$file" || true)
+    # The generic reading is lower fidelity than a harness parser (it cannot tell
+    # cumulative totals from per-turn deltas), so it never wears the plain
+    # harness label in the ledger.
+    [ "$source" = generic ] || effective="$source-generic"
+  fi
   [ -n "$result" ] || return 1
-  printf '%s\n' "$result"
+  printf '%s\t%s\n' "$result" "$effective"
 }
 
 collect_usage() {
-  local id=$1 meta=$2 harness=$3 worktree=$4 source file usage prompt completion total
+  local id=$1 meta=$2 harness=$3 worktree=$4 source file usage prompt completion total read_as
   local prompt_sum=0 completion_sum=0 total_sum=0 sources='' found=0
   while IFS="$(printf '\t')" read -r source file; do
     [ -n "$source" ] && [ -n "$file" ] || continue
     usage=$(usage_from_file "$source" "$file" | tail -1 || true)
     [ -n "$usage" ] || continue
-    IFS="$(printf '\t')" read -r prompt completion total <<EOF
+    IFS="$(printf '\t')" read -r prompt completion total read_as <<EOF
 $usage
 EOF
     case "$prompt$completion$total" in *[!0-9]*|'') continue ;; esac
@@ -278,11 +319,10 @@ EOF
     completion_sum=$((completion_sum + completion))
     total_sum=$((total_sum + total))
     found=1
-    if [ -z "$sources" ]; then
-      sources=$source
-    else
-      sources="$sources+$source"
-    fi
+    case "+$sources+" in
+      *"+$read_as+"*) ;;
+      *) sources="${sources:+$sources+}$read_as" ;;
+    esac
   done <<EOF
 $(candidate_files "$id" "$meta" "$harness" "$worktree" | awk -F "$(printf '\t')" '!seen[$1 FS $2]++')
 EOF

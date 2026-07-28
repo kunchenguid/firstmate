@@ -6,6 +6,12 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
+# Every scaffold wraps the firstmate-filled text - the task description, and a
+# charter's charter and routing scope - in `<!-- fm-brief:task-begin -->` and
+# `<!-- fm-brief:task-end -->` comment markers. This file owns those markers and
+# the region they delimit; bin/fm-task-telemetry.sh reads them to score task
+# difficulty from the filled text alone, so generated boilerplate never decides
+# the estimate. Keep the markers around the filled text when adjusting a brief.
 # Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -153,10 +159,14 @@ cat > "$BRIEF" <<EOF
 You are a persistent second mate managed by the main firstmate. Work on your own; do not wait for a human.
 
 # Charter
+<!-- fm-brief:task-begin -->
 $SECONDMATE_CHARTER
+<!-- fm-brief:task-end -->
 
 # Routing scope
+<!-- fm-brief:task-begin -->
 $SECONDMATE_SCOPE
+<!-- fm-brief:task-end -->
 
 # Project clones
 $PROJECT_CLONES_BODY
@@ -252,7 +262,9 @@ cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
+<!-- fm-brief:task-begin -->
 {TASK}
+<!-- fm-brief:task-end -->
 
 $HERDR_SECTION
 
@@ -360,7 +372,9 @@ cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
+<!-- fm-brief:task-begin -->
 {TASK}
+<!-- fm-brief:task-end -->
 
 $HERDR_SECTION
 

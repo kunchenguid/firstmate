@@ -63,11 +63,14 @@ normalize_registry_text() {
   '
 }
 
+# The fm-brief.sh task markers delimit the firstmate-filled text; they are not
+# part of it, so they never reach the registry.
 brief_section_text() {
   local brief=$1 heading=$2
   awk -v heading="# $heading" '
     $0 == heading { in_section=1; next }
     in_section && /^# / { exit }
+    /<!-- fm-brief:task-(begin|end) -->/ { next }
     in_section { print }
   ' "$brief"
 }
