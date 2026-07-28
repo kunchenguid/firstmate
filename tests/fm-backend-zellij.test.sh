@@ -549,6 +549,31 @@ test_supervisor_reconcile_builds_tab_and_panes() {
   pass "fm_backend_zellij_supervisor_reconcile: builds the supervisor tab and pane commands for active crews"
 }
 
+test_supervisor_reconcile_seed_rename_is_best_effort() {
+  local dir fb log
+  dir="$TMP_ROOT/supervisor-reconcile-noseedid"; mkdir -p "$dir/responses"
+  printf '[]\n' > "$dir/responses/1.out"
+  printf '[]\n' > "$dir/responses/2.out"
+  printf '8\n' > "$dir/responses/3.out"
+  # list-panes reports nothing for the brand-new tab, so the seed pane id
+  # cannot be resolved. The title is cosmetic, so reconcile must skip the
+  # rename and still build the rest of the pane set.
+  printf '[]\n' > "$dir/responses/4.out"
+  printf 'terminal_31\n' > "$dir/responses/5.out"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HOME="$ROOT" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_supervisor_reconcile firstmate alpha bravo' "$ROOT" \
+    || fail "an unresolvable seed pane id must not fail supervisor_reconcile - the pane title is cosmetic"
+  log=$(cat "$dir/log")
+  assert_not_contains "$log" $'\x1f''rename-pane' \
+    "supervisor_reconcile should not rename an unresolved seed pane id"
+  assert_contains "$log" $'\x1f''new-pane'$'\x1f''--tab-id'$'\x1f''8'$'\x1f''--cwd'$'\x1f'"$ROOT"$'\x1f''--name'$'\x1f''fm-bravo' \
+    "supervisor_reconcile should still build the remaining panes after skipping the seed rename"
+  pass "fm_backend_zellij_supervisor_reconcile: seed pane rename is best-effort when the pane id is unresolvable"
+}
+
 test_supervisor_reconcile_fails_when_new_pane_returns_no_pane_id() {
   local dir fb err
   dir="$TMP_ROOT/supervisor-reconcile-nopane"; mkdir -p "$dir/responses"
@@ -1119,6 +1144,7 @@ test_create_task_creates_and_parses_ids
 test_create_task_restores_previously_active_tab
 test_create_task_no_restore_when_new_tab_was_already_active
 test_supervisor_reconcile_builds_tab_and_panes
+test_supervisor_reconcile_seed_rename_is_best_effort
 test_supervisor_reconcile_fails_when_new_pane_returns_no_pane_id
 test_supervisor_command_argv_forwards_tuning_knobs
 test_capture_small_reads_use_viewport_and_trim

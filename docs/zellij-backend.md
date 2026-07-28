@@ -89,7 +89,7 @@ Real test cleanup uses only an isolated non-`firstmate` session and the guard in
 
 ## Supervisor surface
 
-Zellij now owns one additional supervision-only tab per firstmate home when that home has active non-secondmate zellij crews.
+Zellij owns one additional supervision-only tab per firstmate home, titled `fm-supervisor-<home-label>` with the same home label as task tabs, whenever that home has active non-secondmate zellij crews.
 The task runtime contract is unchanged: each task still executes in its own tab.
 The supervisor tab is rebuilt by `bin/fm-supervisor-panes.sh` after successful spawn, after teardown, and on the locked path during `bin/fm-session-start.sh`.
 Each supervisor pane runs `bin/fm-supervisor-pane-loop.sh`, which refreshes `bin/fm-crew-state.sh` plus bounded `bin/fm-peek.sh` output until the task metadata disappears.
@@ -98,7 +98,7 @@ When no active non-secondmate zellij crews remain, reconciliation closes the sup
 Other backends currently no-op for this feature.
 
 The pane command runs under the zellij server process, so the reconciler passes everything the loop needs through an explicit `env` allow-list.
-`FM_SUPERVISOR_REFRESH_SECS` (default 5) and `FM_SUPERVISOR_PEEK_LINES` (default 20) tune the loop and are forwarded into that allow-list only when set in the environment of the command that triggers reconciliation.
+`FM_SUPERVISOR_REFRESH_SECS` and `FM_SUPERVISOR_PEEK_LINES` tune the loop and are forwarded into that allow-list only when set in the environment of the command that triggers reconciliation; [`configuration.md`](configuration.md#environment-variables) owns their defaults and fallback handling.
 The loop peeks with `FM_GUARD_READ_ONLY=1`: it is a non-owning guard caller, so it must never claim or clear `bin/fm-guard.sh`'s once-per-episode watcher-down banner from a background pane no agent is reading.
 
 ## Active limits
