@@ -196,6 +196,29 @@ test_missing_base_branch_is_refused() {
   pass "a base= record naming a branch the repo does not have is refused"
 }
 
+# A local-only project lands work with bin/fm-merge-local.sh, which fast-forwards
+# the LOCAL default branch and never pushes, so origin/main is the stale ref
+# there and the worker must start from the local branch instead.
+test_local_only_prefers_local_branch() {
+  local rec id out status
+  id=base-localonly-b6
+  rec=$(make_base_case base-localonly "$id" main \
+    '- base-localonly [local-only] - merged locally, never pushed (added 2026-07-28)')
+  read_base_record "$rec"
+  printf 'landed locally\n' > "$PROJ_DIR/landed.txt"
+  git -C "$PROJ_DIR" add landed.txt
+  git -C "$PROJ_DIR" commit -qm "landed locally"
+
+  out=$(run_base_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "a local-only project must still spawn: $out"
+  [ "$(head_sha "$WT_DIR")" = "$(git -C "$PROJ_DIR" rev-parse main)" ] \
+    || fail "local-only worker did not start from the local default branch (HEAD $(head_sha "$WT_DIR"))"
+  [ "$(head_sha "$WT_DIR")" != "$(git -C "$PROJ_DIR" rev-parse origin/main)" ] \
+    || fail "local-only worker started from the stale origin/main"
+  pass "a local-only project starts the worker from the local default branch"
+}
+
 # The registry parse: base= is readable alongside the delivery mode, and every
 # pre-existing line shape keeps parsing to exactly the same two words.
 test_registry_parse_is_backward_compatible() {
@@ -249,5 +272,6 @@ test_unconfirmable_base_is_refused
 test_default_base_passes_assertion
 test_unregistered_project_spawns_as_today
 test_missing_base_branch_is_refused
+test_local_only_prefers_local_branch
 
 echo "# all fm-spawn-base-branch tests passed"

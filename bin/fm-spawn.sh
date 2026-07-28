@@ -903,13 +903,20 @@ spawn_expected_base_branch() {  # -> "<branch> recorded|default"; empty if unres
 }
 
 # origin/<branch> is the fetched truth for a shared clone; a local branch of the
-# same name can itself be stale. Empty when the branch exists in neither form.
+# same name can itself be stale. A local-only project inverts that: it lands work
+# with bin/fm-merge-local.sh, which fast-forwards the LOCAL branch and never
+# pushes, so there origin/<branch> is the stale one whenever an origin exists at
+# all. Empty when the branch exists in neither form.
 spawn_base_ref() {  # <branch>
-  local branch=$1
-  if git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null 2>&1; then
-    echo "origin/$branch"
-  elif git -C "$WT" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1; then
-    echo "$branch"
+  local branch=$1 local_ref="" origin_ref=""
+  git -C "$WT" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1 && local_ref="$branch"
+  git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null 2>&1 && origin_ref="origin/$branch"
+  if [ "${SPAWN_BASE_MODE:-}" = local-only ] && [ -n "$local_ref" ]; then
+    echo "$local_ref"
+  elif [ -n "$origin_ref" ]; then
+    echo "$origin_ref"
+  elif [ -n "$local_ref" ]; then
+    echo "$local_ref"
   fi
   return 0
 }
@@ -924,7 +931,8 @@ spawn_base_gap() {  # <from-ref> <to-ref> -> "<behind> behind, <ahead> ahead"
 }
 
 ensure_spawn_base_branch() {
-  local resolved base source ref want head actual primary primary_ref behind
+  local resolved base source ref want head actual primary primary_ref behind err
+  SPAWN_BASE_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME" 2>/dev/null | awk 'NR==1{print $1}' || true)
   resolved=$(spawn_expected_base_branch)
   if [ -z "$resolved" ]; then
     echo "warning: no expected base branch could be resolved for $PROJ_NAME; launching $ID on the worktree's current base" >&2
@@ -937,13 +945,13 @@ ensure_spawn_base_branch() {
     echo "error: expected base branch '$base' ($source) does not exist in $WT; refusing to launch $ID onto an unconfirmed base. Fetch that branch, or fix the base= record for $PROJ_NAME in data/projects.md." >&2
     exit 1
   fi
-  git -C "$WT" checkout --quiet --detach "$ref" 2>/dev/null || true
+  err=$(git -C "$WT" checkout --quiet --detach "$ref" 2>&1) || true
 
   want=$(git -C "$WT" rev-parse "$ref")
   head=$(git -C "$WT" rev-parse HEAD 2>/dev/null || true)
   if [ "$head" != "$want" ]; then
     actual=$(git -C "$WT" name-rev --name-only --always HEAD 2>/dev/null || echo unknown)
-    echo "error: $WT is not on its base branch and could not be moved there; refusing to launch $ID onto a stale tree. Expected $base ($ref, ${want:0:12}); actual base $actual (${head:-unknown}); $(spawn_base_gap "$ref" "HEAD"). Resolve the worktree by hand (uncommitted work, or a checkout conflict), then respawn." >&2
+    echo "error: $WT is not on its base branch and could not be moved there; refusing to launch $ID onto a stale tree. Expected $base ($ref, ${want:0:12}); actual base $actual (${head:-unknown}); $(spawn_base_gap "$ref" "HEAD"). Resolve the worktree by hand (uncommitted work, or a checkout conflict), then respawn.${err:+ git said: $(echo "$err" | tr '\n' ' ')}" >&2
     exit 1
   fi
 
@@ -958,7 +966,7 @@ ensure_spawn_base_branch() {
       if [ -n "$primary_ref" ]; then
         behind=$(git -C "$WT" rev-list --count "$ref..$primary_ref" 2>/dev/null || echo 0)
         if [ "${behind:-0}" -gt 0 ]; then
-          echo "error: refusing to launch $ID onto a base that cannot be confirmed correct. Actual base '$base' (the repo default branch) is $behind commits behind '$primary', the branch $PROJ_ABS is on; expected base '$primary'. No base branch is recorded for $PROJ_NAME: record it in data/projects.md as \"[<mode> base=$primary]\", then respawn." >&2
+          echo "error: refusing to launch $ID onto a base that cannot be confirmed correct. Actual base '$base' (the repo default branch) is $behind commits behind '$primary', the branch $PROJ_ABS is on; expected base '$primary'. No base branch is recorded for $PROJ_NAME, so which one is right depends on why the checkout is on '$primary': if the project genuinely develops there, record it in data/projects.md as \"[<mode> base=$primary]\"; if the checkout is merely parked on a transient branch (a leftover fm/<id>, a checked-out PR), do NOT record it - return the checkout to '$base' instead. Then respawn." >&2
           exit 1
         fi
       fi
