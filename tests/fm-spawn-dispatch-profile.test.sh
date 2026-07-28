@@ -435,6 +435,23 @@ test_codex_threads_max_reasoning_effort() {
   pass "codex threads max via model_reasoning_effort when explicitly requested"
 }
 
+test_codex_omits_unverified_max_reasoning_effort() {
+  local rec id out status launch
+  id=profile-codex-max-unverified-z4b
+  rec=$(make_spawn_case profile-codex-max-unverified codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
+  status=$?
+  expect_code 0 "$status" "codex spawn with unverified max effort should omit the reasoning effort config"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not preserve the model flag when unverified max was omitted"
+  assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unverified max reasoning effort"
+  pass "codex omits max for models without verified support"
+}
+
 test_grok_threads_model_and_reasoning_effort() {
   local rec id out status launch
   id=profile-grok-z5
@@ -736,6 +753,7 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_threads_max_reasoning_effort
+test_codex_omits_unverified_max_reasoning_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
