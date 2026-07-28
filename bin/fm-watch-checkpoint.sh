@@ -58,7 +58,7 @@ run_with_perl_timeout() {
     die "fork failed\n" unless defined $pid;
     if (!$pid) {
       setpgrp(0, 0);
-      exec @ARGV;
+      exec { $ARGV[0] } @ARGV;
       die "exec failed: $!\n";
     }
     local $SIG{ALRM} = sub {
