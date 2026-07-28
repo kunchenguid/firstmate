@@ -32,15 +32,28 @@ pinned_ready() {
 
 test_list_mode_publishes_the_canonical_set() {
   # --list is what other gates consume, so it must expand to exactly the set the
-  # lint run itself executes. Derive the expectation from the canonical ROOTS
-  # definition rather than re-spelling the globs here.
-  local globs expected actual inventory
-  globs=$(sed -n 's/^ *ROOTS=(\(.*\))$/\1/p' "$LINT" | grep -v '"\$@"')
-  [ -n "$globs" ] || fail "could not read the canonical globs from fm-lint.sh"
-  expected=$(cd "$ROOT" && eval "printf '%s\n' $globs")
+  # lint run itself executes. That equality is structural: one CANONICAL_ROOTS
+  # array spelled exactly once, with both consumers expanding it.
+  local actual path inventory
+  [ "$(grep -Fc -- 'bin/*.sh bin/backends/*.sh tests/*.sh' "$LINT")" -eq 1 ] \
+    || fail "the canonical globs must be spelled exactly once in fm-lint.sh"
+  assert_grep 'printf '\''%s\n'\'' "${CANONICAL_ROOTS[@]}"' "$LINT" "--list must publish the canonical array, not its own glob spelling"
+  assert_grep 'ROOTS=("${CANONICAL_ROOTS[@]}")' "$LINT" "the lint run must consume the canonical array, not its own glob spelling"
   actual=$("$LINT" --list)
-  [ "$actual" = "$expected" ] || fail "fm-lint.sh --list does not match the canonical lint file set"
+  [ -n "$actual" ] || fail "fm-lint.sh --list published nothing"
   printf '%s\n' "$actual" | grep -q '^bin/' || fail "fm-lint.sh --list published no bin shell scripts"
+  printf '%s\n' "$actual" | grep -q '^bin/backends/' || fail "fm-lint.sh --list published no backend adapters"
+  printf '%s\n' "$actual" | grep -q '^tests/' || fail "fm-lint.sh --list published no test shells"
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    [ -f "$ROOT/$path" ] || fail "fm-lint.sh --list published a path that does not exist: $path"
+    case "$path" in
+      *.sh) ;;
+      *) fail "fm-lint.sh --list published a non-shell path: $path" ;;
+    esac
+  done <<EOF
+$actual
+EOF
   # Independent of the globs themselves: the published set must be the complete
   # on-disk shell inventory, so a glob that silently stops covering a directory
   # fails here instead of shrinking every gate that consumes --list.
@@ -57,6 +70,29 @@ test_ci_bash32_sweep_consumes_the_list() {
   assert_no_grep "find bin -type f -name '*.sh'" "$CI" "CI must not re-spell the shell-script file set"
   assert_grep '"$parsed_scripts" -eq "$expected_scripts"' "$CI" "the Bash 3.2 sweep must assert an exact parsed-count match"
   pass "CI's Bash 3.2 sweep is driven by the canonical file list"
+}
+
+test_bin_scripts_avoid_heredoc_in_command_substitution() {
+  # CONTRIBUTING states the rule absolutely; without this guard it was only
+  # prose, and every `VAR=$(cat <<EOF ...)` left in bin/ was one apostrophe away
+  # from breaking `bash -n` on its whole file under stock macOS Bash 3.2 (issue
+  # #166). The CI 3.2 sweep only catches the breakage after it lands; this
+  # catches the construct that makes it possible. Comments describing the
+  # anti-pattern and arithmetic shifts (`$(( x << y ))`) are not matches.
+  local path hits scanned=0
+  while IFS= read -r path; do
+    case "$path" in
+      bin/*) ;;
+      *) continue ;;
+    esac
+    hits=$(grep -nE '^[[:space:]]*[^#]*\$\([^()]*<<[^<]' "$ROOT/$path" || true)
+    [ -z "$hits" ] || fail "$path builds a here-document inside a command substitution, which stock Bash 3.2 mis-parses: $hits"
+    scanned=$((scanned + 1))
+  done <<EOF
+$("$LINT" --list)
+EOF
+  [ "$scanned" -gt 0 ] || fail "the heredoc-in-command-substitution guard scanned no bin scripts"
+  pass "no bin script builds a here-document inside a command substitution ($scanned scanned)"
 }
 
 test_pins_an_explicit_version() {
@@ -449,6 +485,7 @@ SH
 
 test_list_mode_publishes_the_canonical_set
 test_ci_bash32_sweep_consumes_the_list
+test_bin_scripts_avoid_heredoc_in_command_substitution
 test_pins_an_explicit_version
 test_installer_retries_transient_download_failure
 test_rejects_wrong_shellcheck_version

@@ -46,6 +46,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
   Stock macOS `/bin/bash` 3.2 is the supported floor for both, so avoid Bash 4+ constructs such as associative arrays and `${var,,}`/`${var^^}`, keep `$BASHPID` in its guarded `${BASHPID:-$$}` form, and never build a here-document inside a command substitution (`VAR=$(cat <<EOF ...)`), which 3.2 mis-parses even with a quoted delimiter.
+  Emit the body from a function and assign its output, or read the here-document straight into the variable with `IFS= read -r -d '' VAR <<EOF || true`; `tests/fm-lint.test.sh` fails any `bin/` script that reintroduces the construct, and CI's stock-Bash lane parses the whole canonical set through the real 3.2 binary.
   `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, and pinned shellcheck version), and both CI and the no-mistakes pre-push gate run it, so local and CI can never diverge.
   It pins one exact shellcheck version and refuses to run under any other; print it with `bin/fm-lint.sh --required-version` and install that build locally.
   Any other gate that must iterate the same scripts consumes `bin/fm-lint.sh --list` (the canonical file set, one path per line) instead of re-spelling the globs.
@@ -73,7 +74,7 @@ That is firstmate-specific; do not commit `.no-mistakes/evidence/` here even whe
 Check and test the toolbelt before pushing:
 
 ```sh
-for script in $(bin/fm-lint.sh --list); do bash -n "$script"; done   # syntax-check the canonical file set
+bin/fm-lint.sh --list | while IFS= read -r script; do /bin/bash -n "$script"; done   # syntax-check the canonical file set on the 3.2 floor: /bin/bash, never PATH bash, which is Homebrew 5.x on most Macs
 bin/fm-lint.sh   # lint the toolbelt and behavior tests; the single owner CI and the no-mistakes gate both run
 bin/fm-test-run.sh tests/<subject>.test.sh   # one script (primary local focus path, timed)
 bin/fm-test-run.sh --family pure-contract-unit   # ordinary family-scoped local path (serial, timed)

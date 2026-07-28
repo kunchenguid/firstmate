@@ -32,6 +32,12 @@ SELF="$SELF_DIR/fm-lint.sh"
 ROOT="$(cd "$SELF_DIR/.." && pwd)"
 cd "$ROOT" || exit 1
 
+# The canonical file set, spelled exactly once. Both consumers below - `--list`
+# for every other gate, and the lint run's own roots - expand this array, so the
+# published set and the linted set cannot drift by construction. Every adapter
+# and test shell stays an independent root.
+CANONICAL_ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh)
+
 FM_LINT_WORKER_SHELLCHECK_PID=
 # shellcheck disable=SC2329 # Registered by the private worker's signal traps.
 fm_lint_worker_stop() {
@@ -88,7 +94,7 @@ fi
 # definition instead of spelling its own. tests/fm-lint.test.sh asserts this
 # output matches the set the lint run below executes.
 if [ "${1:-}" = "--list" ]; then
-  printf '%s\n' bin/*.sh bin/backends/*.sh tests/*.sh
+  printf '%s\n' "${CANONICAL_ROOTS[@]}"
   exit 0
 fi
 
@@ -158,9 +164,7 @@ fi
 if [ "$#" -gt 0 ]; then
   ROOTS=("$@")
 else
-  # Canonical file set: the one authoritative definition. Callers never repeat
-  # these globs, and every adapter and test shell remains an independent root.
-  ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh)
+  ROOTS=("${CANONICAL_ROOTS[@]}")
 fi
 ROOT_COUNT=${#ROOTS[@]}
 

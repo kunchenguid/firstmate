@@ -679,7 +679,7 @@ EOF
 }
 
 test_session_lock_concurrent_single_winner() {
-  local rec root home fakebin ready completed handoff winners pids i pid child count
+  local rec root home fakebin ready completed handoff winners pids i pid child count stalled
   rec=$(new_world lock-concurrency)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -720,6 +720,22 @@ esac
 SH
   chmod +x "$fakebin/ps"
 
+  # Every contender barrier below is bounded. An unwritable handoff directory, a
+  # parent that dies before publishing a pid, or a peer that exits early would
+  # otherwise leave all 40 contenders spinning until the CI job timeout, which
+  # presents as a hang instead of a diagnosed failure.
+  lock_await() {  # <description> <shell-condition>
+    local what=$1 condition=$2 deadline
+    deadline=$((SECONDS + 60))
+    until eval "$condition"; do
+      if [ "$SECONDS" -ge "$deadline" ]; then
+        printf 'lock-concurrency: timed out after 60s waiting for %s\n' "$what" >&2
+        return 1
+      fi
+      sleep 0.01
+    done
+  }
+
   pids=
   i=1
   while [ "$i" -le 40 ]; do
@@ -728,22 +744,20 @@ SH
       # its own pid instead: for `( ... ) &` the parent's $! is exactly the pid
       # $BASHPID would report inside. Each contender still needs a distinct,
       # genuinely live pid because fm_harness_pid_alive runs a real `kill -0`.
-      while [ ! -s "$handoff/$i" ]; do sleep 0.01; done
+      lock_await "contender $i's pid handoff" '[ -s "$handoff/$i" ]' || exit 1
       harness_pid=$(cat "$handoff/$i")
       : > "$home/state/harness-$harness_pid"
       : > "$ready/$i"
-      while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
-        sleep 0.01
-      done
+      lock_await "all 40 contenders to arm" \
+        '[ "$(find "$ready" -type f | wc -l | tr -d " ")" -ge 40 ]' || exit 1
       if FM_HOME="$home" FM_FAKE_LOCK_STATE="$home/state" \
         FM_FAKE_HARNESS_PID="$harness_pid" PATH="$fakebin:$BASE_PATH" \
         "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1; then
         printf '%s\n' "$harness_pid" >> "$winners"
       fi
       : > "$completed/$i"
-      while [ "$(find "$completed" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
-        sleep 0.01
-      done
+      lock_await "all 40 contenders to finish" \
+        '[ "$(find "$completed" -type f | wc -l | tr -d " ")" -ge 40 ]' || exit 1
     ) &
     child=$!
     # Publish the pid atomically so the subshell never reads a half-written file.
@@ -752,9 +766,14 @@ SH
     pids="$pids $child"
     i=$((i + 1))
   done
+  stalled=0
   for pid in $pids; do
-    wait "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || stalled=$((stalled + 1))
   done
+  # A contender only exits non-zero when one of its bounded barriers timed out,
+  # so report that harness failure instead of the misleading winner count it
+  # would otherwise produce.
+  [ "$stalled" -eq 0 ] || fail "$stalled of 40 lock contenders stalled at a barrier (see the timeout diagnostics above)"
   count=$(awk 'NF { count++ } END { print count + 0 }' "$winners")
   [ "$count" -eq 1 ] || fail "concurrent session-lock acquisition produced $count winners"
 
