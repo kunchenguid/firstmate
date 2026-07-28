@@ -24,14 +24,21 @@ NOT applied to this file for the same reason.
 To refresh: re-copy upstream skills/watch/{SKILL.md,scripts}, drop
 scripts/build-skill.sh and .skillignore, and re-apply this banner.
 
-FIRST-RUN SIDE EFFECTS - GET THE CAPTAIN'S CONSENT BEFORE THE FIRST RUN:
+FIRST-RUN SIDE EFFECTS - GET THE CAPTAIN'S CONSENT BEFORE ANY INSTALLER RUN:
 scripts/setup.py installs missing dependencies itself on macOS only, where
 _install_macos runs `brew install ffmpeg yt-dlp` unattended; on Linux and
 Windows it only prints an install hint and exits non-zero. It also scaffolds
-~/.config/watch/.env and marks SETUP_COMPLETE=true there. Wherever the Step 0
-exit-code table below directs you to run the installer (exits 2, 3, and 4),
-stop and get the captain's word first, notwithstanding the prose there calling
-the installer idempotent and safe to re-run.
+~/.config/watch/.env and marks SETUP_COMPLETE=true there. The consent
+requirement covers EVERY path below this banner that can reach the installer,
+including one a future upstream refresh adds that is not listed here. Three
+exist today, and all three need the captain's word first, notwithstanding the
+prose calling the installer idempotent and safe to re-run:
+  1. Step 0's `--json` branches - `first_run: true` says "run the installer
+     first", and `can_proceed: false` with `first_run: false` says "Run the
+     installer to remediate". This is the path a genuine first run takes.
+  2. Step 0's `--check` exit-code table (exits 2, 3, and 4), reached only on
+     follow-up calls within a session.
+  3. The "Setup preflight failed" bullet under Failure modes.
 AUDIO EGRESS: when a GROQ_API_KEY or OPENAI_API_KEY is configured, and only
 when captions are unavailable, scripts/whisper.py extracts the audio and
 uploads it to api.groq.com or api.openai.com for transcription. Pass
@@ -43,6 +50,24 @@ falls back to `Path.cwd()/.env` after ~/.config/watch/.env, so invoking
 THAT project's OPENAI_API_KEY or GROQ_API_KEY. It is upstream code below this
 banner, so patching it would break byte-identical parity for no safety gain;
 mitigate by invoking from a controlled directory or exporting an explicit key.
+
+CLEANUP TRAP, DELIBERATELY NOT PATCHED: Step 5 below tells you to delete the
+working directory with `rm -rf <dir>`, and that removes the directory
+WHOLESALE. By default it is watch.py's own tempfile.mkdtemp(prefix="watch-")
+path, which is safe, but `--out-dir` makes the working directory any
+caller-chosen path, so every pre-existing file in it is deleted too. Let the
+default temporary directory stand; if you do pass `--out-dir`, point it at a
+directory created for this run alone, never at a project path, a clone, or
+any directory that already holds anything. That Step 5 instruction is
+upstream text below this banner and cannot be patched here without breaking
+byte-identical parity, so this warning IS the mitigation, not a fix.
+
+CLAUDE-ONLY PROMPTS: the first-run API-key and detail-preference questions
+drive through AskUserQuestion, a Claude-only tool declared in this skill's own
+allowed-tools, so that flow degrades to plain prose questions on firstmate's
+other verified harnesses (codex, opencode, pi, pi-signed, grok, kimi). A grep
+for AskUserQuestion across every other SKILL.md under .agents/skills returns
+nothing, making this the first such dependency in the tree.
 
 FFMPEG VERSION TRAP (verified 2026-07-28 on this fleet):
 scripts/frames.py passes ffmpeg's `-vsync` flag, which was REMOVED from

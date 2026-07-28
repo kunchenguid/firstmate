@@ -77,6 +77,12 @@ test_vendored_watch_skill_keeps_license_and_upstream_pin() {
     "watch banner lost the third-party transcription upload disclosure"
   assert_grep 'KEY-SOURCE TRAP, DELIBERATELY NOT PATCHED:' "$WATCH" \
     "watch banner lost the working-directory .env key-source trap note"
+  assert_grep 'CLEANUP TRAP, DELIBERATELY NOT PATCHED:' "$WATCH" \
+    "watch banner lost the Step 5 rm -rf working-directory warning"
+  # The consent gate has to bind every installer path, not just the exit-code
+  # table, or a genuine first run installs before anyone is asked.
+  assert_grep 'covers EVERY path below this banner that can reach the installer' "$WATCH" \
+    "watch banner's install consent gate no longer binds every installer path"
   count=$(grep -Fc -- 'Load the `watch` skill' "$AGENTS")
   [ "$count" -eq 1 ] || fail "watch must have exactly one AGENTS.md trigger line, found $count"
   trigger=$(grep -F -- 'Load the `watch` skill' "$AGENTS")
