@@ -12,7 +12,8 @@ trap fm_test_cleanup EXIT
 DB="$TMP_ROOT/baby-menu.db"
 
 make_fixture() {
-  sqlite3 "$DB" <<'SQL'
+  sqlite3 "$DB" >/dev/null <<'SQL'
+PRAGMA journal_mode=WAL;
 CREATE TABLE claude_code_quota_snapshot (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   snapshot TEXT NOT NULL,
@@ -108,6 +109,36 @@ test_stale_and_auth_required_emit_sourced_aged_snapshots() {
   pass "stale and auth-required primaries expose sourced, aged Baby Menu snapshots"
 }
 
+test_absent_sqlite3_preserves_primary_behavior() {
+  local emptybin shell out status
+  emptybin=$(fm_fakebin "$TMP_ROOT/nosqlite")
+  shell=$(command -v bash)
+  out=$(PATH="$emptybin" "$shell" "$FALLBACK" claude stale "$DB")
+  status=$?
+  expect_code 0 "$status" "absent sqlite3"
+  [ -z "$out" ] || fail "absent sqlite3 produced fallback output: $out"
+  pass "an absent sqlite3 leaves the primary quota result as the only evidence"
+}
+
+test_unusable_saved_timestamp_is_not_reported_as_young() {
+  local skewed="$TMP_ROOT/skewed.db" out status
+  cp "$DB" "$skewed"
+  sqlite3 "$skewed" "
+    UPDATE claude_code_quota_snapshot SET saved_at = datetime('now', '+1 day') WHERE id = 1;
+    UPDATE codex_quota_snapshot SET saved_at = 'not-a-timestamp' WHERE id = 1;"
+
+  out=$("$FALLBACK" claude stale "$skewed")
+  status=$?
+  expect_code 0 "$status" "future-dated snapshot"
+  [ -z "$out" ] || fail "future-dated snapshot was reported as a usable reading: $out"
+
+  out=$("$FALLBACK" codex stale "$skewed")
+  status=$?
+  expect_code 0 "$status" "unparseable snapshot timestamp"
+  [ -z "$out" ] || fail "unparseable saved_at produced a reading without a real age: $out"
+  pass "future-dated and unparseable snapshot timestamps produce no reading"
+}
+
 test_missing_or_unopenable_database_preserves_primary_behavior() {
   local out status locked="$TMP_ROOT/locked.db"
   out=$("$FALLBACK" claude stale "$TMP_ROOT/missing.db")
@@ -126,12 +157,17 @@ test_missing_or_unopenable_database_preserves_primary_behavior() {
 }
 
 test_database_is_never_written() {
-  local before after out
+  local before after wal_before wal_after out
   before=$(file_signature "$DB")
+  wal_before=''
+  [ -f "$DB-wal" ] && wal_before=$(file_signature "$DB-wal")
   chmod 444 "$DB"
   out=$("$FALLBACK" kimi stale "$DB")
   after=$(file_signature "$DB")
+  wal_after=''
+  [ -f "$DB-wal" ] && wal_after=$(file_signature "$DB-wal")
   [ "$before" = "$after" ] || fail "fallback changed the database bytes, size, or mtime"
+  [ "$wal_before" = "$wal_after" ] || fail "fallback changed the write-ahead log of a WAL database"
   printf '%s\n' "$out" | jq -e '
     .source == "baby-menu-sqlite"
     and .sourceTable == "kimi_quota_cache"
@@ -145,5 +181,7 @@ test_database_is_never_written() {
 make_fixture
 test_fresh_primary_is_unchanged
 test_stale_and_auth_required_emit_sourced_aged_snapshots
+test_absent_sqlite3_preserves_primary_behavior
+test_unusable_saved_timestamp_is_not_reported_as_young
 test_missing_or_unopenable_database_preserves_primary_behavior
 test_database_is_never_written

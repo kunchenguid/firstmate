@@ -5,7 +5,9 @@
 # Fresh primary results produce no output and do not inspect Baby Menu.
 # A missing sqlite3, database, table, row, or valid snapshot also produces no
 # output with exit 0, preserving the primary quota-axi result as the only
-# evidence.
+# evidence. A snapshot whose saved timestamp is unreadable or ahead of the
+# current clock is not a valid snapshot: every emitted reading carries a real
+# non-negative age rather than a guessed or clamped one.
 #
 # Successful output is one JSON object with source=Baby Menu SQLite, snapshot
 # age, and quota-only fields from the Baby Menu payload.
@@ -39,8 +41,7 @@ case "$provider" in
     row_query="
       SELECT
         snapshot AS payload,
-        saved_at,
-        max(0, CAST(strftime('%s', 'now') AS INTEGER) - CAST(strftime('%s', saved_at) AS INTEGER)) AS age_seconds
+        saved_at
       FROM claude_code_quota_snapshot
       WHERE id = 1
       LIMIT 1"
@@ -50,8 +51,7 @@ case "$provider" in
     row_query="
       SELECT
         snapshot AS payload,
-        saved_at,
-        max(0, CAST(strftime('%s', 'now') AS INTEGER) - CAST(strftime('%s', saved_at) AS INTEGER)) AS age_seconds
+        saved_at
       FROM codex_quota_snapshot
       WHERE id = 1
       LIMIT 1"
@@ -61,8 +61,7 @@ case "$provider" in
     row_query="
       SELECT
         snapshot AS payload,
-        saved_at,
-        max(0, CAST(strftime('%s', 'now') AS INTEGER) - CAST(strftime('%s', saved_at) AS INTEGER)) AS age_seconds
+        saved_at
       FROM grok_quota_snapshot
       WHERE id = 1
       LIMIT 1"
@@ -72,8 +71,7 @@ case "$provider" in
     row_query="
       SELECT
         value AS payload,
-        strftime('%Y-%m-%dT%H:%M:%SZ', updated_at / 1000, 'unixepoch') AS saved_at,
-        max(0, CAST(strftime('%s', 'now') AS INTEGER) - CAST(updated_at / 1000 AS INTEGER)) AS age_seconds
+        strftime('%Y-%m-%dT%H:%M:%SZ', updated_at / 1000, 'unixepoch') AS saved_at
       FROM kimi_quota_cache
       WHERE key = 'current_result'
       LIMIT 1"
@@ -86,7 +84,14 @@ command -v sqlite3 >/dev/null 2>&1 || exit 0
 
 query="
   PRAGMA query_only=ON;
-  WITH fallback_row AS ($row_query)
+  WITH fallback_row AS ($row_query),
+  aged_row AS (
+    SELECT
+      payload,
+      saved_at,
+      CAST(strftime('%s', 'now') AS INTEGER) - CAST(strftime('%s', saved_at) AS INTEGER) AS age_seconds
+    FROM fallback_row
+  )
   SELECT json_object(
     'schemaVersion', 1,
     'provider', '$provider',
@@ -108,6 +113,7 @@ query="
       'errorCode', json_extract(payload, '$.error.code')
     )
   )
-  FROM fallback_row;"
+  FROM aged_row
+  WHERE saved_at IS NOT NULL AND age_seconds IS NOT NULL AND age_seconds >= 0;"
 
 sqlite3 -readonly -batch -noheader "$database" "$query" 2>/dev/null || true

@@ -233,6 +233,8 @@ Every profile array is an implicit quota-aware choice.
 Firstmate reads `quota-axi --json` first and invokes `bin/fm-quota-fallback.sh <provider> <status>` only when that provider's primary status is `stale` or `auth_required`.
 The helper makes a best-effort, read-only query of `~/.baby-menu/baby-menu.db`; Baby Menu and `sqlite3` remain optional, and a missing or unreadable database leaves the primary result unchanged.
 Fallback output is a separate JSON object marked `source: "baby-menu-sqlite"` with `savedAt` and `ageSeconds`, so it cannot be mistaken for the primary reading.
+`ageSeconds` is always a real non-negative age measured from the stored timestamp; a snapshot whose timestamp is unreadable or ahead of the current clock is skipped like a missing row instead of being reported as young.
+That age is what makes the two readings comparable: a Baby Menu snapshot older than the stale primary's own `refreshedAt` adds no evidence, and a candidate with neither a fresh primary nor a newer snapshot stays an unestablished candidate to stop and report.
 For the inspected Baby Menu 0.1.24 schema, the embedded quota-only `snapshot` preserves Baby Menu's window identifiers because they do not always match quota-axi identifiers: Claude uses `five_hour` and `seven_day`, Codex exposed a 604800-second `weekly` window, Grok uses `credits` plus product windows, and Kimi can return an authentication status without a usable window.
 This source supplies only a current snapshot, not a consumption curve: the Claude, Codex, and Grok tables replace an `id=1` row, while Kimi stores the current result under one key.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.

@@ -112,6 +112,9 @@ test_agent_owned_quota_array_dispatch_contract() {
     'only for a candidate whose primary status is `stale` or `auth_required`, also run `bin/fm-quota-fallback.sh <provider> <status>`' \
     'evaluate every configured candidate against the available explicitly sourced output' \
     'choose the candidate with the most real headroom' \
+    'That helper is the only sanctioned supplementary source and never makes a candidate quota-informed on its own' \
+    "weigh its dated snapshot only when it is newer than that candidate's own primary reading" \
+    'treat a candidate left with neither a fresh primary nor a newer snapshot as one whose quota data cannot be established' \
     'if any harness/model/provider relationship, applicable quota data, or interpretation cannot be established, stop and report that candidate' \
     'instead of omitting it, guessing, falling back, or calling the result quota-informed' \
     'Preserve malformed profile configuration as an actionable error' \
