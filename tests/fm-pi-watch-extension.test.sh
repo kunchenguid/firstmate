@@ -1076,7 +1076,7 @@ const unexpected = makePi();
 mod.default(unexpected.pi);
 await unexpected.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
 const ambiguous = await unexpected.getTool().execute("ambiguous-overlap", {}, undefined, undefined, {});
-if (ambiguous.details?.ok !== false || !String(ambiguous.details.message).includes("shutting down")) {
+if (ambiguous.details?.ok !== false || String(ambiguous.details.message) !== "watcher: not armed - another live Pi session generation owns watcher supervision; this binding stays idle until that session ends") {
   throw new Error(`ambiguous factory overlap acquired arm authority: ${JSON.stringify(ambiguous.details)}`);
 }
 if (!pidAlive(activeChild) || liveArmPids().length !== 1 || liveArmPids()[0] !== activeChild) {

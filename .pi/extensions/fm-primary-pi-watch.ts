@@ -4,10 +4,14 @@
 // Pi emits session_shutdown for ordinary same-process replacements (/new, /resume,
 // /fork, reload) as well as terminal quit. This extension binds one generation per
 // session activation. Only the active live generation may start, stop, rearm, or
-// clear the arm child. Replacement session_start (or a fresh factory bind) activates
-// a new live generation so monitoring can arm again without restarting Pi. Terminal
-// quit leaves the final generation stopped so late callbacks cannot rearm. Stale
-// callbacks from a prior generation are no-ops against the active replacement.
+// clear the arm child, and the process-exit cleanup fallback is installed for exactly
+// that one generation. Activation is first-owner-wins: a replacement session_start
+// (or a fresh factory bind) becomes the active live generation only once the previous
+// one has stopped, so monitoring can arm again without restarting Pi, while a bind
+// that overlaps a still-live generation defers instead of taking over and refuses to
+// arm. Terminal quit leaves the final generation stopped so late callbacks cannot
+// rearm. Stale callbacks from a prior generation are no-ops against the active
+// replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -98,6 +102,7 @@ const armReadyTimeoutMs = positiveInteger(
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
+const notActiveOwnerMessage = "watcher: not armed - another live Pi session generation owns watcher supervision; this binding stays idle until that session ends";
 
 let nextGenerationId = 0;
 let activeGeneration: SessionGeneration | null = null;
@@ -385,7 +390,9 @@ export default function (pi: ExtensionAPI) {
   }
 
   function startArm(owner: SessionGeneration, predecessorArmPid = ""): ArmResult {
-    if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
+    if (!generationIsLive(owner)) {
+      return { ok: false, message: owner.stopping ? shuttingDownMessage : notActiveOwnerMessage };
+    }
     const ownership = lockOwnership();
     if (ownership === "other") return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
     if (ownership === "missing") {
