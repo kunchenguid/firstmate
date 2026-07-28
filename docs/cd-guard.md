@@ -74,7 +74,6 @@ It does not permit `cd /home/project`, because an absolute-path `cd` remains a p
 
 ## Transport and fail-open behavior
 
-`bin/fm-cd-pretool-check.sh` supports all five harness-engine entry shapes used by the tracked adapters, with pi-signed sharing Pi's shape:
 `bin/fm-cd-pretool-check.sh` supports all six harness entry shapes used by the tracked adapters:
 
 - Claude sends stdin JSON at `.tool_input.command` and adds `--claude` to preserve Claude's stderr-only deny requirement.
@@ -82,7 +81,6 @@ It does not permit `cd /home/project`, because an absolute-path `cd` remains a p
 - Grok sends stdin JSON at `.toolInput.command`.
 - OpenCode sends the exact command string through `--command <exact string>`.
 - Pi and pi-signed send the exact command string through `--command <exact string>`.
-- Pi sends the exact command string through `--command <exact string>`.
 - Devin sends stdin JSON at `.tool_input.command` and adds `--claude` for its stderr-only deny response.
 
 Processing order is cheapest-first: a strict-superset prefilter, then the primary-checkout scope, then the Node policy owner.

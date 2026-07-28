@@ -65,6 +65,6 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 The goal is continuity without a Pi or OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
-Claude depends on the Stop `asyncRewake` rewake, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
+Claude depends on the Stop `asyncRewake` rewake, Grok retains native background-completion notifications, and Codex and Devin retain bounded foreground checkpoints.
 
-[`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.
+[`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current cross-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.

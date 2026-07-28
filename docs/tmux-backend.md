@@ -46,7 +46,7 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 A target-existence check proves only that the pane exists.
 The deeper tmux agent-liveness probe first verifies exact window membership, then reads `#{pane_current_command}` to distinguish a running harness process from a bare idle shell.
-It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
+It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Devin process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
 
 The verified Pi Launcher path reports the exact foreground command `pi-launcher` for both pi and pi-signed, while direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly.
@@ -76,11 +76,8 @@ While OpenCode is mid-turn, Enter queues the message but leaves its text visible
 After the normal retry budget, only structurally proven pending text in a provably busy pane is accepted as queued, while an idle pane remains `pending` as a genuine swallowed Enter.
 Ambiguous pending text never receives the busy-queue conversion.
 `tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
-- `alive` - the name is an exact verified harness executable (`claude`, `claude-code`, `codex`, `opencode`, `grok`, `kimi`, `devin`, `pi`, `pi-signed`, `pi-launcher`, or `Pi`).
-  The classifier deliberately rejects unrelated names that merely contain a harness substring.
-  Claude, Codex, OpenCode, and Grok were confirmed on 2026-07-07; Devin CLI 3000.1.27 was confirmed on 2026-07-13 to remain the literal `devin` foreground process throughout an interactive turn.
-- `dead` - the name is a bare shell (`zsh`, `bash`, `sh`, `dash`, `ash`, `ksh`, `mksh`, `tcsh`, `csh`, `fish`).
-- `unknown` - anything else, including an unreadable pane.
+The shared process classifier accepts exact verified harness executables and harness-bearing interpreter scripts while rejecting unrelated names that merely contain a harness substring.
+Devin CLI 3000.1.27 was confirmed on 2026-07-13 to remain the literal `devin` foreground process throughout an interactive turn.
 
 ## Limits and regression entry points
 
