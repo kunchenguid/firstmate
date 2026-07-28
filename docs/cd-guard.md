@@ -33,6 +33,13 @@ The cd-guard does not inspect `.fm-secondmate-home`.
 It therefore applies in a git-cloned secondmate home where git-dir equals git-common-dir, but remains inert in a treehouse-leased secondmate home that is itself a linked worktree.
 Secondmate child crew and scout worktrees are likewise inert under the linked-worktree test.
 
+### Stated before it is enforced
+
+The guard is the backstop, not the first place an agent meets the rule.
+`AGENTS.md` section 2 states it inline, so the primary reads it before its first shell call rather than discovering it through a deny, and `bin/fm-brief.sh`'s ship and scout scaffolds carry the same rule with the scoped alternatives (`git -C <dir>`, an absolute path on the command itself, or a `(cd <dir> && ...)` subshell); `tests/fm-brief.test.sh` asserts it on the generated brief.
+In an ordinary crewmate or scout task worktree the guard is inert under the linked-worktree test above, so the brief's copy earns its place as working-directory discipline and as the rule that does fire in a git-cloned secondmate home.
+The secondmate charter scaffold carries no separate copy, because it points at the local `AGENTS.md` that already states it.
+
 ## Block vs allow
 
 The discriminator is persistence to the parent shell's cwd, not the mere presence of the token `cd`.

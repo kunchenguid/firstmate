@@ -752,6 +752,42 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   pass "bootstrap surfaces active crew-dispatch rules only as verbose BOOTSTRAP_INFO"
 }
 
+# The shipped example is what a captain copies into config/crew-dispatch.json,
+# so it must satisfy the same validator bootstrap runs, and its cost tiers must
+# reach the captain intact. Asserted on the real example file rather than an
+# inline copy, so editing the example without re-checking it fails here.
+test_shipped_crew_dispatch_example_activates() {
+  local case_dir fakebin out expect
+  case_dir="$TMP_ROOT/dispatch-shipped-example"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  cp "$ROOT/docs/examples/crew-dispatch.json" "$case_dir/home/config/crew-dispatch.json"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "shipped crew-dispatch example should validate silently, got: $out"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_VERBOSE_FACTS=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  case $out in
+    *"CREW_DISPATCH:"*) fail "shipped crew-dispatch example was rejected: $out" ;;
+  esac
+
+  expect='BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json'
+  assert_contains "$out" "$expect" "shipped example should report as active"
+  assert_contains "$out" '-> grok' "specialist tier should resolve to grok"
+  assert_contains "$out" '-> claude/haiku/low' "cheap tier should resolve to claude/haiku/low"
+  assert_contains "$out" '-> quota-balanced[claude/claude-sonnet-5/medium, codex/gpt-5.5/medium]' \
+    "mid routine-implementation tier should resolve to the medium-effort pair"
+  assert_contains "$out" '-> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]' \
+    "strong tier should resolve to the high-effort pair"
+  assert_contains "$out" 'crew dispatch default: quota-balanced[codex/gpt-5.5/medium, pi/anthropic/claude-sonnet-5/medium]' \
+    "default should stay at the mid tier so unmatched work does not fall back to the strongest class"
+  pass "bootstrap accepts the shipped crew-dispatch example and surfaces its four cost tiers"
+}
+
 test_crew_dispatch_validation() {
   local label body expect mode case_dir fakebin out n
   n=0
@@ -823,4 +859,5 @@ test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_bootstrap_info_is_no_load_and_actionable_lines_trigger
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
+test_shipped_crew_dispatch_example_activates
 test_crew_dispatch_validation
