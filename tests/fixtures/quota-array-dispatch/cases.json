@@ -187,9 +187,9 @@
       ]
     },
     {
-      "id": "genuine-tie-identity-order",
-      "expect": "A",
-      "reason": "break genuine ties by model|effort|harness, not array order or harness preference",
+      "id": "genuine-tie-captain-choice",
+      "expectError": "genuine tie requires captain choice",
+      "reason": "report genuine ties instead of selecting by array order or harness identity",
       "candidates": [
         {
           "id": "A",
@@ -225,8 +225,8 @@
     },
     {
       "id": "genuine-tie-reversed-array-order",
-      "expect": "A",
-      "reason": "same genuine tie must not flip when array order reverses",
+      "expectError": "genuine tie requires captain choice",
+      "reason": "reversing a genuine tie must still require captain choice",
       "candidates": [
         {
           "id": "B",

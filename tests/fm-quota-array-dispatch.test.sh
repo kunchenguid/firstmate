@@ -44,9 +44,6 @@ def conservation_pressure(c):
         return True
     return False
 
-def identity_key(c):
-    return f"{c.get('model','')}|{c.get('effort','')}|{c.get('harness','')}"
-
 def select(case):
     required = case.get("requiredReasoningClass")
     cands = list(case["candidates"])
@@ -83,14 +80,19 @@ def select(case):
             # Among sustainable with pace: prefer higher reserve then higher raw
             (-reserve_key if (not pressured and pace_available and not unknown) else 0),
             -raw,
-            identity_key(c),
         )
 
     # Special-case all-tight already constrained to required class above.
-    winner = sorted(cands, key=sort_key)[0]
+    best_key = min(sort_key(c) for c in cands)
+    winners = [c for c in cands if sort_key(c) == best_key]
+    if len(winners) > 1:
+        return {
+            "error": "genuine tie requires captain choice",
+            "candidates": sorted(c["id"] for c in winners),
+        }
+    winner = winners[0]
     return {
         "id": winner["id"],
-        "identity": identity_key(winner),
         "pressured": conservation_pressure(winner),
     }
 
@@ -165,7 +167,8 @@ test_owner_contains_acceptance_procedure() {
     'Prefer known sustainable evidence over `unknown` pace when otherwise comparable' \
     'If the dispatch choice materially hinges on unresolved pace, report the uncertainty' \
     'Do not crash, fabricate pace, or silently reinterpret absence as healthy' \
-    'lexicographically smallest concrete profile identity string `model|effort|harness`' \
+    'stop and report every tied candidate for captain choice' \
+    'Do not select by array order, harness name, or another arbitrary identity ordering' \
     'Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-specific policy'; do
     assert_grep "$phrase" "$OWNER" "quota-array-dispatch procedure lost '$phrase'"
   done
@@ -222,26 +225,35 @@ PY
 }
 
 test_deterministic_acceptance_cases() {
-  local raw case_json case_id expect got reason
+  local raw case_json case_id expect expect_error got reason
   raw=$(cat "$CASES")
   while IFS= read -r case_json; do
     case_id=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$case_json")
-    expect=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["expect"])' "$case_json")
+    expect=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("expect", ""))' "$case_json")
+    expect_error=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("expectError", ""))' "$case_json")
     reason=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["reason"])' "$case_json")
     got=$(select_candidate_py "$case_json")
     python3 -c '
 import json,sys
 got=json.loads(sys.argv[1])
 expect=sys.argv[2]
-case_id=sys.argv[3]
+expect_error=sys.argv[3]
+case_id=sys.argv[4]
 err=got.get("error")
-if err:
+if expect_error:
+    if err != expect_error:
+        raise SystemExit("%s: expected error %s, got %s" % (case_id, expect_error, got))
+elif err:
     raise SystemExit("%s: selector error: %s" % (case_id, err))
-if got.get("id") != expect:
+elif got.get("id") != expect:
     raise SystemExit("%s: expected %s, got %s" % (case_id, expect, got))
-' "$got" "$expect" "$case_id" \
+' "$got" "$expect" "$expect_error" "$case_id" \
       || fail "case $case_id failed ($reason); selector returned $got"
-    pass "case $case_id -> $expect ($reason)"
+    if [ -n "$expect_error" ]; then
+      pass "case $case_id -> $expect_error ($reason)"
+    else
+      pass "case $case_id -> $expect ($reason)"
+    fi
   done < <(python3 -c 'import json,sys; data=json.load(sys.stdin); [print(json.dumps(c, separators=(",", ":"))) for c in data["cases"]]' <<<"$raw")
 }
 

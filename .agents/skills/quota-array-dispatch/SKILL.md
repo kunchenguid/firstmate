@@ -103,10 +103,9 @@ Never use pace or raw headroom to silently replace that reasoning class with a w
    Do not crash, fabricate pace, or silently reinterpret absence as healthy/`on_pace`.
    Compare raw applicable headroom only, state that pace is unavailable, and keep every other safety rule above.
 8. **Genuine ties**
-   If every inspectable selection fact is equal, break the tie with the lexicographically smallest concrete profile identity string `model|effort|harness`.
-   That total order exists only for determinism.
-   It is not standing harness-family preference and must not reintroduce array-order dependence.
-   If even that identity is identical, report the duplicate profiles as a configuration error.
+   If every inspectable selection fact is equal, stop and report every tied candidate for captain choice.
+   Do not select by array order, harness name, or another arbitrary identity ordering.
+   Report duplicate concrete profiles as a configuration error.
 
 The intake rationale must name the inspectable facts used for every candidate.
 Never conclude with an unexplained "best quota" label.
@@ -149,7 +148,7 @@ Dispatch inside that class or stop and report that the tight strongest-class cho
 
 Two candidates match on fit, reasoning class, conservation pressure, worst reserve, pace class, raw headroom, and unknown flags.
 Choosing either array order or a standing harness preference is forbidden.
-Break the tie with `model|effort|harness` lexicographic order only as a deterministic identity key.
+Stop and report both tied candidates for captain choice.
 
 ### schemaVersion 2 or absent-pace compatibility
 
