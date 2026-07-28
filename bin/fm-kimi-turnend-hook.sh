@@ -188,6 +188,21 @@ def expected_entry() -> dict:
     return tomllib.loads(block(BEGIN).decode("utf-8"))["hooks"][0]
 
 
+def type_strict_equal(left, right) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            type_strict_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            type_strict_equal(left_value, right_value)
+            for left_value, right_value in zip(left, right)
+        )
+    return left == right
+
+
 def line_spans(data: bytes):
     spans = []
     cursor = 0
@@ -218,7 +233,7 @@ def excision_matches(data: bytes, parsed: dict, start: int, end: int, index: int
         expected["hooks"] = survivors
     else:
         expected.pop("hooks", None)
-    return actual == expected
+    return type_strict_equal(actual, expected)
 
 
 def adopt_unmarked_region(data: bytes, parsed: dict):
@@ -233,7 +248,7 @@ def adopt_unmarked_region(data: bytes, parsed: dict):
     if len(referencing) != 1:
         return None
     index = referencing[0]
-    if hooks[index] != expected_entry():
+    if not type_strict_equal(hooks[index], expected_entry()):
         return None
     spans = line_spans(data)
     headers = [position for position, span in enumerate(spans) if HOOKS_HEADER.match(span[2])]

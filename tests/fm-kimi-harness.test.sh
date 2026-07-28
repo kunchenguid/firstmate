@@ -326,7 +326,7 @@ EOF
 
 test_kimi_hook_still_refuses_unmarked_foreign_hook_tables() {
   local home config before out rc case_name
-  for case_name in other-path extra-key duplicated inline-array; do
+  for case_name in other-path extra-key duplicated inline-array boolean-timeout float-timeout; do
     home="$TMP_ROOT/config-foreign-$case_name"
     config="$home/.kimi-code/config.toml"
     before="$home/before.toml"
@@ -369,6 +369,24 @@ EOF
       inline-array)
         cat > "$config" <<'EOF'
 hooks = [{ event = "Stop", matcher = "^$", command = "bash \"$HOME/.kimi-code/fm-turn-end.sh\" >/dev/null 2>&1 || true", timeout = 1 }]
+EOF
+        ;;
+      boolean-timeout)
+        cat > "$config" <<'EOF'
+[[hooks]]
+event = "Stop"
+matcher = "^$"
+command = "bash \"$HOME/.kimi-code/fm-turn-end.sh\" >/dev/null 2>&1 || true"
+timeout = true
+EOF
+        ;;
+      float-timeout)
+        cat > "$config" <<'EOF'
+[[hooks]]
+event = "Stop"
+matcher = "^$"
+command = "bash \"$HOME/.kimi-code/fm-turn-end.sh\" >/dev/null 2>&1 || true"
+timeout = 1.0
 EOF
         ;;
     esac
