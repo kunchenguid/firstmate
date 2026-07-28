@@ -69,6 +69,14 @@ mkdir -p "$STATE"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
+SUPERVISION_OWNER=${FM_WATCHER_SUPERVISION_OWNER:-durable}
+case "$SUPERVISION_OWNER" in
+  durable|bounded-checkpoint) ;;
+  *)
+    echo "watcher: invalid supervision owner: $SUPERVISION_OWNER" >&2
+    exit 2
+    ;;
+esac
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
 # The singleton-lock acquisition, EXIT trap, and the blocking supervision loop
 # all live below the source guard at the very bottom of this file (see "Main
@@ -662,6 +670,7 @@ trap 'exit 1' HUP INT TERM
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
 WATCHER_PID=${BASHPID:-$$}
+printf '%s\n' "$SUPERVISION_OWNER" > "$WATCH_LOCK/supervision-owner" || exit 1
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true

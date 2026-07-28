@@ -200,7 +200,7 @@ watcher_identity() {
 }
 
 record_watcher_lock() {
-  local dir=$1 pid=$2 identity=$3 root bin_dir
+  local dir=$1 pid=$2 identity=$3 owner=${4:-durable} root bin_dir
   root=$(cd "$dir" && pwd)
   bin_dir=$(cd "$dir/bin" && pwd)
   mkdir -p "$dir/state/.watch.lock"
@@ -208,6 +208,7 @@ record_watcher_lock() {
   printf '%s\n' "$root" > "$dir/state/.watch.lock/fm-home"
   printf '%s\n' "$bin_dir/fm-watch.sh" > "$dir/state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$dir/state/.watch.lock/pid-identity"
+  printf '%s\n' "$owner" > "$dir/state/.watch.lock/supervision-owner"
 }
 
 test_hook_silent_when_no_work_in_flight() {

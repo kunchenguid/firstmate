@@ -5,12 +5,14 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-180}
+export FM_WATCHER_SUPERVISION_OWNER=bounded-checkpoint
 
 usage() {
   cat <<'EOF'
 Usage: fm-watch-checkpoint.sh [--seconds <n>]
 
 Run bin/fm-watch.sh in the foreground for a bounded checkpoint.
+The watcher lock records this process as a bounded checkpoint, not a durable supervisor.
 On an actionable watcher wake, pass through the watcher output and exit 0.
 On a quiet checkpoint, print "checkpoint: no actionable wake within <n>s" and exit 124.
 EOF

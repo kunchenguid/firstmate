@@ -83,6 +83,16 @@ fm_watcher_lock_matches_pid() {
   [ "$current_identity" = "$lock_identity" ]
 }
 
+fm_watcher_supervision_owner() {
+  local state=$1 owner
+  owner=$(cat "$state/.watch.lock/supervision-owner" 2>/dev/null || true)
+  case "$owner" in
+    bounded-checkpoint|durable) printf '%s\n' "$owner" ;;
+    '') printf '%s\n' durable ;;
+    *) return 1 ;;
+  esac
+}
+
 FM_WATCHER_HEALTHY_PID=
 fm_watcher_healthy() {
   local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid age
@@ -105,6 +115,7 @@ fm_lock_clean_known_files() {
     "$lockdir/pid" \
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
+    "$lockdir/supervision-owner" \
     "$lockdir/watcher-path" \
     2>/dev/null || true
 }

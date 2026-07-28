@@ -32,6 +32,9 @@
 # Codex uses stop_hook_active and Grok uses stopHookActive; typed camel-case
 # takes precedence when both spellings are present. A true value means the
 # current stop attempt already follows a block, so this guard always allows it.
+# On the first Stop attempt, a live bounded Codex checkpoint is not a durable
+# supervision owner: the guard blocks so the checkpoint returns into a model
+# continuation that drains wakes and starts the next checkpoint.
 # Passive harness adapters provide their own one-follow-up guard before calling
 # this script.
 # That bounds those harnesses to at most one forced continuation per turn -
@@ -145,9 +148,22 @@ else
     exit 0
   fi
 fi
+BOUNDED_CHECKPOINT=0
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-  budget_reset
-  exit 0
+  supervision_owner=$(fm_watcher_supervision_owner "$STATE" 2>/dev/null || printf unknown)
+  case "$supervision_owner" in
+    bounded-checkpoint)
+      [ "$CLAUDE_MODE" -eq 0 ] && BOUNDED_CHECKPOINT=1
+      ;;
+    durable)
+      budget_reset
+      exit 0
+      ;;
+  esac
+  if [ "$CLAUDE_MODE" -eq 1 ]; then
+    budget_reset
+    exit 0
+  fi
 fi
 
 block_stop() {
@@ -156,13 +172,19 @@ block_stop() {
   [ -e "$STATE/.afk" ] && afk=1
   x_mode=0
   [ -f "$CONFIG/x-mode.env" ] && x_mode=1
-  reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
-    || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
+  if [ "$BOUNDED_CHECKPOINT" -eq 1 ]; then
+    reason='Keep this Codex model turn active until the foreground checkpoint returns, drain queued wakes, handle any user message, and immediately start the next checkpoint.'
+  else
+    reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
+      || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
+  fi
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$rule"
     printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
-    if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
+    if [ "$BOUNDED_CHECKPOINT" -eq 1 ]; then
+      printf '●  %s task(s) in flight, but the only supervision owner is a bounded Codex checkpoint that will expire.\n' "$FM_SUP_IN_FLIGHT"
+    elif [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
       printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
     else
       printf '●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
