@@ -74,7 +74,7 @@ Both changed shared surfaces were inspected, not assumed.
 
 ```sh
 $ for h in claude codex opencode pi pi-signed grok kimi unknown; do
-    printf '%-10s %s\n' "$h" "$(bin/fm-supervision-instructions.sh --harness "$h" \
+    printf '%-10s %s\n' "$h" "$(bin/fm-supervision-instructions.sh --harness "$h" --telegram 1 \
       | grep -c '^- Telegram bridge: active')"
   done
 claude     1
