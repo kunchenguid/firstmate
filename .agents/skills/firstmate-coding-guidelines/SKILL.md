@@ -93,6 +93,7 @@ Run `bin/fm-doc-audience-check.sh`; it enforces classification, README setup rou
 - Put one full sentence per line in tracked Markdown.
 - Never wrap multiple sentences onto one physical line.
 - Plain dash `-`, never an em dash.
+- Vendored material copied from upstream is exempt from those Markdown and code-style rules, because reformatting it to house style breaks byte-identical parity and turns every future upstream refresh into a merge conflict; the vendoring banner inside each vendored directory owns which lines are verbatim and which are firstmate-authored.
 - Never add an agent name as a commit co-author.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
