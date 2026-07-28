@@ -6,8 +6,10 @@
 # fm_parlay_listen must background it rather than block the caller; these
 # tests assert that instead of a hang, the call returns immediately, records
 # the backgrounded pid, and a fake `parlay` observes the expected invocation.
-# Every function must be a no-op (never fail, never hang) when `parlay` is not
-# on PATH, since Parlay enrollment is an enhancement, never a dependency.
+# Every function must never fail or hang when `parlay` is not on PATH, since
+# Parlay enrollment is an enhancement, never a dependency. fm_parlay_listen is
+# a full no-op in that case; fm_parlay_agent_down still kills/clears any
+# already-recorded listen pid and only skips the `parlay agent-down` call.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -132,27 +134,31 @@ test_agent_down_failure_is_best_effort() {
   pass "fm_parlay_agent_down is best-effort: a failing parlay call warns but never fails"
 }
 
-test_agent_down_noop_without_parlay_on_path() {
-  local case_dir state status
+test_agent_down_kills_pid_without_parlay_on_path() {
+  local case_dir state status pidfile out
   case_dir="$TMP_ROOT/down-absent"
   mkdir -p "$case_dir/state" "$case_dir/emptybin"
   state="$case_dir/state"
-  printf '99999999\n' > "$state/down-absent-z5.parlay-listen.pid"
+  pidfile="$state/down-absent-z5.parlay-listen.pid"
+
+  sh -c 'sleep 30' &
+  printf '%s\n' "$!" > "$pidfile"
 
   # shellcheck disable=SC2123
   # shellcheck source=/dev/null
-  ( PATH="$case_dir/emptybin"; . "$LIB"; fm_parlay_agent_down down-absent-z5 "$state" )
+  out=$( ( PATH="$case_dir/emptybin:/usr/bin:/bin"; . "$LIB"; fm_parlay_agent_down down-absent-z5 "$state" ) 2>&1 )
   status=$?
   expect_code 0 "$status" "fm_parlay_agent_down must not fail when parlay is missing"
-  assert_grep 99999999 "$state/down-absent-z5.parlay-listen.pid" \
-    "fm_parlay_agent_down should not touch the pid file when parlay is absent"
-  pass "fm_parlay_agent_down is a silent no-op when parlay is not on PATH"
+  assert_absent "$pidfile" \
+    "fm_parlay_agent_down should still kill the recorded pid and remove the pid file when parlay is absent"
+  assert_contains "$out" "warning:" "fm_parlay_agent_down should warn when parlay is absent"
+  pass "fm_parlay_agent_down kills the recorded poller even when parlay is not on PATH"
 }
 
 test_listen_backgrounds_and_records_pid
 test_listen_noop_without_parlay_on_path
 test_agent_down_kills_pid_and_deregisters
 test_agent_down_failure_is_best_effort
-test_agent_down_noop_without_parlay_on_path
+test_agent_down_kills_pid_without_parlay_on_path
 
 echo "# all fm-parlay-lib tests passed"

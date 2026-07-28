@@ -28,12 +28,15 @@ fm_parlay_listen() {  # <task-id> <state-dir>
 fm_parlay_agent_down() {  # <task-id> <state-dir>
   local id=$1 state_dir=$2 pid
   local pidfile=$state_dir/$id.parlay-listen.pid
-  command -v parlay >/dev/null 2>&1 || return 0
   if [ -f "$pidfile" ]; then
     pid=$(cat "$pidfile" 2>/dev/null || true)
     [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
     rm -f "$pidfile"
   fi
-  parlay agent-down "$id" >/dev/null 2>&1 \
-    || echo "warning: parlay agent-down failed for $id; its Parlay panel entry may remain until it expires" >&2
+  if command -v parlay >/dev/null 2>&1; then
+    parlay agent-down "$id" >/dev/null 2>&1 \
+      || echo "warning: parlay agent-down failed for $id; its Parlay panel entry may remain until it expires" >&2
+  else
+    echo "warning: parlay is not on PATH; skipping agent-down deregistration for $id" >&2
+  fi
 }
