@@ -48,7 +48,7 @@ test_new_skill_metadata_and_triggers() {
 # guesswork. It is captain-invocable, so its trigger belongs in an operating
 # section rather than the agent-only reference list.
 test_vendored_watch_skill_keeps_license_and_upstream_pin() {
-  local count script trigger
+  local count script trigger pycache
   assert_present "$WATCH" "vendored watch skill is missing"
   assert_present "$WATCH_LICENSE" "vendored watch skill lost its upstream LICENSE"
   assert_grep 'MIT License' "$WATCH_LICENSE" "vendored watch LICENSE is no longer the upstream MIT terms"
@@ -59,9 +59,16 @@ test_vendored_watch_skill_keeps_license_and_upstream_pin() {
     "watch skill lost the upstream commit pin a refresh diffs against"
   assert_grep 'To refresh: re-copy upstream skills/watch' "$WATCH" \
     "watch skill lost the vendoring banner's refresh procedure"
+  # The refresh path is a re-copy from upstream, so a truncated or partial copy is
+  # a realistic failure that would otherwise surface only when /watch next runs.
+  # Parsing is checked instead of content so a legitimate refresh still passes.
+  pycache=$(fm_test_tmproot fm-watch-pycompile)
   for script in watch.py frames.py transcribe.py whisper.py download.py setup.py config.py; do
     assert_present "$ROOT/.agents/skills/watch/scripts/$script" \
       "vendored watch skill is missing scripts/$script"
+    PYTHONPYCACHEPREFIX="$pycache" python3 -m py_compile \
+      "$ROOT/.agents/skills/watch/scripts/$script" ||
+      fail "vendored watch scripts/$script does not parse - the upstream re-copy is truncated or partial"
   done
   [ -x "$ROOT/.agents/skills/watch/scripts/watch.py" ] || fail "scripts/watch.py is not executable"
   assert_grep 'brew install ffmpeg yt-dlp' "$WATCH" \

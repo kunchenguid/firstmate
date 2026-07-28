@@ -28,7 +28,10 @@ FIRST-RUN SIDE EFFECTS - GET THE CAPTAIN'S CONSENT BEFORE THE FIRST RUN:
 scripts/setup.py installs missing dependencies itself on macOS only, where
 _install_macos runs `brew install ffmpeg yt-dlp` unattended; on Linux and
 Windows it only prints an install hint and exits non-zero. It also scaffolds
-~/.config/watch/.env and marks SETUP_COMPLETE=true there.
+~/.config/watch/.env and marks SETUP_COMPLETE=true there. Wherever the Step 0
+exit-code table below directs you to run the installer (exits 2, 3, and 4),
+stop and get the captain's word first, notwithstanding the prose there calling
+the installer idempotent and safe to re-run.
 AUDIO EGRESS: when a GROQ_API_KEY or OPENAI_API_KEY is configured, and only
 when captions are unavailable, scripts/whisper.py extracts the audio and
 uploads it to api.groq.com or api.openai.com for transcription. Pass
