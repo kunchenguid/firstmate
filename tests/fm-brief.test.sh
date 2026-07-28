@@ -72,28 +72,52 @@ $hits"
   pass "fm-brief.sh: no here-document is captured by a command substitution"
 }
 
+# Echo the version <path> reports as its own $BASH_VERSION, or nothing when it
+# is not an executable that answers as a bash.
+bash_version_of() {
+  [ -n "$1" ] && [ -x "$1" ] || return 0
+  # shellcheck disable=SC2016  # single quotes are deliberate: BASH_VERSION must expand in the candidate shell, not this one
+  "$1" -c 'echo "$BASH_VERSION"' 2>/dev/null || true
+}
+
 # Real bash 3.2 parse check across every shipped script. This is the strongest
 # guarantee available, but only where a legacy bash exists - macOS developer
 # machines, and CI only if it installs one. It skips loudly rather than
 # silently so a green run never overstates what was verified.
+#
+# An explicit FM_TEST_BASH32 and the autodiscovered candidates are deliberately
+# not the same kind of thing. Discovery may come up empty and skip; a pin is an
+# operator asserting "run the strong check against this binary", so a pin that
+# cannot deliver fails instead of quietly degrading to the same skip the
+# operator would have seen had they never set it.
 test_all_bin_scripts_parse_under_legacy_bash() {
-  local candidate legacy='' legacy_ver='' ver failures='' f
-  for candidate in "${FM_TEST_BASH32:-}" /bin/bash "$(command -v bash-3.2 || true)"; do
-    [ -n "$candidate" ] && [ -x "$candidate" ] || continue
-    # shellcheck disable=SC2016  # single quotes are deliberate: BASH_VERSION must expand in the candidate shell, not this one
-    ver=$("$candidate" -c 'echo "$BASH_VERSION"' 2>/dev/null || true)
+  local candidate legacy='' legacy_ver='' ver failures='' f err
+  if [ -n "${FM_TEST_BASH32:-}" ]; then
+    ver=$(bash_version_of "$FM_TEST_BASH32")
     case "$ver" in
-      3.*) legacy=$candidate; legacy_ver=$ver; break ;;
+      3.*) legacy=$FM_TEST_BASH32; legacy_ver=$ver ;;
+      *) fail "FM_TEST_BASH32 is set to '$FM_TEST_BASH32', which is not an executable bash 3.x (reports: ${ver:-no bash version}); point it at a bash 3.2 binary or unset it" ;;
     esac
-  done
+  else
+    for candidate in /bin/bash "$(command -v bash-3.2 || true)"; do
+      ver=$(bash_version_of "$candidate")
+      case "$ver" in
+        3.*) legacy=$candidate; legacy_ver=$ver; break ;;
+      esac
+    done
+  fi
   if [ -z "$legacy" ]; then
     skip "fm-brief.sh: bin/ parses under bash 3.x" \
       "no bash 3.x found (set FM_TEST_BASH32 to a bash 3.2 binary); the structural guard still applies"
     return
   fi
+  # Report each failure with the line and message bash gives, since that
+  # breakage is invisible on the contributor's own CI.
   for f in "$ROOT"/bin/*.sh "$ROOT"/bin/backends/*.sh; do
     [ -f "$f" ] || continue
-    "$legacy" -n "$f" 2>/dev/null || failures="$failures ${f#"$ROOT"/}"
+    err=$("$legacy" -n "$f" 2>&1) && continue
+    failures="$failures
+  ${f#"$ROOT"/}: ${err:-no diagnostic emitted}"
   done
   [ -z "$failures" ] || fail "these scripts do not parse under $legacy (bash $legacy_ver):$failures"
   pass "fm-brief.sh: every bin/ script parses under bash $legacy_ver"
