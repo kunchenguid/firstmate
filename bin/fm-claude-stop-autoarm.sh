@@ -128,10 +128,15 @@ write_epoch() {  # <outcome>
 
 write_epoch arming
 
-# X mode cadence: source the generated config so an X instance polls at its
-# 30s cadence (fm-bootstrap.sh x_mode_setup contract).
-# shellcheck source=/dev/null
-[ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
+# Always-on channel cadence: source every generated config so a home that armed
+# X mode, the Telegram bridge, or both polls at its 30s cadence instead of the
+# 300s default (fm-bootstrap.sh x_mode_setup and telegram_setup contracts). This
+# is the routine arm path for the default primary harness, so a channel missing
+# here polls five minutes apart no matter what the supervision block says.
+for cadence_env in x-mode.env telegram.env; do
+  # shellcheck source=/dev/null
+  [ -f "$CONFIG/$cadence_env" ] && . "$CONFIG/$cadence_env"
+done
 
 # --- foreground the real arm wrapper ------------------------------------------
 # NO shell &: this hook process tree is the harness-owned lifecycle. The arm

@@ -974,6 +974,100 @@ test_watcher_rotates_between_always_on_channels() {
   pass "the check sweep rotates, so one always-on channel cannot starve another"
 }
 
+# The three integration points below are the ones a bridge-only home actually
+# depends on and that no earlier test touched: the PR-check migration that runs
+# on every watcher start, the arm seatbelt that vets the rendered arm command,
+# and the Claude Stop auto-arm that is the default harness's routine arm path.
+
+test_migration_does_not_quarantine_the_bridge_shim() {
+  local dir home out
+  dir="$TMP_ROOT/migration"
+  mkdir -p "$dir"
+  tg_fake_api "$dir"
+  home=$(tg_home "$dir" home "$TEST_TOKEN")
+  tg_run "$home" "$TG_FAKEBIN" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1 || true
+  assert_present "$home/state/telegram-watch.check.sh" "bootstrap did not arm the shim to migrate against"
+
+  # bin/fm-watch.sh runs this on every watcher start, before taking the lock.
+  for out in "" --checks-safe; do
+    PATH="$TG_FAKEBIN:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+      "$ROOT/bin/fm-pr-check-migrate.sh" $out >/dev/null 2>&1 || true
+    assert_present "$home/state/telegram-watch.check.sh" \
+      "the migration quarantined a valid bridge shim (mode '$out'), disarming the bridge on watcher start"
+  done
+  assert_absent "$home/state/.pr-check-quarantine/telegram-watch.check.sh" \
+    "the bridge shim was moved into PR-check quarantine"
+
+  # A shim whose bytes do not match is not exempt and must still be quarantined.
+  printf '#!/usr/bin/env bash\nexec /bin/echo tampered\n' > "$home/state/telegram-watch.check.sh"
+  chmod 700 "$home/state/telegram-watch.check.sh"
+  PATH="$TG_FAKEBIN:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-pr-check-migrate.sh" >/dev/null 2>&1 || true
+  assert_absent "$home/state/telegram-watch.check.sh" \
+    "a tampered bridge shim was treated as exempt instead of being quarantined"
+  pass "the PR-check migration exempts a valid bridge shim and still quarantines a tampered one"
+}
+
+test_arm_seatbelt_allows_the_rendered_bridge_arm() {
+  local dir home config rendered out rc
+  dir="$TMP_ROOT/seatbelt"
+  home="$dir/home"
+  # The policy blesses only <home>/config/<cadence>.env, so the fixture uses the
+  # real layout rather than a detached config dir.
+  config="$home/config"
+  mkdir -p "$home/state" "$config"
+  : > "$config/telegram.env"
+
+  # Feed the seatbelt the exact string the supervision renderer emits.
+  rendered=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-supervision-instructions.sh" --harness grok --telegram 1 \
+    | grep -F 'exec bin/fm-watch-arm.sh' | sed 's/^ *`//; s/`$//')
+  [ -n "$rendered" ] || fail "could not render the grok arm command"
+  rc=0
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-arm-pretool-check.sh" --command "$rendered" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the seatbelt denied firstmate's own bridge arm command (exit $rc): $out"
+
+  # Both channels armed renders two source nodes; that must pass too.
+  : > "$config/x-mode.env"
+  rendered=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-supervision-instructions.sh" --harness grok \
+    | grep -F 'exec bin/fm-watch-arm.sh' | sed 's/^ *`//; s/`$//')
+  rc=0
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-arm-pretool-check.sh" --command "$rendered" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the seatbelt denied the two-channel arm command (exit $rc): $out"
+
+  # The widening must not bless an arbitrary sourced file.
+  rc=0
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-arm-pretool-check.sh" --command \
+    "[ -f '$config/evil.env' ] && . '$config/evil.env'; exec bin/fm-watch-arm.sh" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "the seatbelt now allows sourcing an arbitrary file before the arm"
+  pass "the arm seatbelt accepts the rendered bridge arm, one or both channels, and nothing else"
+}
+
+test_stop_autoarm_inherits_the_bridge_cadence() {
+  local dir home config out
+  dir="$TMP_ROOT/autoarm"
+  home="$dir/home"
+  config="$dir/config"
+  mkdir -p "$home/state" "$config"
+  printf 'export FM_CHECK_INTERVAL=30\n' > "$config/telegram.env"
+
+  # The hook sources every cadence file before foregrounding the arm; assert the
+  # inherited value rather than the file list, so the contract is what is pinned.
+  out=$(CONFIG="$config" bash -c '
+    for cadence_env in x-mode.env telegram.env; do
+      # shellcheck source=/dev/null
+      [ -f "$CONFIG/$cadence_env" ] && . "$CONFIG/$cadence_env"
+    done
+    printf "%s" "${FM_CHECK_INTERVAL:-300}"')
+  [ "$out" = 30 ] || fail "a bridge-only home would arm at cadence $out instead of 30"
+  assert_grep 'telegram.env' "$ROOT/bin/fm-claude-stop-autoarm.sh" \
+    "the Claude Stop auto-arm does not source the bridge cadence file"
+  pass "the default harness's routine arm inherits the bridge cadence, not the 300s default"
+}
+
 test_gate_agent_cannot_reach_the_channel() {
   local out
   paired_home gate
@@ -1072,5 +1166,8 @@ test_supervision_is_required_for_a_bridged_home
 test_cadence_instruction_reaches_every_harness
 test_both_channels_coexist_in_one_home
 test_watcher_rotates_between_always_on_channels
+test_migration_does_not_quarantine_the_bridge_shim
+test_arm_seatbelt_allows_the_rendered_bridge_arm
+test_stop_autoarm_inherits_the_bridge_cadence
 test_gate_agent_cannot_reach_the_channel
 test_homes_cannot_read_each_other

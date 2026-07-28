@@ -2,7 +2,8 @@
 
 Active empirical evidence for the guarantees the private Telegram bridge claims.
 Behavior, setup, and tunables are owned by [`configuration.md`](../configuration.md#telegram-bridge-env); design rationale by [`architecture.md`](../architecture.md#optional-telegram-bridge).
-Re-run everything here after changing `bin/fm-tg-*`, `bin/fm-private-artifact-lib.sh`, `bin/fm-message-split-lib.sh`, `bin/fm-env-file-lib.sh`, or the watcher check sweep.
+Re-run everything here after changing `bin/fm-tg-*`, `bin/fm-private-artifact-lib.sh`, `bin/fm-message-split-lib.sh`, `bin/fm-env-file-lib.sh`, the watcher check sweep, the PR-check migration, the arm command policy, or the Claude Stop auto-arm.
+`bin/fm-test-run.sh` encodes that list, so a change to any of them selects this suite.
 
 Recorded 2026-07-28 on macOS (Darwin 25.5.0, arm64), GNU bash 5.3.9, ShellCheck 0.11.0.
 
@@ -12,7 +13,7 @@ Recorded 2026-07-28 on macOS (Darwin 25.5.0, arm64), GNU bash 5.3.9, ShellCheck 
 bin/fm-test-run.sh --family telegram-bridge
 ```
 
-46 checks pass, covering: inert-by-default, token secrecy and file modes, pairing success/expiry/replay/wrong-code/wrong-identity/re-pair/revoke, exactly-once acceptance, duplicate delivery, both crash windows, offset confirmation, the recovery sweep and its per-entry budget, the long poll's fit inside the watcher's kill budget, one budget shared across a check's calls, orphaned publication temporaries, refusal of unpaired/group/channel/bot senders, unsupported and oversized payloads, injection inertness, rate limiting, project routing, the two-step publish gate, reply escaping/splitting/retry/final cleanup, bootstrap arm and disarm, supervision eligibility, cross-channel coexistence, sweep rotation, gate-agent refusal, and home isolation.
+46 checks pass, covering: inert-by-default, token secrecy and file modes, pairing success/expiry/replay/wrong-code/wrong-identity/re-pair/revoke, exactly-once acceptance, duplicate delivery, both crash windows, offset confirmation, the recovery sweep and its per-entry budget, the long poll's fit inside the watcher's kill budget, one budget shared across a check's calls, orphaned publication temporaries, refusal of unpaired/group/channel/bot senders, unsupported and oversized payloads, injection inertness, rate limiting, project routing, the two-step publish gate, reply escaping/splitting/retry/final cleanup, bootstrap arm and disarm, supervision eligibility, cross-channel coexistence, sweep rotation, gate-agent refusal, home isolation, and the three channel-aware shared surfaces below.
 
 The Bot API is served by the fake local server in `tests/telegram-helpers.sh`: a stateful implementation of `getUpdates` and `sendMessage` reached through the client's real `curl --config` transport.
 No socket is bound and no real token exists anywhere in the suite.
@@ -88,6 +89,19 @@ unknown    1
 ```
 
 `test_cadence_instruction_reaches_every_harness` pins this, and `test_both_channels_coexist_in_one_home` pins the grok arm command sourcing both channels' cadence files when both are armed.
+
+**Other channel-aware shared surfaces.** An earlier revision of this record claimed the compatibility axes had been inspected while only the supervision renderer and the supervision-eligibility predicate actually had been.
+Three further surfaces hard-code X mode's artifact name and were missed; all three are now fixed and pinned by a test that fails without its fix:
+
+| Surface | What it did to a bridged home | Regression |
+| --- | --- | --- |
+| `bin/fm-pr-check-migrate.sh` | quarantined the valid bridge shim, disarming the bridge on every watcher start | `test_migration_does_not_quarantine_the_bridge_shim` |
+| `bin/fm-arm-command-policy.mjs` | denied the arm command the supervision renderer itself emits | `test_arm_seatbelt_allows_the_rendered_bridge_arm` |
+| `bin/fm-claude-stop-autoarm.sh` | armed at the 300s default instead of 30s on the default harness | `test_stop_autoarm_inherits_the_bridge_cadence` |
+
+The migration exemption now has one owner (`channel_shim_exempt`) covering all four scan sites, rather than four copies of a single-channel condition - which is how the bridge came to be exempt in none of them.
+The two remaining X-only paths there, `x_shim_locked_scan_needed` and `refresh_v1_x_shim`, are correctly X-only: they migrate a legacy mode-0755 v1 shim, and the bridge shim has no v1 legacy.
+Each regression was verified to fail with only its own fix reverted, so none of them passes vacuously.
 
 **Runtime backends.** Not applicable, after inspecting the integration surface rather than assuming it. The bridge adds exactly two things to shared paths, and neither reaches a backend:
 

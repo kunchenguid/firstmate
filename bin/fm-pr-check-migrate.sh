@@ -37,6 +37,8 @@ fi
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-tg-lib.sh
+. "$SCRIPT_DIR/fm-tg-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
 
@@ -76,12 +78,29 @@ scan_marker_content_valid() {
   [ "$value" = "$SCAN_MARKER_VALUE" ]
 }
 
+# An always-on channel poll shim is not a PR poll and must never be quarantined
+# by this migration. Each channel arms a byte-static shim whose bytes the watcher
+# revalidates before every dispatch, so a shim that still matches its expected
+# content is authentic and exempt; anything else falls through to the ordinary
+# PR-poll and custom-check validation below.
+#
+# This is the single owner of that exemption. It previously lived as four copies
+# of one x-watch-only condition across the scan predicates and the quarantine
+# loop, which is exactly how the Telegram shim ended up exempt in none of them
+# and quarantined on every watcher start.
+channel_shim_exempt() {  # <check-path>
+  case "$(basename "$1")" in
+    x-watch.check.sh) fmx_poll_shim_valid "$1" "$FM_HOME" "$FM_ROOT" ;;
+    telegram-watch.check.sh) fmtg_poll_shim_valid "$1" "$FM_HOME" "$FM_ROOT" ;;
+    *) return 1 ;;
+  esac
+}
+
 current_checks_authenticated() {
   local check id
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
-    if [ "$(basename "$check")" = x-watch.check.sh ] \
-      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+    if channel_shim_exempt "$check"; then
       continue
     fi
     id=$(basename "$check" .check.sh)
@@ -374,8 +393,7 @@ migration_needed() {
   local check id
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
-    if [ "$(basename "$check")" = x-watch.check.sh ] \
-      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+    if channel_shim_exempt "$check"; then
       continue
     fi
     id=$(basename "$check" .check.sh)
@@ -391,8 +409,7 @@ unsafe_checks_absent() {
   local check id
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
-    if [ "$(basename "$check")" = x-watch.check.sh ] \
-      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+    if channel_shim_exempt "$check"; then
       continue
     fi
     id=$(basename "$check" .check.sh)
@@ -1023,8 +1040,7 @@ if migration_needed; then
 
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
-    if [ "$(basename "$check")" = x-watch.check.sh ] \
-      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+    if channel_shim_exempt "$check"; then
       continue
     fi
     id=$(basename "$check" .check.sh)
