@@ -866,6 +866,82 @@ test_dirty_worktree_refuses() {
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
 }
 
+# Regression: on 2026-07-26 a KIND=scout|secondmate exemption at the top of
+# validate_worktree_teardown_safety returned 0 before any check ran, and a
+# teardown sweep destroyed 46 uncommitted files across 11 worktrees. The
+# exemption's rationale (scouts leave scratch files) is already covered by the
+# dirty filter, which ignores .claude/ and .fm-*-turnend. These three cases pin
+# both halves: real scout work refuses, scratch-only scout work still tears down.
+# A scout refuses teardown until it has filed data/<id>/report.md and cleared the
+# unresolved-decision inventory. Both gates are about the work product, not the
+# worktree, so a scout that has satisfied them still reaches the dirty check.
+# Satisfying them here is what makes these cases exercise worktree safety rather
+# than stopping at an earlier scout gate.
+satisfy_scout_work_product_gates() {
+  local case_dir=$1
+  mkdir -p "$case_dir/data/task-x1"
+  printf '%s\n' '# scout report' > "$case_dir/data/task-x1/report.md"
+  printf '%s\n' 'decisions_reviewed=1' >> "$case_dir/state/task-x1.meta"
+}
+
+assert_kind_dirty_refuses() {
+  local kind=$1 case_dir rc pr_head
+  case_dir=$(make_case "dirty-wt-$kind")
+  write_meta "$case_dir" no-mistakes "$kind"
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  satisfy_scout_work_product_gates "$case_dir"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  printf '%s\n' "uncommitted edit" > "$case_dir/wt/feature.txt"
+
+  set +e
+  FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "dirty-wt-$kind: teardown must refuse a dirty $kind worktree, not exempt it"
+  grep -q REFUSED "$case_dir/stderr" || fail "dirty-wt-$kind: no REFUSED line in stderr"
+  grep -q "uncommitted changes" "$case_dir/stderr" || fail "dirty-wt-$kind: refusal did not cite uncommitted changes"
+  pass "dirty $kind worktree is refused (kind grants no safety exemption)"
+}
+
+test_scout_dirty_worktree_refuses() { assert_kind_dirty_refuses scout; }
+
+# The deleted exemption covered `secondmate|scout` as one branch, so the scout
+# case above is what discriminates: before the fix it exited 0 with empty stderr.
+# There is deliberately no secondmate twin. A secondmate refuses earlier still,
+# on the seeded-home check, so such a case would pass whether or not the
+# exemption existed and would only look like coverage.
+
+test_scout_scratch_only_worktree_tears_down() {
+  local case_dir rc pr_head
+  case_dir=$(make_case scratch-only-scout)
+  write_meta "$case_dir" no-mistakes scout
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  satisfy_scout_work_product_gates "$case_dir"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  # Only agent scratch is left behind: the dirty filter must ignore it.
+  mkdir -p "$case_dir/wt/.claude"
+  printf '%s\n' 'scratch' > "$case_dir/wt/.claude/settings.local.json"
+  printf '%s\n' 'done' > "$case_dir/wt/.fm-grok-turnend"
+
+  set +e
+  FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "scratch-only-scout: agent scratch alone must not block teardown"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "scratch-only-scout: teardown printed a REFUSED line"
+  pass "scout worktree holding only agent scratch still tears down cleanly"
+}
+
 test_gh_error_and_content_absent_refuses() {
   local case_dir rc
   case_dir=$(make_case gh-error)
@@ -1392,6 +1468,8 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_scout_dirty_worktree_refuses
+test_scout_scratch_only_worktree_tears_down
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses

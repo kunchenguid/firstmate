@@ -668,8 +668,24 @@ validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
+  # This was `secondmate|scout`, which returned 0 before any check ran and
+  # destroyed 46 uncommitted files across 11 worktrees on 2026-07-26.
+  #
+  # scout is removed: a scout's worktree IS a git worktree, so every check below
+  # applies, and the "scouts leave scratch behind" rationale is already covered by
+  # the dirty filter, which ignores .claude/ and .fm-*-turnend. A scout lane wrote
+  # ADR 0058 and a guard script, so "scouts are read-only" was false in practice.
+  #
+  # secondmate stays, and is load-bearing rather than redundant: a secondmate home
+  # is a plain directory carrying a .fm-secondmate-home marker, not a git worktree
+  # (see the teardown case in tests/fm-secondmate-safety.test.sh). Every check
+  # below shells out to `git -C "$WT"`, which fails on a non-repo and correctly
+  # fail-safes to REFUSED, so dropping this would make every secondmate teardown
+  # impossible. There is no uncommitted git state here for the checks to protect.
+  #
+  # --force remains the explicit escape hatch.
   case "$KIND" in
-    secondmate|scout) return 0 ;;
+    secondmate) return 0 ;;
   esac
 
   if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
@@ -1146,8 +1162,13 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
   # left by a killed crew process; see the script header for retry and stale-lock proof.
+  # Same exemption class as the one deleted from validate_worktree_teardown_safety:
+  # this recheck is what catches work written between the first safety check and
+  # the return that resets the worktree, and skipping it for scouts reopened the
+  # hole on the lock path. (secondmate never reaches here; the elif above excludes
+  # it.) --force remains the escape hatch.
   post_lock_cleanup_check=
-  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
+  if [ "$FORCE" != "--force" ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
   teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
