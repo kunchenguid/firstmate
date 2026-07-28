@@ -109,7 +109,8 @@ test_agent_owned_quota_array_dispatch_contract() {
   for phrase in \
     'Firstmate alone resolves a matched profile array' \
     'run `quota-axi --json` at that intake' \
-    'evaluate every configured candidate against that current output' \
+    'only for a candidate whose primary status is `stale` or `auth_required`, also run `bin/fm-quota-fallback.sh <provider> <status>`' \
+    'evaluate every configured candidate against the available explicitly sourced output' \
     'choose the candidate with the most real headroom' \
     'if any harness/model/provider relationship, applicable quota data, or interpretation cannot be established, stop and report that candidate' \
     'instead of omitting it, guessing, falling back, or calling the result quota-informed' \
