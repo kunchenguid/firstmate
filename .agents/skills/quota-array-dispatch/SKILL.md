@@ -40,8 +40,9 @@ For each candidate profile:
 1. Establish the harness/model/provider relationship from current authoritative discovery owned by `harness-adapters`.
    Fail loudly on an unresolved relationship.
 2. Run `quota-axi --json` once per intake and reuse that snapshot for every candidate.
-3. Read the applicable effective-availability record for that candidate's provider and model scope.
-4. Read every bounding window relevant to that candidate, including windows named by `boundedBy`, `limitingWindowIds`, and any pace window-id lists on the effective record.
+3. Require a current provider report with known quota semantics and a known applicable effective-availability record for that candidate's provider and model scope.
+   Stale raw windows remain diagnostic evidence only and are never current headroom.
+4. Read every bounding window relevant to that candidate, including windows named by `boundedBy`, `limitingWindowIds`, `aheadWindowIds`, `behindWindowIds`, `onPaceWindowIds`, and `unknownWindowIds` on the effective record.
 5. Record these inspectable facts, never a hidden score:
    - task/profile fit
    - reasoning class required by the captain request or task ambiguity
@@ -96,12 +97,13 @@ Never use pace or raw headroom to silently replace that reasoning class with a w
    Between known sustainable candidates, prefer the clearly better inspectable pair of pace reserve and raw headroom; state both facts in the choice rationale.
 6. **Unknown pace**
    `unknown` is valid explicit uncertainty from quota-axi, not a parser failure and not permission to assume the window is healthy or exhausted.
+   Inspect `unknownWindowIds` and each window's pace `reason` so the rationale preserves the producer's stated uncertainty.
    Prefer known sustainable evidence when otherwise comparable.
    If the dispatch choice materially hinges on unresolved pace, report the uncertainty rather than inventing a conclusion.
 7. **Absent pace / older schema**
    `schemaVersion` 2 payloads or missing pace fields must degrade explicitly and safely.
    Do not crash, fabricate pace, or silently reinterpret absence as healthy/`on_pace`.
-   Compare raw applicable headroom only, state that pace is unavailable, and keep every other safety rule above.
+   Compare raw applicable headroom only, using known effective availability rather than stale or isolated window percentages, state that pace is unavailable, and keep every other safety rule above.
 8. **Genuine ties**
    If every inspectable selection fact is equal, stop and report every tied candidate for captain choice.
    Do not select by array order, harness name, or another arbitrary identity ordering.
@@ -157,11 +159,12 @@ Compare raw headroom only, state that pace is unavailable, and do not invent ahe
 
 ## Sanitized producer shape
 
-Validate consumers against a sanitized `schemaVersion` 3 shape derived from quota-axi 0.1.15 or newer:
+Validate consumers against a sanitized `schemaVersion` 3 shape derived from quota-axi 0.1.15:
 
 - top level: `schemaVersion`, `generatedAt`, `providers[]`
-- each provider: `provider`, `windows[]`, `quotaSemantics.effectiveAvailability[]`
-- each window may carry `percentRemaining` and `pace` with `status`, optional `timeRemainingPercent`, optional `reservePercentPoints`
-- each effective-availability entry may carry `effectivePercentRemaining`, `boundedBy`, `limitingWindowIds`, and `pace` with `status`, optional `aheadWindowIds`, optional `behindWindowIds`, optional `worstReservePercentPoints`, optional `worstReserveWindowId`
+- each provider: `provider`, `state`, `windows[]`, and optional `quotaSemantics` with `status` and `effectiveAvailability[]`
+- each window: `id`, `label`, `kind`, and optional `percentRemaining` and `pace`; pace has `status` plus optional `reason`, `timeRemainingPercent`, and `reservePercentPoints`
+- each effective-availability entry: `scope`, `status`, `boundedBy`, optional `effectivePercentRemaining`, optional `limitingWindowIds`, and optional pace summary
+- each effective pace summary: `status` plus optional `aheadWindowIds`, `behindWindowIds`, `onPaceWindowIds`, `unknownWindowIds`, `worstReservePercentPoints`, and `worstReserveWindowId`
 
 Never persist live provider balances, reset timestamps, account identifiers, or other private account details in tracked fixtures.

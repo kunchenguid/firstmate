@@ -112,6 +112,57 @@
       ]
     },
     {
+      "id": "ahead-bounding-window-overrides-neutral-effective-summary",
+      "expect": "B",
+      "reason": "an ahead applicable bounding window creates conservation pressure even when the effective summary is neutral",
+      "candidates": [
+        {
+          "id": "A",
+          "harness": "claude",
+          "model": "bounded-a",
+          "effort": "high",
+          "fit": "comparable",
+          "reasoningClass": "strong",
+          "tight": false,
+          "rawHeadroom": 72,
+          "paceStatus": "on_pace",
+          "aheadWindowIds": [],
+          "boundingWindows": [
+            {
+              "id": "weekly",
+              "paceStatus": "ahead",
+              "reservePercentPoints": -9.0
+            }
+          ],
+          "worstReserve": -9.0,
+          "unknownPace": false,
+          "paceAvailable": true
+        },
+        {
+          "id": "B",
+          "harness": "codex",
+          "model": "steady-b",
+          "effort": "high",
+          "fit": "comparable",
+          "reasoningClass": "strong",
+          "tight": false,
+          "rawHeadroom": 58,
+          "paceStatus": "behind",
+          "aheadWindowIds": [],
+          "boundingWindows": [
+            {
+              "id": "weekly",
+              "paceStatus": "behind",
+              "reservePercentPoints": 7.0
+            }
+          ],
+          "worstReserve": 7.0,
+          "unknownPace": false,
+          "paceAvailable": true
+        }
+      ]
+    },
+    {
       "id": "known-sustainable-vs-unknown",
       "expect": "A",
       "reason": "prefer known sustainable evidence over unknown pace",

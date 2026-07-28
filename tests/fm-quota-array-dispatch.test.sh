@@ -38,9 +38,12 @@ def conservation_pressure(c):
         return False
     status = c.get("paceStatus")
     ahead_ids = c.get("aheadWindowIds") or []
+    bounding_windows = c.get("boundingWindows") or []
     if status == "ahead":
         return True
     if status == "mixed" and ahead_ids:
+        return True
+    if any(window.get("paceStatus") == "ahead" for window in bounding_windows):
         return True
     return False
 
