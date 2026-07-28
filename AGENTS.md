@@ -350,6 +350,12 @@ The skill owns the daemon procedure; these safety facts remain inline:
 - Away mode never expands approval authority for merges, ask-user findings, destructive actions, irreversible actions, or security-sensitive choices.
 - Bias ambiguous input toward exit because a present captain takes precedence.
 
+### Session-close stub
+
+Load `session-close` when the captain says they are closing or ending the session, or asks what must happen before it can be closed.
+Closing with work under way requires that skill's handoff steps first; never stop, tear down, or unmonitor running work merely because the session is ending.
+Closing is distinct from `/afk`: away mode keeps supervision live, while closing ends it until the next session start.
+
 ### Stuck-worker trigger
 
 Load `stuck-crewmate-recovery` after a stale wake, looping or confused pane, answered-by-brief question, unresponsive worker, or failed steer.
