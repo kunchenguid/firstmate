@@ -114,3 +114,87 @@ ELAPSED=$(( $(date +%s) - STARTED ))
 grep -Fq 'lifecycle event was not accepted' "$CAPTURE.stall.err" \
   || fail "stalled event store was not surfaced as a warning"
 pass "fm-brain-event: a stalled event store is bounded, not a hung lifecycle command"
+
+# CI runs on Linux, where /usr/bin/timeout always wins the probe above, so the
+# perl fallback that carries the whole bound on stock macOS would never run.
+# Pin PATH to a scratch directory holding only the bridge's own dependencies.
+scratch_bin() {  # <dir>
+  mkdir -p "$1"
+  for tool in bash env sleep perl awk shasum sha256sum; do
+    if tool_path=$(command -v "$tool" 2>/dev/null) && [ -n "$tool_path" ]; then
+      ln -sf "$tool_path" "$1/$tool"
+    fi
+  done
+}
+
+FALLBACK_BIN="$TMP_ROOT/fallback-bin"
+scratch_bin "$FALLBACK_BIN"
+[ -x "$FALLBACK_BIN/perl" ] || fail "test host has no perl to exercise the stock-macOS bound"
+[ -x "$FALLBACK_BIN/shasum" ] || [ -x "$FALLBACK_BIN/sha256sum" ] \
+  || fail "scratch PATH has no SHA-256 utility for the bridge"
+[ ! -e "$FALLBACK_BIN/timeout" ] || fail "scratch PATH still offers timeout"
+[ ! -e "$FALLBACK_BIN/gtimeout" ] || fail "scratch PATH still offers gtimeout"
+
+set +e
+env PATH="$FALLBACK_BIN" FM_BRAIN_EVENT_COMMAND="$FAKE" \
+  "$ROOT/bin/fm-brain-event.sh" decision-resolved DECISION task-1 \
+  'hold-1|sha256-safe-digest' \
+  'resolved captain decision hold hold-1 digest=sha256-safe-digest routed=ship-1' \
+  --artifact-ref report.md > "$CAPTURE.perl" 2> "$CAPTURE.perl.err"
+RC=$?
+set -e
+[ "$RC" -eq 0 ] || fail "the perl-bounded path changed the lifecycle outcome on success"
+cmp -s "$CAPTURE.perl" "$CAPTURE.1" \
+  || fail "the perl-bounded path did not deliver the same event as the timeout path"
+[ ! -s "$CAPTURE.perl.err" ] || fail "the perl-bounded path warned on a delivered event"
+
+set +e
+env PATH="$FALLBACK_BIN" FM_BRAIN_EVENT_COMMAND="$FAIL" \
+  "$ROOT/bin/fm-brain-event.sh" teardown TASK_DONE task-6 stable safe \
+  > "$CAPTURE.perlfail" 2> "$CAPTURE.perlfail.err"
+RC=$?
+set -e
+[ "$RC" -eq 0 ] || fail "the perl-bounded path changed the lifecycle outcome on failure"
+grep -Fq 'lifecycle event was not accepted' "$CAPTURE.perlfail.err" \
+  || fail "the perl-bounded path lost the rejected event's exit status"
+
+STARTED=$(date +%s)
+set +e
+env PATH="$FALLBACK_BIN" FM_BRAIN_EVENT_COMMAND="$STALL" FM_BRAIN_EVENT_TIMEOUT=2 \
+  "$ROOT/bin/fm-brain-event.sh" teardown TASK_DONE task-7 stable safe \
+  > "$CAPTURE.perlstall" 2> "$CAPTURE.perlstall.err"
+RC=$?
+set -e
+ELAPSED=$(( $(date +%s) - STARTED ))
+[ "$RC" -eq 0 ] || fail "the perl-bounded path changed the lifecycle outcome on a stall"
+[ "$ELAPSED" -lt 30 ] \
+  || fail "the perl fallback did not bound a stalled event store (${ELAPSED}s)"
+grep -Fq 'lifecycle event was not accepted' "$CAPTURE.perlstall.err" \
+  || fail "the perl fallback did not surface the abandoned event"
+pass "fm-brain-event: the stock-macOS perl fallback delivers, reports and bounds events"
+
+# `timeout 0` and `alarm 0` both mean "run unbounded", so a zero must fall back
+# to the default rather than silently removing the bound.
+SHIM_BIN="$TMP_ROOT/shim-bin"
+scratch_bin "$SHIM_BIN"
+cat > "$SHIM_BIN/timeout" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" > "$FM_TEST_TIMEOUT_RECORD"
+shift
+exec "$@"
+SH
+chmod +x "$SHIM_BIN/timeout"
+FM_TEST_TIMEOUT_RECORD="$CAPTURE.timeout-arg"
+export FM_TEST_TIMEOUT_RECORD
+
+set +e
+env PATH="$SHIM_BIN" FM_BRAIN_EVENT_COMMAND="$FAKE" FM_BRAIN_EVENT_TIMEOUT=0 \
+  "$ROOT/bin/fm-brain-event.sh" teardown TASK_DONE task-8 stable safe \
+  > "$CAPTURE.zero" 2> "$CAPTURE.zero.err"
+RC=$?
+set -e
+[ "$RC" -eq 0 ] || fail "a zero timeout changed the lifecycle outcome"
+grep -qx '10' "$CAPTURE.timeout-arg" \
+  || fail "FM_BRAIN_EVENT_TIMEOUT=0 disabled the bound instead of using the default"
+[ -s "$CAPTURE.zero" ] || fail "a zero timeout stopped the event from being delivered"
+pass "fm-brain-event: a zero timeout falls back to the default bound"

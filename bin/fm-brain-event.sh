@@ -77,6 +77,10 @@ EVENT_TIMEOUT=${FM_BRAIN_EVENT_TIMEOUT:-10}
 case "$EVENT_TIMEOUT" in
   ''|*[!0-9]*) EVENT_TIMEOUT=10 ;;
 esac
+case "$EVENT_TIMEOUT" in
+  *[1-9]*) ;;
+  *) EVENT_TIMEOUT=10 ;;
+esac
 HAVE_TIMEOUT=none
 if command -v timeout >/dev/null 2>&1; then HAVE_TIMEOUT=timeout
 elif command -v gtimeout >/dev/null 2>&1; then HAVE_TIMEOUT=gtimeout
@@ -84,9 +88,8 @@ elif command -v perl >/dev/null 2>&1; then HAVE_TIMEOUT=perl
 fi
 bounded_event() {  # <command> [args...]
   case "$HAVE_TIMEOUT" in
-    timeout)  timeout "$EVENT_TIMEOUT" "$@" ;;
-    gtimeout) gtimeout "$EVENT_TIMEOUT" "$@" ;;
-    perl)     perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? & 127 ? 128 + ($? & 127) : $? >> 8)' "$EVENT_TIMEOUT" "$@" ;;
+    timeout|gtimeout) "$HAVE_TIMEOUT" "$EVENT_TIMEOUT" "$@" ;;
+    perl) perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? & 127 ? 128 + ($? & 127) : $? >> 8)' "$EVENT_TIMEOUT" "$@" ;;
     *)        "$@" ;;
   esac
 }
