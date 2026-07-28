@@ -63,6 +63,18 @@ resolve_lane() {
   printf '%s' "$id"
 }
 
+# Inbox and Ready are captain-owned lanes: firstmate drives every other lane but
+# never writes a card into either of these two, so any card found there is
+# unambiguously a captain decision. Enforce that in code, not just in prose.
+deny_captain_lane() {
+  local requested norm
+  requested=$1
+  norm=$(trello_norm "$requested")
+  case "$norm" in
+    *inbox*|*ready*) die "trello: '$requested' is a captain-owned lane - firstmate must not write a card into it" ;;
+  esac
+}
+
 cmd=${1:-}
 case "$cmd" in
   ''|-h|--help|help) usage; exit 0 ;;
@@ -118,13 +130,14 @@ case "$cmd" in
     [ $# -ge 2 ] || die "usage: fm-trello.sh move <card> <lane-name>"
     card=$1; lane=$2
     trello_safe_cardid "$card" || die "trello: unsafe card id '$card'"
+    deny_captain_lane "$lane"
     list=$(resolve_lane "$lane") || exit 1
     body=$(mktemp "${TMPDIR:-/tmp}/fm-trello.XXXXXX") || die "trello: mktemp failed"
     trap 'rm -f "$body"' EXIT
-    code=$(trello_api PUT "1/cards/$card" "$body" --data-urlencode "idList=$list") \
+    code=$(trello_api PUT "1/cards/$card?fields=dateLastActivity,idList,labels,badges" "$body" --data-urlencode "idList=$list") \
       || die "trello: move request failed (transport)"
     case "$code" in 200) ;; *) die "trello: move failed (HTTP $code)" ;; esac
-    trello_bump_seen "$card" || true
+    trello_record_seen "$card" "$body" || trello_bump_seen "$card" || true
     echo "$card"
     ;;
   describe)
@@ -133,24 +146,25 @@ case "$cmd" in
     trello_safe_cardid "$card" || die "trello: unsafe card id '$card'"
     body=$(mktemp "${TMPDIR:-/tmp}/fm-trello.XXXXXX") || die "trello: mktemp failed"
     trap 'rm -f "$body"' EXIT
-    code=$(trello_api PUT "1/cards/$card" "$body" --data-urlencode "desc=$text") \
+    code=$(trello_api PUT "1/cards/$card?fields=dateLastActivity,idList,labels,badges" "$body" --data-urlencode "desc=$text") \
       || die "trello: describe request failed (transport)"
     case "$code" in 200) ;; *) die "trello: describe failed (HTTP $code)" ;; esac
-    trello_bump_seen "$card" || true
+    trello_record_seen "$card" "$body" || trello_bump_seen "$card" || true
     echo "$card"
     ;;
   create-card)
     [ $# -ge 2 ] || die "usage: fm-trello.sh create-card <lane-name> <name>"
     lane=$1; name=$2
+    deny_captain_lane "$lane"
     list=$(resolve_lane "$lane") || exit 1
     body=$(mktemp "${TMPDIR:-/tmp}/fm-trello.XXXXXX") || die "trello: mktemp failed"
     trap 'rm -f "$body"' EXIT
-    code=$(trello_api POST "1/cards" "$body" --data-urlencode "idList=$list" --data-urlencode "name=$name") \
+    code=$(trello_api POST "1/cards?fields=dateLastActivity,idList,labels,badges" "$body" --data-urlencode "idList=$list" --data-urlencode "name=$name") \
       || die "trello: create-card request failed (transport)"
     case "$code" in 200|201) ;; *) die "trello: create-card failed (HTTP $code)" ;; esac
     newid=$(jq -r '.id // .shortLink // ""' "$body" 2>/dev/null)
     [ -n "$newid" ] || die "trello: create-card returned no id"
-    trello_bump_seen "$newid" || true
+    trello_record_seen "$newid" "$body" || trello_bump_seen "$newid" || true
     echo "$newid"
     ;;
   label)

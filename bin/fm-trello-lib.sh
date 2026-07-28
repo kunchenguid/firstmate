@@ -28,6 +28,7 @@
 #   trello_marker_read <cardid>        - print date/list/go/comment state or nothing
 #   trello_marker_write <cardid> <date> <list-id> [go-state] [comment-count]
 #   trello_bump_seen <cardid>          - fetch the card and record its current marker
+#   trello_record_seen <cardid> <body> - record the marker from an already-fetched card body
 #   trello_meta_bind <taskid> <cardid> - write trello_card=<cardid> into the task meta
 #   trello_meta_unbind <taskid>        - remove the trello_card= line
 #   trello_meta_card <taskid>          - print the bound card id, if any
@@ -182,25 +183,43 @@ trello_marker_write() {
   printf '%s\t%s\t%s\t%s\n' "$2" "$3" "$go_state" "$comments" > "$p" 2>/dev/null || return 1
 }
 
-# Fetch the current card and record its dateLastActivity + list id as the seen
-# marker. Every mutating fm-trello.sh command calls this after its change so the
-# poll never wakes firstmate for firstmate's own edit; only a later captain edit
-# advances dateLastActivity past this marker. Best-effort: a fetch failure leaves
-# the marker as-is and returns non-zero.
-trello_bump_seen() {
-  local cardid=$1 body code date list go_state comments
+# Parse a card JSON body (already fetched by the caller) and record its
+# dateLastActivity/list/go-label/comment-count as the seen marker. Used both by
+# trello_bump_seen (which fetches the body itself) and by callers that already
+# hold a fresh card response from their own mutating request, so the marker can
+# be written from that response with no further network round trip - closing
+# the window where a concurrent poll sweep could see the mutation's effect on
+# the board before the marker caught up.
+trello_record_seen() {
+  local cardid=$1 body=$2 date list go_state comments
   trello_safe_cardid "$cardid" || return 1
-  body=$(mktemp "${TMPDIR:-/tmp}/fm-trello-bump.XXXXXX") || return 1
-  code=$(trello_api GET "1/cards/$cardid?fields=dateLastActivity,idList,labels,badges" "$body") || { rm -f "$body"; return 1; }
-  if [ "$code" != "200" ]; then rm -f "$body"; return 1; fi
+  [ -f "$body" ] || return 1
   date=$(jq -r '.dateLastActivity // ""' "$body" 2>/dev/null)
   list=$(jq -r '.idList // ""' "$body" 2>/dev/null)
+  [ -n "$date" ] && [ -n "$list" ] || return 1
   go_state=$(jq -r '
     if any(.labels[]?; ((.name // "") | ascii_downcase | gsub("[^a-z0-9]"; "")) == "go")
     then "1" else "0" end' "$body" 2>/dev/null)
   comments=$(jq -r '.badges.comments // 0' "$body" 2>/dev/null)
-  rm -f "$body"
   trello_marker_write "$cardid" "$date" "$list" "$go_state" "$comments"
+}
+
+# Fetch the current card and record its dateLastActivity + list id as the seen
+# marker. Every mutating fm-trello.sh command whose own response does not
+# already carry the full card (comment, label, bind) calls this after its
+# change so the poll never wakes firstmate for firstmate's own edit; only a
+# later captain edit advances dateLastActivity past this marker. Best-effort: a
+# fetch failure leaves the marker as-is and returns non-zero.
+trello_bump_seen() {
+  local cardid=$1 body code
+  trello_safe_cardid "$cardid" || return 1
+  body=$(mktemp "${TMPDIR:-/tmp}/fm-trello-bump.XXXXXX") || return 1
+  code=$(trello_api GET "1/cards/$cardid?fields=dateLastActivity,idList,labels,badges" "$body") || { rm -f "$body"; return 1; }
+  if [ "$code" != "200" ]; then rm -f "$body"; return 1; fi
+  trello_record_seen "$cardid" "$body"
+  local rc=$?
+  rm -f "$body"
+  return $rc
 }
 
 # Write/replace trello_card=<cardid> in the task meta. The meta is firstmate-owned
