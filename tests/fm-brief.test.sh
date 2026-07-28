@@ -170,6 +170,38 @@ exit 0;
 PERL
 }
 
+# Version-portable regression guard for issue #1179. `test_script_parses` runs
+# whatever `bash` is on PATH; on Linux CI that is bash 4+/5+, which parses the
+# offending construct fine and so never caught #1179. Bash 3.2 (the macOS system
+# shell) does not: its lexer tracks quote state through a heredoc body while
+# scanning for the `)` of the enclosing `$(...)`, so a lone apostrophe in a
+# `VAR=$(cat <<EOF ... EOF)` body opens a quote it never closes and `bash -n`
+# fails on the whole file. This scan flags such an apostrophe on every platform,
+# so a reintroduced possessive fails CI even where the running bash tolerates it.
+test_no_apostrophe_in_cmdsubst_heredoc() {
+  local offenders
+  offenders=$(awk '
+    # Start of a command-substitution heredoc: VAR=$(cat <<EOF or <<'\''EOF'\''.
+    !indoc && /=\$\(cat <<-?['\''"]?[A-Za-z_][A-Za-z_0-9]*['\''"]?/ {
+      delim = $0
+      sub(/.*<<-?['\''"]?/, "", delim)
+      sub(/['\''"].*/, "", delim)
+      indoc = 1
+      next
+    }
+    indoc {
+      line = $0
+      stripped = line
+      sub(/^[ \t]+/, "", stripped)   # <<- strips leading tabs from the terminator
+      if (stripped == delim) { indoc = 0; next }
+      if (index(line, "'\''") > 0) printf "%d: %s\n", NR, line
+    }
+  ' "$ROOT/bin/fm-brief.sh")
+  [ -z "$offenders" ] || fail "fm-brief.sh: apostrophe inside a \$(cat <<EOF) body breaks bash 3.2 parsing:
+$offenders"
+  pass "fm-brief.sh: no apostrophe in any command-substitution heredoc body"
+}
+
 test_help_includes_entire_header() {
   local help
   help=$("$ROOT/bin/fm-brief.sh" --help)
@@ -529,6 +561,7 @@ test_scout_and_secondmate_scaffold() {
 
 test_script_parses
 test_no_heredoc_in_command_substitution
+test_no_apostrophe_in_cmdsubst_heredoc
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
