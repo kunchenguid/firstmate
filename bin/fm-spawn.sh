@@ -1825,6 +1825,10 @@ if [ "$KIND" = secondmate ]; then
   fi
 fi
 
+# Refresh the zellij-only supervisor tab (docs/zellij-backend.md "Supervisor
+# surface"); it no-ops for every other backend. Purely a display surface, so it
+# is best-effort: the task is already spawned and recorded by this point, and a
+# reconcile failure must never fail or delay the spawn the caller asked for.
 "$FM_ROOT/bin/fm-supervisor-panes.sh" >/dev/null 2>&1 || true
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"

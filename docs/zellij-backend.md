@@ -98,6 +98,8 @@ Steady-state cost per crew is therefore one pipeline-CLI run-state lookup a minu
 Because the two are not equally fresh, the pane labels each one with its own timestamp: `Peek observed:` stamps the redraw, and the run-state line carries a trailing `run state as of <time>` stamped when that lookup actually ran.
 Every supervisor pane is titled `fm-<id>`: later panes get that title from `new-pane --name`, and the seed pane is titled with a follow-up `rename-pane -p <pane-id>` because `new-tab --name` names the tab only (best-effort, since the title is cosmetic).
 When no active non-secondmate zellij crews remain, reconciliation closes the supervisor tab instead of leaving an empty surface behind.
+`new-tab` reports the created tab's id only when its pane command outlives that report, so a crew torn down while the tab is being built creates the tab silently; reconciliation then re-resolves the tab by name instead of treating the missing id as a missing tab.
+If it still cannot pin exactly one supervisor-titled tab, it closes the supervisor-titled tabs it found, so the next spawn, teardown, or session start rebuilds the surface from nothing rather than leaving a half-built tab behind.
 Other backends currently no-op for this feature.
 
 The pane command runs under the zellij server process, so the reconciler passes everything the loop needs through an explicit `env` allow-list.

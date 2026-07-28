@@ -1691,6 +1691,11 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
+# Drop this task's supervisor pane (docs/zellij-backend.md "Supervisor
+# surface"); it no-ops for every other backend. Runs AFTER the metadata rm
+# above so the reconcile rediscovers the remaining crews only, and stays
+# best-effort: teardown has already completed and must not fail on a display
+# surface.
 "$FM_ROOT/bin/fm-supervisor-panes.sh" >/dev/null 2>&1 || true
 echo "teardown $ID complete (window $T, worktree $WT)"
 backlog_refresh_reminder

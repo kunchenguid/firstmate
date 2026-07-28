@@ -18,7 +18,10 @@
 # so this stays exactly the report's original choice. Target string shape:
 # "<zellij-session>:<pane-id>" (pane id is a bare non-negative integer with no
 # embedded colon, so splitting on the FIRST colon is trivially correct and
-# mirrors herdr's target-string convention).
+# mirrors herdr's target-string convention). One tab per task remains the
+# whole TASK shape; the only other tab this adapter owns is the display-only
+# supervisor tab (fm_backend_zellij_supervisor_reconcile below), which holds no
+# task endpoint and carries no lifecycle authority.
 #
 # Home-scoped tab titles (closes a cross-home collision gap): because every
 # task in every firstmate home - primary or secondmate - shares this ONE
@@ -40,7 +43,8 @@
 # (acceptable - recorded worktree paths do not survive a move either).
 #
 # Empirical verification (real zellij 0.44.0, macOS aarch64, 2026-07-02;
-# docs/zellij-backend.md has the full evidence log) resolved every "gaps to
+# docs/verification/runtime-backends.md "Zellij" owns the full evidence log,
+# including the later 0.44.3 supervisor-pane probes) resolved every "gaps to
 # verify" item in the design report, plus additional real findings not
 # anticipated by the report:
 #

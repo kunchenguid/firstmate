@@ -411,13 +411,14 @@ The focus mitigation restored the previously active tab after `new-tab`, with th
 
 ### Supervisor pane shapes
 
-The supervisor tab reconciler depends on three further command shapes, measured on Zellij 0.44.3:
+The supervisor tab reconciler depends on four further command shapes, measured on Zellij 0.44.3:
 
 | Guarantee | Command shape | Result |
 | --- | --- | --- |
 | Tab discovery | `zellij action list-tabs --json` | Returned an array whose entries carry `tab_id`, `name`, and `active`, so the reconciler can find its own tab by exact name and read the focused tab. |
 | Add pane to a known tab | `zellij action new-pane --tab-id <id> --cwd <dir> --name <title> --close-on-exit -- <argv>` | Echoed the pane id in `terminal_<id>` form, not the bare integer `list-panes --json` reports as `id`. |
 | Pane title | `zellij action rename-pane -p <pane-id> <title>` | Exited 0 with no output and set the same `title` field a pane created with `new-pane --name` reports. |
+| Created-id echo | `zellij action new-tab --close-on-exit -- <argv>` with a long-lived and with an instantly-exiting `<argv>` | Echoed the bare tab id only for the long-lived command; the instantly-exiting one printed nothing while still creating the tab, and `new-pane`'s `terminal_<id>` behaved the same way. |
 
 Observed pane titles on one probe tab, before and after the seed-pane rename:
 
@@ -431,7 +432,12 @@ Observed pane titles on one probe tab, before and after the seed-pane rename:
 
 With no client attached, no tab reported `active: true`, so the reconciler's focus restore is a no-op on a headless session rather than a wrong-target jump.
 
-The exit-0 rule above held for `new-pane --tab-id <missing>` and `close-tab-by-id <missing>`, which both returned exit 0 with empty output; `rename-pane -p <missing>` was the one measured exception and returned exit 2 with `Pane with id Terminal(999) not found`. Shape validation of the echoed id therefore remains required, and the best-effort rename stays safe either way.
+An empty echoed id therefore records that the pane command died, not that no tab was created, so the reconciler re-resolves its tab by name before giving up.
+The real smoke covers both that recovery and the exclusion of ids the caller just closed from the recovery candidate set, since a closed tab can still appear in the very next `list-tabs`.
+
+The exit-0 rule above held for `new-pane --tab-id <missing>` and `close-tab-by-id <missing>`, which both returned exit 0 with empty output.
+`rename-pane -p <missing>` was the one measured exception and returned exit 2 with `Pane with id Terminal(999) not found`.
+Shape validation of the echoed id therefore remains required, and the best-effort rename stays safe either way.
 
 ```sh
 tests/fm-backend-zellij.test.sh
