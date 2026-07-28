@@ -707,11 +707,9 @@ test_treehouse_dirty_idle_slot_audit_is_bounded() {
   pass "bootstrap: the dirty idle treehouse slot audit is bounded and degrades silently to partial findings"
 }
 
-# One `treehouse status` against a real pool costs SECONDS and the sweep forks it
-# per repo, so a small fixed default bound is a bound on the wrong quantity: it
-# would cut a perfectly healthy sweep short at every session start and silently
-# drop its findings. Pin that the default is generous enough for a pool that takes
-# well over ten seconds to answer.
+# One `treehouse status` against a real pool costs SECONDS, so a bound tight enough
+# to cut off a wedged provider must still be loose enough that a merely slow but
+# healthy pool is not routinely dropped and its findings silently lost.
 test_treehouse_dirty_idle_slot_audit_default_bound_tolerates_a_slow_pool() {
   local case_dir root home fakebin by_dir slow_slot out
   case_dir="$TMP_ROOT/treehouse-audit-default-bound"
@@ -723,17 +721,87 @@ test_treehouse_dirty_idle_slot_audit_default_bound_tolerates_a_slow_pool() {
   fakebin=$(make_fake_toolchain "$case_dir")
   by_dir="$case_dir/status-by-dir"
   mkdir -p "$by_dir"
-  printf 'FM_FAKE_TREEHOUSE_SLOW 12\n1     dirty        %s\n' "$slow_slot" > "$by_dir/root"
+  printf 'FM_FAKE_TREEHOUSE_SLOW 10\n1     dirty        %s\n' "$slow_slot" > "$by_dir/root"
 
-  # FM_TREEHOUSE_AUDIT_TIMEOUT deliberately unset: this exercises the DEFAULT.
+  # Both bounds deliberately unset: this exercises the DEFAULTS.
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     FM_FAKE_TREEHOUSE_STATUS_BY_DIR="$by_dir" \
     "$ROOT/bin/fm-bootstrap.sh")
 
   assert_contains "$out" "TREEHOUSE_POOL: dirty idle slot 1 at $slow_slot" \
-    "the default audit bound must be generous enough for a pool that answers slowly"
-  pass "bootstrap: the default pool-audit bound tolerates a slow but healthy pool"
+    "the default per-pool bound must tolerate a pool that answers slowly"
+  pass "bootstrap: the default per-pool audit bound tolerates a slow but healthy pool"
+}
+
+# The bound is PER POOL, not one budget for the whole sweep. A single lock-blocked
+# provider must cost only its own pool's allowance: the healthy pools behind it are
+# exactly the ones that can still be holding stranded work, so starving them would
+# make the audit useless precisely when a pool is misbehaving.
+test_treehouse_dirty_idle_slot_audit_wedged_pool_does_not_starve_the_rest() {
+  local case_dir root home fakebin by_dir late_slot out start elapsed
+  case_dir="$TMP_ROOT/treehouse-audit-per-pool"
+  root="$case_dir/root"
+  home="$case_dir/home"
+  late_slot="$case_dir/late-dirty-slot"
+  mkdir -p "$root" "$home/config" "$late_slot"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  # Swept in order: FM_ROOT, then projects/* alphabetically - so the wedged clone
+  # is reached BEFORE the healthy one that owns the finding.
+  git init -q -b main "$home/projects/a-hung"
+  git init -q -b main "$home/projects/z-healthy"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  by_dir="$case_dir/status-by-dir"
+  mkdir -p "$by_dir"
+  printf 'FM_FAKE_TREEHOUSE_HANG\n' > "$by_dir/a-hung"
+  printf '7     dirty        %s\n' "$late_slot" > "$by_dir/z-healthy"
+
+  start=$(date +%s)
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=2 FM_TREEHOUSE_AUDIT_TIMEOUT=30 \
+    FM_FAKE_TREEHOUSE_STATUS_BY_DIR="$by_dir" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  elapsed=$(( $(date +%s) - start ))
+
+  assert_contains "$out" "TREEHOUSE_POOL: dirty idle slot 7 at $late_slot" \
+    "a pool swept after a wedged one must still be reported"
+  assert_not_contains "$out" "timed out" \
+    "dropping a wedged pool must stay silent"
+  [ "$elapsed" -lt 20 ] || fail "sweep took ${elapsed}s; the wedged pool spent more than its own bound"
+  pass "bootstrap: a wedged pool is dropped at its own bound and the sweep continues"
+}
+
+# Per-pool bounds alone would still multiply by clone count, so the sweep must also
+# stop at a fixed overall deadline: an advisory read-only audit must never add
+# material session-start latency, however many clones a home registers.
+test_treehouse_dirty_idle_slot_audit_total_cost_does_not_grow_with_clones() {
+  local case_dir root home fakebin by_dir out start elapsed i
+  case_dir="$TMP_ROOT/treehouse-audit-total-cap"
+  root="$case_dir/root"
+  home="$case_dir/home"
+  mkdir -p "$root" "$home/config"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  by_dir="$case_dir/status-by-dir"
+  mkdir -p "$by_dir"
+  # Eight wedged clones: unbounded in total, a 3s per-pool bound would cost 24s.
+  for i in 1 2 3 4 5 6 7 8; do
+    git init -q -b main "$home/projects/hung$i"
+    printf 'FM_FAKE_TREEHOUSE_HANG\n' > "$by_dir/hung$i"
+  done
+
+  start=$(date +%s)
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=3 FM_TREEHOUSE_AUDIT_TIMEOUT=6 \
+    FM_FAKE_TREEHOUSE_STATUS_BY_DIR="$by_dir" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  elapsed=$(( $(date +%s) - start ))
+
+  assert_not_contains "$out" "TREEHOUSE_POOL:" "wedged pools yield no findings and no diagnostic"
+  [ "$elapsed" -lt 15 ] || fail "sweep took ${elapsed}s; the overall deadline did not cap eight wedged pools"
+  pass "bootstrap: the whole-sweep deadline caps total audit cost regardless of clone count"
 }
 
 # The audit is only meaningful for a backend whose worktrees ARE treehouse pool
@@ -1046,6 +1114,8 @@ test_treehouse_dirty_idle_slot_audit_reports_read_only
 test_treehouse_dirty_idle_slot_audit_sweeps_project_pools
 test_treehouse_dirty_idle_slot_audit_is_bounded
 test_treehouse_dirty_idle_slot_audit_default_bound_tolerates_a_slow_pool
+test_treehouse_dirty_idle_slot_audit_wedged_pool_does_not_starve_the_rest
+test_treehouse_dirty_idle_slot_audit_total_cost_does_not_grow_with_clones
 test_treehouse_dirty_idle_slot_audit_follows_resolved_backend
 test_treehouse_dirty_idle_slot_audit_zero_timeout_disables_it
 test_fleet_sync_timeout_scales_with_origin_backed_project_count

@@ -333,7 +333,9 @@ Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 Bootstrap also runs a read-only `treehouse status` audit and emits `TREEHOUSE_POOL:` for dirty idle slots that need human inspection before cleanup.
 Pools are per-repo, so that audit sweeps the firstmate repo and every registered project clone, reporting each slot path once.
-It runs only when the resolved backend uses treehouse for worktrees, so an `orca` home never pays for it, and because it is advisory and changes nothing, exceeding its bound is a silent skip that relays the findings it completed rather than printing a timeout diagnostic.
+It runs only when the resolved backend uses treehouse for worktrees, so an `orca` home never pays for it.
+Each pool is bounded on its own and the sweep also stops at a fixed overall deadline, so a wedged pool is dropped quickly, the pools behind it are still swept, and worst-case session-start latency does not grow with clone count.
+Because the audit is advisory and changes nothing, exceeding either bound is a silent skip that reports the findings it completed rather than printing a timeout diagnostic.
 The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
 It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
 Normal completed runs keep local-only and no-origin skips silent.
@@ -529,7 +531,8 @@ FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wa
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
-FM_TREEHOUSE_AUDIT_TIMEOUT=     # optional seconds allowed for bootstrap's whole read-only dirty-idle pool sweep across the firstmate repo and every project clone; unset/blank/non-numeric defaults to max(60, 30 * swept-pool-count), exceeding it is a silent partial skip, and 0 turns the sweep off entirely
+FM_TREEHOUSE_AUDIT_POOL_TIMEOUT=15   # seconds one pool's `treehouse status` may take during bootstrap's read-only dirty-idle audit before that pool is quietly dropped and the sweep moves on; unset/blank/non-numeric defaults to 15
+FM_TREEHOUSE_AUDIT_TIMEOUT=30   # overall ceiling in seconds for that whole sweep across the firstmate repo and every project clone, so worst-case session-start latency does not grow with clone count; unset/blank/non-numeric defaults to 30, exceeding either bound is a silent partial skip, and 0 turns the sweep off entirely
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature

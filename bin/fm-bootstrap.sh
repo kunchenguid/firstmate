@@ -79,14 +79,15 @@
 #          runs only when the RESOLVED backend uses treehouse for worktrees (so
 #          never under orca), and sweeps the firstmate repo's pool AND every
 #          registered project clone that is a git repo, reporting each slot path
-#          once. The whole sweep is bounded by FM_TREEHOUSE_AUDIT_TIMEOUT when it
-#          is a non-empty numeric override, and otherwise by a generous default
-#          that scales with the number of pools swept (30s each, minimum 60s;
-#          non-numeric values fall back to that default). Because the audit is
-#          advisory and changes nothing, exceeding the bound is a SILENT skip: the
-#          sweep relays whatever findings it completed and prints no timeout line,
-#          rather than wedging session start or raising a permanent warning.
-#          FM_TREEHOUSE_AUDIT_TIMEOUT=0 turns this advisory sweep off entirely.
+#          once. EACH pool gets its own tight bound (FM_TREEHOUSE_AUDIT_POOL_TIMEOUT,
+#          default 15s), and the whole sweep additionally stops at a fixed overall
+#          deadline (FM_TREEHOUSE_AUDIT_TIMEOUT, default 30s) so worst-case session
+#          start latency does not grow with clone count; both fall back to their
+#          default when unset, blank, or non-numeric. Because the audit is advisory
+#          and changes nothing, exceeding either bound is a SILENT skip: a wedged
+#          pool is dropped, the remaining pools are still swept, and no timeout line
+#          is printed rather than wedging session start or raising a permanent
+#          warning. FM_TREEHOUSE_AUDIT_TIMEOUT=0 turns this sweep off entirely.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
 #          x_mode_setup, intake_mode_setup, fleet_sync) while still printing
@@ -234,6 +235,9 @@ fleet_sync() {
 
 TREEHOUSE_AUDIT_SEEN_SLOTS=""
 
+# Emit one raw record per dirty idle slot: "<slot>|<path>|<trailing detail>".
+# Each pool is scanned inside its own bounded background job, so this cannot own
+# the cross-pool dedup - it reports what it saw and the parent decides.
 treehouse_pool_dirty_idle_scan() {  # <repo>
   local repo=$1 out line slot state path rest
   out=$( (cd "$repo" 2>/dev/null && treehouse status) 2>/dev/null ) || return 0
@@ -241,15 +245,10 @@ treehouse_pool_dirty_idle_scan() {  # <repo>
     read -r slot state path rest <<EOF_SLOT
 $line
 EOF_SLOT
-    [ -n "$rest" ] && rest=" $rest" || rest=
     case "$slot:$state" in
       [0-9]*:dirty)
         [ -n "$path" ] || path="unknown"
-        case " $TREEHOUSE_AUDIT_SEEN_SLOTS " in
-          *" $path "*) continue ;;
-        esac
-        TREEHOUSE_AUDIT_SEEN_SLOTS="$TREEHOUSE_AUDIT_SEEN_SLOTS $path"
-        echo "TREEHOUSE_POOL: dirty idle slot $slot at $path$rest - inspect before cleanup; no changes made"
+        printf '%s|%s|%s\n' "$slot" "$path" "$rest"
         ;;
     esac
   done <<EOF
@@ -257,16 +256,44 @@ $out
 EOF
 }
 
-treehouse_audit_scan_pools() {
+# Format one bounded pool scan's raw records, dropping slot paths already reported
+# so clones that share a pool do not double-report.
+treehouse_audit_report_slots() {  # <tmp>
+  local tmp=$1 line slot path rest
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    slot=${line%%|*}
+    rest=${line#*|}
+    path=${rest%%|*}
+    rest=${rest#*|}
+    [ -z "$rest" ] || rest=" $rest"
+    case " $TREEHOUSE_AUDIT_SEEN_SLOTS " in
+      *" $path "*) continue ;;
+    esac
+    TREEHOUSE_AUDIT_SEEN_SLOTS="$TREEHOUSE_AUDIT_SEEN_SLOTS $path"
+    echo "TREEHOUSE_POOL: dirty idle slot $slot at $path$rest - inspect before cleanup; no changes made"
+  done < "$tmp"
+}
+
+treehouse_audit_scan_pools() {  # <per-pool-seconds> <sweep-deadline-in-SECONDS>
   # Pools are per-repo and `treehouse status` resolves the pool from the working
   # directory, so scanning FM_ROOT alone would only ever report firstmate's own
   # pool. Crewmate ship and scout slots are leased inside projects/<name>
   # (bin/fm-spawn.sh), and those are exactly the slots that can strand unlanded
-  # project work, so sweep every registered clone too. Each repo and each slot
-  # path is reported once, so clones that share a pool do not double-report.
-  local repo repo_real seen=""
+  # project work, so sweep every registered clone too.
+  #
+  # Each pool gets its OWN tight bound. One lock-blocked or hung provider must cost
+  # only that pool's budget and then be dropped - the healthy pools behind it are
+  # still worth reporting, and a whole-sweep budget would let the first wedged pool
+  # spend the entire fleet's allowance and leave session start with nothing.
+  local per_pool=$1 deadline=$2 repo repo_real seen="" tmp budget
   TREEHOUSE_AUDIT_SEEN_SLOTS=""
   for repo in "$FM_ROOT" "$PROJECTS"/*; do
+    # The per-pool bounds alone would still multiply by clone count, so the sweep
+    # also stops at a fixed overall deadline: worst case stays small on any fleet.
+    budget=$((deadline - SECONDS))
+    [ "$budget" -gt 0 ] || return 0
+    [ "$budget" -le "$per_pool" ] || budget=$per_pool
     [ -d "$repo" ] || continue
     # projects/ holds clones. A non-repo directory there owns no pool of its own,
     # and probing it would only resolve some enclosing repo's pool, so skip it
@@ -277,37 +304,34 @@ treehouse_audit_scan_pools() {
       *" $repo_real "*) continue ;;
     esac
     seen="$seen $repo_real"
-    treehouse_pool_dirty_idle_scan "$repo_real"
+    tmp=$(mktemp "${TMPDIR:-/tmp}/fm-treehouse-audit.XXXXXX" 2>/dev/null) || return 0
+    # Exceeding a pool's bound is NOT itself actionable: nothing was changed and
+    # dispatch is unaffected, so drop that pool quietly and move on rather than put
+    # a permanent startup warning in front of the captain for an advisory sweep.
+    bootstrap_run_bounded "$tmp" "$budget" 0.2 treehouse_pool_dirty_idle_scan "$repo_real" || true
+    treehouse_audit_report_slots "$tmp"
+    rm -f "$tmp"
   done
 }
 
-treehouse_audit_pool_count() {
-  local count proj
-  count=1
-  [ -d "$PROJECTS" ] || { echo "$count"; return 0; }
-  for proj in "$PROJECTS"/*; do
-    [ -d "$proj" ] || continue
-    git -C "$proj" rev-parse --git-dir >/dev/null 2>&1 || continue
-    count=$((count + 1))
-  done
-  echo "$count"
-}
-
-# One `treehouse status` against a real pool costs seconds, and the sweep forks it
-# once per repo, so a fixed whole-sweep bound is a bound on the WRONG quantity: on
-# any fleet with a few clones it fires on a healthy pool. Scale it with the number
-# of pools actually swept, generously, so hitting it means something is genuinely
-# wedged rather than merely normal.
-treehouse_audit_timeout() {
-  local count timeout
-  case "${FM_TREEHOUSE_AUDIT_TIMEOUT:-}" in
-    ''|*[!0-9]*) ;;
-    *) echo "$FM_TREEHOUSE_AUDIT_TIMEOUT"; return 0 ;;
+# Seconds one pool's `treehouse status` may take before it is dropped. Measured
+# healthy pools answer in single-digit seconds, so this is roughly double that:
+# tight enough that a wedged provider is cut off fast, loose enough that a healthy
+# pool is not routinely dropped.
+treehouse_audit_pool_timeout() {
+  case "${FM_TREEHOUSE_AUDIT_POOL_TIMEOUT:-}" in
+    ''|*[!0-9]*) echo 15 ;;
+    *) echo "$FM_TREEHOUSE_AUDIT_POOL_TIMEOUT" ;;
   esac
-  count=$(treehouse_audit_pool_count)
-  timeout=$((30 * count))
-  [ "$timeout" -ge 60 ] || timeout=60
-  echo "$timeout"
+}
+
+# Ceiling on the WHOLE sweep, so worst-case session-start latency does not grow
+# with clone count. 0 turns the advisory sweep off entirely.
+treehouse_audit_timeout() {
+  case "${FM_TREEHOUSE_AUDIT_TIMEOUT:-}" in
+    ''|*[!0-9]*) echo 30 ;;
+    *) echo "$FM_TREEHOUSE_AUDIT_TIMEOUT" ;;
+  esac
 }
 
 treehouse_dirty_idle_slot_audit() {
@@ -318,25 +342,17 @@ treehouse_dirty_idle_slot_audit() {
   # treehouse lease-support check follows.
   fm_backend_list_contains "$TOOLS" treehouse || return 0
   command -v treehouse >/dev/null 2>&1 || return 0
-  # The sweep forks `treehouse status` once per registered clone and runs on the
-  # always-executed detect path, including the read-only FM_BOOTSTRAP_DETECT_ONLY
-  # session start, so a hung or lock-blocked provider must never wedge startup.
-  # Bound it the same way fleet_sync is bounded: run it as one background job and
-  # relay whatever it completed. A missing TREEHOUSE_POOL line is far cheaper than
-  # a stalled session start.
-  local tmp timeout
+  # This runs on the always-executed detect path, including the read-only
+  # FM_BOOTSTRAP_DETECT_ONLY session start, and it is purely advisory: a missing
+  # TREEHOUSE_POOL line is far cheaper than a stalled session start.
+  local per_pool timeout
+  per_pool=$(treehouse_audit_pool_timeout)
   timeout=$(treehouse_audit_timeout)
   # A zero bound is the operator turning this advisory sweep off; skip it rather
-  # than kill the sweep before it can read anything.
+  # than kill each pool before it can read anything.
   [ "$timeout" -gt 0 ] || return 0
-  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-treehouse-audit.XXXXXX" 2>/dev/null) || return 0
-  # Exceeding the bound is NOT itself actionable: nothing was changed, dispatch is
-  # unaffected, and a read-only advisory audit that reports its own incompleteness
-  # would put a permanent startup warning in front of the captain for a sweep they
-  # never asked for. Degrade quietly to the partial findings instead.
-  bootstrap_run_bounded "$tmp" "$timeout" 0.2 treehouse_audit_scan_pools || true
-  bootstrap_relay_all_output "$tmp"
-  rm -f "$tmp"
+  [ "$per_pool" -gt 0 ] || return 0
+  treehouse_audit_scan_pools "$per_pool" "$((SECONDS + timeout))"
 }
 
 secondmate_sync() {
