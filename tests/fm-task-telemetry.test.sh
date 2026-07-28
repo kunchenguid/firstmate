@@ -47,7 +47,7 @@ test_estimate_keywords_match_words_not_substrings() {
   home=$(make_home estimate-keywords)
   brief="$home/benign.md"
   : > "$brief"
-  for _ in $(seq 1 40); do
+  for _ in $(seq 1 10); do
     printf 'The decision requires the author to be specific about social policy.\n' >> "$brief"
     printf 'Precise authority racing traces deliciously past the pricing sheet.\n' >> "$brief"
   done
@@ -56,13 +56,52 @@ test_estimate_keywords_match_words_not_substrings() {
 
   brief="$home/lifecycle.md"
   : > "$brief"
-  for _ in $(seq 1 40); do
+  for _ in $(seq 1 10); do
     printf 'Update the dispatch and teardown migrations before the CI e2e run.\n' >> "$brief"
     printf 'Record auth tokens so the watcher reports schema recovery cleanly.\n' >> "$brief"
   done
   [ "$(run_telemetry "$home" estimate "$brief")" = complex ] \
     || fail "real lifecycle keywords, including plurals, must still count"
   pass "task telemetry keyword scoring matches whole words only"
+}
+
+scaffold_brief() {
+  local home=$1 id=$2
+  shift 2
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" demo-repo "$@" >/dev/null 2>&1 \
+    || fail "could not scaffold brief $id"
+  printf '%s\n' "$home/data/$id/brief.md"
+}
+
+fill_task() {
+  local brief=$1 task=$2 tmp
+  tmp="$brief.filled"
+  awk -v task="$task" '{ gsub(/\{TASK\}/, task); print }' "$brief" > "$tmp"
+  printf '%s\n' "$tmp"
+}
+
+test_estimate_ignores_scaffold_boilerplate() {
+  local home ship scout filled
+  home=$(make_home estimate-scaffold)
+  ship=$(scaffold_brief "$home" scaffold-ship)
+  scout=$(scaffold_brief "$home" scaffold-scout --scout)
+  [ "$(run_telemetry "$home" estimate "$ship")" = simple ] \
+    || fail "an unfilled ship scaffold must not score from boilerplate alone"
+  [ "$(run_telemetry "$home" estimate "$scout")" = simple ] \
+    || fail "an unfilled scout scaffold must not score from boilerplate alone"
+
+  filled=$(fill_task "$ship" 'Fix the broken relative link in the README quickstart section.')
+  [ "$(run_telemetry "$home" estimate "$filled")" = simple ] \
+    || fail "a small filled task should still estimate simple inside a scaffold"
+
+  filled=$(fill_task "$ship" 'Update the watcher so a paused task is rechecked on a long cadence. Add a regression test and keep the existing recovery path intact without touching dispatch or teardown.')
+  [ "$(run_telemetry "$home" estimate "$filled")" = intermediate ] \
+    || fail "a mid-sized filled task should estimate intermediate inside a scaffold"
+
+  filled=$(fill_task "$ship" 'Add a backend migration with authentication and concurrency safety, a recovery path, dispatch and teardown changes, telemetry for token quota accounting, and no-mistakes CI plus e2e integration coverage across the lifecycle scripts, tests, and configuration docs.')
+  [ "$(run_telemetry "$home" estimate "$filled")" = complex ] \
+    || fail "a multi-surface filled task should estimate complex inside a scaffold"
+  pass "task telemetry estimates scaffold briefs from task content only"
 }
 
 test_collect_explicit_usage_sidecar() {
@@ -214,8 +253,48 @@ EOF
   pass "task telemetry excludes Claude cache_read from prompt totals"
 }
 
+test_generic_fallback_for_harness_log_without_token_events() {
+  local home codex_dir session ledger old_home
+  home=$(make_home generic-fallback)
+  codex_dir="$home/codex/.codex/sessions/2026/07/24"
+  mkdir -p "$codex_dir"
+  fm_write_meta "$home/state/tokens-fallback-a5.meta" \
+    "window=fm-tokens-fallback-a5" \
+    "worktree=$home/wt" \
+    "project=$home/project" \
+    "harness=codex" \
+    "model=gpt-5" \
+    "effort=medium" \
+    "difficulty=intermediate" \
+    "kind=ship"
+  : > "$home/state/tokens-fallback-a5.spawn-ref"
+  sleep 1
+  session="$codex_dir/rollout.jsonl"
+  # Usage-shaped JSON, but no codex token_count events for the harness filter.
+  cat > "$session" <<EOF
+{"type":"session_meta","payload":{"cwd":"$home/wt"}}
+{"type":"other","usage":{"prompt_tokens":70,"completion_tokens":30,"total_tokens":100}}
+EOF
+
+  old_home=$HOME
+  HOME="$home/codex"
+  export HOME
+  run_telemetry "$home" collect tokens-fallback-a5 \
+    || fail "collect via the generic fallback failed"
+  HOME=$old_home
+  export HOME
+  ledger=$(cat "$home/data/task-telemetry.tsv")
+  assert_contains "$ledger" $'\t70\t30\t100\t2\t50\tcodex' \
+    "generic fallback did not run for a harness log without token events"
+  assert_no_grep "usage_source=unavailable" "$home/state/tokens-fallback-a5.meta" \
+    "usage-shaped JSON should not report an unavailable source"
+  pass "task telemetry falls back to generic usage parsing"
+}
+
 test_estimate_simple_and_complex
 test_estimate_keywords_match_words_not_substrings
+test_estimate_ignores_scaffold_boilerplate
+test_generic_fallback_for_harness_log_without_token_events
 test_collect_explicit_usage_sidecar
 test_collect_codex_cumulative_session
 test_collect_uses_spawn_ref_after_meta_rewrite

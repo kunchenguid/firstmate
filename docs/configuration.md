@@ -22,6 +22,7 @@ Wake, watcher, away-mode, and X-specific state mechanics remain with their named
 
 `fm-spawn.sh` estimates task difficulty from the launch brief before handoff and records `difficulty=simple`, `difficulty=intermediate`, `difficulty=complex`, or `difficulty=unknown` beside the selected `harness=`, `model=`, and `effort=` fields in `state/<id>.meta`.
 The heuristic is intentionally local and deterministic: brief size, lifecycle keywords, investigation language, and explicit "small" wording determine the bucket.
+Only the task-specific part of a brief is scored, so the generated `fm-brief.sh` scaffold sections cannot decide the bucket on their own.
 The exact scoring and usage-log mechanics live in `bin/fm-task-telemetry.sh`, which is the owner of this telemetry contract.
 `fm-teardown.sh` runs `fm-task-telemetry.sh collect <id>` before volatile task state or worktree files are removed.
 Collection is best-effort and never blocks cleanup.

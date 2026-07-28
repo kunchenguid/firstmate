@@ -6,6 +6,11 @@
 #   fm-task-telemetry.sh summary
 #
 # Spawn records the estimate in state/<id>.meta as difficulty=<simple|intermediate|complex|unknown>.
+# `estimate` scores only task-specific brief content: for an fm-brief.sh scaffold it
+# drops the fixed preamble, the `{TASK}` placeholder, and the generated Setup, Rules,
+# Herdr, project-memory, definition-of-done, and secondmate operating sections, so
+# template text alone cannot decide the bucket. A brief that is not a scaffold is
+# scored whole.
 # Teardown calls `collect` before volatile task state and worktree files are removed.
 # `collect` appends usage_* fields to the live meta for immediate inspection, then
 # upserts one durable TSV row in data/task-telemetry.tsv:
@@ -37,7 +42,11 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 LEDGER="$DATA/task-telemetry.tsv"
 
 usage() {
-  sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$0"
 }
 
 meta_get() {
@@ -69,10 +78,29 @@ TELEMETRY_KEYWORDS=(
   recovery diagnose investigate audit design report
 )
 
+SCAFFOLD_SECTIONS='^# (Herdr |(Setup|Rules|Project memory|Project clones|Operating model|Requests from the main firstmate|Escalation to main firstmate|Definition of done)[[:space:]]*$)'
+
+# Task-specific brief text: the scaffold's own boilerplate carries enough size and
+# lifecycle vocabulary to saturate the score on its own, so a recognized scaffold is
+# reduced to the sections firstmate fills in before dispatch.
+scored_content() {
+  local brief=$1
+  if grep -Eq '^# (Task|Charter)[[:space:]]*$' "$brief" 2>/dev/null; then
+    awk -v boilerplate="$SCAFFOLD_SECTIONS" '
+      BEGIN { skip = 1 }
+      /^# / { skip = ($0 ~ boilerplate) ? 1 : 0; next }
+      !skip
+    ' "$brief"
+  else
+    cat "$brief"
+  fi | sed 's/{TASK}//g'
+}
+
 count_keywords() {
-  local brief=$1 keyword count=0
+  local content=$1 keyword count=0
   for keyword in "${TELEMETRY_KEYWORDS[@]}"; do
-    if grep -Eiq "(^|[^[:alnum:]])$keyword(s|es|d|ed|ing)?([^[:alnum:]]|$)" "$brief" 2>/dev/null; then
+    if printf '%s\n' "$content" \
+      | grep -Eiq "(^|[^[:alnum:]])$keyword(s|es|d|ed|ing)?([^[:alnum:]]|$)" 2>/dev/null; then
       count=$((count + 1))
     fi
   done
@@ -80,24 +108,28 @@ count_keywords() {
 }
 
 estimate_difficulty() {
-  local brief=$1 words lines keyword_count score
+  local brief=$1 content words lines keyword_count score
   [ -f "$brief" ] || { printf 'unknown\n'; return 0; }
-  words=$(wc -w < "$brief" | tr -d '[:space:]')
-  lines=$(wc -l < "$brief" | tr -d '[:space:]')
+  content=$(scored_content "$brief")
+  words=$(printf '%s\n' "$content" | wc -w | tr -d '[:space:]')
+  lines=$(printf '%s\n' "$content" | grep -c '[^[:space:]]' || true)
   score=0
-  if [ "${words:-0}" -gt 1000 ]; then
+  if [ "${words:-0}" -gt 400 ]; then
     score=$((score + 2))
-  elif [ "${words:-0}" -gt 300 ]; then
+  elif [ "${words:-0}" -gt 120 ]; then
     score=$((score + 1))
   fi
-  [ "${lines:-0}" -gt 80 ] && score=$((score + 1))
-  keyword_count=$(count_keywords "$brief")
+  [ "${lines:-0}" -gt 30 ] && score=$((score + 1))
+  keyword_count=$(count_keywords "$content")
   if [ "${keyword_count:-0}" -ge 5 ]; then
     score=$((score + 3))
+  elif [ "${keyword_count:-0}" -ge 3 ]; then
+    score=$((score + 2))
   elif [ "${keyword_count:-0}" -ge 2 ]; then
     score=$((score + 1))
   fi
-  if grep -Eiq '(^|[^[:alnum:]])(trivial|typo|copy edit|small doc|one-line|one line)([^[:alnum:]]|$)' "$brief" 2>/dev/null; then
+  if printf '%s\n' "$content" \
+    | grep -Eiq '(^|[^[:alnum:]])(trivial|typo|copy edit|small doc|one-line|one line)([^[:alnum:]]|$)' 2>/dev/null; then
     score=$((score - 1))
   fi
   if [ "$score" -le 1 ]; then
@@ -219,12 +251,16 @@ candidate_files() {
 }
 
 usage_from_file() {
-  local source=$1 file=$2
+  local source=$1 file=$2 result=''
+  # A harness-specific filter that matches nothing still exits 0 with empty
+  # output, so the generic fallback keys off emptiness rather than exit status.
   case "$source" in
-    codex) json_usage_codex "$file" || json_usage_generic "$file" ;;
-    claude) json_usage_claude "$file" || json_usage_generic "$file" ;;
-    *) json_usage_generic "$file" ;;
+    codex) result=$(json_usage_codex "$file" || true) ;;
+    claude) result=$(json_usage_claude "$file" || true) ;;
   esac
+  [ -n "$result" ] || result=$(json_usage_generic "$file" || true)
+  [ -n "$result" ] || return 1
+  printf '%s\n' "$result"
 }
 
 collect_usage() {
