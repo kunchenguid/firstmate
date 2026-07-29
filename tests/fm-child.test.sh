@@ -318,6 +318,19 @@ assert_failure_contains "rejects case-equivalent reserved Git ownership" "extern
   run_parent create reserved-case --instructions "$INSTRUCTIONS" --path .GIT/config
 assert_failure_contains "rejects case-equivalent ownership overlap" "overlaps child 'alpha'" \
   run_parent create overlap-case --instructions "$INSTRUCTIONS" --path SRC/one.txt
+UNICODE_PANES_BEFORE=$(cat "$FAKE_STATE/panes")
+UNICODE_SPLITS_BEFORE=$(grep -c 'CALL <pane> <split>' "$FAKE_STATE/log" || true)
+assert_failure_contains "rejects incomparable Unicode ownership on case-insensitive filesystems" \
+  "use an ASCII repository-relative ownership path" \
+  run_parent create unicode-case --instructions "$INSTRUCTIONS" --path 'Å.txt'
+UNICODE_SPLITS_AFTER=$(grep -c 'CALL <pane> <split>' "$FAKE_STATE/log" || true)
+if [ ! -e "$TASK_TMP/children/unicode-case" ] \
+   && [ "$(cat "$FAKE_STATE/panes")" = "$UNICODE_PANES_BEFORE" ] \
+   && [ "$UNICODE_SPLITS_AFTER" -eq "$UNICODE_SPLITS_BEFORE" ]; then
+  ok "Unicode refusal starts no child and publishes no private record"
+else
+  not_ok "Unicode refusal starts no child and publishes no private record"
+fi
 git -C "$WORKTREE" config core.ignorecase false
 assert_failure_contains "rejects duplicate paths in one request" "supplied more than once" \
   run_parent create duplicate --instructions "$INSTRUCTIONS" --path b.txt --path b.txt
@@ -404,6 +417,17 @@ if [ ! -e "$TASK_TMP/children" ] && grep -Fxq base "$WORKTREE/a.txt"; then
 else
   not_ok "cleanup preserves the shared working copy"
 fi
+
+git -C "$WORKTREE" config core.ignorecase true
+assert_success "accepts ASCII ownership on a case-insensitive filesystem" \
+  run_parent create ascii-case --instructions "$INSTRUCTIONS" --path Docs/Guide.txt
+assert_success "stops the ASCII case-insensitive child" run_parent stop ascii-case
+assert_success "cleans the ASCII case-insensitive child" run_parent cleanup
+git -C "$WORKTREE" config core.ignorecase false
+assert_success "accepts byte-distinct Unicode ownership on a case-sensitive filesystem" \
+  run_parent create unicode-sensitive --instructions "$INSTRUCTIONS" --path 'Å.txt'
+assert_success "stops the Unicode case-sensitive child" run_parent stop unicode-sensitive
+assert_success "cleans the Unicode case-sensitive child" run_parent cleanup
 
 touch "$FAKE_STATE/pause-split"
 run_parent create readiness-race --instructions "$INSTRUCTIONS" --path b.txt >"$TMP/create-race.out" 2>"$TMP/create-race.err" &

@@ -270,7 +270,7 @@ fm_child_acquire_lock() {
 
 fm_child_path_lexical_valid() {  # <relative-path>
   local identity
-  identity=$(fm_child_path_identity "$1")
+  identity=$(fm_child_path_identity "$1") || return 1
   case "$1" in
     ''|.|..|/*|./*|*/.|*/..|*//*|*'*'*|*'?'*|*'['*|*$'\n'*|*$'\r'*|*$'\t'*) return 1 ;;
   esac
@@ -280,8 +280,13 @@ fm_child_path_lexical_valid() {  # <relative-path>
   return 0
 }
 
+fm_child_path_ascii() {  # <relative-path>
+  ! printf '%s' "$1" | LC_ALL=C grep -q '[^ -~]'
+}
+
 fm_child_path_identity() {  # <relative-path>
   if [ "$FM_CHILD_CASE_INSENSITIVE" = 1 ]; then
+    fm_child_path_ascii "$1" || return 1
     printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]'
   else
     printf '%s' "$1"
@@ -309,8 +314,8 @@ fm_child_path_valid() {  # <relative-path>
 
 fm_child_paths_overlap() {  # <a> <b>
   local a b
-  a=$(fm_child_path_identity "$1")
-  b=$(fm_child_path_identity "$2")
+  a=$(fm_child_path_identity "$1") || return 0
+  b=$(fm_child_path_identity "$2") || return 0
   [ "$a" = "$b" ] && return 0
   case "$a" in "$b"/*) return 0 ;; esac
   case "$b" in "$a"/*) return 0 ;; esac
@@ -768,6 +773,11 @@ fm_child_create() {
   done
   [ -n "$instructions" ] || die "create requires --instructions <file>"
   [ "${#paths[@]}" -gt 0 ] || die "create requires at least one --path assignment"
+  for path in "${paths[@]}"; do
+    if [ "$FM_CHILD_CASE_INSENSITIVE" = 1 ] && ! fm_child_path_ascii "$path"; then
+      die "path assignment '$path' contains non-ASCII bytes; use an ASCII repository-relative ownership path on this case-insensitive filesystem"
+    fi
+  done
 
   fm_child_acquire_lock
   mkdir -p "$FM_CHILD_ROOT" || die "cannot create the private child record directory"

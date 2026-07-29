@@ -66,6 +66,7 @@ There is no child option for a different session, workspace, tab, worktree, runt
 
 Children share the parent's writable working copy and branch.
 The parent assigns one or more explicit repository-relative paths, and the helper rejects symlinks, traversal, globs, duplicate ownership, and ancestor or descendant overlap with any retained child record.
+On a case-insensitive working copy, ownership paths must be ASCII so reserved and overlapping identities remain exactly comparable across supported filesystems.
 The instruction source must be a bounded regular file outside the repository.
 Private metadata, reports, completion results, command guards, and startup instructions stay under the parent's exact `/tmp/fm-<task-id>/children/` area.
 
