@@ -31,6 +31,15 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## WorkGraph storage and parallelism
+
+The global WorkGraph parallelism mode is stored in local, gitignored `config/parallelism`, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
+Project-scoped modes are stored in `config/parallelism-projects/<project-id>` under the same effective configuration directory.
+Goal-local WorkGraph data is rooted at `data/workgraphs/<goal-id>/`, or under `FM_DATA_OVERRIDE`, and its parallelism mode is stored in the `parallelism` child file.
+Slice 2 does not prescribe graph or contract filenames inside that goal-local root because `bin/fm-workgraph.sh` validates an explicit graph path and its relative contract reference.
+[`workgraph.md`](workgraph.md) owns current mode semantics, precedence, graph validation, and the non-enforcement boundary.
+The headers and help for [`fm-parallelism.sh`](../bin/fm-parallelism.sh) and [`fm-workgraph.sh`](../bin/fm-workgraph.sh) own their exact commands and mutation mechanics.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.

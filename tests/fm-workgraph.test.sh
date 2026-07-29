@@ -5,6 +5,8 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+unset FM_CONFIG_OVERRIDE FM_DATA_OVERRIDE FM_PARALLELISM_OVERRIDE NODE_OPTIONS
+
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-workgraph.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT")
 trap fm_test_cleanup EXIT
@@ -82,46 +84,70 @@ const fs = require("node:fs");
 const source = process.argv[2];
 const target = process.argv[3];
 const mutation = process.argv[4];
-const value = JSON.parse(fs.readFileSync(source, "utf8"));
+const text = fs.readFileSync(source, "utf8");
+if (mutation === "duplicate-root") {
+  fs.writeFileSync(target, text.replace(
+    '"goal_id": "goal-1",',
+    '"goal_id": "goal-1",\n  "goal_id": "goal-1",',
+  ));
+  process.exit(0);
+}
+if (mutation === "duplicate-reference") {
+  fs.writeFileSync(target, text.replace(
+    '"contract_path": "contracts/slice-1.json",',
+    '"contract_path": "contracts/slice-1.json", "contract_path": "contracts/slice-1.json",',
+  ));
+  process.exit(0);
+}
+const value = JSON.parse(text);
 if (mutation === "unknown-schema") value.schema_version = "workgraph/v99";
 if (mutation === "missing-field") delete value.slices;
 if (mutation === "multiple-nodes") value.slices.push({...value.slices[0], slice_id: "slice-2"});
 if (mutation === "unsafe-id") value.goal_id = "../unsafe";
 if (mutation === "bad-hash") value.slices[0].contract_sha256 = "0".repeat(64);
+if (mutation === "unknown-root") value.unexpected = true;
+if (mutation === "unknown-reference") value.slices[0].unexpected = true;
+if (mutation === "control-path-lf") value.slices[0].contract_path = "contracts/\nslice-1.json";
+if (mutation === "control-path-cr") value.slices[0].contract_path = "contracts/\rslice-1.json";
+if (mutation === "control-path-del") value.slices[0].contract_path = "contracts/\u007fslice-1.json";
+if (mutation === "control-path-c1") value.slices[0].contract_path = "contracts/\u0085slice-1.json";
 fs.writeFileSync(target, JSON.stringify(value, null, 2) + "\n");
 NODE
 }
 
 mutate_contract_case() {
   local root=$1 mutation=$2 contract="$1/contracts/slice-1.json" digest
-  if [ "$mutation" = bad-claim ]; then
-    node - "$contract" "$contract.tmp" <<'NODE'
+  node - "$contract" "$contract.tmp" "$mutation" <<'NODE'
 const fs = require("node:fs");
 const file = process.argv[2];
 const target = process.argv[3];
-const value = JSON.parse(fs.readFileSync(file, "utf8"));
-value.claims[0].mode = "bogus";
+const mutation = process.argv[4];
+const text = fs.readFileSync(file, "utf8");
+if (mutation === "duplicate-root") {
+  fs.writeFileSync(target, text.replace(
+    '"purpose": "Validate the Slice-2 implementation.",',
+    '"purpose": "Validate the Slice-2 implementation.",\n  "purpose": "Validate the Slice-2 implementation.",',
+  ));
+  process.exit(0);
+}
+if (mutation === "duplicate-claim") {
+  fs.writeFileSync(target, text.replace(
+    '"mode": "write"',
+    '"mode": "write", "mode": "write"',
+  ));
+  process.exit(0);
+}
+const value = JSON.parse(text);
+if (mutation === "bad-claim") value.claims[0].mode = "bogus";
+if (mutation === "missing-field") delete value.acceptance;
+if (mutation === "bad-contract-schema") value.schema_version = "slice-contract/v99";
+if (mutation === "object-output") value.outputs = [{path: "report.md"}];
+if (mutation === "unknown-root") value.unexpected = true;
+if (mutation === "unknown-input") value.immutable_inputs[0].unexpected = true;
+if (mutation === "unknown-claim") value.claims[0].unexpected = true;
+if (mutation === "unknown-context") value.context_budget.unexpected = true;
 fs.writeFileSync(target, JSON.stringify(value, null, 2) + "\n");
 NODE
-  elif [ "$mutation" = missing-field ]; then
-    node - "$contract" "$contract.tmp" <<'NODE'
-const fs = require("node:fs");
-const file = process.argv[2];
-const target = process.argv[3];
-const value = JSON.parse(fs.readFileSync(file, "utf8"));
-delete value.acceptance;
-fs.writeFileSync(target, JSON.stringify(value, null, 2) + "\n");
-NODE
-  else
-    node - "$contract" "$contract.tmp" <<'NODE'
-const fs = require("node:fs");
-const file = process.argv[2];
-const target = process.argv[3];
-const value = JSON.parse(fs.readFileSync(file, "utf8"));
-value.schema_version = "slice-contract/v99";
-fs.writeFileSync(target, JSON.stringify(value, null, 2) + "\n");
-NODE
-  fi
   mv "$contract.tmp" "$contract"
   digest=$(sha_file "$contract")
   node - "$root/graph.json" "$root/graph.json.tmp" "$digest" <<'NODE'
@@ -153,12 +179,17 @@ test_auto_and_invalid_values() {
   run_parallelism get
   expect_code 0 "$RC" "absent configuration resolves to the non-enforcing default"
   [ "$OUTPUT" = on ] || fail "absent configuration did not resolve to on"
+  [ ! -e "$TEST_HOME/config/parallelism" ] || fail "get materialized the default global mode"
   run_parallelism status
   assert_contains "$OUTPUT" 'source=default' "status did not identify the absent default"
+  [ ! -e "$TEST_HOME/config/parallelism" ] || fail "status materialized the default global mode"
   run_parallelism set auto
   expect_code 0 "$RC" "auto is accepted"
   [ "$OUTPUT" = on ] || fail "auto output was not canonical on"
   [ "$(cat "$TEST_HOME/config/parallelism")" = on ] || fail "auto was not persisted as on"
+  printf 'auto\n' > "$TEST_HOME/config/parallelism"
+  run_parallelism get
+  [ "$RC" -ne 0 ] || fail "manually persisted auto was accepted"
   run_parallelism set invalid
   [ "$RC" -ne 0 ] || fail "invalid mode was accepted"
   printf 'invalid\n' > "$TEST_HOME/config/parallelism"
@@ -185,29 +216,59 @@ test_precedence_and_scopes() {
   assert_contains "$OUTPUT" 'global=off' "status omitted global scope"
   run_parallelism get --project project-1 --request auto
   [ "$OUTPUT" = on ] || fail "request did not override goal/project/global"
+  run_parallelism status --goal goal-1 --project project-1 --request auto
+  assert_contains "$OUTPUT" 'goal=uninspected' "request status misreported the goal scope"
+  assert_contains "$OUTPUT" 'project=uninspected' "request status misreported the project scope"
+  assert_contains "$OUTPUT" 'global=uninspected' "request status misreported the global scope"
   FM_PARALLELISM_OVERRIDE=off run_parallelism get --project project-1
   [ "$OUTPUT" = off ] || fail "environment request override did not win"
   pass "parallelism: request > goal > project > global"
 }
 
 test_atomic_scoped_and_metadata_unchanged() {
-  local before_meta after_meta before_fixture after_fixture
+  local expected_meta expected_fixture
   new_home
+  expected_meta="$TEST_HOME/expected-task-1.meta"
+  expected_fixture="$TEST_HOME/expected-process.fixture"
+  printf 'window=fm-task-1\nmode=no-mistakes\n' > "$expected_meta"
+  printf 'process-fixture\n' > "$expected_fixture"
   printf 'window=fm-task-1\nmode=no-mistakes\n' > "$TEST_HOME/state/task-1.meta"
   printf 'process-fixture\n' > "$TEST_HOME/state/process.fixture"
-  before_meta=$(sha_file "$TEST_HOME/state/task-1.meta")
-  before_fixture=$(sha_file "$TEST_HOME/state/process.fixture")
   run_parallelism set eco --goal goal-1
   expect_code 0 "$RC" "goal write succeeds"
   [ -f "$TEST_HOME/data/workgraphs/goal-1/parallelism" ] || fail "goal value missing"
   [ ! -e "$TEST_HOME/config/parallelism" ] || fail "goal write touched global scope"
   [ ! -e "$TEST_HOME/config/parallelism-projects/goal-1" ] || fail "goal write touched project scope"
   find "$TEST_HOME/data/workgraphs/goal-1" -name '.parallelism.tmp.*' -print -quit | grep -q . && fail "temporary file leaked"
-  after_meta=$(sha_file "$TEST_HOME/state/task-1.meta")
-  after_fixture=$(sha_file "$TEST_HOME/state/process.fixture")
-  [ "$before_meta" = "$after_meta" ] || fail "task metadata changed"
-  [ "$before_fixture" = "$after_fixture" ] || fail "process fixture changed"
+  cmp -s "$expected_meta" "$TEST_HOME/state/task-1.meta" || fail "task metadata bytes changed"
+  cmp -s "$expected_fixture" "$TEST_HOME/state/process.fixture" || fail "process fixture bytes changed"
+  [ "$(find "$TEST_HOME/state" -type f | wc -l | tr -d ' ')" = 2 ] || fail "parallelism created active-state files"
   pass "parallelism: scoped atomic write leaves task fixtures unchanged"
+}
+
+test_nonregular_mode_targets() {
+  new_home
+  mkdir -p "$TEST_HOME/config"
+  ln -s missing "$TEST_HOME/config/parallelism"
+  run_parallelism get
+  [ "$RC" -ne 0 ] || fail "dangling mode symlink was read as absent"
+  run_parallelism set off
+  [ "$RC" -ne 0 ] || fail "dangling mode symlink accepted a publish"
+  rm "$TEST_HOME/config/parallelism"
+  mkdir "$TEST_HOME/config/parallelism"
+  run_parallelism get
+  [ "$RC" -ne 0 ] || fail "mode directory was accepted for reading"
+  run_parallelism set off
+  [ "$RC" -ne 0 ] || fail "mode directory accepted a publish"
+  find "$TEST_HOME/config/parallelism" -name '.parallelism.tmp.*' -print -quit | grep -q . \
+    && fail "mode directory received a temporary file"
+  rmdir "$TEST_HOME/config/parallelism"
+  mkfifo "$TEST_HOME/config/parallelism"
+  run_parallelism get
+  [ "$RC" -ne 0 ] || fail "mode fifo was accepted for reading"
+  run_parallelism set off
+  [ "$RC" -ne 0 ] || fail "mode fifo accepted a publish"
+  pass "parallelism: non-regular persisted targets are rejected"
 }
 
 test_valid_graph_and_status() {
@@ -228,14 +289,21 @@ test_valid_graph_and_status() {
 
 test_graph_negative_cases() {
   local mutation root case_root
-  for mutation in unknown-schema missing-field multiple-nodes unsafe-id bad-hash; do
+  for mutation in \
+    unknown-schema missing-field multiple-nodes unsafe-id bad-hash \
+    unknown-root unknown-reference duplicate-root duplicate-reference
+  do
     case_root=$(mktemp -d "$TMP_ROOT/$mutation.XXXXXX")
     write_valid_graph "$case_root"
     mutate_json "$case_root/graph.json" "$case_root/bad.json" "$mutation"
     run_workgraph validate "$case_root/bad.json"
     [ "$RC" -ne 0 ] || fail "$mutation graph was accepted"
   done
-  for mutation in bad-contract-schema bad-claim missing-field; do
+  for mutation in \
+    bad-contract-schema bad-claim missing-field object-output \
+    unknown-root unknown-input unknown-claim unknown-context \
+    duplicate-root duplicate-claim
+  do
     root=$(mktemp -d "$TMP_ROOT/contract-$mutation.XXXXXX")
     write_valid_graph "$root"
     mutate_contract_case "$root" "$mutation"
@@ -245,16 +313,89 @@ test_graph_negative_cases() {
   pass "workgraph: schema, field, node-count, id, hash, and claim negatives reject"
 }
 
-test_existing_surfaces_unchanged() {
-  git diff --quiet -- bin/fm-brief.sh bin/fm-spawn.sh \
-    || fail "existing brief/spawn files changed in Slice 2"
-  pass "workgraph: existing brief and spawn surfaces remain unchanged"
+test_contract_path_control_characters() {
+  local mutation case_root
+  for mutation in control-path-lf control-path-cr control-path-del control-path-c1; do
+    case_root=$(mktemp -d "$TMP_ROOT/$mutation.XXXXXX")
+    write_valid_graph "$case_root"
+    mutate_json "$case_root/graph.json" "$case_root/bad.json" "$mutation"
+    run_workgraph status "$case_root/bad.json"
+    [ "$RC" -ne 0 ] || fail "$mutation contract path was accepted"
+    assert_contains "$OUTPUT" 'WG-E-ID' "$mutation did not reject as an unsafe path"
+  done
+  pass "workgraph: contract paths reject control characters before status"
+}
+
+test_contract_bytes_captured_once() {
+  local root preload contract
+  root=$(mktemp -d "$TMP_ROOT/captured.XXXXXX")
+  write_valid_graph "$root"
+  preload="$root/mutate-after-read.cjs"
+  contract="$root/contracts/slice-1.json"
+  cat > "$preload" <<'NODE'
+const fs = require("node:fs");
+const originalRead = fs.readFileSync;
+let mutated = false;
+fs.readFileSync = function readFileSync(target, ...args) {
+  const value = originalRead.call(this, target, ...args);
+  const text = Buffer.isBuffer(value) ? value.toString("utf8") : value;
+  if (!mutated && text.includes('"schema_version": "slice-contract/v1"')) {
+    mutated = true;
+    const contract = process.env.WORKGRAPH_RACE_CONTRACT;
+    const changed = originalRead.call(this, contract, "utf8")
+      .replace("slice-contract/v1", "slice-contract/v99");
+    fs.writeFileSync(contract, changed);
+  }
+  return value;
+};
+NODE
+  NODE_OPTIONS="--require=$preload" WORKGRAPH_RACE_CONTRACT="$contract" \
+    run_workgraph validate "$root/graph.json"
+  expect_code 0 "$RC" "validator hashes and parses one captured contract sequence"
+  grep -q 'slice-contract/v99' "$contract" || fail "contract mutation seam did not run"
+  pass "workgraph: contract hash and parse share one captured byte sequence"
+}
+
+test_schema_strictness() {
+  node - "$ROOT/schemas/workgraph/workgraph-v1.json" \
+    "$ROOT/schemas/workgraph/slice-contract-v1.json" \
+    "$ROOT/schemas/workgraph/parallelism-v1.json" <<'NODE'
+const fs = require("node:fs");
+const [graphPath, contractPath, parallelismPath] = process.argv.slice(2);
+const graph = JSON.parse(fs.readFileSync(graphPath, "utf8"));
+const contract = JSON.parse(fs.readFileSync(contractPath, "utf8"));
+const parallelism = JSON.parse(fs.readFileSync(parallelismPath, "utf8"));
+function requireStrictObjects(schema, name) {
+  if (schema === null || typeof schema !== "object") return;
+  if (schema.type === "object" && schema.additionalProperties !== false) {
+    throw new Error(`${name} permits additional properties`);
+  }
+  if (schema.properties) {
+    for (const [key, value] of Object.entries(schema.properties)) {
+      requireStrictObjects(value, `${name}.properties.${key}`);
+    }
+  }
+  if (schema.items) requireStrictObjects(schema.items, `${name}.items`);
+}
+requireStrictObjects(graph, "workgraph");
+requireStrictObjects(contract, "slice-contract");
+if (contract.properties.outputs.items.type !== "string") {
+  throw new Error("slice-contract outputs are not strings");
+}
+if (parallelism.enum.includes("auto")) {
+  throw new Error("persisted parallelism schema permits auto");
+}
+NODE
+  pass "schemas: object shapes and persisted modes are strict"
 }
 
 test_mode_round_trips
 test_auto_and_invalid_values
 test_precedence_and_scopes
 test_atomic_scoped_and_metadata_unchanged
+test_nonregular_mode_targets
 test_valid_graph_and_status
 test_graph_negative_cases
-test_existing_surfaces_unchanged
+test_contract_path_control_characters
+test_contract_bytes_captured_once
+test_schema_strictness

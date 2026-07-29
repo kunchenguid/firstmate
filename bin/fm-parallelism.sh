@@ -41,6 +41,13 @@ canonical_mode() {
   esac
 }
 
+persisted_mode() {
+  case "$1" in
+    off|eco|on|max) printf '%s\n' "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
 require_mode() {
   local raw=$1 canonical
   canonical=$(canonical_mode "$raw") || die "invalid mode '$raw'; expected off|eco|on|max (auto aliases on)"
@@ -137,21 +144,31 @@ GOAL_FILE=
 
 read_persisted() {
   local path=$1 label=$2 value
+  [ ! -L "$path" ] || die "$label configuration is not a regular file: $path"
   if [ ! -e "$path" ]; then
     return 1
   fi
-  [ -f "$path" ] && [ ! -L "$path" ] || die "$label configuration is not a regular file: $path"
+  [ -f "$path" ] || die "$label configuration is not a regular file: $path"
   value=$(awk 'NR == 1 { first=$0; next } { bad=1 } END { if (bad || NR != 1) exit 2; print first }' "$path") \
     || die "malformed $label configuration: $path"
   [ -n "$value" ] || die "malformed $label configuration: $path"
-  canonical_mode "$value" >/dev/null \
+  persisted_mode "$value" >/dev/null \
     || die "unknown $label mode '$value' in $path"
-  PERSISTED_MODE=$(canonical_mode "$value")
+  PERSISTED_MODE=$value
   return 0
+}
+
+require_publishable_target() {
+  local path=$1
+  [ ! -L "$path" ] || die "configuration target is not a regular file: $path"
+  if [ -e "$path" ]; then
+    [ -f "$path" ] || die "configuration target is not a regular file: $path"
+  fi
 }
 
 publish_mode() {
   local path=$1 value=$2 dir tmp
+  require_publishable_target "$path"
   dir=$(dirname "$path")
   mkdir -p "$dir" || die "cannot create configuration directory: $dir"
   tmp=$(mktemp "$dir/.parallelism.tmp.XXXXXX") || die "cannot create atomic temporary file in $dir"
@@ -159,6 +176,7 @@ publish_mode() {
     rm -f "$tmp"
     die "cannot write temporary configuration in $dir"
   fi
+  require_publishable_target "$path"
   if ! mv -f "$tmp" "$path"; then
     rm -f "$tmp"
     die "cannot publish configuration atomically at $path"
@@ -189,6 +207,9 @@ GLOBAL_DISPLAY=absent
 if [ -n "$REQUEST_MODE" ]; then
   RESOLVED_MODE=$REQUEST_MODE
   RESOLVED_SOURCE=request
+  [ -z "$GOAL_FILE" ] || GOAL_DISPLAY=uninspected
+  [ -z "$PROJECT_FILE" ] || PROJECT_DISPLAY=uninspected
+  GLOBAL_DISPLAY=uninspected
 else
   if [ -n "$GOAL_FILE" ] && read_persisted "$GOAL_FILE" goal; then
     GOAL_DISPLAY=$PERSISTED_MODE

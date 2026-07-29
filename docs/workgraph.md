@@ -9,7 +9,10 @@ This document is the operator-facing contract and points to the executable owner
 [`bin/fm-parallelism.sh`](../bin/fm-parallelism.sh) owns mode parsing, persistence, precedence, and status presentation.
 The canonical modes are `off`, `eco`, `on`, and `max`.
 `auto` is accepted as an input alias and is persisted and reported as `on`.
+Persisted files accept canonical modes only, so a manually stored `auto` value is invalid.
 An absent configuration resolves to `on` as a documented non-enforcing default.
+Reading or inspecting that default never creates a configuration file.
+An explicit selector-free `set on` or `set auto` command writes the canonical global `on` value.
 The command never starts, stops, signals, steers, reclassifies, or rewrites an active task.
 
 Use the simple forms below.
@@ -31,14 +34,12 @@ bin/fm-parallelism.sh set auto --goal goal-1
 
 Resolution precedence is request override, goal configuration, project configuration, and global configuration.
 The request override may be supplied as `--request MODE` or `FM_PARALLELISM_OVERRIDE`.
+Status reports selected lower scopes as `uninspected` while a request override shadows them.
 The goal and project selectors use safe identifiers containing 1 to 64 ASCII letters, digits, dots, underscores, or hyphens.
 Malformed persisted files, unsafe identifiers, and unknown modes fail closed.
 
-The global value is `${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/parallelism`.
-The project value is `${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/parallelism-projects/<project-id>`.
-The goal value is `${FM_DATA_OVERRIDE:-$FM_HOME/data}/workgraphs/<goal-id>/parallelism`.
+[`configuration.md`](configuration.md#workgraph-storage-and-parallelism) owns the global, project, and goal storage locations.
 Each write creates a temporary file in the target directory and publishes it with an atomic same-directory rename.
-The default `on` value is not written implicitly.
 Parallelism mode is separate from the existing project delivery `mode=` vocabulary.
 
 ## One-node graph
@@ -46,10 +47,13 @@ Parallelism mode is separate from the existing project delivery `mode=` vocabula
 [`bin/fm-workgraph.sh`](../bin/fm-workgraph.sh) owns Slice-2 graph and contract validation and status presentation.
 The graph is a JSON object with `schema_version` `workgraph/v1`, a safe `goal_id`, and exactly one `slices` reference.
 The reference contains a safe `slice_id`, a safe relative `contract_path`, and a lowercase `contract_sha256` digest.
-The referenced contract is an independently stored JSON file below the graph directory and is verified byte-for-byte before parsing.
+Contract paths reject traversal, empty segments, and Unicode control characters.
+The referenced contract is an independently stored JSON file below the graph directory.
+The validator captures its bytes once and hashes and parses that same captured sequence.
 
 The contract uses schema version `slice-contract/v1` and repeats matching `slice_id` and `goal_id` values.
 Its required fields are `purpose`, `type`, `depends_on`, `immutable_inputs`, `outputs`, `claims`, `worktree`, `harness`, `model`, `effort`, `acceptance`, `validation_commands`, `expected_evidence`, `context_budget`, `gates`, `implementer`, `independent_validators`, and `authorized_exceptions`.
+Every output is a non-empty path string.
 The allowed slice types are `ship`, `scout`, `audit`, and `integration`.
 Each immutable input has a `path` and a lowercase SHA-256 `sha256` digest.
 Each claim has a `resource` and one of `read`, `write`, or `exclusive`.
@@ -64,7 +68,7 @@ bin/fm-workgraph.sh status path/to/goal.json
 ```
 
 `status` validates first and then reports the goal, one-node count, contract path, exact digest, and `enforcement=disabled`.
-More than one node, missing fields, unknown schema versions, unsafe identifiers, malformed claims, and bad contract hashes are errors.
+Duplicate JSON keys, recursively unknown object fields, more than one node, missing fields, unknown schema versions, unsafe identifiers, malformed claims, and bad contract hashes are errors.
 
 Slice 2 intentionally does not normalize resources, compute waves, check compatibility, acquire or release leases, record gates, create snapshots, integrate output, or enforce dispatch decisions.
 No lifecycle script is changed by this slice, so existing brief and spawn behavior remains authoritative.
