@@ -39,6 +39,12 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Ship and scout briefs also scaffold an agent-maintained working log at
+# data/<task-id>/log.md: the crewmate's own durable memory, written as it works,
+# and the resume path when a relaunch discards its context. It survives teardown
+# with the task's other data, and unlike state/<task-id>.status it never wakes
+# firstmate, so it carries the detail the sparse supervisor channel must not -
+# established facts, rejected approaches, and steers received after dispatch.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -226,6 +232,22 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# The crewmate's own working memory, shared by ship and scout briefs. It is
+# deliberately NOT the status file: status appends wake firstmate and must stay
+# sparse, while this log is written for the worker's own future self and can be
+# as long as the task needs. A relaunched worker resumes from it instead of from
+# an understanding firstmate reconstructs by hand.
+IFS= read -r -d '' WORKLOG_SECTION <<WORKLOG || true
+# Working log
+Keep a working log at \`$DATA/$ID/log.md\` and write it as you go, not at the end.
+**If you are resuming this task, read that log first - it is your memory of this task, and it survives a relaunch that your context does not.**
+Append to it whenever you establish something that would be expensive to rediscover: the task as you currently understand it, what you have established, what you are doing now, what you tried and rejected and why, and what you have verified and how you verified it.
+Rejected approaches matter as much as the live one - a resuming agent that does not know an approach already failed will spend its context repeating it.
+When firstmate steers you with a correction, a changed requirement, or a decision, append it to the log before you act on it; a steer that lives only in your context is exactly what a relaunch loses.
+The log is yours and appending to it never notifies firstmate, so keep it as long and as candid as it needs to be; the status file in the rules below is the separate sparse supervisor channel and its contract is unchanged.
+WORKLOG
+WORKLOG_SECTION=${WORKLOG_SECTION%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -239,11 +261,13 @@ $HERDR_SECTION
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
-The report is the only thing that survives, so anything worth keeping must be in it.
+The report is the only deliverable that survives, so anything worth keeping must be in it.
+
+$WORKLOG_SECTION
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+2. Stay inside this worktree; the only files you may write outside it are the report, your working log above, and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -350,11 +374,13 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: \`git checkout -b fm/$ID\` - if you are resuming and it already exists, check it out instead and read your working log below before doing anything else.$SETUP2
+
+$WORKLOG_SECTION
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+2. Stay inside this worktree; the only files you may write outside it are your working log above and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`

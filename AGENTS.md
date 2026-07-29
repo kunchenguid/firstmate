@@ -82,6 +82,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
+  <id>/log.md        crewmate working log, maintained by the crewmate as it works; its resume-from-disk memory, survives teardown, and never wakes firstmate
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
@@ -451,6 +452,7 @@ Use its scaffold as the contract, then replace every `{TASK}` placeholder with a
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
+Every ship and scout brief must retain the working-log section: the crewmate's own durable memory at `data/<id>/log.md`, written as it works, is what a relaunched worker resumes from instead of an understanding firstmate reconstructs by hand.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
 If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if that need appears after an unguarded scaffold, stop and regenerate rather than adding commands by hand.
 The generated Herdr contract must use a named non-`default` isolated lab and its guarded helper for every lifecycle action.

@@ -139,6 +139,11 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
 The intake and authority contract in `AGENTS.md` owns when separate scout research is warranted.
 
+Both shapes keep two durable channels with deliberately different wake semantics.
+`state/<id>.status` is the supervisor channel: sparse, and every append wakes firstmate.
+`data/<id>/log.md` is the crewmate's own working log, maintained by the agent as it works and never a wake source, so it can carry the established facts, rejected approaches, and post-dispatch steers that a lost context would otherwise take with it.
+It survives teardown with the task's other data, which is what lets a relaunched worker resume from disk rather than from a brief firstmate rebuilds by hand.
+
 ## Dispatch profiles
 
 Crewmate and scout dispatch can stay on the static crewmate harness resolved by `config/crew-harness`, or it can use local dispatch profiles in `config/crew-dispatch.json`.
