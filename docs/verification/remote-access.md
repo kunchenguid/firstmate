@@ -28,7 +28,7 @@ The documented `~/.ssh/config` block was written to a standalone file and expand
 
 ```sh
 ssh -F <config-file> -G shadowbyte-agent |
-  grep -iE '^(host|hostname|user|forwardagent|serveralive|exitonforwardfailure|clearallforwardings|controlmaster|controlpath|port) '
+  grep -iE '^(host|hostname|user|forwardagent|serveralive[^ ]*|exitonforwardfailure|clearallforwardings|controlmaster|controlpath|port) '
 ```
 
 Observed output, with the real host and account rendered as the same placeholders [`../remote-access.md`](../remote-access.md) uses:
@@ -105,7 +105,7 @@ exit=255
 
 The troubleshooting section reproduces these three message lines with the port substituted for the one it documents, and the immediate non-zero exit is what makes the failure visible.
 
-## Without the directive, the same conflict is silent
+## Without the directive, the same conflict leaves SSH connected
 
 The identical conflict was rerun with the directive overridden.
 
@@ -118,11 +118,13 @@ echo "exit=$?"
 Observed output:
 
 ```text
-Terminated
+bind [127.0.0.1]:14388: Address already in use
+channel_setup_fwd_listener_tcpip: cannot listen to port: 14388
+Could not request local forwarding.
 exit=124
 ```
 
-SSH printed no diagnostic and stayed connected until the external timeout killed it, leaving a live session with a dead tunnel.
+OpenSSH printed the forwarding diagnostics but stayed connected until the external timeout killed it, leaving a live session with a dead tunnel.
 This is the failure mode the directive prevents, and it is why the setting is part of the documented config rather than an optional extra.
 
 ## No listener survives the checks
