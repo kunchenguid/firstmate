@@ -26,9 +26,10 @@
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
-# declared scratch and the report at data/<task-id>/report.md is the work
-# product. Teardown proceeds only once the report exists and the shared
-# unresolved-decision completion gate verifies its captain-held inventory.
+# declared scratch and the report at data/<task-id>/report.md is the working
+# copy. Teardown proceeds only once bin/fm-report-finalize.sh archives it and
+# the shared unresolved-decision completion gate verifies its captain-held inventory.
+# Ship tasks archive a short delivery receipt through the same finalization step.
 # Before destructive cleanup, teardown validates task check artifacts and any
 # matching quarantine entries as ordinary single-link files on the state
 # device. It refuses and preserves task state when that proof fails; otherwise
@@ -427,7 +428,8 @@ backlog_refresh_reminder() {
   if fm_tasks_axi_backend_available "$CONFIG"; then
     case "$KIND" in
       scout)
-        report_path="data/$ID/report.md"
+        report_path=$(meta_value "$META" report_archive)
+        [ -n "$report_path" ] || report_path="data/$ID/report.md"
         done_cmd="tasks-axi done $ID --report $report_path"
         ;;
       *)
@@ -1078,17 +1080,11 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH"
 fi
 
-if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
-  REPORT="$DATA/$ID/report.md"
-  if [ ! -f "$REPORT" ]; then
-    echo "REFUSED: scout task $ID has no report at $REPORT." >&2
-    echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2
-    exit 1
-  fi
+if [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-decision-hold.sh" verify "$ID" >/dev/null; then
-    echo "REFUSED: scout task $ID has not passed the unresolved-decision completion gate." >&2
-    echo "Inventory its report and any visual review through bin/fm-decision-hold.sh before teardown." >&2
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-report-finalize.sh" "$ID" >/dev/null; then
+    echo "REFUSED: task $ID report is not finalized into the canonical archive." >&2
+    echo "Run bin/fm-report-finalize.sh $ID after the deliverable is ready, or use --force after explicit discard approval." >&2
     exit 1
   fi
 fi

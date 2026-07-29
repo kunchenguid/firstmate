@@ -116,9 +116,14 @@ show_field() {  # <show-output> <field>
 }
 
 origin_exists_here() {  # <origin-id>
-  [ -f "$STATE/$1.meta" ] && return 0
-  [ -f "$DATA/$1/report.md" ] && return 0
-  task_show "$1" >/dev/null 2>&1
+  local id=$1 archived
+  [ -f "$STATE/$id.meta" ] && return 0
+  [ -f "$DATA/$id/report.md" ] && return 0
+  for archived in "$DATA"/reports/*/"$id".md; do
+    [ -e "$archived" ] || continue
+    [ -f "$archived" ] && return 0
+  done
+  task_show "$id" >/dev/null 2>&1
 }
 
 list_has_key() {  # <comma-list> <key>

@@ -418,7 +418,12 @@ task_json_lines() {
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     status_log="$STATE/$id.status"
-    report_path="$DATA/$id/report.md"
+    report_path=$(meta_value "$meta" report_archive)
+    if [ -z "$report_path" ]; then
+      report_path="$DATA/$id/report.md"
+    else
+      report_path="$FM_HOME/$report_path"
+    fi
     pr=$(meta_value "$meta" pr)
     pr_source=meta
     if [ -z "$pr" ]; then
