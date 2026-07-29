@@ -1,19 +1,28 @@
 #!/usr/bin/env bash
-# fm-send from-firstmate marker for secondmate targets.
+# fm-send from-firstmate marker policy.
 #
-# A secondmate is itself a firstmate, so a request relayed to it lands in its own
-# chat - which the main firstmate never reads (the only channel back is the terse
-# status file). fm-send therefore prepends a from-firstmate marker
-# (bin/fm-marker-lib.sh) when, and only when, the resolved target is a task
-# selector whose meta records kind=secondmate, so the secondmate can recognize
-# the request and route its reply via the status path. These tests pin that
-# behavior hermetically (stubbed tmux, no real agent):
-#   1. Exact-id and stable-label kind=secondmate selectors prepend the marker.
-#   2. Exact-id and stable-label ordinary crewmate selectors stay unmarked.
-#   3. Explicit endpoints stay unmarked, with or without matching local meta.
-#   4. The --key path never carries the marker.
-#   5. Direct captain text stays unmarked, and already-marked text is idempotent.
-#   6. The marker is the label plus terminal-safe U+2063 INVISIBLE SEPARATOR.
+# A steer lands in the receiving agent's own chat, where nothing else tells
+# firstmate's instructions apart from a human typing directly into that pane.
+# fm-send therefore prepends the from-firstmate marker (bin/fm-marker-lib.sh) to
+# every text steer whose target is a task selector resolved through this home's
+# meta. The target's kind then selects how much machinery rides along: a
+# kind=secondmate request also carries a corr= correlation token and a durable
+# parent pending-reply record so its answer can be matched on the status path,
+# while a crewmate or scout carries the marker alone and reports through its own
+# status file. These tests pin that policy hermetically (stubbed tmux, no real
+# agent):
+#   1. Exact-id and stable-label kind=secondmate selectors get marker+corr+record.
+#   2. Exact-id and stable-label crewmate and scout selectors get the marker
+#      alone: no corr token, no pending-reply record.
+#   3. Command-shaped text is never marked for a crewmate or scout. A harness
+#      recognizes a slash command, or a codex `$<skill>` invocation, only at the
+#      very start of the composer line, so any prefix would silently demote it to
+#      prose (verified 2026-07-28 on claude 2.1.220 and pi 0.82.0). A `$...`
+#      message to a NON-codex harness is ordinary text and is still marked.
+#   4. Explicit endpoints stay unmarked, with or without matching local meta.
+#   5. The --key path never carries the marker.
+#   6. Direct captain text stays unmarked, and already-marked text is idempotent.
+#   7. The marker is the label plus terminal-safe U+2063 INVISIBLE SEPARATOR.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -143,8 +152,28 @@ test_exact_secondmate_task_id_is_marked() {
   pass "fm-send: an exact kind=secondmate task id is marked with corr exactly once"
 }
 
-test_crewmate_target_is_not_marked() {
-  local dir fb log home rc got
+# A crewmate/scout target carries the marker but NONE of the secondmate
+# correlation machinery: no corr= token in the text and no parent pending-reply
+# record on disk. A crewmate answers on its own status file, which the watcher
+# already surfaces, so there is nothing for a parent expectation to add.
+assert_marked_without_corr() {  # <label> <home> <literal-text>
+  local label=$1 home=$2 got=$3 body records
+  case "$got" in
+    "$FM_FROMFIRST_MARK"?*) ;;
+    *) fail "$label: expected the from-firstmate marker"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
+  esac
+  body=${got#"$FM_FROMFIRST_MARK"}
+  case "$body" in
+    corr=*) fail "$label: a crewmate steer must not carry a corr= token"$'\n'"$body" ;;
+  esac
+  records=$(find "$home/state/pending-replies" -type f 2>/dev/null | wc -l)
+  [ "$records" -eq 0 ] \
+    || fail "$label: a crewmate steer must not create a pending-reply record (found $records)"
+  printf '%s' "$body"
+}
+
+test_crewmate_target_is_marked() {
+  local dir fb log home rc got body
   dir="$TMP_ROOT/crew"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home crew)
@@ -154,14 +183,106 @@ test_crewmate_target_is_not_marked() {
   run_send "$fb" "$home" "$log" "fm-build" "fix the test"; rc=$?
   expect_code 0 "$rc" "send to a stable-label crewmate target should succeed"
   got=$(cat "$log")
-  [ "$got" = "fix the test" ] \
-    || fail "stable-label crewmate send: expected bare text, got marker or other"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
+  body=$(assert_marked_without_corr "stable-label crewmate send" "$home" "$got")
+  [ "$body" = "fix the test" ] \
+    || fail "stable-label crewmate send altered the body"$'\n'"$body"
   run_send "$fb" "$home" "$log" "build" "fix the exact test"; rc=$?
   expect_code 0 "$rc" "send to an exact-id crewmate target should succeed"
   got=$(cat "$log")
-  [ "$got" = "fix the exact test" ] \
-    || fail "exact-id crewmate send: expected bare text, got marker or other"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
-  pass "fm-send: exact-id and stable-label kind=ship selectors are sent unmarked"
+  body=$(assert_marked_without_corr "exact-id crewmate send" "$home" "$got")
+  [ "$body" = "fix the exact test" ] \
+    || fail "exact-id crewmate send altered the body"$'\n'"$body"
+  pass "fm-send: exact-id and stable-label kind=ship selectors get the marker without corr or a parent record"
+}
+
+test_scout_target_is_marked() {
+  local dir fb log home rc got body
+  dir="$TMP_ROOT/scout"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home scout)
+  fm_write_meta "$home/state/probe.meta" \
+    "window=sess:fm-probe" "worktree=$home/wt" "project=$home/p" \
+    "harness=echo" "kind=scout" "mode=no-mistakes" "yolo=off"
+  run_send "$fb" "$home" "$log" "probe" "check the second hypothesis"; rc=$?
+  expect_code 0 "$rc" "send to a scout target should succeed"
+  got=$(cat "$log")
+  body=$(assert_marked_without_corr "scout send" "$home" "$got")
+  [ "$body" = "check the second hypothesis" ] \
+    || fail "scout send altered the body"$'\n'"$body"
+  pass "fm-send: a kind=scout selector gets the marker without corr or a parent record"
+}
+
+# A meta written before the kind= field records no value at all. That is not
+# secondmate, so it must read as the crewmate default rather than losing the
+# marker or reaching for correlation machinery it has no task id for.
+test_meta_without_kind_is_marked_as_crewmate() {
+  local dir fb log home rc got body
+  dir="$TMP_ROOT/nokind"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home nokind)
+  fm_write_meta "$home/state/legacy.meta" \
+    "window=sess:fm-legacy" "worktree=$home/wt" "project=$home/p" "harness=echo"
+  run_send "$fb" "$home" "$log" "legacy" "resume where you left off"; rc=$?
+  expect_code 0 "$rc" "send to a kind-less meta should succeed"
+  got=$(cat "$log")
+  body=$(assert_marked_without_corr "kind-less meta send" "$home" "$got")
+  [ "$body" = "resume where you left off" ] \
+    || fail "kind-less meta send altered the body"$'\n'"$body"
+  pass "fm-send: a meta predating kind= is marked as an ordinary crewmate"
+}
+
+# The one exclusion. A prefix on command-shaped text demotes it to prose, so
+# these sends must stay byte-identical to the pre-marker behavior.
+# shellcheck disable=SC2016 # the single-quoted `$` is the literal sigil under test, never an expansion
+test_command_shaped_crewmate_send_is_not_marked() {
+  local dir fb log home rc got harness
+  dir="$TMP_ROOT/cmd"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home cmd)
+  for harness in claude codex opencode pi grok kimi; do
+    fm_write_meta "$home/state/$harness.meta" \
+      "window=sess:fm-$harness" "worktree=$home/wt" "project=$home/p" \
+      "harness=$harness" "kind=ship" "mode=no-mistakes" "yolo=off"
+    run_send "$fb" "$home" "$log" "$harness" "/no-mistakes"; rc=$?
+    expect_code 0 "$rc" "slash-command send to a $harness crewmate should succeed"
+    got=$(cat "$log")
+    [ "$got" = "/no-mistakes" ] \
+      || fail "slash command to $harness must reach the composer unmarked, or the harness will not recognize it"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
+  done
+  # codex's skill sigil is `$`, so `$no-mistakes` is command-shaped there.
+  run_send "$fb" "$home" "$log" "codex" '$no-mistakes'; rc=$?
+  expect_code 0 "$rc" "codex \$skill send should succeed"
+  got=$(cat "$log")
+  [ "$got" = '$no-mistakes' ] \
+    || fail "a codex \$<skill> invocation must reach the composer unmarked"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
+  # On every other harness a leading `$` is ordinary text ("$5/month"), so the
+  # exclusion must NOT widen to it.
+  run_send "$fb" "$home" "$log" "claude" '$5/month is the budget'; rc=$?
+  expect_code 0 "$rc" "non-codex \$-leading send should succeed"
+  got=$(cat "$log")
+  [ "$got" = "${FM_FROMFIRST_MARK}\$5/month is the budget" ] \
+    || fail "a leading \$ on a non-codex harness is ordinary text and must still be marked"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
+  pass "fm-send: command-shaped crewmate sends stay unmarked; a non-codex leading \$ does not"
+}
+
+# A secondmate keeps its marker even for command-shaped text: the marker is what
+# creates the corr= correlation and the parent pending-reply record, so dropping
+# it would silently lose the reply guarantee. No caller sends a secondmate a
+# command-shaped message today; this pins that the exclusion did not leak there.
+test_command_shaped_secondmate_send_keeps_its_marker() {
+  local dir fb log home rc got
+  dir="$TMP_ROOT/cmd-sm"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home cmd-sm)
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  run_send "$fb" "$home" "$log" "domain" "/updatefirstmate"; rc=$?
+  expect_code 0 "$rc" "command-shaped secondmate send should succeed"
+  got=$(cat "$log")
+  case "$got" in
+    "$FM_FROMFIRST_MARK"corr=[a-f0-9][a-f0-9]*) : ;;
+    *) fail "a secondmate request must keep marker+corr regardless of shape"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
+  esac
+  pass "fm-send: the command-shaped exclusion does not reach secondmate requests"
 }
 
 test_explicit_window_is_not_marked() {
@@ -255,7 +376,11 @@ test_marked_send_preserves_trailing_newlines() {
 
 test_secondmate_target_is_marked
 test_exact_secondmate_task_id_is_marked
-test_crewmate_target_is_not_marked
+test_crewmate_target_is_marked
+test_scout_target_is_marked
+test_meta_without_kind_is_marked_as_crewmate
+test_command_shaped_crewmate_send_is_not_marked
+test_command_shaped_secondmate_send_keeps_its_marker
 test_explicit_window_is_not_marked
 test_key_path_is_not_marked
 test_marker_is_label_plus_invisible_separator

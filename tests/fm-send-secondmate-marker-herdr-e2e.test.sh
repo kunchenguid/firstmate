@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Real Pi/Herdr regression for exact-id secondmate marker delivery.
+# Real Pi/Herdr regression for exact-id marker delivery.
 #
 # This is opt-in because it launches a real interactive Pi process and a real
 # isolated Herdr lab session.
 # It exercises the end-user command shape against metadata written by a real
 # fm-spawn.sh --secondmate launch, captures Pi's before_agent_start prompt bytes,
-# and proves both sides of the routing boundary:
-#   - exact task id through explicit FM_HOME receives exactly one marker;
+# and proves every side of the routing boundary:
+#   - an exact secondmate task id through explicit FM_HOME receives exactly one
+#     marker, plus its correlation token and parent pending-reply record;
+#   - a crewmate-shaped record for the same live pane receives exactly one
+#     marker and no correlation machinery;
 #   - direct terminal input remains unmarked.
 #
 # Every Herdr call, including calls made inside the production backend adapter,
@@ -41,7 +44,9 @@ FAKEBIN="$TMP_ROOT/fakebin"
 ORIGINAL_PATH=$PATH
 REAL_PI=$(command -v pi)
 ID='marker-pi-sm'
+CREW_ID='marker-pi-crew'
 REQUEST='FM_MARKER_HERDR_E2E exact-id request'
+CREW_REQUEST='FM_MARKER_HERDR_CREW crewmate steer'
 DIRECT='FM_MARKER_HERDR_DIRECT captain input'
 
 cleanup() {
@@ -172,6 +177,29 @@ GOT=$(jq -r --arg needle "$REQUEST" 'select(.prompt | contains($needle)) | .prom
 printf 'evidence: exact-id received-hex=%s\n' "$(printf '%s' "$GOT" | od -An -tx1 | tr -d ' \n')"
 pass "real Pi/Herdr: exact-id FM_HOME send delivers exactly one from-firstmate marker"
 wait_for_idle || fail "real Pi did not become idle after the exact-id capture"
+
+# The same live pane reached through a crewmate-shaped record. A crewmate cannot
+# otherwise tell a firstmate steer from a human typing into its pane, so it gets
+# the marker too - but none of the secondmate correlation machinery, because it
+# already answers on its own status file. Deriving the record from the real
+# spawn's metadata keeps the backend target, harness, and window exactly as the
+# adapter recorded them; only the authoritative kind differs.
+sed 's/^kind=secondmate$/kind=ship/' "$META" > "$SENDER_HOME/state/$CREW_ID.meta"
+[ "$(fm_meta_get "$SENDER_HOME/state/$CREW_ID.meta" kind)" = ship ] \
+  || fail "derived crewmate metadata did not record kind=ship"
+PENDING_BEFORE=$(find "$SENDER_HOME/state/pending-replies" -type f 2>/dev/null | wc -l)
+PATH="$FAKEBIN:$ORIGINAL_PATH" FM_GATE_REFUSE_BYPASS=1 FM_HOME="$SENDER_HOME" \
+  "$ROOT/bin/fm-send.sh" "$CREW_ID" "$CREW_REQUEST" >/dev/null
+wait_for_prompt "$CREW_REQUEST" || fail "real Pi did not receive the crewmate fm-send steer"
+GOT=$(jq -r --arg needle "$CREW_REQUEST" 'select(.prompt | contains($needle)) | .prompt' "$CAPTURE" | tail -1)
+[ "$GOT" = "${FM_FROMFIRST_MARK}${CREW_REQUEST}" ] \
+  || fail "real Pi crewmate prompt was not exactly one marker plus the steer"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$GOT" | od -An -tx1)"
+PENDING_AFTER=$(find "$SENDER_HOME/state/pending-replies" -type f 2>/dev/null | wc -l)
+[ "$PENDING_AFTER" -eq "$PENDING_BEFORE" ] \
+  || fail "a crewmate steer must not create a parent pending-reply record (before=$PENDING_BEFORE after=$PENDING_AFTER)"
+printf 'evidence: crewmate received-hex=%s\n' "$(printf '%s' "$GOT" | od -An -tx1 | tr -d ' \n')"
+pass "real Pi/Herdr: a crewmate steer delivers exactly one marker and no correlation record"
+wait_for_idle || fail "real Pi did not become idle after the crewmate capture"
 
 # Direct terminal input bypasses fm-send's metadata-routed transformation and
 # therefore remains conversational captain input.

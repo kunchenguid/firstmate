@@ -618,9 +618,66 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# A crewmate cannot otherwise tell a firstmate steer from a human typing into its
+# pane (bin/fm-send.sh marks the former). Both crewmate scaffolds must carry the
+# reader side of that contract, name the worker's own task id so the
+# self-identification is concrete, state the command-shaped exclusion so the
+# routine validation trigger does not read as a rule violation, and repeat that
+# escalation is the status file - the failure that direction is silent.
+test_crewmate_scaffolds_carry_who_is_speaking() {
+  local home brief kind
+  home="$TMP_ROOT/who-speaks-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+        "$ROOT/bin/fm-brief.sh" "speaks-$kind" alpha --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+        "$ROOT/bin/fm-brief.sh" "speaks-$kind" alpha >/dev/null 2>&1
+    fi
+    brief="$home/data/speaks-$kind/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    assert_grep "# Who is speaking to you" "$brief" \
+      "$kind brief must carry the pane-provenance section"
+    assert_grep '[fm-from-firstmate]' "$brief" \
+      "$kind brief must name the marker a firstmate message carries"
+    assert_grep "untypable, so a human never produces it" "$brief" \
+      "$kind brief must say why an unmarked message means a human"
+    assert_grep "you are a worker on task \`speaks-$kind\`" "$brief" \
+      "$kind brief must name its own task id for self-identification"
+    assert_grep "bare skill or slash command" "$brief" \
+      "$kind brief must state the one unmarked exception so /no-mistakes is not read as a human"
+    assert_grep "never this pane" "$brief" \
+      "$kind brief must send escalation to the status file, not the pane"
+  done
+  pass "fm-brief: ship and scout scaffolds teach the crewmate who is speaking to it"
+}
+
+# The charter keeps its own consequence (route the answer to the status path);
+# only the marker's shape is shared with the crewmate scaffolds.
+test_secondmate_charter_keeps_its_own_marker_consequence() {
+  local home charter
+  home="$TMP_ROOT/charter-marker-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='alpha reviews' \
+    "$ROOT/bin/fm-brief.sh" charter-marker --secondmate --no-projects >/dev/null 2>&1
+  charter="$home/data/charter-marker/brief.md"
+  assert_grep "untypable, so a human never produces it" "$charter" \
+    "charter lost the shared marker-shape fact"
+  assert_grep "respond via the STATUS/ESCALATION path below" "$charter" \
+    "charter must keep its own routing consequence"
+  if grep -q "# Who is speaking to you" "$charter"; then
+    fail "charter must not take the crewmate section; its consequence differs"
+  fi
+  pass "fm-brief: the charter shares the marker fact but keeps its own consequence"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
+test_crewmate_scaffolds_carry_who_is_speaking
+test_secondmate_charter_keeps_its_own_marker_consequence
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
