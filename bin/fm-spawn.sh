@@ -85,6 +85,15 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   They also refuse a pooled worktree that any OTHER state/<id>.meta in this home
+#   already records as its worktree=. Those records are authoritative occupancy and
+#   outrank treehouse's process-based detection, which goes stale whenever a live
+#   crewmate's shell sits outside its worktree and is cleared entirely by a reboot.
+#   A refused slot is re-requested up to FM_SPAWN_WORKTREE_ATTEMPTS times (default 3,
+#   with FM_SPAWN_WORKTREE_POLLS/FM_SPAWN_WORKTREE_POLL_INTERVAL bounding each
+#   attempt's settle wait); an exhausted pool fails the spawn with every claiming task
+#   named. A claim whose task is no longer running is named the same way and is never
+#   discarded here - only fm-teardown.sh releases a claim.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -883,6 +892,70 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+# --- worktree occupancy: fleet metadata is authoritative --------------------
+#
+# Treehouse decides a pooled worktree is free by looking for live processes whose
+# cwd is inside it. That signal is unreliable for firstmate's crewmates in both
+# directions: a working crewmate's shell frequently sits outside its own worktree,
+# and a reboot clears treehouse's occupancy state entirely while every recorded
+# worktree= under state/ survives untouched. A slot handed out through that gap
+# double-assigns: the second crewmate's first branch switch hijacks the live
+# crewmate's checkout and pipeline anchoring, and teardown then refuses to clean
+# either task up because the slot holds the other one's unpushed commits.
+#
+# So a path recorded as worktree= in ANY other state/<id>.meta of this home is
+# claimed until fm-teardown.sh removes that meta - across reboots, and regardless
+# of what treehouse reports. A claim whose task is no longer running is refused
+# here too and named for firstmate: releasing it means recovering or tearing down
+# that task, which is what protects its unlanded work. Spawn never discards
+# another task's record as a side effect of allocating a slot.
+#
+# Deliberately out of scope: Orca allocates a fresh worktree per task instead of
+# drawing from a shared pool, and two concurrent spawns of different ids can still
+# race between this read and their own meta write. Both are outside the incident
+# class this closes, which is a stale or reboot-cleared pool handing out a slot
+# firstmate's own records already own.
+worktree_meta_claim() {  # <candidate-real-path>; prints "<task-id>|<agent-state>|<recorded-path>"
+  local cand=$1 meta other recorded recorded_real backend target agent_state
+  [ -n "$cand" ] || return 1
+  [ -d "$STATE" ] || return 1
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    other=$(basename "$meta" .meta)
+    # A respawn of THIS task legitimately re-claims the worktree its own record
+    # already names; every other record is somebody else's claim.
+    [ "$other" != "$ID" ] || continue
+    recorded=$(fm_meta_get "$meta" worktree)
+    [ -n "$recorded" ] || continue
+    recorded_real=$(real_path_or_raw "$recorded")
+    [ "$recorded_real" = "$cand" ] || continue
+    backend=$(fm_backend_of_meta "$meta")
+    target=$(fm_backend_target_of_meta "$meta")
+    agent_state=unreadable
+    if [ -n "$target" ]; then
+      agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf 'unreadable')
+    fi
+    printf '%s|%s|%s\n' "$other" "$agent_state" "$recorded"
+    return 0
+  done
+  return 1
+}
+
+# One reportable line per refused claim. The agent state only shapes the wording -
+# every state refuses the slot, because only fm-teardown.sh releases a claim.
+worktree_claim_line() {  # <claim-record>
+  local record=$1 claim_id claim_state claim_path note
+  IFS='|' read -r claim_id claim_state claim_path <<EOF
+$record
+EOF
+  case "$claim_state" in
+    alive) note="live worker" ;;
+    dead|missing) note="no live worker ($claim_state) - unreconciled record, left in place for recovery or cleanup" ;;
+    *) note="worker state $claim_state - treated as claimed" ;;
+  esac
+  printf '  claimed by %s (%s): %s\n' "$claim_id" "$note" "$claim_path"
+}
+
 herdr_projection_meta_field_exact() {  # <meta> <key>
   local meta=$1 key=$2 count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -1259,34 +1332,69 @@ kimi_spawn_fail() {  # <detail>
 }
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # Bounded re-acquire: a slot refused by the occupancy check below is asked for
+  # again rather than accepted or silently retargeted. The refused subshell is
+  # deliberately left in place while retrying, so treehouse's own process check
+  # now sees that slot as busy and offers a different one; the whole stack is
+  # released when the window dies. Polls stay per-attempt so a genuinely
+  # exhausted pool fails within a bounded time with the claimants named.
+  WT_ATTEMPTS=${FM_SPAWN_WORKTREE_ATTEMPTS:-3}
+  WT_POLLS=${FM_SPAWN_WORKTREE_POLLS:-60}
+  WT_POLL_INTERVAL=${FM_SPAWN_WORKTREE_POLL_INTERVAL:-1}
+  WT_REFUSED_PATHS=""
+  WT_REFUSED_REPORT=""
+  wt_attempt=0
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  # Target the stable window id, not the name: if the name is ever lost (e.g. an
-  # automatic-rename slips through), display-message -t <bad-name> falls back to the
-  # active client's window, which would misread firstmate's OWN pane path as the
-  # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
-  #
-  # A single read that already differs from PROJ_ABS_REAL is not proof the pane
-  # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
-  # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
-  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
-  # a mismatch just becomes the new candidate rather than resetting the wait, so a
-  # pane that is already settled by the first real read only costs the one existing
-  # inter-poll sleep as confirmation, not a whole extra cycle on top.
-  candidate=""
-  for _ in $(seq 1 60); do
-    p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ]; then
-      p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+  wt_path_refused() {  # <real-path>
+    [ -n "$WT_REFUSED_PATHS" ] || return 1
+    printf '%s\n' "$WT_REFUSED_PATHS" | grep -Fqx -- "$1"
+  }
+
+  wt_claim_refuse() {  # <why>
+    {
+      printf "error: refusing to launch %s: %s, and every worktree treehouse offered is already claimed by this home's task records.\n" "$ID" "$1"
+      printf '%s' "$WT_REFUSED_REPORT"
+      printf 'Those records are authoritative occupancy regardless of treehouse process detection, and spawn never discards one.\n'
+      printf 'Recover or tear down the named task(s) to release their worktrees, or widen the pool. Inspect target %s.\n' "$T"
+    } >&2
+  }
+
+  while :; do
+    wt_attempt=$((wt_attempt + 1))
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+
+    # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+    # Target the stable window id, not the name: if the name is ever lost (e.g. an
+    # automatic-rename slips through), display-message -t <bad-name> falls back to the
+    # active client's window, which would misread firstmate's OWN pane path as the
+    # worktree and tangle a hook into the primary checkout. The window id never lies.
+    # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
+    # prefix would otherwise make the pane's OS-level cwd read differ from
+    # PROJ_ABS on the very first poll, before the pane has actually moved.
+    #
+    # A single read that already differs from PROJ_ABS_REAL is not proof the pane
+    # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
+    # transiently reports an unrelated stale path (seen live as another real git
+    # checkout entirely) before the shell catches up with treehouse get's cd. That
+    # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
+    # below (it resolves to a real, distinct worktree top-level too), so accepting it
+    # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
+    # two consecutive reads to agree on the same non-project path before accepting it;
+    # a mismatch just becomes the new candidate rather than resetting the wait, so a
+    # pane that is already settled by the first real read only costs the one existing
+    # inter-poll sleep as confirmation, not a whole extra cycle on top.
+    # An already-refused path is treated exactly like the project path here: the pane
+    # is still sitting in the slot the previous attempt rejected, and that reading must
+    # never be mistaken for the new slot this attempt asked for.
+    candidate=""
+    WT=""
+    for _ in $(seq 1 "$WT_POLLS"); do
+      p=$(spawn_current_path "$WT_TARGET" || true)
+      p_real=""
+      if [ -n "$p" ]; then
+        p_real=$(real_path_or_raw "$p")
+      fi
+      if [ -n "$p_real" ] && [ "$p_real" != "$PROJ_ABS_REAL" ] && ! wt_path_refused "$p_real"; then
         if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
           WT="$p"
           break
@@ -1295,17 +1403,33 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       else
         candidate=""
       fi
-    else
-      candidate=""
+      sleep "$WT_POLL_INTERVAL"
+    done
+    if [ -z "$WT" ]; then
+      # With claims already refused this spawn, a settle timeout is the pool telling
+      # us it has nothing else to offer - report it as the claim refusal it is.
+      if [ -n "$WT_REFUSED_REPORT" ]; then
+        wt_claim_refuse "treehouse offered no further worktree"
+        exit 1
+      fi
+      echo "error: treehouse get did not enter a worktree within $WT_POLLS polls; inspect window $T" >&2
+      exit 1
     fi
-    sleep 1
-  done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
-    exit 1
-  fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+    validate_spawn_worktree "treehouse get" "$T"
+
+    # Metadata-verified occupancy, before the worktree is used for anything.
+    wt_real=$(real_path_or_raw "$WT")
+    wt_claim=$(worktree_meta_claim "$wt_real") || break
+    WT_REFUSED_PATHS="${WT_REFUSED_PATHS}${wt_real}"$'\n'
+    WT_REFUSED_REPORT="${WT_REFUSED_REPORT}$(worktree_claim_line "$wt_claim")"$'\n'
+    if [ "$wt_attempt" -ge "$WT_ATTEMPTS" ]; then
+      wt_claim_refuse "$WT_ATTEMPTS attempt(s) exhausted"
+      exit 1
+    fi
+    echo "warning: treehouse offered ${wt_real}, already recorded as another task's worktree; asking for a different slot (attempt $wt_attempt of $WT_ATTEMPTS)" >&2
+    WT=""
+  done
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

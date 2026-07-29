@@ -19,8 +19,31 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# FM_FAKE_PANE_PATH may carry SEVERAL paths, one per line: the pool then hands
+# out the nth on the nth `treehouse get`, clamped to the last line, so a batch
+# lands one task per slot exactly as a real pool does. A single-line value
+# behaves as it always did.
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"send-keys"*"treehouse get"*)
+    if [ -n "${FM_FAKE_PANE_COUNTFILE:-}" ]; then
+      n=0
+      [ -f "$FM_FAKE_PANE_COUNTFILE" ] && n=$(cat "$FM_FAKE_PANE_COUNTFILE")
+      printf '%s\n' "$((n + 1))" > "$FM_FAKE_PANE_COUNTFILE"
+    fi
+    exit 0
+    ;;
+  *"#{pane_current_path}"*)
+    n=1
+    if [ -n "${FM_FAKE_PANE_COUNTFILE:-}" ] && [ -f "$FM_FAKE_PANE_COUNTFILE" ]; then
+      n=$(cat "$FM_FAKE_PANE_COUNTFILE")
+      [ "$n" -ge 1 ] || n=1
+    fi
+    total=$(printf '%s\n' "${FM_FAKE_PANE_PATH:-}" | grep -c .)
+    [ "$total" -ge 1 ] || total=1
+    [ "$n" -le "$total" ] || n=$total
+    printf '%s\n' "${FM_FAKE_PANE_PATH:-}" | sed -n "${n}p"
+    exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -84,6 +107,9 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
+  # Pool cursor for the fake tmux above; reset per run so each case starts at
+  # the first slot. A batch run keeps it across its re-execed pairs.
+  : > "$launchlog.pane-count"
   # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
@@ -91,7 +117,8 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_PANE_COUNTFILE="$launchlog.pane-count" \
+    TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
@@ -570,14 +597,19 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
 }
 
 test_batch_forwards_shared_profile_flags() {
-  local rec id1 id2 out status
+  local rec id1 id2 wt2 out status
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  # A two-task batch draws two pool slots. Handing both tasks the same worktree
+  # is the double-assignment fm-spawn now refuses, so the pool offers one slot
+  # per task, as it does live.
+  wt2="$CASE_DIR/wt-second"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt-profile-batch-second "$wt2"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR"$'\n'"$wt2" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
@@ -585,6 +617,10 @@ test_batch_forwards_shared_profile_flags() {
   assert_contains "$out" "spawned $id2 harness=codex" "second batch task did not use shared harness"
   assert_meta_profile "$HOME_DIR/state/$id1.meta" codex gpt-5 high
   assert_meta_profile "$HOME_DIR/state/$id2.meta" codex gpt-5 high
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id1.meta" \
+    "first batch task did not record the first slot"
+  assert_grep "worktree=$wt2" "$HOME_DIR/state/$id2.meta" \
+    "second batch task did not take its own slot"
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
