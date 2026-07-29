@@ -1,4 +1,8 @@
 {
+  "statusLine": {
+    "type": "command",
+    "command": "\"$CLAUDE_PROJECT_DIR\"/bin/fm-context-statusline.sh"
+  },
   "hooks": {
     "SessionStart": [
       {

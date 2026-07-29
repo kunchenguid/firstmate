@@ -598,6 +598,40 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+test_context_pressure_contract_reaches_every_agent_kind() {
+  local home ship scout charter
+  home="$TMP_ROOT/context-pressure-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" context-ship-z1 firstmate >/dev/null 2>&1
+  ship="$home/data/context-ship-z1/brief.md"
+  assert_grep '/tmp/fm-context-ship-z1/context-pressure.json' "$ship" \
+    "ship brief missing its task-scoped Claude context snapshot"
+  # shellcheck disable=SC2016 # Literal Markdown backticks must remain unexpanded.
+  assert_grep 'When `compact_recommended` is `true` (70 percent used or higher), run `/compact` before continuing.' "$ship" \
+    "ship brief missing the instrument-backed compaction trigger"
+  assert_grep 'use it instead of a self-estimate' "$ship" \
+    "ship brief still permits estimated context pressure when telemetry exists"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" context-scout-z2 firstmate --scout >/dev/null 2>&1
+  scout="$home/data/context-scout-z2/brief.md"
+  assert_grep '/tmp/fm-context-scout-z2/context-pressure.json' "$scout" \
+    "scout brief missing its task-scoped Claude context snapshot"
+  assert_grep 'never fabricate a reading when it is absent' "$scout" \
+    "scout brief did not preserve the non-Claude compatibility boundary"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Handle routed work.' \
+    "$ROOT/bin/fm-brief.sh" context-mate-z3 --secondmate --no-projects >/dev/null 2>&1
+  charter="$home/data/context-mate-z3/brief.md"
+  # shellcheck disable=SC2016 # Literal Markdown backticks must remain unexpanded.
+  assert_grep 'the bottom `CTX` row is host-computed context pressure' "$charter" \
+    "secondmate charter did not identify the real Claude context instrument"
+  # shellcheck disable=SC2016 # Literal Markdown backticks must remain unexpanded.
+  assert_grep 'when it shows `COMPACT NOW: /compact` at 70 percent used or higher, run `/compact`' "$charter" \
+    "secondmate charter missing the status-line compaction trigger"
+  pass "fm-brief.sh: every agent kind receives the instrument-backed Claude compaction contract"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -692,4 +726,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_context_pressure_contract_reaches_every_agent_kind
 test_scout_and_secondmate_scaffold
