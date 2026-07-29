@@ -7,8 +7,8 @@ This page owns the Mac-side setup for attaching to a server-resident Firstmate a
 
 ## Boundaries
 
-- Every command, file, git worktree, and agent process stays on the server.
-- The Mac contributes a terminal and a browser and holds no project state.
+- Firstmate and all project state, files, git worktrees, and agent processes stay on the server.
+- The Mac intentionally holds only its SSH config, terminal, browser, and local tunnel process as the control and viewing surface, and holds no Firstmate or project state.
 - Pi is the only Firstmate primary.
 - The authoritative Firstmate runs in the named Herdr session `firstmate`.
 - Claude Code, Codex, and every other harness are supervised crewmates only and must not start a competing primary.
