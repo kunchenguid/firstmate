@@ -52,7 +52,7 @@ make_launch_fakebin() {  # <dir> -> echoes fakebin dir
   mkdir -p "$fb"
   printf '{"next":1,"workspaces":[],"tabs":[],"agent_status":{},"server":"true","prompt":"$ "}\n' > "$dir/state.json"
 
-  for tool in claude codex opencode pi grok kimi curl wget nc ping; do
+  for tool in claude codex opencode pi pi-signed grok kimi curl wget nc ping; do
     cat > "$fb/$tool" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$(basename "$0") $*" >> "${FM_LAUNCH_EXEC_LOG:-/dev/null}"
@@ -72,6 +72,9 @@ jq_state() { jq "$@" "$STATE"; }
 save() { local tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
 
 cmd=${1:-}; sub=${2:-}
+if [ "${FM_FAKE_HERDR_FAIL:-}" = "$cmd $sub" ]; then
+  exit 1
+fi
 ws=""; label=""
 args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
@@ -168,6 +171,7 @@ run_launch() {
   printf '%s' "$input" | env \
     PATH="$fb:/usr/bin:/bin" \
     FM_HOME="$home" \
+    FM_BACKEND= \
     FM_LAUNCH_PI_AUTH="$home/pi-auth.json" \
     FM_FAKE_HERDR_STATE="$state" \
     FM_LAUNCH_EXEC_LOG="$execlog" \
@@ -185,6 +189,7 @@ render_menu_out() {
   printf '' | env \
     PATH="$fb:/usr/bin:/bin" \
     FM_HOME="$home" \
+    FM_BACKEND= \
     FM_LAUNCH_PI_AUTH="$home/pi-auth.json" \
     "$@" \
     bash "$LAUNCH" --print-menu 2>&1
@@ -282,6 +287,37 @@ JSON
     "an unverified adapter must be named as a preset error"
   assert_not_contains "$out" "raw launch" "the menu must not offer a raw-launch escape hatch"
   pass "menu: the two launch_template refusal causes get different wording"
+}
+
+test_pi_signed_shares_the_provider_probe_but_not_the_executable() {
+  local home fb state execlog out
+  { read -r home; read -r fb; read -r state; read -r execlog; } <<EOF
+$(launch_case pi-signed)
+EOF
+  cat > "$home/config/launch-presets.json" <<'JSON'
+{"entries":[{"id":"grok-signed","label":"Grok Signed","harness":"pi-signed","model":"xai/grok-4","effort":"high"}]}
+JSON
+  # Provider half: pi-signed reads the same auth record as pi, so an
+  # unauthenticated provider must show the sign-in fix even though the
+  # pi-signed executable resolves on PATH.
+  out=$(render_menu_out "$home" "$fb")
+  assert_contains "$(menu_row "$out" "Grok Signed")" "via pi - sign in: pi /login" \
+    "a pi-signed entry with an unauthenticated provider must show the sign-in fix"
+
+  write_pi_auth "$home" xai
+  out=$(render_menu_out "$home" "$fb")
+  assert_contains "$(menu_row "$out" "Grok Signed")" "via pi" \
+    "an authenticated pi-signed entry must show its route"
+  assert_not_contains "$(menu_row "$out" "Grok Signed")" "sign in" \
+    "an authenticated pi-signed entry must not show a sign-in fix"
+
+  # PATH half: pi-signed is an explicitly selected executable identity
+  # (bin/fm-spawn.sh), never an alias for pi, so pi on PATH is not enough.
+  rm -f "$fb/pi-signed"
+  out=$(render_menu_out "$home" "$fb")
+  assert_contains "$(menu_row "$out" "Grok Signed")" "not installed - install pi-signed" \
+    "a pi-signed entry must be unavailable when only pi is on PATH"
+  pass "probe: pi-signed shares pi's provider probe but keeps its own executable identity"
 }
 
 # --- menu: the inherited consumer obligation --------------------------------
@@ -542,6 +578,27 @@ EOF
   pass "reattach guard: an agent-less husk is replaced, not treated as a live session"
 }
 
+test_reattach_check_fails_closed_when_herdr_stops_answering() {
+  local home fb state execlog out rc tabs_before
+  { read -r home; read -r fb; read -r state; read -r execlog; } <<EOF
+$(launch_case pane-list-race)
+EOF
+  run_launch "$home" "$fb" "$state" "$execlog" $'1\n' >/dev/null
+  tabs_before=$(jq -r '.tabs | length' "$state")
+  # The narrow race: the herdr server answers the status check, then dies
+  # before the pane list. The guard must refuse with the front door's
+  # actionable line - not die silently under set -eu, and not fail open into
+  # creating the second primary this guard exists to prevent.
+  out=$(run_launch "$home" "$fb" "$state" "$execlog" $'1\n' FM_FAKE_HERDR_FAIL="pane list") && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a failing pane list must refuse the launch, not proceed"
+  assert_contains "$out" "could not confirm whether a session is already running" \
+    "the refusal must name what herdr failed to answer"
+  assert_contains "$out" "Retry, or run with --verbose" "the refusal must carry the one thing that fixes it"
+  [ "$(jq -r '.tabs | length' "$state")" = "$tabs_before" ] \
+    || fail "a failed reattach check must create nothing"
+  pass "reattach guard: a dying pane list refuses loudly instead of silently or fail-open"
+}
+
 # --- refusals that precede the menu -----------------------------------------
 
 test_missing_home_refuses_at_the_door() {
@@ -590,6 +647,56 @@ EOF
   pass "presets: a menu too large for one keypress refuses instead of stranding entries"
 }
 
+test_configured_non_herdr_backend_refuses_before_the_menu() {
+  local home fb state execlog out rc
+  { read -r home; read -r fb; read -r state; read -r execlog; } <<EOF
+$(launch_case backend-mismatch)
+EOF
+  # The launcher only starts Herdr sessions. A home explicitly configured for
+  # another backend would get a primary that fm-send/fm-watch/fm-spawn cannot
+  # see and the reattach guard cannot find, so it must refuse at the door.
+  printf 'tmux\n' > "$home/config/backend"
+  out=$(render_menu_out "$home" "$fb") && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a home whose config/backend selects tmux must refuse"
+  assert_contains "$out" "config/backend selects tmux" "the refusal must name the configured value"
+  assert_contains "$out" "herdr" "the refusal must name the one thing that fixes it"
+  assert_not_contains "$out" "1-5 select" "the refusal must land before the menu is drawn"
+
+  out=$(render_menu_out "$home" "$fb" FM_BACKEND=zellij) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "FM_BACKEND selecting a non-herdr backend must refuse"
+  assert_contains "$out" "FM_BACKEND selects the zellij backend" \
+    "the refusal must name the FM_BACKEND value that caused it"
+
+  printf 'herdr\n' > "$home/config/backend"
+  out=$(render_menu_out "$home" "$fb") && rc=0 || rc=$?
+  [ "$rc" -eq 0 ] || fail "config/backend=herdr must render the menu normally: $out"
+  assert_contains "$out" "1-5 select" "a herdr-configured home keeps its menu"
+  pass "door: an explicitly configured non-herdr backend refuses before the menu"
+}
+
+test_glob_characters_in_preset_fields_never_shift_the_record() {
+  local home fb state execlog out globdir
+  { read -r home; read -r fb; read -r state; read -r execlog; } <<EOF
+$(launch_case glob-label)
+EOF
+  # A field carrying a glob character must survive the record split intact.
+  # Rendered from a cwd holding files the pattern matches, an expanded label
+  # would shift harness/model/effort one place left - a corrupted record that
+  # still passes the required-field validation.
+  cat > "$home/config/launch-presets.json" <<'JSON'
+{"entries":[{"id":"glob","label":"file*","harness":"claude","model":"claude-opus-5","effort":"low"}]}
+JSON
+  globdir="$TMP_ROOT/glob-label/cwd"
+  mkdir -p "$globdir"
+  : > "$globdir/fileA"
+  : > "$globdir/fileB"
+  out=$(cd "$globdir" && render_menu_out "$home" "$fb")
+  assert_contains "$(menu_row "$out" 'file*')" "claude-opus-5 · low" \
+    "a glob character in a label must not shift the entry's harness/model/effort"
+  assert_not_contains "$out" "fileA" "a preset field must never expand against the launcher's cwd"
+  pass "presets: a glob character in a field parses intact from a matching cwd"
+}
+
 test_custom_presets_replace_the_builtin_menu() {
   local home fb state execlog out
   { read -r home; read -r fb; read -r state; read -r execlog; } <<EOF
@@ -614,6 +721,7 @@ test_menu_shows_all_five_entries_always
 test_menu_probes_rather_than_declares_availability
 test_menu_marks_missing_native_binaries_unavailable
 test_menu_reports_the_two_launch_template_refusals_differently
+test_pi_signed_shares_the_provider_probe_but_not_the_executable
 test_menu_states_the_no_permission_prompt_posture
 test_menu_executes_nothing
 test_menu_creates_nothing
@@ -629,7 +737,10 @@ test_launch_records_the_choice_atomically
 test_stale_last_used_never_becomes_an_unlaunchable_default
 test_a_live_primary_blocks_a_second_one
 test_a_dead_primary_does_not_block_a_relaunch
+test_reattach_check_fails_closed_when_herdr_stops_answering
 test_missing_home_refuses_at_the_door
 test_broken_presets_refuse_instead_of_guessing
 test_presets_beyond_one_keypress_refuse
+test_configured_non_herdr_backend_refuses_before_the_menu
+test_glob_characters_in_preset_fields_never_shift_the_record
 test_custom_presets_replace_the_builtin_menu

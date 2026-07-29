@@ -214,9 +214,17 @@ EOF
 # Routing them through command substitution measured 152 ms against a 2 ms bash
 # floor - the forks WERE the entire budget.
 entry_split() {  # <record>
-  local rec=$1 IFS=$FM_LAUNCH_US
+  local rec=$1 IFS=$FM_LAUNCH_US noglob=0
+  # Splitting is not the whole story: each split word would still undergo
+  # pathname expansion, so a field carrying * ? or [ could match files in the
+  # launcher's cwd and shift every later field. Glob is off for the split and
+  # restored to whatever it was - via set -f/+f, never a subshell, per the
+  # no-fork contract above.
+  case $- in *f*) noglob=1 ;; esac
+  set -f
   # shellcheck disable=SC2086  # deliberate word split on the unit separator via IFS
   set -- $rec
+  [ "$noglob" -eq 1 ] || set +f
   E_ID=${1:-}; E_LABEL=${2:-}; E_HARNESS=${3:-}; E_MODEL=${4:-}; E_EFFORT=${5:-}
 }
 
@@ -325,8 +333,15 @@ probe_entry() {
     return 0
   fi
 
+  # Both members of the pi family are Pi-routed: pi-signed shares pi's auth
+  # record, so it gets the same provider probe and route hint. It does NOT
+  # share pi's executable - pi-signed is an explicitly selected identity that
+  # never falls back to pi (bin/fm-spawn.sh), so the PATH probe below still
+  # resolves the entry's own harness name.
   E_PROVIDER=""
-  [ "$E_HARNESS" = pi ] && { route="via pi"; pi_provider_of "$E_MODEL"; }
+  case "$E_HARNESS" in
+    pi|pi-signed) route="via pi"; pi_provider_of "$E_MODEL" ;;
+  esac
 
   if ! harness_on_path "$E_HARNESS"; then
     P_NOTE="not installed - install $E_HARNESS"
@@ -540,7 +555,9 @@ herdr_gate() {
 # empty. Read-only, and skipped entirely when no herdr server is up - if nothing
 # is running, nothing can be reattached to. Reattach is checked BEFORE any create
 # so a second launch can never leave two primaries contending for this home's
-# session lock.
+# session lock. Returns non-zero when herdr stops answering mid-check; the
+# caller must then FAIL CLOSED - proceeding would create a second primary in
+# exactly the race this guard exists to prevent.
 live_primary_pane() {  # <session>
   local session=$1 running wsid tab pane
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
@@ -550,7 +567,7 @@ live_primary_pane() {  # <session>
   tab=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null \
     | jq -r --arg want "$PRIMARY_TAB_LABEL" '.result.tabs[]? | select(.label == $want) | .tab_id' 2>/dev/null | head -1)
   [ -n "$tab" ] || return 0
-  pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab")
+  pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab") || return 1
   [ -n "$pane" ] || return 0
   [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane")" = live ] || return 0
   printf '%s' "$pane"
@@ -590,14 +607,14 @@ launch_entry() {  # <record>
 
   printf '  %s · %s\n' "$E_LABEL" "$E_DETAIL"
 
-  # shellcheck source=bin/fm-backend.sh
-  . "$SCRIPT_DIR/fm-backend.sh"
   fm_backend_source herdr || refuse "The Herdr runtime could not be loaded." "Reinstall firstmate, then relaunch."
 
   herdr_gate
   session=$(fm_backend_herdr_session)
 
-  pane=$(live_primary_pane "$session")
+  pane=$(live_primary_pane "$session") \
+    || refuse "Herdr could not confirm whether a session is already running here." \
+              "Retry, or run with --verbose."
   if [ -n "$pane" ]; then
     if [ "$TTY" -eq 1 ]; then
       printf '\n  A firstmate session is already running here.\n'
@@ -664,6 +681,28 @@ launch_entry() {  # <record>
 
 [ -d "$FM_HOME" ] \
   || refuse_at_door "No firstmate home at $FM_HOME." "Set FM_HOME, or finish setup, then relaunch."
+
+# Sourcing fm-backend.sh here is a local file read - it touches no herdr
+# socket, so the no-network, no-`herdr status` promises above hold. It is
+# needed at the door because the launcher only ever starts a Herdr session:
+# a home explicitly configured for another backend would get a primary that
+# fm-send/fm-watch/fm-spawn cannot see and that the reattach guard cannot
+# find, so the incoherence must refuse before the menu, not after a choice.
+# Only the EXPLICIT setting (FM_BACKEND, then config/backend) is checked;
+# auto-detection reflects the terminal this command runs in, not the home's
+# configuration, and the session this launcher creates runs inside Herdr.
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
+
+BACKEND_CONFIGURED=$(fm_backend_configured_name)
+if [ -n "$BACKEND_CONFIGURED" ] && [ "$BACKEND_CONFIGURED" != herdr ]; then
+  if [ -n "${FM_BACKEND:-}" ]; then
+    refuse_at_door "FM_BACKEND selects the $BACKEND_CONFIGURED backend, and this launcher only starts Herdr sessions." \
+                   "Unset FM_BACKEND (or set it to herdr), then relaunch."
+  fi
+  refuse_at_door "This home's config/backend selects $BACKEND_CONFIGURED, and this launcher only starts Herdr sessions." \
+                 "Set config/backend to herdr (or remove it), then relaunch."
+fi
 
 # shellcheck source=bin/fm-launch-lib.sh
 . "$SCRIPT_DIR/fm-launch-lib.sh"
