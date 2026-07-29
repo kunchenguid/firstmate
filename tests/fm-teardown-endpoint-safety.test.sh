@@ -293,7 +293,7 @@ test_tmux_window_id_target_is_killed_verbatim() {
 # like an id is not one, and must refuse rather than be handed to tmux.
 test_tmux_malformed_window_id_refuses_without_invocation() {
   local dir rc target
-  for target in '@7:x' '@' '@7a'; do
+  for target in '@7:x' '@' '@7a' '@7@8' '@1@'; do
     dir=$(make_case "malformed-id-$(printf '%s' "$target" | tr -c 'A-Za-z0-9' '-')")
     set +e
     FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \

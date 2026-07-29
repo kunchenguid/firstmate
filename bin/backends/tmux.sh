@@ -130,7 +130,7 @@ fm_backend_tmux_kill() {  # <target>
   # it or hit a different window entirely.
   case "$target" in
     @[0-9]*)
-      case "$target" in *[!0-9@]*) return 1 ;; esac
+      case ${target#@} in ''|*[!0-9]*) return 1 ;; esac
       tmux kill-window -t "$target" 2>/dev/null || true
       return 0
       ;;
