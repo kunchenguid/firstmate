@@ -107,7 +107,8 @@ test_static_contract() {
   assert_contains "$assistant_layout" 'block.type !== "thinking"' "Pi Calm assistant layout does not remove thinking from its presentation copy"
   assert_not_contains "$assistant_layout" 'state.hideThinkingBlock' "Pi Calm assistant layout still reveals internal thinking when expanded"
   assert_contains "$tool_layout" 'ToolExecutionComponent.prototype.render' "Pi Calm tool layout does not own complete tool-row presentation"
-  assert_contains "$tool_layout" 'if (patch.hidesToolRows()) return []' "Pi Calm tool layout does not remove complete tool rows"
+  assert_contains "$tool_layout" 'return calmErrorLines(this as unknown as CalmToolRowState, width)' "Pi Calm tool layout does not remove complete tool rows"
+  assert_contains "$tool_layout" 'if (!result?.isError) return ""' "Pi Calm tool layout does not restrict its visible tool text to actionable errors"
   assert_contains "$operational_user_layout" 'import * as PiCodingAgent' "Pi Calm operational-user layout still requires its optional runtime class as a named import"
   assert_contains "$operational_user_layout" 'InteractiveMode.prototype' "Pi Calm operational-user layout does not control the transcript owner"
   assert_contains "$operational_user_layout" 'classifyFirstmateCurrentOperationalText(text)' "Pi Calm operational-user layout bypasses canonical current classification"
@@ -735,6 +736,59 @@ if (!imageVisibleBefore.join("\n").includes("\x1b]1337;File=")) {
   throw new Error("image-capable Pi fixture did not render the built-in read image boundary");
 }
 
+const routineArgs = { command: "printf 'CALM_ROUTINE_ARGS\\n'" };
+const bashDefinition = tools.find((tool) => tool.name === "bash");
+const errorCases = [
+  {
+    key: "aborted-turn",
+    result: { content: [{ type: "text", text: "Operation aborted" }], details: {}, isError: true },
+    visible: ["Operation aborted"],
+  },
+  {
+    key: "provider-error",
+    result: { content: [{ type: "text", text: "Error: provider stream failed" }], details: {}, isError: true },
+    visible: ["Error: provider stream failed"],
+  },
+  {
+    key: "tool-failure",
+    result: {
+      content: [
+        {
+          type: "text",
+          text: "\x1b[31mCommand failed with exit code 1\x1b[0m\nno such file: missing.txt",
+        },
+      ],
+      details: {},
+      isError: true,
+    },
+    visible: ["Command failed with exit code 1", "no such file: missing.txt"],
+  },
+];
+const errorFixtures = errorCases.map((errorCase) => {
+  const baseline = new ToolExecutionComponent("bash", `error-baseline-${errorCase.key}`, routineArgs, { showImages: false }, undefined, renderUi, process.cwd());
+  const actual = new ToolExecutionComponent("bash", `error-actual-${errorCase.key}`, routineArgs, { showImages: false }, bashDefinition, renderUi, process.cwd());
+  for (const row of [baseline, actual]) {
+    row.markExecutionStarted();
+    row.setArgsComplete();
+    row.updateResult(errorCase.result);
+  }
+  if (JSON.stringify(actual.render(100)) !== JSON.stringify(baseline.render(100))) {
+    throw new Error(`${errorCase.key} error rendering changed while calm mode was off`);
+  }
+  return { ...errorCase, baseline, actual };
+});
+const pendingAbortRow = new ToolExecutionComponent("bash", "error-actual-pending", routineArgs, { showImages: false }, bashDefinition, renderUi, process.cwd());
+pendingAbortRow.markExecutionStarted();
+pendingAbortRow.updateResult({ content: [{ type: "text", text: "Operation aborted" }], isError: true });
+const noisyErrorRow = new ToolExecutionComponent("bash", "error-actual-noisy", routineArgs, { showImages: false }, bashDefinition, renderUi, process.cwd());
+noisyErrorRow.markExecutionStarted();
+noisyErrorRow.setArgsComplete();
+noisyErrorRow.updateResult({
+  content: [{ type: "text", text: Array.from({ length: 12 }, (_, index) => `error line ${index + 1}`).join("\n") }],
+  details: {},
+  isError: true,
+});
+
 const assistantBase = {
   role: "assistant",
   api: "calm-render-test",
@@ -985,6 +1039,41 @@ if (customRow.render(100).length !== 0) {
 if (watchActual.render(100).length !== 0) {
   throw new Error("Calm left the fm_watch_arm_pi call/result shell visible");
 }
+for (const fixture of errorFixtures) {
+  const rendered = fixture.actual.render(100);
+  const text = rendered.join("\n");
+  for (const visible of fixture.visible) {
+    if (!text.includes(visible)) {
+      throw new Error(`Calm hid the actionable ${fixture.key} tool error text: ${visible}`);
+    }
+  }
+  if (text.includes("CALM_ROUTINE_ARGS")) {
+    throw new Error(`Calm exposed routine tool call content on the ${fixture.key} error row`);
+  }
+  if (text.includes("\x1b[")) {
+    throw new Error(`Calm left raw terminal escapes in the ${fixture.key} error row`);
+  }
+  if (rendered[0] !== "" || rendered.length < 2) {
+    throw new Error(`Calm rendered the ${fixture.key} error row without its single leading spacer`);
+  }
+}
+const pendingAbortRendered = pendingAbortRow.render(100).join("\n");
+if (!pendingAbortRendered.includes("Operation aborted")) {
+  throw new Error("Calm hid the abort text attached to a still-pending tool call");
+}
+if (pendingAbortRendered.includes("CALM_ROUTINE_ARGS")) {
+  throw new Error("Calm exposed routine tool call content on a pending aborted row");
+}
+const noisyRendered = noisyErrorRow.render(100);
+if (noisyRendered.length !== 8) {
+  throw new Error(`Calm did not bound a noisy tool error to its capped surface: ${noisyRendered.length}`);
+}
+if (!noisyRendered.join("\n").includes("6 earlier error lines hidden")) {
+  throw new Error("Calm dropped noisy tool error lines without saying so");
+}
+if (!noisyRendered.join("\n").includes("error line 12") || noisyRendered.join("\n").includes("error line 6")) {
+  throw new Error("Calm did not keep the trailing lines of a noisy tool error");
+}
 if (assistantThinkingTool.render(100).length !== 0) {
   throw new Error("Calm-hidden thinking beside a tool call retained vertical height");
 }
@@ -1025,6 +1114,11 @@ for (const { name, baseline, actual } of rows) {
 }
 if (JSON.stringify(imageRow.render(100)) !== JSON.stringify(imageVisibleBefore)) {
   throw new Error("built-in read image row did not restore its ordinary call shell and image output");
+}
+for (const fixture of errorFixtures) {
+  if (JSON.stringify(fixture.actual.render(100)) !== JSON.stringify(fixture.baseline.render(100))) {
+    throw new Error(`${fixture.key} error row did not restore stock Pi rendering when Calm was turned off`);
+  }
 }
 if (JSON.stringify(watchActual.render(100)) !== JSON.stringify(watchBaseline.render(100))) {
   throw new Error("fm_watch_arm_pi did not restore its stock call/result shell");

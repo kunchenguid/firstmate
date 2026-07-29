@@ -34,12 +34,12 @@ No input event is intercepted, no message role is rewritten, and no provider con
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including operational-marker near misses. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
 | `assistant-thinking` | Thinking content in `AssistantMessageComponent` | Zero height whether Pi's thinking display is collapsed or expanded. |
-| `assistant-tool-call`, `tool-result`, `tool-image` | `ToolExecutionComponent` | Complete row is zero height for built-in and custom tools. |
+| `assistant-tool-call`, `tool-result`, `tool-image` | `ToolExecutionComponent` | Complete row is zero height for built-in and custom tools while the result is routine. An errored result keeps only its plain error text, capped at six lines with an explicit hidden-line count. |
 | `working-status` | Pi working status indicator | Hidden through `ExtensionUIContext.setWorkingVisible(false)`. |
 | `synthetic-user` | Firstmate session-start, watcher, turn-end, away-supervisor, from-firstmate, and launch-brief input | Exact user-role content and ordering are retained, while the TUI row is zero height. |
 | Legacy Calm operational entries | Registered custom-entry renderer | Retained in session data and rendered at zero height. |
 | Interactive dialogs | Extension and built-in focused UI | Visible. |
-| Explicit errors and warnings | Pi status and assistant error rendering | Visible. |
+| Explicit errors and warnings | Pi status, assistant error rendering, and errored tool rows | Visible. Pi routes abort, provider-failure, and tool-failure text through the tool row whenever the turn has a tool call, so Calm surfaces that text as plain lines instead of hiding it. |
 | User bash, skill invocation, compaction and branch summaries, command notices, and unrelated custom entries | Their stock Pi components | Unchanged because they are neither internal model work nor Firstmate operational follow-up rows. |
 
 Stock HTML export and share rendering are enabled only around the matching terminal submit action and then presentation is redrawn immediately.
