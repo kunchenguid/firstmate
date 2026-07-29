@@ -22,8 +22,8 @@ TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
-# The script itself must always parse under the Bash selected by the caller.
-# On macOS this exercises the Bash 3.2 parser that exposed this regression.
+# The script itself must always parse under the `bash` resolved from PATH.
+# The stock-macOS CI lane puts `/bin` first to exercise the Bash 3.2 parser.
 # Elsewhere the structural guard below carries the cross-version enforcement.
 test_script_parses() {
   local out rc direct_count
@@ -191,7 +191,8 @@ write_registry() {
 EOF
 }
 
-# Scaffold every task kind through the real script and pin its safety contract.
+# Scaffold every ship delivery mode plus scout through the real script and pin
+# the safety contracts relevant to this regression.
 test_task_modes_generate_safety_contracts() {
   local home id brief status
   home="$TMP_ROOT/task-mode-home"
