@@ -36,7 +36,9 @@
 #   context    fmtg_context_set/get/clear/prune, fmtg_inbox_get
 #   outbound   fmtg_send_text, fmtg_outbox_record
 #   task link  fmtg_meta_get, fmtg_meta_link_set, fmtg_meta_link_clear,
-#              fmtg_meta_is_linked, fmtg_landing_gate_applies
+#              fmtg_meta_is_linked, fmtg_landing_gate_applies,
+#              fmtg_meta_released, fmtg_meta_release_set,
+#              fmtg_release_reason_valid
 #   publish    fmtg_publish_arm, fmtg_publish_attempt, fmtg_publish_confirm,
 #              fmtg_publish_show, fmtg_publish_clear
 #
@@ -1034,6 +1036,65 @@ fmtg_meta_link_clear() {  # <meta-file>
   mv -f -- "$tmp" "$meta" || { rm -f -- "$tmp"; return 1; }
 }
 
+# --- explicit local release ---------------------------------------------------
+#
+# `tg_origin` is immutable, which is what makes the landing gate un-forgettable.
+# On its own that also strands work: once the pairing is revoked there is no
+# person left to confirm anything, so a task the bridge ever linked could never
+# land again and the documented "the home returns to exactly its pre-Telegram
+# behavior" opt-out was false for it.
+#
+# The release is the narrow, audited way out. It is deliberately NOT an erasure:
+# it only ever APPENDS to the task record, so the origin and the whole history
+# stay readable, and a task that was released says so forever. It names one task,
+# needs an affirmative flag and a written reason, and `bin/fm-tg-task.sh` refuses
+# it while the ordinary confirmation path is still available - so it can recover
+# a stranded task but can never stand in for a confirmation the paired person
+# could still be asked for.
+
+# One line of plain text: a reason that could carry a newline would forge further
+# `key=value` lines into the task record it is about to be written into.
+fmtg_release_reason_valid() {  # <reason>
+  local reason=$1
+  [ -n "$reason" ] || return 1
+  [ "${#reason}" -le 200 ] || return 1
+  case "$reason" in
+    *[![:space:]]*) ;;
+    *) return 1 ;;
+  esac
+  # The newline is the character this exists to reject, and it is exactly the one
+  # a line-oriented tool cannot see - `grep '[[:cntrl:]]'` never matches it,
+  # because it is the line separator rather than content. So the whole value is
+  # compared against itself with every control character removed.
+  [ "$(printf '%s' "$reason" | LC_ALL=C tr -d '[:cntrl:]')" = "$reason" ]
+}
+
+fmtg_meta_released() {  # <meta-file>
+  local meta=$1
+  [ -f "$meta" ] || return 1
+  grep -qE '^tg_released_at=' "$meta" 2>/dev/null
+}
+
+# Append the release. Refuses to overwrite an existing one, so the reason and the
+# moment a task was released cannot be rewritten by a later, different
+# justification.
+fmtg_meta_release_set() {  # <meta-file> <reason> <now>
+  local meta=$1 reason=$2 now=$3 tmp
+  [ -f "$meta" ] || return 1
+  fmtg_release_reason_valid "$reason" || return 1
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  ! fmtg_meta_released "$meta" || return 1
+  tmp=$(umask 077; mktemp "$(dirname "$meta")/.fm-tg-meta.XXXXXX") || return 1
+  {
+    cat "$meta"
+    [ -s "$meta" ] && [ -n "$(tail -c1 "$meta")" ] && printf '\n'
+    printf 'tg_released_at=%s\n' "$now"
+    printf 'tg_release_reason=%s\n' "$reason"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  fmtg_copy_mode "$meta" "$tmp"
+  mv -f -- "$tmp" "$meta" || { rm -f -- "$tmp"; return 1; }
+}
+
 # --- publish gate -----------------------------------------------------------
 #
 # A request from the paired human authorizes preparing a change and showing a
@@ -1137,7 +1198,8 @@ fmtg_landing_gate_applies() {  # <task-id> <meta-file>
 #
 # fmtg_landing_guard is the single owner of that decision. It prints one
 # machine-readable reason word and returns:
-#   0 authorized, and the authorization is now consumed for THIS landing
+#   0 authorized ("authorized", and the authorization is now consumed for THIS
+#     landing; or "released", an explicit local release for this task)
 #   1 malformed input or a state write that did not become durable
 #   3 nothing armed for this task
 #   4 the confirmation expired before the change landed
@@ -1151,14 +1213,24 @@ fmtg_landing_gate_applies() {  # <task-id> <meta-file>
 # The consume is written BEFORE the caller lands anything, so a crash between
 # the two refuses the next attempt rather than allowing a second landing on one
 # approval.
-fmtg_landing_guard() {  # <task-id> <task-project> <landing-target> <actual-revision> <now>
-  local task=$1 project=$2 target=$3 rev=$4 now=$5
+fmtg_landing_guard() {  # <task-id> <task-project> <landing-target> <actual-revision> <now> [meta-file]
+  local task=$1 project=$2 target=$3 rev=$4 now=$5 meta=${6-}
   local dir record peer pinned consumed landed armed_head armed_project armed_target expires
   local peer_user peer_chat armed_user armed_chat
   fmtg_publish_task_valid "$task" || { printf 'invalid-task'; return 1; }
   [ -n "$target" ] || { printf 'missing-landing-target'; return 1; }
   [ -n "$rev" ] || { printf 'unresolved-revision'; return 1; }
   case "$now" in ''|*[!0-9]*) printf 'bad-clock'; return 1 ;; esac
+
+  # An explicit local release stands in for a confirmation that can no longer be
+  # obtained, and only while there is nothing live to obtain: an armed record for
+  # this task means a preview WAS shown under it, so that supersedes an older
+  # release and the ordinary rules below decide.
+  if [ -n "$meta" ] && ! fmtg_publish_show "$task" >/dev/null 2>&1 \
+    && fmtg_meta_released "$meta"; then
+    printf 'released'
+    return 0
+  fi
 
   peer=$(fmtg_peer_get 2>/dev/null) || { printf 'no-paired-peer'; return 6; }
   pinned=$(printf '%s' "$peer" | jq -r '.project // empty') || { printf 'bad-peer-record'; return 1; }
@@ -1217,7 +1289,9 @@ fmtg_landing_guard() {  # <task-id> <task-project> <landing-target> <actual-revi
 fmtg_landing_refusal_text() {  # <reason> <task> <target>
   local reason=$1 task=$2 target=$3
   case "$reason" in
-    no-paired-peer) printf 'task %s is linked to a Telegram request but no peer is paired' "$task" ;;
+    no-paired-peer)
+      printf 'task %s came from the Telegram bridge but no peer is paired, so nobody can confirm publishing it; if the pairing is gone for good, the captain can release this one task with bin/fm-tg-task.sh release %s --yes --reason "<why>"' \
+        "$task" "$task" ;;
     task-project-mismatch|record-project-mismatch)
       printf 'task %s is outside the project this bridge is paired for' "$task" ;;
     peer-changed|record-has-no-peer)

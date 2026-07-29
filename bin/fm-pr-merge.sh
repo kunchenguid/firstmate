@@ -107,13 +107,17 @@ if fmtg_landing_gate_applies "$ID" "$META"; then
   # the person's approval against, so a linked task refuses rather than merging
   # an unverified revision.
   TG_HEAD=$(fmtg_meta_get "$META" pr_head) || TG_HEAD=
-  TG_REASON=$(fmtg_landing_guard "$ID" "$TG_PROJECT" "$URL" "$TG_HEAD" "$TG_NOW") || {
+  TG_REASON=$(fmtg_landing_guard "$ID" "$TG_PROJECT" "$URL" "$TG_HEAD" "$TG_NOW" "$META") || {
     TG_RC=$?
     printf 'REFUSED: %s\n' "$(fmtg_landing_refusal_text "$TG_REASON" "$ID" "$URL")" >&2
     printf 'This task answers Telegram request %s. Preview the change to the paired person and have them confirm publishing it before merging.\n' \
       "$TG_REQUEST" >&2
     exit "$TG_RC"
   }
+  if [ "$TG_REASON" = released ]; then
+    printf 'NOTE: task %s came from the Telegram bridge and is landing under an explicit local release, not a publish confirmation: %s\n' \
+      "$ID" "$(fmtg_meta_get "$META" tg_release_reason || printf '<no reason recorded>')" >&2
+  fi
 fi
 
 merge_args=()

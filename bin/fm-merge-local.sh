@@ -82,13 +82,17 @@ if fmtg_landing_gate_applies "$ID" "$META"; then
   fmtg_load_config
   TG_NOW=$(fmtg_now) || { echo "error: cannot read the current time" >&2; exit 1; }
   TG_HEAD=$(git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH") || TG_HEAD=
-  TG_REASON=$(fmtg_landing_guard "$ID" "$PROJ" "local:$DEFAULT" "$TG_HEAD" "$TG_NOW") || {
+  TG_REASON=$(fmtg_landing_guard "$ID" "$PROJ" "local:$DEFAULT" "$TG_HEAD" "$TG_NOW" "$META") || {
     TG_RC=$?
     printf 'REFUSED: %s\n' "$(fmtg_landing_refusal_text "$TG_REASON" "$ID" "local:$DEFAULT")" >&2
     printf 'This task answers Telegram request %s. Preview the change to the paired person and have them confirm publishing it before merging.\n' \
       "$TG_REQUEST" >&2
     exit "$TG_RC"
   }
+  if [ "$TG_REASON" = released ]; then
+    printf 'NOTE: task %s came from the Telegram bridge and is landing under an explicit local release, not a publish confirmation: %s\n' \
+      "$ID" "$(fmtg_meta_get "$META" tg_release_reason || printf '<no reason recorded>')" >&2
+  fi
 fi
 
 before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")

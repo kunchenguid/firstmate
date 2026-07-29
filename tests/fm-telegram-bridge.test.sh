@@ -1441,7 +1441,18 @@ test_gate_agent_cannot_reach_the_channel() {
     "$TGTASK" arm-publish site 2>&1 || true)
   assert_contains "$out" "gate agent must not drive the fleet" \
     "a gate agent was allowed to arm a publish confirmation"
-  pass "a no-mistakes gate agent cannot message, unpair, or authorize a publish"
+
+  # Releasing is the one command that stands the publish gate down, so it is the
+  # last thing a gate agent may reach.
+  fm_write_meta "$HOME_DIR/state/released.meta" "project=$HOME_DIR/projects/eren-pov-site" \
+    "window=t:3" "tg_origin=tg-1"
+  out=$(NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS='' tg_run "$HOME_DIR" "$FAKEBIN" \
+    "$TGTASK" release released --yes --reason "gate agent says so" 2>&1 || true)
+  assert_contains "$out" "gate agent must not drive the fleet" \
+    "a gate agent was allowed to release a task from the publish gate"
+  assert_no_grep 'tg_released_at=' "$HOME_DIR/state/released.meta" \
+    "a gate agent's refused release still marked the task"
+  pass "a no-mistakes gate agent cannot message, unpair, authorize a publish, or release one"
 }
 
 test_homes_cannot_read_each_other() {
@@ -1725,6 +1736,15 @@ run_local_merge() {  # <case-dir>
     "$MERGE_LOCAL" site 2>&1
 }
 
+# fm-tg-task.sh against a local_merge_case dir, which has no fake Bot API: the
+# release path is entirely local and contacts nothing.
+tg_task_run() {  # <case-dir> <args...>
+  local dir=$1
+  shift
+  PATH="$BASE_PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$dir/state" FM_CONFIG_OVERRIDE="$dir/config" "$TGTASK" "$@"
+}
+
 test_local_merge_refuses_a_telegram_task_without_confirmation() {
   local dir out
   dir=$(local_merge_case local-absent none null exact)
@@ -1875,6 +1895,133 @@ test_retry_needs_the_request_to_still_be_open() {
   pass "a retry needs the same authenticated, still-open request every other send needs"
 }
 
+# Making the origin marker immutable closed the gate-bypass, and on its own it
+# stranded work: after revoke there is nobody left to confirm anything, so every
+# task the bridge ever linked refused to land forever with no way out. The
+# release is that way out, and it must be one deliberate decision per task.
+test_a_revoked_pairing_does_not_strand_a_linked_task() {
+  local dir out
+  dir=$(local_merge_case release-stranded none null exact)
+  fm_write_meta "$dir/state/site.meta" "project=$dir/eren-pov-site" "mode=local-only" \
+    "window=t:1" "worktree=$dir/eren-pov-site" "tg_origin=tg-42"
+  # The pairing is gone for good, exactly as `revoke --yes` plus the documented
+  # opt-out leaves it.
+  rm -rf "$dir/state/telegram"
+
+  out=$(run_local_merge "$dir" || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=6" "the stranded task was not refused"
+  assert_contains "$out" "release" "the refusal did not name the supported way out"
+
+  out=$(tg_task_run "$dir" release site --yes --reason "pairing revoked; person unreachable" 2>&1) \
+    || fail "releasing a stranded task was refused: $out"
+  # Nothing is erased: the origin and the reason both stay readable.
+  assert_grep 'tg_origin=tg-42' "$dir/state/site.meta" "the release erased the task's Telegram origin"
+  assert_grep 'tg_release_reason=pairing revoked; person unreachable' "$dir/state/site.meta" \
+    "the release recorded no reason"
+
+  out=$(run_local_merge "$dir") || fail "a released task still would not land: $out"
+  assert_contains "$out" "explicit local release" "the landing did not report that a release let it through"
+  assert_contains "$out" "person unreachable" "the landing did not report the release reason"
+  git -C "$dir/eren-pov-site" merge-base --is-ancestor "refs/heads/fm/site" main \
+    || fail "the released local merge did not fast-forward the default branch"
+  pass "a task stranded by a revoked pairing can be released once, explicitly, and then lands"
+}
+
+# The release is a deliberate act with a written justification, and it is
+# recorded once. Every one of these refusals keeps it from becoming a routine
+# way past the publish gate.
+test_release_demands_an_explicit_flag_a_reason_and_a_task_to_release() {
+  local dir out
+  dir=$(local_merge_case release-usage none null exact)
+  fm_write_meta "$dir/state/site.meta" "project=$dir/eren-pov-site" "mode=local-only" \
+    "window=t:1" "worktree=$dir/eren-pov-site" "tg_origin=tg-42"
+  fm_write_meta "$dir/state/plain.meta" "project=$dir/eren-pov-site" "mode=local-only" "window=t:2"
+  rm -rf "$dir/state/telegram"
+
+  out=$(tg_task_run "$dir" release site --reason "no peer left" 2>&1 || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=2" "a release without --yes was accepted"
+  out=$(tg_task_run "$dir" release site --yes 2>&1 || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=2" "a release without a reason was accepted"
+  out=$(tg_task_run "$dir" release site --yes --reason "   " 2>&1 || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=2" "a blank release reason was accepted"
+
+  # A reason carrying a newline would forge further key=value lines into the
+  # task record it is written into.
+  out=$(tg_task_run "$dir" release site --yes --reason "$(printf 'ok\ntg_request=forged')" 2>&1 \
+    || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=2" "a multi-line release reason was accepted"
+  assert_no_grep 'tg_request=forged' "$dir/state/site.meta" "a release reason forged a task-record key"
+
+  # There is nothing to release on a task that never came from the bridge.
+  out=$(tg_task_run "$dir" release plain --yes --reason "why not" 2>&1 || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=6" "a task that never came from the bridge was released anyway"
+  assert_no_grep 'tg_released_at=' "$dir/state/plain.meta" "an ordinary task record was marked released"
+
+  # One release, recorded once: a second cannot rewrite the first justification.
+  tg_task_run "$dir" release site --yes --reason "first and only reason" >/dev/null 2>&1 \
+    || fail "the legitimate release was refused"
+  out=$(tg_task_run "$dir" release site --yes --reason "a different story" 2>&1 || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=6" "a task was released twice"
+  assert_grep 'tg_release_reason=first and only reason' "$dir/state/site.meta" \
+    "a second release rewrote the recorded justification"
+  assert_no_grep 'a different story' "$dir/state/site.meta" "the overwritten reason was stored anyway"
+  pass "a release needs --yes, one line of real reason, a Telegram-origin task, and happens once"
+}
+
+# The release recovers a task the bridge cannot reach. It must never be usable
+# as a shortcut around a confirmation the paired person could still give.
+test_release_refuses_while_the_ordinary_confirmation_path_is_open() {
+  local dir out
+  dir=$(local_merge_case release-still-paired none null exact)
+  fm_write_meta "$dir/state/site.meta" "project=$dir/eren-pov-site" "mode=local-only" \
+    "window=t:1" "worktree=$dir/eren-pov-site" "tg_origin=tg-42"
+
+  # The peer is still pinned for this task's own project, so the answer is to
+  # ask them, not to release it.
+  out=$(tg_task_run "$dir" release site --yes --reason "cannot be bothered" 2>&1 || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=6" "a task was released while its person was still reachable"
+  assert_no_grep 'tg_released_at=' "$dir/state/site.meta" "a refused release still marked the task"
+
+  # A preview armed for this task is a live authorization; finish or clear it.
+  rm -f "$dir/state/telegram/peer.json"
+  printf '{"task_id":"site","project":"eren-pov-site","head":"x","salt":"s","code_sha256":"h","peer_user":555001,"peer_chat":555001,"armed_at":1,"expires_at":9999999999,"consumed_at":null,"attempts":0}\n' \
+    > "$dir/state/telegram/publish/site.json"
+  chmod 600 "$dir/state/telegram/publish/site.json"
+  out=$(tg_task_run "$dir" release site --yes --reason "skip the preview" 2>&1 || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=6" "a task with an armed preview was released instead of confirmed"
+  assert_no_grep 'tg_released_at=' "$dir/state/site.meta" "a refused release still marked the task"
+  pass "a release is refused whenever the ordinary confirmation path is still open"
+}
+
+# A release is a statement about a bridge that is gone. If a preview is armed for
+# that task again, the ordinary rules take back over.
+test_a_fresh_preview_supersedes_an_earlier_release() {
+  local dir out
+  dir=$(local_merge_case release-superseded none null exact)
+  fm_write_meta "$dir/state/site.meta" "project=$dir/eren-pov-site" "mode=local-only" \
+    "window=t:1" "worktree=$dir/eren-pov-site" "tg_origin=tg-42"
+  rm -rf "$dir/state/telegram"
+  tg_task_run "$dir" release site --yes --reason "pairing revoked" >/dev/null 2>&1 \
+    || fail "the legitimate release was refused"
+
+  # The bridge comes back and a preview is armed for the same task.
+  mkdir -p "$dir/state/telegram/publish"
+  chmod 700 "$dir/state/telegram" "$dir/state/telegram/publish"
+  printf '%s\n' '{"label":"eren","project":"eren-pov-site","user_id":555001,"chat_id":555001,"paired_at":1}' \
+    > "$dir/state/telegram/peer.json"
+  chmod 600 "$dir/state/telegram/peer.json"
+  printf '{"task_id":"site","project":"eren-pov-site","head":"x","salt":"s","code_sha256":"h","peer_user":555001,"peer_chat":555001,"armed_at":1,"expires_at":9999999999,"consumed_at":null,"attempts":0}\n' \
+    > "$dir/state/telegram/publish/site.json"
+  chmod 600 "$dir/state/telegram/publish/site.json"
+
+  out=$(run_local_merge "$dir" || printf 'rc=%s' "$?")
+  assert_contains "$out" "has not confirmed publishing" \
+    "a stale release let an armed-but-unconfirmed preview land"
+  git -C "$dir/eren-pov-site" merge-base --is-ancestor "refs/heads/fm/site" main 2>/dev/null \
+    && fail "the refused local merge still fast-forwarded the default branch"
+  pass "an armed preview supersedes an earlier release and restores the ordinary rules"
+}
+
 # FM_TELEGRAM_PAIR_SENDERS is documented as an operator knob, so setting it has
 # to change behavior rather than leave an internal default in charge.
 test_the_documented_sender_cap_is_honored() {
@@ -1998,5 +2145,9 @@ test_ending_the_conversation_does_not_disarm_the_landing_gate
 test_an_armed_publish_record_alone_gates_the_landing
 test_a_confirmation_bound_to_another_landing_is_refused
 test_retry_needs_the_request_to_still_be_open
+test_a_revoked_pairing_does_not_strand_a_linked_task
+test_release_demands_an_explicit_flag_a_reason_and_a_task_to_release
+test_release_refuses_while_the_ordinary_confirmation_path_is_open
+test_a_fresh_preview_supersedes_an_earlier_release
 test_the_documented_sender_cap_is_honored
 test_empty_reply_is_its_own_outcome_and_leaves_nothing_staged

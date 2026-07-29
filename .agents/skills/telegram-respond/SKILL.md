@@ -116,6 +116,8 @@ You do not have to remember this at the moment of landing, and you cannot bypass
 `bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` refuse to land any task of Telegram origin without a live confirmation bound to the exact revision they are about to land, and they consume it, so one approval lands exactly one change.
 That origin is recorded once when the task is linked and is not cleared by `--final` or `unlink`, so ending the conversation cannot end the gate either.
 If a landing helper refuses, the answer is to preview and get a fresh confirmation - never to work around the gate.
+`bin/fm-tg-task.sh release` exists only for a task the bridge can no longer reach at all, because the pairing is gone for good.
+That is a captain decision, so if a landing refuses because no peer is paired, report it and let the captain decide - never run `release` yourself.
 Never infer a confirmation from "yes", "ok", or a thumbs-up.
 Arming and confirming in one turn is not possible: a message that arrived before the preview was armed is refused, so there must be a real reply in between.
 

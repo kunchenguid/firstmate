@@ -419,7 +419,9 @@ The token is validated against BotFather's `<id>:<secret>` shape before use; a m
 **Moving to a different bot** is a new bot, so run `bin/fm-tg-pair.sh begin --replace` and pair again.
 
 **Complete opt-out**: run `bin/fm-tg-pair.sh revoke --yes`, remove `FM_TELEGRAM_BOT_TOKEN` from `.env`, and rerun session start.
-Bootstrap then removes the poll shim and the cadence file and the home returns to exactly its pre-Telegram behavior; delete `state/telegram/` to erase the remaining local records.
+Bootstrap then removes the poll shim and the cadence file and the home stops polling, sending, and pairing; delete `state/telegram/` to erase the remaining local records.
+One thing deliberately survives: a task the bridge already linked keeps its immutable `tg_origin=` marker and stays under the publish gate, which after opt-out has nobody left to confirm it.
+Release each such task individually with `bin/fm-tg-task.sh release <task-id> --yes --reason "<why>"` (see "Releasing a task the bridge can no longer reach"); finished and torn-down tasks need nothing.
 
 ### Generated state and cadence
 
@@ -500,6 +502,21 @@ Absent, unconsumed, expired, moved, wrong-project, wrong-person, wrong-target, a
 Whether the gate applies is decided by durable evidence, never by the open conversation: the task's immutable `tg_origin=` marker, written once when it is first linked and removed by no clearing path, or an armed publish record for that task id.
 `--final` and `unlink` clear only the open exchange, so a terminal reply sent before the merge cannot switch the gate off for work the paired person was already shown.
 A task that never came from the bridge is unaffected and merges exactly as it did before the bridge existed.
+
+### Releasing a task the bridge can no longer reach
+
+Because the origin marker is immutable, revoking a pairing would otherwise strand every task the bridge ever linked: there is nobody left to confirm anything, so the gate refuses forever.
+
+```sh
+bin/fm-tg-task.sh release <task-id> --yes --reason "<why the confirmation cannot be obtained>"
+```
+
+This is a **captain** action and covers exactly one named task; there is deliberately no bulk form, and revoking a pairing never releases anything on its own.
+It needs both the affirmative `--yes` and a written reason, which must be one line of plain text (1-200 characters, no control characters, so it cannot forge further keys into the task record).
+It refuses when the ordinary path is still open - a peer pinned for that task's project, or a publish confirmation already armed for it - so it recovers a stranded task and never substitutes for a confirmation the paired person could still be asked for.
+
+Nothing is erased. The release only appends `tg_released_at=` and `tg_release_reason=` to the task's own record, so `tg_origin=` and the reason stay readable forever, a second release on the same task is refused rather than allowed to rewrite the first, and both landing helpers print the reason to stderr when a release is what let the merge through.
+A publish record armed for that task later supersedes the release, so re-pairing and previewing again puts the task back under the ordinary rules.
 
 ### Replies
 

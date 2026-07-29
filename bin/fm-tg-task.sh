@@ -9,6 +9,7 @@
 #   fm-tg-task.sh arm-publish <task-id>
 #   fm-tg-task.sh confirm-publish <task-id> --request <request-id>
 #   fm-tg-task.sh clear-publish <task-id>
+#   fm-tg-task.sh release <task-id> --yes --reason <text>
 #   fm-tg-task.sh --help
 #
 # PROJECT ROUTING IS CHECKED, NOT ASSUMED
@@ -20,6 +21,32 @@
 #   Widening that is a captain decision made by re-pairing, not something a
 #   message can ask for. `show` changes nothing and is a read-only diagnostic
 #   over this home's own task records, so it is deliberately not scoped.
+#   `release` is the one subcommand a project mismatch does NOT refuse, because
+#   a task the bridge can no longer reach is exactly what it exists to recover.
+#
+# THE EXPLICIT LOCAL RELEASE
+#   A task's Telegram origin is immutable, so the landing gate cannot be
+#   forgotten. That alone would strand work: once the pairing is revoked there is
+#   nobody left to confirm anything, and a task the bridge ever linked could
+#   never land again. `release` is the narrow way out, and it is a CAPTAIN
+#   action, not something an agent reaches for when a landing refuses.
+#
+#   It names ONE task - there is deliberately no bulk form - and needs both an
+#   affirmative `--yes` and a written `--reason`, which is recorded in the task's
+#   own record. Nothing is erased: the release only APPENDS, so the origin and
+#   the reason stay readable forever, and a second release on the same task is
+#   refused rather than allowed to rewrite the first one's justification.
+#
+#   It refuses whenever the ordinary path is still available - a pinned peer for
+#   this task's project, or a publish confirmation already armed for it - so it
+#   can recover a stranded task but can never substitute for a confirmation the
+#   paired person could still be asked for. Revoking a pairing never releases
+#   anything on its own; each task is a separate, deliberate decision.
+#
+# release exit codes:
+#   0 released        2 bad usage (missing --yes, missing or malformed --reason)
+#   6 nothing to release, already released, or the ordinary confirmation path is
+#     still available for this task
 #
 # THE TWO-STEP PUBLISH CONFIRMATION
 #   A request authorizes preparing a change and showing a preview. It does not
@@ -86,7 +113,7 @@ COMMAND=${1:-}
 [ "$#" -gt 0 ] && shift
 case "$COMMAND" in
   -h|--help|help|'') usage; exit 0 ;;
-  link|unlink|show|arm-publish|confirm-publish|clear-publish) ;;
+  link|unlink|show|arm-publish|confirm-publish|clear-publish|release) ;;
   *) die "unknown command: $COMMAND (see --help)" ;;
 esac
 
@@ -96,6 +123,8 @@ shift 2>/dev/null || true
 
 REQUEST=
 HEAD_REV=
+REASON=
+RELEASE_YES=0
 case "$COMMAND" in
   link)
     REQUEST=${1:-}
@@ -115,6 +144,17 @@ while [ "$#" -gt 0 ]; do
       [ "$COMMAND" = confirm-publish ] || die "--request is only meaningful for confirm-publish"
       [ "$#" -gt 1 ] || die "--request requires a request id"
       REQUEST=$2
+      shift 2
+      ;;
+    --yes)
+      [ "$COMMAND" = release ] || die "--yes is only meaningful for release"
+      RELEASE_YES=1
+      shift
+      ;;
+    --reason)
+      [ "$COMMAND" = release ] || die "--reason is only meaningful for release"
+      [ "$#" -gt 1 ] || die "--reason requires text"
+      REASON=$2
       shift 2
       ;;
     *) die "unknown argument: $1" ;;
@@ -217,6 +257,8 @@ case "$COMMAND" in
     printf 'linked request: %s\n' "$(fmtg_meta_get "$META" tg_request || printf '<none>')"
     printf 'linked chat: %s\n' "$(fmtg_meta_get "$META" tg_chat || printf '<none>')"
     printf 'telegram origin: %s\n' "$(fmtg_meta_get "$META" tg_origin || printf '<none>')"
+    printf 'released at: %s\n' "$(fmtg_meta_get "$META" tg_released_at || printf '<never>')"
+    printf 'release reason: %s\n' "$(fmtg_meta_get "$META" tg_release_reason || printf '<none>')"
     if RECORD=$(fmtg_publish_show "$TASK" 2>/dev/null); then
       printf 'publish armed for: %s\n' "$(printf '%s' "$RECORD" | jq -r '.head // "?"')"
       printf 'publish expires at: %s\n' "$(printf '%s' "$RECORD" | jq -r '.expires_at // "?"')"
@@ -348,5 +390,39 @@ EOF
   clear-publish)
     require_project_match
     fmtg_publish_clear "$TASK" || die "cannot clear the armed confirmation"
+    ;;
+
+  release)
+    [ "$RELEASE_YES" -eq 1 ] \
+      || die "release needs --yes: it lets one task of Telegram origin land without the paired person's confirmation"
+    [ -n "$REASON" ] || die "release requires --reason <text> saying why the confirmation can no longer be obtained"
+    fmtg_release_reason_valid "$REASON" \
+      || die "the release reason must be one line of plain text, 1-200 characters, with no control characters"
+    [ -f "$META" ] || die "no task record at $META"
+    fmtg_meta_is_linked "$META" || {
+      printf 'fm-tg-task: task %s did not come from the Telegram bridge, so there is nothing to release\n' "$TASK" >&2
+      exit 6
+    }
+    if fmtg_meta_released "$META"; then
+      printf 'fm-tg-task: task %s was already released (%s); a release is recorded once and never rewritten\n' \
+        "$TASK" "$(fmtg_meta_get "$META" tg_release_reason || printf '<no reason recorded>')" >&2
+      exit 6
+    fi
+    if fmtg_publish_show "$TASK" >/dev/null 2>&1; then
+      printf 'fm-tg-task: a publish confirmation is armed for %s, so the ordinary path is still open; finish it, or clear-publish it first\n' \
+        "$TASK" >&2
+      exit 6
+    fi
+    if PINNED=$(pinned_project) && [ -n "$PINNED" ]; then
+      RELEASE_PROJECT=$(fmtg_meta_get "$META" project) || RELEASE_PROJECT=
+      RELEASE_PROJECT=$(basename "${RELEASE_PROJECT:-}")
+      if [ "$RELEASE_PROJECT" = "$PINNED" ]; then
+        printf 'fm-tg-task: the bridge is still paired for "%s", so ask that person to confirm publishing %s instead of releasing it\n' \
+          "$PINNED" "$TASK" >&2
+        exit 6
+      fi
+    fi
+    fmtg_meta_release_set "$META" "$REASON" "$NOW" || die "cannot record the release"
+    printf 'released %s\n' "$TASK"
     ;;
 esac

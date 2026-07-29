@@ -97,7 +97,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-tg-pair.sh`          | Open, inspect, or revoke the bridge's single one-time pairing                        |
 | `fm-tg-poll.sh`          | One bounded Telegram long-poll: claim new messages exactly once and emit their wake  |
 | `fm-tg-reply.sh`         | Send, split, retry, or dry-run preview a reply to the one paired chat                |
-| `fm-tg-task.sh`          | Link a task to its Telegram request and run the two-step publish confirmation        |
+| `fm-tg-task.sh`          | Link a task to its Telegram request, run the two-step publish confirmation, and release a stranded task |
 | `fm-private-artifact-lib.sh` | Shared owner-only file guarantees for generated local state                     |
 | `fm-message-split-lib.sh` | Shared outbound-message splitting for firstmate's chat channels                     |
 | `fm-env-file-lib.sh`     | Shared reader for the home's gitignored .env                                         |
