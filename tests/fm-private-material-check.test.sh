@@ -20,6 +20,21 @@ CHECK="$ROOT/bin/fm-private-material-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-private-material-check)
 fm_git_identity
 
+# The script derives a marker from `id -un`. On a host whose account name is a
+# STOPWORDS entry or shorter than MIN_LEN, that raises a coverage gap and
+# downgrades every case here that asserts a clean run - so the suite's result
+# would depend on who is running it. Shim `id` to a synthetic name instead:
+# deterministic everywhere, and it hardcodes no real account name.
+FAKEBIN=$(fm_fakebin "$TMP_ROOT")
+REAL_ID=$(command -v id)
+TEST_ACCOUNT=fmtestacct
+cat > "$FAKEBIN/id" <<SH
+#!/usr/bin/env bash
+[ "\$*" = "-un" ] && { printf '%s\n' '$TEST_ACCOUNT'; exit 0; }
+exec '$REAL_ID' "\$@"
+SH
+chmod +x "$FAKEBIN/id"
+
 # new_case <name>: a tracked repo plus an empty private home, and echo the base.
 new_case() {
   local dir="$TMP_ROOT/$1"
@@ -46,7 +61,7 @@ track() {
 
 run_check() {
   local base=$1; shift
-  "$CHECK" --root "$base/repo" --home "$base/home" "$@" 2>&1
+  PATH="$FAKEBIN:$PATH" "$CHECK" --root "$base/repo" --home "$base/home" "$@" 2>&1
 }
 
 # --- a marker present in a tracked file fails and names the location ---------
@@ -250,26 +265,12 @@ pass "both the delivery-mode and legacy registry line forms yield markers"
 # --- the local account name is a marker, so machine-local paths are caught ---
 # Derived at runtime here too, so this test hardcodes no real account name.
 
-acct=$(id -un 2>/dev/null || printf '')
-acct_lower=$(printf '%s' "$acct" | tr '[:upper:]' '[:lower:]')
-# Derived from the script rather than copied: a second copy would drift the
-# moment a stopword changes, and the drift would be silent in both directions.
-stopwords=$(sed -n '/^STOPWORDS="/,/"$/p' "$CHECK" | sed 's/^STOPWORDS="//; s/"$//' | tr '\n' ' ')
-[ -n "$(printf '%s' "$stopwords" | tr -d '[:space:]')" ] \
-  || fail "could not derive the stopword list from $CHECK"
-generic=" $stopwords "
-case "$generic" in
-  *" $acct_lower "*) acct='' ;;
-esac
-if [ -n "$acct" ] && [ "${#acct}" -ge 3 ]; then
-  base=$(new_case account-name)
-  track "$base" docs/guide.md "Run it from /home/$acct/firstmate to reproduce."
-  out=$(run_check "$base") && code=0 || code=$?
-  expect_code 1 "$code" "a machine-local home path must be caught via the account name"
-  pass "the local account name is a marker, so a machine-local path in a tracked file fails"
-else
-  pass "account-name marker case skipped: this account name is filtered as generic or too short"
-fi
+base=$(new_case account-name)
+track "$base" docs/guide.md "Run it from /home/$TEST_ACCOUNT/firstmate to reproduce."
+out=$(run_check "$base") && code=0 || code=$?
+expect_code 1 "$code" "a machine-local home path must be caught via the account name"
+assert_contains "$out" "$TEST_ACCOUNT" "failure must name the account-derived marker"
+pass "the local account name is a marker, so a machine-local path in a tracked file fails"
 
 # --- a vacuous run must announce itself rather than read as a clean pass -----
 # On a runner with no private dirs there is nothing to derive. That MUST NOT

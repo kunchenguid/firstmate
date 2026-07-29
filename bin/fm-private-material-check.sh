@@ -32,11 +32,12 @@
 #   the local account name               catches machine-local home paths; used
 #                                        only when data/ or projects/ is present,
 #                                        so it never fakes a marker source
-#   config/private-material-markers      one token per line, for anything not
+#   config/private-material-markers      one entry per line, compared whole, so
+#                                        a multi-word name is one entry; for anything not
 #                                        derivable (device serials, people)
 #
 # Suppression, also local and gitignored:
-#   config/private-material-allow        one token per line; use it for an
+#   config/private-material-allow        one entry per line, compared whole; for an
 #                                        identity that is legitimately public,
 #                                        such as the upstream this repo forks.
 #
@@ -77,6 +78,13 @@
 #   - Anything at all when no marker source is present. On a machine or CI runner
 #     with no private dirs the run is VACUOUS: it reports SKIPPED.
 #     A SKIPPED run is not evidence the surface is clean.
+#   - Commits BETWEEN the merge-base and HEAD, in the default mode. It scans the
+#     working tree and HEAD, so a marker added in one commit and removed in a
+#     later commit on the same unpushed branch is in neither and passes, even
+#     though pushing that branch publishes it. --history covers that range, so
+#     run it before ANY push, not only before contributing to a third party.
+#     Defining the scanned surface once as the push range would remove this
+#     hole; until then the limit is stated here rather than left to be found.
 # Human review of the diff remains the real control; this only makes the
 # mechanical, repeatable part of it impossible to forget.
 #
@@ -461,9 +469,14 @@ while IFS= read -r m; do
   if [ "$HAVE_HEAD" -eq 1 ]; then
     headhits=$(git -C "$ROOT" grep -n -I -i -E -e "$pat" HEAD 2>"$ERRLOG") && rc=0 || rc=$?
     [ "$rc" -le 1 ] || scan_failed "$rc" "scanning the committed tree for marker \"$m\""
-    printf '%s\n' "$hits" > "$TIPHITS"
+    printf '%s\n' "$hits" > "$TIPHITS" 2>"$ERRLOG" \
+      || scan_failed 2 "recording working-tree hits for marker \"$m\""
+    # grep exit 2 is an ERROR and exit 1 is "nothing left after dedup". Reading
+    # them the same way would silently drop every committed-only hit, which is
+    # the one thing this HEAD scan exists to surface.
     headhits=$(printf '%s\n' "$headhits" | sed 's/^HEAD://' \
-      | grep -Fxv -f "$TIPHITS" || true)
+      | grep -Fxv -f "$TIPHITS") && rc=0 || rc=$?
+    [ "$rc" -le 1 ] || scan_failed "$rc" "de-duplicating committed hits for marker \"$m\""
     if [ -n "$headhits" ]; then
       status=1
       printf '\nPRIVATE MATERIAL AT HEAD: marker "%s" is committed, beyond what the working tree shows:\n' "$m"

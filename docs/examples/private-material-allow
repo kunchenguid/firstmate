@@ -1,6 +1,8 @@
 # config/private-material-allow - identities that are legitimately public for
 # this home. Copy this into a local, gitignored config/private-material-allow
-# and edit. One token per line; blank lines and "#" comments are ignored.
+# and edit. One entry per line, compared as a whole line, so a multi-word
+# identity such as a person's name is one entry; blank lines and "#" comments
+# are ignored.
 #
 # bin/fm-private-material-check.sh derives its markers at runtime from this
 # home's private dirs (project clone names, registered project and secondmate

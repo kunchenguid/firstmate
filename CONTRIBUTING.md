@@ -44,6 +44,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Only exit status 0 (`OK`) is a clean result: 1 means a marker is present, 3 means the run proved nothing (`SKIPPED` if it had nothing to derive, `INCOMPLETE` if something went unscanned), and 2 means it could not run at all.
   Those are distinct codes on purpose, so neither a person nor a later gate has to read the prose to learn whether the run proved anything.
   It matches names only, so it cannot see private strategy written as ordinary prose; its header owns the full limits, and [`docs/examples/private-material-allow`](docs/examples/private-material-allow) documents the local allowlist for an identity that is legitimately public.
+  Its default mode scans the working tree and HEAD but not the commits between the merge-base and HEAD, so run it with `--history` before any push rather than only before contributing upstream.
   The root `.tasks.toml` is tracked `tasks-axi` config for `data/backlog.md`; compatible `tasks-axi` is the default backend for routine backlog mutations, with the compatibility definition owned by [`docs/configuration.md`](docs/configuration.md) ("Backlog backend").
   A local `config/backlog-backend=manual` opt-out forces firstmate's routine backlog updates to hand-editing and stays gitignored; validated secondmate handoffs still delegate through `tasks-axi mv`.
   A local `config/backend` file explicitly overrides runtime auto-detection for new task endpoints and stays gitignored; spawn-supported values are `tmux` plus experimental `herdr`, `zellij`, `orca`, and `cmux`, while `codex-app` is documented only in `docs/codex-app-backend.md`.
@@ -80,7 +81,7 @@ Check and test the toolbelt before pushing:
 ```sh
 while IFS= read -r script; do /bin/bash -n "$script" || exit; done < <(bin/fm-lint.sh --list-files)   # syntax-check the canonical shell surface
 bin/fm-lint.sh   # lint the toolbelt and behavior tests; the single owner CI and the no-mistakes gate both run
-bin/fm-private-material-check.sh   # refuse private fleet material in tracked files (add --history before publishing)
+bin/fm-private-material-check.sh --history   # refuse private fleet material; --history before ANY push (the default mode does not cover merge-base..HEAD)
 bin/fm-test-run.sh tests/<subject>.test.sh   # one script (primary local focus path, timed)
 bin/fm-test-run.sh --family pure-contract-unit   # ordinary family-scoped local path (serial, timed)
 bin/fm-test-run.sh --changed   # conservative changed-file-informed set (never silent full suite)
