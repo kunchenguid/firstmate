@@ -2,13 +2,15 @@
 # Behavior tests for fm-fleet-sync.sh drift handling.
 #
 # fm-fleet-sync fast-forwards a clone that is cleanly on its default branch. This
-# suite pins the two behavioral additions on top of that:
-#   - the one safe drift self-heals: a clean, detached HEAD that holds no unique
-#     commits (it is an ancestor of origin/<default>) and whose <default> is free
-#     to check out is re-attached and then fast-forwarded ("recovered:").
-#   - every other off-default state is left untouched and reported as a loud,
-#     quantified "STUCK: ... N commits behind ... - needs attention" warning
-#     instead of a quiet skip.
+# suite pins its narrowly guarded recoveries on top of that:
+#   - a clean, detached HEAD that holds no unique commits (it is an ancestor of
+#     origin/<default>) and whose <default> is free to check out is re-attached and
+#     then fast-forwarded ("recovered:");
+#   - a clean, checked-out default with genuine local/remote divergence but the
+#     exact same root tree preserves its old head at a deterministic direct ref
+#     before an expected-old atomic update to the freshly fetched remote commit.
+# Every other off-default or diverged state is left untouched and reported as a
+# loud, quantified "STUCK: ... N commits behind ... - needs attention" warning.
 # The pre-existing fast-forward / already-current / local-only / no-origin paths
 # must be unchanged, and bootstrap must relay the new outcomes as FLEET_SYNC lines.
 #
@@ -81,7 +83,35 @@ advance_origin() {
   git -C "$work" push -q origin main
 }
 
+# build_tree_identical_squash_pair <home> <name>: create the motivating graph:
+# common C0; local main gains a two-commit chain; origin/main gains one squash
+# commit from C0 whose exact root tree equals the local chain's final tree.
+build_tree_identical_squash_pair() {
+  local home=$1 name=$2 clone work
+  clone=$(build_pair "$home" "$name")
+  work="$home/work-$name"
+
+  commit_file "$clone" file.txt final-local L1
+  commit_file "$clone" final.txt same-tree L2
+
+  printf '%s\n' final-local > "$work/file.txt"
+  printf '%s\n' same-tree > "$work/final.txt"
+  git -C "$work" add file.txt final.txt
+  git -C "$work" commit -qm "squash L1 and L2"
+  git -C "$work" push -q origin main
+  printf '%s\n' "$clone"
+}
+
 head_sha() { git -C "$1" rev-parse HEAD; }
+root_tree() { git -C "$1" rev-parse "$2^{tree}"; }
+preservation_ref_for() {
+  local clone=$1 branch=${2:-main} old=${3:-}
+  [ -n "$old" ] || old=$(git -C "$clone" rev-parse "refs/heads/$branch")
+  printf 'refs/fm-fleet-sync/squash-preserved/%s/%s\n' "$branch" "$old"
+}
+preservation_refs() {
+  git -C "$1" for-each-ref --format='%(refname)' refs/fm-fleet-sync/squash-preserved
+}
 
 # run_sync <home> [args...]: run fleet-sync against an isolated home, stdout only.
 run_sync() {
@@ -175,6 +205,27 @@ if [ "$is_fetch" = 1 ]; then
     rm -f "$lock"
     exit 1
   fi
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
+# Refuse the multi-ref expected-old transaction while recording its exact input.
+# All other git commands, including preservation-ref creation, delegate unchanged.
+git_ref_transaction_refusal() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+is_update=0; is_stdin=0
+for a in "$@"; do
+  [ "$a" = update-ref ] && is_update=1
+  [ "$a" = --stdin ] && is_stdin=1
+done
+if [ "$is_update" = 1 ] && [ "$is_stdin" = 1 ]; then
+  cat > "${GIT_REF_TRANSACTION_LOG:?}"
+  echo "simulated expected-old ref transaction refusal" >&2
+  exit 1
 fi
 exec "$real" "$@"
 SH
@@ -307,7 +358,148 @@ test_diverged_is_stuck_untouched() {
   assert_contains "$out" "diverged main" "STUCK names the diverged state"
   assert_contains "$out" "commits behind origin/main - needs attention" "STUCK is quantified"
   [ "$(head_sha "$clone")" = "$before" ] || fail "diverged clone was moved"
+  [ -z "$(preservation_refs "$clone")" ] || fail "unequal divergence created a preservation ref"
   pass "diverged default branch is reported STUCK and left untouched"
+}
+
+test_tree_identical_squash_divergence_reconciles_and_converges() {
+  local home clone out again old remote tree anchor
+  home=$(new_home)
+  clone=$(build_tree_identical_squash_pair "$home" squash-equivalent)
+  old=$(git -C "$clone" rev-parse main)
+  tree=$(root_tree "$clone" "$old")
+  anchor=$(preservation_ref_for "$clone" main "$old")
+
+  out=$(run_sync "$home" "$clone")
+  remote=$(git -C "$clone" rev-parse origin/main)
+
+  assert_contains "$out" "squash-equivalent: recovered: reconciled tree-identical squash" \
+    "tree-identical squash reports recovery"
+  assert_contains "$out" "preserved $anchor" "recovery outcome names the preservation ref"
+  [ "$(git -C "$clone" rev-parse "$anchor")" = "$old" ] \
+    || fail "preservation ref does not resolve exactly to the old local head"
+  [ "$(git -C "$clone" rev-parse main)" = "$remote" ] \
+    || fail "default branch does not equal the freshly fetched remote head"
+  [ "$(head_sha "$clone")" = "$remote" ] || fail "HEAD does not equal the remote head"
+  [ "$(root_tree "$clone" HEAD)" = "$tree" ] || fail "recovery changed the root tree identity"
+  [ -z "$(git -C "$clone" status --porcelain)" ] || fail "reconciled clone is dirty"
+
+  again=$(run_sync "$home" "$clone")
+  assert_contains "$again" "squash-equivalent: already current" "repeated sync converges harmlessly"
+  [ "$(git -C "$clone" rev-parse "$anchor")" = "$old" ] \
+    || fail "repeated sync changed the preservation ref"
+  [ "$(head_sha "$clone")" = "$remote" ] || fail "repeated sync moved the default branch"
+  [ -z "$(git -C "$clone" status --porcelain)" ] || fail "repeated sync dirtied the clone"
+  pass "tree-identical squash divergence is anchored, reconciled, and idempotent"
+}
+
+test_unrelated_equal_tree_is_not_normalized() {
+  local home clone work remote out before remote_head
+  home=$(new_home)
+  clone=$(build_pair "$home" unrelated-equal)
+  work="$home/work-unrelated-equal"
+  remote="$home/remotes/unrelated-equal.git"
+  commit_file "$clone" file.txt final-unrelated "local final tree"
+  before=$(head_sha "$clone")
+
+  git -C "$work" checkout --orphan remote-root -q
+  git -C "$work" rm -rfq .
+  printf '%s\n' final-unrelated > "$work/file.txt"
+  git -C "$work" add file.txt
+  git -C "$work" commit -qm "unrelated remote root with equal tree"
+  remote_head=$(git -C "$work" rev-parse HEAD)
+  git -C "$remote" fetch -q "$work" remote-root:refs/fm-test/unrelated
+  git -C "$remote" update-ref refs/heads/main "$remote_head"
+  git -C "$remote" update-ref -d refs/fm-test/unrelated
+  [ "$(root_tree "$clone" main)" = "$(root_tree "$work" remote-root)" ] \
+    || fail "unrelated-equal fixture does not have equal trees"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "unrelated-equal: STUCK:" "unrelated equal trees remain STUCK"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "unrelated history was normalized"
+  [ -z "$(preservation_refs "$clone")" ] || fail "unrelated history created a preservation ref"
+  pass "equal trees without one unambiguous common base are preserved"
+}
+
+test_unpublished_ahead_equal_tree_is_not_normalized() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" ahead-equal)
+  commit_file "$clone" temporary.txt temporary "add temporary file"
+  git -C "$clone" rm -q temporary.txt
+  git -C "$clone" commit -qm "remove temporary file"
+  before=$(head_sha "$clone")
+  [ "$(root_tree "$clone" main)" = "$(root_tree "$clone" origin/main)" ] \
+    || fail "ahead-equal fixture does not have equal net trees"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "ahead-equal: STUCK:" "unpublished-ahead branch remains STUCK"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "unpublished-ahead history was normalized"
+  [ -z "$(preservation_refs "$clone")" ] || fail "unpublished-ahead history created a preservation ref"
+  pass "clean unpublished-ahead history with an equal net tree is preserved"
+}
+
+test_tree_identical_conflicting_anchor_refuses() {
+  local home clone out old anchor conflict
+  home=$(new_home)
+  clone=$(build_tree_identical_squash_pair "$home" anchor-conflict)
+  old=$(git -C "$clone" rev-parse main)
+  anchor=$(preservation_ref_for "$clone" main "$old")
+  conflict=$(git -C "$clone" rev-parse main^^)
+  git -C "$clone" update-ref "$anchor" "$conflict"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "anchor-conflict: STUCK:" "conflicting anchor reports STUCK"
+  assert_contains "$out" "preservation ref conflict" "conflicting anchor explains the refusal"
+  [ "$(head_sha "$clone")" = "$old" ] || fail "conflicting anchor path moved the default branch"
+  [ "$(git -C "$clone" rev-parse "$anchor")" = "$conflict" ] \
+    || fail "conflicting preservation ref was overwritten"
+  pass "a conflicting preservation ref is never overwritten and blocks reconciliation"
+}
+
+test_tree_identical_expected_old_transaction_refusal() {
+  local home clone fakebin out err log old remote anchor
+  home=$(new_home)
+  clone=$(build_tree_identical_squash_pair "$home" ref-race)
+  old=$(git -C "$clone" rev-parse main)
+  anchor=$(preservation_ref_for "$clone" main "$old")
+  fakebin="$home/fb-ref-race"; mkdir -p "$fakebin"
+  git_ref_transaction_refusal "$fakebin"
+  out="$home/out-ref-race"; err="$home/err-ref-race"; log="$home/ref-transaction"
+  export GIT_REF_TRANSACTION_LOG="$log"
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" ref-race
+  unset GIT_REF_TRANSACTION_LOG
+  remote=$(git -C "$clone" rev-parse origin/main)
+
+  assert_grep "verify $anchor $old" "$log" "atomic transaction did not verify the preservation ref"
+  assert_grep "verify refs/remotes/origin/main $remote" "$log" \
+    "atomic transaction did not verify the freshly observed remote ref"
+  assert_grep "update refs/heads/main $remote $old" "$log" \
+    "atomic branch update did not carry its expected old object"
+  assert_contains "$(cat "$out")" "ref-race: STUCK:" "expected-old refusal reports STUCK"
+  assert_contains "$(cat "$out")" "atomic update rejected" "expected-old refusal explains the atomic rejection"
+  [ "$(head_sha "$clone")" = "$old" ] || fail "ref transaction refusal moved the default branch"
+  [ "$(git -C "$clone" rev-parse "$anchor")" = "$old" ] \
+    || fail "ref transaction refusal lost the anchored old head"
+  pass "an expected-old ref transaction refusal leaves the default branch unmoved"
+}
+
+test_prunes_gone_branch_during_ordinary_sync() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_packed_prunable "$home" prune-ordinary)
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "prune-ordinary: pruned feature" "ordinary sync still reports pruning"
+  ! git -C "$clone" show-ref --verify --quiet refs/heads/feature \
+    || fail "ordinary sync did not prune a gone branch"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "ordinary pruning path did not retain fast-forward behavior"
+  pass "ordinary gone-branch pruning still works"
 }
 
 test_on_default_clean_behind_fast_forwards() {
@@ -353,6 +545,23 @@ test_no_origin_skipped() {
   assert_contains "$out" "theta: skipped: no origin remote" "no-origin clone is skipped as before"
   assert_not_contains "$out" "STUCK" "no-origin skip is not escalated to STUCK"
   pass "no-origin clone is skipped (benign), not flagged STUCK"
+}
+
+test_missing_remote_default_skipped() {
+  local home clone remote out before
+  home=$(new_home)
+  clone=$(build_pair "$home" missing-default)
+  remote="$home/remotes/missing-default.git"
+  before=$(head_sha "$clone")
+  git -C "$remote" update-ref -d refs/heads/main
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "missing-default: skipped: origin/main does not exist" \
+    "missing remote default is skipped as before"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "missing remote default moved the local branch"
+  [ -z "$(preservation_refs "$clone")" ] || fail "missing remote default created a preservation ref"
+  pass "a missing remote default remains a benign skip"
 }
 
 test_local_only_skipped() {
@@ -609,9 +818,16 @@ test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
 test_dirty_is_stuck_untouched
 test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
+test_tree_identical_squash_divergence_reconciles_and_converges
+test_unrelated_equal_tree_is_not_normalized
+test_unpublished_ahead_equal_tree_is_not_normalized
+test_tree_identical_conflicting_anchor_refuses
+test_tree_identical_expected_old_transaction_refusal
+test_prunes_gone_branch_during_ordinary_sync
 test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
+test_missing_remote_default_skipped
 test_local_only_skipped
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow

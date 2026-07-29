@@ -3,13 +3,18 @@
 # origin/<default> when safe, and prune local branches whose upstream tracking
 # branch is gone (the remote branch was deleted, i.e. its PR merged) and that no
 # worktree still needs.
-# Self-heals the one unambiguously safe drift: a clean, detached HEAD that holds
-# no unique commits (it is an ancestor of origin/<default>) and whose <default>
-# branch is free to check out is re-attached and then fast-forwarded ("recovered:").
-# Every other off-default state - a non-default named branch, a detached HEAD with
-# unique commits, a dirty tree, or a diverged default - may hold real work, so it
-# is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
-# ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
+# Self-heals a clean, detached HEAD that holds no unique commits (it is an
+# ancestor of origin/<default>) and whose <default> branch is free to check out by
+# re-attaching it before the normal fast-forward ("recovered:"). One additional
+# narrow recovery handles a clean, checked-out default branch after a successful
+# fetch when the local and remote commits genuinely diverged but resolve to the
+# same root tree: preserve the full old local identity at
+# refs/fm-fleet-sync/squash-preserved/<default>/<old-oid>, verify that direct ref,
+# then atomically move the local branch to the observed remote commit with
+# expected-old checks on the preservation, remote-tracking, and local refs.
+# Every other off-default or diverged state may hold real work, so it is left
+# untouched and reported as a quantified, loud "STUCK: ... N commits behind ...
+# - needs attention" warning rather than quiet drift. Nothing is ever forced,
 # stashed, or discarded.
 # Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
 # and fetch failures.
@@ -289,6 +294,111 @@ report_stuck() {
   echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention"
 }
 
+reconciliation_refusal() {
+  report_stuck "diverged $DEFAULT (tree-identical recovery refused: $1)"
+}
+
+preservation_ref_oid() {
+  git -C "$PROJ" symbolic-ref --quiet "$PRESERVE_REF" >/dev/null 2>&1 && return 1
+  git -C "$PROJ" show-ref --verify --hash "$PRESERVE_REF" 2>/dev/null
+}
+
+ensure_preservation_ref() {
+  local anchor_oid update_output
+
+  if git -C "$PROJ" show-ref --verify --quiet "$PRESERVE_REF"; then
+    if ! anchor_oid=$(preservation_ref_oid) || [ "$anchor_oid" != "$local_rev" ]; then
+      reconciliation_refusal "preservation ref conflict at $PRESERVE_REF"
+      return 1
+    fi
+  else
+    if ! update_output=$(git -C "$PROJ" update-ref "$PRESERVE_REF" "$local_rev" "" 2>&1); then
+      # A concurrent creator of the same exact direct ref is harmless. Any
+      # other creation failure or conflicting value is a refusal, never an
+      # overwrite.
+      if ! anchor_oid=$(preservation_ref_oid) || [ "$anchor_oid" != "$local_rev" ]; then
+        reconciliation_refusal "cannot create preservation ref $PRESERVE_REF$(if [ -n "$update_output" ]; then printf ': %s' "$(first_line "$update_output")"; fi)"
+        return 1
+      fi
+    fi
+  fi
+
+  if ! anchor_oid=$(preservation_ref_oid) || [ "$anchor_oid" != "$local_rev" ] \
+      || ! git -C "$PROJ" cat-file -e "$PRESERVE_REF^{commit}" 2>/dev/null; then
+    reconciliation_refusal "preservation ref verification failed at $PRESERVE_REF"
+    return 1
+  fi
+  return 0
+}
+
+reconcile_tree_identical_divergence() {
+  local anchor_oid branch_ref head_oid local_oid remote_oid local_tree_now
+  local remote_tree_now common_base_now worktree_status update_input update_output
+  local post_branch post_head post_tree post_status rollback_output
+
+  PRESERVE_REF="refs/fm-fleet-sync/squash-preserved/$DEFAULT/$local_rev"
+  if ! git check-ref-format "$PRESERVE_REF" >/dev/null 2>&1; then
+    reconciliation_refusal "unsafe preservation ref identity"
+    return 0
+  fi
+  if ! ensure_preservation_ref; then
+    return 0
+  fi
+
+  # Revalidate every predicate after the preservation ref exists. The update-ref
+  # transaction below then verifies all three refs under one atomic ref lock, so
+  # a race cannot move the checked-out branch from an identity we did not inspect.
+  branch_ref=$(git -C "$PROJ" symbolic-ref --quiet HEAD 2>/dev/null || true)
+  head_oid=$(git -C "$PROJ" rev-parse --verify "HEAD^{commit}" 2>/dev/null || true)
+  local_oid=$(git -C "$PROJ" rev-parse --verify "$LOCAL_REF^{commit}" 2>/dev/null || true)
+  remote_oid=$(git -C "$PROJ" rev-parse --verify "$REMOTE_REF^{commit}" 2>/dev/null || true)
+  anchor_oid=$(preservation_ref_oid 2>/dev/null || true)
+  local_tree_now=$(git -C "$PROJ" rev-parse --verify "$local_rev^{tree}" 2>/dev/null || true)
+  remote_tree_now=$(git -C "$PROJ" rev-parse --verify "$remote_rev^{tree}" 2>/dev/null || true)
+  common_base_now=$(git -C "$PROJ" merge-base --all "$local_rev" "$remote_rev" 2>/dev/null || true)
+  if ! worktree_status=$(git -C "$PROJ" status --porcelain 2>/dev/null); then
+    reconciliation_refusal "worktree identity became unreadable before atomic update; preserved $PRESERVE_REF"
+    return 0
+  fi
+  if [ "$branch_ref" != "$LOCAL_REF" ] || [ "$head_oid" != "$local_rev" ] \
+      || [ "$local_oid" != "$local_rev" ] || [ "$remote_oid" != "$remote_rev" ] \
+      || [ "$anchor_oid" != "$local_rev" ] || [ "$local_tree_now" != "$local_tree" ] \
+      || [ "$remote_tree_now" != "$local_tree" ] || [ "$common_base_now" != "$common_base" ] \
+      || [ -n "$worktree_status" ] \
+      || git -C "$PROJ" merge-base --is-ancestor "$local_rev" "$remote_rev" 2>/dev/null \
+      || git -C "$PROJ" merge-base --is-ancestor "$remote_rev" "$local_rev" 2>/dev/null; then
+    reconciliation_refusal "repository identity changed before atomic update; preserved $PRESERVE_REF"
+    return 0
+  fi
+
+  update_input=$(printf 'verify %s %s\nverify %s %s\nupdate %s %s %s\n' \
+    "$PRESERVE_REF" "$local_rev" "$REMOTE_REF" "$remote_rev" \
+    "$LOCAL_REF" "$remote_rev" "$local_rev")
+  if ! update_output=$(printf '%s\n' "$update_input" | git -C "$PROJ" update-ref --stdin 2>&1); then
+    reconciliation_refusal "atomic update rejected; preserved $PRESERVE_REF$(if [ -n "$update_output" ]; then printf ': %s' "$(first_line "$update_output")"; fi)"
+    return 0
+  fi
+
+  post_branch=$(git -C "$PROJ" symbolic-ref --quiet HEAD 2>/dev/null || true)
+  post_head=$(git -C "$PROJ" rev-parse --verify "HEAD^{commit}" 2>/dev/null || true)
+  post_tree=$(git -C "$PROJ" rev-parse --verify "HEAD^{tree}" 2>/dev/null || true)
+  anchor_oid=$(preservation_ref_oid 2>/dev/null || true)
+  post_status=$(git -C "$PROJ" status --porcelain 2>/dev/null) || post_status=unreadable
+  if [ "$post_branch" != "$LOCAL_REF" ] || [ "$post_head" != "$remote_rev" ] \
+      || [ "$post_tree" != "$local_tree" ] || [ "$anchor_oid" != "$local_rev" ] \
+      || [ -n "$post_status" ]; then
+    if rollback_output=$(git -C "$PROJ" update-ref "$LOCAL_REF" "$local_rev" "$remote_rev" 2>&1); then
+      reconciliation_refusal "post-update verification failed and the local branch was restored; preserved $PRESERVE_REF"
+    else
+      reconciliation_refusal "post-update verification failed and atomic restore was refused; preserved $PRESERVE_REF$(if [ -n "$rollback_output" ]; then printf ': %s' "$(first_line "$rollback_output")"; fi)"
+    fi
+    return 0
+  fi
+
+  echo "$label: recovered: reconciled tree-identical squash on $DEFAULT to $BASE; preserved $PRESERVE_REF"
+  return 0
+}
+
 sync_project() {
   PROJ=$1
   label=$(project_label)
@@ -328,7 +438,9 @@ sync_project() {
     return 0
   }
   BASE="origin/$DEFAULT"
-  if ! git -C "$PROJ" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
+  LOCAL_REF="refs/heads/$DEFAULT"
+  REMOTE_REF="refs/remotes/origin/$DEFAULT"
+  if ! git -C "$PROJ" rev-parse --verify --quiet "$REMOTE_REF^{commit}" >/dev/null; then
     echo "$label: skipped: $BASE does not exist"
     return 0
   fi
@@ -367,16 +479,16 @@ sync_project() {
     return 0
   fi
 
-  if ! git -C "$PROJ" rev-parse --verify --quiet "$DEFAULT^{commit}" >/dev/null; then
+  if ! git -C "$PROJ" rev-parse --verify --quiet "$LOCAL_REF^{commit}" >/dev/null; then
     echo "$label: skipped: local $DEFAULT does not exist"
     return 0
   fi
 
-  local_rev=$(git -C "$PROJ" rev-parse "$DEFAULT") || {
+  local_rev=$(git -C "$PROJ" rev-parse --verify "$LOCAL_REF^{commit}") || {
     echo "$label: skipped: cannot read local $DEFAULT"
     return 0
   }
-  remote_rev=$(git -C "$PROJ" rev-parse "$BASE") || {
+  remote_rev=$(git -C "$PROJ" rev-parse --verify "$REMOTE_REF^{commit}") || {
     echo "$label: skipped: cannot read $BASE"
     return 0
   }
@@ -388,8 +500,23 @@ sync_project() {
     fi
     return 0
   fi
-  if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BASE"; then
-    report_stuck "diverged $DEFAULT"
+  if ! git -C "$PROJ" merge-base --is-ancestor "$local_rev" "$remote_rev"; then
+    # Preserve ordinary unpublished-ahead history and every unequal divergence.
+    # Reconcile only genuine divergence (neither side is an ancestor) with exact,
+    # equal root tree identities from the freshly fetched refs.
+    if git -C "$PROJ" merge-base --is-ancestor "$remote_rev" "$local_rev" 2>/dev/null; then
+      report_stuck "diverged $DEFAULT"
+      return 0
+    fi
+    local_tree=$(git -C "$PROJ" rev-parse --verify "$local_rev^{tree}" 2>/dev/null || true)
+    remote_tree=$(git -C "$PROJ" rev-parse --verify "$remote_rev^{tree}" 2>/dev/null || true)
+    common_base=$(git -C "$PROJ" merge-base --all "$local_rev" "$remote_rev" 2>/dev/null || true)
+    if [ -z "$local_tree" ] || [ -z "$remote_tree" ] || [ "$local_tree" != "$remote_tree" ] \
+        || [ -z "$common_base" ] || [ "$(printf '%s\n' "$common_base" | wc -l | tr -d '[:space:]')" != 1 ]; then
+      report_stuck "diverged $DEFAULT"
+      return 0
+    fi
+    reconcile_tree_identical_divergence
     return 0
   fi
 
