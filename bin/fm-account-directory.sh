@@ -48,8 +48,8 @@
 #
 # Credential and profile-registry state is read-only.
 # This script never logs in, imports credentials, or invokes a provider model.
-# Test-only command, root, state-root, passwd-home, Perl, and timeout overrides require
-# FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1.
+# Test-only command, root, state-root, passwd-home, Perl, timeout, and marker-race
+# hook overrides require FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1.
 set -u
 
 TEST_LAB_TOKEN=firstmate-account-directory-test-lab-v1
@@ -308,7 +308,7 @@ last_resort_pool() { # <vendor>
 }
 
 eligible_account_homes() { # <vendor> <pool>
-  local vendor=$1 pool=$2 root vendor_dir fleet_bin profiles candidate eligible matched reason marker marker_root marker_dir
+  local vendor=$1 pool=$2 root vendor_dir fleet_bin profiles candidate eligible matched reason marker marker_root marker_dir marker_race_hook
   root=$(account_root) || return 1
   vendor_dir=$root/$vendor
   [ -d "$vendor_dir" ] && [ ! -L "$vendor_dir" ] || {
@@ -384,6 +384,10 @@ EOF
       continue
     fi
     if [ "$vendor" = claude ]; then
+      marker_race_hook=
+      if test_lab_enabled && [ -n "${FM_ACCOUNT_DIRECTORY_MARKER_RACE_HOOK:-}" ]; then
+        marker_race_hook=$FM_ACCOUNT_DIRECTORY_MARKER_RACE_HOOK
+      fi
       marker_root=$candidate/.agent-fleet-quota-cache
       marker_dir=$marker_root/quota-axi
       marker=$marker_dir/claude-keychain-access-granted
@@ -398,48 +402,83 @@ EOF
           use strict;
           use warnings;
           use Fcntl qw(:DEFAULT);
+          use Config;
 
-          my ($account_home, $path) = @ARGV;
-          my @directories = (
+          my ($account_home, $path, $race_hook) = @ARGV;
+          my $openat_number =
+            $^O eq "darwin" ? 463 :
+            $^O eq "linux" && $Config{archname} =~ /(?:x86_64|amd64)/ ? 257 :
+            $^O eq "linux" && $Config{archname} =~ /(?:aarch64|arm64)/ ? 56 :
+            undef;
+          exit 1 unless defined($openat_number);
+
+          my $openat_handle = sub {
+            my ($parent, $name, $flags) = @_;
+            my $fd = syscall($openat_number, fileno($parent), $name, $flags, 0);
+            exit 1 if $fd < 0;
+            open(my $handle, "<&=$fd") or exit 1;
+            return $handle;
+          };
+
+          sysopen(my $account, $account_home, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+            or exit 1;
+          my $cache = $openat_handle->(
+            $account, ".agent-fleet-quota-cache",
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW,
+          );
+          my $quota = $openat_handle->(
+            $cache, "quota-axi",
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW,
+          );
+          my $marker = $openat_handle->(
+            $quota, "claude-keychain-access-granted",
+            O_RDONLY | O_NOFOLLOW,
+          );
+
+          my @handles = ($account, $cache, $quota);
+          my @paths = (
             $account_home,
             "$account_home/.agent-fleet-quota-cache",
             "$account_home/.agent-fleet-quota-cache/quota-axi",
           );
-          for my $directory (@directories) {
-            my @before = lstat($directory);
-            exit 1 unless @before && -d _ && !-l _;
-            exit 1 unless $before[4] == $< && ($before[2] & 0022) == 0;
-            sysopen(my $directory_fh, $directory, O_RDONLY) or exit 1;
-            my @opened = stat($directory_fh);
+          my @directory_stats;
+          for my $handle (@handles) {
+            my @opened = stat($handle);
             exit 1 unless @opened && -d _;
-            my @after = lstat($directory);
-            exit 1 unless @after;
-            for my $index (0, 1, 2, 3, 4, 5, 7, 9, 10) {
-              exit 1 unless $before[$index] == $opened[$index]
-                && $opened[$index] == $after[$index];
-            }
-            close($directory_fh) or exit 1;
+            exit 1 unless $opened[4] == $< && ($opened[2] & 0022) == 0;
+            push @directory_stats, \@opened;
           }
 
-          my @before = lstat($path);
-          exit 1 unless @before && -f _ && !-l _;
-          exit 1 unless ($before[2] & 07777) == 0600;
-          exit 1 unless $before[4] == $< && $before[3] == 1;
-          sysopen(my $fh, $path, O_RDONLY) or exit 1;
-          binmode($fh);
-          my @opened = stat($fh);
-          exit 1 unless @opened;
+          my @opened = stat($marker);
+          exit 1 unless @opened && -f _;
+          exit 1 unless ($opened[2] & 07777) == 0600;
+          exit 1 unless $opened[4] == $< && $opened[3] == 1;
+          binmode($marker);
           local $/;
-          my $payload = <$fh>;
+          my $payload = <$marker>;
           exit 1 unless defined($payload) && $payload eq "granted\n";
-          exit 1 unless close($fh);
-          my @after = lstat($path);
-          exit 1 unless @after;
-          for my $index (0, 1, 2, 3, 4, 5, 7, 9, 10) {
-            exit 1 unless $before[$index] == $opened[$index]
-              && $opened[$index] == $after[$index];
+          if (length($race_hook)) {
+            system($race_hook) == 0 or exit 1;
           }
-        ' "$candidate" "$marker" 2>/dev/null; then
+
+          for my $index (0 .. $#paths) {
+            my @after = lstat($paths[$index]);
+            exit 1 unless @after && -d _ && !-l _;
+            my $expected = $directory_stats[$index];
+            for my $field (0, 1, 2, 3, 4, 5, 7, 9, 10) {
+              exit 1 unless $expected->[$field] == $after[$field];
+            }
+          }
+          my @after = lstat($path);
+          exit 1 unless @after && -f _ && !-l _;
+          for my $index (0, 1, 2, 3, 4, 5, 7, 9, 10) {
+            exit 1 unless $opened[$index] == $after[$index];
+          }
+          close($marker) or exit 1;
+          close($quota) or exit 1;
+          close($cache) or exit 1;
+          close($account) or exit 1;
+        ' "$candidate" "$marker" "$marker_race_hook" 2>/dev/null; then
         log "claude account $candidate excluded from $pool: invalid quota-axi Keychain approval marker; expected exact granted payload, mode 0600, current-user ownership, one link, real path components, and stable metadata"
         continue
       fi

@@ -182,7 +182,7 @@ test_profile_eligibility_requires_enabled_worker() {
 }
 
 test_claude_approval_marker_contract() {
-  local account cache_dir marker marker_dir out status
+  local account cache_dir marker marker_dir out race_hook status
   reset_accounts
   mkdir -p "$ACCOUNT_ROOT/claude/1/.agent-fleet-quota-cache/quota-axi"
   account="$ACCOUNT_ROOT/claude/1"
@@ -220,6 +220,21 @@ test_claude_approval_marker_contract() {
   chmod 770 "$marker_dir"
   if out=$(run_selector select claude 2>&1); then status=0; else status=$?; fi
   [ "$status" -ne 0 ] || fail "Claude selection accepted a group-writable marker parent"
+  chmod 700 "$marker_dir"
+
+  race_hook="$TMP_ROOT/replace-marker-parent"
+  cat > "$race_hook" <<SH
+#!/usr/bin/env bash
+set -u
+mv "$marker_dir" "$marker_dir.replaced"
+mkdir "$marker_dir"
+printf 'granted\\n' > "$marker"
+chmod 600 "$marker"
+SH
+  chmod +x "$race_hook"
+  if out=$(FM_ACCOUNT_DIRECTORY_MARKER_RACE_HOOK="$race_hook" \
+    run_selector select claude 2>&1); then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "Claude selection accepted a replaced marker parent"
   pass "Claude approval marker requires secure stable parents and leaf metadata"
 }
 
