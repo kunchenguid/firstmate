@@ -199,7 +199,7 @@ bin/fm-watch-arm.sh &
 **Superseded case.** The third command was an allowed shape when this live sweep ran.
 It is now DENIED, because no source node is blessed in any form (see "Blessed syntax tree" above): blessing a cadence path the policy never opens made this policy's own trust list an indirect shell-execution vector.
 The equivalent current shape for that slot is a plain setup node, `cd '<scratch-project>'; bin/fm-watch-checkpoint.sh --seconds 180`.
-The live cross-harness sweep below has not been re-run since that change; what the change is verified by is the matrix suite, where `DS01`-`DS08` and `E04` in `tests/fm-arm-pretool-check.test.sh` assert the denial and `A01`-`A16` assert that ordinary `cd`/`export` setup and the arm command firstmate itself renders are still allowed.
+The live cross-harness sweep below has not been re-run since that change; what the change is verified by is the matrix suite, where `DS01`-`DS08` and `E04` in `tests/fm-arm-pretool-check.test.sh` assert the denial and the remaining `A` series (`A01`-`A09`, `A15`, `A16`; the former `A10`-`A14` and `A17` are the source-node cases that became the `DS` series) asserts that ordinary `cd`/`export` setup and the arm command firstmate itself renders are still allowed.
 The harness-adapter finding this sweep exists to record - that each harness maps a policy denial through its own native behavior - is unaffected by which command is denied.
 
 The real harness launch commands were:

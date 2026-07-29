@@ -419,7 +419,7 @@ The token is validated against BotFather's `<id>:<secret>` shape before use; a m
 **Moving to a different bot** is a new bot, so run `bin/fm-tg-pair.sh begin --replace` and pair again.
 
 **Complete opt-out**: run `bin/fm-tg-pair.sh revoke --yes`, remove `FM_TELEGRAM_BOT_TOKEN` from `.env`, and rerun session start.
-Bootstrap then removes the poll shim and the cadence file and the home stops polling, sending, and pairing; delete `state/telegram/` to erase the remaining local records.
+Bootstrap then removes the poll shim and the armed marker and the home stops polling, sending, and pairing; delete `state/telegram/` to erase the remaining local records.
 One thing deliberately survives: a task the bridge already linked keeps its immutable `tg_origin=` marker and stays under the publish gate, which after opt-out has nobody left to confirm it.
 Release each such task individually with `bin/fm-tg-task.sh release <task-id> --yes --reason "<why>"` (see "Releasing a task the bridge can no longer reach"); finished and torn-down tasks need nothing.
 
@@ -496,7 +496,7 @@ The named request must be one this home really accepted from the currently pinne
 A confirmation is refused when it is late, guessed, replayed, over its attempt budget, carried by no fresh authentic message, or aimed at a preview that has since been rebuilt; the script's `--help` owns the exact exit codes.
 
 `bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` then refuse to land any task of Telegram origin unless a live confirmation exists for exactly the revision they are really about to land.
-The pull-request path uses the forge's own recorded `pr_head`, and the local path resolves the branch tip itself; a revision that cannot be resolved refuses rather than merging something unverified.
+The pull-request path uses the forge's own recorded `pr_head`, and the local path resolves the branch tip itself; a revision that cannot be resolved refuses rather than merging something unverified, unless the task carries the explicit release below.
 Absent, unconsumed, expired, moved, wrong-project, wrong-person, wrong-target, and already-used authorizations all refuse, and the authorization is consumed before the merge runs, so one approval can never land twice.
 
 Whether the gate applies is decided by durable evidence, never by the open conversation: the task's immutable `tg_origin=` marker, written once when it is first linked and removed by no clearing path, or an armed publish record for that task id.
@@ -514,6 +514,7 @@ bin/fm-tg-task.sh release <task-id> --yes --reason "<why the confirmation cannot
 This is a **captain** action and covers exactly one named task; there is deliberately no bulk form, and revoking a pairing never releases anything on its own.
 It needs both the affirmative `--yes` and a written reason, which must be one line of plain text (1-200 characters, no control characters, so it cannot forge further keys into the task record).
 It refuses when the ordinary path is still open - a peer pinned for that task's project, or a publish confirmation already armed for it - so it recovers a stranded task and never substitutes for a confirmation the paired person could still be asked for.
+A release is answered before any revision requirement, because a released task has no confirmation for a revision to be checked against: it lands even where no head revision was recorded - every GitLab task, and any GitHub task whose forge CLI could not supply one - while an unreleased task still refuses on a revision that cannot be resolved.
 
 Nothing is erased. The release only appends `tg_released_at=` and `tg_release_reason=` to the task's own record, so `tg_origin=` and the reason stay readable forever, a second release on the same task is refused rather than allowed to rewrite the first, and both landing helpers print the reason to stderr when a release is what let the merge through.
 A publish record armed for that task later supersedes the release, so re-pairing and previewing again puts the task back under the ordinary rules.

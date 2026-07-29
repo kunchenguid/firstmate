@@ -59,9 +59,12 @@
 #
 # FINAL CLEANUP
 #   --final marks a terminal outcome. After the last chunk lands it clears the
-#   task's Telegram link and closes the request, so no later milestone can post
-#   against either. The context record itself is deliberately KEPT as evidence
-#   of which conversation the task answered until its retention window expires.
+#   task's OPEN EXCHANGE (tg_request, tg_chat, tg_request_ts) and closes the
+#   request, so no later milestone can post against either. Two things are
+#   deliberately KEPT: the context record, as evidence of which conversation the
+#   task answered until its retention window expires, and the task's immutable
+#   tg_origin marker, which is what the landing gate reads - ending the
+#   conversation must not be able to end the gate.
 #
 # DRY RUN
 #   With FM_TELEGRAM_DRY_RUN set truthy, nothing is sent. The would-be payload is

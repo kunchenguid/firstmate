@@ -53,9 +53,15 @@
 # again.
 #
 # COMPLETE OPT-OUT: run `revoke --yes`, remove FM_TELEGRAM_BOT_TOKEN from .env,
-# and rerun session start. Bootstrap then removes the poll shim and the cadence
-# file, and the home returns to exactly its pre-Telegram behavior. Delete
+# and rerun session start. Bootstrap then removes the poll shim and the armed
+# marker, and the home stops polling, sending, and pairing. Delete
 # state/telegram/ to erase the remaining local records.
+#
+# One thing deliberately survives a revoke: a task the bridge already linked
+# keeps its immutable tg_origin= marker and stays under the publish gate, which
+# now has nobody left to confirm it. Release each such task on its own with
+# `bin/fm-tg-task.sh release <task-id> --yes --reason <text>`; finished and
+# torn-down tasks need nothing.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

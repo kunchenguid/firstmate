@@ -267,6 +267,7 @@ The confirming words are read from the stored record of a named inbound message 
 A gate only the agent remembers to run is a comment, so `bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` refuse to land a task of Telegram origin without a live confirmation bound to the revision they are really about to land, resolved from the forge's recorded head or the branch tip rather than asserted.
 Whether the gate applies is read from durable evidence - an immutable origin marker on the task, or an armed publish record for it - rather than from the open conversation, because the terminal reply and the unlink helper both clear that conversation and would otherwise switch the gate off.
 The authorization is consumed before the merge runs, so one approval lands exactly one change; absent, unconsumed, expired, moved, wrong-project, wrong-person, wrong-target, and replayed authorizations all refuse, and a task that never came from the bridge is unaffected.
+An immutable marker would otherwise strand every linked task once the pairing is gone, so one audited, append-only captain release per task stands the gate down when there is provably nobody left to confirm; the [configuration reference](configuration.md#releasing-a-task-the-bridge-can-no-longer-reach) owns its exact refusals.
 Landing remains the project's own delivery path, and anything that reaches a live host, a domain, or an outside audience stays a captain decision.
 
 **Shared contracts are extracted, not duplicated.**
