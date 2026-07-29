@@ -39,6 +39,10 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Ship and scout scaffolds share one commit-discipline section: expensive-to-
+# reproduce evidence is committed the moment it exists, ahead of any analysis
+# drawn from it, and changed files never sit longer than about 15 minutes
+# without a checkpoint commit. It is judged by cost to reproduce, not task size.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -247,6 +251,19 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# One owner for the commit-discipline contract, rendered into both the ship and
+# scout scaffolds. Quoted delimiter: the body is literal brief prose.
+IFS= read -r -d '' COMMIT_DISCIPLINE <<'EOF' || true
+# Commit discipline
+Commit at moments of value, not only at completion.
+Commit anything expensive to reproduce - a long measurement, a captured fixture, probe output, hours of compute - as raw evidence the moment it exists, in its own commit, before any analysis or polishing drawn from it.
+Never go more than about 15 minutes of changed files without a checkpoint commit; a `wip` commit is fine, and you can amend or squash it later.
+The distinction that matters is cost to reproduce, not task size: a 30-second script fed by two hours of compute is expensive, while a 400-line refactor is not.
+The reason is handoff, not just crashes: an uncommitted file survives a crash but dies at handoff, because a successor will not trust loose output it does not remember producing, while a commit carries provenance.
+The one exception is an active automated validation run: while a pipeline owns your branch, follow Definition of done and do not commit into the run.
+EOF
+COMMIT_DISCIPLINE=${COMMIT_DISCIPLINE%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -283,6 +300,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+$COMMIT_DISCIPLINE
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -397,6 +416,8 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+$COMMIT_DISCIPLINE
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
