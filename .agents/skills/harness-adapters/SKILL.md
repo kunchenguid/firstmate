@@ -194,6 +194,7 @@ Its broader dark-TRUECOLOR placeholder handling and dark-theme tradeoff are docu
 That styled capture is internal to the boolean detector only.
 `fm-peek` and every other human or LLM-facing capture path stays plain `tmux capture-pane` with no escape codes.
 Claude's `CTX ... | COMPACT NOW: /compact` row is host-computed context-pressure telemetry, not a busy signature or supervision event; [`docs/configuration.md`](../../../docs/configuration.md#claude-context-pressure-telemetry) owns its display, task snapshot, and 70-percent advisory behavior.
+The underlying `statusLine` `context_window` payload contract was verified 2026-07-24 against the installed Claude Code 2.1.219 bundle (`/home/shane/.local/share/claude/versions/2.1.219`): a grep of that bundle confirmed `context_window` carries `remaining_percentage`, `used_percentage`, `total_tokens`, and `current_usage`.
 
 **Primary-session guard fact (verified 2026-07-04, Claude Code 2.1.201; preserved 2026-07-08, Claude Code 2.1.204; Stop-owned auto-arm revalidated 2026-07-24, Claude Code 2.1.219).**
 This is separate from the per-task crewmate turn-end hook above (that one just `touch`es a marker file in a task's own `.claude/settings.local.json`).
