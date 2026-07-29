@@ -222,6 +222,7 @@ test_reclaims_stale_session_lock_before_arming() {
 
 test_login_shell_lock_probe_is_silent_with_bsd_basename() {
   local dir fakebin real_ps real_basename login_pid status out err
+  local harness_out harness_err harness_status
   dir=$(make_primary_dir "$TMP_ROOT/login-shell-lock")
   fakebin="$dir/fakebin"
   real_ps=$(command -v ps)
@@ -242,6 +243,12 @@ while [ "$#" -gt 0 ]; do
     *) break ;;
   esac
 done
+if [ "${FM_TEST_DASH_COMM:-}" = 1 ]; then
+  case "$field" in
+    comm=|args=) printf '%s\n' '-zsh'; exit 0 ;;
+    ppid=) printf '%s\n' 1; exit 0 ;;
+  esac
+fi
 if [ "$pid" = "$FM_TEST_LOGIN_PID" ]; then
   case "$field" in
     comm=|args=) printf '%s\n' '-zsh'; exit 0 ;;
@@ -263,6 +270,19 @@ esac
 exec "$FM_TEST_REAL_BASENAME" "$@"
 SH
   chmod +x "$fakebin/ps" "$fakebin/basename"
+
+  harness_out="$dir/state/harness.out"
+  harness_err="$dir/state/harness.err"
+  CLAUDECODE='' PI_CODING_AGENT='' GROK_AGENT='' \
+    PATH="$fakebin:$PATH" \
+    FM_TEST_DASH_COMM=1 \
+    FM_TEST_REAL_PS="$real_ps" \
+    FM_TEST_REAL_BASENAME="$real_basename" \
+    "$ROOT/bin/fm-harness.sh" >"$harness_out" 2>"$harness_err"
+  harness_status=$?
+  expect_code 0 "$harness_status" "harness detection must accept a dash-leading ps command"
+  [ "$(cat "$harness_out")" = unknown ] || fail "dash-leading login shell must remain an unknown harness"
+  [ ! -s "$harness_err" ] || fail "BSD basename semantics leaked stderr during harness detection: $(cat "$harness_err")"
 
   sleep 60 &
   login_pid=$!
