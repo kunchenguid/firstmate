@@ -198,6 +198,73 @@ test_reclaims_stale_session_lock_before_arming() {
   pass "auto-arm: a demonstrably dead recorded session owner is reclaimed through fm-lock.sh before arming"
 }
 
+test_login_shell_lock_probe_is_silent_with_bsd_basename() {
+  local dir fakebin real_ps real_basename login_pid status out err
+  dir=$(make_primary_dir "$TMP_ROOT/login-shell-lock")
+  fakebin="$dir/fakebin"
+  real_ps=$(command -v ps)
+  real_basename=$(command -v basename)
+  mkdir -p "$fakebin"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" clean
+
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+original=("$@")
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) break ;;
+  esac
+done
+if [ "$pid" = "$FM_TEST_LOGIN_PID" ]; then
+  case "$field" in
+    comm=|args=) printf '%s\n' '-zsh'; exit 0 ;;
+    ppid=) printf '%s\n' 1; exit 0 ;;
+  esac
+fi
+exec "$FM_TEST_REAL_PS" "${original[@]}"
+SH
+  cat > "$fakebin/basename" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  -z*)
+    printf '%s\n' 'basename: illegal option -- z' >&2
+    printf '%s\n' 'usage: basename string [suffix]' >&2
+    exit 1
+    ;;
+esac
+exec "$FM_TEST_REAL_BASENAME" "$@"
+SH
+  chmod +x "$fakebin/ps" "$fakebin/basename"
+
+  sleep 60 &
+  login_pid=$!
+  printf '%s\n' "$login_pid" > "$dir/state/.lock"
+  out="$dir/state/hook.out"
+  err="$dir/state/hook.err"
+  printf '%s\n' '{"session_id":"login-shell","stop_hook_active":false}' \
+    | PATH="$fakebin:$PATH" \
+      FM_HOME="$dir" \
+      FM_TEST_LOGIN_PID="$login_pid" \
+      FM_TEST_REAL_PS="$real_ps" \
+      FM_TEST_REAL_BASENAME="$real_basename" \
+      "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' >"$out" 2>"$err"
+  status=$?
+  kill "$login_pid" 2>/dev/null || true
+  wait "$login_pid" 2>/dev/null || true
+
+  expect_code 0 "$status" "a stale login-shell owner must recover through the Stop auto-arm path"
+  [ ! -s "$out" ] || fail "clean Stop auto-arm recovery wrote stdout: $(cat "$out")"
+  [ ! -s "$err" ] || fail "BSD basename semantics leaked stderr before the wake: $(cat "$err")"
+  [ -e "$dir/state/arm-ran" ] || fail "Stop auto-arm did not continue after the stale login-shell probe"
+  pass "auto-arm: stale -zsh lock-owner composition is silent with BSD basename semantics"
+}
+
 test_inert_when_lock_held_by_other_harness() {
   local dir other out status owner_after
   dir=$(make_primary_dir "$TMP_ROOT/other-lock")
@@ -419,6 +486,7 @@ test_fm_lock_status_still_works_with_shared_lib() {
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
+test_login_shell_lock_probe_is_silent_with_bsd_basename
 test_inert_when_lock_held_by_other_harness
 test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
