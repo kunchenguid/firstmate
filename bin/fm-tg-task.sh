@@ -7,16 +7,19 @@
 #   fm-tg-task.sh unlink <task-id>
 #   fm-tg-task.sh show <task-id>
 #   fm-tg-task.sh arm-publish <task-id>
-#   fm-tg-task.sh confirm-publish <task-id> --message-file <path>
+#   fm-tg-task.sh confirm-publish <task-id> --request <request-id>
 #   fm-tg-task.sh clear-publish <task-id>
 #   fm-tg-task.sh --help
 #
 # PROJECT ROUTING IS CHECKED, NOT ASSUMED
-#   Pairing pins exactly one project name. Every subcommand here compares the
-#   task's own recorded project against that pinned name and refuses on any
-#   mismatch (exit 6), so a request from the bridge can only ever move work in
-#   the project it was paired for. Widening that is a captain decision made by
-#   re-pairing, not something a message can ask for.
+#   Pairing pins exactly one project name. Every subcommand that changes a
+#   task's link or its publish authorization - link, unlink, arm-publish,
+#   confirm-publish, clear-publish - compares the task's own recorded project
+#   against that pinned name and refuses on any mismatch (exit 6), so a request
+#   from the bridge can only ever move work in the project it was paired for.
+#   Widening that is a captain decision made by re-pairing, not something a
+#   message can ask for. `show` changes nothing and is a read-only diagnostic
+#   over this home's own task records, so it is deliberately not scoped.
 #
 # THE TWO-STEP PUBLISH CONFIRMATION
 #   A request authorizes preparing a change and showing a preview. It does not
@@ -35,15 +38,25 @@
 #   bin/fm-pr-merge.sh and bin/fm-merge-local.sh then require that same record,
 #   consumed, matching the revision they are really about to land.
 #
-#   The incoming reply is read from a FILE, never an argument. Only the salted
-#   hash of the code is stored, and only the code alphabet is scanned out of the
-#   message, so no other part of that untrusted text is ever interpreted.
+#   THE CONFIRMATION IS A REAL MESSAGE, NOT A FILE THE CALLER WROTE. This used
+#   to take `--message-file <path>` and scan whatever that path contained, so
+#   nothing tied the approval to the paired person having said anything at all
+#   and "never arm and confirm in the same turn" was a rule in an agent skill
+#   rather than a property of the code - the same shape the outbound side closed
+#   by removing `--text-file`. `--request <request-id>` names an inbound message
+#   instead: it must be one this home really accepted from the currently pinned
+#   peer, still open, carrying text, and RECEIVED AFTER the preview was armed.
+#   Only the salted hash of the code is stored, and only the code alphabet is
+#   scanned out of that message, so no other part of the untrusted text is ever
+#   interpreted.
 #
 # confirm-publish exit codes:
-#   0 confirmed and consumed        5 no matching code in the reply
-#   3 nothing armed for this task   6 project mismatch, or the prepared change
-#   4 the confirmation expired        moved since the preview
-#   7 already used                  8 too many confirmation attempts
+#   0 confirmed and consumed        6 project mismatch, or the prepared change
+#   3 nothing armed for this task     moved since the preview
+#   4 the confirmation expired      7 already used
+#   5 no matching code in the       8 too many confirmation attempts
+#     message                       9 no fresh, authentic message from the
+#                                     paired person carries this confirmation
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -83,7 +96,6 @@ shift 2>/dev/null || true
 
 REQUEST=
 HEAD_REV=
-MESSAGE_FILE=
 case "$COMMAND" in
   link)
     REQUEST=${1:-}
@@ -96,7 +108,15 @@ while [ "$#" -gt 0 ]; do
     --head)
       die "--head was removed: the prepared revision is resolved from the task's own worktree, not asserted by the caller"
       ;;
-    --message-file) [ "$#" -gt 1 ] || die "--message-file requires a path"; MESSAGE_FILE=$2; shift 2 ;;
+    --message-file)
+      die "--message-file was removed: a confirmation must be carried by a real message from the paired person, so confirm-publish reads it from that message's own stored record with --request <request-id>"
+      ;;
+    --request)
+      [ "$COMMAND" = confirm-publish ] || die "--request is only meaningful for confirm-publish"
+      [ "$#" -gt 1 ] || die "--request requires a request id"
+      REQUEST=$2
+      shift 2
+      ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -117,20 +137,27 @@ rev_valid() {
 # The exact revision this task has prepared, read from the task's own recorded
 # worktree. This is what makes the confirmation a statement about the change the
 # person actually previewed rather than about a string the caller supplied.
+#
+# It RETURNS its refusal rather than exiting. Callers invoke it through a command
+# substitution, where `exit` ends only the subshell: this script runs under
+# `set -u` without `-e`, so an exiting refusal printed its message and then let
+# both subcommands carry on with an empty revision - arming a record no landing
+# could ever match, and scanning a confirmation against nothing. Every caller
+# therefore checks the status and exits with it.
 prepared_revision() {
   local worktree rev
   worktree=$(fmtg_meta_get "$META" worktree) || {
     printf 'fm-tg-task: task %s has no recorded worktree, so its prepared revision cannot be resolved\n' "$TASK" >&2
-    exit 6
+    return 6
   }
   [ -d "$worktree" ] || {
     printf 'fm-tg-task: the recorded worktree for task %s is missing, so its prepared revision cannot be resolved\n' "$TASK" >&2
-    exit 6
+    return 6
   }
   rev=$(git -C "$worktree" rev-parse --verify --quiet HEAD) || rev=
   rev_valid "$rev" || {
     printf 'fm-tg-task: cannot resolve a prepared revision for task %s\n' "$TASK" >&2
-    exit 6
+    return 6
   }
   printf '%s' "$rev"
 }
@@ -179,7 +206,7 @@ case "$COMMAND" in
     ;;
 
   unlink)
-    [ -f "$META" ] || die "no task record at $META"
+    require_project_match
     fmtg_meta_link_clear "$META" || die "cannot clear the link"
     ;;
 
@@ -189,6 +216,7 @@ case "$COMMAND" in
     printf 'project: %s\n' "$(fmtg_meta_get "$META" project || printf '<none>')"
     printf 'linked request: %s\n' "$(fmtg_meta_get "$META" tg_request || printf '<none>')"
     printf 'linked chat: %s\n' "$(fmtg_meta_get "$META" tg_chat || printf '<none>')"
+    printf 'telegram origin: %s\n' "$(fmtg_meta_get "$META" tg_origin || printf '<none>')"
     if RECORD=$(fmtg_publish_show "$TASK" 2>/dev/null); then
       printf 'publish armed for: %s\n' "$(printf '%s' "$RECORD" | jq -r '.head // "?"')"
       printf 'publish expires at: %s\n' "$(printf '%s' "$RECORD" | jq -r '.expires_at // "?"')"
@@ -201,7 +229,7 @@ case "$COMMAND" in
 
   arm-publish)
     require_project_match
-    HEAD_REV=$(prepared_revision)
+    HEAD_REV=$(prepared_revision) || exit $?
     CODE=$(fmtg_random_code 6) || die "cannot generate a confirmation code"
     PROJECT=$(pinned_project)
     fmtg_publish_arm "$TASK" "$PROJECT" "$HEAD_REV" "$CODE" "$NOW" \
@@ -210,26 +238,79 @@ case "$COMMAND" in
     ;;
 
   confirm-publish)
-    [ -n "$MESSAGE_FILE" ] || die "confirm-publish requires --message-file <path>"
+    [ -n "$REQUEST" ] || die "confirm-publish requires --request <request-id>"
+    fmtg_request_id_valid "$REQUEST" || die "invalid request id: $REQUEST"
     require_project_match
-    HEAD_REV=$(prepared_revision)
-    if [ "$MESSAGE_FILE" = - ]; then
-      RAW=$(cat)
-    else
-      [ -f "$MESSAGE_FILE" ] || die "no such message file: $MESSAGE_FILE"
-      RAW=$(cat "$MESSAGE_FILE")
-    fi
-    fmtg_publish_show "$TASK" >/dev/null 2>&1 || {
+    HEAD_REV=$(prepared_revision) || exit $?
+    RECORD=$(fmtg_publish_show "$TASK" 2>/dev/null) || {
       printf 'fm-tg-task: nothing armed for %s\n' "$TASK" >&2
       exit 3
     }
-    # One attempt per reply, however many candidate codes it contains.
+    ARMED_AT=$(printf '%s' "$RECORD" | jq -r '.armed_at // 0')
+    case "$ARMED_AT" in ''|*[!0-9]*) ARMED_AT=0 ;; esac
+
+    # The confirming message must be one this home really accepted from the
+    # currently pinned peer, and the exchange must still be open. This is the
+    # same single-owner check the outbound path uses, so an invented request id
+    # is as inert here as it is there.
+    PEER=$(fmtg_peer_get) || die "no paired peer"
+    PEER_CHAT=$(printf '%s' "$PEER" | jq -r '.chat_id // empty')
+    fmtg_chat_id_valid "$PEER_CHAT" || die "the pinned peer record has no usable chat id"
+    AUTH_RC=0
+    fmtg_request_authentic "$REQUEST" "$PEER_CHAT" || AUTH_RC=$?
+    case "$AUTH_RC" in
+      0) ;;
+      4)
+        printf 'fm-tg-task: %s is not a message this home accepted from the paired person; refusing\n' "$REQUEST" >&2
+        exit 9
+        ;;
+      6)
+        printf 'fm-tg-task: request %s came from a chat that is no longer the paired peer; refusing\n' "$REQUEST" >&2
+        exit 9
+        ;;
+      7)
+        printf 'fm-tg-task: request %s was already closed by a final reply; refusing\n' "$REQUEST" >&2
+        exit 9
+        ;;
+      *) die "cannot verify request $REQUEST" ;;
+    esac
+
+    # The words themselves come from the stored inbound record, which is the
+    # only place the person's own text exists. A message that arrived BEFORE the
+    # preview was armed cannot be the answer to it, which is what stops arming
+    # and confirming inside a single turn.
+    ENTRY=$(fmtg_inbox_get "$REQUEST" 2>/dev/null) || {
+      printf 'fm-tg-task: no stored message for %s; a confirmation is read from the message that carried it, not from a file\n' \
+        "$REQUEST" >&2
+      exit 9
+    }
+    ENTRY_CHAT=$(printf '%s' "$ENTRY" | jq -r '.chat_id // empty')
+    if [ "$ENTRY_CHAT" != "$PEER_CHAT" ]; then
+      printf 'fm-tg-task: message %s came from a chat that is no longer the paired peer; refusing\n' "$REQUEST" >&2
+      exit 9
+    fi
+    ENTRY_KIND=$(printf '%s' "$ENTRY" | jq -r '.kind // empty')
+    if [ "$ENTRY_KIND" != text ]; then
+      printf 'fm-tg-task: message %s carries no text (kind=%s), so it cannot carry a confirmation\n' \
+        "$REQUEST" "${ENTRY_KIND:-<none>}" >&2
+      exit 9
+    fi
+    RECEIVED=$(printf '%s' "$ENTRY" | jq -r '.received_at // 0')
+    case "$RECEIVED" in ''|*[!0-9]*) RECEIVED=0 ;; esac
+    if [ "$RECEIVED" -lt "$ARMED_AT" ]; then
+      printf 'fm-tg-task: message %s arrived before the preview for %s was armed, so it cannot confirm it\n' \
+        "$REQUEST" "$TASK" >&2
+      exit 9
+    fi
+    RAW=$(printf '%s' "$ENTRY" | jq -r '.text // ""')
+
+    # One attempt per message, however many candidate codes it contains.
     if ! fmtg_publish_attempt "$TASK"; then
       printf 'fm-tg-task: too many confirmation attempts for %s\n' "$TASK" >&2
       exit 8
     fi
-    # Only characters from the code alphabet are read out of the reply; every
-    # other byte of that untrusted message is discarded here.
+    # Only characters from the code alphabet are read out of the message; every
+    # other byte of that untrusted text is discarded here.
     CANDIDATES=$(printf '%s' "$RAW" \
       | LC_ALL=C tr '[:lower:]' '[:upper:]' \
       | LC_ALL=C tr -c "$FMTG_CODE_ALPHABET" '\n' \
@@ -239,7 +320,7 @@ case "$COMMAND" in
     while IFS= read -r CANDIDATE; do
       [ -n "$CANDIDATE" ] || continue
       CODE_RC=0
-      fmtg_publish_confirm "$TASK" "$CANDIDATE" "$HEAD_REV" "$NOW" || CODE_RC=$?
+      fmtg_publish_confirm "$TASK" "$CANDIDATE" "$HEAD_REV" "$NOW" "$REQUEST" || CODE_RC=$?
       if [ "$CODE_RC" -eq 0 ]; then
         RC=0
         break
@@ -256,7 +337,7 @@ EOF
       0) printf 'confirmed\n' ;;
       3) printf 'fm-tg-task: nothing armed for %s\n' "$TASK" >&2 ;;
       4) printf 'fm-tg-task: the confirmation for %s expired\n' "$TASK" >&2 ;;
-      5) printf 'fm-tg-task: the reply carries no matching confirmation code\n' >&2 ;;
+      5) printf 'fm-tg-task: message %s carries no matching confirmation code\n' "$REQUEST" >&2 ;;
       6) printf 'fm-tg-task: the prepared change moved since the preview; re-preview before publishing\n' >&2 ;;
       7) printf 'fm-tg-task: that confirmation was already used\n' >&2 ;;
       *) printf 'fm-tg-task: confirmation failed\n' >&2 ;;
@@ -265,6 +346,7 @@ EOF
     ;;
 
   clear-publish)
+    require_project_match
     fmtg_publish_clear "$TASK" || die "cannot clear the armed confirmation"
     ;;
 esac

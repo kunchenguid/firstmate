@@ -91,10 +91,15 @@ grep -qxF "pr=$URL" "$META" || {
 # recorded PR head, not from anything a caller asserted, and the authorization
 # is consumed here so it cannot be replayed onto a second landing.
 #
-# A task with no Telegram link is unaffected: the whole gate is skipped and the
-# merge behaves exactly as it did before the bridge existed.
-if fmtg_meta_is_linked "$META"; then
-  TG_REQUEST=$(fmtg_meta_get "$META" tg_request) || TG_REQUEST='<malformed>'
+# Whether the gate applies is decided by durable evidence - the task's immutable
+# Telegram origin, or an armed publish record for it - rather than by the open
+# conversation, so ending the exchange cannot end the gate.
+#
+# A task that never came from the bridge is unaffected: the whole gate is
+# skipped and the merge behaves exactly as it did before the bridge existed.
+if fmtg_landing_gate_applies "$ID" "$META"; then
+  TG_REQUEST=$(fmtg_meta_get "$META" tg_request) \
+    || TG_REQUEST=$(fmtg_meta_get "$META" tg_origin) || TG_REQUEST='<malformed>'
   fmtg_load_config
   TG_NOW=$(fmtg_now) || { echo "error: cannot read the current time" >&2; exit 1; }
   TG_PROJECT=$(fmtg_meta_get "$META" project) || TG_PROJECT=

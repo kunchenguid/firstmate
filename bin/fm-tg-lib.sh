@@ -33,9 +33,10 @@
 #   inbound    fmtg_offset_get/set, fmtg_seen_claim, fmtg_normalize_text_program,
 #              fmtg_rate_allow
 #   recovery   fmtg_announce_count, fmtg_announce_bump
-#   context    fmtg_context_set/get/clear/prune
+#   context    fmtg_context_set/get/clear/prune, fmtg_inbox_get
 #   outbound   fmtg_send_text, fmtg_outbox_record
-#   task link  fmtg_meta_get, fmtg_meta_link_set, fmtg_meta_link_clear
+#   task link  fmtg_meta_get, fmtg_meta_link_set, fmtg_meta_link_clear,
+#              fmtg_meta_is_linked, fmtg_landing_gate_applies
 #   publish    fmtg_publish_arm, fmtg_publish_attempt, fmtg_publish_confirm,
 #              fmtg_publish_show, fmtg_publish_clear
 #
@@ -81,6 +82,7 @@ FMTG_BUDGET_MIN=2
 #   FMTG_MAX_TEXT     inbound text bound, above which a message is "oversized"
 #   FMTG_RATE_MAX / FMTG_RATE_WINDOW   accepted-message rate limit
 #   FMTG_PAIR_TTL / FMTG_PAIR_ATTEMPTS pairing offer lifetime and attempt budget
+#   FMTG_PAIR_SENDERS distinct senders one pairing offer will track
 #   FMTG_PUBLISH_TTL / FMTG_PUBLISH_ATTEMPTS  publish-confirmation lifetime and
 #                     its own attempt budget, separate from the pairing one
 #   FMTG_RECOVERY_SECS  age after which a still-pending inbox entry re-wakes
@@ -191,6 +193,16 @@ fmtg_load_config() {
   [ "$raw" -le 20 ] 2>/dev/null || raw=20
   FMTG_PAIR_ATTEMPTS=$raw
 
+  # How many distinct senders one offer will track before refusing a new one.
+  # This is an operator knob like every other FM_TELEGRAM_* value here; reading
+  # it only from the internal default meant the documented variable silently did
+  # nothing.
+  raw=${FM_TELEGRAM_PAIR_SENDERS:-}
+  case "$raw" in ''|*[!0-9]*) raw=20 ;; esac
+  [ "$raw" -ge 1 ] 2>/dev/null || raw=20
+  [ "$raw" -le 200 ] 2>/dev/null || raw=200
+  FMTG_PAIR_SENDERS=$raw
+
   # Its own budget, not the pairing one. Sharing FMTG_PAIR_ATTEMPTS meant a
   # single knob silently moved two unrelated limits - how many times a stranger
   # may guess a pairing code, and how many times a reply may be scanned for a
@@ -198,7 +210,7 @@ fmtg_load_config() {
   raw=${FM_TELEGRAM_PUBLISH_ATTEMPTS:-}
   case "$raw" in ''|*[!0-9]*) raw=5 ;; esac
   [ "$raw" -ge 1 ] 2>/dev/null || raw=5
-  [ "$raw" -le 20 ] 2>/dev/null || raw=5
+  [ "$raw" -le 20 ] 2>/dev/null || raw=20
   FMTG_PUBLISH_ATTEMPTS=$raw
 
   raw=${FM_TELEGRAM_PUBLISH_TTL:-}
@@ -857,6 +869,21 @@ fmtg_request_authentic() {  # <request_id> <peer-chat>
   [ "$closed" = null ] || return 7
 }
 
+# The stored inbound message for a request, read back through the same private
+# boundary every other bridge artifact goes through.
+#
+# bin/fm-tg-poll.sh writes one of these for an accepted message and for nothing
+# else, and it is the ONLY place the person's own words are kept. A check that
+# has to read what they actually wrote - the publish confirmation - therefore
+# reads it from here rather than from a path its caller chose.
+fmtg_inbox_get() {  # <request_id>
+  local rid=$1 dir
+  fmtg_request_id_valid "$rid" || return 1
+  dir="$(fmtg_dir)/inbox"
+  fm_private_artifact_file_valid "$dir" "$rid.json" 600 || return 1
+  cat "$dir/$rid.json"
+}
+
 # Close a request permanently after its terminal reply lands, so a later
 # milestone - or a replayed command - cannot post against a finished exchange.
 # The record itself is deliberately KEPT as evidence of which conversation the
@@ -969,6 +996,13 @@ fmtg_meta_get() {  # <meta-file> <key>
 # Record which Telegram request a task answers, so milestone and final replies
 # can find the conversation later. Written into the task's own meta file next to
 # the X-mode link fields, using the same rewrite-in-place discipline.
+#
+# THE CONVERSATION LINK IS MUTABLE, THE ORIGIN IS NOT. `tg_request`, `tg_chat`
+# and `tg_request_ts` say which exchange is still open, so ending the exchange
+# clears them. `tg_origin` says this task came from the bridge at all, is
+# written exactly once - the FIRST request this task answered - and is removed
+# by no clearing path, because the publish gate's question is "did the paired
+# person ever ask for this work", which a terminal reply does not change.
 fmtg_meta_link_set() {  # <meta-file> <request_id> <chat_id> <now>
   local meta=$1 rid=$2 chat=$3 now=$4 tmp
   [ -f "$meta" ] || return 1
@@ -977,6 +1011,7 @@ fmtg_meta_link_set() {  # <meta-file> <request_id> <chat_id> <now>
   tmp=$(umask 077; mktemp "$(dirname "$meta")/.fm-tg-meta.XXXXXX") || return 1
   {
     grep -v -E '^(tg_request|tg_chat|tg_request_ts)=' "$meta" 2>/dev/null || true
+    grep -qE '^tg_origin=' "$meta" 2>/dev/null || printf 'tg_origin=%s\n' "$rid"
     printf 'tg_request=%s\n' "$rid"
     printf 'tg_chat=%s\n' "$chat"
     printf 'tg_request_ts=%s\n' "$now"
@@ -985,6 +1020,10 @@ fmtg_meta_link_set() {  # <meta-file> <request_id> <chat_id> <now>
   mv -f -- "$tmp" "$meta" || { rm -f -- "$tmp"; return 1; }
 }
 
+# End the open exchange. `tg_origin` is deliberately NOT in this pattern: it is
+# the evidence the landing gate reads, and a caller that could erase it could
+# switch the gate off for a task the paired person was already shown a preview
+# of, which is precisely what this must not be able to do.
 fmtg_meta_link_clear() {  # <meta-file>
   local meta=$1 tmp
   [ -f "$meta" ] || return 0
@@ -1049,17 +1088,41 @@ fmtg_publish_attempt() {  # <task-id>
   [ "$attempts" -le "${FMTG_PUBLISH_ATTEMPTS:-5}" ]
 }
 
-# Is this task answering a Telegram request?
+# Does this task's own record show a Telegram origin?
 #
 # Linkage is decided by the PRESENCE of the key, not by its value. Reading the
 # value and treating "absent or empty" alike would make an empty `tg_request=`
 # line a silent bypass of the landing gate below, which is exactly the shape a
 # half-written or hand-edited record takes. A present-but-empty link is
 # therefore linked-and-malformed, and the gate refuses it rather than skipping.
+#
+# `tg_origin` counts too, and it is what makes the answer survive an ended
+# conversation: fmtg_meta_link_clear removes the open-exchange keys, so without
+# it a `--final` reply or an `unlink` would leave a task the paired person
+# requested looking exactly like one they never touched.
 fmtg_meta_is_linked() {  # <meta-file>
   local meta=$1
   [ -f "$meta" ] || return 1
-  grep -qE '^tg_(request|chat)=' "$meta" 2>/dev/null
+  grep -qE '^tg_(request|chat|origin)=' "$meta" 2>/dev/null
+}
+
+# Does the landing gate apply to this task at all?
+#
+# Two independent pieces of evidence, because either one alone leaves a hole:
+#   - the task's own record shows a Telegram origin (above), which covers every
+#     task the bridge linked, including one whose exchange has since been closed;
+#   - an armed publish record exists for the task, which covers a task that
+#     entered the two-step flow at all - a preview was shown to the paired
+#     person under this task id - even if its meta was never linked or was
+#     rewritten afterwards.
+#
+# The gate must not be switchable off by any ordinary operation, so it asks
+# about durable evidence rather than about current conversation state.
+fmtg_landing_gate_applies() {  # <task-id> <meta-file>
+  local task=$1 meta=$2
+  fmtg_meta_is_linked "$meta" && return 0
+  fmtg_publish_task_valid "$task" || return 1
+  fm_private_artifact_file_valid "$(fmtg_dir)/publish" "$task.json" 600
 }
 
 # --- landing authorization ----------------------------------------------------
@@ -1115,6 +1178,18 @@ fmtg_landing_guard() {  # <task-id> <task-project> <landing-target> <actual-revi
   { [ "$armed_user" = "$peer_user" ] && [ "$armed_chat" = "$peer_chat" ]; } \
     || { printf 'peer-changed'; return 6; }
 
+  # A confirmation binds to the first landing target it is ever used against, so
+  # an approval spent on a pull request cannot later be spent on a local merge.
+  # This is checked BEFORE the replay check below: both refuse, but a
+  # confirmation reappearing at a DIFFERENT landing is a distinct mistake from
+  # the same landing running twice, and reporting it as a plain replay hid which
+  # one actually happened.
+  armed_target=$(printf '%s' "$record" | jq -r '.landing_target // ""') || { printf 'bad-record'; return 1; }
+  if [ -n "$armed_target" ] && [ "$armed_target" != "$target" ]; then
+    printf 'landing-target-mismatch'
+    return 10
+  fi
+
   landed=$(printf '%s' "$record" | jq -r '.landed_at // "null"') || { printf 'bad-record'; return 1; }
   [ "$landed" = null ] || { printf 'already-landed'; return 7; }
 
@@ -1128,14 +1203,6 @@ fmtg_landing_guard() {  # <task-id> <task-project> <landing-target> <actual-revi
   armed_head=$(printf '%s' "$record" | jq -r '.head // ""') || { printf 'bad-record'; return 1; }
   [ -n "$armed_head" ] || { printf 'bad-record'; return 1; }
   [ "$armed_head" = "$rev" ] || { printf 'revision-moved'; return 9; }
-
-  # A confirmation binds to the first landing target it is used against, so an
-  # approval given for a pull request cannot later be spent on a local merge.
-  armed_target=$(printf '%s' "$record" | jq -r '.landing_target // ""') || { printf 'bad-record'; return 1; }
-  if [ -n "$armed_target" ] && [ "$armed_target" != "$target" ]; then
-    printf 'landing-target-mismatch'
-    return 10
-  fi
 
   dir="$(fmtg_dir)/publish"
   printf '%s' "$record" \
@@ -1192,8 +1259,12 @@ fmtg_publish_clear() {  # <task-id>
 #   3 nothing armed for this task          5 code does not match
 #   6 prepared change moved since preview   7 already used
 #   1 malformed input or state write failure
-fmtg_publish_confirm() {  # <task-id> <supplied-code> <current-head> <now>
-  local task=$1 supplied=$2 head=$3 now=$4 dir record salt want got expires consumed recorded_head
+#
+# <request-id> is the inbound message that carried the code. It is recorded on
+# the consumed record so the approval names the message it came from rather than
+# only the moment it was accepted.
+fmtg_publish_confirm() {  # <task-id> <supplied-code> <current-head> <now> [request-id]
+  local task=$1 supplied=$2 head=$3 now=$4 rid=${5-} dir record salt want got expires consumed recorded_head
   fmtg_publish_task_valid "$task" || return 1
   dir="$(fmtg_dir)/publish"
   record=$(fmtg_publish_show "$task") || return 3
@@ -1209,6 +1280,7 @@ fmtg_publish_confirm() {  # <task-id> <supplied-code> <current-head> <now>
   [ "$got" = "$want" ] || return 5
   recorded_head=$(printf '%s' "$record" | jq -r '.head // ""') || return 1
   [ "$recorded_head" = "$head" ] || return 6
-  printf '%s' "$record" | jq -c --argjson at "$now" '.consumed_at = $at' \
+  printf '%s' "$record" | jq -c --argjson at "$now" --arg rid "$rid" \
+    '.consumed_at = $at | .confirmed_by = (if $rid == "" then null else $rid end)' \
     | fm_private_artifact_publish_stdin "$dir" "$task.json" 600 || return 1
 }

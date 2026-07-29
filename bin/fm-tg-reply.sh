@@ -26,7 +26,8 @@
 #   is refused (exit 6), and one already closed by a final reply is refused
 #   (exit 7). With --task, the task's own recorded project must equal the pinned
 #   project (exit 6), so the outbound path checks project scope exactly as the
-#   inbound task operations do.
+#   inbound task operations do. --retry is a send too, and is held to the same
+#   check: finishing an abandoned reply is still delivering to that person.
 #
 # ONE POSSIBLE RECIPIENT
 #   The destination is always the pinned peer's chat id from
@@ -194,6 +195,29 @@ finalize() {  # <task-id>
   fmtg_meta_link_clear "$meta" || true
 }
 
+# Every send goes through this, so there is one place that decides whether a
+# request may be addressed at all rather than one per entry point.
+require_open_request() {  # <request_id>
+  local rid=$1 rc=0
+  fmtg_request_authentic "$rid" "$PEER_CHAT" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    4)
+      printf 'fm-tg-reply: %s is not a message this home accepted from the paired peer; refusing\n' "$rid" >&2
+      exit 4
+      ;;
+    6)
+      printf 'fm-tg-reply: request %s came from a chat that is no longer the paired peer; refusing\n' "$rid" >&2
+      exit 6
+      ;;
+    7)
+      printf 'fm-tg-reply: request %s was already closed by a final reply; refusing\n' "$rid" >&2
+      exit 7
+      ;;
+    *) die "cannot verify request $rid" ;;
+  esac
+}
+
 if [ -n "$RETRY" ]; then
   fmtg_request_id_valid "$RETRY" || die "invalid request id: $RETRY"
   fm_private_artifact_file_valid "$TG_DIR/outbox" "$RETRY.json" 600 \
@@ -207,6 +231,12 @@ if [ -n "$RETRY" ]; then
     printf 'fm-tg-reply: preserved reply targets a chat that is no longer the paired peer; refusing\n' >&2
     exit 6
   fi
+  # A preserved record proved the target, never the request. This path used to
+  # stop there, so the one send that skipped the authenticity check could finish
+  # an abandoned reply into an exchange that is no longer this home's to answer.
+  # A legitimate retry is unaffected: a final reply closes its request only after
+  # every one of its chunks has landed.
+  require_open_request "$RETRY"
   send_chunks "$RETRY" "$RECORD"
   if [ "$(printf '%s' "$RECORD" | jq -r '.final // false')" = true ]; then
     finalize "$(printf '%s' "$RECORD" | jq -r '.task_id // ""')"
@@ -248,24 +278,7 @@ fmtg_request_id_valid "$REQUEST" || die "invalid request id: $REQUEST"
 
 # The request must be one this home really accepted from the pinned peer, and
 # must still be open. This is the check that makes an invented id inert.
-AUTH_RC=0
-fmtg_request_authentic "$REQUEST" "$PEER_CHAT" || AUTH_RC=$?
-case "$AUTH_RC" in
-  0) ;;
-  4)
-    printf 'fm-tg-reply: %s is not a message this home accepted from the paired peer; refusing\n' "$REQUEST" >&2
-    exit 4
-    ;;
-  6)
-    printf 'fm-tg-reply: request %s came from a chat that is no longer the paired peer; refusing\n' "$REQUEST" >&2
-    exit 6
-    ;;
-  7)
-    printf 'fm-tg-reply: request %s was already closed by a final reply; refusing\n' "$REQUEST" >&2
-    exit 7
-    ;;
-  *) die "cannot verify request $REQUEST" ;;
-esac
+require_open_request "$REQUEST"
 
 # The body arrives on stdin and is staged as a private artifact before it can be
 # sent, so there is no caller-supplied path anywhere on this path.

@@ -97,23 +97,27 @@ It never authorizes making it public.
 
    The prepared revision is resolved from the task's own worktree, not passed in, so you cannot arm a revision the task has not actually prepared.
    Ask them to reply with that code if they want it published.
-2. When a reply arrives, write it to a file and check it:
+2. When their reply arrives as a new `telegram-message <request_id>` wake, name that message:
 
    ```sh
-   bin/fm-tg-task.sh confirm-publish <task-id> --message-file <path>
+   bin/fm-tg-task.sh confirm-publish <task-id> --request <request_id>
    ```
 
+   There is no path argument: the text is read from that message's own stored record, so a confirmation can only ever be something the paired person actually sent.
+   Run this **before** step (e) of the procedure below removes the inbox file.
    Exit 0 means confirmed and consumed.
-   Any other exit means **not confirmed**: the code did not match, it expired, it was already used, the attempt budget is spent, or the prepared change moved since the preview.
+   Any other exit means **not confirmed**: the code did not match, it expired, it was already used, the attempt budget is spent, the prepared change moved since the preview, or no fresh authentic message from that person carries it (exit 9).
    The script's `--help` owns the exact exit codes.
 
 Only after exit 0 may the prepared change land, and only through the project's own approved landing path.
 A confirmation is valid for the exact change that was previewed: if the branch moved, re-preview and arm again rather than reusing the old code.
 
 You do not have to remember this at the moment of landing, and you cannot bypass it by forgetting.
-`bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` refuse to land any Telegram-linked task without a live confirmation bound to the exact revision they are about to land, and they consume it, so one approval lands exactly one change.
+`bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` refuse to land any task of Telegram origin without a live confirmation bound to the exact revision they are about to land, and they consume it, so one approval lands exactly one change.
+That origin is recorded once when the task is linked and is not cleared by `--final` or `unlink`, so ending the conversation cannot end the gate either.
 If a landing helper refuses, the answer is to preview and get a fresh confirmation - never to work around the gate.
-Never accept a confirmation that arrived before the preview, never infer one from "yes", "ok", or a thumbs-up, and never arm and confirm in the same turn.
+Never infer a confirmation from "yes", "ok", or a thumbs-up.
+Arming and confirming in one turn is not possible: a message that arrived before the preview was armed is refused, so there must be a real reply in between.
 
 Landing is not the same as deploying.
 Anything that pushes the site to a live host, connects a domain, or hands out a URL is an outward-facing action on the captain's infrastructure and belongs in the escalation list above, whatever the project's routine autonomy allows internally.
@@ -183,14 +187,14 @@ Treat `state/telegram/inbox/` as the source of truth and process **every** file 
 A linked task reports back to the same conversation on real milestones and once at the end.
 Spend milestone replies only on what that person would actually want to hear - the change is ready to look at, it is live, it did not work out - never on internal progress.
 
-The terminal reply uses `--final`, which clears the task's link so nothing can post against a finished task afterwards:
+The terminal reply uses `--final`, which clears the task's open exchange so nothing can post against a finished task afterwards:
 
 ```sh
 bin/fm-tg-reply.sh --task <task-id> --final < <path>
 ```
 
-`--final` deliberately does not delete the request's context record; that stays as evidence of which conversation the task answered until it ages out.
-Clearing the link is what ends the conversation thread, so send the final reply **before** the task is torn down - after teardown there is no link left to answer from.
+`--final` deliberately deletes neither the request's context record, which stays as evidence of which conversation the task answered until it ages out, nor the task's Telegram origin, which is what keeps the publish gate in force.
+Clearing the open exchange is what ends the conversation thread, so send the final reply **before** the task is torn down - after teardown there is no link left to answer from.
 If a task ends with nothing worth saying, still send one short closing message; silence on a private channel reads as being ignored.
 
 ## Other wakes

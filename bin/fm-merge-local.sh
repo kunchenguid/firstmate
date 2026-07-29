@@ -69,12 +69,16 @@ fi
 # may not land without a live confirmation the paired person gave for exactly
 # the revision about to be fast-forwarded. The revision is resolved from the
 # branch itself in trusted code, and the authorization is consumed before the
-# merge so one approval can never land twice. A task with no Telegram link is
+# merge so one approval can never land twice. Whether the gate applies is
+# decided by durable evidence - the task's immutable Telegram origin, or an
+# armed publish record for it - rather than by the open conversation, so ending
+# the exchange cannot end the gate. A task that never came from the bridge is
 # unaffected.
 # shellcheck source=bin/fm-tg-lib.sh
 . "$FM_ROOT/bin/fm-tg-lib.sh"
-if fmtg_meta_is_linked "$META"; then
-  TG_REQUEST=$(fmtg_meta_get "$META" tg_request) || TG_REQUEST='<malformed>'
+if fmtg_landing_gate_applies "$ID" "$META"; then
+  TG_REQUEST=$(fmtg_meta_get "$META" tg_request) \
+    || TG_REQUEST=$(fmtg_meta_get "$META" tg_origin) || TG_REQUEST='<malformed>'
   fmtg_load_config
   TG_NOW=$(fmtg_now) || { echo "error: cannot read the current time" >&2; exit 1; }
   TG_HEAD=$(git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH") || TG_HEAD=

@@ -790,6 +790,15 @@ test_show_names_an_absent_link_rather_than_printing_a_blank() {
 
 # --- two-step publish -------------------------------------------------------
 
+# Deliver one real inbound message from the paired person and echo its request
+# id. Every confirmation below has to travel this way: confirm-publish reads the
+# text from the message's own stored record, never from a caller-supplied path.
+tg_say() {  # <update_id> <text>
+  tg_queue "$1" "$PEER_ID" "$PEER_ID" "$2"
+  tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
+  printf 'tg-%s' "$1"
+}
+
 # Arm a publish confirmation on a paired home. Sets HOME_DIR, FAKEBIN, and
 # PUBLISH_CODE in the caller.
 publish_home() {  # <name>
@@ -811,7 +820,7 @@ publish_home() {  # <name>
 }
 
 test_publish_needs_a_matching_confirmation() {
-  local msg out
+  local rid out
   publish_home publish-ok
   [ -n "$PUBLISH_CODE" ] || fail "arm-publish printed no confirmation code"
   # The armed revision is the worktree's real HEAD, resolved by arm-publish
@@ -821,40 +830,40 @@ test_publish_needs_a_matching_confirmation() {
   assert_no_grep "$PUBLISH_CODE" "$HOME_DIR/state/telegram/publish/site.json" \
     "the confirmation code was stored in the clear and could be replayed"
 
-  msg="$HOME_DIR/msg.txt"
-  printf 'ja mach das live: %s\n' "$PUBLISH_CODE" > "$msg"
-  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --message-file "$msg" 2>&1)
+  rid=$(tg_say 1900 "ja mach das live: $PUBLISH_CODE")
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --request "$rid" 2>&1)
   assert_contains "$out" "confirmed" "a matching confirmation was not accepted"
+  # The approval names the message that carried it, not just the moment it was taken.
+  [ "$(jq -r '.confirmed_by' "$HOME_DIR/state/telegram/publish/site.json")" = "$rid" ] \
+    || fail "the consumed record does not name the message that confirmed it"
 
   # Single use.
-  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --message-file "$msg" 2>&1 \
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --request "$rid" 2>&1 \
     || printf 'rc=%s' "$?")
   assert_contains "$out" "rc=7" "a confirmation was accepted twice"
   pass "publishing needs one matching confirmation code, and it is single use"
 }
 
 test_bare_agreement_is_not_a_confirmation() {
-  local msg out
+  local rid out
   publish_home publish-bare
-  msg="$HOME_DIR/msg.txt"
-  printf 'ja klar, mach das\n' > "$msg"
-  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --message-file "$msg" 2>&1 \
+  rid=$(tg_say 1910 "ja klar, mach das")
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --request "$rid" 2>&1 \
     || printf 'rc=%s' "$?")
   assert_contains "$out" "rc=5" "a bare yes was treated as a publish confirmation"
   pass "a bare agreement without the code never authorizes publishing"
 }
 
 test_stale_confirmation_is_refused() {
-  local msg out
+  local rid out
   publish_home publish-stale
-  msg="$HOME_DIR/msg.txt"
-  printf '%s\n' "$PUBLISH_CODE" > "$msg"
+  rid=$(tg_say 1920 "$PUBLISH_CODE")
   # The prepared change really moved after the preview was shown: the worktree
   # has a new HEAD, and confirm-publish resolves that itself rather than
   # believing a revision its caller passed in.
   git -C "$PUBLISH_WT" -c user.email=t@example.invalid -c user.name=t \
     commit -q --allow-empty -m rebuilt
-  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --message-file "$msg" 2>&1 \
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --request "$rid" 2>&1 \
     || printf 'rc=%s' "$?")
   assert_contains "$out" "rc=6" "a confirmation for a change that moved was accepted"
   assert_contains "$out" "re-preview" "the stale refusal did not say what to do next"
@@ -862,27 +871,110 @@ test_stale_confirmation_is_refused() {
 }
 
 test_expired_and_over_budget_confirmations_are_refused() {
-  local msg out i
+  local rid wrong out i
   publish_home publish-expiry
-  msg="$HOME_DIR/msg.txt"
-  printf '%s\n' "$PUBLISH_CODE" > "$msg"
+  rid=$(tg_say 1930 "$PUBLISH_CODE")
   out=$(FMTG_NOW_OVERRIDE=$(( $(date +%s) + 200000 )) tg_run "$HOME_DIR" "$FAKEBIN" \
-    "$TGTASK" confirm-publish site --message-file "$msg" 2>&1 || printf 'rc=%s' "$?")
+    "$TGTASK" confirm-publish site --request "$rid" 2>&1 || printf 'rc=%s' "$?")
   assert_contains "$out" "rc=4" "an expired confirmation was accepted"
 
   publish_home publish-budget
-  msg="$HOME_DIR/msg.txt"
-  printf 'WRONGX\n' > "$msg"
+  wrong=$(tg_say 1940 "WRONGX")
   i=0
   while [ "$i" -lt 5 ]; do
-    tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --message-file "$msg" >/dev/null 2>&1 || true
+    tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --request "$wrong" >/dev/null 2>&1 || true
     i=$(( i + 1 ))
   done
-  printf '%s\n' "$PUBLISH_CODE" > "$msg"
-  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --message-file "$msg" 2>&1 \
+  rid=$(tg_say 1941 "$PUBLISH_CODE")
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --request "$rid" 2>&1 \
     || printf 'rc=%s' "$?")
   assert_contains "$out" "rc=8" "the confirmation attempt budget was not enforced"
   pass "expired confirmations and exhausted attempt budgets are both refused"
+}
+
+# The publish confirmation used to be read from any path the caller named, so
+# nothing tied an approval to the paired person having said anything at all:
+# writing the code the script had just printed into a file confirmed it, and
+# "never arm and confirm in the same turn" lived only in an agent skill.
+test_a_confirmation_must_be_carried_by_a_fresh_message_from_that_person() {
+  local out rid armed_late
+  publish_home publish-source
+
+  # The exact reproducer: the agent writes the code it was just handed into a
+  # file of its own. There is no path argument left to point anywhere.
+  printf 'ja mach das live: %s\n' "$PUBLISH_CODE" > "$HOME_DIR/self.txt"
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site \
+    --message-file "$HOME_DIR/self.txt" 2>&1 || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=2" "the removed --message-file path argument was still accepted"
+  [ "$(jq -r '.consumed_at' "$HOME_DIR/state/telegram/publish/site.json")" = null ] \
+    || fail "a self-written file consumed the publish authorization"
+
+  # A syntactically valid request id this home never accepted is inert too.
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site \
+    --request tg-nonexistent 2>&1 || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=9" "an invented request id confirmed a publish"
+
+  # A message that predates the preview cannot be an answer to it, however
+  # perfectly it matches: this is the same-turn arm-and-confirm reproducer.
+  rid=$(tg_say 1950 "$PUBLISH_CODE")
+  armed_late=$(( $(date +%s) + 600 ))
+  FMTG_NOW_OVERRIDE=$armed_late tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" arm-publish site >/dev/null
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --request "$rid" 2>&1 \
+    || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=9" "a message that arrived before the preview confirmed it anyway"
+  assert_contains "$out" "before the preview" "the stale-message refusal did not say why"
+  [ "$(jq -r '.consumed_at' "$HOME_DIR/state/telegram/publish/site.json")" = null ] \
+    || fail "a message older than the preview consumed the publish authorization"
+  pass "a publish confirmation must be carried by a fresh, authentic message from the paired person"
+}
+
+# A confirmation must also arrive inside a live exchange: once a terminal reply
+# has closed that conversation, nothing in it can authorize anything.
+test_a_closed_exchange_cannot_confirm_a_publish() {
+  local rid out
+  publish_home publish-closed
+  rid=$(tg_say 1970 "$PUBLISH_CODE")
+  printf 'alles klar\n' | tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" "$rid" --final >/dev/null
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --request "$rid" 2>&1 \
+    || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=9" "a message from a closed exchange confirmed a publish"
+  [ "$(jq -r '.consumed_at' "$HOME_DIR/state/telegram/publish/site.json")" = null ] \
+    || fail "a message from a closed exchange consumed the publish authorization"
+  pass "a message from an exchange a final reply already closed cannot confirm a publish"
+}
+
+# A message with no text at all - an attachment or an over-long body - carries
+# no words, so it can never carry a confirmation either.
+test_a_textless_message_cannot_confirm_a_publish() {
+  local out
+  publish_home publish-textless
+  tg_queue_json "$(jq -cn --argjson chat "$PEER_ID" \
+    '{update_id:1960, message:{message_id:19600, date:1750000000,
+      from:{id:$chat, is_bot:false, first_name:"Paired"},
+      chat:{id:$chat, type:"private"}, photo:[{file_id:"x"}]}}')"
+  tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
+  [ "$(jq -r '.kind' "$HOME_DIR/state/telegram/inbox/tg-1960.json")" = unsupported ] \
+    || fail "the fixture did not produce a textless inbox entry"
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" confirm-publish site --request tg-1960 2>&1 \
+    || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=9" "a message carrying no text confirmed a publish"
+  pass "a message with no text can never carry a publish confirmation"
+}
+
+# arm-publish and confirm-publish both resolve the prepared revision by running
+# git in the task's own worktree, and that resolution can fail. It used to fail
+# inside a command substitution, where `exit` ends only the subshell: both
+# subcommands printed the refusal and then carried on with an empty revision.
+test_an_unresolvable_prepared_revision_refuses_instead_of_arming() {
+  local out
+  paired_home publish-norev
+  fm_write_meta "$HOME_DIR/state/site.meta" "project=$HOME_DIR/projects/eren-pov-site" \
+    "worktree=$HOME_DIR/gone" "window=t:1"
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" arm-publish site 2>&1 || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=6" "arming with an unresolvable prepared revision was not refused"
+  assert_absent "$HOME_DIR/state/telegram/publish/site.json" \
+    "a refused arm still wrote a publish record no landing could ever match"
+  pass "an unresolvable prepared revision refuses instead of arming an empty one"
 }
 
 # --- replies ----------------------------------------------------------------
@@ -1689,6 +1781,131 @@ test_local_merge_is_unaffected_without_a_telegram_link() {
   pass "a local-only task with no Telegram link merges exactly as it did before the bridge existed"
 }
 
+# The landing gate used to read the OPEN exchange - tg_request/tg_chat - and
+# both `--final` and `unlink` clear exactly those keys with no authorization
+# check. A terminal reply sent before the merge therefore switched the whole
+# publish gate off for a task the paired person had already been shown.
+test_ending_the_conversation_does_not_disarm_the_landing_gate() {
+  local dir out
+  paired_home gate-origin
+  tg_queue 2900 "$PEER_ID" "$PEER_ID" "mach das bitte"
+  tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
+  fm_write_meta "$HOME_DIR/state/site.meta" "project=$HOME_DIR/projects/eren-pov-site" "window=t:1"
+  tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" link site tg-2900 >/dev/null
+
+  printf 'fertig\n' | tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" --task site --final >/dev/null
+  assert_no_grep 'tg_request=' "$HOME_DIR/state/site.meta" "the final reply left the exchange open"
+  assert_grep 'tg_origin=tg-2900' "$HOME_DIR/state/site.meta" \
+    "the final reply erased the task's Telegram origin, which is the landing gate's own evidence"
+  tg_run "$HOME_DIR" "$FAKEBIN" "$TGTASK" unlink site >/dev/null
+  assert_grep 'tg_origin=tg-2900' "$HOME_DIR/state/site.meta" \
+    "unlink erased the task's Telegram origin"
+
+  # And a task carrying only that origin really is still gated.
+  dir=$(local_merge_case gate-origin-merge none null exact)
+  fm_write_meta "$dir/state/site.meta" "project=$dir/eren-pov-site" "mode=local-only" \
+    "window=t:1" "worktree=$dir/eren-pov-site" "tg_origin=tg-42"
+  out=$(run_local_merge "$dir" || printf 'rc=%s' "$?")
+  assert_contains "$out" "no publish confirmation was ever armed" \
+    "a task whose Telegram exchange was closed landed with no publish gate at all"
+  git -C "$dir/eren-pov-site" merge-base --is-ancestor "refs/heads/fm/site" main 2>/dev/null \
+    && fail "the refused local merge still fast-forwarded the default branch"
+  pass "ending the Telegram conversation cannot turn the landing gate off"
+}
+
+# The other half of the same hole: a task whose record carries no Telegram keys
+# at all, but for which a preview was armed under this task id.
+test_an_armed_publish_record_alone_gates_the_landing() {
+  local dir out
+  dir=$(local_merge_case gate-armed-only eren-pov-site null exact)
+  fm_write_meta "$dir/state/site.meta" "project=$dir/eren-pov-site" "mode=local-only" \
+    "window=t:1" "worktree=$dir/eren-pov-site"
+  out=$(run_local_merge "$dir" || printf 'rc=%s' "$?")
+  assert_contains "$out" "has not confirmed publishing" \
+    "a task with an armed publish record landed as if it had never been previewed"
+  git -C "$dir/eren-pov-site" merge-base --is-ancestor "refs/heads/fm/site" main 2>/dev/null \
+    && fail "the refused local merge still fast-forwarded the default branch"
+  pass "an armed publish record gates the landing even with no link left in the task record"
+}
+
+# An approval binds to the landing it was first spent on, so it cannot be moved
+# from a pull request to a local merge. Reporting that as a plain replay hid
+# which of the two landings actually ran.
+test_a_confirmation_bound_to_another_landing_is_refused() {
+  local dir out
+  dir=$(local_merge_case local-target eren-pov-site 100 exact)
+  jq -c '.landing_target = "https://github.com/example/repo/pull/9"' \
+    "$dir/state/telegram/publish/site.json" > "$dir/rec.tmp" \
+    && mv -f "$dir/rec.tmp" "$dir/state/telegram/publish/site.json"
+  chmod 600 "$dir/state/telegram/publish/site.json"
+  out=$(run_local_merge "$dir" || printf 'rc=%s' "$?")
+  assert_contains "$out" "approved for a different landing target" \
+    "an approval already spent on a pull request was spent again on a local merge"
+  git -C "$dir/eren-pov-site" merge-base --is-ancestor "refs/heads/fm/site" main 2>/dev/null \
+    && fail "the refused local merge still fast-forwarded the default branch"
+  pass "a publish confirmation bound to one landing target cannot be spent on another"
+}
+
+# Every send needs an authenticated, still-open request. --retry checked only
+# the target chat, so it was the one send that could finish an abandoned reply
+# into an exchange that is no longer this home's to answer.
+test_retry_needs_the_request_to_still_be_open() {
+  local out before ctx
+  paired_home retry-authentic
+  tg_queue 3100 "$PEER_ID" "$PEER_ID" "frage"
+  tg_run "$HOME_DIR" "$FAKEBIN" "$POLL" >/dev/null
+  printf 'Erster Absatz mit genug Text fuer eine eigene Nachricht.\n\nZweiter Absatz mit genug Text fuer eine eigene Nachricht.\n\nDritter Absatz mit genug Text fuer eine eigene Nachricht.\n' \
+    > "$HOME_DIR/reply.txt"
+
+  # A real mid-send failure, so the preserved record is the genuine article.
+  FAKE_TG_SEND_FAIL_FROM=3 FM_TELEGRAM_MAX_CHARS=100 \
+    tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" tg-3100 >/dev/null 2>&1 < "$HOME_DIR/reply.txt" || true
+  assert_present "$HOME_DIR/state/telegram/outbox/tg-3100.json" \
+    "the failed send preserved nothing to retry"
+
+  # The exchange is then closed exactly as a --final reply closes it.
+  ctx="$HOME_DIR/state/telegram/context/tg-3100.json"
+  jq -c '.closed_at = 1750000000' "$ctx" > "$HOME_DIR/ctx.tmp" && mv -f "$HOME_DIR/ctx.tmp" "$ctx"
+  chmod 600 "$ctx"
+
+  before=$(tg_sent_count)
+  out=$(tg_run "$HOME_DIR" "$FAKEBIN" "$REPLY" --retry tg-3100 2>&1 || printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=7" "a retry delivered into an exchange a final reply had already closed"
+  [ "$(tg_sent_count)" = "$before" ] || fail "the refused retry still delivered a message"
+  pass "a retry needs the same authenticated, still-open request every other send needs"
+}
+
+# FM_TELEGRAM_PAIR_SENDERS is documented as an operator knob, so setting it has
+# to change behavior rather than leave an internal default in charge.
+test_the_documented_sender_cap_is_honored() {
+  local dir home fakebin code
+  dir="$TMP_ROOT/pair-senders"
+  mkdir -p "$dir"
+  tg_fake_api "$dir"
+  fakebin=$TG_FAKEBIN
+  home=$(tg_home "$dir" home "$TEST_TOKEN")
+  code=$(tg_run "$home" "$fakebin" "$PAIR" begin --label eren --project eren-pov-site \
+    | sed -n 's|^  /start ||p')
+
+  # One sender fills the whole map, so the next distinct sender is refused
+  # before it can consume anybody's attempts.
+  tg_queue 400 "$OTHER_ID" "$OTHER_ID" "/start WRONGCDE"
+  FM_TELEGRAM_PAIR_SENDERS=1 tg_run "$home" "$fakebin" "$POLL" >/dev/null
+  tg_queue 401 "$PEER_ID" "$PEER_ID" "/start $code"
+  FM_TELEGRAM_PAIR_SENDERS=1 tg_run "$home" "$fakebin" "$POLL" >/dev/null
+  assert_absent "$home/state/telegram/peer.json" \
+    "the documented sender cap did nothing: a sender past the cap still redeemed"
+  [ "$(jq -r '(.attempts_by | length)' "$home/state/telegram/pairing.json")" = 1 ] \
+    || fail "a sender past the cap was still tracked"
+
+  # At the default the same offer admits that sender and pairs.
+  tg_queue 402 "$PEER_ID" "$PEER_ID" "/start $code"
+  tg_run "$home" "$fakebin" "$POLL" >/dev/null
+  assert_present "$home/state/telegram/peer.json" \
+    "the cap was not the reason the earlier redemption was refused"
+  pass "FM_TELEGRAM_PAIR_SENDERS really caps how many senders one offer tracks"
+}
+
 # An abandoned attempt must not leave message content sitting in bridge state,
 # and "nothing to send" must be distinguishable from "that request was never
 # accepted here" - both used to exit 4.
@@ -1741,6 +1958,10 @@ test_publish_needs_a_matching_confirmation
 test_bare_agreement_is_not_a_confirmation
 test_stale_confirmation_is_refused
 test_expired_and_over_budget_confirmations_are_refused
+test_a_confirmation_must_be_carried_by_a_fresh_message_from_that_person
+test_a_closed_exchange_cannot_confirm_a_publish
+test_a_textless_message_cannot_confirm_a_publish
+test_an_unresolvable_prepared_revision_refuses_instead_of_arming
 test_reply_is_literal_and_single_target
 test_reply_refuses_when_the_target_no_longer_matches
 test_reply_without_a_peer_sends_nothing
@@ -1773,4 +1994,9 @@ test_local_merge_refuses_a_telegram_task_without_confirmation
 test_local_merge_refuses_an_unconsumed_or_moved_confirmation
 test_local_merge_lands_once_on_a_matching_confirmation
 test_local_merge_is_unaffected_without_a_telegram_link
+test_ending_the_conversation_does_not_disarm_the_landing_gate
+test_an_armed_publish_record_alone_gates_the_landing
+test_a_confirmation_bound_to_another_landing_is_refused
+test_retry_needs_the_request_to_still_be_open
+test_the_documented_sender_cap_is_honored
 test_empty_reply_is_its_own_outcome_and_leaves_nothing_staged

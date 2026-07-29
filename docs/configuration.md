@@ -426,7 +426,7 @@ Bootstrap then removes the poll shim and the cadence file and the home returns t
 Pairing binds Telegram's immutable numeric `user_id` and `chat_id`; usernames and display names are informational and never authority.
 The offer's guess budget is counted PER NUMERIC SENDER, because a bot is reachable by any Telegram user who knows its `@handle` and a single global counter let a stranger burn the whole offer and deny the intended recipient their own attempt.
 `bin/fm-tg-pair.sh begin --user-id <numeric id>` binds the offer to exactly one account, and every other sender is then dropped before the attempt budget is touched at all.
-The number of distinct senders one offer will track is capped by `FM_TELEGRAM_PAIR_SENDERS` (default 20), so the record cannot grow without bound either.
+The number of distinct senders one offer will track is capped by `FM_TELEGRAM_PAIR_SENDERS` (default 20, clamped to 1-200), so the record cannot grow without bound either; a new sender arriving at a full map is refused rather than allowed to consume anybody else's remaining attempts.
 
 `begin --replace` is one crash-safe identity transition: the old peer is retired, and its pending messages, reply contexts, preserved replies and armed publish authorizations are cleared, BEFORE the replacement offer exists.
 There is no window in which both identities are valid, and a crash mid-transition leaves the home unpaired with no offer, which is the safe end.
@@ -484,14 +484,22 @@ The long poll is therefore bounded by that budget and not only by its own ceilin
 A message from the paired person authorizes preparing a change and showing a preview.
 It never authorizes publishing that change, and that rule is enforced by the code that lands work rather than by instructions alone.
 
-`bin/fm-tg-task.sh arm-publish` records the prepared revision and prints a one-time code to include in the preview.
+`bin/fm-tg-task.sh arm-publish <task-id>` records the prepared revision and prints a one-time code to include in the preview.
 Both `arm-publish` and `confirm-publish` resolve that revision themselves with `git rev-parse HEAD` in the task's own recorded worktree, so neither end takes a revision from its caller and "they approved what they actually saw" is checkable rather than trusted.
-`confirm-publish` accepts only a reply carrying the matching code while the prepared revision is still exactly what was previewed.
+A revision that cannot be resolved refuses rather than arming or confirming against an empty one.
 
-`bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` then refuse to land any task carrying a Telegram link unless a live confirmation exists for exactly the revision they are really about to land.
+`confirm-publish <task-id> --request <request-id>` names the inbound message that carried the code, and reads the text from that message's own stored record.
+There is no path argument: reading a caller-named file meant nothing tied an approval to the paired person having said anything at all, so writing the code the script had just printed into a file confirmed it and "never arm and confirm in the same turn" was a rule in an agent skill rather than a property of the code.
+The named request must be one this home really accepted from the currently pinned peer and still open, must carry text, and must have been RECEIVED AFTER the preview was armed; only the code alphabet is scanned out of that text, so no other part of the untrusted message is interpreted.
+A confirmation is refused when it is late, guessed, replayed, over its attempt budget, carried by no fresh authentic message, or aimed at a preview that has since been rebuilt; the script's `--help` owns the exact exit codes.
+
+`bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` then refuse to land any task of Telegram origin unless a live confirmation exists for exactly the revision they are really about to land.
 The pull-request path uses the forge's own recorded `pr_head`, and the local path resolves the branch tip itself; a revision that cannot be resolved refuses rather than merging something unverified.
-Absent, unconsumed, expired, moved, wrong-project, wrong-target, and already-used authorizations all refuse, and the authorization is consumed before the merge runs, so one approval can never land twice.
-A task with no Telegram link is unaffected and merges exactly as it did before the bridge existed.
+Absent, unconsumed, expired, moved, wrong-project, wrong-person, wrong-target, and already-used authorizations all refuse, and the authorization is consumed before the merge runs, so one approval can never land twice.
+
+Whether the gate applies is decided by durable evidence, never by the open conversation: the task's immutable `tg_origin=` marker, written once when it is first linked and removed by no clearing path, or an armed publish record for that task id.
+`--final` and `unlink` clear only the open exchange, so a terminal reply sent before the merge cannot switch the gate off for work the paired person was already shown.
+A task that never came from the bridge is unaffected and merges exactly as it did before the bridge existed.
 
 ### Replies
 
@@ -501,9 +509,19 @@ It takes no path argument: a generic path-to-Telegram primitive would let the on
 Every send also requires an authenticated, still-open request.
 The request id must name a message this home really accepted from the currently pinned peer, proven by the context record `bin/fm-tg-poll.sh` writes for accepted messages and for nothing else; an invented id is refused.
 A request whose recorded chat is no longer the pinned peer is refused, a request already closed by a final reply is refused, and with `--task` the task's own project must equal the pinned project, so the outbound path checks scope exactly as the inbound task operations do.
+`--retry` is held to the same check, because finishing an abandoned reply is still delivering to that person.
 
-Delivery progress must become durable before the next chunk is sent.
-If a chunk is accepted by Telegram but the progress record cannot be written, delivery is reported as AMBIGUOUS rather than as preserved for retry, because a retry from a stale counter would repeat a message the person already received.
+It sends to the pinned peer's chat and only that chat; a request or task whose recorded chat no longer matches the pinned peer is refused rather than delivered elsewhere, and with no pinned peer nothing is ever sent.
+That is what makes "sendMessage only after pairing" structural rather than a matter of discipline.
+
+No `parse_mode` is ever set.
+That is the whole escaping contract: with no markup parser enabled, Telegram delivers the body literally, so text containing `*`, `_`, `[`, a backtick, or a stray backslash arrives exactly as written and can neither be reinterpreted as markup nor rejected as an unbalanced entity.
+
+A reply longer than `FM_TELEGRAM_MAX_CHARS` (default 3900, below Telegram's 4096 limit) is split deterministically on fenced-code, paragraph, line, and word boundaries into at most `FM_TELEGRAM_MAX_MESSAGES` numbered messages (default 8), by the same splitter X mode uses (`bin/fm-message-split-lib.sh`).
+Before the first send the whole plan is written to `outbox/<request_id>.json`, and each delivered chunk advances its `sent` counter, so a failure preserves exactly what is left: `bin/fm-tg-reply.sh --retry <request_id>` resumes at the first undelivered chunk without repeating a delivered message and without re-running whatever produced the text.
+That progress must become durable before the next chunk is sent: if a chunk is accepted by Telegram but the progress record cannot be written, delivery is reported as AMBIGUOUS rather than as preserved for retry, because a retry from a stale counter would repeat a message the person already received.
+`--final` marks a terminal outcome and clears the task's open exchange after the last chunk lands, but deliberately keeps both the per-request context record as evidence of which conversation the task answered and the task's immutable `tg_origin` marker that the landing gate reads.
+`FM_TELEGRAM_DRY_RUN` previews without sending, recording the would-be payload to the same outbox path with `"dry_run": true`.
 
 The budget belongs to the check, not to a request, and one check can issue more than one call - a code redeemed inside the poll is answered with a pairing confirmation in the same cycle.
 Each call therefore gets what is *left* of the budget rather than a fresh full-length deadline, and the long poll is shortened by whatever the prune already spent, so the sum of a cycle's requests still lands before the kill.
@@ -517,26 +535,6 @@ An over-long message is recorded as `"kind": "oversized"` and carries no text at
 Accepted messages are bounded at `FM_TELEGRAM_RATE_MAX` per `FM_TELEGRAM_RATE_WINDOW` seconds (default 60 per hour); crossing that reports one deduplicated `telegram-error` rather than one wake per message.
 
 HTTP 409 from `getUpdates` means another process is already long-polling the same bot, which is reported as the misconfiguration it is: one bot token belongs to one home.
-
-### Replies
-
-`bin/fm-tg-reply.sh` sends to the pinned peer's chat and only that chat; a request or task whose recorded chat no longer matches the pinned peer is refused rather than delivered elsewhere, and with no pinned peer nothing is ever sent.
-That is what makes "sendMessage only after pairing" structural rather than a matter of discipline.
-
-No `parse_mode` is ever set.
-That is the whole escaping contract: with no markup parser enabled, Telegram delivers the body literally, so text containing `*`, `_`, `[`, a backtick, or a stray backslash arrives exactly as written and can neither be reinterpreted as markup nor rejected as an unbalanced entity.
-
-A reply longer than `FM_TELEGRAM_MAX_CHARS` (default 3900, below Telegram's 4096 limit) is split deterministically on fenced-code, paragraph, line, and word boundaries into at most `FM_TELEGRAM_MAX_MESSAGES` numbered messages (default 8), by the same splitter X mode uses (`bin/fm-message-split-lib.sh`).
-Before the first send the whole plan is written to `outbox/<request_id>.json`, and each delivered chunk advances its `sent` counter, so a failure preserves exactly what is left: `bin/fm-tg-reply.sh --retry <request_id>` resumes at the first undelivered chunk without repeating a delivered message and without re-running whatever produced the text.
-`--final` marks a terminal outcome and clears the task's link after the last chunk lands, but deliberately keeps the per-request context record as evidence of which conversation the task answered.
-`FM_TELEGRAM_DRY_RUN` previews without sending, recording the would-be payload to the same outbox path with `"dry_run": true`.
-
-### Publishing needs a second, matching confirmation
-
-A message authorizes preparing and previewing a change, never making it public.
-`bin/fm-tg-task.sh arm-publish <task-id>` records the exact prepared revision and prints a one-time code to include in the preview; `confirm-publish <task-id> --message-file <path>` accepts only a reply carrying that code while the prepared revision is still the one previewed. Both resolve that revision from the task's own worktree rather than from an argument.
-The reply is read from a file and only the code alphabet is scanned out of it, so no other part of that untrusted text is interpreted.
-A confirmation is refused when it is late, guessed, replayed, over its attempt budget, or aimed at a preview that has since been rebuilt; the script's `--help` owns the exact exit codes.
 
 ### What this is not
 
@@ -598,7 +596,7 @@ FM_TELEGRAM_RATE_MAX=60       # accepted messages per window before the bridge d
 FM_TELEGRAM_RATE_WINDOW=3600  # seconds in that accept window
 FM_TELEGRAM_PAIR_TTL=900      # pairing offer lifetime in seconds (clamped to 30-3600)
 FM_TELEGRAM_PAIR_ATTEMPTS=5   # guesses allowed PER NUMERIC SENDER on one pairing offer (clamped to 1-20)
-FM_TELEGRAM_PAIR_SENDERS=20   # distinct senders one offer will track before refusing new ones
+FM_TELEGRAM_PAIR_SENDERS=20   # distinct senders one offer will track before refusing new ones (clamped to 1-200)
 FM_TELEGRAM_PUBLISH_ATTEMPTS=5  # confirmation scans allowed per armed publish record (clamped to 1-20)
 FM_TELEGRAM_PUBLISH_TTL=86400 # publish confirmation lifetime in seconds
 FM_TELEGRAM_RECOVERY_SECS=300 # age at which a still-pending message is re-announced, at most once per window
