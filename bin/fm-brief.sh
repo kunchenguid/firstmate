@@ -53,6 +53,8 @@
 # Ship and scout tasks include the Claude context-pressure snapshot path and
 # the host-computed 70%-used /compact trigger. Other harnesses see the section
 # but do not fabricate a reading when the optional snapshot is absent.
+# Secondmate charters carry the same 70%-used /compact trigger read from the
+# bottom CTX status-line row, with no snapshot file.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
