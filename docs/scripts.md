@@ -74,6 +74,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-wake-lib.sh`         | Shared durable wake queue, portable locks, and watcher identity/health helpers       |
 | `fm-classify-lib.sh`     | Shared captain-relevant and declared-external-wait wake classification vocabulary    |
 | `fm-quota-watch.sh`      | Agent-free cron/launchd Claude quota gate: pause and resume this home's live ship/scout crew (docs/quota-watch.md) |
+| `fm-quota-watch-install.sh` | Print (default) or, with `--install-crontab`, append the OS-scheduler entry that runs `fm-quota-watch.sh` periodically |
 | `fm-send.sh`             | Send one verified literal line or supported key through the target's recorded backend |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, composer capture, and verified submit |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
