@@ -116,6 +116,12 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Quota watch (config/quota-pause-threshold / config/quota-resume-threshold)
+
+`bin/fm-quota-watch.sh` is an agent-free script, meant to be run from `cron` or `launchd` rather than the `schedule`/`loop` skills, that pauses this home's live `kind=ship`/`kind=scout` crew when Claude usage crosses a pause threshold (local gitignored `config/quota-pause-threshold` or `FM_QUOTA_PAUSE_THRESHOLD`, default 80) and resumes them once usage drops back below a lower hysteresis resume threshold (`config/quota-resume-threshold` or `FM_QUOTA_RESUME_THRESHOLD`, default 65).
+It never touches a `kind=secondmate`.
+See [`quota-watch.md`](quota-watch.md) for the full behavior, the install command (`bin/fm-quota-watch-install.sh`), and why no new supervision code was needed to keep a paused pane from being treated as stuck.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
@@ -462,6 +468,10 @@ FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry pl
 FM_WEDGE_ALARM_CHANNEL=            # override config/wedge-alarm with one active-alert directive for the wedge alarm; off|auto|osascript|herdr|command:<cmd>; absent = auto (macOS -> an OS notification)
 FM_WEDGE_ALARM_EXEC=              # notifier seam: route every channel (osascript, herdr, command:) through this command as `<cmd> <channel> <summary>`; "discard" fires nothing; unset in production; the daemon defaults it to "discard" when sourced so no test posts a real notification (docs/wedge-alarm.md)
 FM_WEDGE_ALARM_TIMEOUT_SECS=10    # maximum seconds for each osascript, herdr, override, or command: notifier before its watchdog terminates it and continues to the next channel; invalid or zero values use 10
+FM_QUOTA_PAUSE_THRESHOLD=80   # fm-quota-watch.sh: claude usage pct (0-100) at/above which live ship/scout crew are interrupted and paused
+FM_QUOTA_RESUME_THRESHOLD=65  # fm-quota-watch.sh: claude usage pct (0-100) below which paused crew are resumed; must be strictly below FM_QUOTA_PAUSE_THRESHOLD
+FM_QUOTA_AXI_BIN=quota-axi    # fm-quota-watch.sh: quota reader command, test seam
+FM_QUOTA_SEND_BIN=            # fm-quota-watch.sh: crewmate sender, test seam; defaults to the sibling bin/fm-send.sh
 FM_INJECT_FAIL_SLEEP=30            # seconds to back off when the supervisor pane is unavailable
 FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a digest once
 FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between daemon submit checks
