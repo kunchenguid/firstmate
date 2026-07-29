@@ -103,6 +103,54 @@ function sha256(value, name) {
   }
 }
 
+class JsonNumber {
+  constructor(lexeme) {
+    this.lexeme = lexeme;
+  }
+
+  isIntegerInRange(minimum, maximum) {
+    const match = /^(-?)([0-9]+)(?:\.([0-9]+))?(?:[eE]([+-]?[0-9]+))?$/.exec(this.lexeme);
+    if (match === null) {
+      return false;
+    }
+    const negative = match[1] === "-";
+    const fraction = match[3] || "";
+    const coefficient = `${match[2]}${fraction}`;
+    const normalizedCoefficient = coefficient.replace(/^0+/, "");
+    if (normalizedCoefficient === "") {
+      return minimum <= 0n && maximum >= 0n;
+    }
+    const scale = BigInt(match[4] || "0") - BigInt(fraction.length);
+    let integerText;
+    if (scale >= 0n) {
+      if (BigInt(normalizedCoefficient.length) + scale > BigInt(maximum.toString().length)) {
+        return false;
+      }
+      integerText = `${normalizedCoefficient}${"0".repeat(Number(scale))}`;
+    } else {
+      const truncatedDigits = -scale;
+      if (truncatedDigits > BigInt(coefficient.length)) {
+        return false;
+      }
+      const integerEnd = coefficient.length - Number(truncatedDigits);
+      for (let index = integerEnd; index < coefficient.length; index += 1) {
+        if (coefficient[index] !== "0") {
+          return false;
+        }
+      }
+      integerText = coefficient.slice(0, integerEnd).replace(/^0+/, "") || "0";
+    }
+    if (integerText.length > maximum.toString().length) {
+      return false;
+    }
+    let integer = BigInt(integerText);
+    if (negative) {
+      integer = -integer;
+    }
+    return integer >= minimum && integer <= maximum;
+  }
+}
+
 class StrictJsonParser {
   constructor(text) {
     this.text = text;
@@ -247,7 +295,7 @@ class StrictJsonParser {
       this.error("invalid number");
     }
     this.index += match[0].length;
-    return Number(match[0]);
+    return new JsonNumber(match[0]);
   }
 
   error(message) {
@@ -431,9 +479,10 @@ const contextBudget = strictObject(
   "contract.context_budget",
   ["source_tokens", "report_words"],
 );
+const maxContextInteger = 9007199254740991n;
 for (const field of ["source_tokens", "report_words"]) {
   const value = required(contextBudget, field, "contract.context_budget");
-  if (!Number.isSafeInteger(value) || value <= 0) {
+  if (!(value instanceof JsonNumber) || !value.isIntegerInRange(1n, maxContextInteger)) {
     fail("WG-E-CORRUPT", `contract.context_budget.${field} must be a positive integer`);
   }
 }

@@ -139,6 +139,20 @@ if (mutation === "duplicate-claim") {
   ));
   process.exit(0);
 }
+if (mutation === "integral-number-forms") {
+  fs.writeFileSync(target, text.replace(
+    '"context_budget": {"source_tokens": 45000, "report_words": 3000},',
+    '"context_budget": {"source_tokens": 1.0, "report_words": 1e0},',
+  ));
+  process.exit(0);
+}
+if (mutation === "rounded-noninteger") {
+  fs.writeFileSync(target, text.replace(
+    '"source_tokens": 45000',
+    '"source_tokens": 1.0000000000000001',
+  ));
+  process.exit(0);
+}
 const value = JSON.parse(text);
 if (mutation === "bad-claim") value.claims[0].mode = "bogus";
 if (mutation === "missing-field") delete value.acceptance;
@@ -344,6 +358,22 @@ test_contract_path_control_characters() {
   pass "workgraph: contract paths reject control characters before status"
 }
 
+test_exact_context_budget_numbers() {
+  local root
+  root=$(mktemp -d "$TMP_ROOT/integral-number-forms.XXXXXX")
+  write_valid_graph "$root"
+  mutate_contract_case "$root" integral-number-forms
+  run_workgraph validate "$root/graph.json"
+  expect_code 0 "$RC" "mathematically integral decimal and exponent forms validate"
+
+  root=$(mktemp -d "$TMP_ROOT/rounded-noninteger.XXXXXX")
+  write_valid_graph "$root"
+  mutate_contract_case "$root" rounded-noninteger
+  run_workgraph validate "$root/graph.json"
+  [ "$RC" -ne 0 ] || fail "rounded non-integral context budget was accepted"
+  pass "workgraph: context budgets use exact numeric lexemes"
+}
+
 test_contract_bytes_captured_once() {
   local root preload contract
   root=$(mktemp -d "$TMP_ROOT/captured.XXXXXX")
@@ -427,5 +457,6 @@ test_nonregular_mode_targets
 test_valid_graph_and_status
 test_graph_negative_cases
 test_contract_path_control_characters
+test_exact_context_budget_numbers
 test_contract_bytes_captured_once
 test_schema_strictness
