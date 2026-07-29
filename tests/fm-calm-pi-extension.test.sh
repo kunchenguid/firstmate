@@ -16,7 +16,7 @@ PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
 TMUX_SOCKET="fm-calm-$$"
 TMUX_SESSION="fm-calm-e2e"
-PI_COMPAT_VERSIONS="0.81.1 0.82.0"
+PI_COMPAT_VERSIONS="0.81.1 0.82.0 0.82.1"
 
 require_pi_compat_version() {
   local version=$1 context=$2
