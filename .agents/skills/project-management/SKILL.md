@@ -22,7 +22,7 @@ Use the registry format and parser contract owned by the header of `bin/fm-proje
 Keep each registry description useful for identifying the project, but keep delivery posture, captain-private state, and detailed project knowledge in their existing designated homes.
 Do not turn the registry into project documentation.
 
-Before adding, cloning, creating, or registering a project in the main home, inspect the authoritative `data/secondmates.md` routing table and judge every existing natural-language `scope:` against the proposed project or domain.
+Before any main-home project add, clone, create, or registry mutation, inspect the authoritative `data/secondmates.md` routing table and judge every existing natural-language `scope:` against the proposed project, domain, or registry change.
 If an existing second mate's `scope:` owns that domain, route the project operation or work there instead of creating or registering a duplicate main-home clone.
 Absence from the main `data/projects.md` registry is never evidence that no second mate owns the domain.
 The second-mate `projects:` list is non-exclusive provisioning data; natural-language `scope:` is the routing authority.
