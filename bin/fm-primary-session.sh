@@ -9,9 +9,9 @@
 #   fm-primary-session.sh takeover <paseo-agent-id>
 #       Prove that the exact local Paseo agent owns this home's live numeric
 #       session lock, classify it from structured Paseo and quota evidence,
-#       refuse every unsafe state, soft-archive the idle recoverable provider,
-#       verify the captured owner process tree is gone, publish an append-only
-#       privacy-safe receipt, acquire the unchanged stale numeric lock through
+#       refuse every unsafe state, publish an append-only privacy-safe receipt,
+#       soft-archive the idle recoverable provider, verify the captured owner
+#       process tree is gone, acquire the unchanged stale numeric lock through
 #       bin/fm-lock.sh, and run the ordinary session-start digest.
 #
 #   fm-primary-session.sh restore <receipt-id>
@@ -429,8 +429,17 @@ remaining_pid_atoms() {
   printf '%s\n' "$out"
 }
 
+pid_lines_to_atoms() {
+  local pid out=
+  while IFS= read -r pid; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    out="${out}${out:+,}${pid}"
+  done
+  printf '%s\n' "$out"
+}
+
 receipt_prepare() {
-  local agent_id=$1 owner_pid=$2 owner_harness=$3 provider=$4 classification=$5
+  local agent_id=$1 owner_pid=$2 owner_harness=$3 provider=$4 classification=$5 captured_pids=$6
   local provider_session fingerprint identity identity_hash receipt_stamp draft receipt_id
   mkdir -p "$HANDOFF_DIR" || return 1
   [ -d "$HANDOFF_DIR" ] && [ ! -L "$HANDOFF_DIR" ] || return 1
@@ -455,6 +464,7 @@ receipt_prepare() {
     printf 'old_owner_pid=%s\n' "$owner_pid"
     printf 'old_owner_identity_sha256=%s\n' "$identity_hash"
     printf 'classification=%s\n' "$classification"
+    printf 'captured_pids=%s\n' "$captured_pids"
     printf 'prepared_at=%s\n' "$(fm_primary_now_utc)"
     printf 'state=preparing\n'
   } > "$draft"; then
@@ -491,7 +501,7 @@ release_claim_lock() {
 
 takeover() {
   local agent_id=$1 new_owner_pid owner_pid owner_harness classification reason inspect provider
-  local tree draft archive_out post receipt new_lock_pid now remaining rc=0
+  local tree captured_pids draft archive_out post receipt new_lock_pid now remaining rc=0
   fm_primary_atom_valid "$agent_id" || die "invalid Paseo agent id"
   require_takeover_tools
   primary_scope_required
@@ -519,33 +529,37 @@ takeover() {
   grep -qx "$owner_pid" <<< "$tree" || die "captured process tree omitted its owner"
   grep -qx "$new_owner_pid" <<< "$tree" \
     && die "takeover refused: the successor primary is inside the target provider process tree"
-  draft=$(receipt_prepare "$agent_id" "$owner_pid" "$owner_harness" "$provider" "$classification") \
+  captured_pids=$(pid_lines_to_atoms <<< "$tree")
+  [ -n "$captured_pids" ] || die "captured process tree had no restorable process evidence"
+  draft=$(receipt_prepare "$agent_id" "$owner_pid" "$owner_harness" "$provider" "$classification" "$captured_pids") \
     || die "could not prepare a durable handoff receipt before suspension"
+  receipt=$(receipt_publish "$draft" archive-requested archive_requested_at) \
+    || die "could not publish a durable handoff receipt before suspension"
   if ! archive_out=$(paseo agent archive "$agent_id" --json 2>&1); then
-    rm -f "$draft"
-    die "Paseo soft archive failed: $archive_out"
+    fm_primary_receipt_append_state "$receipt" archive-failed archive_failed_at "$(fm_primary_now_utc)" || true
+    die "Paseo soft archive failed: $archive_out; receipt: $receipt"
   fi
   post=$(paseo_inspect "$agent_id" 2>/dev/null) || {
-    receipt=$(receipt_publish "$draft" suspend-incomplete suspend_incomplete_at) || true
+    fm_primary_receipt_append_state "$receipt" suspend-incomplete suspend_incomplete_at "$(fm_primary_now_utc)" || true
     die "Paseo archive returned success but the archived session could not be verified"
   }
   if [ "$(jq -r '.Archived' <<< "$post")" != true ]; then
-    receipt=$(receipt_publish "$draft" suspend-incomplete suspend_incomplete_at) || true
+    fm_primary_receipt_append_state "$receipt" suspend-incomplete suspend_incomplete_at "$(fm_primary_now_utc)" || true
     die "Paseo archive returned success but the target is not archived"
   fi
   if ! wait_tree_gone "$tree"; then
     remaining=$(remaining_pid_atoms "$FM_PRIMARY_REMAINING_PIDS")
     if [ -n "$remaining" ]; then
-      printf 'remaining_pids=%s\n' "$remaining" >> "$draft" \
+      printf 'remaining_pids=%s\n' "$remaining" >> "$receipt" \
         || die "owner process tree remained alive and the remaining process receipt could not be recorded"
     else
       die "owner process tree remained alive and the remaining process receipt could not be recorded"
     fi
-    receipt=$(receipt_publish "$draft" suspend-incomplete suspend_incomplete_at) \
+    fm_primary_receipt_append_state "$receipt" suspend-incomplete suspend_incomplete_at "$(fm_primary_now_utc)" \
       || die "owner process tree remained alive and the incomplete handoff receipt could not be published"
     die "owner process tree remained alive after soft archive ($FM_PRIMARY_REMAINING_PIDS); lock was left untouched; receipt: $receipt"
   fi
-  receipt=$(receipt_publish "$draft" suspended suspended_at) \
+  fm_primary_receipt_append_state "$receipt" suspended suspended_at "$(fm_primary_now_utc)" \
     || die "provider was suspended but the durable handoff receipt could not be published"
   release_claim_lock
   if ! "$SCRIPT_DIR/fm-lock.sh"; then
@@ -605,7 +619,7 @@ restore() {
   fi
   state=$(fm_primary_receipt_last_value "$receipt" state 2>/dev/null || true)
   case "$state" in
-    active-successor|suspended|suspend-resolved|restore-failed) ;;
+    active-successor|suspended|suspend-resolved|restore-failed|archive-requested) ;;
     *) die "receipt state '$state' is not eligible for restore" ;;
   esac
   if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then

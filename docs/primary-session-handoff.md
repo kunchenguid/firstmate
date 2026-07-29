@@ -1,7 +1,7 @@
 # Recoverable primary-session handoff
 
 Firstmate can transfer primary orchestration away from an idle local Paseo-hosted Claude or Codex session without weakening the live session lock or losing the provider transcript.
-The transfer soft-archives the exact recoverable provider session, proves its captured process tree has stopped, acquires the unchanged numeric lock through the ordinary stale-owner path, and runs normal session start for the successor.
+The transfer publishes a privacy-safe receipt before the provider archive boundary, soft-archives the exact recoverable provider session, proves its captured process tree has stopped, acquires the unchanged numeric lock through the ordinary stale-owner path, and runs normal session start for the successor.
 
 Use the command family directly or let the first mate follow the agent-only `primary-session-handoff` procedure:
 
@@ -27,7 +27,8 @@ Only `idle` and `paused-rate-limited` are eligible for transfer.
 `waiting-on-captain`, `busy`, `wedged`, `unknown`, and `unsupported` refuse without provider lifecycle mutation.
 
 The privacy-safe receipt is stored under `data/primary-session-handoffs/`.
-It contains session identifiers, provider and harness identity, classification, timestamps, a home fingerprint, and a process-identity hash, but no credentials, prompts, titles, permission descriptions, or transcript text.
+It contains session identifiers, provider and harness identity, classification, timestamps, a home fingerprint, a captured pid set, and a process-identity hash, but no credentials, prompts, titles, permission descriptions, or transcript text.
+An `archive-requested` receipt blocks ordinary stale-lock acquisition while any captured pid remains live, and restore accepts it only after the same process proof has cleared and Paseo verifies the provider is actually archived.
 Task metadata, worktrees, wake records, secondmate homes, and provider transcripts are outside the transaction and remain untouched.
 
 ## Restoration

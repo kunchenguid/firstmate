@@ -117,6 +117,9 @@ case "$cmd1 $cmd2" in
       owner=$(cat "$home/owner-pid")
       kill "$owner" 2>/dev/null || true
     fi
+    if [ -e "$home/chmod-receipt-after-archive" ]; then
+      chmod 400 "$FM_HOME"/data/primary-session-handoffs/*.receipt
+    fi
     jq -cn --arg id "$id" '{agentId:$id,status:"archived"}'
     ;;
   "agent reload")
@@ -448,9 +451,9 @@ test_suspend_failure_and_live_tree_refuse() {
   assert_contains "$RUN_OUT" "soft archive failed" "suspend failure lacked a typed refusal"
   kill -0 "$OWNER_PID" 2>/dev/null || fail "suspend failure stopped the owner"
   [ "$(cat "$W_ROOT/state/.lock")" = "$OWNER_PID" ] || fail "suspend failure changed the lock"
-  [ ! -d "$W_ROOT/data/primary-session-handoffs" ] \
-    || [ -z "$(find "$W_ROOT/data/primary-session-handoffs" -name '*.receipt' -print -quit)" ] \
-    || fail "suspend failure published a completed receipt"
+  receipt=$(only_receipt) || fail "suspend failure did not retain its fail-closed receipt"
+  [ "$(record_last_value "$receipt" state)" = archive-failed ] \
+    || fail "suspend failure receipt did not record archive-failed"
 
   new_world tree-alive
   write_agent "$AGENT_A"
@@ -487,6 +490,29 @@ test_suspend_failure_and_live_tree_refuse() {
   [ "$(record_last_value "$receipt" state)" = suspend-resolved ] \
     || fail "ordinary stale-lock acquisition did not resolve the incomplete receipt"
   pass "primary-session: suspend failure and surviving owner process tree block stale-lock acquisition until resolved"
+}
+
+test_post_archive_receipt_write_failure_remains_restorable() {
+  new_world post-archive-receipt-failure
+  write_agent "$AGENT_A"
+  : > "$W_PASEO/chmod-receipt-after-archive"
+  start_owner "$AGENT_A"
+  run_takeover "$AGENT_A"
+  [ "$RUN_RC" -ne 0 ] || fail "post-archive receipt write failure unexpectedly completed takeover"
+  assert_contains "$RUN_OUT" "provider was suspended but the durable handoff receipt could not be published" \
+    "post-archive receipt write failure lacked a typed refusal"
+  receipt=$(only_receipt) || fail "post-archive receipt failure did not leave a restore-eligible receipt"
+  [ "$(record_last_value "$receipt" state)" = archive-requested ] \
+    || fail "post-archive receipt failure lost the pre-archive receipt state"
+  [ -e "$W_PASEO/archived-$AGENT_A" ] || fail "post-archive receipt failure did not archive the provider"
+  chmod 600 "$receipt"
+  receipt_id=$(record_last_value "$receipt" receipt_id)
+  : > "$W_PASEO/reload-spawn"
+  run_restore "$receipt_id"
+  [ "$RUN_RC" -eq 0 ] || fail "restore could not use the pre-archive receipt after publication recovered: $RUN_OUT"
+  assert_contains "$RUN_OUT" "restore requested" \
+    "restore did not proceed from the pre-archive receipt"
+  pass "primary-session: post-archive receipt write failure preserves an explicit restore path"
 }
 
 test_lock_publish_failure_rolls_back_own_claim() {
@@ -660,6 +686,7 @@ test_owner_mismatch_refuses_without_archive
 test_busy_pending_and_unknown_refuse
 test_wedged_and_attached_child_refuse
 test_suspend_failure_and_live_tree_refuse
+test_post_archive_receipt_write_failure_remains_restorable
 test_lock_publish_failure_rolls_back_own_claim
 test_successful_takeover_preserves_fleet_and_records_receipt
 test_rate_limited_takeover_is_distinct_and_recoverable

@@ -9,7 +9,7 @@ Operator behavior, supported combinations, and current limits remain in [`../pri
 
 The missing primitive was reproduced on 2026-07-29 with Paseo 0.1.104 and Claude Code 2.1.219.
 A live but idle credit-exhausted provider still correctly owned Firstmate's numeric lock, so another primary was refused even though a recoverable soft archive could safely stop that provider.
-The manual incident recovery established the shipped ordering: prove visible-session ownership and idle safety, soft-archive the exact provider, prove its process tree has exited, use ordinary stale-lock acquisition, and require the restored provider to reacquire through normal session start.
+The manual incident recovery established the shipped ordering: prove visible-session ownership and idle safety, publish a privacy-safe recovery receipt, soft-archive the exact provider, prove its process tree has exited, use ordinary stale-lock acquisition, and require the restored provider to reacquire through normal session start.
 
 No live provider lifecycle command is part of repository verification.
 All suspend, reload, quota, permission, child-agent, and process-tree behavior is exercised through an isolated disposable Firstmate home and fake Paseo executable.
@@ -22,12 +22,13 @@ Run:
 bin/fm-test-run.sh tests/fm-primary-session.test.sh
 ```
 
-The suite covers external-session and process-identity owner mismatch, busy and pending-action refusal, unknown and wedged classification, attached-child refusal, provider suspend failure, a surviving owner pid, successful stale-lock takeover, concurrent attempts, restore refusal under a live successor, restored normal lock reacquisition, fleet-state preservation, and the privacy-safe read-only scan.
+The suite covers external-session and process-identity owner mismatch, busy and pending-action refusal, unknown and wedged classification, attached-child refusal, provider suspend failure, a surviving owner pid, post-archive receipt write failure recovery, successful stale-lock takeover, concurrent attempts, restore refusal under a live successor, restored normal lock reacquisition, fleet-state preservation, and the privacy-safe read-only scan.
 
 The expected terminal lines include:
 
 ```text
 ok - primary-session: concurrent takeover attempts admit one suspension and one successor
+ok - primary-session: post-archive receipt write failure preserves an explicit restore path
 ok - primary-session: archived provider reload remains recoverable and reacquires through normal session start
 ok - primary-session: fleet-wide captain-action scan is read-only and omits prompt/title prose
 ```
