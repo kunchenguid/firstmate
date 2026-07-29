@@ -2334,7 +2334,7 @@ if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ] && [ "$BACKEND" = orca ]; then
 fi
 if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ] && ! fm_account_test_lab_enabled \
   && [ "$BACKEND" != herdr ]; then
-  echo "error: enforced Agent Fleet routing requires backend=herdr with a process-bound closed-shell certificate; backend=$BACKEND cannot prove that its pane shell was sanitized before startup" >&2
+  echo "error: enforced Agent Fleet routing requires backend=herdr so native agent startup can inject the selected account environment; backend=$BACKEND cannot provide that isolation, so retry with --backend herdr" >&2
   exit 1
 fi
 if [ "$ACCOUNT_EFFECTIVE_MODE" != off ] && [ "$RESUME_ACCOUNT" != 1 ]; then
