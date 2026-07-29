@@ -1,11 +1,13 @@
 // Firstmate's home-persistent Pi transcript presentation toggle.
 //
-// Compatibility boundary: Pi 0.81.1 and 0.82.0 expose built-in ToolDefinitions, per-slot
+// Verified against Pi 0.81.1 and 0.82.0, which expose built-in ToolDefinitions, per-slot
 // renderers, renderShell: "self", session_start replacement reasons,
 // ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), and
-// setHiddenThinkingLabel(). The focused tests pin those assumptions. Version-bounded
-// presentation adapters cover collapsed assistant thinking and operational user rows;
-// Pi still exposes no global renderer for arbitrary built-in or custom rows.
+// setHiddenThinkingLabel(). The focused tests pin those assumptions but never reject a
+// newer Pi solely for its version. The collapsed-thinking and operational-user
+// presentation adapters probe the exact API they patch and degrade independently with a
+// diagnostic (see installCalmPresentationAdapter below) if a future Pi removes it; Pi
+// still exposes no global renderer for arbitrary built-in or custom rows.
 // docs/configuration.md owns the home-local Calm preference contract.
 import { randomUUID } from "node:crypto";
 import {
@@ -74,9 +76,20 @@ const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
 
+// Each presentation adapter probes the exact Pi API it patches. If a future Pi removes
+// that API, only the affected adapter degrades; the rest of Calm keeps working.
+function installCalmPresentationAdapter(name: string, install: () => void): void {
+  try {
+    install();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`Firstmate Calm: ${name} presentation adapter unavailable, skipping. ${reason}`);
+  }
+}
+
 export default function (pi: ExtensionAPI) {
-  installCalmAssistantLayout();
-  installCalmOperationalUserLayout();
+  installCalmPresentationAdapter("collapsed-thinking", installCalmAssistantLayout);
+  installCalmPresentationAdapter("operational-user-row", installCalmOperationalUserLayout);
 
   let exportRendering = false;
   let removeTerminalInputHandler: (() => void) | undefined;
