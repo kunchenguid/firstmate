@@ -13,13 +13,16 @@
 # ignored by the target head's .gitignore rules under the project's
 # core.ignoreCase semantics; info/exclude and global excludes do not count.
 # An ignored directory is allowed only when the target head tracks nothing under
-# its prefix. Every unresolved path is diagnosed before advancing. Proven ignored
-# files are retained byte-for-byte; proven ignored directories remain directories
-# without walking or hashing their contents. Every previously dirty path is then
-# verified clean. A preservation or cleanliness failure after the fast-forward is
-# reported without attempting rollback. Diverged branches still refuse and
-# require the crewmate to rebase. See AGENTS.md prime directives, project
-# management, and task lifecycle.
+# its prefix. Unresolved paths refuse before advancing; the first 50 receive
+# per-path diagnostics, followed by a +N summary for any remainder. Proven
+# ignored files are retained byte-for-byte; proven ignored symlinks retain their
+# readlink targets; proven ignored directories remain directories without
+# walking or hashing their contents. Other present entry types and entries that
+# cannot be inspected refuse. Every previously dirty path is then verified clean.
+# A preservation or cleanliness failure after the fast-forward is reported
+# without attempting rollback. Diverged branches still refuse and require the
+# crewmate to rebase. See AGENTS.md prime directives, project management, and
+# task lifecycle.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
@@ -213,7 +216,8 @@ working_tree_mode() {
 }
 
 staged_state_matches_worktree() {
-  local current_mode current_oid index_meta index_mode index_oid path=$1
+  local current_mode current_oid current_target index_meta index_mode index_oid
+  local index_snapshot path=$1 worktree_snapshot
   index_meta=$(index_blob_metadata "$path") || return 1
   if [ ! -e "$PROJ/$path" ] && [ ! -L "$PROJ/$path" ]; then
     [ -z "$index_meta" ]
@@ -222,6 +226,20 @@ staged_state_matches_worktree() {
   [ -n "$index_meta" ] || return 1
   index_mode=${index_meta%% *}
   index_oid=${index_meta##* }
+  if [ "$index_mode" = "120000" ]; then
+    [ -L "$PROJ/$path" ] || return 1
+    current_target=$(readlink "$PROJ/$path" && printf x) || return 1
+    current_target=${current_target%?}
+    current_target=${current_target%$'\n'}
+    worktree_snapshot="$TARGET_VIEW_ROOT/staged-symlink-worktree"
+    index_snapshot="$TARGET_VIEW_ROOT/staged-symlink-index"
+    printf '%s' "$current_target" >"$worktree_snapshot" || return 1
+    git --no-replace-objects -C "$PROJ" cat-file blob "$index_oid" \
+      >"$index_snapshot" || return 1
+    cmp -s "$worktree_snapshot" "$index_snapshot"
+    return
+  fi
+  [ ! -L "$PROJ/$path" ] || return 1
   current_oid=$(git -C "$PROJ" hash-object -- "$path" 2>/dev/null) || return 1
   current_mode=$(working_tree_mode "$path") || return 1
   [ "$index_oid" = "$current_oid" ] && [ "$index_mode" = "$current_mode" ]
@@ -276,54 +294,92 @@ add_unresolved() {
   UNRESOLVED_REASONS+=("$2")
 }
 
-expand_unignored_untracked_directories() {
-  local i path state record records_path ignore_directory_rc
+append_target_classified_untracked_tree() {
+  local child dotglob_was_set ignore_directory_rc nullglob_was_set path=$1
+  local -a children=()
+
+  set +e
+  branch_ignores_directory_path "$path"
+  ignore_directory_rc=$?
+  set -e
+  case "$ignore_directory_rc" in
+    0)
+      expanded_paths+=("$path")
+      expanded_states+=("??")
+      return 0
+      ;;
+    1)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  if [ -e "$PROJ/${path%/}/.git" ] || [ -L "$PROJ/${path%/}/.git" ]; then
+    expanded_paths+=("$path")
+    expanded_states+=("??")
+    return 0
+  fi
+  [ -r "$PROJ/$path" ] && [ -x "$PROJ/$path" ] || return 1
+
+  if shopt -q dotglob; then
+    dotglob_was_set=1
+  else
+    dotglob_was_set=0
+  fi
+  if shopt -q nullglob; then
+    nullglob_was_set=1
+  else
+    nullglob_was_set=0
+  fi
+  shopt -s dotglob nullglob
+  children=("$PROJ/${path%/}"/*)
+  [ "$dotglob_was_set" -eq 1 ] || shopt -u dotglob
+  [ "$nullglob_was_set" -eq 1 ] || shopt -u nullglob
+
+  for child in "${children[@]}"; do
+    child=${child#"$PROJ"/}
+    if [ -d "$PROJ/$child" ] && [ ! -L "$PROJ/$child" ]; then
+      append_target_classified_untracked_tree "$child" || return 1
+    else
+      expanded_paths+=("$child")
+      expanded_states+=("??")
+    fi
+  done
+}
+
+expand_untracked_directories_against_target() {
+  local i path state
   local -a expanded_paths=() expanded_states=()
   for ((i = 0; i < ${#DIRTY_PATHS[@]}; i++)); do
     path=${DIRTY_PATHS[$i]}
     state=${DIRTY_STATES[$i]}
-    if [ "$state" != "??" ] || [ ! -d "$PROJ/$path" ] || [ -L "$PROJ/$path" ]; then
+    if { [ "$state" != "??" ] && [ "$state" != "!!" ]; } \
+      || [ ! -d "$PROJ/$path" ] || [ -L "$PROJ/$path" ]; then
       expanded_paths+=("$path")
       expanded_states+=("$state")
       continue
     fi
 
-    set +e
-    branch_ignores_directory_path "$path"
-    ignore_directory_rc=$?
-    set -e
-    case "$ignore_directory_rc" in
-      0)
-        # The later collision proof covers this entire prefix, so do not walk it.
-        expanded_paths+=("$path")
-        expanded_states+=("$state")
-        ;;
-      1)
-        # A whole-directory proof is unavailable.  Preserve the established
-        # regular-file behavior by enumerating this one prefix for target-ignored
-        # files, rather than recursively walking every untracked directory.
-        records_path="$TARGET_VIEW_ROOT/untracked-$i"
-        if ! git -C "$PROJ" status --porcelain=v1 -z --untracked-files=all \
-          -- ":(literal)$path" >"$records_path"; then
-          return 1
-        fi
-        while IFS= read -r -d '' record; do
-          expanded_paths+=("${record:3}")
-          expanded_states+=("${record:0:2}")
-        done <"$records_path"
-        ;;
-      *)
-        return 1
-        ;;
-    esac
+    append_target_classified_untracked_tree "$path" || return 1
   done
   DIRTY_PATHS=("${expanded_paths[@]}")
   DIRTY_STATES=("${expanded_states[@]}")
 }
 
 remember_preserved_path() {
-  local path=$1 oid
-  if oid=$(git -C "$PROJ" hash-object -- "$path" 2>/dev/null); then
+  local path=$1 oid snapshot
+  if [ -L "$PROJ/$path" ]; then
+    snapshot="$TARGET_VIEW_ROOT/readlink"
+    if ! readlink "$PROJ/$path" >"$snapshot" \
+      || ! oid=$(git -C "$PROJ" hash-object -- "$snapshot"); then
+      return 1
+    fi
+    PRESERVE_PATHS+=("$path")
+    PRESERVE_KINDS+=("symlink")
+    PRESERVE_OIDS+=("$oid")
+  elif [ -f "$PROJ/$path" ] \
+    && oid=$(git -C "$PROJ" hash-object -- "$path" 2>/dev/null); then
     PRESERVE_PATHS+=("$path")
     PRESERVE_KINDS+=("blob")
     PRESERVE_OIDS+=("$oid")
@@ -345,6 +401,17 @@ remember_preserved_directory() {
     return 0
   fi
   return 1
+}
+
+print_unresolved_paths() {
+  local count=${#UNRESOLVED_PATHS[@]} i limit=50
+  echo "error: $PROJ has dirty paths not resolved by $BRANCH; refusing to merge:" >&2
+  for ((i = 0; i < count && i < limit; i++)); do
+    printf '  - %q: %s\n' "${UNRESOLVED_PATHS[$i]}" "${UNRESOLVED_REASONS[$i]}" >&2
+  done
+  if [ "$count" -gt "$limit" ]; then
+    printf '  +%d more unresolved paths\n' "$((count - limit))" >&2
+  fi
 }
 
 move_preserved_path_out_of_merge() {
@@ -375,7 +442,7 @@ if [ "${#DIRTY_PATHS[@]}" -gt 0 ]; then
     echo "error: could not construct the $BRANCH ignore view; refusing to merge a dirty checkout" >&2
     exit 1
   fi
-  if ! expand_unignored_untracked_directories; then
+  if ! expand_untracked_directories_against_target; then
     echo "error: could not classify untracked directories against $BRANCH; refusing to merge a dirty checkout" >&2
     exit 1
   fi
@@ -527,10 +594,7 @@ if [ "${#DIRTY_PATHS[@]}" -gt 0 ]; then
 fi
 
 if [ "${#UNRESOLVED_PATHS[@]}" -gt 0 ]; then
-  echo "error: $PROJ has dirty paths not resolved by $BRANCH; refusing to merge:" >&2
-  for ((i = 0; i < ${#UNRESOLVED_PATHS[@]}; i++)); do
-    printf '  - %q: %s\n' "${UNRESOLVED_PATHS[$i]}" "${UNRESOLVED_REASONS[$i]}" >&2
-  done
+  print_unresolved_paths
   exit 1
 fi
 
@@ -577,10 +641,7 @@ for ((i = 0; i < ${#RESOLVED_PATHS[@]}; i++)); do
 done
 
 if [ "${#UNRESOLVED_PATHS[@]}" -gt 0 ]; then
-  echo "error: $PROJ has dirty paths not resolved by $BRANCH; refusing to merge:" >&2
-  for ((i = 0; i < ${#UNRESOLVED_PATHS[@]}; i++)); do
-    printf '  - %q: %s\n' "${UNRESOLVED_PATHS[$i]}" "${UNRESOLVED_REASONS[$i]}" >&2
-  done
+  print_unresolved_paths
   exit 1
 fi
 
@@ -631,6 +692,21 @@ for ((i = 0; i < ${#PRESERVE_PATHS[@]}; i++)); do
   if [ "${PRESERVE_KINDS[$i]}" = "directory" ]; then
     if [ ! -d "$PROJ/$path" ] || [ -L "$PROJ/$path" ]; then
       printf 'error: fast-forward completed, but ignored directory %q is now absent or no longer a directory\n' \
+        "$path" >&2
+      exit 1
+    fi
+    continue
+  fi
+  if [ "${PRESERVE_KINDS[$i]}" = "symlink" ]; then
+    snapshot="$TARGET_VIEW_ROOT/readlink"
+    if [ ! -L "$PROJ/$path" ] || ! readlink "$PROJ/$path" >"$snapshot" \
+      || ! preserved_oid=$(git -C "$PROJ" hash-object -- "$snapshot"); then
+      printf 'error: fast-forward completed, but ignored symlink %q is now absent or unreadable\n' \
+        "$path" >&2
+      exit 1
+    fi
+    if [ "$preserved_oid" != "${PRESERVE_OIDS[$i]}" ]; then
+      printf 'error: fast-forward completed, but ignored symlink %q changed target\n' \
         "$path" >&2
       exit 1
     fi
