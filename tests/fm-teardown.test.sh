@@ -2043,6 +2043,10 @@ test_managed_child_teardown_locks_generation_before_snapshot() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  list-windows)
+    [ -f "$FM_FAKE_ALLOW_KILL" ] || printf '%s\n' 'fm-child-lock-x3'
+    exit 0
+    ;;
   kill-window)
     case "$*" in
       *fm-child-lock-x3*)
