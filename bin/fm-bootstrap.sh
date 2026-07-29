@@ -55,7 +55,8 @@
 #          effective floor at 0.2.2+; docs/configuration.md owns the definition);
 #          an installed but incompatible build reports MISSING like no-mistakes. A
 #          compatible tasks-axi default backend is silent. quota-axi is required for the
-#          agent-owned dispatch-profile array procedure in AGENTS.md section 4.
+#          agent-owned dispatch-profile array procedure in AGENTS.md section 4
+#          and .agents/skills/quota-array-dispatch/SKILL.md.
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
@@ -443,7 +444,7 @@ secondmate_liveness_sweep() {
     [ -n "$target" ] || target="$window"
     agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
     case "$harness" in
-      claude|codex|opencode|pi|grok|kimi) ;;
+      claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
       *)
         case "$agent_state" in dead|missing) agent_state=unverified-harness ;; esac
         ;;
@@ -720,14 +721,14 @@ crew_dispatch_validate() {
     return 0
   fi
   err=$(jq -r '
-    def verified($h): ["claude","codex","opencode","pi","grok","kimi"] | index($h);
+    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi"] | index($h);
     def effort_ok($h; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
       elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "codex" then (["low","medium","high","xhigh"] | index($e))
       elif $h == "grok" then (["low","medium","high"] | index($e))
-      elif $h == "pi" then (["low","medium","high","xhigh","max"] | index($e))
+      elif $h == "pi" or $h == "pi-signed" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "opencode" or $h == "kimi" then false
       else true
       end;

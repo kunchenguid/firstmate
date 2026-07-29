@@ -223,26 +223,26 @@ HERDR_SECTION=$(printf '%s\n' \
 'Never bypass the helper, even for a read-only lifecycle probe or cleanup after failure.' \
 'The captain fleet uses the running `default` session.')
 else
-HERDR_SECTION=$(cat <<'EOF'
+IFS= read -r -d '' HERDR_SECTION <<'EOF' || true
 # Herdr lifecycle declaration - NOT ENABLED
 **HARD SAFETY GATE:** this scaffold cannot inspect the task text that replaces `{TASK}` later.
 If the task will start, stop, delete, restart, profile, or otherwise drive Herdr lifecycle behavior, stop and regenerate the brief with `--herdr-lab` before dispatch.
 Do not add Herdr lifecycle commands to this unguarded brief by hand.
 EOF
-)
+HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
 # The rule 2 carve-out is shared by the ship and scout scaffolds so the one
 # exemption driving a real browser needs has a single owner, while each variant
 # keeps its own distinct outside-the-worktree wording ahead of it.
-BROWSER_PATH_EXEMPTION=$(cat <<'EOF'
+IFS= read -r -d '' BROWSER_PATH_EXEMPTION <<'EOF' || true
    One narrow exemption: the profile and cache directories a browser or its driver creates and manages for itself. Outside this worktree, no other path a browser or driver touches is exempt - not project or repository paths elsewhere on disk - and this changes nothing else in this rule.
 EOF
-)
+BROWSER_PATH_EXEMPTION=${BROWSER_PATH_EXEMPTION%$'\n'}
 
 # Rule 3 is shared by the ship and scout scaffolds so the browser-as-a-user
 # contract has one owner and cannot drift between the two variants.
-BROWSER_RULE=$(cat <<'EOF'
+IFS= read -r -d '' BROWSER_RULE <<'EOF' || true
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
    When the task involves user-visible web behavior, reproduce and verify it by driving the browser AS A REAL USER; reading code, API responses, or database rows never proves what a page actually rendered.
    Use `chrome-devtools-axi` to drive a real browser interactively and inspect live rendered state, and the project's Playwright/e2e harness for a scripted, repeatable run of the same user flow; when such a task needs e2e tooling this project does not have yet, adding it is part of that work.
@@ -250,7 +250,7 @@ BROWSER_RULE=$(cat <<'EOF'
    On such a task, if you cannot successfully drive a browser by any available means, append `blocked: cannot drive a browser to verify {the behavior}` and stop - never silently skip the browser check and report success on rendered behavior you never saw.
    That reproduction becomes the regression test once a fix is authorized; record it, and any e2e tooling it needed, where this task's deliverable lives - on the branch for a ship task, in the report for a scout.
 EOF
-)
+BROWSER_RULE=${BROWSER_RULE%$'\n'}
 
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
@@ -316,19 +316,18 @@ case "$MODE" in
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-    DOD=$(cat <<EOF
+    IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
-)
     ;;
   local-only)
     SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
-    DOD=$(cat <<EOF
+    IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 This project ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
@@ -336,13 +335,12 @@ Keep your branch a clean fast-forward onto the current default branch - if \`mai
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
-)
     ;;
   *)  # no-mistakes (default)
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
-    DOD=$(cat <<EOF
+    IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
@@ -360,11 +358,10 @@ Two firstmate-specific rules layer on top of that guidance:
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
-)
     ;;
 esac
 
-TDD_SECTION=$(cat <<'EOF'
+IFS= read -r -d '' TDD_SECTION <<'EOF' || true
 # Test discipline
 Agree the test seam before you implement, not after.
 Decide up front what observable behavior each test asserts against - the public output, return value, or contract a caller sees - and let that seam, not the code you are about to write, define the test.
@@ -375,7 +372,12 @@ Avoid these anti-patterns:
 - Over-mocking, especially mocking what you do not own: you end up testing the mock, not the system.
 - Assertion-free or snapshot-everything tests: they lock in whatever happens to run, not the behavior you meant to guarantee.
 EOF
-)
+TDD_SECTION=${TDD_SECTION%$'\n'}
+
+# read -r -d '' preserves the heredoc's trailing newline that the removed
+# $(...) command substitution used to strip. Drop that one newline so generated
+# briefs stay byte-identical to the historical Bash 5 output.
+DOD=${DOD%$'\n'}
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.

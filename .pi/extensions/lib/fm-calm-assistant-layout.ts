@@ -1,7 +1,12 @@
-import { AssistantMessageComponent } from "@earendil-works/pi-coding-agent";
+// Verified against Pi 0.81.1 and 0.82.0, which export AssistantMessageComponent with an
+// updateContent method. installCalmAssistantLayout() probes that exact method and throws
+// if it is missing; fm-calm.ts catches that and skips only this adapter with a diagnostic
+// instead of blocking Calm or Pi.
+import type { AssistantMessageComponent as PiAssistantMessageComponent } from "@earendil-works/pi-coding-agent";
+import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import { calmPresentationHides } from "./fm-calm-visibility.ts";
 
-type AssistantMessage = Parameters<AssistantMessageComponent["updateContent"]>[0];
+type AssistantMessage = Parameters<PiAssistantMessageComponent["updateContent"]>[0];
 
 type AssistantMessagePresentationState = {
   hiddenThinkingLabel: string;
@@ -31,6 +36,10 @@ export function installCalmAssistantLayout(): void {
   }
 
   const patch: CalmAssistantLayoutPatch = { hidesThinking };
+  const AssistantMessageComponent = PiCodingAgent.AssistantMessageComponent;
+  if (typeof AssistantMessageComponent !== "function") {
+    throw new Error("Firstmate Calm requires Pi AssistantMessageComponent");
+  }
   const originalUpdateContent = AssistantMessageComponent.prototype.updateContent;
   if (typeof originalUpdateContent !== "function") {
     throw new Error("Firstmate Calm requires Pi AssistantMessageComponent.updateContent");

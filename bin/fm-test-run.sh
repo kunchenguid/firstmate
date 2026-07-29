@@ -156,7 +156,7 @@ family_for_basename() {
       ;;
     fm-afk-pi-herdr-return-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
-    fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
+    fm-grok-stop-live-e2e.test.sh|fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
     fm-send-secondmate-marker-herdr-e2e.test.sh)
       printf '%s\n' live-harness-optin
       ;;
@@ -164,7 +164,8 @@ family_for_basename() {
     fm-herdr-session-cleanup.test.sh|fm-send-strict.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|fm-spawn-nonworktree-refusal.test.sh|\
     fm-spawn-session-name.test.sh|\
-    fm-spawn-worktree-race.test.sh|fm-spawn-worktree-settle.test.sh)
+    fm-spawn-worktree-race.test.sh|fm-spawn-worktree-settle.test.sh|\
+    fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
     fm-pr-check-security.test.sh|fm-pr-merge.test.sh|fm-review-diff.test.sh|\

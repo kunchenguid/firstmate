@@ -83,10 +83,12 @@ exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-# tmux kill-window etc.: succeed silently. display-message reports a live agent
-# (claude) as the pane's foreground command, so the treehouse-owner guard's
+# tmux kill-window etc.: succeed silently. list-windows reports this task's own
+# window as present in the session inventory, and display-message reports a live
+# agent (claude) as the pane's foreground command, so the treehouse-owner guard's
 # confident agent-liveness probe reads this task's own pane as alive by default.
 case "${1:-}" in
+  list-windows) echo fm-task-x1 ;;
   display-message) echo claude ;;
 esac
 exit 0
@@ -156,11 +158,12 @@ SH
   chmod +x "$case_dir/fakebin/tasks-axi"
 }
 
-# Write a meta file for the task. Args: case_dir mode kind
+# Write a meta file for the task. Args: case_dir mode kind [window]
 write_meta() {
-  local case_dir=$1 mode=$2 kind=$3 window=${4:-fm-task-x1}
+  local case_dir=$1 mode=$2 kind=$3 window=${4:-firstmate:fm-task-x1}
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=$window" \
+    "endpoint_task_id=task-x1" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=$kind" \
@@ -1353,7 +1356,12 @@ test_herdr_teardown_clears_escalation_marker() {
   write_meta "$case_dir" local-only ship
   sed -i.bak 's/^window=.*/window=default:wG:pQ/' "$case_dir/state/task-x1.meta"
   rm -f "$case_dir/state/task-x1.meta.bak"
-  printf '%s\n' 'backend=herdr' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' \
+    'backend=herdr' \
+    'herdr_session=default' \
+    'herdr_workspace_id=wG' \
+    'herdr_tab_id=wG:tQ' \
+    'herdr_pane_id=wG:pQ' >> "$case_dir/state/task-x1.meta"
   cat > "$case_dir/fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -1407,7 +1415,7 @@ test_reused_slot_leased_spaced_path_refuses() {
   wt_spaced="$case_dir/wt with space"
   git -C "$case_dir/project" worktree add -q -b fm/task-spaced "$wt_spaced" main
   fm_write_meta "$case_dir/state/task-x1.meta" \
-    "window=fm-task-x1" \
+    "window=firstmate:fm-task-x1" \
     "worktree=$wt_spaced" \
     "project=$case_dir/project" \
     "kind=ship" \
@@ -1598,11 +1606,15 @@ test_zellij_in_use_present_pane_proceeds() {
   case_dir=$(make_case zellij-inuse-present)
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=sess1:3" \
+    "endpoint_task_id=task-x1" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=no-mistakes" \
-    "backend=zellij"
+    "backend=zellij" \
+    "zellij_session=sess1" \
+    "zellij_tab_id=1" \
+    "zellij_pane_id=3"
   # No unpushed work (HEAD is the origin baseline), so the guard's liveness
   # fallback is what governs the outcome.
   add_slot_status_treehouse "$case_dir" in-use ""
@@ -1627,11 +1639,15 @@ test_zellij_in_use_absent_pane_refuses() {
   case_dir=$(make_case zellij-inuse-absent)
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=sess1:3" \
+    "endpoint_task_id=task-x1" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=no-mistakes" \
-    "backend=zellij"
+    "backend=zellij" \
+    "zellij_session=sess1" \
+    "zellij_tab_id=1" \
+    "zellij_pane_id=3"
   wt_commit "$case_dir" "work"
   add_slot_status_treehouse "$case_dir" in-use ""
   # No zellij mock: the session/pane queries fail, so presence resolves to absent.
