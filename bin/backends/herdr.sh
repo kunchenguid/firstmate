@@ -2653,16 +2653,11 @@ fm_backend_herdr_expected_label_matches() {  # <target> [expected-label]
 # launch-grade fm_backend_herdr_server_ensure used to spawn new crewmates.
 #
 # Reading a pane or sending keys to it does not care how the server was
-# launched - the pane already exists and the server is up. It only needs the
-# server to be running and adapter-owned (this HOME's own certificate names the
-# live pid), which fm_backend_herdr_server_adapter_owned proves without the
-# closed-shell launch certification. This is what keeps peek/steer working when
-# FirstMate itself runs INSIDE the herdr session it manages (HERDR_ENV=1): that
-# server was not launched through the crewmate adapter's own closed-shell path, so
-# closed_shell_environment_ready is false and the full ensure would try to
-# restart+recertify - impossible while the session is occupied by live crewmates and
-# FirstMate itself. The SPAWN path deliberately keeps the strict ensure so a new
-# crewmate still launches only in a certified closed-shell server.
+# launched - the pane already exists and the server is up. Native-agent
+# production servers therefore need only report running, matching
+# fm_backend_herdr_server_ensure after the native cutover. The explicit legacy
+# certificate lab retains its adapter-ownership proof so that retired lifecycle
+# remains testable without constraining ordinary read/steer.
 fm_backend_herdr_server_reachable_for_readsteer() {  # <session>
   local session=$1 running
   if fm_backend_herdr_test_hooks_enabled \
@@ -2672,6 +2667,9 @@ fm_backend_herdr_server_reachable_for_readsteer() {  # <session>
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null \
     | fm_backend_herdr_control_jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = true ] || return 1
+  if ! fm_backend_herdr_server_certificate_required; then
+    return 0
+  fi
   fm_backend_herdr_server_adapter_owned "$session"
 }
 
@@ -3269,9 +3267,14 @@ fm_backend_herdr_events_capable() {  # <session>
   case "$protocol" in ''|*[!0-9]*) return 1 ;; esac
   [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL" ] || return 1
   schema=$(fm_backend_herdr_scrubbed_exec "$herdr_bin" api schema --json 2>/dev/null) || return 1
-  printf '%s' "$schema" | fm_backend_herdr_control_grep -Fq 'events.subscribe' || return 1
-  printf '%s' "$schema" | fm_backend_herdr_control_grep -Fq 'pane.agent_status_changed' || return 1
-  return 0
+  # Parse once and consume the complete schema. Early-exit grep -q pipelines
+  # close their input as soon as a match is found, which makes the upstream
+  # printf hit EPIPE and turns a real capability into a false negative whenever
+  # the caller inherits pipefail.
+  printf '%s' "$schema" | fm_backend_herdr_control_jq -e '
+    any(.. | scalars; . == "events.subscribe")
+    and any(.. | scalars; . == "pane.agent_status_changed")
+  ' >/dev/null 2>&1
 }
 
 # fm_backend_herdr_normalize_event: THE single normalize point (report section 5

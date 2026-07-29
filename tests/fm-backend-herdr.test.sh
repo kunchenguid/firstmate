@@ -242,6 +242,54 @@ test_version_check_refuses_missing_herdr() {
   pass "fm_backend_herdr_version_check: refuses loudly when herdr is not installed"
 }
 
+test_readsteer_native_server_does_not_require_legacy_certificate() {
+  local dir lock_root log resp fb status
+  dir="$TMP_ROOT/readsteer-native-server"
+  lock_root="$dir/locks"
+  log="$dir/log"
+  resp="$dir/responses"
+  mkdir -p "$lock_root" "$resp"
+  chmod 700 "$lock_root"
+  : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+
+  # shellcheck disable=SC2016
+  env -u FM_TEST_HERDR_REQUIRE_CERT_LIFECYCLE \
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_SERVER_LOCK_ROOT="$lock_root" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_reachable_for_readsteer native' "$ROOT"
+  status=$?
+
+  expect_code 0 "$status" "native read/steer should accept a running server without the retired closed-shell certificate"
+  assert_contains "$(cat "$log")" $'\x1f''status'$'\x1f''--json'$'\x1f''--session'$'\x1f''native' \
+    "native read/steer did not check the exact session's running state"
+  [ -z "$(find "$lock_root" -mindepth 1 -print -quit)" ] \
+    || fail "native read/steer consulted or created retired certificate artifacts"
+  pass "fm_backend_herdr_server_reachable_for_readsteer: native-agent servers need only be running"
+}
+
+test_readsteer_legacy_lab_still_requires_certificate() {
+  local dir lock_root log resp fb status
+  dir="$TMP_ROOT/readsteer-legacy-certificate"
+  lock_root="$dir/locks"
+  log="$dir/log"
+  resp="$dir/responses"
+  mkdir -p "$lock_root" "$resp"
+  chmod 700 "$lock_root"
+  : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+
+  # shellcheck disable=SC2016
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_SERVER_LOCK_ROOT="$lock_root" \
+    FM_TEST_HERDR_REQUIRE_CERT_LIFECYCLE=firstmate-herdr-tests-v1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_reachable_for_readsteer legacy' "$ROOT"
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "the explicit legacy lifecycle lab accepted an uncertified server"
+  pass "fm_backend_herdr_server_reachable_for_readsteer: the explicit legacy lab retains certificate enforcement"
+}
+
 test_herdr_binary_revalidates_leaf_and_physical_ancestry() {
   local dir safe bin release unsafe hardlink out status
   dir="$TMP_ROOT/herdr-physical-pin"
@@ -3883,6 +3931,48 @@ SH
   printf '%s\n' "$fb"
 }
 
+make_herdr_schemafake() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  "status --json")
+    printf '{"client":{"version":"0.7.3","protocol":16},"server":{"running":true}}\n'
+    ;;
+  "api schema")
+    printf '{"method":"events.subscribe","event":"pane.agent_status_changed","padding":"'
+    awk 'BEGIN { for (i = 0; i < 20000; i++) printf "0123456789abcdef" }'
+    printf '"}\n'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+test_events_capable_consumes_schema_without_broken_pipe() {
+  local dir fb err status
+  dir="$TMP_ROOT/events-schema-pipe"
+  mkdir -p "$dir"
+  fb=$(make_herdr_schemafake "$dir")
+  err="$dir/stderr"
+
+  # shellcheck disable=SC2016
+  PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENT_READER=/bin/true \
+    bash -o pipefail -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_events_capable native' "$ROOT" \
+    2>"$err"
+  status=$?
+
+  expect_code 0 "$status" "events capability should recognize both required schema values with pipefail enabled"
+  assert_not_contains "$(cat "$err")" "Broken pipe" "events capability emitted a broken-pipe diagnostic"
+  pass "fm_backend_herdr_events_capable: consumes the full schema without a broken pipe"
+}
+
 # make_fake_reader: a stand-in for bin/backends/herdr-eventwait.py. It ignores
 # the socket, streams the TAB-separated lines in $FM_FAKE_READER_LINES to stdout
 # (one projected event per line: pane_id\tworkspace_id\tagent_status\tagent),
@@ -4143,6 +4233,13 @@ test_wait_transition_clean_timeout_returns_1() {
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
+if [ "${FM_TEST_FOCUSED:-}" = readsteer-native-cutover ]; then
+  test_readsteer_native_server_does_not_require_legacy_certificate
+  test_readsteer_legacy_lab_still_requires_certificate
+  test_events_capable_consumes_schema_without_broken_pipe
+  exit 0
+fi
+
 if [ "${FM_TEST_FOCUSED:-}" = review-round-25 ]; then
   test_target_state_distinguishes_absent_from_malformed_panes
   test_target_state_refuses_missing_recorded_pane_with_replacement
@@ -4221,6 +4318,8 @@ fi
 test_version_check_accepts_current_protocol
 test_version_check_refuses_old_protocol
 test_version_check_refuses_missing_herdr
+test_readsteer_native_server_does_not_require_legacy_certificate
+test_readsteer_legacy_lab_still_requires_certificate
 test_server_test_hooks_are_inert_without_explicit_opt_in
 test_herdr_binary_revalidates_leaf_and_physical_ancestry
 test_server_launch_scrubs_hostile_perl_and_control_environment
@@ -4324,6 +4423,7 @@ test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend
 test_scripts_route_explicit_target_through_meta_backend
+test_events_capable_consumes_schema_without_broken_pipe
 test_normalize_event_leaves_from_empty
 test_escalation_marker_keys_like_watcher
 test_apply_transition_blocked_requires_commit_to_dedupe
