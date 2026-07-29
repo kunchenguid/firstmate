@@ -2069,12 +2069,14 @@ SH
     FM_EXPECT_CHILD_LINEAGE_MARKER="$case_dir/child-lineage-verified" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" &
   teardown_pid=$!
-  for _ in $(seq 1 100); do
+  for _ in $(seq 1 600); do
     [ -f "$kill_started" ] && break
+    kill -0 "$teardown_pid" 2>/dev/null || break
     sleep 0.05
   done
   [ -f "$kill_started" ] || {
-    kill "$teardown_pid" 2>/dev/null || true
+    : > "$allow_kill"
+    wait "$teardown_pid" 2>/dev/null || true
     fail "managed child teardown never reached endpoint cleanup: $(cat "$case_dir/stderr")"
   }
 
