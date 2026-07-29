@@ -112,6 +112,23 @@ preservation_ref_for() {
 preservation_refs() {
   git -C "$1" for-each-ref --format='%(refname)' refs/fm-fleet-sync/squash-preserved
 }
+git_operation_marker_path() {
+  local clone=$1 marker=$2 path
+  path=$(git -C "$clone" rev-parse --git-path "$marker")
+  case "$path" in
+    /*) printf '%s\n' "$path" ;;
+    *) printf '%s/%s\n' "$clone" "$path" ;;
+  esac
+}
+install_git_operation_marker() {
+  local clone=$1 marker=$2 kind=$3 path
+  path=$(git_operation_marker_path "$clone" "$marker")
+  if [ "$kind" = directory ]; then
+    mkdir -p "$path"
+  else
+    git -C "$clone" rev-parse HEAD > "$path"
+  fi
+}
 
 # run_sync <home> [args...]: run fleet-sync against an isolated home, stdout only.
 run_sync() {
@@ -223,10 +240,126 @@ for a in "$@"; do
   [ "$a" = --stdin ] && is_stdin=1
 done
 if [ "$is_update" = 1 ] && [ "$is_stdin" = 1 ]; then
-  cat > "${GIT_REF_TRANSACTION_LOG:?}"
+  n=$(cat "${GIT_REF_TRANSACTION_COUNTER:?}" 2>/dev/null || echo 0)
+  n=$(( n + 1 ))
+  printf '%s\n' "$n" > "$GIT_REF_TRANSACTION_COUNTER"
+  if [ "$n" -eq 1 ]; then
+    exec "$real" "$@"
+  fi
+  : > "${GIT_REF_TRANSACTION_LOG:?}"
+  while IFS= read -r line; do
+    printf '%s\n' "$line" >> "$GIT_REF_TRANSACTION_LOG"
+    [ "$line" = prepare ] && break
+  done
   echo "simulated expected-old ref transaction refusal" >&2
   exit 1
 fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
+git_operation_after_preservation() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+is_anchor_check=0
+prev=
+for a in "$@"; do
+  [ "$prev" = cat-file ] && [ "$a" = -e ] && is_anchor_check=1
+  prev=$a
+done
+if [ "$is_anchor_check" = 1 ] && printf '%s\n' "$*" | grep -F 'refs/fm-fleet-sync/squash-preserved/' >/dev/null; then
+  "$real" "$@"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    marker=$("$real" -C "${GIT_RACE_CLONE:?}" rev-parse --git-path MERGE_HEAD)
+    case "$marker" in /*) ;; *) marker="${GIT_RACE_CLONE:?}/$marker" ;; esac
+    "$real" -C "${GIT_RACE_CLONE:?}" rev-parse HEAD > "$marker"
+  fi
+  exit "$rc"
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
+git_symbolic_ref_before_preservation() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+is_check=0
+for a in "$@"; do [ "$a" = check-ref-format ] && is_check=1; done
+if [ "$is_check" = 1 ]; then
+  "$real" "$@"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    oid=$("$real" -C "${GIT_RACE_CLONE:?}" rev-parse --verify "${GIT_SYMBOLIC_RACE_REF:?}^{commit}")
+    "$real" -C "$GIT_RACE_CLONE" update-ref --no-deref "$GIT_SYMBOLIC_RACE_TARGET" "$oid" ""
+    "$real" -C "$GIT_RACE_CLONE" update-ref --no-deref -d "$GIT_SYMBOLIC_RACE_REF" "$oid"
+    "$real" -C "$GIT_RACE_CLONE" symbolic-ref "$GIT_SYMBOLIC_RACE_REF" "$GIT_SYMBOLIC_RACE_TARGET"
+  fi
+  exit "$rc"
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
+git_symbolic_preservation_creation_race() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+is_anchor_check=0
+for a in "$@"; do [ "$a" = show-ref ] && is_anchor_check=1; done
+if [ "$is_anchor_check" = 1 ] \
+    && printf '%s\n' "$*" | grep -F 'refs/fm-fleet-sync/squash-preserved/' >/dev/null; then
+  "$real" "$@"
+  rc=$?
+  "$real" -C "${GIT_RACE_CLONE:?}" symbolic-ref "${GIT_SYMBOLIC_RACE_REF:?}" "${GIT_SYMBOLIC_RACE_TARGET:?}"
+  exit "$rc"
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
+git_symbolic_ref_transaction_race() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+replace_ref() {
+  oid=$("$real" -C "${GIT_RACE_CLONE:?}" rev-parse --verify "${GIT_SYMBOLIC_RACE_REF:?}^{commit}")
+  "$real" -C "$GIT_RACE_CLONE" update-ref --no-deref "${GIT_SYMBOLIC_RACE_TARGET:?}" "$oid" ""
+  "$real" -C "$GIT_RACE_CLONE" update-ref --no-deref -d "$GIT_SYMBOLIC_RACE_REF" "$oid"
+  "$real" -C "$GIT_RACE_CLONE" symbolic-ref "$GIT_SYMBOLIC_RACE_REF" "$GIT_SYMBOLIC_RACE_TARGET"
+}
+
+if [ "${GIT_SYMBOLIC_RACE_PHASE:?}" = before ] \
+    && printf '%s\n' "$*" | grep -F 'rev-parse --git-path sequencer' >/dev/null; then
+  output=$("$real" "$@")
+  rc=$?
+  n=$(cat "${GIT_SYMBOLIC_RACE_COUNTER:?}" 2>/dev/null || echo 0)
+  n=$(( n + 1 ))
+  printf '%s\n' "$n" > "$GIT_SYMBOLIC_RACE_COUNTER"
+  if [ "$n" -eq 2 ]; then
+    replace_ref
+  fi
+  [ -z "$output" ] || printf '%s\n' "$output"
+  exit "$rc"
+fi
+
+if [ "$GIT_SYMBOLIC_RACE_PHASE" = after ] \
+    && printf '%s\n' "$*" | grep -F 'symbolic-ref --quiet --no-recurse HEAD' >/dev/null; then
+  n=$(cat "${GIT_SYMBOLIC_RACE_COUNTER:?}" 2>/dev/null || echo 0)
+  n=$(( n + 1 ))
+  printf '%s\n' "$n" > "$GIT_SYMBOLIC_RACE_COUNTER"
+  if [ "$n" -eq 2 ]; then
+    replace_ref
+  fi
+  exec "$real" "$@"
+fi
+
 exec "$real" "$@"
 SH
   chmod +x "$1/git"
@@ -460,8 +593,136 @@ test_tree_identical_conflicting_anchor_refuses() {
   pass "a conflicting preservation ref is never overwritten and blocks reconciliation"
 }
 
+test_active_git_operations_refuse_before_preservation() {
+  local spec operation marker kind home clone out old status
+  for spec in \
+      "merge MERGE_HEAD file" \
+      "cherry-pick CHERRY_PICK_HEAD file" \
+      "revert REVERT_HEAD file" \
+      "rebase rebase-merge directory" \
+      "rebase rebase-apply directory" \
+      "sequencer sequencer directory"; do
+    set -- $spec
+    operation=$1 marker=$2 kind=$3
+    home=$(new_home)
+    clone=$(build_tree_identical_squash_pair "$home" "operation-$marker")
+    old=$(head_sha "$clone")
+    install_git_operation_marker "$clone" "$marker" "$kind"
+    status=$(git -C "$clone" status --porcelain 2>/dev/null) \
+      || fail "$marker fixture does not expose readable porcelain"
+    [ -z "$status" ] || fail "$marker fixture is not porcelain-clean"
+
+    out=$(run_sync "$home" "$clone")
+
+    assert_contains "$out" "STUCK:" "$marker operation did not report STUCK"
+    assert_contains "$out" "active $operation operation" "$marker operation did not explain the refusal"
+    [ "$(head_sha "$clone")" = "$old" ] || fail "$marker operation moved the default branch"
+    [ -z "$(preservation_refs "$clone")" ] || fail "$marker operation created a preservation ref"
+  done
+  pass "all active Git operation states refuse before preservation"
+}
+
+test_operation_starting_after_preservation_refuses_before_transaction() {
+  local home clone fakebin out err old anchor
+  home=$(new_home)
+  clone=$(build_tree_identical_squash_pair "$home" operation-race)
+  old=$(head_sha "$clone")
+  anchor=$(preservation_ref_for "$clone" main "$old")
+  fakebin="$home/fb-operation-race"; mkdir -p "$fakebin"
+  git_operation_after_preservation "$fakebin"
+  out="$home/out-operation-race"; err="$home/err-operation-race"
+  export GIT_RACE_CLONE="$clone"
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" operation-race
+  unset GIT_RACE_CLONE
+
+  assert_contains "$(cat "$out")" "active merge operation appeared before atomic update" \
+    "operation race did not explain the pre-transaction refusal"
+  [ "$(head_sha "$clone")" = "$old" ] || fail "operation race moved the default branch"
+  [ "$(git -C "$clone" rev-parse "$anchor")" = "$old" ] \
+    || fail "operation race lost the preservation ref"
+  pass "an operation starting after preservation still blocks the transaction"
+}
+
+test_symbolic_reconciliation_refs_are_refused() {
+  local home clone out old remote anchor target fakebin err
+
+  home=$(new_home)
+  clone=$(build_tree_identical_squash_pair "$home" symbolic-local)
+  old=$(head_sha "$clone")
+  target=refs/fm-test/symbolic-local-target
+  git -C "$clone" update-ref --no-deref "$target" "$old" ""
+  git -C "$clone" update-ref --no-deref -d refs/heads/main "$old"
+  git -C "$clone" symbolic-ref refs/heads/main "$target"
+  out=$(run_sync "$home" "$clone")
+  assert_contains "$out" "symbolic local default ref" "symbolic local ref was not explicitly refused"
+  [ "$(head_sha "$clone")" = "$old" ] || fail "symbolic local ref moved its referent"
+  [ -z "$(preservation_refs "$clone")" ] || fail "symbolic local ref created a preservation ref"
+
+  home=$(new_home)
+  clone=$(build_tree_identical_squash_pair "$home" symbolic-remote)
+  old=$(head_sha "$clone")
+  fakebin="$home/fb-symbolic-remote"; mkdir -p "$fakebin"
+  git_symbolic_ref_before_preservation "$fakebin"
+  out="$home/out-symbolic-remote"; err="$home/err-symbolic-remote"
+  target=refs/fm-test/symbolic-remote-target
+  export GIT_RACE_CLONE="$clone"
+  export GIT_SYMBOLIC_RACE_REF=refs/remotes/origin/main
+  export GIT_SYMBOLIC_RACE_TARGET="$target"
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" symbolic-remote
+  unset GIT_RACE_CLONE GIT_SYMBOLIC_RACE_REF GIT_SYMBOLIC_RACE_TARGET
+  assert_contains "$(cat "$out")" "symbolic remote-tracking ref" \
+    "symbolic remote-tracking ref was not explicitly refused"
+  [ "$(head_sha "$clone")" = "$old" ] || fail "symbolic remote-tracking ref moved the local branch"
+  [ -z "$(preservation_refs "$clone")" ] || fail "symbolic remote-tracking ref created a preservation ref"
+
+  home=$(new_home)
+  clone=$(build_tree_identical_squash_pair "$home" symbolic-preservation)
+  old=$(head_sha "$clone")
+  anchor=$(preservation_ref_for "$clone" main "$old")
+  target=refs/fm-test/symbolic-preservation-target
+  git -C "$clone" update-ref --no-deref "$target" "$old" ""
+  git -C "$clone" symbolic-ref "$anchor" "$target"
+  out=$(run_sync "$home" "$clone")
+  assert_contains "$out" "symbolic preservation ref" "symbolic preservation ref was not explicitly refused"
+  [ "$(head_sha "$clone")" = "$old" ] || fail "symbolic preservation ref moved the default branch"
+  [ "$(git -C "$clone" symbolic-ref "$anchor")" = "$target" ] \
+    || fail "symbolic preservation ref was overwritten"
+  [ "$(git -C "$clone" rev-parse "$target")" = "$old" ] \
+    || fail "symbolic preservation referent was moved"
+
+  remote=$(git -C "$clone" rev-parse origin/main)
+  [ "$remote" != "$old" ] || fail "symbolic-ref fixtures lost their divergence"
+  pass "symbolic local, remote-tracking, and preservation refs are refused"
+}
+
+test_preservation_creation_symbolic_race_does_not_write_through() {
+  local home clone fakebin out err old anchor target
+  home=$(new_home)
+  clone=$(build_tree_identical_squash_pair "$home" preservation-symbolic-race)
+  old=$(head_sha "$clone")
+  anchor=$(preservation_ref_for "$clone" main "$old")
+  target=refs/fm-test/dangling-preservation-target
+  fakebin="$home/fb-preservation-symbolic-race"; mkdir -p "$fakebin"
+  git_symbolic_preservation_creation_race "$fakebin"
+  out="$home/out-preservation-symbolic-race"; err="$home/err-preservation-symbolic-race"
+  export GIT_RACE_CLONE="$clone"
+  export GIT_SYMBOLIC_RACE_REF="$anchor"
+  export GIT_SYMBOLIC_RACE_TARGET="$target"
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" preservation-symbolic-race
+  unset GIT_RACE_CLONE GIT_SYMBOLIC_RACE_REF GIT_SYMBOLIC_RACE_TARGET
+
+  assert_contains "$(cat "$out")" "symbolic preservation ref appeared before creation" \
+    "symbolic preservation creation race did not refuse"
+  [ "$(head_sha "$clone")" = "$old" ] || fail "symbolic preservation creation race moved the branch"
+  [ "$(git -C "$clone" symbolic-ref "$anchor")" = "$target" ] \
+    || fail "symbolic preservation creation race replaced the named ref"
+  ! git -C "$clone" show-ref --verify --quiet "$target" \
+    || fail "preservation creation wrote through the dangling symbolic ref"
+  pass "preservation creation cannot write through a symbolic race"
+}
+
 test_tree_identical_expected_old_transaction_refusal() {
-  local home clone fakebin out err log old remote anchor
+  local home clone fakebin out err log counter old remote anchor
   home=$(new_home)
   clone=$(build_tree_identical_squash_pair "$home" ref-race)
   old=$(git -C "$clone" rev-parse main)
@@ -469,9 +730,11 @@ test_tree_identical_expected_old_transaction_refusal() {
   fakebin="$home/fb-ref-race"; mkdir -p "$fakebin"
   git_ref_transaction_refusal "$fakebin"
   out="$home/out-ref-race"; err="$home/err-ref-race"; log="$home/ref-transaction"
+  counter="$home/ref-transaction-count"
   export GIT_REF_TRANSACTION_LOG="$log"
+  export GIT_REF_TRANSACTION_COUNTER="$counter"
   run_sync_guarded "$home" "$fakebin" "$out" "$err" ref-race
-  unset GIT_REF_TRANSACTION_LOG
+  unset GIT_REF_TRANSACTION_LOG GIT_REF_TRANSACTION_COUNTER
   remote=$(git -C "$clone" rev-parse origin/main)
 
   assert_grep "verify $anchor $old" "$log" "atomic transaction did not verify the preservation ref"
@@ -479,12 +742,86 @@ test_tree_identical_expected_old_transaction_refusal() {
     "atomic transaction did not verify the freshly observed remote ref"
   assert_grep "update refs/heads/main $remote $old" "$log" \
     "atomic branch update did not carry its expected old object"
+  [ "$(grep -Fc 'option no-deref' "$log")" -eq 3 ] \
+    || fail "atomic transaction did not apply no-deref to all three named refs"
   assert_contains "$(cat "$out")" "ref-race: STUCK:" "expected-old refusal reports STUCK"
   assert_contains "$(cat "$out")" "atomic update rejected" "expected-old refusal explains the atomic rejection"
   [ "$(head_sha "$clone")" = "$old" ] || fail "ref transaction refusal moved the default branch"
   [ "$(git -C "$clone" rev-parse "$anchor")" = "$old" ] \
     || fail "ref transaction refusal lost the anchored old head"
   pass "an expected-old ref transaction refusal leaves the default branch unmoved"
+}
+
+test_symbolic_transaction_races_do_not_write_through() {
+  local kind home clone fakebin out err counter old remote anchor race_ref target expected
+  for kind in preservation remote local; do
+    home=$(new_home)
+    clone=$(build_tree_identical_squash_pair "$home" "transaction-symbolic-$kind")
+    old=$(head_sha "$clone")
+    anchor=$(preservation_ref_for "$clone" main "$old")
+    remote=$(git -C "$home/work-transaction-symbolic-$kind" rev-parse main)
+    case "$kind" in
+      preservation) race_ref=$anchor; expected=$old ;;
+      remote) race_ref=refs/remotes/origin/main; expected=$remote ;;
+      local) race_ref=refs/heads/main; expected=$old ;;
+    esac
+    target="refs/fm-test/transaction-symbolic-$kind-target"
+    fakebin="$home/fb-transaction-symbolic-$kind"; mkdir -p "$fakebin"
+    git_symbolic_ref_transaction_race "$fakebin"
+    out="$home/out-transaction-symbolic-$kind"
+    err="$home/err-transaction-symbolic-$kind"
+    counter="$home/count-transaction-symbolic-$kind"
+    export GIT_RACE_CLONE="$clone"
+    export GIT_SYMBOLIC_RACE_REF="$race_ref"
+    export GIT_SYMBOLIC_RACE_TARGET="$target"
+    export GIT_SYMBOLIC_RACE_PHASE=before
+    export GIT_SYMBOLIC_RACE_COUNTER="$counter"
+    run_sync_guarded "$home" "$fakebin" "$out" "$err" "transaction-symbolic-$kind"
+    unset GIT_RACE_CLONE GIT_SYMBOLIC_RACE_REF GIT_SYMBOLIC_RACE_TARGET
+    unset GIT_SYMBOLIC_RACE_PHASE GIT_SYMBOLIC_RACE_COUNTER
+
+    assert_contains "$(cat "$out")" "atomic update rejected" \
+      "$kind symbolic transaction race did not reject"
+    [ "$(head_sha "$clone")" = "$old" ] || fail "$kind symbolic transaction race moved HEAD"
+    [ "$(git -C "$clone" symbolic-ref "$race_ref")" = "$target" ] \
+      || fail "$kind symbolic transaction race replaced the raced named ref"
+    [ "$(git -C "$clone" rev-parse "$target")" = "$expected" ] \
+      || fail "$kind symbolic transaction race wrote through its referent"
+  done
+  pass "atomic ref checks reject symbolic substitutions without write-through"
+}
+
+test_symbolic_rollback_race_does_not_write_through() {
+  local home clone fakebin out err counter old remote anchor target
+  home=$(new_home)
+  clone=$(build_tree_identical_squash_pair "$home" rollback-symbolic-race)
+  old=$(head_sha "$clone")
+  anchor=$(preservation_ref_for "$clone" main "$old")
+  remote=$(git -C "$home/work-rollback-symbolic-race" rev-parse main)
+  target=refs/fm-test/rollback-symbolic-target
+  fakebin="$home/fb-rollback-symbolic-race"; mkdir -p "$fakebin"
+  git_symbolic_ref_transaction_race "$fakebin"
+  out="$home/out-rollback-symbolic-race"; err="$home/err-rollback-symbolic-race"
+  counter="$home/count-rollback-symbolic-race"
+  export GIT_RACE_CLONE="$clone"
+  export GIT_SYMBOLIC_RACE_REF=refs/heads/main
+  export GIT_SYMBOLIC_RACE_TARGET="$target"
+  export GIT_SYMBOLIC_RACE_PHASE=after
+  export GIT_SYMBOLIC_RACE_COUNTER="$counter"
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" rollback-symbolic-race
+  unset GIT_RACE_CLONE GIT_SYMBOLIC_RACE_REF GIT_SYMBOLIC_RACE_TARGET
+  unset GIT_SYMBOLIC_RACE_PHASE GIT_SYMBOLIC_RACE_COUNTER
+
+  assert_contains "$(cat "$out")" "local branch was restored" \
+    "symbolic rollback race did not restore the named local ref"
+  ! git -C "$clone" symbolic-ref --quiet refs/heads/main >/dev/null 2>&1 \
+    || fail "symbolic rollback race left the local ref symbolic"
+  [ "$(head_sha "$clone")" = "$old" ] || fail "symbolic rollback race did not restore the old local head"
+  [ "$(git -C "$clone" rev-parse "$target")" = "$remote" ] \
+    || fail "rollback wrote the old local head through the symbolic ref"
+  [ "$(git -C "$clone" rev-parse "$anchor")" = "$old" ] \
+    || fail "symbolic rollback race lost the preservation ref"
+  pass "rollback cannot write through a symbolic local ref race"
 }
 
 test_prunes_gone_branch_during_ordinary_sync() {
@@ -822,7 +1159,13 @@ test_tree_identical_squash_divergence_reconciles_and_converges
 test_unrelated_equal_tree_is_not_normalized
 test_unpublished_ahead_equal_tree_is_not_normalized
 test_tree_identical_conflicting_anchor_refuses
+test_active_git_operations_refuse_before_preservation
+test_operation_starting_after_preservation_refuses_before_transaction
+test_symbolic_reconciliation_refs_are_refused
+test_preservation_creation_symbolic_race_does_not_write_through
 test_tree_identical_expected_old_transaction_refusal
+test_symbolic_transaction_races_do_not_write_through
+test_symbolic_rollback_race_does_not_write_through
 test_prunes_gone_branch_during_ordinary_sync
 test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged

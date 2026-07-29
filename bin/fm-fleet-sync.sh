@@ -11,7 +11,9 @@
 # same root tree: preserve the full old local identity at
 # refs/fm-fleet-sync/squash-preserved/<default>/<old-oid>, verify that direct ref,
 # then atomically move the local branch to the observed remote commit with
-# expected-old checks on the preservation, remote-tracking, and local refs.
+# no-dereference expected-old checks on the preservation, remote-tracking, and
+# local refs. Active Git operations and symbolic forms of those refs refuse the
+# recovery before preservation and are rechecked immediately before the move.
 # Every other off-default or diverged state may hold real work, so it is left
 # untouched and reported as a quantified, loud "STUCK: ... N commits behind ...
 # - needs attention" warning rather than quiet drift. Nothing is ever forced,
@@ -298,21 +300,139 @@ reconciliation_refusal() {
   report_stuck "diverged $DEFAULT (tree-identical recovery refused: $1)"
 }
 
+ref_is_symbolic() {
+  git -C "$PROJ" symbolic-ref --quiet "$1" >/dev/null 2>&1
+}
+
+direct_ref_oid() {
+  ref_is_symbolic "$1" && return 1
+  git -C "$PROJ" show-ref --verify --hash "$1" 2>/dev/null
+}
+
+git_operation_in_progress() {
+  local marker operation path
+
+  for marker in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply sequencer; do
+    case "$marker" in
+      MERGE_HEAD) operation=merge ;;
+      CHERRY_PICK_HEAD) operation=cherry-pick ;;
+      REVERT_HEAD) operation=revert ;;
+      rebase-merge|rebase-apply) operation=rebase ;;
+      sequencer) operation=sequencer ;;
+    esac
+    if ! path=$(git -C "$PROJ" rev-parse --git-path "$marker" 2>/dev/null); then
+      printf 'unreadable Git operation state\n'
+      return 0
+    fi
+    case "$path" in
+      /*) ;;
+      *) path="$PROJ/$path" ;;
+    esac
+    if [ -e "$path" ]; then
+      printf '%s\n' "$operation"
+      return 0
+    fi
+  done
+  return 1
+}
+
+direct_ref_transaction() {
+  local commands=$1 git_dir txn_dir input_pipe output_pipe error_file pid response ref rc
+  shift
+  REF_TRANSACTION_OUTPUT=
+
+  git_dir=$(git -C "$PROJ" rev-parse --absolute-git-dir 2>/dev/null) || {
+    REF_TRANSACTION_OUTPUT="cannot resolve Git directory"
+    return 1
+  }
+  txn_dir=$(mktemp -d "$git_dir/fm-fleet-sync-ref-transaction.XXXXXX") || {
+    REF_TRANSACTION_OUTPUT="cannot create ref transaction channel"
+    return 1
+  }
+  input_pipe="$txn_dir/input"
+  output_pipe="$txn_dir/output"
+  error_file="$txn_dir/error"
+  if ! mkfifo "$input_pipe" "$output_pipe"; then
+    rmdir "$txn_dir" 2>/dev/null || true
+    REF_TRANSACTION_OUTPUT="cannot create ref transaction channel"
+    return 1
+  fi
+
+  git -C "$PROJ" update-ref --stdin <"$input_pipe" >"$output_pipe" 2>"$error_file" &
+  pid=$!
+  exec 8>"$input_pipe"
+  exec 9<"$output_pipe"
+  printf '%s\nprepare\n' "$commands" >&8
+  if ! IFS= read -r response <&9 || [ "$response" != "prepare: ok" ]; then
+    exec 8>&-
+    exec 9<&-
+    wait "$pid" 2>/dev/null || true
+    REF_TRANSACTION_OUTPUT=$(first_line "$(cat "$error_file" 2>/dev/null || true)")
+    rm -f "$input_pipe" "$output_pipe" "$error_file"
+    rmdir "$txn_dir" 2>/dev/null || true
+    [ -n "$REF_TRANSACTION_OUTPUT" ] || REF_TRANSACTION_OUTPUT="ref transaction preparation failed"
+    return 1
+  fi
+
+  for ref in "$@"; do
+    if ref_is_symbolic "$ref"; then
+      printf 'abort\n' >&8
+      IFS= read -r response <&9 || true
+      exec 8>&-
+      exec 9<&-
+      wait "$pid" 2>/dev/null || true
+      REF_TRANSACTION_OUTPUT="symbolic ref at $ref"
+      rm -f "$input_pipe" "$output_pipe" "$error_file"
+      rmdir "$txn_dir" 2>/dev/null || true
+      return 2
+    fi
+  done
+
+  printf 'commit\n' >&8
+  IFS= read -r response <&9 || response=
+  exec 8>&-
+  exec 9<&-
+  wait "$pid" 2>/dev/null
+  rc=$?
+  if [ "$rc" -ne 0 ] || [ "$response" != "commit: ok" ]; then
+    REF_TRANSACTION_OUTPUT=$(first_line "$(cat "$error_file" 2>/dev/null || true)")
+    [ -n "$REF_TRANSACTION_OUTPUT" ] || REF_TRANSACTION_OUTPUT="ref transaction commit failed"
+    rm -f "$input_pipe" "$output_pipe" "$error_file"
+    rmdir "$txn_dir" 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$input_pipe" "$output_pipe" "$error_file"
+  rmdir "$txn_dir" 2>/dev/null || true
+  return 0
+}
+
 preservation_ref_oid() {
-  git -C "$PROJ" symbolic-ref --quiet "$PRESERVE_REF" >/dev/null 2>&1 && return 1
-  git -C "$PROJ" show-ref --verify --hash "$PRESERVE_REF" 2>/dev/null
+  direct_ref_oid "$PRESERVE_REF"
 }
 
 ensure_preservation_ref() {
-  local anchor_oid update_output
+  local anchor_oid creation_input transaction_rc update_output
 
+  if ref_is_symbolic "$PRESERVE_REF"; then
+    reconciliation_refusal "symbolic preservation ref at $PRESERVE_REF"
+    return 1
+  fi
   if git -C "$PROJ" show-ref --verify --quiet "$PRESERVE_REF"; then
     if ! anchor_oid=$(preservation_ref_oid) || [ "$anchor_oid" != "$local_rev" ]; then
       reconciliation_refusal "preservation ref conflict at $PRESERVE_REF"
       return 1
     fi
   else
-    if ! update_output=$(git -C "$PROJ" update-ref "$PRESERVE_REF" "$local_rev" "" 2>&1); then
+    creation_input=$(printf 'option no-deref\ncreate %s %s\n' "$PRESERVE_REF" "$local_rev")
+    if direct_ref_transaction "$creation_input" "$PRESERVE_REF"; then
+      :
+    else
+      transaction_rc=$?
+      update_output=$REF_TRANSACTION_OUTPUT
+      if [ "$transaction_rc" -eq 2 ]; then
+        reconciliation_refusal "symbolic preservation ref appeared before creation at $PRESERVE_REF"
+        return 1
+      fi
       # A concurrent creator of the same exact direct ref is harmless. Any
       # other creation failure or conflicting value is a refusal, never an
       # overwrite.
@@ -332,13 +452,35 @@ ensure_preservation_ref() {
 }
 
 reconcile_tree_identical_divergence() {
-  local anchor_oid branch_ref head_oid local_oid remote_oid local_tree_now
+  local anchor_oid branch_ref head_oid local_oid remote_oid local_tree_now operation
   local remote_tree_now common_base_now worktree_status update_input update_output
-  local post_branch post_head post_tree post_status rollback_output
+  local post_branch post_head post_local post_remote post_tree post_status rollback_output
 
   PRESERVE_REF="refs/fm-fleet-sync/squash-preserved/$DEFAULT/$local_rev"
   if ! git check-ref-format "$PRESERVE_REF" >/dev/null 2>&1; then
     reconciliation_refusal "unsafe preservation ref identity"
+    return 0
+  fi
+  if operation=$(git_operation_in_progress); then
+    reconciliation_refusal "active $operation operation"
+    return 0
+  fi
+  if ref_is_symbolic "$LOCAL_REF"; then
+    reconciliation_refusal "symbolic local ref at $LOCAL_REF"
+    return 0
+  fi
+  if ref_is_symbolic "$REMOTE_REF"; then
+    reconciliation_refusal "symbolic remote-tracking ref at $REMOTE_REF"
+    return 0
+  fi
+  if ref_is_symbolic "$PRESERVE_REF"; then
+    reconciliation_refusal "symbolic preservation ref at $PRESERVE_REF"
+    return 0
+  fi
+  local_oid=$(direct_ref_oid "$LOCAL_REF" 2>/dev/null || true)
+  remote_oid=$(direct_ref_oid "$REMOTE_REF" 2>/dev/null || true)
+  if [ "$local_oid" != "$local_rev" ] || [ "$remote_oid" != "$remote_rev" ]; then
+    reconciliation_refusal "repository identity changed before preservation"
     return 0
   fi
   if ! ensure_preservation_ref; then
@@ -348,10 +490,10 @@ reconcile_tree_identical_divergence() {
   # Revalidate every predicate after the preservation ref exists. The update-ref
   # transaction below then verifies all three refs under one atomic ref lock, so
   # a race cannot move the checked-out branch from an identity we did not inspect.
-  branch_ref=$(git -C "$PROJ" symbolic-ref --quiet HEAD 2>/dev/null || true)
+  branch_ref=$(git -C "$PROJ" symbolic-ref --quiet --no-recurse HEAD 2>/dev/null || true)
   head_oid=$(git -C "$PROJ" rev-parse --verify "HEAD^{commit}" 2>/dev/null || true)
-  local_oid=$(git -C "$PROJ" rev-parse --verify "$LOCAL_REF^{commit}" 2>/dev/null || true)
-  remote_oid=$(git -C "$PROJ" rev-parse --verify "$REMOTE_REF^{commit}" 2>/dev/null || true)
+  local_oid=$(direct_ref_oid "$LOCAL_REF" 2>/dev/null || true)
+  remote_oid=$(direct_ref_oid "$REMOTE_REF" 2>/dev/null || true)
   anchor_oid=$(preservation_ref_oid 2>/dev/null || true)
   local_tree_now=$(git -C "$PROJ" rev-parse --verify "$local_rev^{tree}" 2>/dev/null || true)
   remote_tree_now=$(git -C "$PROJ" rev-parse --verify "$remote_rev^{tree}" 2>/dev/null || true)
@@ -370,24 +512,46 @@ reconcile_tree_identical_divergence() {
     reconciliation_refusal "repository identity changed before atomic update; preserved $PRESERVE_REF"
     return 0
   fi
+  if ref_is_symbolic "$LOCAL_REF"; then
+    reconciliation_refusal "symbolic local ref appeared before atomic update; preserved $PRESERVE_REF"
+    return 0
+  fi
+  if ref_is_symbolic "$REMOTE_REF"; then
+    reconciliation_refusal "symbolic remote-tracking ref appeared before atomic update; preserved $PRESERVE_REF"
+    return 0
+  fi
+  if ref_is_symbolic "$PRESERVE_REF"; then
+    reconciliation_refusal "symbolic preservation ref appeared before atomic update; preserved $PRESERVE_REF"
+    return 0
+  fi
+  if operation=$(git_operation_in_progress); then
+    reconciliation_refusal "active $operation operation appeared before atomic update; preserved $PRESERVE_REF"
+    return 0
+  fi
 
-  update_input=$(printf 'verify %s %s\nverify %s %s\nupdate %s %s %s\n' \
+  update_input=$(printf 'option no-deref\nverify %s %s\noption no-deref\nverify %s %s\noption no-deref\nupdate %s %s %s\n' \
     "$PRESERVE_REF" "$local_rev" "$REMOTE_REF" "$remote_rev" \
     "$LOCAL_REF" "$remote_rev" "$local_rev")
-  if ! update_output=$(printf '%s\n' "$update_input" | git -C "$PROJ" update-ref --stdin 2>&1); then
+  if direct_ref_transaction "$update_input" "$PRESERVE_REF" "$REMOTE_REF" "$LOCAL_REF"; then
+    :
+  else
+    update_output=$REF_TRANSACTION_OUTPUT
     reconciliation_refusal "atomic update rejected; preserved $PRESERVE_REF$(if [ -n "$update_output" ]; then printf ': %s' "$(first_line "$update_output")"; fi)"
     return 0
   fi
 
-  post_branch=$(git -C "$PROJ" symbolic-ref --quiet HEAD 2>/dev/null || true)
+  post_branch=$(git -C "$PROJ" symbolic-ref --quiet --no-recurse HEAD 2>/dev/null || true)
   post_head=$(git -C "$PROJ" rev-parse --verify "HEAD^{commit}" 2>/dev/null || true)
+  post_local=$(direct_ref_oid "$LOCAL_REF" 2>/dev/null || true)
+  post_remote=$(direct_ref_oid "$REMOTE_REF" 2>/dev/null || true)
   post_tree=$(git -C "$PROJ" rev-parse --verify "HEAD^{tree}" 2>/dev/null || true)
   anchor_oid=$(preservation_ref_oid 2>/dev/null || true)
   post_status=$(git -C "$PROJ" status --porcelain 2>/dev/null) || post_status=unreadable
   if [ "$post_branch" != "$LOCAL_REF" ] || [ "$post_head" != "$remote_rev" ] \
+      || [ "$post_local" != "$remote_rev" ] || [ "$post_remote" != "$remote_rev" ] \
       || [ "$post_tree" != "$local_tree" ] || [ "$anchor_oid" != "$local_rev" ] \
       || [ -n "$post_status" ]; then
-    if rollback_output=$(git -C "$PROJ" update-ref "$LOCAL_REF" "$local_rev" "$remote_rev" 2>&1); then
+    if rollback_output=$(git -C "$PROJ" update-ref --no-deref "$LOCAL_REF" "$local_rev" "$remote_rev" 2>&1); then
       reconciliation_refusal "post-update verification failed and the local branch was restored; preserved $PRESERVE_REF"
     else
       reconciliation_refusal "post-update verification failed and atomic restore was refused; preserved $PRESERVE_REF$(if [ -n "$rollback_output" ]; then printf ': %s' "$(first_line "$rollback_output")"; fi)"
@@ -440,6 +604,14 @@ sync_project() {
   BASE="origin/$DEFAULT"
   LOCAL_REF="refs/heads/$DEFAULT"
   REMOTE_REF="refs/remotes/origin/$DEFAULT"
+  if ref_is_symbolic "$LOCAL_REF"; then
+    report_stuck "symbolic local default ref $LOCAL_REF"
+    return 0
+  fi
+  if ref_is_symbolic "$REMOTE_REF"; then
+    report_stuck "symbolic remote-tracking ref $REMOTE_REF"
+    return 0
+  fi
   if ! git -C "$PROJ" rev-parse --verify --quiet "$REMOTE_REF^{commit}" >/dev/null; then
     echo "$label: skipped: $BASE does not exist"
     return 0
