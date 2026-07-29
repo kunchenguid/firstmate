@@ -242,7 +242,8 @@ SH
 }
 
 wait_for_exit() {
-  local pid=$1 limit=${2:-50} i=0
+  local pid=$1 limit i=0
+  limit=$(fm_test_liveness_iterations "${2:-50}" 0.1)
   while [ "$i" -lt "$limit" ]; do
     if ! kill -0 "$pid" 2>/dev/null; then
       wait "$pid"

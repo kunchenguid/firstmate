@@ -50,6 +50,42 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
+# --- bounded liveness waits -------------------------------------------------
+#
+# These waits synchronize fixtures; they are not performance assertions.
+# Keep their ceiling generous on a loaded machine while still guaranteeing
+# that a broken test fails instead of hanging forever. Callers may lower or
+# raise the shared ceiling for local diagnosis.
+
+FM_TEST_LIVENESS_TIMEOUT_SECONDS=${FM_TEST_LIVENESS_TIMEOUT_SECONDS:-30}
+
+fm_test_liveness_iterations() {
+  local requested=${1:-1} interval=${2:-0.1} minimum
+  minimum=$(awk -v seconds="$FM_TEST_LIVENESS_TIMEOUT_SECONDS" -v tick="$interval" \
+    'BEGIN { value = int((seconds / tick) + 0.999999); if (value > 0) print value; else print 1 }')
+  if [ "$requested" -gt "$minimum" ]; then
+    printf '%s\n' "$requested"
+  else
+    printf '%s\n' "$minimum"
+  fi
+}
+
+fm_test_wait_for_file() {
+  local path=$1 pid=${2:-} interval=${3:-0.05} limit i=0
+  limit=$(fm_test_liveness_iterations 1 "$interval")
+  while [ "$i" -lt "$limit" ]; do
+    [ -e "$path" ] && return 0
+    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+      printf 'background process %s exited before %s appeared\n' "$pid" "$path" >&2
+      return 125
+    fi
+    sleep "$interval"
+    i=$((i + 1))
+  done
+  printf 'timed out after %ss waiting for %s\n' "$FM_TEST_LIVENESS_TIMEOUT_SECONDS" "$path" >&2
+  return 124
+}
+
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal

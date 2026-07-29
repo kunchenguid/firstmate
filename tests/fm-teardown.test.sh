@@ -1096,8 +1096,8 @@ SH
   FM_TEST_PR_HEAD="$head" PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" task-x1 "$url" > "$case_dir/pr-check.out" 2> "$case_dir/pr-check.err" &
   pr_check=$!
-  for _ in $(seq 1 100); do [ -e "$lookup_ready" ] && break; sleep 0.02; done
-  [ -e "$lookup_ready" ] || { kill -TERM "$pr_check" 2>/dev/null || true; fail "PR generation lookup gate did not open"; }
+  fm_test_wait_for_file "$lookup_ready" "$pr_check" 0.02 \
+    || { kill -TERM "$pr_check" 2>/dev/null || true; fail "PR generation lookup gate did not open"; }
   bash -c '
     . "$1/bin/fm-account-routing-lib.sh"
     held=$(fm_account_meta_lock_acquire "$2" task-x1) || exit 1
@@ -1171,8 +1171,8 @@ SH
   FM_TEST_PR_HEAD="$head" PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" task-x1 "$url" > "$case_dir/pr-check.out" 2> "$case_dir/pr-check.err" &
   pr_check=$!
-  for _ in $(seq 1 100); do [ -e "$lookup_ready" ] && break; sleep 0.02; done
-  [ -e "$lookup_ready" ] || { kill -TERM "$pr_check" 2>/dev/null || true; fail "legacy PR generation lookup gate did not open"; }
+  fm_test_wait_for_file "$lookup_ready" "$pr_check" 0.02 \
+    || { kill -TERM "$pr_check" 2>/dev/null || true; fail "legacy PR generation lookup gate did not open"; }
   grep -Eq '^generation_id=legacy:a[0-9a-f]{15}$' "$meta" \
     || fail "PR check did not atomically backfill a legacy generation identity"
   count=$(grep -c '^generation_id=' "$meta" || true)
@@ -2302,11 +2302,8 @@ SH
     FM_FAKE_KILL_STARTED="$kill_started" FM_FAKE_ALLOW_KILL="$allow_kill" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" &
   teardown_pid=$!
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    [ -f "$kill_started" ] && break
-    sleep 0.05
-  done
-  [ -f "$kill_started" ] || { kill "$teardown_pid" 2>/dev/null || true; fail "managed generation teardown never reached endpoint cleanup"; }
+  fm_test_wait_for_file "$kill_started" "$teardown_pid" 0.05 \
+    || { kill "$teardown_pid" 2>/dev/null || true; fail "managed generation teardown never reached endpoint cleanup: $(cat "$case_dir/stderr")"; }
 
   set +e
   FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS=0 bash -c '
@@ -2405,14 +2402,10 @@ SH
     FM_EXPECT_CHILD_LINEAGE_MARKER="$case_dir/child-lineage-verified" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" &
   teardown_pid=$!
-  for _ in $(seq 1 100); do
-    [ -f "$kill_started" ] && break
-    sleep 0.05
-  done
-  [ -f "$kill_started" ] || {
+  if ! fm_test_wait_for_file "$kill_started" "$teardown_pid" 0.05; then
     kill "$teardown_pid" 2>/dev/null || true
     fail "managed child teardown never reached endpoint cleanup: $(cat "$case_dir/stderr")"
-  }
+  fi
 
   set +e
   FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS=0 bash -c '
