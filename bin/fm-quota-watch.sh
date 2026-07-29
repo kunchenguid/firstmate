@@ -266,7 +266,17 @@ fm_quota_watch_pause() {
 }
 
 fm_quota_watch_resume() {
-  local pct=$1 id meta acted=0
+  local pct=$1 id meta acted=0 pending=0 paused_at prior_paused_at tmp_flag
+  paused_at=$(date +%s)
+  prior_paused_at=$(fm_meta_get "$PAUSE_FLAG" paused_at)
+  [ -n "$prior_paused_at" ] && paused_at=$prior_paused_at
+
+  tmp_flag=$(mktemp "${TMPDIR:-/tmp}/fm-quota-paused.XXXXXX") || return 1
+  {
+    printf 'paused_at=%s\n' "$paused_at"
+    printf 'pct=%s\n' "$pct"
+  } > "$tmp_flag"
+
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     meta="$STATE/$id.meta"
@@ -277,11 +287,19 @@ fm_quota_watch_resume() {
     if "$FM_QUOTA_SEND_BIN" "$id" "Quota recovered (now ${pct}% used, below the ${RESUME_THRESHOLD}% resume threshold). Continue where you left off."; then
       acted=$((acted + 1))
     else
-      echo "fm-quota-watch.sh: warning: could not deliver the resume message to $id" >&2
+      echo "fm-quota-watch.sh: warning: could not deliver the resume message to $id; keeping it recorded as paused for a retry" >&2
+      printf 'task=%s\n' "$id" >> "$tmp_flag"
+      pending=$((pending + 1))
     fi
   done < <(fm_quota_watch_flag_tasks)
-  rm -f "$PAUSE_FLAG"
-  echo "fm-quota-watch.sh: pct=$pct < resume threshold $RESUME_THRESHOLD - resumed $acted crew, cleared the pause"
+
+  if [ "$pending" -gt 0 ]; then
+    mv "$tmp_flag" "$PAUSE_FLAG"
+    echo "fm-quota-watch.sh: pct=$pct < resume threshold $RESUME_THRESHOLD - resumed $acted crew, $pending still pending a retry"
+  else
+    rm -f "$tmp_flag" "$PAUSE_FLAG"
+    echo "fm-quota-watch.sh: pct=$pct < resume threshold $RESUME_THRESHOLD - resumed $acted crew, cleared the pause"
+  fi
 }
 
 # --- act -----------------------------------------------------------------
