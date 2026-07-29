@@ -1455,6 +1455,39 @@ SH
   pass "already-returned landed worktree completes bookkeeping without a second return"
 }
 
+test_already_returned_worktree_refuses_preservation_without_mutation() {
+  local case_dir rc
+  case_dir=$(make_case already-returned-preserve)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "landed task work"
+  add_fork_with_pushed_branch "$case_dir"
+  printf '%s\n' "unowned newer bytes" > "$case_dir/wt/feature.txt"
+  printf '%s\n' "unowned payload" > "$case_dir/wt/unowned.txt"
+  write_treehouse_returned "$case_dir/wt"
+  rm -f "$case_dir/fakebin/.tmux-live"
+
+  set +e
+  run_teardown "$case_dir" --preserve-scratch \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "already-returned-preserve: preservation must refuse an unowned slot"
+  assert_grep "unowned newer bytes" "$case_dir/wt/feature.txt" \
+    "already-returned-preserve: tracked bytes were mutated"
+  assert_grep "unowned payload" "$case_dir/wt/unowned.txt" \
+    "already-returned-preserve: untracked bytes were mutated"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "already-returned-preserve: task metadata was cleared"
+  assert_absent "$case_dir/data/task-x1/scratch" \
+    "already-returned-preserve: scratch capture mutated bookkeeping"
+  assert_grep "cannot mutate an already-returned Treehouse worktree" \
+    "$case_dir/stderr" \
+    "already-returned-preserve: refusal did not identify the ownership boundary"
+  pass "already-returned preservation leaves unowned worktree and metadata intact"
+}
+
 test_watchman_cookies_do_not_block_teardown() {
   local case_dir rc
   case_dir=$(make_case watchman-cookie)
@@ -1529,6 +1562,61 @@ test_preserve_scratch_never_cleans_unlanded_commits() {
   assert_grep "work not on any remote and not landed" "$case_dir/stderr" \
     "preserve-unlanded: refusal did not cite the unlanded commit"
   pass "preserve-scratch never bypasses the landed-commit proof"
+}
+
+test_preserve_scratch_refuses_tracked_drift_before_cleanup() {
+  local case_dir rc scratch_capture drift_count
+  case_dir=$(make_case preserve-tracked-drift)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "landed task work"
+  add_fork_with_pushed_branch "$case_dir"
+  printf '%s\n' "captured correction" > "$case_dir/wt/feature.txt"
+  drift_count="$case_dir/tracked-drift-count"
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+"$real" "$@"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  case " $* " in
+    *" ls-files --stage -v -z -- "*)
+      count=0
+      [ ! -f "${FM_FAKE_TRACKED_DRIFT_COUNT:?}" ] \
+        || count=$(cat "$FM_FAKE_TRACKED_DRIFT_COUNT")
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FM_FAKE_TRACKED_DRIFT_COUNT"
+      if [ "$count" -eq 3 ]; then
+        printf '%s\n' "newer bytes after capture" \
+          > "${FM_FAKE_TRACKED_DRIFT_PATH:?}"
+      fi
+      ;;
+  esac
+fi
+exit "$rc"
+SH
+  chmod +x "$case_dir/fakebin/git"
+
+  set +e
+  FM_FAKE_TRACKED_DRIFT_PATH="$case_dir/wt/feature.txt" \
+    FM_FAKE_TRACKED_DRIFT_COUNT="$drift_count" \
+    run_teardown "$case_dir" --preserve-scratch \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "preserve-tracked-drift: cleanup must refuse tracked drift"
+  assert_grep "newer bytes after capture" "$case_dir/wt/feature.txt" \
+    "preserve-tracked-drift: newer tracked bytes were discarded"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "preserve-tracked-drift: task metadata was cleared"
+  scratch_capture=$(find "$case_dir/data/task-x1/scratch" -mindepth 1 -maxdepth 1 \
+    -type d -print -quit)
+  [ -n "$scratch_capture" ] || fail \
+    "preserve-tracked-drift: scratch capture was not retained"
+  assert_present "$scratch_capture/tracked.patch" \
+    "preserve-tracked-drift: tracked capture was not retained"
+  pass "tracked drift before cleanup retains newer bytes and scratch capture"
 }
 
 test_gh_error_and_content_absent_refuses() {
@@ -4635,9 +4723,11 @@ fi
 
 if [ "${FM_TEST_FOCUSED:-}" = reclaim-regressions ]; then
   test_already_returned_worktree_finishes_bookkeeping
+  test_already_returned_worktree_refuses_preservation_without_mutation
   test_watchman_cookies_do_not_block_teardown
   test_preserve_scratch_captures_then_reclaims_dirty_worktree
   test_preserve_scratch_never_cleans_unlanded_commits
+  test_preserve_scratch_refuses_tracked_drift_before_cleanup
   test_no_mistakes_truly_unpushed_refuses
   test_dirty_worktree_refuses
   exit 0
@@ -4745,9 +4835,11 @@ test_locked_return_reuses_checkout_lock_for_landing_recheck
 test_treehouse_return_timeout_reaps_children_before_unlock
 test_dirty_worktree_refuses
 test_already_returned_worktree_finishes_bookkeeping
+test_already_returned_worktree_refuses_preservation_without_mutation
 test_watchman_cookies_do_not_block_teardown
 test_preserve_scratch_captures_then_reclaims_dirty_worktree
 test_preserve_scratch_never_cleans_unlanded_commits
+test_preserve_scratch_refuses_tracked_drift_before_cleanup
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses

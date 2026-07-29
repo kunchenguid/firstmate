@@ -1620,8 +1620,160 @@ with open(os.path.join(capture, "untracked-manifest.json"), "w", encoding="utf-8
     json.dump(manifest, stream, indent=2, ensure_ascii=False)
     stream.write("\n")
 PY
+  capture_preserved_tracked_snapshot "$capture_dir" || return 1
+  verify_preserved_tracked_capture "$capture_dir" || return 1
   : > "$capture_dir/capture-complete"
   PRESERVED_SCRATCH_CAPTURE=$capture_dir
+}
+
+capture_preserved_tracked_snapshot() {
+  local capture_dir=$1
+  git -C "$WT" ls-files --stage -v -z -- \
+    > "$capture_dir/tracked-index.snapshot" || return 1
+  git -C "$WT" ls-files -z -- \
+    > "$capture_dir/tracked.paths" || return 1
+  python3 - "$WT" "$capture_dir/tracked.paths" \
+    "$capture_dir/tracked-manifest.json" <<'PY'
+import hashlib
+import json
+import os
+import stat
+import sys
+
+root, paths_file, manifest_file = sys.argv[1:]
+with open(paths_file, "rb") as stream:
+    paths = [
+        item.decode("utf-8", "surrogateescape")
+        for item in stream.read().split(b"\0")
+        if item
+    ]
+
+def snapshot(relative):
+    path = os.path.join(root, relative)
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return {"path": relative, "missing": True}
+    record = {
+        "path": relative,
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "mode": metadata.st_mode,
+        "size": metadata.st_size,
+    }
+    if stat.S_ISREG(metadata.st_mode):
+        digest = hashlib.sha256()
+        with open(path, "rb", buffering=0) as stream:
+            opened = os.fstat(stream.fileno())
+            if (opened.st_dev, opened.st_ino) != (
+                metadata.st_dev,
+                metadata.st_ino,
+            ):
+                raise OSError(f"tracked file identity changed: {relative}")
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        record["sha256"] = digest.hexdigest()
+    elif stat.S_ISLNK(metadata.st_mode):
+        record["target"] = os.readlink(path)
+    return record
+
+with open(manifest_file, "w", encoding="utf-8") as stream:
+    json.dump([snapshot(path) for path in paths], stream, indent=2)
+    stream.write("\n")
+PY
+}
+
+verify_preserved_tracked_snapshot() {
+  local capture_dir=$1 current_index
+  current_index="$capture_dir/.tracked-index.current"
+  git -C "$WT" ls-files --stage -v -z -- > "$current_index" || return 1
+  cmp -s "$capture_dir/tracked-index.snapshot" "$current_index" || {
+    rm -f "$current_index"
+    echo "REFUSED: tracked index changed after scratch capture." >&2
+    return 1
+  }
+  rm -f "$current_index"
+  python3 - "$WT" "$capture_dir/tracked-manifest.json" <<'PY'
+import hashlib
+import json
+import os
+import stat
+import sys
+
+root, manifest_file = sys.argv[1:]
+with open(manifest_file, encoding="utf-8") as stream:
+    manifest = json.load(stream)
+
+def snapshot(relative):
+    path = os.path.join(root, relative)
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return {"path": relative, "missing": True}
+    record = {
+        "path": relative,
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "mode": metadata.st_mode,
+        "size": metadata.st_size,
+    }
+    if stat.S_ISREG(metadata.st_mode):
+        digest = hashlib.sha256()
+        with open(path, "rb", buffering=0) as stream:
+            opened = os.fstat(stream.fileno())
+            if (opened.st_dev, opened.st_ino) != (
+                metadata.st_dev,
+                metadata.st_ino,
+            ):
+                raise OSError(f"tracked file identity changed: {relative}")
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        record["sha256"] = digest.hexdigest()
+    elif stat.S_ISLNK(metadata.st_mode):
+        record["target"] = os.readlink(path)
+    return record
+
+for expected in manifest:
+    if snapshot(expected["path"]) != expected:
+        raise OSError(
+            f"tracked working-tree file changed after capture: "
+            f"{expected['path']}"
+        )
+PY
+}
+
+verify_preserved_tracked_capture() {
+  local capture_dir=$1 candidate patch
+  for patch in tracked staged unstaged; do
+    candidate="$capture_dir/.$patch.current"
+    case "$patch" in
+      tracked)
+        git -C "$WT" diff --binary --full-index HEAD -- > "$candidate" \
+          || return 1
+        ;;
+      staged)
+        git -C "$WT" diff --binary --full-index --cached -- > "$candidate" \
+          || return 1
+        ;;
+      unstaged)
+        git -C "$WT" diff --binary --full-index -- > "$candidate" \
+          || return 1
+        ;;
+    esac
+    cmp -s "$capture_dir/$patch.patch" "$candidate" || {
+      rm -f "$candidate"
+      echo "REFUSED: tracked work changed during scratch capture." >&2
+      return 1
+    }
+    rm -f "$candidate"
+  done
+  verify_preserved_tracked_snapshot "$capture_dir"
 }
 
 verify_preserved_untracked_snapshot() {
@@ -1666,6 +1818,7 @@ clean_preserved_worktree_scratch() {
   local capture_dir=$1 path
   [ -f "$capture_dir/capture-complete" ] || return 1
   verify_preserved_untracked_snapshot "$capture_dir" || return 1
+  verify_preserved_tracked_snapshot "$capture_dir" || return 1
   git -C "$WT" reset --hard HEAD >/dev/null || return 1
   while IFS= read -r -d '' path; do
     git -C "$WT" clean -fd -- "$path" >/dev/null || return 1
@@ -1675,6 +1828,10 @@ clean_preserved_worktree_scratch() {
 prepare_preserved_worktree_scratch_locked() {
   local dirty_raw dirty
   validate_teardown_target_identity || return 1
+  [ "$TREEHOUSE_TARGET_ALREADY_RETURNED" -eq 0 ] || {
+    echo "REFUSED: --preserve-scratch cannot mutate an already-returned Treehouse worktree." >&2
+    return 1
+  }
   validate_worktree_stash_absent || return 1
   dirty_raw=$(git -C "$WT" status --porcelain=v1 --untracked-files=all 2>/dev/null) || {
     echo "REFUSED: cannot inspect worktree $WT before scratch preservation." >&2
@@ -4349,6 +4506,11 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
 fi
 
 if [ "$PRESERVE_SCRATCH" -eq 1 ] && [ -d "$WT" ]; then
+  [ "$TREEHOUSE_TARGET_ALREADY_RETURNED" -eq 0 ] || {
+    echo "REFUSED: --preserve-scratch cannot mutate an already-returned Treehouse worktree." >&2
+    post_quiescence_safety_refusal
+    exit 1
+  }
   prepare_preserved_worktree_scratch || {
     post_quiescence_safety_refusal
     exit 1
