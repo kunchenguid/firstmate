@@ -12,4 +12,6 @@ __pycache__/
 # Ignore the directory rather than each known file: an enumeration leaves every
 # future config file tracked by default, so a new one would leak on the commit
 # that creates it. Shipped example configs live in docs/examples/ instead.
-config/
+# Anchored: only this home's own config/ is private, not any nested directory
+# that happens to be called config, which would otherwise go silently untracked.
+/config/

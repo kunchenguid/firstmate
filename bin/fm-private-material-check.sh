@@ -24,7 +24,8 @@
 # Marker sources, all local and gitignored (see --home):
 #   projects/<name>/                     project clone directory names
 #   data/projects.md                     registered project names
-#   data/secondmates.md                  registered secondmate ids
+#   data/secondmates.md                  registered secondmate ids and the
+#                                        project names in their "projects:" field
 #   git remote owners                    of this repo and of each project clone
 #   the local account name               catches machine-local home paths; used
 #                                        only when data/ or projects/ is present,
@@ -37,10 +38,26 @@
 #                                        identity that is legitimately public,
 #                                        such as the upstream this repo forks.
 #
-# Matching is case-insensitive and treats "-", "_", and a space as the same
-# separator, so a registered id also matches its display-name spelling
-# ("sm-thing" matches "SM THING"). Matches are word-bounded, so a marker inside
-# a longer word does not fire.
+# Matching is case-insensitive - at the tip, through history, and across commit
+# metadata alike - and treats "-", "_", and a space as the same separator, so a
+# registered id also matches its display-name spelling ("sm-thing" matches
+# "SM THING"). Matches are word-bounded, so a marker inside a longer word does
+# not fire.
+#
+# NOTHING IS SUPPRESSED SILENTLY
+# A run that could not prove the surface clean must never read like one that did,
+# because false confidence here is worse than no check at all. So every marker
+# source is accounted for by name and count, and each of these is reported as a
+# COVERAGE GAP line rather than passing unmentioned:
+#   - a source that is present but yields no names (format drift, unreadable file)
+#   - a derived name dropped as shorter than MIN_LEN or as a generic STOPWORD
+#   - a project clone whose git remotes could not be read
+#   - an account name that could not be read
+# A run with any gap reports INCOMPLETE rather than OK, and a scan command that
+# FAILS - as opposed to finding nothing - aborts with exit 2 instead of reading
+# as clean. Operator-declared markers are never dropped: they bypass the length
+# and stopword filters, because declaring a token is the strongest available
+# statement that it is private.
 #
 # WHAT THIS CANNOT CATCH - state this plainly rather than trusting a green run:
 #   - Private strategy, delivery posture, or fleet-internal decisions written as
@@ -49,20 +66,23 @@
 #   - Anything whose name is not in the local operational dirs: a retired or
 #     never-registered project, a customer, or a person not listed in the extra
 #     markers file.
-#   - Markers shorter than MIN_LEN, or filtered as generic (see STOPWORDS),
-#     because matching them would be pure noise.
 #   - Anything at all when no marker source is present. On a machine or CI runner
 #     with no private dirs the run is VACUOUS: it reports SKIPPED and exits 0.
 #     A SKIPPED run is not evidence the surface is clean.
 # Human review of the diff remains the real control; this only makes the
 # mechanical, repeatable part of it impossible to forget.
+#
+# Exit codes: 0 clean, SKIPPED, or INCOMPLETE; 1 private material found;
+# 2 bad usage or a scan that could not complete.
 set -eu
 
 MIN_LEN=3
 
 # Generic tokens that would storm the scan if a project, account, or secondmate
 # happened to be named one of them. A fleet that really owns one of these names
-# must add it to config/private-material-markers to force it back in.
+# must add it to config/private-material-markers to force it back in; a derived
+# name dropped here is always named in a COVERAGE GAP line, so the suppression
+# is never invisible.
 STOPWORDS="main master api web app core src bin lib doc docs data home user users
 admin root dev test tests tmp temp work repo repos git github gitlab build dist
 node http https com org net local shared common util utils new old the and for
@@ -80,7 +100,9 @@ while [ $# -gt 0 ]; do
     --root) [ $# -ge 2 ] || die "--root needs a value"; ROOT=$2; shift 2 ;;
     --home) [ $# -ge 2 ] || die "--home needs a value"; HOME_DIR=$2; shift 2 ;;
     --history) SCAN_HISTORY=1; shift ;;
-    -h|--help) sed -n '2,60p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    # Print the header block and stop at the first non-comment line, so the help
+    # never spills code and never needs re-tuning when the header grows.
+    -h|--help) sed -n '2,${/^#/!q; s/^# \{0,1\}//; p;}' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -97,49 +119,132 @@ if [ -z "$HOME_DIR" ]; then
   HOME_DIR=${FM_HOME:-$ROOT}
 fi
 
-lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+TMPD=$(mktemp -d "${TMPDIR:-/tmp}/fm-private-material-check.XXXXXX")
+trap 'rm -rf "$TMPD"' EXIT
+ERRLOG="$TMPD/err"
+: > "$ERRLOG"
 
-RAW_MARKERS=""
-add_marker() {
-  local m=$1
-  m=$(printf '%s' "$m" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+NL='
+'
+
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+trim() { printf '%s' "$1" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'; }
+
+# --- source accounting -------------------------------------------------------
+# Every declared source is reported by name, and anything that silently narrows
+# coverage becomes a gap. A gap never fails the run on its own, but it does stop
+# the run from claiming a clean result.
+
+SOURCES=""
+GAPS=""
+GAP_COUNT=0
+
+gap() {
+  GAPS="${GAPS}COVERAGE GAP: $1${NL}"
+  GAP_COUNT=$((GAP_COUNT + 1))
+}
+
+report_absent() { SOURCES="${SOURCES}  $1: absent${NL}"; }
+
+report_source() {
+  SOURCES="${SOURCES}  $1: $2 name(s)${NL}"
+  [ "$2" -gt 0 ] || gap "$1 is present but yielded no names, so nothing from it was scanned"
+}
+
+DERIVED=""
+DECLARED=""
+SRC_COUNT=0
+
+add_derived() {
+  local m
+  m=$(trim "$1")
   [ -n "$m" ] || return 0
-  RAW_MARKERS="$RAW_MARKERS
-$(lower "$m")"
+  DERIVED="${DERIVED}$(lower "$m")${NL}"
+  SRC_COUNT=$((SRC_COUNT + 1))
+}
+
+add_declared() {
+  local m
+  m=$(trim "$1")
+  [ -n "$m" ] || return 0
+  DECLARED="${DECLARED}$(lower "$m")${NL}"
+  SRC_COUNT=$((SRC_COUNT + 1))
+}
+
+# Read an operator-edited config file: strip comments and blanks, and keep the
+# final line even when the file has no trailing newline, which is routine in a
+# hand-edited file and would otherwise drop a whole marker.
+read_config_lines() {
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=$(trim "$line")
+    case "$line" in ''|\#*) continue ;; esac
+    printf '%s\n' "$line"
+  done < "$1"
 }
 
 # 1. project clone directory names
 if [ -d "$HOME_DIR/projects" ]; then
+  SRC_COUNT=0
   for d in "$HOME_DIR/projects"/*; do
     [ -d "$d" ] || continue
-    add_marker "$(basename "$d")"
+    add_derived "$(basename "$d")"
   done
+  report_source "projects/ clone directories" "$SRC_COUNT"
+else
+  report_absent "projects/ clone directories"
 fi
 
-# 2. registered project names: "- <name> [<mode>] - ..."
+# 2. registered project names. Both registry forms are current: the delivery-mode
+#    form "- <name> [<mode>] - ..." and the legacy bracketless "- <name> - ...".
 if [ -f "$HOME_DIR/data/projects.md" ]; then
-  while IFS= read -r name; do add_marker "$name"; done < <(
-    sed -n 's/^[[:space:]]*-[[:space:]]\{1,\}\([A-Za-z0-9._-]\{1,\}\)[[:space:]]\{1,\}\[.*/\1/p' \
+  SRC_COUNT=0
+  while IFS= read -r name; do add_derived "$name"; done < <(
+    sed -n 's/^[[:space:]]*-[[:space:]]\{1,\}\([A-Za-z0-9._-]\{1,\}\)[[:space:]]\{1,\}[[-].*/\1/p' \
       "$HOME_DIR/data/projects.md"
   )
+  report_source "data/projects.md" "$SRC_COUNT"
+else
+  report_absent "data/projects.md"
 fi
 
-# 3. registered secondmate ids: "- <id> - ..."
+# 3. registered secondmate ids ("- <id> - ...") plus the project names in each
+#    entry's "projects:" field, which are the only record of a project cloned
+#    solely in a secondmate home.
 if [ -f "$HOME_DIR/data/secondmates.md" ]; then
-  while IFS= read -r name; do add_marker "$name"; done < <(
-    sed -n 's/^[[:space:]]*-[[:space:]]\{1,\}\([A-Za-z0-9._-]\{1,\}\)[[:space:]]\{1,\}-[[:space:]].*/\1/p' \
+  SRC_COUNT=0
+  while IFS= read -r name; do add_derived "$name"; done < <(
+    sed -n 's/^[[:space:]]*-[[:space:]]\{1,\}\([A-Za-z0-9._-]\{1,\}\)[[:space:]]\{1,\}[[-].*/\1/p' \
       "$HOME_DIR/data/secondmates.md"
   )
+  while IFS= read -r name; do add_derived "$name"; done < <(
+    sed -n 's/.*[Pp]rojects:[[:space:]]*\([^;)]*\).*/\1/p' "$HOME_DIR/data/secondmates.md" \
+      | tr ',' '\n'
+  )
+  report_source "data/secondmates.md" "$SRC_COUNT"
+else
+  report_absent "data/secondmates.md"
 fi
 
 # 4. forge OWNERS of this repo's remotes and of every project clone's remotes.
 #    Owners only, never repository names: a repo name is usually this repo's own
 #    name or a project name already covered above, and matching it would storm.
+#    A directory whose remotes cannot be read is a gap, not a silent zero.
 collect_remote_owners() {
-  local dir=$1 url owner
-  git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  local dir=$1 label=$2 url owner rc urls
+  if ! git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
+    gap "$label is not a git repository, so its forge owners could not be read"
+    return 0
+  fi
+  # Capture git's own status: piping first would report the pipe's last command.
+  urls=$(git -C "$dir" config --get-regexp '^remote\..*\.url$' 2>"$ERRLOG") && rc=0 || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    gap "$label: reading git remotes failed (exit $rc: $(tr '\n' ' ' < "$ERRLOG")), so its forge owners are unscanned"
+    return 0
+  fi
   while IFS= read -r url; do
     [ -n "$url" ] || continue
+    url=${url#* }
     case "$url" in
       /*|./*|../*|file://*) continue ;;
       *://*) url=${url#*://} ;;
@@ -149,59 +254,109 @@ collect_remote_owners() {
     url=${url#*@}
     url=${url#*/}
     owner=${url%%/*}
-    add_marker "$owner"
-  done < <(git -C "$dir" config --get-regexp '^remote\..*\.url$' 2>/dev/null | cut -d' ' -f2-)
+    add_derived "$owner"
+  done <<EOF
+$urls
+EOF
 }
-collect_remote_owners "$ROOT"
+SRC_COUNT=0
+collect_remote_owners "$ROOT" "this repo"
 if [ -d "$HOME_DIR/projects" ]; then
   for d in "$HOME_DIR/projects"/*; do
-    [ -d "$d" ] && collect_remote_owners "$d"
+    [ -d "$d" ] && collect_remote_owners "$d" "project clone $(basename "$d")"
   done
 fi
+SOURCES="${SOURCES}  git remote owners: $SRC_COUNT name(s)${NL}"
 
 # 5. the local account name, which is what makes machine-local home paths legible.
 #    Only when this really is an operational home: on a runner with no private
 #    dirs the account name is noise, and adding it unconditionally would make
 #    every run look like it had a marker source when it had none.
 if [ -d "$HOME_DIR/data" ] || [ -d "$HOME_DIR/projects" ]; then
-  add_marker "$(id -un 2>/dev/null || true)"
+  SRC_COUNT=0
+  if acct=$(id -un 2>"$ERRLOG") && [ -n "$acct" ]; then
+    add_derived "$acct"
+    report_source "the local account name" "$SRC_COUNT"
+  else
+    SOURCES="${SOURCES}  the local account name: unreadable${NL}"
+    gap "the local account name could not be read, so machine-local home paths are unscanned"
+  fi
+else
+  report_absent "the local account name"
 fi
 
 # 6. operator-supplied markers that nothing can derive
-if [ -f "$HOME_DIR/config/private-material-markers" ]; then
-  while IFS= read -r line; do
-    case "$line" in ''|\#*) continue ;; esac
-    add_marker "$line"
-  done < "$HOME_DIR/config/private-material-markers"
+MARKERS_FILE="$HOME_DIR/config/private-material-markers"
+if [ -f "$MARKERS_FILE" ]; then
+  SRC_COUNT=0
+  while IFS= read -r line; do add_declared "$line"; done < <(read_config_lines "$MARKERS_FILE")
+  report_source "config/private-material-markers" "$SRC_COUNT"
+else
+  report_absent "config/private-material-markers"
 fi
 
-# Allowlist: identities that are legitimately public for this home.
-ALLOW=" "
-if [ -f "$HOME_DIR/config/private-material-allow" ]; then
+# Allowlist: identities that are legitimately public for this home. Entries are
+# newline-delimited and compared whole, so a multi-word entry never also allows
+# its interior words as standalone markers.
+ALLOW="$NL"
+ALLOW_FILE="$HOME_DIR/config/private-material-allow"
+if [ -f "$ALLOW_FILE" ]; then
   while IFS= read -r line; do
-    case "$line" in ''|\#*) continue ;; esac
-    line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-    [ -n "$line" ] && ALLOW="$ALLOW$(lower "$line") "
-  done < "$HOME_DIR/config/private-material-allow"
+    ALLOW="${ALLOW}$(lower "$line")${NL}"
+  done < <(read_config_lines "$ALLOW_FILE")
 fi
 # This repo's own directory name is never a marker: it names the tool, not a fleet.
-ALLOW="$ALLOW$(lower "$(basename "$ROOT")") "
-for w in $STOPWORDS; do ALLOW="$ALLOW$w "; done
+ALLOW="${ALLOW}$(lower "$(basename "$ROOT")")${NL}"
+
+STOPWORD_SET=" $(printf '%s' "$STOPWORDS" | tr '\n' ' ') "
 
 MARKERS=""
-seen=" "
+SEEN="$NL"
+keep_marker() {
+  case "$SEEN" in *"$NL$1$NL"*) return 0 ;; esac
+  SEEN="${SEEN}$1${NL}"
+  MARKERS="${MARKERS}$1${NL}"
+}
+
+# Operator-declared markers first, and unconditionally: the length and stopword
+# filters exist to keep DERIVED noise out, not to overrule an explicit "this is
+# private". A token in both config files is an operator contradiction, so keep
+# it and say so rather than resolving it silently toward publication.
 while IFS= read -r m; do
   [ -n "$m" ] || continue
-  [ "${#m}" -ge "$MIN_LEN" ] || continue
-  case "$ALLOW" in *" $m "*) continue ;; esac
-  case "$seen" in *" $m "*) continue ;; esac
-  seen="$seen$m "
-  MARKERS="$MARKERS$m
-"
-done < <(printf '%s\n' "$RAW_MARKERS" | sort -u)
+  case "$ALLOW" in
+    *"$NL$m$NL"*)
+      gap "\"$m\" is declared in config/private-material-markers and also allowed in config/private-material-allow; keeping it as a marker" ;;
+  esac
+  keep_marker "$m"
+done < <(printf '%s' "$DECLARED" | sort -u)
+
+while IFS= read -r m; do
+  [ -n "$m" ] || continue
+  case "$SEEN" in *"$NL$m$NL"*) continue ;; esac
+  case "$ALLOW" in *"$NL$m$NL"*) continue ;; esac
+  if [ "${#m}" -lt "$MIN_LEN" ]; then
+    gap "derived name \"$m\" is shorter than $MIN_LEN characters and was NOT scanned"
+    continue
+  fi
+  case "$STOPWORD_SET" in
+    *" $m "*)
+      gap "derived name \"$m\" is filtered as generic and was NOT scanned; declare it in config/private-material-markers to force it in"
+      continue ;;
+  esac
+  keep_marker "$m"
+done < <(printf '%s' "$DERIVED" | sort -u)
+
+printf 'fm-private-material-check: marker sources under %s:\n' "$HOME_DIR"
+printf '%s' "$SOURCES"
+[ "$GAP_COUNT" -eq 0 ] || printf '%s' "$GAPS"
 
 if [ -z "$MARKERS" ]; then
-  printf 'fm-private-material-check: SKIPPED - no private marker sources under %s\n' "$HOME_DIR"
+  if [ "$GAP_COUNT" -gt 0 ]; then
+    printf 'fm-private-material-check: SKIPPED - every name found under %s was filtered out (see the gaps above).\n' "$HOME_DIR"
+  else
+    printf 'fm-private-material-check: SKIPPED - no private marker sources under %s\n' "$HOME_DIR"
+  fi
   printf 'fm-private-material-check: a SKIPPED run proves nothing about the tracked surface.\n'
   exit 0
 fi
@@ -221,31 +376,57 @@ history_remedy() {
   printf '   captain'"'"'s call, not this script'"'"'s)\n'
 }
 
+# A scan command that fails is not a scan that found nothing. Treat any status
+# beyond "matched" / "did not match" as fatal, with the tool's own diagnostic.
+scan_failed() {
+  printf '\nfm-private-material-check: %s failed (exit %s):\n' "$2" "$1" >&2
+  sed 's/^/  /' "$ERRLOG" >&2
+  printf 'fm-private-material-check: ABORTED - the scan could not complete, so this run proves nothing.\n' >&2
+  exit 2
+}
+
+# Commit metadata travels with a pull request exactly like file content does,
+# and an author identity is the usual way a real name or an org email domain
+# reaches a third-party repository. Flatten each commit to one line so a
+# multi-line body cannot hide a marker from a line-oriented grep. Built once,
+# before the marker loop, so a failure here is caught before any marker is
+# reported clean.
+META="$TMPD/meta"
+if [ "$SCAN_HISTORY" -eq 1 ]; then
+  git -C "$ROOT" log --all -z --format='%h %an <%ae> %cn <%ce> %s %b' \
+    >"$TMPD/meta.raw" 2>"$ERRLOG" && rc=0 || rc=$?
+  [ "$rc" -eq 0 ] || scan_failed "$rc" "reading commit metadata"
+  tr '\n' ' ' < "$TMPD/meta.raw" | tr '\0' '\n' > "$META"
+fi
+
 status=0
 count=0
 while IFS= read -r m; do
   [ -n "$m" ] || continue
   count=$((count + 1))
   pat=$(marker_pattern "$m")
-  if hits=$(git -C "$ROOT" grep -n -I -i -E -- "$pat" -- ':!assets' 2>/dev/null) && [ -n "$hits" ]; then
+  hits=$(git -C "$ROOT" grep -n -I -i -E -- "$pat" 2>"$ERRLOG") && rc=0 || rc=$?
+  [ "$rc" -le 1 ] || scan_failed "$rc" "scanning tracked files for marker \"$m\""
+  if [ -n "$hits" ]; then
     status=1
     printf '\nPRIVATE MATERIAL: marker "%s" appears in tracked files:\n' "$m"
     printf '%s\n' "$hits" | sed 's/^/  /'
   fi
   if [ "$SCAN_HISTORY" -eq 1 ]; then
-    if hist=$(git -C "$ROOT" log --all --oneline -G"$pat" 2>/dev/null) && [ -n "$hist" ]; then
+    # -i is required here: markers are lowercased, and git log -G is
+    # case-sensitive by default, so without it the history scan would miss
+    # exactly the spellings the tip scan catches.
+    hist=$(git -C "$ROOT" log --all -i --oneline -G"$pat" 2>"$ERRLOG") && rc=0 || rc=$?
+    [ "$rc" -eq 0 ] || scan_failed "$rc" "scanning history for marker \"$m\""
+    if [ -n "$hist" ]; then
       status=1
       printf '\nPRIVATE MATERIAL IN HISTORY: marker "%s" appears in the content of:\n' "$m"
       printf '%s\n' "$hist" | sed 's/^/  /'
       history_remedy
     fi
-    # Commit metadata travels with a pull request exactly like file content does,
-    # and an author identity is the usual way a real name or an org email domain
-    # reaches a third-party repository. Flatten each commit to one line so a
-    # multi-line body cannot hide a marker from a line-oriented grep.
-    if meta=$(git -C "$ROOT" log --all -z \
-        --format='%h %an <%ae> %cn <%ce> %s %b' 2>/dev/null \
-        | tr '\n' ' ' | tr '\0' '\n' | grep -i -E -- "$pat") && [ -n "$meta" ]; then
+    meta=$(grep -i -E -- "$pat" "$META" 2>"$ERRLOG") && rc=0 || rc=$?
+    [ "$rc" -le 1 ] || scan_failed "$rc" "scanning commit metadata for marker \"$m\""
+    if [ -n "$meta" ]; then
       status=1
       printf '\nPRIVATE MATERIAL IN COMMIT METADATA: marker "%s" appears in:\n' "$m"
       printf '%s\n' "$meta" | cut -c1-160 | sed 's/^/  /' | head -20
@@ -255,12 +436,17 @@ while IFS= read -r m; do
 done < <(printf '%s' "$MARKERS")
 
 if [ "$status" -eq 0 ]; then
-  printf 'fm-private-material-check: OK - %d marker(s) checked, none present in tracked files.\n' "$count"
-  [ "$SCAN_HISTORY" -eq 1 ] && printf 'fm-private-material-check: history also clean for those markers.\n'
+  if [ "$GAP_COUNT" -gt 0 ]; then
+    printf 'fm-private-material-check: INCOMPLETE - %d marker(s) checked with no hits, but %d coverage gap(s) above mean this run did NOT prove the tracked surface clean.\n' \
+      "$count" "$GAP_COUNT"
+  else
+    printf 'fm-private-material-check: OK - %d marker(s) checked, none present in tracked files.\n' "$count"
+    [ "$SCAN_HISTORY" -eq 1 ] && printf 'fm-private-material-check: history also clean for those markers.\n'
+  fi
   printf 'fm-private-material-check: prose that names no marker is NOT covered; review the diff.\n'
 else
   printf '\nfm-private-material-check: FAILED - private fleet material is in the tracked surface.\n' >&2
   printf 'Fix each hit, or record a legitimately public identity in %s\n' \
-    "$HOME_DIR/config/private-material-allow" >&2
+    "$ALLOW_FILE" >&2
 fi
 exit "$status"

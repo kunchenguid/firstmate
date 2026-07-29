@@ -50,13 +50,27 @@ pass "a project clone name appearing in a tracked file fails with its location"
 
 # --- the same repo with no such text passes ---------------------------------
 
+# The clone is a real repo here so the run has no coverage gap at all: an
+# unqualified OK is exactly what must NOT appear when anything went unscanned.
+
 base=$(new_case clean-surface)
-mkdir -p "$base/home/projects/widget-store"
+fm_git_init_commit "$base/home/projects/widget-store" >/dev/null
 track "$base" docs/guide.md 'Deploy the service nightly.'
 out=$(run_check "$base") && code=0 || code=$?
 expect_code 0 "$code" "a clean tracked surface must pass"
-assert_contains "$out" "OK" "a clean run must say so"
+assert_contains "$out" "OK -" "a fully covered clean run must report OK"
+assert_not_contains "$out" "COVERAGE GAP" "a fully covered run must report no gap"
 pass "a tracked surface free of every marker passes"
+
+# --- every marker source is accounted for by name ----------------------------
+# An operator cannot tell what a run covered unless the run says so, and an
+# unaccounted source is how a name goes unscanned while the output reads clean.
+
+assert_contains "$out" "projects/ clone directories: 1 name(s)" \
+  "the run must report how many names each present source yielded"
+assert_contains "$out" "data/projects.md: absent" \
+  "the run must distinguish an absent source from an empty one"
+pass "each marker source is reported by name with the count it contributed"
 
 # --- separator-insensitivity: the case that a plain grep misses -------------
 # A registered id leaks just as badly spelled as a display name, so "sm-thing"
@@ -116,16 +130,90 @@ expect_code 1 "$code" "a declared extra marker must be caught"
 assert_contains "$out" "2026040005" "failure must name the declared marker"
 pass "an operator-declared marker catches material nothing can derive"
 
+# --- a hand-edited config file without a trailing newline keeps its last line -
+# Missing newline-at-EOF is routine in a hand-edited file, and dropping the last
+# line would drop a whole marker while the run still reported a result.
+
+base=$(new_case markers-no-trailing-newline)
+track "$base" docs/guide.md 'Bench unit 2026040005 is the reference rig.'
+printf '%s' '2026040005' > "$base/home/config/private-material-markers"
+out=$(run_check "$base") && code=0 || code=$?
+expect_code 1 "$code" "a declared marker on an unterminated final line must still be read"
+pass "a config file with no trailing newline keeps its final marker"
+
+# --- a declared marker is never dropped by the generic filter ----------------
+# The generic filter exists to keep derived noise down, not to overrule an
+# operator who has explicitly declared a token private. A fleet that really owns
+# a generic-looking name declares it, and that declaration must win.
+
+base=$(new_case declared-beats-stopword)
+generic_word=$(sed -n '/^STOPWORDS="/,/"$/p' "$CHECK" | sed 's/^STOPWORDS="//' | awk 'NR==1 {print $1}')
+[ -n "$generic_word" ] || fail "could not derive a stopword from $CHECK"
+mkdir -p "$base/home/projects/$generic_word"
+track "$base" docs/guide.md "The $generic_word service is ours."
+out=$(run_check "$base") && code=0 || code=$?
+expect_code 0 "$code" "a generic derived name is filtered, not scanned"
+assert_contains "$out" "COVERAGE GAP" "a filtered derived name must be reported, never silent"
+assert_contains "$out" "$generic_word" "the gap must name the derived name it dropped"
+assert_not_contains "$out" "OK -" "a run that dropped a name must not read as a clean pass"
+printf '%s\n' "$generic_word" > "$base/home/config/private-material-markers"
+out=$(run_check "$base") && code=0 || code=$?
+expect_code 1 "$code" "a declared marker must be scanned even when it looks generic"
+pass "a generic name is dropped loudly when derived and honored when declared"
+
+# --- an allowlist entry never allows its interior words ----------------------
+# The markers file holds people too, so multi-word entries are expected. A
+# multi-word allowance must suppress that identity and nothing else.
+
+base=$(new_case allowlist-multiword)
+mkdir -p "$base/home/projects/foundry"
+track "$base" docs/guide.md 'The foundry pipeline runs nightly.'
+printf 'Open Foundry\n' > "$base/home/config/private-material-allow"
+out=$(run_check "$base") && code=0 || code=$?
+expect_code 1 "$code" "a multi-word allowance must not allow its interior words"
+assert_contains "$out" "foundry" "the standalone marker must still be reported"
+pass "an allowlist entry with a space suppresses only that whole identity"
+
+# --- a present-but-empty marker source is never silent -----------------------
+# A registry that exists but parses to nothing means a whole class of names went
+# unscanned. Reporting OK there would be the exact false confidence this gate
+# exists to prevent.
+
+base=$(new_case empty-source)
+fm_git_init_commit "$base/home/projects/widget-store" >/dev/null
+printf '\n' > "$base/home/data/projects.md"
+track "$base" docs/guide.md 'Nothing private here.'
+out=$(run_check "$base") && code=0 || code=$?
+expect_code 0 "$code" "an unparsed source is a coverage gap, not a build failure"
+assert_contains "$out" "COVERAGE GAP" "a present-but-empty source must be reported"
+assert_contains "$out" "INCOMPLETE" "a run with a gap must say it proved nothing clean"
+assert_not_contains "$out" "OK -" "a run with a gap must not read as a clean pass"
+pass "a source that is present but yields nothing reports INCOMPLETE, never OK"
+
+# --- the legacy bracketless registry line is still parsed --------------------
+# bin/fm-project-mode.sh still resolves "- <name> - <desc>", so a project
+# registered that way must not go unscanned.
+
+base=$(new_case legacy-registry-form)
+printf -- '- legacy-thing - a registered project (added 2026-01-01)\n' \
+  > "$base/home/data/projects.md"
+track "$base" docs/guide.md 'The legacy-thing rollout continues.'
+out=$(run_check "$base") && code=0 || code=$?
+expect_code 1 "$code" "a bracketless registry entry must still yield a marker"
+assert_contains "$out" "legacy-thing" "failure must name the legacy-form project"
+pass "both the delivery-mode and legacy registry line forms yield markers"
+
 # --- the local account name is a marker, so machine-local paths are caught ---
 # Derived at runtime here too, so this test hardcodes no real account name.
 
 acct=$(id -un 2>/dev/null || printf '')
 acct_lower=$(printf '%s' "$acct" | tr '[:upper:]' '[:lower:]')
-generic=" main master api web app core src bin lib doc docs data home user users
-admin root dev test tests tmp temp work repo repos git github gitlab build dist
-node http https com org net local shared common util utils new old the and for
-firstmate treehouse herdr zellij orca cmux tmux claude codex opencode grok kimi
-anthropic openai vercel supabase "
+# Derived from the script rather than copied: a second copy would drift the
+# moment a stopword changes, and the drift would be silent in both directions.
+stopwords=$(sed -n '/^STOPWORDS="/,/"$/p' "$CHECK" | sed 's/^STOPWORDS="//; s/"$//' | tr '\n' ' ')
+[ -n "$(printf '%s' "$stopwords" | tr -d '[:space:]')" ] \
+  || fail "could not derive the stopword list from $CHECK"
+generic=" $stopwords "
 case "$generic" in
   *" $acct_lower "*) acct='' ;;
 esac
@@ -169,6 +257,21 @@ out=$(run_check "$base" --history) && code=0 || code=$?
 expect_code 1 "$code" "--history must still catch a marker removed at tip"
 assert_contains "$out" "HISTORY" "history failure must be labelled distinctly from a tip hit"
 pass "--history catches a marker that only survives in past commits"
+
+# --- --history matches case-insensitively, exactly like the tip scan ---------
+# Markers are lowercased, so a history scan that respected case would miss the
+# display-name spelling the tip scan catches - and history cannot be un-published.
+
+base=$(new_case history-case)
+mkdir -p "$base/home/projects/widget-store"
+track "$base" docs/guide.md 'Deploy the Widget-Store service.'
+printf 'Deploy the service.\n' > "$base/repo/docs/guide.md"
+git -C "$base/repo" add docs/guide.md
+git -C "$base/repo" -c user.name=t -c user.email=t@example.invalid commit -qm 'scrub'
+out=$(run_check "$base" --history) && code=0 || code=$?
+expect_code 1 "$code" "--history must catch a marker spelled with different case"
+assert_contains "$out" "HISTORY" "the mixed-case history hit must be labelled as history"
+pass "--history is case-insensitive, so a display-name spelling cannot slip through"
 
 # --- --history also reads commit metadata, which travels with a pull request ---
 # An author identity is the usual way a real name or an org email domain reaches
@@ -217,8 +320,11 @@ if [ -n "${FM_HOME:-}" ] && { [ -d "$FM_HOME/data" ] || [ -d "$FM_HOME/projects"
     "firstmate's own tracked surface must carry no private material"$'\n'"$out"
   pass "this repo's tracked surface is free of every marker derived from FM_HOME"
 else
-  printf '# skip - set FM_HOME to a real operational home to scan this repo for real\n'
-  pass "real-surface case skipped: no operational home named by FM_HOME"
+  # Deliberately not an "ok -" line: a case that never ran must never be
+  # counted, read, or parsed as a passing one.
+  printf 'skip: the real-surface case did NOT run - no operational home named by FM_HOME\n'
+  printf '#      nothing above checked firstmate own tracked surface; run it with\n'
+  printf '#      FM_HOME set, or run bin/fm-private-material-check.sh directly.\n'
 fi
 
 printf '# all fm-private-material-check tests passed\n'
