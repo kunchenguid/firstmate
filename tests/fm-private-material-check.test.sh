@@ -80,6 +80,72 @@ assert_contains "$out" "widget-store" "failure must name the marker"
 assert_contains "$out" "docs/guide.md:1" "failure must name the offending file and line"
 pass "a project clone name appearing in a tracked file fails with its location"
 
+# --- a marker in a tracked PATH fails even when the content is clean ---------
+# A path publishes its own name: anyone listing the tree reads it without
+# opening the file, so a clean-content file named after a registered project is
+# a leak, not a stated limit. No content scan can see it - git grep matches blob
+# contents and git log -G matches patch text, and neither reads a pathname.
+
+base=$(new_case project-name-in-tracked-path)
+clone "$base" widget-store
+track "$base" docs/widget-store-notes.md 'Nothing private in the text.'
+out=$(run_check "$base") && code=0 || code=$?
+expect_code 1 "$code" "a registered project name in a tracked FILENAME must fail"
+assert_contains "$out" "TRACKED PATH" "a path hit must be labelled apart from a content hit"
+assert_contains "$out" "docs/widget-store-notes.md" "the failure must name the offending path"
+pass "a marker in a tracked filename fails even when the file's content is clean"
+
+# --- a marker in a tracked DIRECTORY name fails the same way -----------------
+
+base=$(new_case project-name-in-tracked-directory)
+clone "$base" widget-store
+track "$base" docs/widget-store/guide.md 'Nothing private in the text.'
+out=$(run_check "$base") && code=0 || code=$?
+expect_code 1 "$code" "a registered project name in a tracked DIRECTORY must fail"
+assert_contains "$out" "TRACKED PATH" "a directory-name hit must be labelled as a path hit"
+assert_contains "$out" "docs/widget-store/guide.md" "the failure must name the path under it"
+pass "a marker in a tracked directory name fails, not just a marker in a filename"
+
+# --- a committed path deleted from the working tree is still committed -------
+# The working-tree list no longer carries it, exactly as with content, so the
+# committed pass is what keeps a dirty checkout from hiding the published name.
+
+base=$(new_case committed-path-not-in-worktree)
+clone "$base" widget-store
+track "$base" docs/widget-store-notes.md 'Nothing private in the text.'
+git -C "$base/repo" rm -q --cached docs/widget-store-notes.md
+rm -f "$base/repo/docs/widget-store-notes.md"
+out=$(run_check "$base") && code=0 || code=$?
+expect_code 1 "$code" "a path removed from the index but still committed must fail"
+assert_contains "$out" "COMMITTED PATH" "the committed-only path must be labelled distinctly"
+assert_contains "$out" "docs/widget-store-notes.md" "the committed-only hit must name the path"
+pass "a marker in a path that is committed but no longer tracked is still caught"
+
+# --- a path tracked at both points is reported once --------------------------
+# The COMMITTED PATH label drives the remedy, so it must not fire for a path the
+# working-tree list already reported.
+
+base=$(new_case path-both-points)
+clone "$base" widget-store
+track "$base" docs/widget-store-notes.md 'Nothing private in the text.'
+out=$(run_check "$base") && code=0 || code=$?
+expect_code 1 "$code" "an unchanged tracked path carrying a marker must still fail"
+assert_contains "$out" "TRACKED PATH" "the path must be reported at the working-tree point"
+assert_not_contains "$out" "COMMITTED PATH" \
+  "a path present at both points must not also read as committed-only"
+pass "a path tracked in the working tree and at HEAD is reported once, not twice"
+
+# --- a marker inside a longer path component does not fire -------------------
+# Paths use the same word-bounded rules as content, so a green run here is not
+# bought by loosening the matching only for names.
+
+base=$(new_case path-word-boundary)
+printf -- '- sm-thing - Persistent firstmate (added 2026-01-01)\n' > "$base/home/data/secondmates.md"
+track "$base" docs/transmthingle.md 'Nothing private in the text.'
+out=$(run_check "$base") && code=0 || code=$?
+expect_code 0 "$code" "a marker embedded in a longer path component must not fire"
+pass "path matching is word-bounded, exactly like content matching"
+
 # --- the same repo with no such text passes ---------------------------------
 
 # The clone is a real repo here so the run has no coverage gap at all: an

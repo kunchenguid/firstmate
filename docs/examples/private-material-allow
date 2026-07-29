@@ -21,6 +21,7 @@
 # upstream-owner
 # some-vendor
 
-# The sibling file config/private-material-markers uses the same one-token-per-
-# line format for the opposite job: markers nothing can derive from local state,
-# such as a device serial, a customer, or a person's name.
+# The sibling file config/private-material-markers uses the same format for the
+# opposite job - one entry per line, compared as a whole line, so a person's name
+# goes on one line rather than split into two useless markers. It holds what
+# nothing can derive from local state: a device serial, a customer, or a person.

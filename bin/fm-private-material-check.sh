@@ -6,10 +6,19 @@
 #
 # The default scan covers tracked files in the working tree AND at HEAD, because
 # a dirty checkout is not the surface a push publishes: a marker already
-# committed but edited out locally would otherwise read as absent. --history adds
-# past commit content AND commit metadata (author and committer identity,
-# subject, body), because a pull request carries all of that into the target
-# repository and a marker deleted at tip is still published forever.
+# committed but edited out locally would otherwise read as absent. Both passes
+# read what is INSIDE each tracked file and what each tracked file is CALLED: a
+# path publishes its own name to anyone who lists the directory, so a file or
+# directory named after a private project leaks it without anyone opening it.
+# --history adds past commit content AND commit metadata (author and committer
+# identity, subject, body), because a pull request carries all of that into the
+# target repository and a marker deleted at tip is still published forever.
+#
+# --history WALKS EVERY REF, not the range you are about to push. It is
+# git log --all: every local branch, every remote-tracking ref, and the stash. So
+# a hit may sit on an abandoned local branch, or in an upstream commit reachable
+# only through refs/remotes, which is not yours to rewrite. Read each hit's
+# commit before deciding a remedy; see the note printed beside a history finding.
 #
 # A CONTRIBUTOR IDENTITY IS NOT A LEAK
 # The local account name and the forge owner of one of THIS repo's own remotes
@@ -102,10 +111,12 @@
 #   - Commits BETWEEN the merge-base and HEAD, in the default mode. It scans the
 #     working tree and HEAD, so a marker added in one commit and removed in a
 #     later commit on the same unpushed branch is in neither and passes, even
-#     though pushing that branch publishes it. --history covers that range, so
-#     run it before ANY push, not only before contributing to a third party.
-#     Defining the scanned surface once as the push range would remove this
-#     hole; until then the limit is stated here rather than left to be found.
+#     though pushing that branch publishes it. --history reaches those commits -
+#     along with every other ref, as above - so run it before ANY push, not only
+#     before contributing to a third party. Defining the scanned surface once as
+#     the push range would remove this hole and would also stop --history
+#     reporting refs you are not publishing; until then both limits are stated
+#     here rather than left to be found.
 #   - Anything inside a tracked BINARY file. The content scans skip them by
 #     design (git grep -I, and a binary blob yields no patch text for git log
 #     -G), so a marker in the metadata of a checked-in image or archive is never
@@ -484,9 +495,15 @@ marker_pattern() {
 }
 
 history_remedy() {
-  printf '  (remedy differs from a tip fix: published history cannot be unpublished by a\n'
-  printf '   later commit, so this needs a rewrite or a squashed re-publish - the\n'
-  printf '   captain'"'"'s call, not this script'"'"'s)\n'
+  printf '  (remedy differs from a tip fix: history cannot be unpublished by a later\n'
+  printf '   commit. First find WHICH ref carries the commit, because this scan walks\n'
+  printf '   every ref - all local branches, all remote-tracking refs, and the stash:\n'
+  printf '     git branch -a --contains <commit>\n'
+  printf '   On a branch you are about to push, this needs a rewrite or a squashed\n'
+  printf '   re-publish. On an abandoned local branch, deleting the ref is enough. On\n'
+  printf '   an upstream commit reachable only through refs/remotes, it is already\n'
+  printf '   published and is not yours to rewrite - decide whether it blocks this\n'
+  printf '   push at all. Either way it is the captain'"'"'s call, not this script'"'"'s)\n'
 }
 
 # A scan command that fails is not a scan that found nothing. Treat any status
@@ -525,6 +542,34 @@ if [ "$SCAN_HISTORY" -eq 1 ]; then
   tr '\n' ' ' < "$TMPD/msg.raw" | tr '\0' '\n' > "$META_MSG"
 fi
 
+# A tracked PATH publishes its own name. A file or directory named after a
+# private project discloses it to anyone who lists the tree, with nothing to
+# open, and no content scan can see it: git grep matches blob contents and
+# git log -G matches patch text, and neither reads a pathname. So the same marker
+# set, with the same matching rules, is applied to the tracked file lists
+# themselves - at both points the content scans already cover, and no further.
+# Built once, before the marker loop, so a failure here is caught before any
+# marker is reported clean.
+PATHS_WT="$TMPD/paths-worktree"
+PATHS_HEAD="$TMPD/paths-head"
+# -z, so a path git would otherwise quote is compared in the same spelling the
+# markers are written in.
+git -C "$ROOT" ls-files -z >"$TMPD/paths.raw" 2>"$ERRLOG" && rc=0 || rc=$?
+[ "$rc" -eq 0 ] || scan_failed "$rc" "listing tracked paths"
+tr '\0' '\n' < "$TMPD/paths.raw" > "$PATHS_WT"
+: > "$PATHS_HEAD"
+if [ "$HAVE_HEAD" -eq 1 ]; then
+  git -C "$ROOT" ls-tree -r --name-only -z HEAD >"$TMPD/headpaths.raw" 2>"$ERRLOG" && rc=0 || rc=$?
+  [ "$rc" -eq 0 ] || scan_failed "$rc" "listing committed paths"
+  # Keep only the committed paths the working-tree list does not already carry,
+  # so a path present at both points is named once, under the label whose remedy
+  # applies. grep exits 1 when nothing is left, which is an ordinary empty
+  # result, not a failure.
+  tr '\0' '\n' < "$TMPD/headpaths.raw" | grep -vxF -f "$PATHS_WT" \
+    >"$PATHS_HEAD" 2>"$ERRLOG" && rc=0 || rc=$?
+  [ "$rc" -le 1 ] || scan_failed "$rc" "separating committed-only paths"
+fi
+
 # The account that writes commits here, and the forge owners of this repo's own
 # remotes, ride along on every published commit, so seeing one in an identity
 # field is expected. Nothing else qualifies - a project clone's owner is not in
@@ -551,6 +596,15 @@ while IFS= read -r m; do
     printf '\nPRIVATE MATERIAL: marker "%s" appears in tracked files:\n' "$m"
     printf '%s\n' "$hits" | sed 's/^/  /'
   fi
+  # Labelled apart from a content hit because the remedy is different: a path hit
+  # is fixed by renaming or removing the file, not by editing what is inside it.
+  pathhits=$(grep -i -E -- "$pat" "$PATHS_WT" 2>"$ERRLOG") && rc=0 || rc=$?
+  [ "$rc" -le 1 ] || scan_failed "$rc" "scanning tracked paths for marker \"$m\""
+  if [ -n "$pathhits" ]; then
+    status=1
+    printf '\nPRIVATE MATERIAL IN A TRACKED PATH: marker "%s" is in the NAME of:\n' "$m"
+    printf '%s\n' "$pathhits" | sed 's/^/  /'
+  fi
   # git grep reads the working tree, so on a dirty checkout it is not reading
   # what a push would publish. Scan HEAD too, and report only what the working
   # tree did not already show, so the committed-only case cannot pass silently.
@@ -574,6 +628,13 @@ while IFS= read -r m; do
       status=1
       printf '\nPRIVATE MATERIAL AT HEAD: marker "%s" is committed, beyond what the working tree shows:\n' "$m"
       printf '%s\n' "$headhits" | sed 's/^/  /'
+    fi
+    headpaths=$(grep -i -E -- "$pat" "$PATHS_HEAD" 2>"$ERRLOG") && rc=0 || rc=$?
+    [ "$rc" -le 1 ] || scan_failed "$rc" "scanning committed paths for marker \"$m\""
+    if [ -n "$headpaths" ]; then
+      status=1
+      printf '\nPRIVATE MATERIAL IN A COMMITTED PATH: marker "%s" is in the NAME of a path that is committed, beyond what the working tree tracks:\n' "$m"
+      printf '%s\n' "$headpaths" | sed 's/^/  /'
     fi
   fi
   if [ "$SCAN_HISTORY" -eq 1 ]; then
@@ -620,7 +681,7 @@ if [ "$status" -eq 0 ]; then
     printf 'fm-private-material-check: INCOMPLETE - %d marker(s) checked with no hits, but %d coverage gap(s) above mean this run did NOT prove the tracked surface clean.\n' \
       "$count" "$GAP_COUNT"
   else
-    printf 'fm-private-material-check: OK - %d marker(s) checked, none present in tracked files.\n' "$count"
+    printf 'fm-private-material-check: OK - %d marker(s) checked, none present in the content or the name of any tracked file.\n' "$count"
     [ "$SCAN_HISTORY" -eq 1 ] && printf 'fm-private-material-check: history also clean for those markers.\n'
   fi
   printf 'fm-private-material-check: prose that names no marker is NOT covered; review the diff.\n'
