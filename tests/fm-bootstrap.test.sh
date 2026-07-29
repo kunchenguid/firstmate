@@ -870,6 +870,36 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+# Regression through the BOOTSTRAP path, not only a direct script call: the probe
+# sweep once ran fm-model-verify.sh with stderr discarded, so a due-selection
+# query that died at runtime read as a healthy sweep that probed nothing. The
+# registry passes schema validation (observation levels are unvalidated) but
+# fails inside select_due, because an object probe_max_age_days cannot be
+# multiplied - the diagnostic arrives on stderr and bootstrap must surface it.
+test_model_probe_sweep_failure_is_loud_through_bootstrap() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/probe-sweep-loud"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  cat > "$case_dir/home/config/models.json" <<'JSON'
+{ "schema": "fm-model-registry.v1",
+  "providers": { "openai-codex": { "access_class": "A", "cost_posture": "subscription-flat" } },
+  "models": { "openai-codex/gpt-5.4-mini": {
+      "provider": "openai-codex", "model_id": "gpt-5.4-mini",
+      "cost_class": "subscription-flat", "status": "approved-primary",
+      "observation_level": "O4",
+      "evidence": { "probe": { "result": "ok", "rc": 0, "at": "2026-07-27T01:20:00Z" } } } },
+  "observation": { "levels": { "O4": { "probe_max_age_days": { "days": 36500 } } } } }
+JSON
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "could not determine which models are due" \
+    "a failed due-selection must be visible in bootstrap output, not swallowed"
+  pass "bootstrap surfaces a probe-sweep failure instead of reading it as a healthy empty sweep"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_quota_axi_min_version
@@ -891,3 +921,4 @@ test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_model_probe_sweep_failure_is_loud_through_bootstrap

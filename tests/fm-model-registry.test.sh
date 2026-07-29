@@ -89,10 +89,15 @@ write_registry() {
 # swallowed, so the sweep silently probed NOTHING while looking perfectly
 # healthy - an observation floor that never runs is worse than none, because it
 # reads as a passing check.
-verify_dry_run() {
+run_verify() {
   local home=$1
+  shift
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-model-verify.sh" --dry-run 2>&1
+    FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-model-verify.sh" "$@" 2>&1
+}
+
+verify_dry_run() {
+  run_verify "$1" --dry-run
 }
 
 # make_verify_home <name> <probe-iso> -> home whose one O1 model was probed then.
@@ -132,6 +137,89 @@ test_unprobed_model_is_due() {
   out=$(verify_dry_run "$home")
   assert_contains "$out" "would probe" "a never-probed model is always due"
   pass "a model with no probe record at all is due for a probe"
+}
+
+# --- fm-model-verify cost gate (no probe without a zero-budget verdict) ------
+
+# The probe that catches an entitlement error is itself a billable act on a
+# metered provider, so cost class must be established before entitlement. These
+# tests pin that ordering in code: every probe path consults the zero-budget
+# decision, an explicit --model included, and --force-probe is the only override.
+# All run with --dry-run or against a fully refused selection - no live request.
+
+# make_gated_home <name> -> home whose one due model sits on an api-key provider
+# with no allowlist entry, the combination the cost gate must refuse to probe.
+make_gated_home() {
+  local home="$TMP/$1"
+  mkdir -p "$home/config" "$home/state"
+  write_registry "$home/config/models.json" '
+    .models["google/gemini-2.5-flash"] =
+      { "provider": "google", "model_id": "gemini-2.5-flash",
+        "cost_class": "unknown", "status": "approved-specialist",
+        "observation_level": "O1",
+        "evidence": { "probe": { "result": "ok", "rc": 0, "at": "2020-01-01T00:00:00Z" } } }
+    | del(.models["openai-codex/gpt-5.4-mini"])
+    | del(.models["opencode/deepseek-v4-flash-free"])
+    | del(.zero_budget.allowlist["opencode/deepseek-v4-flash-free"])'
+  printf '%s\n' "$home"
+}
+
+test_sweep_probe_is_cost_gated() {
+  local home out
+  home=$(make_gated_home gate-sweep)
+  out=$(run_verify "$home" --dry-run)
+  assert_contains "$out" "refusing to probe google/gemini-2.5-flash" "the sweep consults the cost decision before any request"
+  assert_contains "$out" "not on the verified-free allowlist" "the decision function's own reason is reused"
+  assert_not_contains "$out" "would probe" "a cost-refused model is not selected for probing"
+  pass "the interval-gated sweep refuses to probe a model the zero-budget decision refuses"
+}
+
+test_explicit_model_probe_is_cost_gated() {
+  local home out before after
+  home=$(make_gated_home gate-model)
+  printf '{"models":{"google/gemini-2.5-flash":{"state":"available","shape":"ok"}}}\n' \
+    > "$home/state/model-health.json"
+  before=$(cat "$home/state/model-health.json")
+  out=$(run_verify "$home" --model google/gemini-2.5-flash) \
+    && fail "a cost-refused --model run must exit non-zero"
+  assert_contains "$out" "refusing to probe google/gemini-2.5-flash" "a typed --model is not authorization to spend"
+  assert_contains "$out" "--force-probe" "the refusal names its only override"
+  after=$(cat "$home/state/model-health.json")
+  [ "$before" = "$after" ] || fail "a refused probe must leave the prior health record untouched"
+  pass "an explicit --model is cost-gated too, and a refusal leaves the health record untouched"
+}
+
+test_force_probe_is_the_only_override() {
+  local home out
+  home=$(make_gated_home gate-force)
+  out=$(run_verify "$home" --dry-run --force-probe)
+  assert_contains "$out" "--force-probe overrides the cost refusal for google/gemini-2.5-flash" "a forced billable probe announces itself"
+  assert_contains "$out" "would probe google/gemini-2.5-flash" "the override actually authorizes the probe"
+  pass "--force-probe overrides visibly: the probe proceeds and says so on stdout"
+}
+
+test_model_flag_does_not_imply_force_probe() {
+  local home out
+  home=$(make_gated_home gate-no-imply)
+  out=$(run_verify "$home" --dry-run --model google/gemini-2.5-flash || true)
+  assert_not_contains "$out" "would probe" "--model alone never authorizes a refused probe"
+  pass "--model does not imply --force-probe"
+}
+
+# Regression: the due-selection jq once failed at runtime and the failure was
+# swallowed, so the sweep probed nothing forever while appearing healthy. The
+# fixture passes schema validation (observation levels are unvalidated) but dies
+# inside select_due: an object probe_max_age_days cannot be multiplied.
+test_due_selection_failure_is_loud() {
+  local home out rc
+  home="$TMP/due-fail"
+  mkdir -p "$home/config" "$home/state"
+  write_registry "$home/config/models.json" '.observation.levels.O4.probe_max_age_days = {"days": 90}'
+  out=$(run_verify "$home" --dry-run)
+  rc=$?
+  [ "$rc" = 2 ] || fail "a failed due-selection must exit 2, got rc=$rc (output: $out)"
+  assert_contains "$out" "could not determine which models are due" "the failure is loud, never an empty sweep"
+  pass "a due-selection failure is reported rather than reading as nothing-is-due"
 }
 
 test_valid_registry_passes() {
@@ -324,7 +412,7 @@ test_registered_probed_model_passes() {
   local reg="$TMP/int-ok.json" disp="$TMP/int-ok-dispatch.json" out
   write_registry "$reg"
   dispatch_with_model "$disp" "openai-codex/gpt-5.4-mini"
-  if ! out=$(fm_model_registry_integrity "$disp" "$reg" "$(date -u -d '2026-07-28' +%s 2>/dev/null || date -u +%s)"); then
+  if ! out=$(fm_model_registry_integrity "$disp" "$reg" "$(date -u -d '2026-07-28' +%s 2>/dev/null || echo 1785196800)"); then
     fail "an approved, probed, in-interval model must pass integrity, got: $out"
   fi
   pass "an approved and recently probed model passes integrity"
@@ -513,3 +601,8 @@ test_promotion_activates_on_config_and_data_only
 test_stale_model_is_due_for_probe
 test_fresh_model_is_not_due
 test_unprobed_model_is_due
+test_sweep_probe_is_cost_gated
+test_explicit_model_probe_is_cost_gated
+test_force_probe_is_the_only_override
+test_model_flag_does_not_imply_force_probe
+test_due_selection_failure_is_loud

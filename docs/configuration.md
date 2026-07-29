@@ -381,6 +381,9 @@ Routability is a separate axis from cost, and the two are enforced independently
 A model recorded as `rejected` or `blocked` is refused at spawn even when it carries no cost risk at all, because a model on a flat subscription can still be one the account is not entitled to use.
 Availability is a third axis again: a rate-limited or cooling-down model is unavailable rather than rejected, lives in `state/model-health.json`, and never changes the routing status recorded here.
 
+A live probe is itself a billable act on a metered provider, so `bin/fm-model-verify.sh` consults the same zero-budget decision before issuing any request, on the interval-gated sweep and on an explicit `--model` alike - a typed model name is not authorization to spend money.
+A refused model is reported as `MODEL_VERIFY: refusing to probe <model> - <reason>`, no request is issued, and its prior record in `state/model-health.json` is left untouched.
+`--force-probe` is the only override, and a forced probe announces itself on stdout so an authorized billable probe is never invisible.
 Bootstrap reports registry problems as `MODEL_REGISTRY: invalid config/models.json - <reason>` for schema failures, `MODEL_REGISTRY: <model> ...` for integrity failures, `MODEL_PRICE: <model> ...` for drift, and `MODEL_VERIFY: <model> ...` for probe results.
 Valid, current registries stay silent.
 See [`docs/examples/models.json`](examples/models.json) for a starting point to copy into local `config/models.json`, and `bin/fm-model-verify.sh --help` for the probe and drift mechanics.

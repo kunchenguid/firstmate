@@ -785,7 +785,11 @@ model_registry_validate() {
 model_probe_sweep() {
   local out
   [ -f "$CONFIG/models.json" ] || return 0
-  out=$("$SCRIPT_DIR/fm-model-verify.sh" 2>/dev/null || true)
+  # stderr is captured alongside stdout: the script's failure diagnostics (a
+  # due-selection query that dies at runtime) arrive there, and a sweep whose
+  # failures are swallowed reads as a healthy sweep that probed nothing.
+  # Non-fatal either way - bootstrap detects and reports, never aborts.
+  out=$("$SCRIPT_DIR/fm-model-verify.sh" 2>&1 || true)
   [ -z "$out" ] || printf '%s\n' "$out"
 }
 

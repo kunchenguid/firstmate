@@ -72,10 +72,12 @@ Also record: billing required at signup, overage possible, free tier promotional
 **G2 Probe authorization.** May I make a live request?
 Authorized if and only if G1 returned `subscription-flat` (with that flat-allowance confirmation) or `verified-free`.
 Otherwise the probe needs the captain's explicit word, and the candidate is recorded as *researched, not probed*.
-This stage exists only because of the ordering rule above.
+This stage exists only because of the ordering rule above, and it is enforced in code rather than by this prose: `bin/fm-model-verify.sh` consults the zero-budget decision before issuing any live request, on the automatic sweep and on an explicit `--model` alike, and refuses to probe a model the decision refuses.
+The captain's explicit word takes the concrete form of `--force-probe`, the only override, and a forced billable probe announces itself on stdout so it is never invisible.
 
 **G3 Entitlement and liveness.** Will this account actually get an answer?
 Run `bin/fm-model-verify.sh --model <provider>/<id>`.
+The command itself re-checks G2 first: a model the zero-budget decision refuses is not probed, and only `--force-probe` overrides that refusal.
 Where the provider offers real entitlement data, read it first and probe second - an empty entitlement set is a refusal that costs nothing to detect.
 
 Four distinguishable response shapes:

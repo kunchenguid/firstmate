@@ -2,7 +2,7 @@
 # fm-model-verify.sh - live entitlement probes and local price-drift checks for
 # the models config/models.json says this home routes to.
 # Usage: fm-model-verify.sh [--all] [--model <provider/model>] [--drift-only]
-#                           [--dry-run] [--json] [--timeout <s>]
+#                           [--dry-run] [--force-probe] [--json] [--timeout <s>]
 #          Default: probe only routed models whose recorded evidence is older
 #          than their observation level's interval, then run the price-drift
 #          comparison. Prints ONE line per model that needs firstmate's attention
@@ -12,9 +12,19 @@
 #        --model       probe exactly this model, ignoring the interval.
 #        --drift-only  skip probing entirely; only compare stored prices.
 #        --dry-run     print what would be probed, probe nothing.
+#        --force-probe probe a model the zero-budget cost decision refuses; the
+#                      only override, and it announces itself on stdout.
 #        --json        emit the health record to stdout instead of the summary.
 #        --timeout     hard ceiling in seconds for the whole sweep (default 90).
 #          Exits 0 when everything is current, 2 when any line was printed.
+#
+# NO PROBE WITHOUT A COST VERDICT. Every probe path, including an explicit
+# --model, consults fm_model_zero_budget_decision before issuing a live request:
+# the instrument that catches an entitlement error is itself a billable act on a
+# metered provider, which is why cost class is established before entitlement
+# and not after. A typed --model is not authorization to spend money - under the
+# zero-budget rule spending is never implied, only explicitly flagged, and the
+# flag is --force-probe.
 #
 # WHY BOTH CHECKS, FOREVER. The two things that decay are not properties of the
 # model - they are properties of the ACCOUNT and of the provider's price list, and
@@ -44,7 +54,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -62,6 +72,7 @@ ALL=0
 ONE=
 DRIFT_ONLY=0
 DRY_RUN=0
+FORCE_PROBE=0
 AS_JSON=0
 TOTAL_TIMEOUT=90
 PROBE_TIMEOUT=25
@@ -82,6 +93,7 @@ for a in "$@"; do
     --model=*) ONE=${a#--model=} ;;
     --drift-only) DRIFT_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
+    --force-probe) FORCE_PROBE=1 ;;
     --json) AS_JSON=1 ;;
     --timeout) want=timeout ;;
     --timeout=*) TOTAL_TIMEOUT=${a#--timeout=} ;;
@@ -159,6 +171,36 @@ if [ -n "$ONE" ]; then
   fi
 else
   DUE=$(select_due) || exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# Cost gate: no live request without a zero-budget verdict
+# ---------------------------------------------------------------------------
+# The probe that catches an entitlement error is itself a billable act on a
+# metered provider, which is why cost class is established BEFORE entitlement
+# and not after. Both paths land here - the interval-gated sweep and an explicit
+# --model - because a typed model name is not authorization to spend money. A
+# refused model is skipped entirely: no request is issued and its prior health
+# record is left untouched. --force-probe is the only override, and it announces
+# itself so an authorized billable probe is never invisible in the output.
+NEEDS_ACTION=0
+if [ "$DRIFT_ONLY" != 1 ] && [ -n "$DUE" ]; then
+  ALLOWED=
+  while IFS=$'\t' read -r key harness provider model_id; do
+    [ -n "$key" ] || continue
+    if reason=$(fm_model_zero_budget_decision "$key"); then
+      ALLOWED="${ALLOWED}${key}"$'\t'"${harness}"$'\t'"${provider}"$'\t'"${model_id}"$'\n'
+    elif [ "$FORCE_PROBE" = 1 ]; then
+      echo "MODEL_VERIFY: --force-probe overrides the cost refusal for $key - this probe is a billable act: $reason"
+      ALLOWED="${ALLOWED}${key}"$'\t'"${harness}"$'\t'"${provider}"$'\t'"${model_id}"$'\n'
+    else
+      echo "MODEL_VERIFY: refusing to probe $key - $reason (--force-probe is the only override)"
+      NEEDS_ACTION=1
+    fi
+  done <<EOF
+$DUE
+EOF
+  DUE=$ALLOWED
 fi
 
 # ---------------------------------------------------------------------------
@@ -271,7 +313,6 @@ fi
 # ---------------------------------------------------------------------------
 # Report only what firstmate should act on
 # ---------------------------------------------------------------------------
-NEEDS_ACTION=0
 if [ -n "$RESULTS" ]; then
   while IFS=$'\t' read -r key shape rc lat detail; do
     [ -n "$key" ] || continue
