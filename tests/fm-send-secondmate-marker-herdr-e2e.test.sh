@@ -172,8 +172,18 @@ PATH="$FAKEBIN:$ORIGINAL_PATH" FM_GATE_REFUSE_BYPASS=1 FM_HOME="$SENDER_HOME" \
   "$ROOT/bin/fm-send.sh" "$ID" "$REQUEST" >/dev/null
 wait_for_prompt "$REQUEST" || fail "real Pi did not receive the exact-id fm-send request"
 GOT=$(jq -r --arg needle "$REQUEST" 'select(.prompt | contains($needle)) | .prompt' "$CAPTURE" | tail -1)
-[ "$GOT" = "${FM_FROMFIRST_MARK}${REQUEST}" ] \
-  || fail "real Pi exact-id prompt did not contain exactly one terminal-safe marker"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$GOT" | od -An -tx1)"
+# A marked secondmate request carries its corr= correlation token between the
+# marker and the body (bin/fm-pending-reply-lib.sh), so the exact form is
+# marker + "corr=<id> " + request, with the marker appearing exactly once.
+case "$GOT" in
+  "${FM_FROMFIRST_MARK}corr="[a-f0-9]*" ${REQUEST}") : ;;
+  *) fail "real Pi exact-id prompt was not exactly one marker plus corr plus the request"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$GOT" | od -An -tx1)" ;;
+esac
+case "${GOT#"$FM_FROMFIRST_MARK"}" in
+  *"$FM_FROMFIRST_MARK"*) fail "real Pi exact-id prompt carried the marker more than once"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$GOT" | od -An -tx1)" ;;
+esac
+[ "$(find "$SENDER_HOME/state/pending-replies" -type f 2>/dev/null | wc -l)" -eq 1 ] \
+  || fail "the exact-id secondmate send must create its parent pending-reply record"
 printf 'evidence: exact-id received-hex=%s\n' "$(printf '%s' "$GOT" | od -An -tx1 | tr -d ' \n')"
 pass "real Pi/Herdr: exact-id FM_HOME send delivers exactly one from-firstmate marker"
 wait_for_idle || fail "real Pi did not become idle after the exact-id capture"
