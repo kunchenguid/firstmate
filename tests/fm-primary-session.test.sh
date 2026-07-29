@@ -39,14 +39,23 @@ cmd1=${1:-}
 cmd2=${2:-}
 
 inspect_agent() {
-  local id=$1 file archived=false status provider cwd pending parent persistence
+  local id=$1 file archived=false status provider cwd pending parent persistence count_file count
   file=$(resolve_agent_file "$id") || exit 4
+  mkdir -p "$home/inspect-counts"
+  count_file="$home/inspect-counts/$id"
+  count=0
+  [ ! -s "$count_file" ] || count=$(cat "$count_file")
+  count=$(( count + 1 ))
+  printf '%s\n' "$count" > "$count_file"
   [ ! -e "$home/archived-$id" ] || archived=true
   status=$(jq -r '.lastStatus' "$file")
   [ "$archived" = false ] || status=closed
   provider=$(jq -r '.provider' "$file")
   cwd=$(jq -r '.cwd' "$file")
   pending=$(jq -r '.testPending // 0' "$file")
+  if [ -e "$home/race-pending-after-receipt" ] && [ "$count" -ge 4 ]; then
+    pending=1
+  fi
   parent=$(jq -r '.testParent // empty' "$file")
   persistence=$(jq -r '.testPersistence // true' "$file")
   jq -cn \
@@ -162,6 +171,7 @@ remaining=100
 [ ! -e "${PASEO_HOME:?}/quota-blocked" ] || remaining=0
 state=fresh
 [ ! -e "$PASEO_HOME/quota-unknown" ] || state=error
+[ ! -e "$PASEO_HOME/quota-malformed" ] || remaining='"unknown"'
 jq -cn \
   --arg provider "$provider" \
   --arg state "$state" \
@@ -563,6 +573,39 @@ test_rate_limited_takeover_is_distinct_and_recoverable() {
   pass "primary-session: fresh exhausted quota evidence produces a distinct recoverable pause"
 }
 
+test_malformed_quota_refuses_without_archive() {
+  new_world malformed-quota
+  write_agent "$AGENT_A"
+  : > "$W_PASEO/quota-malformed"
+  start_owner "$AGENT_A"
+  run_takeover "$AGENT_A"
+  [ "$RUN_RC" -ne 0 ] || fail "malformed quota evidence unexpectedly took over"
+  assert_contains "$RUN_OUT" "fresh provider quota evidence is unavailable" \
+    "malformed quota did not fail closed as unknown"
+  [ ! -e "$W_PASEO/calls.log" ] || fail "malformed quota invoked Paseo archive"
+  kill -0 "$OWNER_PID" 2>/dev/null || fail "malformed quota stopped the owner"
+  [ "$(cat "$W_ROOT/state/.lock")" = "$OWNER_PID" ] || fail "malformed quota changed the lock"
+  pass "primary-session: malformed quota evidence fails closed before archive"
+}
+
+test_takeover_revalidates_after_receipt_publication() {
+  new_world revalidation-race
+  write_agent "$AGENT_A"
+  : > "$W_PASEO/race-pending-after-receipt"
+  start_owner "$AGENT_A"
+  run_takeover "$AGENT_A"
+  [ "$RUN_RC" -ne 0 ] || fail "stale post-receipt eligibility unexpectedly took over"
+  assert_contains "$RUN_OUT" "target safety changed before archive" \
+    "post-receipt revalidation did not report the changed safety state"
+  [ ! -e "$W_PASEO/calls.log" ] || fail "post-receipt revalidation invoked Paseo archive"
+  receipt=$(only_receipt) || fail "post-receipt revalidation did not publish a recoverable receipt"
+  [ "$(record_last_value "$receipt" state)" = archive-aborted ] \
+    || fail "post-receipt revalidation did not retire the prepared receipt"
+  kill -0 "$OWNER_PID" 2>/dev/null || fail "post-receipt revalidation stopped the owner"
+  [ "$(cat "$W_ROOT/state/.lock")" = "$OWNER_PID" ] || fail "post-receipt revalidation changed the lock"
+  pass "primary-session: takeover revalidates safety after receipt publication"
+}
+
 test_concurrent_takeovers_admit_one_successor() {
   local rc1 rc2 successes archive_count
   new_world concurrent
@@ -690,6 +733,8 @@ test_post_archive_receipt_write_failure_remains_restorable
 test_lock_publish_failure_rolls_back_own_claim
 test_successful_takeover_preserves_fleet_and_records_receipt
 test_rate_limited_takeover_is_distinct_and_recoverable
+test_malformed_quota_refuses_without_archive
+test_takeover_revalidates_after_receipt_publication
 test_concurrent_takeovers_admit_one_successor
 test_restore_refuses_live_successor
 test_recoverable_happy_path_reacquires_normally

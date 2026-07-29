@@ -113,7 +113,7 @@ iso_epoch() {
 }
 
 quota_classification() {
-  local provider=$1 quota provider_count state_ok blocked
+  local provider=$1 quota provider_count state_ok quota_schema_ok blocked
   quota=$(quota-axi --provider "$provider" --json 2>/dev/null) || return 1
   provider_count=$(jq --arg provider "$provider" '[.providers[]? | select(.provider == $provider)] | length' <<< "$quota") || return 1
   [ "$provider_count" = 1 ] || return 1
@@ -122,11 +122,18 @@ quota_classification() {
     | (.state.status == "fresh" and .state.stale == false)
   ' <<< "$quota") || return 1
   [ "$state_ok" = true ] || return 1
+  quota_schema_ok=$(jq -r --arg provider "$provider" '
+    [.providers[]? | select(.provider == $provider)][0]
+    | (.windows | type) == "array"
+      and ([.windows[] | select((.kind == "session") or (.kind == "weekly"))] | length) > 0
+      and all(.windows[] | select((.kind == "session") or (.kind == "weekly")); (.percentRemaining | type) == "number")
+  ' <<< "$quota") || return 1
+  [ "$quota_schema_ok" = true ] || return 1
   blocked=$(jq -r --arg provider "$provider" '
     [.providers[]? | select(.provider == $provider)][0]
     | any(.windows[]?;
         ((.kind == "session") or (.kind == "weekly"))
-        and ((.percentRemaining | numbers) <= 0))
+        and (.percentRemaining <= 0))
   ' <<< "$quota") || return 1
   if [ "$blocked" = true ]; then
     printf 'rate-limited\n'
@@ -485,6 +492,28 @@ receipt_publish() {
   printf '%s\n' "$final"
 }
 
+assert_takeover_still_eligible() {
+  local owner_pid=$1 agent_id=$2 owner_harness=$3 expected_classification=$4 classification reason
+  fm_harness_pid_alive "$owner_pid" || {
+    printf 'lock owner exited before archive\n'
+    return 1
+  }
+  [ "$(fm_harness_pid_kind "$owner_pid" 2>/dev/null || true)" = "$owner_harness" ] \
+    || {
+      printf 'lock-owner harness changed before archive\n'
+      return 1
+    }
+  if ! prove_lock_owner "$agent_id" "$owner_pid" "$owner_harness" 2>/dev/null; then
+    printf 'lock-owner identity changed before archive\n'
+    return 1
+  fi
+  IFS='|' read -r classification reason <<< "$(classify_target "$owner_pid" "$agent_id" "$owner_harness")"
+  [ "$classification" = "$expected_classification" ] || {
+    printf 'target safety changed before archive: %s: %s\n' "$classification" "$reason"
+    return 1
+  }
+}
+
 acquire_claim_lock() {
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -501,7 +530,7 @@ release_claim_lock() {
 
 takeover() {
   local agent_id=$1 new_owner_pid owner_pid owner_harness classification reason inspect provider
-  local tree captured_pids draft archive_out post receipt new_lock_pid now remaining rc=0
+  local tree captured_pids draft archive_out post receipt new_lock_pid now remaining recheck_reason rc=0
   fm_primary_atom_valid "$agent_id" || die "invalid Paseo agent id"
   require_takeover_tools
   primary_scope_required
@@ -533,8 +562,17 @@ takeover() {
   [ -n "$captured_pids" ] || die "captured process tree had no restorable process evidence"
   draft=$(receipt_prepare "$agent_id" "$owner_pid" "$owner_harness" "$provider" "$classification" "$captured_pids") \
     || die "could not prepare a durable handoff receipt before suspension"
+  if ! recheck_reason=$(assert_takeover_still_eligible "$owner_pid" "$agent_id" "$owner_harness" "$classification"); then
+    rm -f "$draft"
+    die "takeover refused: $recheck_reason"
+  fi
   receipt=$(receipt_publish "$draft" archive-requested archive_requested_at) \
     || die "could not publish a durable handoff receipt before suspension"
+  if ! recheck_reason=$(assert_takeover_still_eligible "$owner_pid" "$agent_id" "$owner_harness" "$classification"); then
+    fm_primary_receipt_append_state "$receipt" archive-aborted archive_aborted_at "$(fm_primary_now_utc)" \
+      || die "target safety changed before archive and the aborted handoff receipt could not be published: $receipt"
+    die "takeover refused: $recheck_reason; receipt: $receipt"
+  fi
   if ! archive_out=$(paseo agent archive "$agent_id" --json 2>&1); then
     fm_primary_receipt_append_state "$receipt" archive-failed archive_failed_at "$(fm_primary_now_utc)" || true
     die "Paseo soft archive failed: $archive_out; receipt: $receipt"
