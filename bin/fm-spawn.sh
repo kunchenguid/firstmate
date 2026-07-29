@@ -121,6 +121,9 @@
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
+# After a successful state/<id>.meta write, this script also appends a durable
+# "spawn" record to data/dispatch-log.jsonl; bin/fm-dispatch-log.sh's header
+# owns that log's format and query CLI.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1643,6 +1646,27 @@ META_WINDOW=$T
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
+
+# Durable dispatch record (bin/fm-dispatch-log.sh header owns the log format).
+# Best-effort and non-fatal: reuses the variables already resolved above for
+# meta, never recomputes anything, and a logging failure (missing/unwritable
+# data/, full disk, ...) must never fail an otherwise-successful spawn.
+{
+  mkdir -p "$DATA" 2>/dev/null
+  printf '{"event":"spawn","ts":"%s","id":"%s","harness":"%s","model":"%s","effort":"%s","kind":"%s","repo":"%s","mode":"%s","backend":"%s","yolo":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$(json_escape "$ID")" \
+    "$(json_escape "$HARNESS")" \
+    "$(json_escape "${MODEL:-default}")" \
+    "$(json_escape "${EFFORT:-default}")" \
+    "$(json_escape "$KIND")" \
+    "$(json_escape "$PROJ_ABS")" \
+    "$(json_escape "$MODE")" \
+    "$(json_escape "$BACKEND")" \
+    "$(json_escape "$YOLO")" \
+    >> "$DATA/dispatch-log.jsonl"
+} 2>/dev/null || true
+
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")

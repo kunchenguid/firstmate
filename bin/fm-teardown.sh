@@ -57,6 +57,10 @@
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
 #
+# Before deleting state/<id>.meta, this script also appends a durable
+# "teardown" record to data/dispatch-log.jsonl; bin/fm-dispatch-log.sh's header
+# owns that log's format and query CLI.
+#
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
 # non-linked worktree, .git/index.lock) that makes `treehouse return --force` fail
@@ -1685,6 +1689,16 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+# Durable dispatch record (bin/fm-dispatch-log.sh header owns the log format).
+# Best-effort and non-fatal, appended while META still exists so the read above
+# stays the single source for this task's fields; a logging failure must never
+# block teardown. Deliberately minimal (id only) - see the header cross-reference.
+{
+  mkdir -p "$DATA" 2>/dev/null
+  printf '{"event":"teardown","ts":"%s","id":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ID" \
+    >> "$DATA/dispatch-log.jsonl"
+} 2>/dev/null || true
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token"
