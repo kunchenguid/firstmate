@@ -114,10 +114,17 @@ log_last_line() {
 # the deliberate-external-wait verb (fm-classify-lib.sh's FM_CLASSIFY_PAUSED_VERB):
 # a crewmate with no active run and an idle pane that declared a known external wait
 # reports `paused` distinctly, so a supervisor reading this sees a declared pause
-# and its reason rather than a wedge-suspect idle.
+# and its reason rather than a wedge-suspect idle. A line that uses the pause verb to
+# report a FAILURE is not a pause (fm-classify-lib.sh's status_pause_is_failure); it
+# maps to `failed` so a supervisor reads the failure it actually is, and so
+# crew_absorb_class refuses to absorb it, instead of falling through to `unknown`.
 map_log_state() {  # <line>
   if status_is_paused "$1"; then
     echo paused
+    return
+  fi
+  if status_pause_is_failure "$1"; then
+    echo failed
     return
   fi
   case "$(status_line_verb "$1")" in

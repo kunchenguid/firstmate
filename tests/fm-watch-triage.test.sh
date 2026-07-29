@@ -10,8 +10,9 @@
 # provably-working stale panes absorbed-then-escalated past the threshold,
 # terminal-looking stale status lines overridden by an active run, the heartbeat
 # backstop fail-safe, direct harness-permission prompt escalation, the bounded
-# busy/no-progress system-dialog heuristic, and afk coherence (no double-triage
-# while the away-mode daemon owns supervision).
+# busy/no-progress system-dialog heuristic, the failure-pause discriminator (a failure
+# reported under the pause verb escalates while a deliberate wait still absorbs), and
+# afk coherence (no double-triage while the away-mode daemon owns supervision).
 #
 # Daemon-side classification/injection lives in fm-daemon.test.sh; watcher/lock
 # liveness in fm-watcher-lock.test.sh; the durable-queue safety matrix in
@@ -229,6 +230,93 @@ test_status_is_paused_classifier() {
   # work to keep surfacing.
   status_is_captain_relevant 'paused: holding for the upstream release' && fail "paused is captain-relevant (should not be)"
   pass "status_is_paused: only the leading paused verb matches, and paused is not captain-relevant"
+}
+
+# status_pause_is_failure: the failure-pause discriminator. A crewmate reporting a
+# FAILURE under the pause verb ("paused: error: ...") must NOT be absorbed as a
+# declared external wait - the 2026-07-24 incident, where six crewmates sat absorbed
+# for hours behind exactly the three lines asserted below. The discriminator is
+# positional: failure vocabulary in the pause HEADLINE (leading clause, bounded to
+# FM_CLASSIFY_PAUSE_HEAD_WORDS words) escalates, while a deliberate wait that merely
+# mentions a failure later in its prose still absorbs, because absorbing deliberate
+# waits is the whole point of the pause verb.
+test_failure_pause_is_failure_classifier() {
+  local line
+
+  # (1) The three REAL absorbed-failure lines from the incident. Each must stop
+  # being a pause and start being captain-relevant, exactly like blocked:/failed:.
+  local -a real=(
+    'paused: error: "drive run: reconcile run 01KYQ8QXTVR5KDRPSR49ZF422B: read response: read unix ->/Users/x/.no-mistakes/socket: i/o timeout"'
+    'paused: no-mistakes v1.41.2 fresh run error: drive run: reconcile run 01KYQ8QXTVR5KDRPSR49ZF422B: read response: read unix ->/Users/x/.no-mistakes/socket: i/o timeout'
+    'paused: run 01KYQ8NGB3YTQC9PS82P3E6C81 drive failed on no-mistakes v1.41.2: drive run: reconcile run 01KYQ8NGB3YTQC9PS82P3E6C81: read response'
+  )
+  for line in "${real[@]}"; do
+    status_pause_is_failure "$line" || fail "a real failure-pause was not detected: $line"
+    status_is_paused "$line" && fail "a real failure-pause was still classed a declared pause: $line"
+    status_is_captain_relevant "$line" || fail "a real failure-pause did not escalate: $line"
+  done
+
+  # (2) Genuine deliberate pauses keep absorbing; regressing this would flood the
+  # supervisor with the idle waits the pause verb exists to silence.
+  local -a deliberate=(
+    "paused: waiting for the captain's decision on the IDC rollout"
+    'paused: waiting on upstream CI'
+    'paused: rate limit until 15:00'
+    'paused: holding for the upstream tool release'
+    'paused: awaiting PR review before the rebase'
+  )
+  for line in "${deliberate[@]}"; do
+    status_pause_is_failure "$line" && fail "a deliberate pause was flagged a failure: $line"
+    status_is_paused "$line" || fail "a deliberate pause stopped being a pause: $line"
+    status_is_captain_relevant "$line" && fail "a deliberate pause became captain-relevant: $line"
+  done
+
+  # (3) The documented tradeoff: a deliberate wait that mentions a failure in PASSING,
+  # past the headline, still absorbs - position is the discriminator, not presence.
+  line='paused: waiting for the captain to decide how to handle the failed Shopify webhook'
+  status_pause_is_failure "$line" && fail "a passing failure mention past the headline escalated"
+  status_is_paused "$line" || fail "a passing failure mention past the headline stopped being a pause"
+  # ...but the SAME failure word inside the headline does escalate, which is the
+  # asymmetry the bound buys. Conservative direction: ambiguity escalates.
+  status_pause_is_failure 'paused: the Shopify webhook failed, waiting for the captain' \
+    || fail "a failure word inside the headline did not escalate"
+
+  # (4) The headline bound itself: text after the reason's first colon is detail, not
+  # headline, so a failure word only in the detail tail does not escalate.
+  status_pause_is_failure 'paused: waiting on the vendor window: previous attempt failed' \
+    && fail "a failure word in the detail tail (past the first colon) escalated"
+
+  # (5) Both knobs are data. A home can retune the vocabulary and the bound, and the
+  # discriminator follows the configurable pause verb rather than the literal.
+  # shellcheck disable=SC2034 # Read by fm-classify-lib.sh (sourced above), not here.
+  FM_CLASSIFY_PAUSE_HEAD_WORDS=2
+  [ "$(status_pause_headline 'paused: one two three four')" = 'one two' ] \
+    || fail "FM_CLASSIFY_PAUSE_HEAD_WORDS did not bound the headline"
+  # shellcheck disable=SC2034 # Read by fm-classify-lib.sh (sourced above), not here.
+  FM_CLASSIFY_PAUSE_HEAD_WORDS=3
+  status_pause_is_failure 'paused: waiting on the failed vendor job' \
+    && fail "a tightened headline bound still matched a word past it"
+  unset FM_CLASSIFY_PAUSE_HEAD_WORDS
+
+  # shellcheck disable=SC2034 # Read by fm-classify-lib.sh (sourced above), not here.
+  FM_CLASSIFY_PAUSE_FAILURE_RE='(^|[^[:alnum:]_])kaput([^[:alnum:]_]|$)'
+  status_pause_is_failure 'paused: kaput after the drive run' \
+    || fail "FM_CLASSIFY_PAUSE_FAILURE_RE override was not honored"
+  status_pause_is_failure 'paused: error: drive run' \
+    && fail "FM_CLASSIFY_PAUSE_FAILURE_RE override did not replace the default vocabulary"
+  unset FM_CLASSIFY_PAUSE_FAILURE_RE
+
+  FM_CLASSIFY_PAUSED_VERB=awaiting
+  status_pause_is_failure 'awaiting: error: drive run' \
+    || fail "the failure discriminator did not follow FM_CLASSIFY_PAUSED_VERB"
+  status_pause_is_failure 'paused: error: drive run' \
+    && fail "the failure discriminator ignored the pause-verb override"
+  unset FM_CLASSIFY_PAUSED_VERB
+
+  status_pause_is_failure 'blocked: error: drive run' && fail "a non-pause verb was treated as a failure-pause"
+  status_pause_is_failure '' && fail "an empty line was treated as a failure-pause"
+
+  pass "status_pause_is_failure: failure vocabulary in the pause headline escalates; a deliberate wait mentioning one in passing still absorbs"
 }
 
 # crew_absorb_class: the single fm-crew-state.sh read that returns BOTH absorb
@@ -928,6 +1016,49 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   pass "a declared pause re-surfaces once, persists its cadence across watcher restart, and loads the cadence from config/watcher.env"
 }
 
+# --- non-terminal stale, crewmate reported a FAILURE under the pause verb --------
+# The 2026-07-24 incident, end to end: six crewmates appended "paused: <failure>" when
+# their no-mistakes runs died on a socket timeout, and the watcher absorbed all of them
+# as declared external waits, re-surfacing at most once an hour. The fleet sat stalled
+# for 2.5 hours. A failure-pause must take the ordinary surface path immediately -
+# never .paused-<key>, never the hour-long recheck cadence - while the deliberate-pause
+# absorb tested above stays exactly as it was.
+test_failure_pause_stale_surfaced_not_absorbed() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case failure-pause-stale); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-failpause"
+  printf 'idle after the run died' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/failpause.meta"
+  # The exact shape from the incident: the pause verb carrying a failure report.
+  printf 'paused: run 01KYQ8NGB3YTQC9PS82P3E6C81 drive failed on no-mistakes v1.41.2: drive run: reconcile run: read response\n' \
+    > "$state/failpause.status"
+  sig=$(seen_sig "$state/failpause.status"); printf '%s' "$sig" > "$state/.seen-failpause_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle after the run died")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # fm-crew-state.sh maps a failure-pause log line to `failed` (map_log_state), so
+  # crew_absorb_class reports `none` - the crewmate has stopped.
+  export FM_FAKE_CREW_STATE='state: failed · source: status-log · run 01KY drive failed on no-mistakes v1.41.2'
+
+  # A generous pause cadence must not help it hide: the failure surfaces at once.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999999 \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher absorbed a failure reported under the pause verb"
+  grep -F "stale: $window" "$out" >/dev/null || fail "failure-pause did not print a stale wake"
+  grep -F "awaiting external" "$out" >/dev/null && fail "a failure-pause was mislabeled a declared external wait"
+  [ ! -e "$state/.paused-$key" ] || fail "a failure-pause was tracked as a declared pause"
+  [ ! -e "$state/.paused-resurfaced-$key" ] || fail "a failure-pause was put on the long pause recheck cadence"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the failure-pause surface failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "failure-pause wake was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a failure reported under the pause verb surfaces immediately instead of being absorbed as a declared wait"
+}
+
 test_herdr_blocked_transition_enters_pause_absorb_path() {
   local dir state fakebin window key record
   dir=$(make_case herdr-paused-transition); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1602,6 +1733,12 @@ if [ "${FM_TEST_FOCUSED:-}" = pause-regressions ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = failure-pause ]; then
+  test_failure_pause_is_failure_classifier
+  test_failure_pause_stale_surfaced_not_absorbed
+  exit 0
+fi
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -1609,6 +1746,7 @@ test_classifier_primitives
 test_managed_tmux_window_id_reverse_mapping
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
+test_failure_pause_is_failure_classifier
 test_crew_absorb_class_classifier
 test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
@@ -1626,6 +1764,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_failure_pause_stale_surfaced_not_absorbed
 test_herdr_blocked_transition_enters_pause_absorb_path
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
