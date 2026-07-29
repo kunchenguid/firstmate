@@ -94,6 +94,14 @@ def select(case):
             "candidates": sorted(c["id"] for c in winners),
         }
     winner = winners[0]
+    if winner.get("authAvailable") is False:
+        return {
+            "error": "selected candidate authentication unavailable",
+            "harness": winner["harness"],
+            "model": winner["model"],
+            "authenticationSurface": winner["authenticationSurface"],
+            "failureEvidence": winner["authFailure"],
+        }
     return {
         "id": winner["id"],
         "pressured": conservation_pressure(winner),
@@ -161,19 +169,21 @@ test_owner_contains_selection_procedure() {
     'Positive reserve means usage is behind reset pace' \
     '`on_pace` is neutral' \
     'effective pace status is `mixed` and any `aheadWindowIds` remain' \
-    'prefer a candidate without ahead-of-reset conservation pressure over one with conservation pressure' \
-    'even when the pressured candidate has somewhat higher raw remaining percentage' \
+    'Comparable fit/reasoning: prefer no ahead pressure over pressure' \
+    'even with higher raw headroom' \
     'prefer the least-negative worst applicable reserve' \
-    'use known behind/on-pace evidence plus raw headroom transparently' \
+    'Sustainable candidates: use known pace plus raw headroom' \
     'Do not collapse those facts into an opaque composite score' \
     '`unknown` is valid explicit uncertainty from quota-axi' \
-    'Prefer known sustainable evidence over `unknown` pace when otherwise comparable' \
-    'If the dispatch choice materially hinges on unresolved pace, report the uncertainty' \
-    'do not crash, fabricate pace, or silently reinterpret absence as healthy' \
+    'Prefer known sustainable evidence over `unknown` when comparable' \
+    'If unresolved pace changes the choice, report uncertainty' \
+    'do not crash, fabricate pace, or treat absence as healthy' \
     'stop and report every tied candidate for captain choice' \
     'Do not select by array order, harness name, or another arbitrary identity ordering' \
     'Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-specific policy' \
     'Report duplicate concrete profiles as a configuration error' \
+    'Unresolved relationship or quota: stop and report the tuple and concrete evidence' \
+    'After selecting, check auth only through that tuple'\''s surface' \
     'Name the inspectable facts used for every candidate'; do
     assert_grep "$phrase" "$OWNER" "quota-array-dispatch procedure lost '$phrase'"
   done
@@ -269,6 +279,77 @@ elif got.get("id") != expect:
   done < <(python3 -c 'import json,sys; data=json.load(sys.stdin); [print(json.dumps(c, separators=(",", ":"))) for c in data["cases"]]' <<<"$raw")
 }
 
+test_dispatch_identity_and_blocked_report() {
+  local reports
+  assert_grep '`harness-adapters` owns identity' "$OWNER" \
+    "quota-array-dispatch does not point to the adapter identity owner"
+  assert_grep "After selecting, check auth only through that tuple's surface; another harness CLI cannot block it" "$OWNER" \
+    "quota-array-dispatch does not scope evidence to the concrete tuple"
+  assert_no_grep 'Unresolved relationship, auth, or quota' "$OWNER" \
+    "quota-array-dispatch checks authentication before selecting a candidate"
+  assert_grep 'A blocked credential report must name `harness`, `model`, authentication surface, and concrete failure evidence' "$OWNER" \
+    "blocked reports do not preserve the minimum identity and evidence fields"
+  assert_grep 'The concrete `harness` field owns adapter identity independently of the model provider' "$HARNESS" \
+    "harness-adapters lost the anti-conflation owner paragraph"
+  assert_grep '`harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`' "$HARNESS" \
+    "harness-adapters lost the concrete Pi/xAI versus Grok distinction"
+  assert_grep 'does not require Grok CLI login' "$HARNESS" \
+    "Pi/xAI guidance incorrectly requires Grok CLI login"
+  assert_no_grep '### Dispatch identity mapping' "$HARNESS" \
+    "identity guidance grew a separate table instead of one owner paragraph"
+
+  reports=$(python3 - <<'PY'
+
+def auth_surface(harness, model, provider):
+    surfaces = {
+        ("pi", "xai/grok-4.5", "xai"): "Pi xAI OAuth",
+        ("grok", "grok-4.5", "grok"): "Grok Build CLI",
+    }
+    try:
+        return surfaces[(harness, model, provider)]
+    except KeyError:
+        raise AssertionError("unresolved concrete profile") from None
+
+def evaluate(harness, model, provider, auth_available, failure):
+    surface = auth_surface(harness, model, provider)
+    if auth_available:
+        return (f"ready: harness={harness} model={model} provider={provider} "
+                f"authentication surface checked={surface}")
+    return (f"blocked: harness={harness} model={model} provider={provider} "
+            f"authentication surface checked={surface} failure evidence={failure}")
+
+pi = evaluate("pi", "xai/grok-4.5", "xai", True, None)
+grok = evaluate("grok", "grok-4.5", "grok", False, "Grok Build CLI login missing")
+assert "Grok Build CLI" not in pi
+assert "Pi xAI OAuth" in pi
+assert "Grok Build CLI" in grok
+for mismatched in (
+    ("grok", "xai/grok-4.5", "xai"),
+    ("pi", "grok-4.5", "grok"),
+):
+    try:
+        auth_surface(*mismatched)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(f"accepted mismatched profile: {mismatched}")
+print(pi)
+print(grok)
+PY
+) || fail "identity counterfactual fixture failed"
+  assert_contains "$reports" 'ready: harness=pi model=xai/grok-4.5 provider=xai authentication surface checked=Pi xAI OAuth' \
+    "Pi/xAI did not remain dispatchable with its own authentication"
+  assert_not_contains "$reports" 'harness=pi model=xai/grok-4.5 provider=xai authentication surface checked=Grok Build CLI' \
+    "Pi/xAI was reported with the standalone Grok CLI surface"
+  assert_contains "$reports" 'blocked: harness=grok model=grok-4.5 provider=grok authentication surface checked=Grok Build CLI' \
+    "explicit Grok candidate did not use the Grok Build CLI surface"
+  for field in harness=grok model=grok-4.5 provider=grok 'authentication surface checked=Grok Build CLI' 'failure evidence=Grok Build CLI login missing'; do
+    assert_contains "$reports" "$field" "Grok blocked report lost '$field'"
+  done
+  printf '%s\n' "$reports"
+  pass "dispatch identity stays concrete across the Pi/xAI versus Grok counterfactual"
+}
+
 test_no_duplicate_procedure_in_agents() {
   # Guard against re-expanding the full procedure into AGENTS.md.
   local count
@@ -284,4 +365,5 @@ test_owner_contains_selection_procedure
 test_cross_references_stay_pointers
 test_schema_v3_shape_fixture
 test_deterministic_acceptance_cases
+test_dispatch_identity_and_blocked_report
 test_no_duplicate_procedure_in_agents

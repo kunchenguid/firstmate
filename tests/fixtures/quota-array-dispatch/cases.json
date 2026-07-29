@@ -200,6 +200,48 @@
       ]
     },
     {
+      "id": "select-pi-xai-before-authentication",
+      "expect": "pi-xai",
+      "reason": "an unauthenticated standalone Grok candidate cannot block selected authenticated Pi/xAI",
+      "candidates": [
+        {
+          "id": "pi-xai",
+          "harness": "pi",
+          "model": "xai/grok-4.5",
+          "provider": "xai",
+          "authenticationSurface": "Pi xAI OAuth",
+          "authAvailable": true,
+          "fit": "comparable",
+          "reasoningClass": "strong",
+          "tight": false,
+          "rawHeadroom": 55,
+          "paceStatus": "behind",
+          "aheadWindowIds": [],
+          "worstReserve": 15.0,
+          "unknownPace": false,
+          "paceAvailable": true
+        },
+        {
+          "id": "standalone-grok",
+          "harness": "grok",
+          "model": "grok-4.5",
+          "provider": "grok",
+          "authenticationSurface": "Grok Build CLI",
+          "authAvailable": false,
+          "authFailure": "Grok Build CLI login missing",
+          "fit": "comparable",
+          "reasoningClass": "strong",
+          "tight": false,
+          "rawHeadroom": 80,
+          "paceStatus": "ahead",
+          "aheadWindowIds": ["weekly"],
+          "worstReserve": -12.0,
+          "unknownPace": false,
+          "paceAvailable": true
+        }
+      ]
+    },
+    {
       "id": "all-tight-strongest-reasoning",
       "expect": "A",
       "reason": "preserve strongest-reasoning class when every candidate is tight",
