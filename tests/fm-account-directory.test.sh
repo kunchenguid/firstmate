@@ -238,6 +238,27 @@ SH
   pass "Claude approval marker requires secure stable parents and leaf metadata"
 }
 
+test_openat_binding_failure_is_a_setup_error() {
+  local cpp out status
+  reset_accounts
+  mark_claude_keychain_ready 1
+  cpp="$FAKEBIN/unsupported-openat-cpp"
+  cat > "$cpp" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$cpp"
+  if out=$(FM_ACCOUNT_DIRECTORY_OPENAT_CPP="$cpp" \
+    run_selector select claude 2>&1); then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "Claude selection accepted a platform without an openat binding"
+  assert_contains "$out" \
+    "error: descriptor-relative approval validation is unsupported: system openat binding unavailable" \
+    "unsupported openat platform did not fail at selector setup"
+  assert_not_contains "$out" "invalid quota-axi Keychain approval marker" \
+    "unsupported openat platform was misclassified as an invalid account marker"
+  pass "missing system openat binding fails once at selector setup"
+}
+
 test_codex_picks_highest_fresh_minimum_and_skips_no_window() {
   local out err
   reset_accounts
@@ -1266,6 +1287,7 @@ make_spawn_fakebin "$FAKEBIN"
 if [ "${FM_TEST_FOCUSED:-}" = account-directory-trust ]; then
   test_profile_eligibility_requires_enabled_worker
   test_claude_approval_marker_contract
+  test_openat_binding_failure_is_a_setup_error
   exit 0
 fi
 
@@ -1282,6 +1304,7 @@ fi
 test_codex_picks_highest_fresh_minimum_and_skips_no_window
 test_profile_eligibility_requires_enabled_worker
 test_claude_approval_marker_contract
+test_openat_binding_failure_is_a_setup_error
 test_codex_rechecks_health_on_every_selection
 test_codex_rotates_when_no_account_has_a_fresh_window
 test_codex_timeout_skips_wedged_account

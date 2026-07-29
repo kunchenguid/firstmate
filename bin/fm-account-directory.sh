@@ -48,8 +48,8 @@
 #
 # Credential and profile-registry state is read-only.
 # This script never logs in, imports credentials, or invokes a provider model.
-# Test-only command, root, state-root, passwd-home, Perl, timeout, and marker-race
-# hook overrides require FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1.
+# Test-only command, root, state-root, passwd-home, Perl, timeout, openat preprocessor,
+# and marker-race hook overrides require FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1.
 set -u
 
 TEST_LAB_TOKEN=firstmate-account-directory-test-lab-v1
@@ -196,6 +196,36 @@ read_profile_registry() { # <agent-fleet-bin>
   fi
 }
 
+openat_syscall_number() {
+  local cpp_bin output
+  if test_lab_enabled && [ -n "${FM_ACCOUNT_DIRECTORY_OPENAT_CPP:-}" ]; then
+    cpp_bin=$FM_ACCOUNT_DIRECTORY_OPENAT_CPP
+  elif [ -x /usr/bin/cpp ] && [ -f /usr/bin/cpp ]; then
+    cpp_bin=/usr/bin/cpp
+  elif [ -x /bin/cpp ] && [ -f /bin/cpp ]; then
+    cpp_bin=/bin/cpp
+  else
+    echo "error: descriptor-relative approval validation is unsupported: system openat binding unavailable" >&2
+    return 1
+  fi
+  output=$(
+    printf '#include <sys/syscall.h>\nSYS_openat\n' \
+      | /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "$cpp_bin" -P - 2>/dev/null
+  ) || {
+    echo "error: descriptor-relative approval validation is unsupported: system openat binding unavailable" >&2
+    return 1
+  }
+  output=${output//$'\n'/}
+  output=${output//[[:space:]]/}
+  case "$output" in
+    ''|*[!0-9]*)
+      echo "error: descriptor-relative approval validation is unsupported: system openat binding unavailable" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$output"
+}
+
 rotation_state_root() {
   local root home
   if test_lab_enabled && [ -n "${FM_ACCOUNT_DIRECTORY_STATE_ROOT:-}" ]; then
@@ -308,7 +338,7 @@ last_resort_pool() { # <vendor>
 }
 
 eligible_account_homes() { # <vendor> <pool>
-  local vendor=$1 pool=$2 root vendor_dir fleet_bin profiles candidate eligible matched reason marker marker_root marker_dir marker_race_hook
+  local vendor=$1 pool=$2 root vendor_dir fleet_bin profiles candidate eligible matched reason marker marker_root marker_dir marker_race_hook openat_number
   root=$(account_root) || return 1
   vendor_dir=$root/$vendor
   [ -d "$vendor_dir" ] && [ ! -L "$vendor_dir" ] || {
@@ -319,6 +349,9 @@ eligible_account_homes() { # <vendor> <pool>
     echo "error: jq is required for direct account pool eligibility" >&2
     return 1
   }
+  if [ "$vendor" = claude ]; then
+    openat_number=$(openat_syscall_number) || return 1
+  fi
   fleet_bin=$(agent_fleet_command) || return 1
   profiles=$(read_profile_registry "$fleet_bin" 2>/dev/null) || {
     echo "error: agent-fleet could not read the account profile registry for $vendor crew selection" >&2
@@ -402,15 +435,9 @@ EOF
           use strict;
           use warnings;
           use Fcntl qw(:DEFAULT);
-          use Config;
 
-          my ($account_home, $path, $race_hook) = @ARGV;
-          my $openat_number =
-            $^O eq "darwin" ? 463 :
-            $^O eq "linux" && $Config{archname} =~ /(?:x86_64|amd64)/ ? 257 :
-            $^O eq "linux" && $Config{archname} =~ /(?:aarch64|arm64)/ ? 56 :
-            undef;
-          exit 1 unless defined($openat_number);
+          my ($openat_number, $account_home, $path, $race_hook) = @ARGV;
+          exit 1 unless $openat_number =~ /\A[0-9]+\z/;
 
           my $openat_handle = sub {
             my ($parent, $name, $flags) = @_;
@@ -478,7 +505,7 @@ EOF
           close($quota) or exit 1;
           close($cache) or exit 1;
           close($account) or exit 1;
-        ' "$candidate" "$marker" "$marker_race_hook" 2>/dev/null; then
+        ' "$openat_number" "$candidate" "$marker" "$marker_race_hook" 2>/dev/null; then
         log "claude account $candidate excluded from $pool: invalid quota-axi Keychain approval marker; expected exact granted payload, mode 0600, current-user ownership, one link, real path components, and stable metadata"
         continue
       fi
