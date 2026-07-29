@@ -296,6 +296,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/task-report-archive.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/tmux-backend.md",
       "audience": "operator-current"
     },
