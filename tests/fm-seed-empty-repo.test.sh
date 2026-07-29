@@ -91,6 +91,7 @@ SH
 run_seed() {
   local case_dir=$1 proj=$2
   FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$SEED" "$proj"
@@ -326,7 +327,7 @@ test_refuses_without_gh_axi() {
   make_empty_clone "$case_dir" example repo
 
   set +e
-  FM_ROOT_OVERRIDE="$ROOT" PATH="/usr/bin:/bin" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" PATH="/usr/bin:/bin" \
     "$SEED" "$case_dir/proj" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
