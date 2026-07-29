@@ -1,5 +1,8 @@
-// Pi 0.81.1 and 0.82.0 add the ordinary-user spacer and row together.
-// This version-bounded adapter changes only that presentation and never message delivery.
+// Verified against Pi 0.81.1 and 0.82.0, which add the ordinary-user spacer and row
+// together via InteractiveMode.addMessageToChat. This adapter probes that exact method
+// and throws if it is missing; fm-calm.ts catches that and skips only this adapter with a
+// diagnostic instead of blocking Calm or Pi. It changes only that presentation and never
+// message delivery.
 import {
   InteractiveMode,
   UserMessageComponent,

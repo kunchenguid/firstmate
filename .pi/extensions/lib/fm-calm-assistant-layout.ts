@@ -1,3 +1,7 @@
+// Verified against Pi 0.81.1 and 0.82.0, which export AssistantMessageComponent with an
+// updateContent method. installCalmAssistantLayout() probes that exact method and throws
+// if it is missing; fm-calm.ts catches that and skips only this adapter with a diagnostic
+// instead of blocking Calm or Pi.
 import { AssistantMessageComponent } from "@earendil-works/pi-coding-agent";
 import { calmPresentationHides } from "./fm-calm-visibility.ts";
 
