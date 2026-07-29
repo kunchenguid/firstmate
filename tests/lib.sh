@@ -216,3 +216,37 @@ assert_absent() {
 assert_present() {
   [ -e "$1" ] || fail "$2"
 }
+
+# --- old-vs-new conformance baseline ----------------------------------------
+
+# fm_test_base_ref: the commit this branch started from, for extraction-conformance
+# suites that run the PRE-change scripts against the SAME fixtures as the changed
+# ones and diff the results.
+#
+# Suitable for byte-identical old-vs-new checks while a branch still diverges from
+# main. After a squash lands, merge-base(HEAD, main) collapses to HEAD, so a caller
+# that needs a true pre-change fixture must not rely on this alone - resolve that
+# fixture content-addressably from history instead.
+#
+# Returns 1 when no default-branch ref is reachable; callers fail loudly rather
+# than falling back to HEAD, which would make every comparison tautological.
+#
+# Every candidate ref is consulted and the NEWEST resulting merge-base wins,
+# rather than the first ref that happens to resolve. A disposable task worktree
+# is routinely cut from a pool whose local `main` is many commits stale, so
+# taking the first hit could pin the baseline to a commit far older than the true
+# branch point - and every unrelated change landed in between would then read as
+# a behavior difference in an old-vs-new comparison.
+fm_test_base_ref() {
+  local ref base best=
+  for ref in main refs/heads/main origin/main refs/remotes/origin/main origin/HEAD refs/remotes/origin/HEAD; do
+    git -C "$ROOT" rev-parse --verify -q "$ref^{commit}" >/dev/null || continue
+    base=$(git -C "$ROOT" merge-base HEAD "$ref" 2>/dev/null) || continue
+    [ -n "$base" ] || continue
+    if [ -z "$best" ] || git -C "$ROOT" merge-base --is-ancestor "$best" "$base" 2>/dev/null; then
+      best=$base
+    fi
+  done
+  [ -n "$best" ] || return 1
+  printf '%s\n' "$best"
+}

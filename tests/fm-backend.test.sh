@@ -83,22 +83,9 @@ SH
 }
 
 # The commit this branch started from - the P1 "current main" baseline.
-# Suitable for byte-identical old-vs-new checks while a branch still diverges
-# from main. After a squash lands, merge-base(HEAD, main) collapses to HEAD, so
-# callers that need a true pre-change fixture must not rely on this alone.
-resolve_base_ref() {
-  local ref base
-  for ref in main refs/heads/main origin/main refs/remotes/origin/main origin/HEAD refs/remotes/origin/HEAD; do
-    if git -C "$ROOT" rev-parse --verify -q "$ref^{commit}" >/dev/null; then
-      base=$(git -C "$ROOT" merge-base HEAD "$ref" 2>/dev/null) || continue
-      [ -n "$base" ] || continue
-      printf '%s\n' "$base"
-      return 0
-    fi
-  done
-  return 1
-}
-BASE_REF=$(resolve_base_ref) \
+# tests/lib.sh's fm_test_base_ref is the single owner of that resolution and of
+# its post-squash caveat; this suite and tests/fm-harness-adapter.test.sh share it.
+BASE_REF=$(fm_test_base_ref) \
   || fail "fm-backend baseline requires local main or origin/main; fetch the default branch before running this test"
 
 # Newest first-parent revision whose bin/backends/tmux.sh still uses the
@@ -141,7 +128,7 @@ resolve_permissive_tmux_kill_ref() {
 # hence the dispatcher is a copied sibling, while the tmux adapter is extracted
 # from BASE_REF so conformance tests retain the exact historical behavior even
 # when this branch changes tmux dispatch semantics.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh fm-public-followup-lib.sh fm-x-lib.sh"
+OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-harness-adapter.sh fm-crew-state.sh fm-decision-hold.sh fm-backend.sh fm-operational-input.sh fm-public-followup-lib.sh fm-x-lib.sh"
 # A pull-request merge may add a new main-only dependency that the branch's older baseline does not have yet.
 OLD_BIN_OPTIONAL_SIBLINGS="fm-pending-reply-lib.sh"
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh fm-marker-lib.sh"
@@ -159,6 +146,11 @@ build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry p
     cp "$ROOT/bin/$f" "$bin/$f"
   done
   cp -R "$ROOT/bin/backends" "$bin/backends"
+  # bin/harnesses/ is the harness-axis adapter directory that fm-harness-adapter.sh
+  # sources; like fm-backend.sh's own adapters it must be a real, reachable tree in
+  # the old bin/ too, or sourcing aborts under set -eu. A fixture addition, not a
+  # behavior change to what is being tested.
+  cp -R "$ROOT/bin/harnesses" "$bin/harnesses"
   git -C "$ROOT" show "$BASE_REF:bin/backends/tmux.sh" > "$bin/backends/tmux.sh"
   for f in $OLD_BIN_REFACTORED; do
     git -C "$ROOT" show "$BASE_REF:bin/$f" > "$bin/$f"

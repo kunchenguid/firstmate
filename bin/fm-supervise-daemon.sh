@@ -154,6 +154,10 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$FM_DAEMON_DIR/fm-tmux-lib.sh"
 
+# Per-harness busy signatures live on the harness axis, not in the tmux library.
+# shellcheck source=bin/fm-harness-adapter.sh
+. "$FM_DAEMON_DIR/fm-harness-adapter.sh"
+
 # shellcheck source=bin/fm-backend.sh
 . "$FM_DAEMON_DIR/fm-backend.sh"
 
@@ -589,7 +593,7 @@ pane_is_busy() {  # <target> [backend]
   esac
   tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-    | fm_busy_lines_match "$harness"
+    | fm_harness_busy_match "$harness"
 }
 
 # pane_input_pending dispatches through fm_backend_composer_state and treats

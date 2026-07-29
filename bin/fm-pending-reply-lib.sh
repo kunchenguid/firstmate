@@ -66,8 +66,11 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-backend.sh"
-# shellcheck source=bin/fm-tmux-lib.sh
-. "$_FM_PENDING_REPLY_LIB_DIR/fm-tmux-lib.sh"
+# Harness busy signatures come from the harness axis. This library is
+# backend-agnostic and used to reach them by sourcing bin/fm-tmux-lib.sh, which
+# was the only reason it depended on a tmux library at all.
+# shellcheck source=bin/fm-harness-adapter.sh
+. "$_FM_PENDING_REPLY_LIB_DIR/fm-harness-adapter.sh"
 
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
@@ -585,7 +588,7 @@ fm_pending_reply_fallback_idle_eligible() {  # <record-path>
 # category as the submit acknowledgement in bin/fm-tmux-lib.sh - never task
 # state, and never a source consumers can confuse with semantic state.
 #
-# It stays harness-scoped (fm_busy_lines_match with the recorded harness, no
+# It stays harness-scoped (fm_harness_busy_match with the recorded harness, no
 # global OR of every vendor signature), so one harness's output cannot make
 # another read busy, and a weak rendered idle degrades to `fallback-idle`,
 # which the caller accepts as idle only after its grace window.
@@ -598,7 +601,7 @@ fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] 
   tail40=$(fm_backend_capture "$backend" "$target" 40 "$expected_label" 2>/dev/null) \
     || { printf 'unknown'; return 0; }
   if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-    | fm_busy_lines_match "$harness"; then
+    | fm_harness_busy_match "$harness"; then
     printf 'busy'
   else
     printf 'fallback-idle'

@@ -249,10 +249,12 @@ fm_busy_record_read() {  # <state-dir> <id>
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
 # Consumes the tail on stdin; 0 when Grok's verified busy signature matches.
 # FM_BUSY_REGEX still globally overrides the signature, mirroring the
-# historical operator escape hatch.
+# historical operator escape hatch. The signature itself is owned by
+# bin/harnesses/grok.sh (via bin/fm-harness-adapter.sh); the inline literal is
+# only the same-value fallback for consumers that never load the adapter.
 fm_busy_grok_tail_busy() {
   grep -v '^[[:space:]]*$' | tail -12 \
-    | grep -qiE "${FM_BUSY_REGEX:-${FM_TMUX_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
+    | grep -qiE "${FM_BUSY_REGEX:-${FM_HARNESS_GROK_BUSY_REGEX:-Ctrl\\+c:cancel}}"
 }
 
 # fm_busy_classify: semantic classification for a task whose endpoint the

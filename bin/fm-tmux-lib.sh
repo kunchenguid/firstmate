@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # fm-tmux-lib.sh — shared tmux pane primitives for firstmate.
 #
-# ONE source of truth for: busy detection, composer-empty (pending-input)
-# detection, and a verify-and-retry-Enter submit. Sourced by both the away-mode
-# daemon (bin/fm-supervise-daemon.sh) and bin/fm-send.sh so the composer/submit
-# logic cannot drift between the two.
+# ONE source of truth for: composer-empty (pending-input) detection and a
+# verify-and-retry-Enter submit. Sourced by both the away-mode daemon
+# (bin/fm-supervise-daemon.sh) and bin/fm-send.sh so the composer/submit logic
+# cannot drift between the two.
+#
+# Busy DETECTION is split across two axes on purpose. The tmux-specific probe -
+# capture a 40-line pane tail and scan its last few non-blank lines - stays here
+# in fm_pane_is_busy. The per-harness SIGNATURE it scans for is a harness fact
+# and is owned by bin/fm-harness-adapter.sh; this file consumes it and never
+# restates it.
 #
 # Why this exists (incident afk-invx-i5): the daemon's old composer check only
 # recognized a BARE prompt glyph ("> ") as an empty composer. claude draws its
@@ -47,7 +53,7 @@
 #
 # Overrides: FM_COMPOSER_IDLE_RE matches an empty composer after ghost and
 # structural border stripping. FM_BUSY_REGEX overrides the rendered busy-footer
-# matching used here.
+# matching used here; bin/fm-harness-adapter.sh owns that override's precedence.
 #
 # NOT a task-state source: task busy state is owned by bin/fm-busy-lib.sh's
 # semantic contract. The matching below serves only delivery guards: the submit
@@ -66,53 +72,12 @@
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
-# Delivery-only rendered busy footers per harness. claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel".
-# Claude's current spinner has a rotating glyph and word, but every active-turn
-# line has an ellipsis followed by a parenthesized elapsed duration. Keep this
-# signature separate from the shared default because that shape is not generic
-# enough to classify arbitrary harness output safely.
-# Kimi's anchored moon-phase spinner is separate because bare moon glyphs in
-# ordinary output must not classify another harness as busy. Leading whitespace is
-# OPTIONAL; whitespace on both sides of the separator is REQUIRED because every
-# captured spinner row had it. A zero-whitespace form has NEVER been observed and
-# is deliberately not matched. The line end is intentionally unanchored because
-# rotating tip text follows and is not required to be present. The idle status
-# bar's lowercase `thinking` label and independently rotating tip text are not
-# busy signals on their own.
-# The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
-# exposes no stable ASCII busy token.
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
-FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
-FM_TMUX_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
-FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
-FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
-FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
-FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
-
-fm_busy_lines_match() {  # [harness]
-  local harness=${1:-} lines regex
-  IFS= read -r -d '' lines || true
-  if [ -n "${FM_BUSY_REGEX:-}" ]; then
-    regex=$FM_BUSY_REGEX
-  else
-    case "$harness" in
-      claude) regex=$FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT ;;
-      codex) regex=$FM_TMUX_CODEX_BUSY_REGEX_DEFAULT ;;
-      opencode) regex=$FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT ;;
-      pi|pi-signed) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
-      grok) regex=$FM_TMUX_GROK_BUSY_REGEX_DEFAULT ;;
-      kimi) regex=$FM_TMUX_KIMI_BUSY_REGEX_DEFAULT ;;
-      '') regex=$FM_TMUX_BUSY_REGEX_DEFAULT ;;
-      *)
-        # A supplied harness must never borrow another harness's signature.
-        # Register its verified signature explicitly before classifying it busy.
-        regex=
-        ;;
-    esac
-  fi
-  [ -n "$regex" ] && printf '%s' "$lines" | grep -qiE "$regex"
-}
+# Per-harness busy signatures are NOT owned here: they are harness facts, not
+# tmux facts, and they now live on the harness axis in bin/fm-harness-adapter.sh
+# plus bin/harnesses/<name>.sh. This file keeps only the tmux-specific PROBE
+# (capture a pane tail) and asks the adapter what busy looks like.
+# shellcheck source=bin/fm-harness-adapter.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-harness-adapter.sh"
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised
@@ -143,7 +108,7 @@ fm_tmux_composer_row_state() {  # <raw-row> [bordered] [allow-busy] -> empty|pen
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
   if [ "$allow_busy" = 1 ] && [ -n "$stripped" ] \
-     && printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
+     && printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_HARNESS_BUSY_REGEX_DEFAULT}"; then
     printf 'empty'; return 0
   fi
   fm_composer_classify_content "$bordered" "$stripped" "${FM_COMPOSER_IDLE_RE:-}" insensitive "$plain"
@@ -376,7 +341,7 @@ fm_pane_is_busy() {  # <target> [harness]
   local win=$1 harness=${2:-} tail40
   tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-    | fm_busy_lines_match "$harness"
+    | fm_harness_busy_match "$harness"
 }
 
 # fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,

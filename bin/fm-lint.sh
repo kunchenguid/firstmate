@@ -134,7 +134,7 @@ esac
 if [ "$#" -gt 0 ]; then
   ROOTS=("$@")
 else
-  ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh)
+  ROOTS=(bin/*.sh bin/backends/*.sh bin/harnesses/*.sh tests/*.sh)
 fi
 ROOT_COUNT=${#ROOTS[@]}
 

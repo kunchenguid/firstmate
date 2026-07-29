@@ -56,8 +56,11 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
-# shellcheck source=bin/fm-tmux-lib.sh
-. "$SCRIPT_DIR/fm-tmux-lib.sh"
+# Per-harness busy-signature facts live on the harness axis; sourcing the
+# adapter here keeps bin/fm-busy-lib.sh's Grok-scoped rendered fallback fed
+# without reaching into a tmux library.
+# shellcheck source=bin/fm-harness-adapter.sh
+. "$SCRIPT_DIR/fm-harness-adapter.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-classify-lib.sh
