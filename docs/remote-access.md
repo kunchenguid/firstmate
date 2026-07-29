@@ -26,6 +26,8 @@ Private operator configuration was verified separately while this guide preserve
 
 Add one block to `~/.ssh/config` on the Mac.
 Angle-bracket values are placeholders for your own infrastructure; the table below names each one and where to read its real value.
+Place this block before every broad `Host *` block and every `Include` directive in the file.
+OpenSSH uses the first value obtained for most settings, while forwarding directives can accumulate from later matching blocks.
 
 ```text
 Host shadowbyte-agent
@@ -35,6 +37,7 @@ Host shadowbyte-agent
     ServerAliveInterval 30
     ServerAliveCountMax 3
     ExitOnForwardFailure yes
+    ClearAllForwardings yes
 ```
 
 | Placeholder | What it is | Where to read the real value |
@@ -53,6 +56,7 @@ Host shadowbyte-agent
 | `ForwardAgent no` | The Mac's SSH agent stays off the server, so a shared or compromised server session cannot borrow the Mac's keys to reach other hosts. |
 | `ServerAliveInterval 30` and `ServerAliveCountMax 3` | An idle attach or tunnel that a NAT or a sleeping laptop has already dropped is ended within about 90 seconds instead of hanging silently. |
 | `ExitOnForwardFailure yes` | A forward that cannot bind its local port ends the connection with a visible error instead of leaving SSH connected with a dead tunnel. |
+| `ClearAllForwardings yes` | Clears inherited `LocalForward` and `DynamicForward` entries so this alias cannot carry ambient tunnels. |
 
 No step in this path needs agent forwarding, which is why `ForwardAgent no` costs nothing and removes a real risk.
 Check the entry on the Mac without connecting:
@@ -62,6 +66,8 @@ ssh -G shadowbyte-agent
 ```
 
 That prints the fully expanded settings, so a typo in the host alias or a directive is visible before any connection attempt.
+Use `shadowbyte-agent` for the Firstmate attach only.
+`ClearAllForwardings yes` also clears command-line forwards, so the Lavish tunnel below uses a separate minimal configuration file.
 
 ## Which SSH server answers
 
@@ -100,8 +106,22 @@ Closing it detaches the view; the session and every worker keep running on the s
 Lavish serves review artifacts on server loopback `127.0.0.1:4387` and is not reachable from the Mac by any other route.
 Open a second Mac terminal and start the forward:
 
+Create `~/.ssh/shadowbyte-lavish.conf` on the Mac with only this host block:
+
+```text
+Host shadowbyte-agent
+    HostName <server-host>.<tailnet>.ts.net
+    User <server-user>
+    ForwardAgent no
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+    ExitOnForwardFailure yes
+```
+
+The `-F` option makes this tunnel read the minimal file instead of the normal user and system SSH configuration, so no ambient `LocalForward` or `DynamicForward` can be added.
+
 ```sh
-ssh -N -L 127.0.0.1:4387:127.0.0.1:4387 shadowbyte-agent
+ssh -F ~/.ssh/shadowbyte-lavish.conf -o ForwardAgent=no -o ExitOnForwardFailure=yes -N -L 127.0.0.1:4387:127.0.0.1:4387 shadowbyte-agent
 ```
 
 `-N` runs no remote command, so this connection only carries the forward.
@@ -137,12 +157,13 @@ The tool's own CLI already prints the current session URLs, and a wrapper would 
 The same shape reaches any future server-resident web tool:
 
 ```sh
-ssh -N -L 127.0.0.1:LOCAL_PORT:127.0.0.1:REMOTE_PORT shadowbyte-agent
+ssh -F ~/.ssh/shadowbyte-lavish.conf -o ForwardAgent=no -o ExitOnForwardFailure=yes -N -L 127.0.0.1:LOCAL_PORT:127.0.0.1:REMOTE_PORT shadowbyte-agent
 ```
 
 `REMOTE_PORT` is the port the service listens on inside the server, and `LOCAL_PORT` is the port the Mac browser visits.
 Keep them equal whenever the tool prints absolute URLs containing its own port.
 Keep the explicit local `127.0.0.1` in every forward you add, for the same reason it is in the Lavish command above.
+Use a separate minimal `-F` file for each tunnel when the destination or local port changes.
 
 ## What to forward, and what not to
 
@@ -196,7 +217,7 @@ Find the local process holding it with `lsof -nP -iTCP:4387 -sTCP:LISTEN` on the
 Either stop that process, or pick a free local port and visit that port in the browser instead:
 
 ```sh
-ssh -N -L 127.0.0.1:14387:127.0.0.1:4387 shadowbyte-agent
+ssh -F ~/.ssh/shadowbyte-lavish.conf -o ForwardAgent=no -o ExitOnForwardFailure=yes -N -L 127.0.0.1:14387:127.0.0.1:4387 shadowbyte-agent
 ```
 
 Then the artifact is at `http://127.0.0.1:14387/session/<session-id>`, with the session id unchanged.
