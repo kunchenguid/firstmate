@@ -1057,7 +1057,7 @@ validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 # Ordinary Herdr workers may own bounded child panes in this same working copy.
 # Stop them before any report or Git safety read so shared edits cannot race the
 # inspection. Keep their private reports and records until every teardown safety
-# check passes; a refused teardown must not lose that evidence.
+# check passes; a refusal during those checks must not lose that evidence.
 FM_CHILD_RECORDS_PRESENT=0
 if [ "$KIND" != secondmate ] \
    && { [ -e "$TASK_TMP/children" ] || [ -L "$TASK_TMP/children" ]; }; then

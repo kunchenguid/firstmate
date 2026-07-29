@@ -74,7 +74,8 @@ The generated child contract reserves every Git mutation, final validation, no-m
 A private PATH guard blocks supported Git mutation and publication interfaces while retaining read-only Git inspection.
 The child cannot recursively invoke `fm-child.sh` and reports only through its private report and completion result, never FirstMate's status channel or captain chat.
 The `FM_CHILD_AGENT=1` marker also makes FirstMate's managed global Grok and Kimi turn-end hooks inert, while Claude, OpenCode, and Pi child launches suppress their parent-facing project integrations and Codex receives no parent notify command.
-The complete child contract remains in private `launch.md`; delivery sends only one operationally encoded absolute-file pointer through the same `fm_backend_herdr_send_text_submit` owner and exact `empty` confirmation required by `fm-send`.
+The complete child contract remains in private `launch.md`; delivery sends only one operationally encoded absolute-file pointer through the same `fm_backend_herdr_send_text_submit` owner used by `fm-send`.
+Its exact `empty` verdict confirms delivery directly.
 A child-only `pending` verdict receives the same rendered-busy corroboration owned by `fm-crew-state.sh`: the exact registered agent must still match the inherited harness, and only that harness's verified `fm_busy_lines_match` signature in the bounded pane tail confirms delivery.
 Transcript text alone never confirms delivery, and another harness's busy token cannot match.
 A verdict that remains unconfirmed preserves the raw pre-injection baseline, private startup log, and a bounded ANSI-stripped, credential-redacted composer capture before the exact child pane is stopped.
@@ -86,7 +87,7 @@ A disappeared pane becomes dead while its path ownership and private evidence re
 Before any parent Git mutation or final validation, the parent must inspect reports, stop all children, and pass `fm-child.sh ready`.
 
 Normal `fm-teardown.sh` quiesces exact child panes before reading report and Git safety state.
-If teardown later refuses, child records and reports remain.
+A refusal during child quiescence or those safety inspections preserves child records and reports.
 After all safety checks pass, teardown removes the private records before returning the Treehouse worktree.
 Neither child stop nor child cleanup restores, resets, or discards shared edits.
 

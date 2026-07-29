@@ -26,8 +26,9 @@
 #   FM_CHILD_TEARDOWN=1 fm-child.sh quiesce <task-id>
 #   FM_CHILD_TEARDOWN=1 fm-child.sh cleanup <task-id>
 # `quiesce` stops exact recorded child panes but retains private records so a
-# refused teardown loses no reports. `cleanup` removes records only after every
-# child pane is confirmed absent. Neither action resets or discards repo edits.
+# refusal during later report or Git safety inspection loses no reports.
+# `cleanup` removes records only after every child pane is confirmed absent.
+# Neither action resets or discards repo edits.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -894,8 +895,9 @@ EOF
     | "$SCRIPT_DIR/fm-operational-input.sh" encode launch-brief) \
     || { fm_child_close_created_pane "$pane"; printf 'dead\n' > "$dir/state"; die "could not encode the child brief pointer"; }
   # Reuse fm-send's verified Herdr composer path: type once, retry Enter only,
-  # and accept only its exact proof-carrying `empty` verdict. Raw `herdr agent
-  # prompt` is not a verified Pi composer path and can report a stalled native
+  # accept its exact proof-carrying `empty` verdict directly, and independently
+  # corroborate a child-only `pending` verdict below. Raw `herdr agent prompt`
+  # is not a verified Pi composer path and can report a stalled native
   # transition after merely filling the composer.
   delivery_file="$dir/delivery.verdict"
   if ! fm_backend_send_text_submit herdr \

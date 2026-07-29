@@ -103,7 +103,7 @@ Run the readiness assertion before the parent stages, commits, switches branch s
 ```
 
 Readiness succeeds only when every recorded child has a non-empty private report, a completion result, and no live pane.
-It never validates the code or replace parent review.
+It never validates the code or replaces parent review.
 The parent owns integration, conflict resolution, tests, documentation, exact-head validation, and final delivery.
 
 The parent may remove stopped private child records after reports have been consumed:
@@ -113,5 +113,6 @@ The parent may remove stopped private child records after reports have been cons
 ```
 
 Normal FirstMate cleanup also quiesces exact recorded child panes before safety inspection and removes their private records before returning the parent's working copy.
-A refused cleanup preserves the shared working copy and reports.
+A refusal during child quiescence or safety inspection preserves the shared working copy and reports.
+After those checks pass, private records are retired before the working copy return is attempted.
 Child cleanup never resets, restores, or discards shared edits.
