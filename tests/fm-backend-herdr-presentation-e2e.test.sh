@@ -383,8 +383,27 @@ make_project() {  # <dir>
 }
 
 spawn_task() {  # <id> <home> <project>
-  local id=$1 home=$2 project=$3
+  local id=$1 home=$2 project=$3 polls=()
+  # The post-create abort fixtures rewrite foreground_cwd to a nonexistent path
+  # from the very first poll and never report the project directory, so they can
+  # no longer take fm-spawn's gated nonexistent-path fast refusal: that abort now
+  # requires one confirmed sighting of the project directory first, so a
+  # pre-shell-init transient cannot trigger it (see bin/fm-spawn.sh's settle
+  # loop). Unbounded they would sit out the whole default window rather than
+  # concluding in about two seconds as they did before that gate, so cap the
+  # window for those ids only. Three polls keeps the abort on its previous
+  # timescale and still well outside the 5s presentation-order lock window this
+  # file exercises. Every other spawn here is a HEALTHY one that must be allowed
+  # the full default window to reach its worktree on a real Herdr host.
+  # Passed through `env`, not as a shell assignment prefix: bash only recognizes
+  # an assignment prefix that is LITERAL at parse time, so a word produced by
+  # expanding this array would be taken as the command name ("command not
+  # found") and the spawn would never run at all.
+  case $id in
+    abort-*) polls=(FM_SPAWN_WORKTREE_POLLS=3) ;;
+  esac
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    env ${polls[@]+"${polls[@]}"} \
     "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'sleep 120'" --backend herdr
 }
 
@@ -750,16 +769,18 @@ if wait "$ABORT_A_PID"; then fail "post-create abort fixture A unexpectedly succ
 if wait "$ABORT_B_PID"; then fail "post-create abort fixture B unexpectedly succeeded"; fi
 # Since the WSL spawn-worktree race fix (c61a5ac; see tests/fm-tangle-guard.test.sh),
 # the detection loop itself refuses a pane that never reaches a genuine
-# isolated worktree: the armed nonexistent path here trips its fast-refusal
-# early abort ("did not yield an isolated worktree: ... nonexistent path"),
-# while an existing non-worktree path would trip its poll timeout ("did not
-# enter a worktree within 60s"). The isolation SAFETY property is identical
+# isolated worktree. The armed nonexistent path here trips the poll timeout
+# ("did not enter an isolated worktree within <n> polls"), not the fast-refusal
+# early abort: that abort is gated on one confirmed sighting of the project
+# directory, and this fixture never reports one, so a nonexistent pre-init
+# transient can never be mistaken for a parked pane. spawn_task bounds the window
+# for these ids so the abort still concludes quickly. The isolation SAFETY property is identical
 # across all shapes: the spawn exits 1, publishes no metadata, and runs the
 # same post-create cleanup; accept every refusal shape so the fixture asserts
 # the abort, not one message lineage.
-grep -E "did not yield an isolated worktree|did not enter a worktree within 60s" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
+grep -E "did not yield an isolated worktree|did not enter an isolated worktree within" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
   || fail "post-create abort fixture A did not reach the armed validation failure"
-grep -E "did not yield an isolated worktree|did not enter a worktree within 60s" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
+grep -E "did not yield an isolated worktree|did not enter an isolated worktree within" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
   || fail "post-create abort fixture B did not reach the armed validation failure"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")

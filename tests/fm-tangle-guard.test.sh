@@ -181,6 +181,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    FM_SPAWN_WORKTREE_POLLS=4 FM_SPAWN_WORKTREE_POLL_INTERVAL=0.05 \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
 }
@@ -198,22 +199,33 @@ test_spawn_isolation_abort() {
   # Since the WSL spawn-worktree race fix (c61a5ac), the detection loop polls
   # until the pane path passes spawn_worktree_ok rather than aborting on the
   # first non-worktree read, so a pane that never reaches a genuine isolated
-  # worktree is refused via the loop's timeout ("did not enter a worktree
-  # within 60s") instead of validate_spawn_worktree's immediate "did not yield
-  # an isolated worktree". The isolation SAFETY property is unchanged and is
-  # what these two abort cases verify: the spawn still refuses (exit 1) and
-  # still records no meta; only the refusal message and timing moved. Each
-  # abort case therefore takes the full ~60s poll window to conclude.
+  # worktree is refused via the loop's timeout ("did not enter an isolated
+  # worktree within <n>s") instead of validate_spawn_worktree's immediate "did
+  # not yield an isolated worktree". The isolation SAFETY property is unchanged
+  # and is what these two abort cases verify: the spawn still refuses (exit 1)
+  # and still records no meta; only the refusal message and timing moved.
+  # An EXISTING non-worktree pane path is never fast-refused - a live shell can
+  # still cd away from it - so both abort cases genuinely wait out the poll
+  # window. run_spawn shortens that window through FM_SPAWN_WORKTREE_POLLS and
+  # FM_SPAWN_WORKTREE_POLL_INTERVAL so the two waits cost a fraction of a second
+  # instead of two minutes of pure sleep in the serial CI lane; neither the poll
+  # count nor the interval is the property under test, the refusal is.
+  # tests/fm-spawn-nonworktree-refusal.test.sh owns the timing contract on both
+  # sides of that line, including that the default window stays slow.
   # Abort: the pane resolves to a plain non-git directory (not a worktree at all).
   out=$(run_spawn "$home" abort-notgit-dd4 "$proj" "$TMP_ROOT/spawn-notgit" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn into a non-worktree dir should abort"
-  assert_contains "$out" "did not enter a worktree within 60s" "non-worktree spawn lacked the timeout refusal"
+  assert_contains "$out" "did not enter an isolated worktree" "non-worktree spawn lacked the timeout refusal"
+  assert_contains "$out" "$TMP_ROOT/spawn-notgit" "timeout refusal did not name the parked path"
+  assert_contains "$out" "not inside a git repository" "timeout refusal did not name the concrete reason"
   assert_absent "$home/state/abort-notgit-dd4.meta" "aborted spawn must not record meta"
 
   # Abort: the pane resolves INTO the primary checkout (a subdir of PROJ_ABS).
   out=$(run_spawn "$home" abort-primary-ee5 "$proj" "$proj/sub" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn landing inside the primary checkout should abort"
-  assert_contains "$out" "did not enter a worktree within 60s" "primary-checkout spawn lacked the timeout refusal"
+  assert_contains "$out" "did not enter an isolated worktree" "primary-checkout spawn lacked the timeout refusal"
+  assert_contains "$out" "$proj/sub" "timeout refusal did not name the parked path"
+  assert_contains "$out" "subdirectory of the primary checkout" "timeout refusal did not name the concrete reason"
   assert_absent "$home/state/abort-primary-ee5.meta" "aborted spawn must not record meta"
 
   # Proceed: the pane resolves to a genuine, isolated worktree.
@@ -221,7 +233,7 @@ test_spawn_isolation_abort() {
   expect_code 0 "$status" "spawn into a genuine isolated worktree should succeed"
   assert_contains "$out" "spawned ok-isolated-ff6" "isolated spawn did not report success"
   assert_not_contains "$out" "did not yield an isolated worktree" "isolated spawn wrongly tripped the guard"
-  assert_not_contains "$out" "did not enter a worktree within 60s" "isolated spawn wrongly hit the timeout refusal"
+  assert_not_contains "$out" "did not enter an isolated worktree" "isolated spawn wrongly hit the timeout refusal"
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
 }
 

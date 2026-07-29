@@ -95,7 +95,31 @@
 #   display name; it never changes remote-control state. Ship/scout spawns
 #   carry no label (crew windows keep their fm-<id> names).
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
-#   git worktree root distinct from the primary project checkout.
+#   git worktree root distinct from the primary project checkout. Two pre-flight
+#   checks decide the provable cases up front, before any window is created, so
+#   an operator mistake costs milliseconds instead of the settle window: the
+#   project argument must name an existing directory, and (for ship/scout) that
+#   directory must be inside a git repository, since nothing else can ever yield
+#   an isolated worktree. Every remaining shape is decided by the post-launch
+#   settle poll, which deliberately never fast-refuses an EXISTING pane path -
+#   a live shell can still cd away from one - and whose timeout names the path
+#   the window is parked on and the concrete reason it is not a worktree.
+#   A pane parked on a NONEXISTENT path is refused early, but only once the pane
+#   has been seen at the project directory: before that, an absent path can still
+#   be a pre-shell-init transient, and refusing one would abort a healthy spawn.
+#   FM_SPAWN_WORKTREE_POLLS and FM_SPAWN_WORKTREE_POLL_INTERVAL size that poll's
+#   window, resolved and validated with those pre-flight refusals - each on its
+#   own range, and their product against the settle window's wall-clock ceiling
+#   (docs/configuration.md owns their schema).
+#   A settle-poll refusal never leaves that window a SILENT orphan, since no task
+#   metadata records it yet. The nonexistent-path abort and the worktree re-check
+#   remove the tmux/zellij/cmux/flat-herdr window this launch created; the
+#   TIMEOUT deliberately does not touch it, because treehouse get may still be
+#   allocating in that pane and killing it could damage the project, so it names
+#   the window, the path, and the by-hand commands instead. A present
+#   state/<id>.meta stops the removal and is reported unless its recorded
+#   endpoint resolves unambiguously to a DIFFERENT window; a removal that cannot
+#   be confirmed names what was left behind, and no worktree is ever removed.
 #   Task metadata written to state/<id>.meta: window=, worktree=, project=,
 #   harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=. A kind=secondmate
 #   spawn also records home=, projects=, and label= (session display name); a
@@ -143,7 +167,11 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,85p' "$0" | sed 's/^# \{0,1\}//'
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$0"
 }
 
 case "${1:-}" in
@@ -253,6 +281,13 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+SETTLE_ABORT_CLEANUP=0
+SETTLE_ABORT_TARGET=
+# report (never touch the window, say loudly what was left behind) or reclaim
+# (remove the window this launch created). Defaults to report so an exit nobody
+# anticipated inside the armed span leaks loudly rather than killing a pane whose
+# state is unknown; the two exits that are provably safe opt in explicitly.
+SETTLE_ABORT_MODE=report
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -279,6 +314,273 @@ parse_orca_worktree_result() {
   else
     ORCA_TERMINAL=
   fi
+}
+
+# Deal with the window a refused settle poll created. Every refusal inside that
+# poll exits after the backend window exists and `treehouse get` was sent into it,
+# but before state/<id>.meta is written, so nothing records that window for
+# fm-teardown.sh - it hard-refuses with "no meta for task <id>", which leaves the
+# window unreclaimable by the fleet rather than merely untidy.
+#
+# The response is split by what the pane can be proved to be doing, because
+# damaging a PROJECT is categorically worse than leaking a window:
+#   - reclaim: the pane was seen at the project directory and then sat on a
+#     nonexistent path across consecutive reads, or a confirmed worktree failed
+#     its re-check. `treehouse get` cannot still be allocating in either case, so
+#     removing the window costs nothing that was making progress.
+#   - report: the settle window simply elapsed, or the launch exited somewhere
+#     else inside the armed span. A slow-but-progressing `treehouse get` (large
+#     repo, cold cache, WSL mount) would be SIGHUPed mid-flight by a kill, which
+#     can leave a partial .git/worktrees/<name> or a stale lock IN the project,
+#     and the timeout refusal itself sends the operator to read that pane. The
+#     same holds for any exit nobody anticipated: the pane's state is unknown,
+#     so nothing is touched and the orphan is named loudly instead. A reported
+#     orphan is acceptable, a silent one is not.
+#
+# Two constraints keep the reclaim from being worse than the disease:
+#   - Clean only what THIS spawn created, and only once no other task is shown to
+#     own it. A meta is normally the proof that some task owns that window, so its
+#     presence stops the cleanup dead unless the endpoint it records is readable,
+#     unambiguous, and positively a DIFFERENT window - the stale-record class
+#     where a completed task's pointer outlived its slot, leaving the window this
+#     launch created owned by nothing. Ambiguity never authorizes a kill.
+#   - Address the window by the stable id captured at creation, never the fm-<id>
+#     name, for the same reason the settle poll targets that id: a lost or
+#     renamed name can resolve to a DIFFERENT window, and killing the wrong
+#     window is far worse than leaking one. The name is passed only as the
+#     backends' own cross-check on the id, never as the handle.
+#
+# It never removes a worktree. `treehouse get` may already have allocated one in
+# the pane, and fm-spawn can prove neither which one nor that it is disposable,
+# so the possibility is reported for a human to settle and nothing is touched.
+#
+# Scoped to the backends whose task window this path leaves entirely unowned:
+# tmux, zellij, cmux, and herdr's ordinary flat layout. Orca never reaches the
+# settle poll at all, and a PROJECTED herdr task is left to its own exact
+# projection cleanup, which owns the presentation lock this must not race for.
+
+# The endpoint an existing record names for this task, or empty when the record
+# is unreadable or carries no window field.
+spawn_settle_abort_meta_window() {  # <meta-path>
+  local line
+  line=$(grep -m1 '^window=' "$1" 2>/dev/null) || return 0
+  printf '%s' "${line#window=}"
+}
+
+# Compare that recorded endpoint against the window THIS launch created, echoing
+# other (positively a different window), same, or unknown. Only "other" may
+# authorize a reclaim, so every unreadable, malformed, or ambiguous answer has to
+# land on unknown.
+spawn_settle_abort_meta_verdict() {  # <recorded-endpoint>
+  local recorded=$1 resolved out want
+  if [ -z "$recorded" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  case "$BACKEND" in
+    tmux)
+      # The record keeps the NAME form of the endpoint while this launch holds
+      # the stable window id, so the two are comparable only after resolving the
+      # name - and `display-message -t <gone-name>` answers about the ACTIVE
+      # client's window instead of failing. Believe the resolution only when the
+      # window it found still carries the recorded name; anything else is the
+      # fallback answering about a window nobody asked about.
+      out=$(tmux display-message -p -t "$recorded" '#{window_id} #{window_name}' 2>/dev/null) || out=
+      resolved=${out%% *}
+      want=${recorded##*:}
+      if [ -z "$out" ] || [ -z "$resolved" ] || [ "$out" = "$resolved" ] \
+         || [ -z "$want" ] || [ "${out#* }" != "$want" ]; then
+        printf 'unknown'
+        return 0
+      fi
+      ;;
+    *)
+      # Every other backend records the same id-form endpoint this launch holds,
+      # so the strings are directly comparable with no lookup to be misled by.
+      resolved=$recorded
+      ;;
+  esac
+  if [ "$resolved" = "$SETTLE_ABORT_TARGET" ]; then
+    printf 'same'
+  else
+    printf 'other'
+  fi
+}
+
+# The title the backend actually gave this task's surface. zellij and cmux
+# home-scope the caller-facing fm-<id> label to fm-<hometag>-<id> and create,
+# list, and match only that scoped form, so naming the bare label in a by-hand
+# hint would send an operator hunting for a tab that was never created.
+spawn_settle_abort_display_name() {
+  local scoped=''
+  case "$BACKEND" in
+    zellij)
+      if fm_backend_source zellij >/dev/null 2>&1; then
+        scoped=$(fm_backend_zellij_scoped_title "$W" 2>/dev/null) || scoped=''
+      fi
+      ;;
+    cmux)
+      if fm_backend_source cmux >/dev/null 2>&1; then
+        scoped=$(fm_backend_cmux_scoped_title "$W" 2>/dev/null) || scoped=''
+      fi
+      ;;
+  esac
+  printf '%s' "${scoped:-$W}"
+}
+
+# The exact by-hand commands for the window this launch could not or must not
+# remove, so a reported orphan is actionable rather than merely acknowledged.
+spawn_settle_abort_manual_hint() {
+  local name
+  name=$(spawn_settle_abort_display_name)
+  case "$BACKEND" in
+    tmux)
+      printf "read it with 'tmux capture-pane -p -t %s' and close it with 'tmux kill-window -t %s'" \
+        "$SETTLE_ABORT_TARGET" "$SETTLE_ABORT_TARGET"
+      ;;
+    zellij)
+      printf "read it by attaching with 'zellij attach %s' and close its '%s' tab there" \
+        "${SETTLE_ABORT_TARGET%%:*}" "$name"
+      ;;
+    cmux)
+      printf "read the '%s' workspace and close it with 'cmux close-workspace --workspace %s'" \
+        "$name" "${SETTLE_ABORT_TARGET%%:*}"
+      ;;
+    herdr)
+      printf "read it with 'herdr pane read %s --source recent --session %s' and close it with 'herdr pane close %s --session %s'" \
+        "${SETTLE_ABORT_TARGET#*:}" "${SETTLE_ABORT_TARGET%%:*}" \
+        "${SETTLE_ABORT_TARGET#*:}" "${SETTLE_ABORT_TARGET%%:*}"
+      ;;
+    *)
+      printf "read and close the %s endpoint %s by hand" "$BACKEND" "$SETTLE_ABORT_TARGET"
+      ;;
+  esac
+}
+
+spawn_settle_abort_worktree_note() {
+  echo "note: 'treehouse get' may already have allocated a worktree of '$PROJ_ABS' for this launch, and on the timeout path may still have been allocating one. fm-spawn never removes a worktree it cannot prove it created, so none was touched - run 'git -C $PROJ_ABS worktree list' and reclaim any unused or partial one by hand." >&2
+}
+
+# Whether the window this launch created is still open, as present, absent, or
+# unknown. A CONFIRMED removal is the whole point of the reclaim, so the answer
+# may not come from a probe that silently answers about a DIFFERENT window, nor
+# from one that reads "closed" and "could not be read" identically.
+#
+# <kill-confirmed> is 1 only when the backend's own close call reported success.
+spawn_settle_abort_target_state() {  # <kill-confirmed>
+  local kill_confirmed=${1:-0} out
+  case "$BACKEND" in
+    tmux)
+      # fm_backend_target_exists's tmux probe cannot answer this. Verified on
+      # tmux 3.6: after `kill-window -t <window-id>`,
+      # `display-message -p -t <window-id> '#{pane_id}'` exits 0 with EMPTY
+      # output instead of failing, so an exit-status-only read calls every
+      # removed window present and would warn about a leak that does not exist.
+      # Match the exact id against the window inventory instead - the shape
+      # fm_backend_tmux_agent_state already uses for this same tmux habit -
+      # where absence is real absence. Only a failed inventory read is unknown,
+      # apart from the responses that mean no server is left to hold a window.
+      if out=$(LC_ALL=C tmux list-windows -a -F '#{window_id}' 2>&1); then
+        if printf '%s\n' "$out" | grep -Fqx "$SETTLE_ABORT_TARGET"; then
+          printf 'present'
+        else
+          printf 'absent'
+        fi
+        return 0
+      fi
+      case "$out" in
+        *"no server running on "*|*"error connecting to "*) printf 'absent' ;;
+        *) printf 'unknown' ;;
+      esac
+      ;;
+    *)
+      # Every other backend's probe queries its own inventory for the exact
+      # recorded endpoint, with no active-window fallback to be misled by, so a
+      # positive answer is presence. A negative one still conflates a closed
+      # surface with an unreadable backend (server down, CLI gone), and this
+      # path may not claim a removal it cannot see: absence counts only when the
+      # close call itself succeeded, which is the evidence that the backend was
+      # reachable enough for the negative to mean what it says.
+      if fm_backend_target_exists "$BACKEND" "$SETTLE_ABORT_TARGET" "$W" >/dev/null 2>&1; then
+        printf 'present'
+      elif [ "$kill_confirmed" = 1 ]; then
+        printf 'absent'
+      else
+        printf 'unknown'
+      fi
+      ;;
+  esac
+}
+
+spawn_settle_abort_reclaim() {
+  local meta="$STATE/$ID.meta" recorded='' verdict=none why unowned='' fate
+  local name before after kill_confirmed=0
+  name=$(spawn_settle_abort_display_name)
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    recorded=$(spawn_settle_abort_meta_window "$meta")
+    verdict=$(spawn_settle_abort_meta_verdict "$recorded")
+  fi
+  if [ "$verdict" = none ]; then
+    unowned="no task record was written for it"
+  else
+    unowned="the only task record for it, $meta, records endpoint '${recorded:-<none>}'"
+  fi
+  if [ "$SETTLE_ABORT_MODE" != reclaim ]; then
+    # Only claim the orphan is beyond cleanup's reach where that was actually
+    # established. A record naming this SAME window is a record teardown can
+    # still follow, so saying otherwise would be false.
+    case "$verdict" in
+      same)
+        fate="$meta records endpoint '$recorded', which resolves to this same window, so cleanup can still reach it through that record"
+        ;;
+      unknown)
+        fate="$unowned, which could not be compared with this window, so cleanup may never find it"
+        ;;
+      *)
+        fate="$unowned, so cleanup will never find it"
+        ;;
+    esac
+    echo "warning: leaving the $BACKEND window this launch created open: $SETTLE_ABORT_TARGET (named $name) in '$PROJ_ABS', and $fate. It was NOT closed because 'treehouse get' may still be allocating in that pane and killing it could damage the project - $(spawn_settle_abort_manual_hint) once you have read it." >&2
+    spawn_settle_abort_worktree_note
+    return 0
+  fi
+  case "$verdict" in
+    none) ;;
+    other)
+      echo "note: $meta records endpoint '$recorded', which is a different window than the $SETTLE_ABORT_TARGET this launch created, so that record is stale for this window and nothing owns it." >&2
+      ;;
+    *)
+      if [ "$verdict" = same ]; then
+        why="names this same window"
+      else
+        why="is unreadable, malformed, or could not be compared"
+      fi
+      echo "warning: leaving window $SETTLE_ABORT_TARGET open: $meta exists and this launch could not establish that the window it created is unowned - its recorded endpoint '${recorded:-<none>}' $why. Nothing was removed; inspect that record and the window by hand." >&2
+      spawn_settle_abort_worktree_note
+      return 0
+      ;;
+  esac
+  before=$(spawn_settle_abort_target_state 0)
+  if fm_backend_kill "$BACKEND" "$SETTLE_ABORT_TARGET" "${ZELLIJ_TAB_ID:-}" "$W" >/dev/null 2>&1; then
+    kill_confirmed=1
+  fi
+  after=$(spawn_settle_abort_target_state "$kill_confirmed")
+  case "$after" in
+    present)
+      echo "warning: could not remove the window this launch created: $BACKEND window $SETTLE_ABORT_TARGET (named $name) is still open, $unowned, so cleanup will never find it. $(spawn_settle_abort_manual_hint)." >&2
+      ;;
+    absent)
+      if [ "$before" = absent ]; then
+        echo "note: the $BACKEND window this launch created ($SETTLE_ABORT_TARGET) was already gone; nothing was left behind." >&2
+      else
+        echo "note: removed the $BACKEND window this launch created ($SETTLE_ABORT_TARGET), since $unowned." >&2
+      fi
+      ;;
+    *)
+      echo "warning: could not confirm that the window this launch created was removed: $BACKEND could not be read after the close, so $SETTLE_ABORT_TARGET (named $name) may still be open, and $unowned, so cleanup will never find it. $(spawn_settle_abort_manual_hint)." >&2
+      ;;
+  esac
+  spawn_settle_abort_worktree_note
 }
 
 spawn_abort_cleanup() {
@@ -328,6 +630,10 @@ spawn_abort_cleanup() {
         fi
       fi
     fi
+  fi
+  if [ "$SETTLE_ABORT_CLEANUP" = 1 ]; then
+    SETTLE_ABORT_CLEANUP=0
+    spawn_settle_abort_reclaim || true
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
@@ -873,7 +1179,16 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$DATA/$ID/brief.md"
   fi
 else
-  PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  PROJ_ARG_PATH=$(resolve_project_dir_arg "$PROJ")
+  # Pre-flight refusal 1 of 2: the project argument must name an existing
+  # directory. Without this the bare `cd` below aborts under `set -e` with
+  # bash's own "cd: ...: No such file or directory", which names the path but
+  # not what fm-spawn expected of it or what to do next.
+  if [ ! -d "$PROJ_ARG_PATH" ]; then
+    echo "error: refusing to launch $ID: project path '$PROJ_ARG_PATH' is not an existing directory. Expected the project's local copy (an absolute path, or projects/<name> under $PROJECTS). Check the path, or clone the project first." >&2
+    exit 1
+  fi
+  PROJ_ABS="$(cd "$PROJ_ARG_PATH" && pwd)"
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
@@ -893,6 +1208,155 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
+# Pre-flight refusal 2 of 2: a ship/scout task's isolated worktree is always a
+# git worktree derived from the project, whether treehouse get allocates it in
+# the pane or Orca allocates it directly. A project path that is not inside a
+# git repository at all therefore CANNOT yield one, no matter how long the poll
+# below waits, so refuse here - before any window exists - instead of launching
+# into a pane and burning the whole settle window on a certainty.
+#
+# This is deliberately a property of the project path fm-spawn was handed,
+# evaluated in fm-spawn's own process, and never a property of the pane's
+# reported cwd. That is what makes it safe to decide immediately: the slow-start
+# case the poll below exists to tolerate is a pane that has not yet MOVED, which
+# says nothing about whether the project can produce a worktree. A refusal here
+# is wrong only if the project path is wrong, and a fast wrong-path refusal is
+# exactly the outcome the operator wants.
+if [ "$KIND" != secondmate ] && ! git -C "$PROJ_ABS" rev-parse --show-toplevel >/dev/null 2>&1; then
+  echo "error: refusing to launch $ID: project path '$PROJ_ABS' is not inside a git repository, so no isolated worktree can ever be created for it. Expected a git repository (or a directory inside one); found a directory git does not track. Check the project path, or clone/initialize the project before dispatching." >&2
+  exit 1
+fi
+
+# The settle poll's window is sized here, with the pre-flight refusals above and
+# under the same conditions as the poll itself, because a malformed value is a
+# property of the environment fm-spawn was handed and needs nothing the launch
+# produces. Validating it inside the poll instead would abort only after a window
+# had been created and a worktree allocated in it, and since state/<id>.meta is
+# never written on a refusal, both would be left behind with nothing recording
+# them for fm-teardown.sh to reclaim.
+#
+# A malformed value must also never silently shorten the wait into an accidental
+# fast refusal, which is exactly the wrong-refusal failure that poll exists to
+# avoid, so refuse the misconfiguration rather than guessing a window for it. The
+# floor is 2 rather than 1 because accepting a worktree requires two consecutive
+# reads that agree on the same physical path (see the poll below for why), so a
+# one-poll window can only ever time out however correctly the pane settled. The
+# ceilings exist because the window is a real wait: a fat-fingered extra digit
+# would park the spawn for years rather than sizing it for a slow host. What an
+# operator actually waits is count x interval, so the wall-clock ceiling is
+# enforced on that PRODUCT as well; two independently in-range values still
+# multiply into a window nobody asked for (86400 polls 60s apart is ~60 days).
+#
+# The shape check runs BEFORE any arithmetic comparison, and rejects a digit
+# string too long to compare as well as a non-numeric one. `[ "$v" -lt 2 ]` on a
+# value past the shell's integer range does not answer false, it errors, and the
+# error status reads as "not less than 2" - so a value validated by comparison
+# alone would be ACCEPTED while leaking the raw shell diagnostic that this whole
+# refusal exists to replace. The product is therefore computed only once both
+# values passed their own shape and range checks, and in whole milliseconds so a
+# decimal interval stays exact integer arithmetic.
+WT_POLLS_MIN=2
+WT_POLLS_MAX=86400
+# Consecutive identical nonexistent reads required before the gated fast refusal
+# below may abort. Above the two reads that accepting a worktree needs, because a
+# wrong abort here is the costly direction and the pre-init transient the gate
+# already blocks was observed spanning more than one poll.
+WT_MISSING_READS=3
+# The interval floor is the millisecond the window is measured in: anything
+# smaller rounds to no wait at all and busy-spins the backend path query, which
+# is the failure the floor exists to prevent.
+WT_POLL_INTERVAL_MIN=0.001
+WT_POLL_INTERVAL_MAX=60
+WT_WINDOW_MAX_SECONDS=86400
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  WT_POLLS=${FM_SPAWN_WORKTREE_POLLS:-60}
+  wt_polls_bad=""
+  case $WT_POLLS in
+    ''|*[!0-9]*) wt_polls_bad=yes ;;
+    ????????*) wt_polls_bad=yes ;;
+  esac
+  if [ -z "$wt_polls_bad" ] &&
+    { [ "$WT_POLLS" -lt "$WT_POLLS_MIN" ] || [ "$WT_POLLS" -gt "$WT_POLLS_MAX" ]; }; then
+    wt_polls_bad=yes
+  fi
+  if [ -n "$wt_polls_bad" ]; then
+    echo "error: FM_SPAWN_WORKTREE_POLLS must be a whole number of polls between $WT_POLLS_MIN and $WT_POLLS_MAX, since accepting a worktree requires two consecutive reads that agree on the same path, got '${FM_SPAWN_WORKTREE_POLLS:-}'" >&2
+    exit 1
+  fi
+  # Sleep length between polls, the other half of the count/interval poll pair
+  # that sizes the settle window. Validated on the
+  # same fail-closed shape-before-arithmetic rule as the count: a value reaching
+  # `sleep` unchecked would abort mid-poll with the shell's own raw diagnostic,
+  # and an effectively zero interval would busy-spin the backend path query with
+  # no wait.
+  #
+  # The accepted shape is exactly what the refusal below and
+  # docs/configuration.md advertise: whole seconds, a decimal, or the
+  # leading-dot form `sleep` also takes. Nothing in range is rejected for how it
+  # was WRITTEN - `60.000000` is a legal 60 - because only the whole part ever
+  # reaches the arithmetic below, so only it needs a length bound, and that bound
+  # is applied after cosmetic leading zeros are stripped.
+  WT_POLL_INTERVAL=${FM_SPAWN_WORKTREE_POLL_INTERVAL:-1}
+  wt_interval_bad=""
+  wt_interval_int=$WT_POLL_INTERVAL
+  wt_interval_frac=""
+  case $WT_POLL_INTERVAL in
+    *.*.*) wt_interval_bad=yes ;;
+    *.*)
+      wt_interval_int=${WT_POLL_INTERVAL%%.*}
+      wt_interval_frac=${WT_POLL_INTERVAL#*.}
+      # A dot with no digits after it ("1.", ".") is not a number sleep accepts.
+      case $wt_interval_frac in
+        ''|*[!0-9]*) wt_interval_bad=yes ;;
+      esac
+      ;;
+  esac
+  if [ -z "$wt_interval_bad" ]; then
+    case $wt_interval_int in
+      *[!0-9]*) wt_interval_bad=yes ;;
+    esac
+  fi
+  # Only the leading-dot form may omit the whole part, so a bare "." is out.
+  if [ -z "$wt_interval_bad" ] && [ -z "$wt_interval_int" ] && [ -z "$wt_interval_frac" ]; then
+    wt_interval_bad=yes
+  fi
+  if [ -z "$wt_interval_bad" ]; then
+    while [ "$wt_interval_int" != "${wt_interval_int#0}" ]; do
+      wt_interval_int=${wt_interval_int#0}
+    done
+    # The one length bound that has to exist: bash's own arithmetic ERRORS on a
+    # value past its integer range, which under set -e is the raw diagnostic
+    # this whole refusal replaces.
+    case $wt_interval_int in
+      ??????*) wt_interval_bad=yes ;;
+    esac
+  fi
+  if [ -z "$wt_interval_bad" ]; then
+    # Whole milliseconds, the unit the wall-clock ceiling below is enforced in.
+    # Truncating toward zero is what makes the floor exact: a value that rounds
+    # away to no wait at all lands on 0 and is refused.
+    wt_interval_frac_ms=${wt_interval_frac}000
+    wt_interval_frac_ms=${wt_interval_frac_ms:0:3}
+    WT_POLL_INTERVAL_MS=$((10#${wt_interval_int:-0} * 1000 + 10#$wt_interval_frac_ms))
+    if [ "$WT_POLL_INTERVAL_MS" -lt 1 ] ||
+      [ "$WT_POLL_INTERVAL_MS" -gt $((WT_POLL_INTERVAL_MAX * 1000)) ]; then
+      wt_interval_bad=yes
+    fi
+  fi
+  if [ -n "$wt_interval_bad" ]; then
+    echo "error: FM_SPAWN_WORKTREE_POLL_INTERVAL must be a positive number of seconds from $WT_POLL_INTERVAL_MIN to $WT_POLL_INTERVAL_MAX (a decimal such as 0.5 or .5 is fine), got '${FM_SPAWN_WORKTREE_POLL_INTERVAL:-}'" >&2
+    exit 1
+  fi
+  # Both knobs are in range on their own; the wait they arm together may still
+  # not be. The ceiling belongs to the wall-clock window, not to either number,
+  # so enforce it on the product now that both are proven safe to multiply.
+  wt_window_ms=$((WT_POLLS * WT_POLL_INTERVAL_MS))
+  if [ "$wt_window_ms" -gt $((WT_WINDOW_MAX_SECONDS * 1000)) ]; then
+    echo "error: FM_SPAWN_WORKTREE_POLLS=$WT_POLLS with FM_SPAWN_WORKTREE_POLL_INTERVAL=$WT_POLL_INTERVAL arms a settle window of $((wt_window_ms / 1000)) seconds, past the $WT_WINDOW_MAX_SECONDS-second ceiling; the window is a real wait, so lower the poll count, the interval, or both" >&2
+    exit 1
+  fi
+fi
+
 # spawn_worktree_ok: true when <path> is itself the top of a git worktree
 # distinct from PROJ_ABS_REAL. The one place that decides "is this an isolated
 # worktree", shared by the poll below (probing non-fatally while waiting for
@@ -905,6 +1369,44 @@ spawn_worktree_ok() {  # <path>
   top=$(git -C "$p" rev-parse --show-toplevel 2>/dev/null) || return 1
   top_real=$(cd "$top" 2>/dev/null && pwd -P) || return 1
   [ "$p_real" = "$top_real" ] && [ "$p_real" != "$PROJ_ABS_REAL" ]
+}
+
+# spawn_worktree_reject_reason: the concrete reason the settle poll below did not
+# accept <path>, as a phrase for an operator-facing refusal. Diagnosis only - it
+# never decides anything, so a path it cannot classify still reads as "not an
+# isolated worktree" rather than silently passing. A path spawn_worktree_ok does
+# accept was withheld only by the poll's acceptance rule, so state that rule
+# rather than calling a genuine isolated worktree something it is not. The rule
+# is the general one the loop enforces - no two CONSECUTIVE reads agreed on it -
+# which covers both a worktree first seen on the final poll and one seen several
+# times but never twice running.
+spawn_worktree_reject_reason() {  # <path>
+  local p=$1 p_real top top_real
+  [ -n "$p" ] || { printf 'the backend reported no current path for that window\n'; return 0; }
+  if spawn_worktree_ok "$p"; then
+    printf 'it is an isolated worktree, but no two consecutive reads agreed on it, so it could not be confirmed\n'
+    return 0
+  fi
+  [ -e "$p" ] || { printf 'that path does not exist\n'; return 0; }
+  [ -d "$p" ] || { printf 'that path is not a directory\n'; return 0; }
+  p_real=$(cd "$p" 2>/dev/null && pwd -P) || {
+    printf 'that directory could not be entered\n'; return 0; }
+  top=$(git -C "$p" rev-parse --show-toplevel 2>/dev/null) || {
+    printf 'it is not inside a git repository\n'; return 0; }
+  top_real=$(cd "$top" 2>/dev/null && pwd -P) || top_real=$top
+  if [ "$p_real" = "$PROJ_ABS_REAL" ]; then
+    printf 'it is the primary checkout itself, not an isolated worktree\n'
+    return 0
+  fi
+  if [ "$p_real" != "$top_real" ]; then
+    if [ "$top_real" = "$PROJ_ABS_REAL" ]; then
+      printf "it is a subdirectory of the primary checkout, not an isolated worktree\n"
+    else
+      printf "it is not the root of its worktree, whose root is '%s'\n" "$top"
+    fi
+    return 0
+  fi
+  printf 'it is not an isolated worktree\n'
 }
 
 real_path_or_raw() {  # <path>
@@ -1304,6 +1806,30 @@ kimi_spawn_fail() {  # <detail>
 }
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  # Arm the settle-abort handler (spawn_settle_abort_reclaim) for exactly the
+  # span where a window exists but no meta records it yet - it stays armed until
+  # state/<id>.meta has actually been written, not merely until the worktree is
+  # accepted. Every refusal in the poll below and the worktree re-check after it
+  # sit inside that span, and so does everything between them and the meta
+  # write: the per-task temp mkdir, the state-directory resolution, and the
+  # per-harness hook writes all run under `set -eu` and can exit, leaving the
+  # same unrecorded orphan. Those later exits keep the default report mode,
+  # because a pane whose state nobody anticipated must leak loudly rather than
+  # be killed. The stable id captured at creation is the handle. A PROJECTED
+  # herdr task is excluded because its own exact projection cleanup already owns
+  # that window.
+  case "$BACKEND" in
+    tmux | zellij | cmux)
+      SETTLE_ABORT_TARGET=$WT_TARGET
+      SETTLE_ABORT_CLEANUP=1
+      ;;
+    herdr)
+      if [ "${HERDR_PROJECTED:-0}" -ne 1 ]; then
+        SETTLE_ABORT_TARGET=$WT_TARGET
+        SETTLE_ABORT_CLEANUP=1
+      fi
+      ;;
+  esac
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to
@@ -1331,21 +1857,56 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # becomes the new candidate rather than resetting the wait, so a pane that
   # is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
-  # Fast-refusal early abort (the follow-up filed with the WSL race fix), in
-  # its provably-safe subset: a pane whose reported path is NONEXISTENT on two
-  # consecutive identical reads can never become an isolated worktree, so
-  # refuse it in ~2s instead of burning the full 60s window. This matters
+  # Fast-refusal early abort (the follow-up filed with the WSL race fix): a pane
+  # parked on a NONEXISTENT path can never become an isolated worktree, so
+  # refuse it early instead of burning the full settle window. This matters
   # under the herdr presentation-order lock, whose bounded (5s) contention
   # window sits around this poll: a slow abort forces a concurrent sibling
-  # into its flat fallback. The WSL transient this loop defends against (a
-  # pre-shell-init cwd such as the multiplexer's default directory) is always
-  # an EXISTING directory, so it can never match this fast path; existing
-  # non-worktree paths still wait the full 60s.
+  # into its flat fallback.
+  #
+  # That refusal is GATED on having seen the pane at the project directory at
+  # least once. The gate exists because this abort originally rested on the
+  # claim that the pre-shell-init transient is always an existing directory, so
+  # it could never collide with a nonexistent path. That claim is not provable
+  # and was contradicted in the tree: the fixture in
+  # tests/fm-spawn-worktree-race.test.sh reports a transient path it never
+  # creates, and the transient can span more than one poll - on WSL a path can
+  # also read as absent while a mount is still coming up. Two consecutive
+  # nonexistent pre-init reads therefore aborted a spawn that would have
+  # reached its worktree, which is the one failure this loop must never have.
+  #
+  # A confirmed sighting of PROJ_ABS_REAL is the proof that shell init finished
+  # and treehouse get actually had its chance, so anything nonexistent after it
+  # is a real parked pane rather than a pre-init artifact. This is the same
+  # "require one confirmed sighting of the project directory before trusting a
+  # divergence" shape the WSL race fix established. The gate can only ever
+  # WITHHOLD the fast refusal and fall back to the full window, so a pane that
+  # never reports the project directory stays slow instead of refusing wrongly.
+  # Existing non-worktree paths are still never fast-refused at all.
+  #
+  # An EXISTING path is deliberately never fast-refused here, however stable it
+  # looks: a live shell can cd at any moment, so "this pane is parked somewhere
+  # that is not a worktree" is a statement about the pane's cwd right now, not a
+  # proof about its future. The provable non-worktree cases are decided by the
+  # two pre-flight refusals above, against the project path itself, before this
+  # loop ever runs. A wrong refusal here would send project work into the
+  # primary checkout's blast radius, so this loop stays slow on purpose.
   candidate=""
   missing_path=""
   missing_reads=0
-  for _ in $(seq 1 60); do
+  last_path=""
+  # Set once the pane has been observed at the project directory, which unlocks
+  # the nonexistent-path fast refusal above. Never reset: shell init happens once.
+  proj_seen=0
+  # WT_POLLS was resolved and validated with the pre-flight refusals, before this
+  # window existed, so a malformed value never costs an orphaned window here. The
+  # loop counts rather than iterating `seq 1 "$WT_POLLS"`, so a large window costs
+  # nothing but time - a word list would have to be materialized in full up front.
+  poll_n=0
+  while [ "$poll_n" -lt "$WT_POLLS" ]; do
+    poll_n=$((poll_n + 1))
     p=$(spawn_current_path "$WT_TARGET" || true)
+    last_path=$p
     if [ -n "$p" ] && spawn_worktree_ok "$p"; then
       p_real=$(real_path_or_raw "$p")
       if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
@@ -1357,11 +1918,18 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       missing_reads=0
     else
       candidate=""
+      if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" = "$PROJ_ABS_REAL" ]; then
+        proj_seen=1
+      fi
       if [ -n "$p" ] && [ ! -e "$p" ]; then
         if [ "$p" = "$missing_path" ]; then
           missing_reads=$((missing_reads + 1))
-          if [ "$missing_reads" -ge 2 ]; then
-            echo "error: treehouse get did not yield an isolated worktree: window $T is parked on nonexistent path '$p'" >&2
+          if [ "$proj_seen" = 1 ] && [ "$missing_reads" -ge "$WT_MISSING_READS" ]; then
+            # Consecutive reads of a nonexistent path after the project sighting
+            # are proof the pane is parked, not mid-allocation, so this exit is
+            # one of the two that may remove the window it created.
+            SETTLE_ABORT_MODE=reclaim
+            echo "error: treehouse get did not yield an isolated worktree: window $T is parked on nonexistent path '$p'; the pane reached '$PROJ_ABS' and then moved somewhere that does not exist, so no worktree can appear there" >&2
             exit 1
           fi
         else
@@ -1373,14 +1941,27 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         missing_reads=0
       fi
     fi
-    sleep 1
+    sleep "$WT_POLL_INTERVAL"
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    # SETTLE_ABORT_MODE stays report here on purpose: the window merely ran out
+    # of time, so `treehouse get` may still be allocating in that pane, and this
+    # refusal sends the operator to read its scrollback. The handler names the
+    # orphan and the by-hand commands rather than killing it.
+    echo "error: treehouse get did not enter an isolated worktree within ${WT_POLLS} polls ${WT_POLL_INTERVAL}s apart: window $T is still on '${last_path:-<no path reported>}' ($(spawn_worktree_reject_reason "$last_path")). Expected an isolated git worktree of '$PROJ_ABS', distinct from that primary checkout. treehouse may be missing there, or the project may not be treehouse-managed." >&2
     exit 1
   fi
 
+  # The re-check can still refuse, with the same reason and the same unrecorded
+  # window, so it stays armed. Two agreeing reads already confirmed the worktree,
+  # which means treehouse finished and the pane is parked, so its refusal is in
+  # the same provably-safe category as the nonexistent-path abort above.
+  SETTLE_ABORT_MODE=reclaim
   validate_spawn_worktree "treehouse get" "$T"
+  # Back to report for the rest of the armed span: from here on an exit is one
+  # nobody anticipated, so the pane's state is unknown and only a loud report is
+  # safe.
+  SETTLE_ABORT_MODE=report
 fi
 
 # The worktree is isolated, but not necessarily on the branch this project
@@ -1588,6 +2169,9 @@ META_WINDOW=$T
     echo "label=$SECONDMATE_LABEL"
   fi
 } > "$STATE/$ID.meta"
+# The window is recorded now, so cleanup can find it: the span the settle-abort
+# handler exists to cover has genuinely ended here.
+SETTLE_ABORT_CLEANUP=0
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")

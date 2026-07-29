@@ -116,6 +116,10 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
+Two of those refusals are decided up front, in `fm-spawn.sh`'s own process and before any window exists, against the project path it was handed: that path must name an existing directory, and it must be inside a git repository, since nothing else can ever yield an isolated worktree.
+Every other shape is decided by the post-launch settle poll, which deliberately never fast-refuses an existing pane path - a live shell can still `cd` away from one - and whose timeout names the path the window is parked on and the concrete reason it is not a worktree.
+[configuration.md](configuration.md#environment-variables) owns the `FM_SPAWN_WORKTREE_POLLS` and `FM_SPAWN_WORKTREE_POLL_INTERVAL` knobs that size that window, and both are validated with the pre-flight refusals so a malformed value cannot orphan a window either.
+A refusal inside that poll lands before `state/<id>.meta` is written, so nothing records the window the launch created: the provably-parked cases remove it, while the timeout leaves it open on purpose - `treehouse get` may still be allocating in that pane - and names the window, the path, and the by-hand commands instead.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.

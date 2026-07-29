@@ -107,9 +107,10 @@ jobs:
   tests-portable-serial:
     name: Behavior portable serial
     runs-on: ubuntu-latest
-    # Measured serial remainder is ~13 min wall without Herdr, including this
-    # fork's two deliberate 60s non-worktree spawn-abort poll windows in
-    # fm-tangle-guard (see tests/fm-tangle-guard.test.sh). Cap is a hang
+    # Measured serial remainder is ~13 min wall without Herdr. The two
+    # non-worktree spawn-abort poll windows in fm-tangle-guard no longer cost
+    # 60s each: that test now shortens the window through
+    # FM_SPAWN_WORKTREE_POLLS (see tests/fm-tangle-guard.test.sh). Cap is a hang
     # tripwire above observed p99 script cost and suite wall, not the expected
     # healthy end (interim full-suite slack reduced after sharding).
     timeout-minutes: 20

@@ -162,7 +162,8 @@ family_for_basename() {
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-strict.test.sh|fm-spawn-batch.test.sh|\
-    fm-spawn-dispatch-profile.test.sh|fm-spawn-session-name.test.sh|\
+    fm-spawn-dispatch-profile.test.sh|fm-spawn-nonworktree-refusal.test.sh|\
+    fm-spawn-session-name.test.sh|\
     fm-spawn-worktree-race.test.sh|fm-spawn-worktree-settle.test.sh)
       printf '%s\n' backend-dispatch
       ;;
