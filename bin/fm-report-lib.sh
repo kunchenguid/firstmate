@@ -24,7 +24,8 @@ fm_report_project_slug() {  # <project-path>
   local project=${1-} base
   [ -n "$project" ] || return 1
   base=$(basename "$project")
-  fm_report_slug_valid "$base"
+  fm_report_slug_valid "$base" || return 1
+  printf '%s\n' "$base"
 }
 
 fm_report_working_path() {  # <data-dir> <task-id>

@@ -53,8 +53,7 @@ KIND=$(fm_report_meta_value "$META" kind)
 PROJECT=$(fm_report_meta_value "$META" project)
 [ -n "$PROJECT" ] || fail "task $ID has no project= in metadata; cannot choose an archive owner"
 
-SLUG=$(basename "$PROJECT")
-fm_report_slug_valid "$SLUG" || fail "project slug is not archive-safe: $SLUG"
+SLUG=$(fm_report_project_slug "$PROJECT") || fail "project slug is not archive-safe: $(basename "$PROJECT")"
 
 WORKING=$(fm_report_working_path "$DATA" "$ID")
 ARCHIVE_REL=$(fm_report_archive_rel "$SLUG" "$ID")

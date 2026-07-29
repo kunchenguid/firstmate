@@ -189,6 +189,40 @@ test_teardown_refuses_unfinalizable_scout() {
   pass "teardown refuses when finalize cannot succeed"
 }
 
+test_teardown_finalizes_ship_and_archives_receipt() {
+  local home id rc
+  home=$(make_home teardown-ship)
+  id=ship-td
+  write_ship_meta "$home" "$id"
+  printf 'done: PR https://github.com/example/example/pull/2 checks green\n' > "$home/state/$id.status"
+  touch "$home/state/.last-watcher-beat"
+  set +e
+  run_teardown "$home" "$id" >/dev/null 2>"$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "ship teardown failed after implicit finalize: $(cat "$home/err")"
+  assert_present "$home/data/reports/sample/$id.md" "teardown did not leave archived ship receipt"
+  assert_grep "Ship delivery receipt" "$home/data/reports/sample/$id.md" "archived file is not a ship receipt"
+  pass "teardown finalizes ship tasks and archives a delivery receipt before cleanup"
+}
+
+test_teardown_refuses_unfinalizable_ship() {
+  local home id rc
+  home=$(make_home teardown-refuse-ship)
+  id=ship-refuse
+  write_ship_meta "$home" "$id"
+  mkdir -p "$home/data/reports/sample"
+  printf 'a conflicting archive that finalize did not write\n' \
+    > "$home/data/reports/sample/$id.md"
+  set +e
+  run_teardown "$home" "$id" >/dev/null 2>"$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "ship teardown should refuse when finalize cannot succeed"
+  assert_grep "not finalized" "$home/err" "ship teardown refusal missing"
+  pass "teardown refuses ship tasks when finalize cannot succeed"
+}
+
 test_scout_finalize_archives_and_records_meta
 test_scout_finalize_refuses_without_report
 test_scout_finalize_refuses_without_decision_gate
@@ -196,3 +230,5 @@ test_finalize_is_idempotent
 test_ship_finalize_writes_delivery_receipt
 test_teardown_requires_finalize_for_scout
 test_teardown_refuses_unfinalizable_scout
+test_teardown_finalizes_ship_and_archives_receipt
+test_teardown_refuses_unfinalizable_ship
