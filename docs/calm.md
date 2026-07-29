@@ -9,8 +9,9 @@ It removes thinking blocks, tool call and result rows, tool images and shells, P
 The hidden operational kinds are session start, watcher, turn-end guard, away supervisor, from-firstmate routing, and launch briefs.
 Calm adds no enable banner, footer chip, replacement status, or other presentation row.
 Interactive dialogs and explicit Pi errors remain visible so the captain can respond.
-An errored tool row keeps only its plain error text, so aborts, provider failures, and tool failures stay visible without exposing routine tool call, result, image, or shell content.
-When one assistant turn attaches the same text to several tool rows, Calm shows that message once and keeps distinct errors separate, and each separately interrupted turn keeps its own message after a reload or resume.
+A tool row whose assistant turn stopped on an abort or a provider failure keeps only that plain error text, so the failures that need a captain response stay visible without exposing routine tool call, result, image, or shell content.
+Routine per-tool failures the agent handles itself, such as a non-zero `bash` exit, an unmatched `edit`, or a missing `read`, stay hidden with the rest of the row.
+When one interrupted turn attaches the same text to several tool rows, Calm shows that message once and keeps distinct actionable errors separate, and each separately interrupted turn keeps its own message after a reload or resume.
 
 Calm changes presentation only.
 Tool execution, operational input delivery, ordering, model context, session storage, diagnostics, and `/export` and `/share` data remain unchanged.

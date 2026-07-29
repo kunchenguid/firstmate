@@ -5,14 +5,15 @@
 // diagnostic instead of blocking Calm or Pi. It changes only transcript presentation and
 // never tool execution.
 //
-// Pi routes abort, provider-failure, and tool-failure text exclusively through the tool
-// row whenever the assistant turn contains a tool call
-// (AssistantMessageComponent.updateContent skips its own error branch when
-// hasToolCalls is true, and InteractiveMode attaches the stop-reason text to every
-// pending tool row on both the live and rebuilt-transcript paths). So Calm keeps routine
-// call, result, image, and shell content hidden while still surfacing an errored row's
-// text as plain actionable lines, measured in terminal columns because pi-tui treats an
-// over-wide rendered line as a fatal render error.
+// Pi routes an assistant turn's abort and provider-failure text exclusively through the
+// tool row whenever that turn contains a tool call
+// (AssistantMessageComponent.updateContent skips its own error branch when hasToolCalls is
+// true, and InteractiveMode attaches the stop-reason text to every pending tool row on both
+// the live and rebuilt-transcript paths). Only that turn-level class is actionable for the
+// captain, so Calm surfaces an errored row's text only while its assistant turn stopped on
+// "aborted" or "error" and keeps every routine failure - a non-zero bash exit, an unmatched
+// edit, a missing read - hidden with the rest of the tool row. Visible lines are measured in
+// terminal columns because pi-tui treats an over-wide rendered line as a fatal render error.
 import type {
   AssistantMessageComponent as PiAssistantMessageComponent,
   ToolExecutionComponent as PiToolExecutionComponent,
@@ -25,8 +26,14 @@ type CalmToolLayoutPatch = {
   hidesToolRows: () => boolean;
 };
 
-type CalmTurnBoundaryPatch = {
+type CalmErrorTurn = {
+  component: object | undefined;
+  actionable: boolean;
   owners: Map<string, object>;
+};
+
+type CalmTurnBoundaryPatch = {
+  turn: CalmErrorTurn;
 };
 
 type CalmToolResult = {
@@ -50,6 +57,8 @@ const CALM_TOOL_ERROR_TURN_PATCH = Symbol.for(
 );
 
 const CALM_ERROR_MAX_LINES = 6;
+// The only stop reasons Pi fans out to tool rows as turn-level failure text.
+const CALM_ACTIONABLE_STOP_REASONS = new Set(["aborted", "error"]);
 const ANSI_SEQUENCE = /\u001B\[[0-9;?]*[ -/]*[@-~]/g;
 const TAB_COLUMNS = "   ";
 
@@ -65,6 +74,14 @@ function calmTurnScope(): CalmTurnBoundaryPatch | undefined {
   return registry[CALM_TOOL_ERROR_TURN_PATCH];
 }
 
+function calmEmptyTurn(): CalmErrorTurn {
+  return { component: undefined, actionable: false, owners: new Map() };
+}
+
+function calmActionableTurn(message: { stopReason?: string } | undefined): boolean {
+  return CALM_ACTIONABLE_STOP_REASONS.has(message?.stopReason ?? "");
+}
+
 function calmResultText(result: CalmToolResult): string {
   return (result.content ?? [])
     .filter((block) => block?.type === "text")
@@ -73,17 +90,19 @@ function calmResultText(result: CalmToolResult): string {
     .trim();
 }
 
-// Pi attaches one turn's abort, provider-failure, or tool-failure text to every pending
-// tool row of that turn, so the first row to record a given text within the turn owns it
-// and identical siblings stay silent instead of repeating it. Separate turns own their own
-// text, including when a whole session history replays in one synchronous pass. Without the
-// turn-boundary adapter the owner is always the recording row, so every error stays visible.
-function calmErrorTextOwner(text: string, component: object): object {
+// A row's error text is actionable only while its assistant turn stopped on "aborted" or
+// "error"; every other errored result is a routine per-tool failure the agent handles itself,
+// so it stays hidden with the rest of the row. Pi copies one actionable text onto every
+// pending row of that turn, so the first row to record a given text within the turn owns it
+// and identical siblings stay silent while a genuinely distinct text still gets its own row.
+// Without the turn-boundary adapter no turn can be classified, so Calm stays conversation-only
+// rather than guessing that a routine failure needs the captain.
+function calmActionableErrorOwner(text: string, component: object): object | undefined {
   const scope = calmTurnScope();
-  if (!scope) return component;
-  const owner = scope.owners.get(text);
+  if (!scope || !scope.turn.actionable) return undefined;
+  const owner = scope.turn.owners.get(text);
   if (owner) return owner;
-  scope.owners.set(text, component);
+  scope.turn.owners.set(text, component);
   return component;
 }
 
@@ -146,16 +165,22 @@ function requireColumnHelpers(): CalmColumnHelpers {
   return { truncateToWidth, visibleWidth, wrapTextWithAnsi };
 }
 
-// Pi builds exactly one AssistantMessageComponent per assistant message and its
-// constructor calls updateContent, on the live streaming path and once per replayed
-// history message, so that call is the turn boundary for tool-row error ownership.
+// Pi builds exactly one AssistantMessageComponent per assistant message, on the live
+// streaming path and once per replayed history message, and calls updateContent on it
+// repeatedly: from the constructor, from every streaming delta, from message_end once the
+// stop reason is known, and again from invalidate(), setHideThinkingBlock(),
+// setHiddenThinkingLabel(), and setOutputPad() - the last of which Calm itself triggers.
+// So the reset is keyed on the calling component rather than the call: a new component opens
+// a new turn, and every repeat call on the same component only refreshes that turn's stop
+// reason, leaving established ownership intact. Pi never interleaves those repeats with a
+// turn's updateResult batch, which stays synchronous on both paths.
 export function installCalmToolErrorTurnBoundary(): void {
   const registry = globalThis as typeof globalThis & {
     [key: symbol]: CalmTurnBoundaryPatch | undefined;
   };
   const installed = registry[CALM_TOOL_ERROR_TURN_PATCH];
   if (installed) {
-    installed.owners = new Map();
+    installed.turn = calmEmptyTurn();
     return;
   }
 
@@ -173,11 +198,18 @@ export function installCalmToolErrorTurnBoundary(): void {
     message: Parameters<PiAssistantMessageComponent["updateContent"]>[0],
   ): void {
     const scope = calmTurnScope();
-    if (scope) scope.owners = new Map();
+    if (scope) {
+      const actionable = calmActionableTurn(message);
+      if (scope.turn.component === this) {
+        scope.turn.actionable = actionable;
+      } else {
+        scope.turn = { component: this, actionable, owners: new Map() };
+      }
+    }
     originalUpdateContent.call(this, message);
   };
 
-  registry[CALM_TOOL_ERROR_TURN_PATCH] = { owners: new Map() };
+  registry[CALM_TOOL_ERROR_TURN_PATCH] = { turn: calmEmptyTurn() };
 }
 
 export function installCalmToolLayout(): void {
@@ -215,7 +247,7 @@ export function installCalmToolLayout(): void {
   ): void {
     const errorResult = result as CalmToolResult;
     const errorText = errorResult?.isError && !isPartial ? calmResultText(errorResult) : "";
-    if (errorText && calmErrorTextOwner(errorText, this) === this) {
+    if (errorText && calmActionableErrorOwner(errorText, this) === this) {
       calmErrorTexts.set(this, errorText);
     } else {
       calmErrorTexts.delete(this);

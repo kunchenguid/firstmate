@@ -109,11 +109,14 @@ test_static_contract() {
   assert_contains "$tool_layout" 'ToolExecutionComponent.prototype.render' "Pi Calm tool layout does not own complete tool-row presentation"
   assert_contains "$tool_layout" 'return calmErrorLines(this, width, columns)' "Pi Calm tool layout does not remove complete tool rows"
   assert_contains "$tool_layout" 'errorResult?.isError && !isPartial ? calmResultText(errorResult) : ""' "Pi Calm tool layout does not restrict its visible tool text to actionable errors"
-  assert_contains "$tool_layout" 'calmErrorTextOwner(errorText, this) === this' "Pi Calm tool layout repeats one turn's actionable error across sibling tool rows"
-  assert_contains "$tool_layout" 'if (!scope) return component' "Pi Calm tool layout deduplicates actionable errors without a Pi-supported turn boundary"
+  assert_contains "$tool_layout" 'calmActionableErrorOwner(errorText, this) === this' "Pi Calm tool layout repeats one turn's actionable error across sibling tool rows"
+  assert_contains "$tool_layout" 'CALM_ACTIONABLE_STOP_REASONS = new Set(["aborted", "error"])' "Pi Calm tool layout does not restrict its visible tool text to turn-level abort and provider failures"
+  assert_contains "$tool_layout" 'if (!scope || !scope.turn.actionable) return undefined' "Pi Calm tool layout surfaces tool errors it cannot classify as actionable"
+  assert_contains "$tool_layout" 'scope.turn.owners.get(text)' "Pi Calm tool layout does not scope its dedup to one turn's identical fan-out text"
   assert_contains "$tool_layout" 'return registry[CALM_TOOL_ERROR_TURN_PATCH]' "Pi Calm tool layout keeps turn state outside the registry shared across extension reloads"
   assert_not_contains "$tool_layout" 'const calmErrorTurn' "Pi Calm tool layout still holds reload-split turn state in module scope"
-  assert_contains "$tool_layout" 'AssistantMessageComponent.prototype.updateContent' "Pi Calm tool-error turn boundary does not use the one-per-assistant-message Pi seam"
+  assert_contains "$tool_layout" 'AssistantMessageComponent.prototype.updateContent' "Pi Calm tool-error turn boundary does not use the one-component-per-assistant-message Pi seam"
+  assert_contains "$tool_layout" 'if (scope.turn.component === this)' "Pi Calm tool-error turn boundary is not idempotent across Pi's repeated updateContent calls"
   assert_not_contains "$tool_layout" 'queueMicrotask' "Pi Calm tool layout still infers turn boundaries from the scheduler that spans transcript replay"
   assert_contains "$text" 'installCalmPresentationAdapter("tool-error-turn", installCalmToolErrorTurnBoundary)' "Pi Calm extension does not install its degradable tool-error turn boundary"
   assert_contains "$tool_layout" 'ToolExecutionComponent.prototype.updateResult' "Pi Calm tool layout does not read errors through a declared Pi seam"
@@ -567,7 +570,7 @@ const turnMessage = {
     totalTokens: 0,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
   },
-  stopReason: "stop",
+  stopReason: "aborted",
   timestamp: 1,
   content: [{ type: "text", text: "CALM_RELOAD_TURN" }],
 };
@@ -576,17 +579,33 @@ const turnMessage = {
 // renderSessionItems rebuilds a transcript right after a reload.
 function replayInterruptedTurns(generation) {
   return [0, 1].map((turn) => {
-    new AssistantMessageComponent(turnMessage, true);
-    const rows = ["a", "b"].map((slot) => {
+    const turnComponent = new AssistantMessageComponent(turnMessage, true);
+    // Pi calls updateContent again on the same component from invalidate(), setOutputPad(),
+    // and the thinking-label controls, so the reset must not re-open the turn.
+    turnComponent.setOutputPad(2);
+    const rows = ["a", "b", "c"].map((slot) => {
       const row = new ToolExecutionComponent("bash", `reload-${generation}-${turn}-${slot}`, { command: "printf CALM_RELOAD_ARGS" }, { showImages: false }, undefined, renderUi, process.cwd());
       row.markExecutionStarted();
       return row;
     });
-    for (const row of rows) {
+    for (const row of rows.slice(0, 2)) {
       row.updateResult({ content: [{ type: "text", text: "Operation aborted" }], details: {}, isError: true });
     }
+    turnComponent.setOutputPad(1);
+    rows[2].updateResult({ content: [{ type: "text", text: "Operation aborted" }], details: {}, isError: true });
     return rows;
   });
+}
+
+function assertRoutineFailureHidden(generation) {
+  new AssistantMessageComponent({ ...turnMessage, stopReason: "toolUse" }, true);
+  const row = new ToolExecutionComponent("bash", `reload-${generation}-routine`, { command: "printf CALM_RELOAD_ARGS" }, { showImages: false }, undefined, renderUi, process.cwd());
+  row.markExecutionStarted();
+  row.setArgsComplete();
+  row.updateResult({ content: [{ type: "text", text: "CALM_RELOAD_ROUTINE_FAILURE" }], details: {}, isError: true });
+  if (row.render(100).length !== 0) {
+    throw new Error(`generation ${generation} surfaced a routine per-tool failure from a completed turn`);
+  }
 }
 
 function assertOneErrorPerTurn(generation) {
@@ -627,6 +646,7 @@ for (const generation of [1, 2, 3]) {
   }
   wrappers = current;
   assertOneErrorPerTurn(generation);
+  assertRoutineFailureHidden(generation);
 }
 
 visibility.setCalmPresentation(false);
@@ -960,19 +980,25 @@ if (!imageVisibleBefore.join("\n").includes("\x1b]1337;File=")) {
 
 const routineArgs = { command: "printf 'CALM_ROUTINE_ARGS\\n'" };
 const bashDefinition = tools.find((tool) => tool.name === "bash");
+// Only a turn that stopped on an abort or a provider failure carries text the captain has to
+// answer. A routine per-tool failure lands on a turn that stopped on "toolUse", so it stays
+// hidden with the rest of the row even though Pi flags it with the same isError.
 const errorCases = [
   {
     key: "aborted-turn",
+    stopReason: "aborted",
     result: { content: [{ type: "text", text: "Operation aborted" }], details: {}, isError: true },
     visible: ["Operation aborted"],
   },
   {
     key: "provider-error",
+    stopReason: "error",
     result: { content: [{ type: "text", text: "Error: provider stream failed" }], details: {}, isError: true },
     visible: ["Error: provider stream failed"],
   },
   {
-    key: "tool-failure",
+    key: "routine-tool-failure",
+    stopReason: "toolUse",
     result: {
       content: [
         {
@@ -983,11 +1009,11 @@ const errorCases = [
       details: {},
       isError: true,
     },
-    visible: ["Command failed with exit code 1", "no such file: missing.txt"],
+    visible: [],
   },
 ];
-// Identical error text from a single turn is surfaced once, so every group below opens a
-// new assistant turn exactly as Pi does. Nothing here awaits: this whole block is one
+// Identical error text from a single interrupted turn is surfaced once, so every group below
+// opens a new assistant turn exactly as Pi does. Nothing here awaits: this whole block is one
 // synchronous pass, matching how Pi replays a full session history.
 const turnBoundaryMessage = {
   role: "assistant",
@@ -1006,14 +1032,15 @@ const turnBoundaryMessage = {
   timestamp: 1,
   content: [{ type: "text", text: "CALM_TURN_BOUNDARY" }],
 };
-const beginErrorTurn = () => new AssistantMessageComponent(turnBoundaryMessage, true);
+const beginErrorTurn = (stopReason = "aborted") =>
+  new AssistantMessageComponent({ ...turnBoundaryMessage, stopReason }, true);
 const newErrorRow = (id, definition = bashDefinition) =>
   new ToolExecutionComponent("bash", `error-${id}`, routineArgs, { showImages: false }, definition, renderUi, process.cwd());
 const errorFixtures = [];
 for (const errorCase of errorCases) {
-  beginErrorTurn();
+  beginErrorTurn(errorCase.stopReason);
   const actual = newErrorRow(`actual-${errorCase.key}`);
-  beginErrorTurn();
+  beginErrorTurn(errorCase.stopReason);
   const baseline = newErrorRow(`baseline-${errorCase.key}`, undefined);
   for (const row of [actual, baseline]) {
     row.markExecutionStarted();
@@ -1337,6 +1364,12 @@ if (watchActual.render(100).length !== 0) {
 for (const fixture of errorFixtures) {
   const rendered = fixture.actual.render(100);
   const text = rendered.join("\n");
+  if (fixture.visible.length === 0) {
+    if (rendered.length !== 0) {
+      throw new Error(`Calm surfaced the routine ${fixture.key} tool row instead of hiding it: ${text}`);
+    }
+    continue;
+  }
   for (const visible of fixture.visible) {
     if (!text.includes(visible)) {
       throw new Error(`Calm hid the actionable ${fixture.key} tool error text: ${visible}`);

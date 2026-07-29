@@ -17,14 +17,17 @@ Presentation must remain inactive in RPC, JSON, print, and untrusted contexts.
 `.pi/extensions/lib/fm-calm-visibility.ts` owns the allowlist-style transcript policy.
 Only `genuine-user-prompt` and `genuine-agent-response` are policy-visible while Calm is active.
 `.pi/extensions/lib/fm-calm-assistant-layout.ts` removes thinking blocks from the shallow presentation copy before Pi calculates assistant layout.
-`.pi/extensions/lib/fm-calm-tool-layout.ts` returns zero rows from Pi's exported `ToolExecutionComponent` while Calm is active, which removes calls, results, framing, and image children together, and keeps only the width-clamped error text of a row whose result is an error.
-`.pi/extensions/lib/fm-calm-tool-layout.ts` also owns the tool-error turn boundary that scopes identical-error ownership to one assistant turn, holding that turn state on the shared patch registry so an extension reload cannot split it from the surviving prototype wrappers.
+`.pi/extensions/lib/fm-calm-tool-layout.ts` returns zero rows from Pi's exported `ToolExecutionComponent` while Calm is active, which removes calls, results, framing, and image children together, and keeps only the width-clamped error text of a row whose assistant turn stopped on `aborted` or `error`.
+Routine per-tool failures carry the same `isError` flag but are not turn-level failures, so they stay hidden with the rest of the row.
+`.pi/extensions/lib/fm-calm-tool-layout.ts` also owns the tool-error turn boundary that classifies each assistant turn and scopes identical-error ownership to that turn, holding the turn state on the shared patch registry so an extension reload cannot split it from the surviving prototype wrappers.
 `.pi/extensions/lib/fm-calm-operational-user-layout.ts` renders canonically classified text-only Firstmate operational user rows at zero height.
 `bin/fm-operational-input.sh` remains the single owner of operational-input construction and parsing.
 The seven built-in definitions and `fm_watch_arm_pi` retain per-renderer zero-height behavior as an independent fallback if the complete tool-row adapter is unavailable.
 
 All four class adapters are idempotent and probe their exact Pi export and prototype method before patching.
-The tool-error turn boundary uses `AssistantMessageComponent.updateContent`, which Pi calls exactly once per assistant message on both the streaming and replay paths, and while it is unavailable every actionable error stays visible instead of being de-duplicated.
+The tool-error turn boundary uses `AssistantMessageComponent.updateContent`, which Pi calls at least once per assistant message before any of that message's tool rows receive results, and repeatedly afterwards from streaming deltas, `message_end`, `invalidate()`, `setHideThinkingBlock()`, `setHiddenThinkingLabel()`, and `setOutputPad()`.
+The reset is therefore idempotent per turn: it keys on the calling component, so a new component opens a turn while every repeat call on the same component only refreshes that turn's stop reason and leaves established ownership intact.
+While that seam is unavailable no turn can be classified, so tool rows stay conversation-only instead of surfacing routine failures.
 A missing seam produces one adapter-specific diagnostic and leaves the remaining Calm behavior and unrelated Pi extensions operational.
 The adapters consult presentation state at render time, so the patches are inert outside a trusted interactive TUI and while Calm is off.
 No input event is intercepted, no message role is rewritten, and no provider context is filtered.
@@ -36,12 +39,12 @@ No input event is intercepted, no message role is rewritten, and no provider con
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including operational-marker near misses. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
 | `assistant-thinking` | Thinking content in `AssistantMessageComponent` | Zero height whether Pi's thinking display is collapsed or expanded. |
-| `assistant-tool-call`, `tool-result`, `tool-image` | `ToolExecutionComponent` | Complete row is zero height for built-in and custom tools while the result is routine. An errored result keeps only its plain error text, capped at six lines with an explicit hidden-line count, and identical text attached to several rows of the same assistant turn is surfaced once, live and during a full synchronous history replay. |
+| `assistant-tool-call`, `tool-result`, `tool-image` | `ToolExecutionComponent` | Complete row is zero height for built-in and custom tools, including a routine per-tool failure such as a non-zero `bash` exit, an unmatched `edit`, or a missing `read`. A row whose assistant turn stopped on `aborted` or `error` keeps only that plain text, capped at six lines with an explicit hidden-line count, and identical text attached to several rows of the same turn is surfaced once, live and during a full synchronous history replay. |
 | `working-status` | Pi working status indicator | Hidden through `ExtensionUIContext.setWorkingVisible(false)`. |
 | `synthetic-user` | Firstmate session-start, watcher, turn-end, away-supervisor, from-firstmate, and launch-brief input | Exact user-role content and ordering are retained, while the TUI row is zero height. |
 | Legacy Calm operational entries | Registered custom-entry renderer | Retained in session data and rendered at zero height. |
 | Interactive dialogs | Extension and built-in focused UI | Visible. |
-| Explicit errors and warnings | Pi status, assistant error rendering, and errored tool rows | Visible. Pi routes abort, provider-failure, and tool-failure text through the tool row whenever the turn has a tool call, so Calm surfaces that text as plain lines instead of hiding it. |
+| Explicit errors and warnings | Pi status, assistant error rendering, and tool rows of an interrupted turn | Visible. Pi routes an aborted or provider-failed turn's text through its tool rows whenever that turn has a tool call, so Calm surfaces that text as plain lines instead of hiding it. Routine per-tool failures need no captain response and stay hidden. |
 | User bash, skill invocation, compaction and branch summaries, command notices, and unrelated custom entries | Their stock Pi components | Unchanged because they are neither internal model work nor Firstmate operational follow-up rows. |
 
 Stock HTML export and share rendering are enabled only around the matching terminal submit action and then presentation is redrawn immediately.
