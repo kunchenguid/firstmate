@@ -7,13 +7,18 @@
 # ancestor of origin/<default>) and whose <default> branch is free to check out by
 # re-attaching it before the normal fast-forward ("recovered:"). One additional
 # narrow recovery handles a clean, checked-out default branch after a successful
-# fetch when the local and remote commits genuinely diverged but resolve to the
-# same root tree: preserve the full old local identity at
-# refs/fm-fleet-sync/squash-preserved/<default>/<old-oid>, verify that direct ref,
-# then atomically move the local branch to the observed remote commit with
-# no-dereference expected-old checks on the preservation, remote-tracking, and
-# local refs. Active Git operations and symbolic forms of those refs refuse the
+# fetch when the local and remote commits genuinely diverged with one unambiguous
+# common base but resolve to the same root tree: create and verify the deterministic
+# direct ref refs/fm-fleet-sync/squash-preserved/<default>/<old-oid> without
+# dereferencing it or overwriting a conflict, then atomically move the local
+# branch to the observed remote commit with no-dereference expected-old checks on
+# the preservation, remote-tracking, and local refs. Active merge, cherry-pick,
+# revert, rebase, or sequencer operations and symbolic forms of those refs refuse
 # recovery before preservation and are rechecked immediately before the move.
+# Post-move checks require HEAD and the local/remote-tracking refs at the remote
+# OID, the preservation ref at the old local OID, a clean worktree, and the same
+# root tree; failure attempts an expected-old no-dereference rollback. Repeated
+# runs then converge through the already-current path.
 # Every other off-default or diverged state may hold real work, so it is left
 # untouched and reported as a quantified, loud "STUCK: ... N commits behind ...
 # - needs attention" warning rather than quiet drift. Nothing is ever forced,
