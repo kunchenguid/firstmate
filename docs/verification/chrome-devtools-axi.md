@@ -120,5 +120,5 @@ ok - browser-stop failure is explicit and preserves the task for an exact retry
 ok - cleanup refuses another task's valid named browser session without touching it
 ```
 
-The root/non-root argument matrix preserves every other token in order, removes every exact `--no-sandbox` occurrence, appends exactly one for uid 0 and none for non-root, rejects prefix lookalikes, and does not add `--disable-dev-shm-usage`.
+The root/non-root argument matrix uses the tool's JavaScript whitespace class, including CR, VT, FF, and Unicode separators, preserves every other token in order, removes every exact `--no-sandbox` occurrence, appends exactly one for uid 0 and none for non-root, rejects prefix lookalikes, and does not add `--disable-dev-shm-usage`.
 The cleanup matrix proves exact-session stop, inert legacy records, another-task refusal, authorization ordering, and retry-safe behavior when the exact stop fails.

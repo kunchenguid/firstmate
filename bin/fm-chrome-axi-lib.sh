@@ -73,17 +73,17 @@ fm_chrome_axi_session_name() {  # <firstmate-home> <task-id>
 }
 
 fm_chrome_axi_args_for_uid() {  # <uid> <ambient-arguments>
-  local uid=$1 args=${2-} token
-  local -a kept=() tokens=()
-  read -r -d '' -a tokens < <(printf '%s\0' "$args") || true
-  for token in "${tokens[@]}"; do
-    [ "$token" = --no-sandbox ] || kept+=("$token")
-  done
-  args=
-  if [ "${#kept[@]}" -gt 0 ]; then
-    printf -v args '%s ' "${kept[@]}"
-    args=${args% }
-  fi
+  local uid=$1 args=${2-}
+  command -v node >/dev/null 2>&1 || {
+    echo "error: cannot normalize Chrome DevTools AXI arguments: node is unavailable" >&2
+    return 1
+  }
+  args=$(
+    node -e 'process.stdout.write(process.argv[1].trim().split(/\s+/).filter((arg) => arg && arg !== "--no-sandbox").join(" "))' -- "$args"
+  ) || {
+    echo "error: cannot normalize Chrome DevTools AXI arguments" >&2
+    return 1
+  }
   if [ "$uid" = 0 ]; then
     args="${args:+$args }--no-sandbox"
   fi

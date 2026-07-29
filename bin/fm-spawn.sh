@@ -392,7 +392,7 @@ CHROME_AXI_SESSION=
 CHROME_AXI_ARGS=
 if [ "$KIND" != secondmate ]; then
   CHROME_AXI_SESSION=$(fm_chrome_axi_session_name "$FM_HOME" "$ID") || exit 1
-  CHROME_AXI_ARGS=$(fm_chrome_axi_args_for_uid "$(id -u)" "${CHROME_DEVTOOLS_AXI_CHROME_ARGS:-}")
+  CHROME_AXI_ARGS=$(fm_chrome_axi_args_for_uid "$(id -u)" "${CHROME_DEVTOOLS_AXI_CHROME_ARGS:-}") || exit 1
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then

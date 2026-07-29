@@ -48,7 +48,15 @@ test_session_names_are_safe_and_isolated() {
 }
 
 test_root_and_nonroot_chrome_arguments() {
-  local out
+  local delimiter out
+  local -a delimiters=(
+    $'\t' $'\n' $'\v' $'\f' $'\r' ' '
+    $'\xc2\xa0' $'\xe1\x9a\x80'
+    $'\xe2\x80\x80' $'\xe2\x80\x81' $'\xe2\x80\x82' $'\xe2\x80\x83' $'\xe2\x80\x84'
+    $'\xe2\x80\x85' $'\xe2\x80\x86' $'\xe2\x80\x87' $'\xe2\x80\x88' $'\xe2\x80\x89'
+    $'\xe2\x80\x8a' $'\xe2\x80\xa8' $'\xe2\x80\xa9' $'\xe2\x80\xaf'
+    $'\xe2\x81\x9f' $'\xe3\x80\x80' $'\xef\xbb\xbf'
+  )
   out=$(fm_chrome_axi_args_for_uid 1000 '')
   [ -z "$out" ] || fail "empty non-root arguments gained a value: $out"
 
@@ -74,8 +82,14 @@ test_root_and_nonroot_chrome_arguments() {
   out=$(fm_chrome_axi_args_for_uid 1000 '--no-sandboxed --enable-gpu')
   [ "$out" = '--no-sandboxed --enable-gpu' ] || fail "non-root normalization removed a non-exact substring: $out"
 
-  out=$(fm_chrome_axi_args_for_uid 0 $'--enable-gpu\t--no-sandbox')
-  [ "$out" = '--enable-gpu --no-sandbox' ] || fail "whitespace-delimited exact token was not normalized"
+  for delimiter in "${delimiters[@]}"; do
+    out=$(fm_chrome_axi_args_for_uid 0 "--enable-gpu${delimiter}--no-sandbox${delimiter}--no-sandboxed")
+    [ "$out" = '--enable-gpu --no-sandboxed --no-sandbox' ] \
+      || fail "root JavaScript-whitespace token was not normalized: $(printf '%q' "$out")"
+    out=$(fm_chrome_axi_args_for_uid 1000 "--enable-gpu${delimiter}--no-sandbox${delimiter}--no-sandboxed")
+    [ "$out" = '--enable-gpu --no-sandboxed' ] \
+      || fail "non-root JavaScript-whitespace token was not removed: $(printf '%q' "$out")"
+  done
   pass "Chrome arguments preserve other tokens and enforce --no-sandbox exactly once only for root"
 }
 
