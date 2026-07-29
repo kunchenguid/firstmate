@@ -427,9 +427,21 @@ else
 fi
 [ "$remote_teardown_rc" -eq 3 ] || exit "$remote_teardown_rc"
 
-# This is the first cleanup authorization check. It is metadata-only and must
-# complete before fm-guard, a backend command, file removal, branch deletion,
-# worktree return, registry change, or process termination can run.
+# A task written by the immediately preceding spawn schema can lack the opaque
+# endpoint binding. Before cleanup authorization, the bounded compatibility
+# helper may add only that binding after read-only live backend proof agrees
+# with the complete legacy record. Every ambiguous record stays untouched.
+if [ "$(grep -c '^endpoint_task_id=' "$META" 2>/dev/null || true)" -eq 0 ]; then
+  LEGACY_BACKEND=$(fm_backend_meta_exact_value "$META" backend 2>/dev/null || true)
+  case "$LEGACY_BACKEND" in
+    herdr|zellij|orca|cmux)
+      "$SCRIPT_DIR/fm-endpoint-binding-migrate.sh" "$ID" || exit 1
+      ;;
+  esac
+fi
+# This is the cleanup authorization check. It is metadata-only and must
+# complete before fm-guard, a backend cleanup command, file removal, branch
+# deletion, worktree return, registry change, or process termination can run.
 fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
