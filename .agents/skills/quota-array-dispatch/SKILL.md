@@ -20,7 +20,8 @@ Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-s
 ## Collect facts
 
 Run `quota-axi --json` once per intake and reuse that snapshot for every candidate.
-For each candidate, establish the harness/model/provider relationship from `harness-adapters`, then record only inspectable facts:
+For each candidate, use explicit `harness`, `model`, and `provider` tuple; `harness-adapters` owns identity, and model/provider never infer harness, then record only inspectable facts:
+Before stopping for auth or unresolved data, scope evidence to that tuple; another harness CLI cannot block it.
 
 - task/profile fit and required reasoning class
 - raw applicable headroom (`effectivePercentRemaining` or the tightest applicable remaining percentage)
@@ -45,7 +46,7 @@ Conservation pressure is present when effective pace status is `ahead`, effectiv
 Apply only among candidates that already satisfy required fit and the strongest reasoning class the request needs.
 Never use pace or raw headroom to silently replace that reasoning class.
 
-1. Unresolved relationship or quota data: stop and report the blocked candidate.
+1. Unresolved relationship, auth, or quota: report exact `harness`, `model`, auth surface, and concrete failure evidence for that tuple.
 2. All-tight: keep the strongest-reasoning class; dispatch inside it or stop and report that the tight choice cannot proceed.
 3. When fit and reasoning are comparable, prefer a candidate without ahead-of-reset conservation pressure over one with conservation pressure, even when the pressured candidate has somewhat higher raw remaining percentage.
 4. Among pressured candidates, prefer the least-negative worst applicable reserve.
@@ -60,4 +61,5 @@ Never use pace or raw headroom to silently replace that reasoning class.
    Report duplicate concrete profiles as a configuration error.
 
 Name the inspectable facts used for every candidate.
+A blocked credential report must name `harness`, `model`, authentication surface, and concrete failure evidence; never emit a bare `Grok unauthenticated` statement.
 Never conclude with an unexplained "best quota" label.

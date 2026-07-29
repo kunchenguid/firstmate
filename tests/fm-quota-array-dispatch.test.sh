@@ -193,7 +193,7 @@ test_owner_contains_selection_procedure() {
   words=$(wc -w < "$OWNER" | tr -d ' ')
   bytes=$(wc -c < "$OWNER" | tr -d ' ')
   [ "$lines" -le 65 ] || fail "quota-array-dispatch skill is too long: $lines lines (want <= 65)"
-  [ "$words" -le 550 ] || fail "quota-array-dispatch skill is too wordy: $words words (want <= 550)"
+  [ "$words" -le 600 ] || fail "quota-array-dispatch skill is too wordy: $words words (want <= 600)"
   [ "$bytes" -le 4600 ] || fail "quota-array-dispatch skill is too large: $bytes bytes (want <= 4600)"
   pass "quota-array-dispatch owns the compact pace procedure ($lines lines, $words words, $bytes bytes)"
 }
@@ -269,6 +269,60 @@ elif got.get("id") != expect:
   done < <(python3 -c 'import json,sys; data=json.load(sys.stdin); [print(json.dumps(c, separators=(",", ":"))) for c in data["cases"]]' <<<"$raw")
 }
 
+test_dispatch_identity_and_blocked_report() {
+  local reports
+  assert_grep '`harness-adapters` owns identity' "$OWNER" \
+    "quota-array-dispatch does not point to the adapter identity owner"
+  assert_grep "another harness CLI cannot block it" "$OWNER" \
+    "quota-array-dispatch does not scope evidence to the concrete tuple"
+  assert_grep 'A blocked credential report must name `harness`, `model`, authentication surface, and concrete failure evidence' "$OWNER" \
+    "blocked reports do not preserve the minimum identity and evidence fields"
+  assert_grep 'The concrete `harness` field owns adapter identity independently of the model provider' "$HARNESS" \
+    "harness-adapters lost the anti-conflation owner paragraph"
+  assert_grep '`harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`' "$HARNESS" \
+    "harness-adapters lost the concrete Pi/xAI versus Grok distinction"
+  assert_grep 'does not require Grok CLI login' "$HARNESS" \
+    "Pi/xAI guidance incorrectly requires Grok CLI login"
+  assert_no_grep '### Dispatch identity mapping' "$HARNESS" \
+    "identity guidance grew a separate table instead of one owner paragraph"
+
+  reports=$(python3 - <<'PY'
+
+def auth_surface(harness, model, provider):
+    if harness == "pi" and model.startswith("xai/") and provider == "xai":
+        return "Pi xAI OAuth"
+    if harness == "grok":
+        return "Grok Build CLI"
+    raise AssertionError("unresolved concrete profile")
+
+def blocked(harness, model, provider, failure):
+    surface = auth_surface(harness, model, provider)
+    return (f"blocked: harness={harness} model={model} provider={provider} "
+            f"authentication surface checked={surface} failure evidence={failure}")
+
+model = "xai/grok-4.5"
+provider = "xai"
+pi = blocked("pi", model, provider, "Pi xAI OAuth unavailable")
+grok = blocked("grok", model, provider, "Grok Build CLI login missing")
+assert "Grok Build CLI" not in pi
+assert "Pi xAI OAuth" in pi
+assert "Grok Build CLI" in grok
+print(pi)
+print(grok)
+PY
+) || fail "identity counterfactual fixture failed"
+  assert_contains "$reports" 'blocked: harness=pi model=xai/grok-4.5 provider=xai authentication surface checked=Pi xAI OAuth' \
+    "Pi/xAI blocked evidence was not scoped to Pi"
+  assert_not_contains "$reports" 'harness=pi model=xai/grok-4.5 provider=xai authentication surface checked=Grok Build CLI' \
+    "Pi/xAI was reported with the standalone Grok CLI surface"
+  assert_contains "$reports" 'blocked: harness=grok model=xai/grok-4.5 provider=xai authentication surface checked=Grok Build CLI' \
+    "explicit Grok candidate did not use the Grok Build CLI surface"
+  for field in harness=pi model=xai/grok-4.5 provider=xai 'authentication surface checked=Pi xAI OAuth' 'failure evidence=Pi xAI OAuth unavailable'; do
+    assert_contains "$reports" "$field" "Pi blocked report lost '$field'"
+  done
+  pass "dispatch identity stays concrete across the Pi/xAI versus Grok counterfactual"
+}
+
 test_no_duplicate_procedure_in_agents() {
   # Guard against re-expanding the full procedure into AGENTS.md.
   local count
@@ -284,4 +338,5 @@ test_owner_contains_selection_procedure
 test_cross_references_stay_pointers
 test_schema_v3_shape_fixture
 test_deterministic_acceptance_cases
+test_dispatch_identity_and_blocked_report
 test_no_duplicate_procedure_in_agents
