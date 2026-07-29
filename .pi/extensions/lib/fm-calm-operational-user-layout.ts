@@ -3,14 +3,12 @@
 // and throws if it is missing; fm-calm.ts catches that and skips only this adapter with a
 // diagnostic instead of blocking Calm or Pi. It changes only that presentation and never
 // message delivery.
-import {
-  InteractiveMode,
-  UserMessageComponent,
-} from "@earendil-works/pi-coding-agent";
+import type { UserMessageComponent as PiUserMessageComponent } from "@earendil-works/pi-coding-agent";
+import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import { calmPresentationHides } from "./fm-calm-visibility.ts";
 import { classifyFirstmateCurrentOperationalText } from "./fm-operational-input.ts";
 
-type UserMessageConstructorArgs = ConstructorParameters<typeof UserMessageComponent>;
+type UserMessageConstructorArgs = ConstructorParameters<typeof PiUserMessageComponent>;
 type UserMessageLike = {
   role: string;
   content: unknown;
@@ -21,7 +19,7 @@ type AddMessageOptions = {
 type InteractiveModePresentation = {
   chatContainer: {
     children: unknown[];
-    addChild(component: UserMessageComponent): void;
+    addChild(component: PiUserMessageComponent): void;
   };
   editor: {
     addToHistory?(text: string): void;
@@ -84,12 +82,20 @@ export function installCalmOperationalUserLayout(): void {
     hidesOperationalInput,
     isOperationalInput,
   };
+  const InteractiveMode = PiCodingAgent.InteractiveMode;
+  if (typeof InteractiveMode !== "function") {
+    throw new Error("Firstmate Calm requires Pi InteractiveMode");
+  }
   const prototype = InteractiveMode.prototype as unknown as InteractiveModePrototype;
   const originalAddMessageToChat = prototype.addMessageToChat;
   if (typeof originalAddMessageToChat !== "function") {
     throw new Error("Firstmate Calm requires Pi InteractiveMode.addMessageToChat");
   }
 
+  const UserMessageComponent = PiCodingAgent.UserMessageComponent;
+  if (typeof UserMessageComponent !== "function") {
+    throw new Error("Firstmate Calm requires Pi UserMessageComponent");
+  }
   class CalmOperationalUserMessageComponent extends UserMessageComponent {
     private readonly hasLeadingSpacer: boolean;
 

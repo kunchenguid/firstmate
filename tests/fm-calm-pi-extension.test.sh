@@ -95,8 +95,10 @@ test_static_contract() {
   assert_contains "$text" 'installCalmPresentationAdapter("collapsed-thinking", installCalmAssistantLayout)' "Pi Calm extension does not install its zero-height assistant layout"
   assert_contains "$text" 'installCalmPresentationAdapter("operational-user-row", installCalmOperationalUserLayout)' "Pi Calm extension does not install its operational-user layout"
   assert_contains "$text" 'function installCalmPresentationAdapter' "Pi Calm extension does not degrade a missing presentation adapter independently with a diagnostic"
+  assert_contains "$assistant_layout" 'import * as PiCodingAgent' "Pi Calm assistant layout still requires its optional runtime class as a named import"
   assert_contains "$assistant_layout" 'AssistantMessageComponent.prototype.updateContent' "Pi Calm assistant layout does not control the exported component presentation path"
   assert_contains "$assistant_layout" 'block.type !== "thinking"' "Pi Calm assistant layout does not remove thinking from its presentation copy"
+  assert_contains "$operational_user_layout" 'import * as PiCodingAgent' "Pi Calm operational-user layout still requires its optional runtime class as a named import"
   assert_contains "$operational_user_layout" 'InteractiveMode.prototype' "Pi Calm operational-user layout does not control the transcript owner"
   assert_contains "$operational_user_layout" 'classifyFirstmateCurrentOperationalText(text)' "Pi Calm operational-user layout bypasses canonical current classification"
   assert_contains "$operational_user_layout" 'text.includes("\u2063")' "Pi Calm operational-user layout spawns its classifier for ordinary captain rows"
@@ -348,6 +350,58 @@ JS
   [ "$status" -eq 0 ] || fail "Pi calm degraded-adapter path failed: $out"
   [ -z "$out" ] || fail "Pi calm degraded-adapter test printed output: $out"
   pass "a missing collapsed-thinking presentation API degrades only that Calm adapter with a clear skip reason, while the rest of Calm still registers"
+}
+
+test_pi_compat_missing_adapter_exports() {
+  local fixture out status
+  if ! command -v node >/dev/null 2>&1; then
+    echo "skip: node not found for Pi calm missing-adapter-export test"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/missing-adapter-exports"
+  mkdir -p \
+    "$fixture/project/.pi/extensions/lib" \
+    "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+  printf '%s\n' \
+    '{"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}' \
+    >"$fixture/project/node_modules/@earendil-works/pi-coding-agent/package.json"
+  printf '%s\n' \
+    'export function getMarkdownTheme() { return {}; }' \
+    'export class UserMessageComponent {}' \
+    >"$fixture/project/node_modules/@earendil-works/pi-coding-agent/index.js"
+
+  out=$(cd "$fixture/project" && node --input-type=module 2>&1 <<'JS'
+const assistant = await import("./.pi/extensions/lib/fm-calm-assistant-layout.ts");
+const operational = await import("./.pi/extensions/lib/fm-calm-operational-user-layout.ts");
+
+for (const [name, install, expected] of [
+  ["collapsed-thinking", assistant.installCalmAssistantLayout, "AssistantMessageComponent"],
+  ["operational-user-row", operational.installCalmOperationalUserLayout, "InteractiveMode"],
+]) {
+  let reason;
+  try {
+    install();
+  } catch (error) {
+    reason = error instanceof Error ? error.message : String(error);
+  }
+  if (!reason?.includes(expected)) {
+    throw new Error(
+      `${name} adapter did not load and report its missing runtime export: ${String(reason)}`,
+    );
+  }
+}
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi calm missing-adapter-export path failed: $out"
+  [ -z "$out" ] || fail "Pi calm missing-adapter-export test printed output: $out"
+  pass "missing Pi presentation class exports reach the independent adapter degradation path"
 }
 
 test_rendering_and_session_lifecycle() {
@@ -2096,6 +2150,7 @@ test_static_contract
 test_home_resolution
 test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
+test_pi_compat_missing_adapter_exports
 test_rendering_and_session_lifecycle
 test_operational_followup_turn_e2e
 test_hidden_block_geometry_e2e
