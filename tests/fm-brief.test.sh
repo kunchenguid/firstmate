@@ -598,6 +598,46 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# Every generated variant must carry the no-agent-co-author commit rule, as a
+# numbered rule in ship and scout Rules lists and as an operating-model line in
+# the secondmate charter, so a harness's default trailer cannot land silently.
+test_all_variants_forbid_agent_commit_coauthor() {
+  local home kind id brief
+  home="$TMP_ROOT/coauthor-rule-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout secondmate; do
+    id="brief-coauthor-$kind"
+    case "$kind" in
+      ship)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+        ;;
+      scout)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+        ;;
+      secondmate)
+        FM_HOME="$home" FM_SECONDMATE_CHARTER='domain ops' \
+          "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind: brief was not scaffolded"
+    assert_grep 'Never add an agent name as a commit co-author' "$brief" \
+      "$kind brief omitted the no-agent-co-author commit rule"
+    assert_grep 'no "Co-authored-by" or "Generated with"' "$brief" \
+      "$kind brief omitted the concrete forbidden trailer forms"
+    assert_grep 'trailer naming an agent, a model, or a tool' "$brief" \
+      "$kind brief omitted the trailer-content scope (agent, model, tool)"
+    if [ "$kind" != secondmate ]; then
+      assert_grep '8. Never add an agent name as a commit co-author' "$brief" \
+        "$kind brief must carry the co-author rule as numbered rule 8, not loose prose"
+      assert_grep "append one silently by default, so check your first commit's" "$brief" \
+        "$kind brief lost the harness-default-trailer check instruction"
+    fi
+  done
+  pass "fm-brief.sh: every scaffold variant forbids agent commit co-author trailers"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -634,4 +674,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_all_variants_forbid_agent_commit_coauthor
 test_scout_and_secondmate_scaffold

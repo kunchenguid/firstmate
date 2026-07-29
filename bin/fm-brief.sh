@@ -166,6 +166,7 @@ You are in an isolated firstmate home. The local \`AGENTS.md\` is your job descr
 $PROJECT_CLONES_NOTE
 Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
 Do not invent a second delegation system.
+Never add an agent name as a commit co-author: no "Co-authored-by" or "Generated with" trailer naming an agent, a model, or a tool, on any commit you make; your own generated crewmate briefs carry the same rule to your workers.
 You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
@@ -283,6 +284,10 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Never add an agent name as a commit co-author: no "Co-authored-by" or "Generated with"
+   trailer naming an agent, a model, or a tool, on any commit, including scratch commits.
+   Some worker harnesses append one silently by default, so check your first commit's
+   trailer and amend it out if present.
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -397,6 +402,10 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Never add an agent name as a commit co-author: no "Co-authored-by" or "Generated with"
+   trailer naming an agent, a model, or a tool, on any commit.
+   Some worker harnesses append one silently by default, so check your first commit's
+   trailer and amend it out if present.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
