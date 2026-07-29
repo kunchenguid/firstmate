@@ -2902,7 +2902,11 @@ test_cross_profile_continuation_for_harness() {
   id="account-continue-$harness-z21"
   rec=$(make_case "continue-$harness" "$harness" "$id")
   read_case "$rec"
-  source_model="$harness-source-model"
+  if [ "$harness" = claude ]; then
+    source_model=claude-opus-5
+  else
+    source_model="$harness-source-model"
+  fi
   out=$(FM_FAKE_AF_PROVIDER="$provider" FM_FAKE_AF_PROFILE="$old_profile" FM_FAKE_AF_POOL="$harness-crew" \
     run_spawn "$id" "$PROJ_DIR" --account-pool "$harness-crew" --model "$source_model" --effort high)
   status=$?
@@ -3002,11 +3006,20 @@ PY
 }
 
 test_cross_provider_continuation_uses_target_default_pool() {
-  local source=$1 target=$2 id rec old_task out status source_model launch
+  local source=$1 target=$2 id rec old_task out status source_model target_model launch
   id="account-continue-$source-to-$target-z21a"
   rec=$(make_case "continue-$source-to-$target" "$source" "$id")
   read_case "$rec"
-  source_model="$source-source-model"
+  if [ "$source" = claude ]; then
+    source_model=claude-opus-5
+  else
+    source_model="$source-source-model"
+  fi
+  if [ "$target" = claude ]; then
+    target_model=claude-opus-5
+  else
+    target_model=default
+  fi
   out=$(FM_FAKE_AF_PROVIDER="$source" FM_FAKE_AF_PROFILE="$source-2" FM_FAKE_AF_POOL="$source-crew" \
     run_spawn "$id" "$PROJ_DIR" --account-pool "$source-crew" --model "$source_model" --effort high)
   status=$?
@@ -3025,7 +3038,7 @@ test_cross_provider_continuation_uses_target_default_pool() {
     "$source-to-$target continuation inherited the predecessor provider's pool"
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "$source_model" "$source-to-$target continuation inherited the source provider's model"
-  assert_regex '^model=default$' "$HOME_DIR/state/$id.meta" "$source-to-$target continuation did not restore the target model default"
+  assert_regex "^model=$target_model$" "$HOME_DIR/state/$id.meta" "$source-to-$target continuation did not resolve the target model"
   assert_regex '^effort=default$' "$HOME_DIR/state/$id.meta" "$source-to-$target continuation did not restore the target effort default"
   assert_grep "predecessor=$old_task" "$HOME_DIR/data/$id/account-attempts.md" \
     "$source-to-$target continuation lost predecessor lineage"
