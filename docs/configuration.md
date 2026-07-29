@@ -515,9 +515,11 @@ Keys beginning with `_` are operator notes and are ignored, matching the surroun
 
 `bands` binds each band to its action: `preferred` admits, `soft` queues, and `hard` refuses.
 Both non-preferred bands must name `hold_kind: "load"` - admission never opens a second queue, and a load hold can never masquerade as a captain decision.
+The `preferred` band admits and therefore has no hold at all: it carries only `action`, and a `hold_kind` or `auto_reconsider` there is refused as misleading configuration.
 
 Each entry under `signals` carries `enabled`, a fixed recognized `source`, and its own thresholds.
 `census_integrity` is the required safety signal and is the only one that may set a band under `safety-only`; its `max_snapshot_age_seconds` bounds how old a reused snapshot may be before the decision is treated as unknown.
+When a limit is configured and the snapshot's age cannot be measured, the freshness rule fails closed to the configured unknown band instead of admitting; with no configured limit an unmeasurable age is only recorded.
 `backlog_consistency` is deliberately separate from `census_integrity`: a backlog record that contradicts task metadata must be reported and repaired, but it is not evidence that the fleet is physically saturated, and collapsing both into one health bit would close the fleet for an unrelated bookkeeping error.
 `admission_queue_pressure` counts `hold_kind=load` requests; its oldest-wait age stays unmeasured because backlog age is task age, not admission wait age.
 `active_workers` records the live worker count as an explanatory baseline with no cap.
@@ -536,7 +538,7 @@ When the file exists, bootstrap validates the policy with `jq` on every session 
 A home with no policy, or a note-only policy, stays silent; with `FM_BOOTSTRAP_VERBOSE_FACTS=1` bootstrap emits `BOOTSTRAP_INFO: fleet admission control absent|inert|active`.
 Anything malformed is reported as `ADMISSION_CONTROL: invalid config/crew-dispatch.json _scheduling.admission_control - <reason>` and must be corrected rather than worked around.
 
-Validation refuses a policy that has an unknown field at any level, a threshold that is not null or a non-negative number, a soft threshold more restrictive than its hard counterpart, a threshold key without a `_count` or `_seconds` unit suffix, an unrecognized signal source, a signal enabled while its source is uncollectable, `enforce` set while its signal is disabled or while `enforcement_mode` is `safety-only`, a queue action naming any hold kind other than `load`, a second queue substrate, telemetry disabled while admission is enabled, reservations or a non-single-primary authority enabled before their dormant trigger fires, or a dormant trigger with no named checkpoint.
+Validation refuses a policy that has an unknown field at any level, a threshold that is not null or a non-negative number, a soft threshold more restrictive than its hard counterpart, a threshold key without a `_count` or `_seconds` unit suffix, an unrecognized signal source, a signal enabled while its source is uncollectable, `enforce` set while its signal is disabled or while `enforcement_mode` is `safety-only`, a queue action naming any hold kind other than `load`, a `hold_kind` or `auto_reconsider` on the admitting `preferred` band, a `queue.release_triggers` value other than exactly `["teardown", "session-start"]`, a second queue substrate, telemetry disabled while admission is enabled, reservations or a non-single-primary authority enabled before their dormant trigger fires, or a dormant trigger with no named checkpoint.
 Unknown fields are refused rather than ignored so a typo cannot silently disable a safety condition.
 
 `bin/fm-admission.sh` prints the band and its explanation and exits `0` for preferred, `3` for soft, `4` for hard, and `2` when the policy is malformed or the census cannot be evaluated, so a caller that ignores the output still stops safely.

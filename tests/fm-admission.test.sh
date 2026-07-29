@@ -292,6 +292,45 @@ test_bands_come_from_configuration_not_from_constants() {
   pass "bands are read from configuration, never from constants in the script"
 }
 
+test_unmeasurable_snapshot_age_fails_closed_when_a_limit_is_configured() {
+  local home snap rec rule
+  home=$(make_home unmeasurableage)
+  write_policy "$home"
+  snap="$home/snap.json"
+  write_snapshot "$snap"
+  jq 'del(.generated)' "$snap" > "$snap.new" && mv "$snap.new" "$snap"
+
+  # No configured limit: an unmeasurable age is recorded, nothing enforces.
+  run_owned "$home" --json --snapshot "$snap"; rec=$OUT
+  expect_code 0 "$ADMISSION_RC" "unmeasurable age, no limit"
+  [ "$(printf '%s' "$rec" | jq -r '.snapshot_freshness_seconds')" = null ] \
+    || fail "an unmeasurable age must be recorded as null, not invented"
+  rule=$(printf '%s' "$rec" | jq -r '.rules[] | select(.rule_id == "census_integrity.snapshot_age")')
+  [ "$(printf '%s' "$rule" | jq -r '.valid')" = false ] \
+    || fail "an unmeasurable age must be recorded as invalid evidence"
+  [ "$(printf '%s' "$rule" | jq -r '.signal_band')" = preferred ] \
+    || fail "with no configured limit there is no freshness condition to fail"
+
+  # A configured limit that cannot be evaluated must fail closed to the
+  # configured band, never resolve to preferred.
+  patch_policy "$home" '._scheduling.admission_control.signals.census_integrity.max_snapshot_age_seconds = 10'
+  run_owned "$home" --json --snapshot "$snap"; rec=$OUT
+  expect_code 4 "$ADMISSION_RC" "unmeasurable age with a configured limit"
+  [ "$(printf '%s' "$rec" | jq -r '.decision_band')" = hard ] \
+    || fail "an unmeasurable age with a configured limit must map to the unknown band"
+  assert_contains "$(printf '%s' "$rec" | jq -c '.controlling_rules')" "census_integrity.snapshot_age" \
+    "the unevaluable freshness condition must be named as the controlling rule"
+  [ "$(printf '%s' "$rec" | jq -r '.rules[] | select(.rule_id == "census_integrity.snapshot_age") | .valid')" = false ] \
+    || fail "the record must still say the evidence was unmeasurable"
+
+  patch_policy "$home" '._scheduling.admission_control.signals.census_integrity.unknown_band = "soft"'
+  run_owned "$home" --json --snapshot "$snap"; rec=$OUT
+  expect_code 3 "$ADMISSION_RC" "unmeasurable age, unknown_band soft"
+  [ "$(printf '%s' "$rec" | jq -r '.decision_band')" = soft ] \
+    || fail "the fail-closed band must come from configuration"
+  pass "an unmeasurable snapshot age fails closed exactly when a freshness limit is configured"
+}
+
 test_single_primary_authority_is_the_existing_session_lock() {
   local home snap rec
   home=$(make_home authority)
@@ -457,6 +496,12 @@ test_schema_validation_refuses_every_named_failure() {
     'enforcement_mode must be' 'an unrecognized enforcement mode'
   check_invalid '._scheduling.admission_control.bands.soft.hold_kind = "captain"' \
     'bands.soft.hold_kind must be "load"' 'a queue action naming another hold kind'
+  check_invalid '._scheduling.admission_control.bands.preferred.hold_kind = "load"' \
+    'only action is allowed' 'a hold kind on the admitting band'
+  check_invalid '._scheduling.admission_control.bands.preferred.auto_reconsider = true' \
+    'only action is allowed' 'an auto-reconsider flag on the admitting band'
+  check_invalid '._scheduling.admission_control.queue.release_triggers = ["session-start"]' \
+    'release_triggers must be' 'a trimmed release trigger set'
   check_invalid '._scheduling.admission_control.queue.substrate = "admission-queue.json"' \
     'admission adds no second queue' 'a second queue substrate'
   check_invalid '._scheduling.admission_control.signals.active_workers.enforce = true' \
@@ -561,6 +606,7 @@ test_same_snapshot_and_config_give_the_same_record
 test_backlog_contradiction_is_its_own_signal_not_saturation
 test_census_integrity_enforces_deterministic_safety_conditions
 test_bands_come_from_configuration_not_from_constants
+test_unmeasurable_snapshot_age_fails_closed_when_a_limit_is_configured
 test_single_primary_authority_is_the_existing_session_lock
 test_every_rule_carries_the_five_part_explanation
 test_active_workers_are_observed_and_never_capped

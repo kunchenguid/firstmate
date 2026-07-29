@@ -176,7 +176,8 @@ Admission is a third layer above routing and scheduling that answers whether the
 Its defining constraint is that it reads only the fleet snapshot, never the incoming task, so the same snapshot returns the same band for every task; anything that varies per task belongs to routing or scheduling.
 
 The mechanism is deliberately small.
-`bin/fm-admission.sh` composes the existing read-only fleet snapshot into named signals, each with its own validity, and combines them into a `preferred`, `soft`, `hard`, or `unknown` band whose every threshold and mapping is read from configuration.
+`bin/fm-admission.sh` composes the existing read-only fleet snapshot into named signals, each with its own validity, and combines them into a `preferred`, `soft`, or `hard` band whose every threshold and mapping is read from configuration.
+Missing or contradictory required evidence maps to the configured `unknown_band` rather than resolving to `preferred`.
 Backlog consistency is a separate signal from worker-census integrity, because a backlog row that contradicts task metadata is a bookkeeping fault to repair, not evidence that the fleet is physically saturated, and one aggregate health bit would close the fleet for the wrong reason.
 The existing per-home session lock is the single-primary admission authority, so there is no new process, daemon, reservation store, or second queue: deferred and refused requests stay in the owning backlog under a `load` hold, and capacity is re-examined at exactly two existing seams, successful cleanup and session start.
 

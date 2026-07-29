@@ -105,6 +105,9 @@ def signal_error($name; $sig):
 def band_error($name; $band; $action):
   if (isobj($band) | not) then "bands.\($name) must be an object"
   elif ($band.action != $action) then "bands.\($name).action must be \"\($action)\""
+  elif ($name == "preferred") and ((unknown($band; ["action"])) | length) > 0 then
+    "bands.preferred admits with no hold: only action is allowed, not "
+      + ((unknown($band; ["action"])) | join(", "))
   elif ($name != "preferred") and ($band.hold_kind != "load") then
     "bands.\($name).hold_kind must be \"load\""
   elif ($band | has("auto_reconsider")) and (isbool($band.auto_reconsider) | not) then
@@ -212,10 +215,8 @@ def queue_error:
       "unknown queue field: " + ((unknown($a.queue; ["substrate","release_triggers","already_empty_fleet_recheck"])) | join(", "))
     elif ($a.queue.substrate != "tasks-axi hold --kind load") then
       "queue.substrate must be \"tasks-axi hold --kind load\" - admission adds no second queue"
-    elif (($a.queue.release_triggers | type) != "array")
-      or (($a.queue.release_triggers | length) == 0)
-      or ((($a.queue.release_triggers) - ["teardown","session-start"]) | length) > 0 then
-      "queue.release_triggers must be a non-empty subset of [\"teardown\",\"session-start\"]"
+    elif ($a.queue.release_triggers != ["teardown","session-start"]) then
+      "queue.release_triggers must be [\"teardown\",\"session-start\"] - admission release triggers are fixed seams, not operator-selectable"
     elif ($a.queue.already_empty_fleet_recheck != "session-start-only") then
       "queue.already_empty_fleet_recheck must be \"session-start-only\""
     else empty

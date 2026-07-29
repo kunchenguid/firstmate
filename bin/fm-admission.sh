@@ -197,6 +197,7 @@ RECORD=$(printf '%s' "$SNAPSHOT" | jq \
   | ([$tasks[] | select((.current_state.state // "") == "")] | length) as $unknown_state
   | ($snapshot_age != null and ($sig.census_integrity.max_snapshot_age_seconds != null)
      and ($snapshot_age > $sig.census_integrity.max_snapshot_age_seconds)) as $stale
+  | ($snapshot_age == null and ($sig.census_integrity.max_snapshot_age_seconds != null)) as $age_unmeasurable
 
   # Every rule carries the same five parts: observed value, source and
   # freshness, config path, configured value, resulting band.
@@ -259,7 +260,7 @@ RECORD=$(printf '%s' "$SNAPSHOT" | jq \
         config_path: cfg("/signals/census_integrity/max_snapshot_age_seconds"),
         operator: ">",
         configured_value: $sig.census_integrity.max_snapshot_age_seconds,
-        result: (if $stale then ($sig.census_integrity.unknown_band // $p.unknown_band)
+        result: (if $stale or $age_unmeasurable then ($sig.census_integrity.unknown_band // $p.unknown_band)
                  else "preferred" end)
       },
       {
