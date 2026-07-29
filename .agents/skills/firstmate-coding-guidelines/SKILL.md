@@ -100,6 +100,7 @@ Run `bin/fm-doc-audience-check.sh`; it enforces classification, README setup rou
 - Every file in `bin/fm-lint.sh --list-files` must also parse under stock macOS Bash 3.2, which CI sweeps with `/bin/bash -n`; never nest a heredoc inside a command substitution, and read a multiline block with `IFS= read -r -d ''` instead.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
 - Run `bin/fm-private-material-check.sh` before publishing tracked changes anywhere public, and `--history` as well before contributing to a third-party upstream.
+  Only exit 0 means it proved the surface clean; exit 3 means the run proved nothing (`SKIPPED` or `INCOMPLETE`), so treating any non-failure as a pass would launder exactly the false confidence the check exists to prevent.
 - This repo's tracked surface must let a fleet orchestrate private repositories without naming any of them, so keep examples generic: a concrete example is good documentation, but a real project, owner, secondmate id, person, device, or machine path is a leak that publishing makes permanent.
 - A maintainer-verification record under `docs/verification/` records active empirical facts, not assumptions or task chronology.
 - Include the date, version, exact commands run, and exact output needed to support the current guarantee.

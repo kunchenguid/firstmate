@@ -4,10 +4,12 @@
 # Usage:
 #   bin/fm-private-material-check.sh [--root <repo>] [--home <fm-home>] [--history]
 #
-# The default scan covers tracked files at the current tip. --history adds past
-# commit content AND commit metadata (author and committer identity, subject,
-# body), because a pull request carries all of that into the target repository
-# and a marker deleted at tip is still published forever.
+# The default scan covers tracked files in the working tree AND at HEAD, because
+# a dirty checkout is not the surface a push publishes: a marker already
+# committed but edited out locally would otherwise read as absent. --history adds
+# past commit content AND commit metadata (author and committer identity,
+# subject, body), because a pull request carries all of that into the target
+# repository and a marker deleted at tip is still published forever.
 #
 # WHY THIS EXISTS
 # Firstmate is a toolbox and orchestration repo whose tracked surface is meant to
@@ -49,14 +51,20 @@
 # because false confidence here is worse than no check at all. So every marker
 # source is accounted for by name and count, and each of these is reported as a
 # COVERAGE GAP line rather than passing unmentioned:
-#   - a source that is present but yields no names (format drift, unreadable file)
+#   - a PARSED source that is present but yields no names, meaning format drift
+#     or an unreadable file silently removed a whole class of names
 #   - a derived name dropped as shorter than MIN_LEN or as a generic STOPWORD
-#   - a project clone whose git remotes could not be read
+#   - a project clone whose git remotes could not be read, or a remote URL whose
+#     form yields no forge owner
 #   - an account name that could not be read
+# An ENUMERATED source - a directory glob, or the remotes of a repository - is
+# different: zero there is an unambiguous "there are none", not a name that went
+# missing, so it is reported with its count and no gap. A guard that always warns
+# stops being read, and an unread guard is no guard.
 # A run with any gap reports INCOMPLETE rather than OK, and a scan command that
-# FAILS - as opposed to finding nothing - aborts with exit 2 instead of reading
-# as clean. Operator-declared markers are never dropped: they bypass the length
-# and stopword filters, because declaring a token is the strongest available
+# FAILS - as opposed to finding nothing - aborts instead of reading as clean.
+# Operator-declared markers are never dropped: they bypass the length and
+# stopword filters, because declaring a token is the strongest available
 # statement that it is private.
 #
 # WHAT THIS CANNOT CATCH - state this plainly rather than trusting a green run:
@@ -67,13 +75,20 @@
 #     never-registered project, a customer, or a person not listed in the extra
 #     markers file.
 #   - Anything at all when no marker source is present. On a machine or CI runner
-#     with no private dirs the run is VACUOUS: it reports SKIPPED and exits 0.
+#     with no private dirs the run is VACUOUS: it reports SKIPPED.
 #     A SKIPPED run is not evidence the surface is clean.
 # Human review of the diff remains the real control; this only makes the
 # mechanical, repeatable part of it impossible to forget.
 #
-# Exit codes: 0 clean, SKIPPED, or INCOMPLETE; 1 private material found;
-# 2 bad usage or a scan that could not complete.
+# EXIT CODES - a stated contract, so no caller has to parse the output text to
+# learn whether this run proved anything. "I proved it clean", "I found a leak",
+# and "I could not prove anything" are three different answers and never share a
+# code, because a caller that reads exit 0 as clean would otherwise be right most
+# of the time and catastrophically wrong the rest:
+#   0  OK          every marker was scanned and none is present
+#   1  FAILED      private material is in the scanned surface
+#   2  ERROR       bad usage, or a scan command that could not complete
+#   3  SKIPPED or INCOMPLETE - this run proved NOTHING about the surface
 set -eu
 
 MIN_LEN=3
@@ -146,10 +161,17 @@ gap() {
 
 report_absent() { SOURCES="${SOURCES}  $1: absent${NL}"; }
 
+# A parsed source yields names by matching a format, so zero means the format
+# drifted or the file could not be read: a whole class of names went unscanned.
 report_source() {
   SOURCES="${SOURCES}  $1: $2 name(s)${NL}"
   [ "$2" -gt 0 ] || gap "$1 is present but yielded no names, so nothing from it was scanned"
 }
+
+# An enumerated source lists what exists, so zero means there is nothing to
+# enumerate - a fresh home with no clones yet, or a repository with no remotes.
+# Nothing was missed, so nothing is reported as missed.
+report_enumerated() { SOURCES="${SOURCES}  $1: $2 name(s)${NL}"; }
 
 DERIVED=""
 DECLARED=""
@@ -190,7 +212,7 @@ if [ -d "$HOME_DIR/projects" ]; then
     [ -d "$d" ] || continue
     add_derived "$(basename "$d")"
   done
-  report_source "projects/ clone directories" "$SRC_COUNT"
+  report_enumerated "projects/ clone directories" "$SRC_COUNT"
 else
   report_absent "projects/ clone directories"
 fi
@@ -229,9 +251,11 @@ fi
 # 4. forge OWNERS of this repo's remotes and of every project clone's remotes.
 #    Owners only, never repository names: a repo name is usually this repo's own
 #    name or a project name already covered above, and matching it would storm.
-#    A directory whose remotes cannot be read is a gap, not a silent zero.
+#    A directory whose remotes cannot be read is a gap, not a silent zero, and so
+#    is a remote URL this parser cannot resolve to an owner: dropping one quietly
+#    would leave a forge owner unscanned while the run still read as covered.
 collect_remote_owners() {
-  local dir=$1 label=$2 url owner rc urls
+  local dir=$1 label=$2 line key url rest path owner rc urls
   if ! git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
     gap "$label is not a git repository, so its forge owners could not be read"
     return 0
@@ -242,18 +266,32 @@ collect_remote_owners() {
     gap "$label: reading git remotes failed (exit $rc: $(tr '\n' ' ' < "$ERRLOG")), so its forge owners are unscanned"
     return 0
   fi
-  while IFS= read -r url; do
-    [ -n "$url" ] || continue
-    url=${url#* }
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    key=${line%% *}
+    url=${line#* }
     case "$url" in
+      # A local path names no forge owner and never will; that is not a gap.
       /*|./*|../*|file://*) continue ;;
-      *://*) url=${url#*://} ;;
-      *:*/*) url=${url%%:*}/${url#*:} ;;
-      *) continue ;;
+      *://*) rest=${url#*://} ;;
+      # scp-style "user@host:path"; the path may or may not carry an owner.
+      *:*) rest=${url%%:*}/${url#*:} ;;
+      *) gap "$label: $key has an unrecognised URL form, so its forge owner is unscanned"
+         continue ;;
     esac
-    url=${url#*@}
-    url=${url#*/}
-    owner=${url%%/*}
+    # Any credentials live in the userinfo, which precedes the first "/", so
+    # taking the path after the host drops them without a separate strip.
+    case "$rest" in
+      */*) path=${rest#*/} ;;
+      *) path="" ;;
+    esac
+    case "$path" in
+      */*) owner=${path%%/*} ;;
+      # No owner component: an owner-less host path, or scp-style with a bare
+      # repository. Deriving the repository name here would be wrong, so say so.
+      *) gap "$label: $key has no forge-owner component, so no owner was derived from it"
+         continue ;;
+    esac
     add_derived "$owner"
   done <<EOF
 $urls
@@ -266,7 +304,7 @@ if [ -d "$HOME_DIR/projects" ]; then
     [ -d "$d" ] && collect_remote_owners "$d" "project clone $(basename "$d")"
   done
 fi
-SOURCES="${SOURCES}  git remote owners: $SRC_COUNT name(s)${NL}"
+report_enumerated "git remote owners" "$SRC_COUNT"
 
 # 5. the local account name, which is what makes machine-local home paths legible.
 #    Only when this really is an operational home: on a runner with no private
@@ -358,7 +396,7 @@ if [ -z "$MARKERS" ]; then
     printf 'fm-private-material-check: SKIPPED - no private marker sources under %s\n' "$HOME_DIR"
   fi
   printf 'fm-private-material-check: a SKIPPED run proves nothing about the tracked surface.\n'
-  exit 0
+  exit 3
 fi
 
 # Build a word-bounded, separator-insensitive pattern for one marker.
@@ -392,6 +430,11 @@ scan_failed() {
 # before the marker loop, so a failure here is caught before any marker is
 # reported clean.
 META="$TMPD/meta"
+TIPHITS="$TMPD/tip"
+# A repository with no commits has no committed surface to scan; that is not a
+# gap, because nothing has been published from it.
+HAVE_HEAD=0
+git -C "$ROOT" rev-parse --verify -q HEAD >/dev/null 2>&1 && HAVE_HEAD=1
 if [ "$SCAN_HISTORY" -eq 1 ]; then
   git -C "$ROOT" log --all -z --format='%h %an <%ae> %cn <%ce> %s %b' \
     >"$TMPD/meta.raw" 2>"$ERRLOG" && rc=0 || rc=$?
@@ -405,12 +448,27 @@ while IFS= read -r m; do
   [ -n "$m" ] || continue
   count=$((count + 1))
   pat=$(marker_pattern "$m")
-  hits=$(git -C "$ROOT" grep -n -I -i -E -- "$pat" 2>"$ERRLOG") && rc=0 || rc=$?
+  hits=$(git -C "$ROOT" grep -n -I -i -E -e "$pat" 2>"$ERRLOG") && rc=0 || rc=$?
   [ "$rc" -le 1 ] || scan_failed "$rc" "scanning tracked files for marker \"$m\""
   if [ -n "$hits" ]; then
     status=1
     printf '\nPRIVATE MATERIAL: marker "%s" appears in tracked files:\n' "$m"
     printf '%s\n' "$hits" | sed 's/^/  /'
+  fi
+  # git grep reads the working tree, so on a dirty checkout it is not reading
+  # what a push would publish. Scan HEAD too, and report only what the working
+  # tree did not already show, so the committed-only case cannot pass silently.
+  if [ "$HAVE_HEAD" -eq 1 ]; then
+    headhits=$(git -C "$ROOT" grep -n -I -i -E -e "$pat" HEAD 2>"$ERRLOG") && rc=0 || rc=$?
+    [ "$rc" -le 1 ] || scan_failed "$rc" "scanning the committed tree for marker \"$m\""
+    printf '%s\n' "$hits" > "$TIPHITS"
+    headhits=$(printf '%s\n' "$headhits" | sed 's/^HEAD://' \
+      | grep -Fxv -f "$TIPHITS" || true)
+    if [ -n "$headhits" ]; then
+      status=1
+      printf '\nPRIVATE MATERIAL AT HEAD: marker "%s" is committed, beyond what the working tree shows:\n' "$m"
+      printf '%s\n' "$headhits" | sed 's/^/  /'
+    fi
   fi
   if [ "$SCAN_HISTORY" -eq 1 ]; then
     # -i is required here: markers are lowercased, and git log -G is
@@ -437,6 +495,7 @@ done < <(printf '%s' "$MARKERS")
 
 if [ "$status" -eq 0 ]; then
   if [ "$GAP_COUNT" -gt 0 ]; then
+    status=3
     printf 'fm-private-material-check: INCOMPLETE - %d marker(s) checked with no hits, but %d coverage gap(s) above mean this run did NOT prove the tracked surface clean.\n' \
       "$count" "$GAP_COUNT"
   else

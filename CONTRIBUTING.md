@@ -41,7 +41,8 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Everything personal to one captain's fleet (`.env`, `data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`) is gitignored; never commit it.
   `bin/fm-private-material-check.sh` guards the other direction: it derives markers from those private dirs at runtime and fails when one reaches a tracked file, so a leak does not ride along in the next commit.
   It can only derive those markers on a machine that has the private dirs, so CI cannot run it for you: run it yourself before publishing tracked changes anywhere public, because publishing cannot be undone by a later commit.
-  Only an `OK` result is a clean one; `SKIPPED` means it had nothing to derive and `INCOMPLETE` means something went unscanned, and neither is evidence the surface is clean.
+  Only exit status 0 (`OK`) is a clean result: 1 means a marker is present, 3 means the run proved nothing (`SKIPPED` if it had nothing to derive, `INCOMPLETE` if something went unscanned), and 2 means it could not run at all.
+  Those are distinct codes on purpose, so neither a person nor a later gate has to read the prose to learn whether the run proved anything.
   It matches names only, so it cannot see private strategy written as ordinary prose; its header owns the full limits, and [`docs/examples/private-material-allow`](docs/examples/private-material-allow) documents the local allowlist for an identity that is legitimately public.
   The root `.tasks.toml` is tracked `tasks-axi` config for `data/backlog.md`; compatible `tasks-axi` is the default backend for routine backlog mutations, with the compatibility definition owned by [`docs/configuration.md`](docs/configuration.md) ("Backlog backend").
   A local `config/backlog-backend=manual` opt-out forces firstmate's routine backlog updates to hand-editing and stays gitignored; validated secondmate handoffs still delegate through `tasks-axi mv`.
