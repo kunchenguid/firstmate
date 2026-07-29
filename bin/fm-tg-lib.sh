@@ -1219,18 +1219,30 @@ fmtg_landing_guard() {  # <task-id> <task-project> <landing-target> <actual-revi
   local peer_user peer_chat armed_user armed_chat
   fmtg_publish_task_valid "$task" || { printf 'invalid-task'; return 1; }
   [ -n "$target" ] || { printf 'missing-landing-target'; return 1; }
-  [ -n "$rev" ] || { printf 'unresolved-revision'; return 1; }
   case "$now" in ''|*[!0-9]*) printf 'bad-clock'; return 1 ;; esac
 
   # An explicit local release stands in for a confirmation that can no longer be
   # obtained, and only while there is nothing live to obtain: an armed record for
   # this task means a preview WAS shown under it, so that supersedes an older
   # release and the ordinary rules below decide.
+  #
+  # This is answered BEFORE the revision is required, and the ordering is part of
+  # the contract rather than an accident. Every revision rule below exists to
+  # check a confirmation against the change the person approved; a released task
+  # has no confirmation to check, so demanding a resolvable revision first would
+  # refuse it for failing a test that does not apply to it. `pr_head` is
+  # genuinely optional - a GitLab task never records one, and a GitHub task
+  # records none when the forge CLI cannot supply it - so that is the ordinary
+  # state of a pull-request landing, not an exotic one, and the release must
+  # survive it. Nothing below this point is skipped for an UNRELEASED task: it
+  # still refuses on an unresolvable revision exactly as before.
   if [ -n "$meta" ] && ! fmtg_publish_show "$task" >/dev/null 2>&1 \
     && fmtg_meta_released "$meta"; then
     printf 'released'
     return 0
   fi
+
+  [ -n "$rev" ] || { printf 'unresolved-revision'; return 1; }
 
   peer=$(fmtg_peer_get 2>/dev/null) || { printf 'no-paired-peer'; return 6; }
   pinned=$(printf '%s' "$peer" | jq -r '.project // empty') || { printf 'bad-peer-record'; return 1; }

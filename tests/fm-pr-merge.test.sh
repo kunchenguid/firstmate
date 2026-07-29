@@ -409,6 +409,47 @@ SH
   pass "a Telegram-linked task refuses to merge a revision it cannot verify"
 }
 
+# The explicit release has to reach THIS path too, and the revision it would be
+# checked against is routinely unavailable here: a GitLab task never records
+# pr_head, and a GitHub task records none when the forge CLI cannot supply it.
+# A released task has no confirmation to check a revision against, so requiring
+# one first refused it for failing a test that does not apply - while the local
+# path, which always resolves its own branch tip, worked. The unreleased half of
+# this rule stays pinned by
+# test_telegram_linked_merge_refuses_when_the_revision_cannot_be_resolved.
+test_a_released_task_lands_without_a_resolvable_pr_head() {
+  local case_dir rc
+  case_dir=$(make_telegram_case tg-released none "$TG_HEAD_SHA" null)
+  printf 'tg_released_at=100\ntg_release_reason=pairing revoked; person unreachable\n' \
+    >> "$case_dir/state/task-x1.meta"
+  # The pairing is gone for good, exactly as revoke plus the documented opt-out
+  # leaves it, so no confirmation can ever be obtained for this task again.
+  rm -rf "$case_dir/state/telegram"
+  # No `gh`, so fm-pr-check.sh records no pr_head at all.
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+  rm -f "$case_dir/fakebin/gh"
+  : > "$case_dir/gh-axi.log"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "tg-released: a released task could not land through a pull request"
+  grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "tg-released: the released merge did not run"
+  assert_grep 'explicit local release' "$case_dir/stderr" \
+    "tg-released: the landing did not say a release was what let it through"
+  assert_grep 'person unreachable' "$case_dir/stderr" "tg-released: the release reason was not reported"
+  assert_no_grep 'could not be resolved' "$case_dir/stderr" \
+    "tg-released: a released task was still asked for a revision to check a confirmation against"
+  pass "a released task lands through a pull request even when no pr_head can be resolved"
+}
+
 test_telegram_linked_merge_lands_once_and_never_replays() {
   local case_dir rc
   case_dir=$(make_telegram_case tg-ok eren-pov-site "$TG_HEAD_SHA" 100)
@@ -501,6 +542,7 @@ test_telegram_linked_merge_refuses_an_unconsumed_confirmation
 test_telegram_linked_merge_refuses_a_moved_revision
 test_telegram_linked_merge_refuses_a_wrong_project_confirmation
 test_telegram_linked_merge_refuses_when_the_revision_cannot_be_resolved
+test_a_released_task_lands_without_a_resolvable_pr_head
 test_telegram_linked_merge_lands_once_and_never_replays
 test_unlinked_task_is_unaffected_by_the_telegram_gate
 test_empty_telegram_link_does_not_bypass_the_gate
