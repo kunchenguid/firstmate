@@ -14,6 +14,10 @@
 #   (h) staged content and executable modes must also match the branch
 #   (i) repository and global excludes cannot stand in for branch ignore rules
 #   (j) already-ignored untracked files are enumerated and retained or refused
+#   (k) an ignored untracked directory with no incoming tracked collision stays intact
+#   (l) an ignored untracked directory with an incoming tracked collision refuses
+#   (m) staged mode-only dirt matching the incoming mode remains supported
+#   (n) an ignored file nested under an unignored directory keeps its hash proof
 set -u
 
 # shellcheck disable=SC1091
@@ -222,6 +226,190 @@ test_branch_ignored_untracked_file_permits() {
   pass "fm-merge-local permits an untracked path ignored at the branch head"
 }
 
+test_branch_ignored_untracked_directory_permits_without_descending() {
+  local case_dir before_hash after_hash
+  case_dir=$(make_case ignored-directory)
+  printf 'workspace/\n' >"$case_dir/branch/.gitignore"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" commit -qm "ignore runtime workspace"
+  mkdir -p "$case_dir/project/workspace/nested"
+  git -C "$case_dir/project/workspace" init -q
+  printf 'runtime state\n' >"$case_dir/project/workspace/nested/state.txt"
+  before_hash=$(git -C "$case_dir/project" hash-object -- workspace/nested/state.txt)
+
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "ignored-directory: merge should preserve an ignored directory with no incoming collision"
+
+  after_hash=$(git -C "$case_dir/project" hash-object -- workspace/nested/state.txt)
+  [ "$after_hash" = "$before_hash" ] \
+    || fail "ignored-directory: merge changed content below the preserved directory"
+  [ -d "$case_dir/project/workspace" ] \
+    || fail "ignored-directory: merge removed the preserved directory"
+  assert_path_clean "$case_dir/project" workspace \
+    "ignored-directory: branch-ignored directory remained dirty after merge"
+  assert_main_reached_branch "$case_dir" \
+    "ignored-directory: main did not fast-forward to the task branch"
+  pass "fm-merge-local preserves a branch-ignored untracked directory without hashing its contents"
+}
+
+test_nested_branch_ignored_untracked_file_permits() {
+  local case_dir before_hash after_hash
+  case_dir=$(make_case nested-ignored-untracked)
+  printf 'workspace/runtime-state.txt\n' >"$case_dir/branch/.gitignore"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" commit -qm "ignore nested runtime state"
+  mkdir -p "$case_dir/project/workspace"
+  printf 'runtime scratch\n' >"$case_dir/project/workspace/runtime-state.txt"
+  before_hash=$(git -C "$case_dir/project" hash-object -- workspace/runtime-state.txt)
+
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "nested-ignored-untracked: merge should preserve an ignored file below an unignored directory"
+
+  after_hash=$(git -C "$case_dir/project" hash-object -- workspace/runtime-state.txt)
+  [ "$after_hash" = "$before_hash" ] \
+    || fail "nested-ignored-untracked: merge changed the ignored file"
+  assert_path_clean "$case_dir/project" workspace/runtime-state.txt \
+    "nested-ignored-untracked: ignored nested file remained dirty after merge"
+  assert_main_reached_branch "$case_dir" \
+    "nested-ignored-untracked: main did not fast-forward to the task branch"
+  pass "fm-merge-local retains the file proof for nested branch-ignored untracked content"
+}
+
+test_branch_ignored_directory_with_incoming_collision_refuses() {
+  local case_dir before rc
+  case_dir=$(make_case ignored-directory-collision)
+  printf 'workspace/\n' >"$case_dir/branch/.gitignore"
+  mkdir -p "$case_dir/branch/workspace"
+  printf 'incoming tracked state\n' >"$case_dir/branch/workspace/config.json"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" add -f workspace/config.json
+  git -C "$case_dir/branch" commit -qm "ignore workspace with tracked config"
+  mkdir -p "$case_dir/project/workspace"
+  printf 'local runtime state\n' >"$case_dir/project/workspace/runtime.json"
+  before=$(git -C "$case_dir/project" rev-parse main)
+
+  set +e
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ignored-directory-collision: merge should refuse"
+  assert_grep 'workspace/' "$case_dir/stderr" \
+    "ignored-directory-collision: refusal did not name the unsafe directory"
+  assert_grep 'incoming tracked path' "$case_dir/stderr" \
+    "ignored-directory-collision: refusal did not explain the tracked collision"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "ignored-directory-collision: refusal advanced main"
+  [ -f "$case_dir/project/workspace/runtime.json" ] \
+    || fail "ignored-directory-collision: refusal changed local runtime state"
+  pass "fm-merge-local refuses an ignored directory when the incoming tree uses its prefix"
+}
+
+test_branch_ignored_directory_with_casefolded_incoming_collision_refuses() {
+  local case_dir before fakebin rc real_git
+  case_dir=$(make_case ignored-directory-casefolded-collision)
+  git -C "$case_dir/project" config core.ignoreCase true
+  printf 'workspace/\n' >"$case_dir/branch/.gitignore"
+  mkdir -p "$case_dir/branch/workspace"
+  printf 'incoming tracked state\n' >"$case_dir/branch/workspace/config.json"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" add -f workspace/config.json
+  git -C "$case_dir/branch" commit -qm "ignore workspace with tracked config"
+  mkdir -p "$case_dir/project/Workspace"
+  printf 'local runtime state\n' >"$case_dir/project/Workspace/runtime.json"
+  before=$(git -C "$case_dir/project" rev-parse main)
+  fakebin=$(fm_fakebin "$case_dir")
+  real_git=$(command -v git)
+  cat >"$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+set -eu
+target_init=false
+last=
+for arg in "$@"; do
+  [ "$arg" = "init.defaultBranch=fm-target-view" ] && target_init=true
+  last=$arg
+done
+if [ "$target_init" = true ]; then
+  "$FM_REAL_GIT" "$@"
+  "$FM_REAL_GIT" -C "$last" config core.ignoreCase false
+  exit 0
+fi
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
+
+  set +e
+  FM_REAL_GIT="$real_git" \
+  PATH="$fakebin:$PATH" \
+    run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ignored-directory-casefolded-collision: merge should refuse"
+  assert_grep 'Workspace/' "$case_dir/stderr" \
+    "ignored-directory-casefolded-collision: refusal did not name the unsafe directory"
+  assert_grep 'incoming tracked path' "$case_dir/stderr" \
+    "ignored-directory-casefolded-collision: refusal did not explain the tracked collision"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "ignored-directory-casefolded-collision: refusal advanced main"
+  [ -f "$case_dir/project/Workspace/runtime.json" ] \
+    || fail "ignored-directory-casefolded-collision: refusal changed local runtime state"
+  pass "fm-merge-local refuses case-folded incoming collisions for ignored directories"
+}
+
+test_tracked_path_replaced_by_directory_refuses_staged_state() {
+  local before before_index case_dir rc
+  case_dir=$(make_case staged-directory-conversion)
+  git -C "$case_dir/branch" rm -q runtime-state.txt
+  printf 'runtime-state.txt/\n' >"$case_dir/branch/.gitignore"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" commit -qm "leave runtime directory untracked"
+  printf 'staged runtime state\n' >"$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  rm "$case_dir/project/runtime-state.txt"
+  mkdir "$case_dir/project/runtime-state.txt"
+  printf 'working runtime state\n' >"$case_dir/project/runtime-state.txt/state"
+  before=$(git -C "$case_dir/project" rev-parse main)
+  before_index=$(git -C "$case_dir/project" rev-parse :runtime-state.txt)
+
+  set +e
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "staged-directory-conversion: merge should refuse"
+  assert_grep 'staged state cannot be preserved' "$case_dir/stderr" \
+    "staged-directory-conversion: refusal did not diagnose the staged state"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "staged-directory-conversion: refusal advanced main"
+  [ "$(git -C "$case_dir/project" rev-parse :runtime-state.txt)" = "$before_index" ] \
+    || fail "staged-directory-conversion: refusal changed the index"
+  assert_grep 'working runtime state' "$case_dir/project/runtime-state.txt/state" \
+    "staged-directory-conversion: refusal changed the working directory"
+  pass "fm-merge-local refuses to discard staged state behind an ignored directory"
+}
+
+test_staged_mode_only_dirt_matching_branch_permits() {
+  local case_dir mode
+  case_dir=$(make_case staged-mode)
+  chmod +x "$case_dir/branch/tracked.txt"
+  git -C "$case_dir/branch" add tracked.txt
+  git -C "$case_dir/branch" commit -qm "make tracked script executable"
+  chmod +x "$case_dir/project/tracked.txt"
+  git -C "$case_dir/project" add tracked.txt
+
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "staged-mode: merge should preserve staged mode-only content matching the branch"
+
+  mode=$(git -C "$case_dir/project" ls-files -s -- tracked.txt | awk '{ print $1 }')
+  [ "$mode" = 100755 ] || fail "staged-mode: incoming executable mode was not retained (got $mode)"
+  assert_path_clean "$case_dir/project" tracked.txt \
+    "staged-mode: previously staged mode change was not clean after merge"
+  assert_main_reached_branch "$case_dir" \
+    "staged-mode: main did not fast-forward to the task branch"
+  pass "fm-merge-local retains the incoming mode for staged mode-only dirt"
+}
+
 test_diverged_branch_still_refuses() {
   local case_dir rc
   case_dir=$(make_case diverged)
@@ -427,6 +615,12 @@ test_untracked_conversion_permits_and_preserves_file
 test_untracked_conversion_refuses_divergent_staged_content
 test_untracked_conversion_refuses_divergent_staged_mode
 test_branch_ignored_untracked_file_permits
+test_branch_ignored_untracked_directory_permits_without_descending
+test_nested_branch_ignored_untracked_file_permits
+test_branch_ignored_directory_with_incoming_collision_refuses
+test_branch_ignored_directory_with_casefolded_incoming_collision_refuses
+test_tracked_path_replaced_by_directory_refuses_staged_state
+test_staged_mode_only_dirt_matching_branch_permits
 test_diverged_branch_still_refuses
 test_non_default_checkout_still_refuses
 test_mixed_resolved_and_unresolved_refuses
