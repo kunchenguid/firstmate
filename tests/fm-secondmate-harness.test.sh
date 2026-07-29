@@ -123,8 +123,15 @@ test_claude_crew_model_anchor_resolution() {
   [ "$out" = claude-opus-5 ] || fail "absent Claude crew model config did not resolve the Opus 5 anchor: $out"
 
   printf 'claude-opus-5-custom\n' > "$cfg/claude-crew-model"
-  out=$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" claude-crew-model)
-  [ "$out" = claude-opus-5-custom ] || fail "configured Claude crew model override was ignored: $out"
+  err="$TMP_ROOT/claude-crew-model/mismatch.err"
+  if FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" claude-crew-model > /dev/null 2>"$err"; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "Claude crew model resolver accepted a non-Opus-5 anchor"
+  assert_contains "$(cat "$err")" "must equal the installed Opus 5 anchor 'claude-opus-5'" \
+    "mismatched Claude anchor error was not actionable"
 
   printf 'default\n' > "$cfg/claude-crew-model"
   err="$TMP_ROOT/claude-crew-model/invalid.err"
@@ -136,7 +143,7 @@ test_claude_crew_model_anchor_resolution() {
   [ "$status" -ne 0 ] || fail "Claude crew model resolver accepted an inherited-default sentinel"
   assert_contains "$(cat "$err")" "must contain one explicit Claude model id" \
     "invalid Claude crew model error was not actionable"
-  pass "C2 fm-harness.sh resolves the Opus 5 anchor, honors one local override, and rejects inherited defaults"
+  pass "C2 fm-harness.sh resolves only the exact installed Opus 5 anchor and rejects mismatches"
 }
 
 # ===========================================================================

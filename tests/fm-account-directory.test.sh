@@ -104,8 +104,13 @@ for provider in claude codex; do
     else
       pools="[\"$provider-crew\",\"$provider-manual\"]"
     fi
-    printf '%s{"id":"%s-%s","provider":"%s","home":"%s","pools":%s,"enabled":false}' \
-      "$separator" "$provider" "$account" "$provider" "$home" "$pools"
+    enabled=true
+    safety_policy=worker
+    [ ! -f "$home/test-disabled" ] || enabled=false
+    [ ! -f "$home/test-non-worker" ] || safety_policy=manual_only
+    printf '%s{"id":"%s-%s","provider":"%s","home":"%s","pools":%s,"enabled":%s,"safety_policy":"%s"}' \
+      "$separator" "$provider" "$account" "$provider" "$home" "$pools" \
+      "$enabled" "$safety_policy"
     separator=,
   done
 done
@@ -152,7 +157,52 @@ mark_last_resort() {
 mark_claude_keychain_ready() {
   local account=$1
   mkdir -p "$ACCOUNT_ROOT/claude/$account/.agent-fleet-quota-cache/quota-axi"
-  touch "$ACCOUNT_ROOT/claude/$account/.agent-fleet-quota-cache/quota-axi/claude-keychain-access-granted"
+  printf 'granted\n' > "$ACCOUNT_ROOT/claude/$account/.agent-fleet-quota-cache/quota-axi/claude-keychain-access-granted"
+  chmod 600 "$ACCOUNT_ROOT/claude/$account/.agent-fleet-quota-cache/quota-axi/claude-keychain-access-granted"
+}
+
+test_profile_eligibility_requires_enabled_worker() {
+  local out err expected
+  reset_accounts
+  mkdir -p "$ACCOUNT_ROOT/codex/1" "$ACCOUNT_ROOT/codex/2" "$ACCOUNT_ROOT/codex/3"
+  touch "$ACCOUNT_ROOT/codex/1/test-disabled"
+  touch "$ACCOUNT_ROOT/codex/2/test-non-worker"
+  set_remaining 1 100,100
+  set_remaining 2 100,100
+  set_remaining 3 80,80
+  out=$(run_selector select codex 2>"$TMP_ROOT/profile-eligibility.err")
+  err=$(cat "$TMP_ROOT/profile-eligibility.err")
+  expected="$ACCOUNT_ROOT/codex/3"
+  [ "$out" = "$expected" ] || fail "disabled or non-worker profile entered crew selection: $out"
+  assert_contains "$err" "$ACCOUNT_ROOT/codex/1 excluded from codex-crew: profile is disabled" \
+    "disabled profile exclusion was not explicit"
+  assert_contains "$err" "$ACCOUNT_ROOT/codex/2 excluded from codex-crew: safety policy is not worker" \
+    "non-worker profile exclusion was not explicit"
+  pass "crew selection hard-excludes disabled and non-worker profiles with explicit diagnostics"
+}
+
+test_claude_approval_marker_contract() {
+  local marker out status
+  reset_accounts
+  mkdir -p "$ACCOUNT_ROOT/claude/1/.agent-fleet-quota-cache/quota-axi"
+  marker="$ACCOUNT_ROOT/claude/1/.agent-fleet-quota-cache/quota-axi/claude-keychain-access-granted"
+  printf 'granted' > "$marker"
+  chmod 600 "$marker"
+  if out=$(run_selector select claude 2>&1); then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "Claude selection accepted a marker without the exact granted newline payload"
+  assert_contains "$out" "invalid quota-axi Keychain approval marker" \
+    "malformed approval payload did not fail with a clear diagnostic"
+
+  printf 'granted\n' > "$marker"
+  chmod 644 "$marker"
+  if out=$(run_selector select claude 2>&1); then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "Claude selection accepted an insecure approval marker mode"
+
+  chmod 600 "$marker"
+  ln "$marker" "$marker.link"
+  if out=$(run_selector select claude 2>&1); then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "Claude selection accepted a multiply linked approval marker"
+  pass "Claude approval marker requires exact content, secure metadata, and one stable link"
 }
 
 test_codex_picks_highest_fresh_minimum_and_skips_no_window() {
@@ -356,7 +406,8 @@ test_default_root_uses_passwd_home_not_ambient_home() {
   expected="$passwd_home/.local/share/agent-fleet/accounts/claude/1"
   mkdir -p "$expected" "$hostile_home/.local/share/agent-fleet/accounts/claude/0"
   mkdir -p "$expected/.agent-fleet-quota-cache/quota-axi"
-  touch "$expected/.agent-fleet-quota-cache/quota-axi/claude-keychain-access-granted"
+  printf 'granted\n' > "$expected/.agent-fleet-quota-cache/quota-axi/claude-keychain-access-granted"
+  chmod 600 "$expected/.agent-fleet-quota-cache/quota-axi/claude-keychain-access-granted"
   out=$(HOME="$hostile_home" \
     FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1 \
     FM_ACCOUNT_DIRECTORY_PASSWD_HOME="$passwd_home" \
@@ -566,24 +617,24 @@ test_spawn_uses_direct_claude_fallback_and_hook() {
   pass "new account-flagged Claude spawn excludes reserved profiles and launches on the anchored Opus 5 model"
 }
 
-test_claude_spawn_fails_closed_on_inherited_default_model() {
+test_claude_spawn_rejects_mismatched_explicit_model() {
   local record id out status
   reset_accounts
-  id=claude-default-model-refused-z2
-  record=$(make_spawn_case claude-default-model-refused claude "$id")
+  id=claude-model-mismatch-refused-z2
+  record=$(make_spawn_case claude-model-mismatch-refused claude "$id")
   read_spawn_case "$record"
 
   if out=$(run_direct_spawn "$SPAWN_HOME" "$SPAWN_WORKTREE" "$SPAWN_LAUNCH_LOG" \
-    "$id" "$SPAWN_PROJECT" --model default 2>&1); then
+    "$id" "$SPAWN_PROJECT" --model sonnet 2>&1); then
     status=0
   else
     status=$?
   fi
-  [ "$status" -ne 0 ] || fail "Claude crew launch silently inherited a default model"
-  assert_contains "$out" "Claude crew/scout launch requires an explicitly resolved model" \
-    "Claude missing-model refusal was not actionable"
-  [ ! -e "$SPAWN_HOME/state/.fake-endpoint" ] || fail "Claude missing-model refusal created an endpoint"
-  pass "Claude crew/scout launch fails closed instead of inheriting an unspecified model"
+  [ "$status" -ne 0 ] || fail "Claude crew launch accepted a non-Opus-5 explicit model"
+  assert_contains "$out" "model 'sonnet' does not match the installed Opus 5 anchor 'claude-opus-5'" \
+    "Claude model mismatch refusal was not actionable"
+  [ ! -e "$SPAWN_HOME/state/.fake-endpoint" ] || fail "Claude model mismatch created an endpoint"
+  pass "Claude crew/scout launch rejects an explicit model that differs from the Opus 5 anchor"
 }
 
 test_direct_claude_recovery_resolves_legacy_default_to_anchor() {
@@ -1190,6 +1241,8 @@ if [ "${FM_TEST_FOCUSED:-}" = direct-recovery-lifecycle ]; then
 fi
 
 test_codex_picks_highest_fresh_minimum_and_skips_no_window
+test_profile_eligibility_requires_enabled_worker
+test_claude_approval_marker_contract
 test_codex_rechecks_health_on_every_selection
 test_codex_rotates_when_no_account_has_a_fresh_window
 test_codex_timeout_skips_wedged_account
@@ -1202,7 +1255,7 @@ test_default_root_uses_passwd_home_not_ambient_home
 test_prepare_installs_and_verifies_per_account_herdr_hooks
 test_spawn_uses_direct_codex_home_without_agent_fleet
 test_spawn_uses_direct_claude_fallback_and_hook
-test_claude_spawn_fails_closed_on_inherited_default_model
+test_claude_spawn_rejects_mismatched_explicit_model
 test_direct_claude_recovery_resolves_legacy_default_to_anchor
 test_observe_spawn_uses_direct_directory_without_agent_fleet
 test_direct_spawn_and_recovery_support_detached_worktree

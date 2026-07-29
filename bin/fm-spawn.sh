@@ -52,10 +52,10 @@
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
 #   Claude ship/scout launches never inherit the CLI's ambient model.
-#   Without an explicit --model, they resolve config/claude-crew-model (inherited
-#   into secondmate homes), whose absent-file default is claude-opus-5.
-#   An empty/default/unresolvable model or a raw Claude launch fails closed before
-#   endpoint creation because firstmate cannot prove which model it would run.
+#   They resolve config/claude-crew-model (inherited into secondmate homes), whose
+#   absent-file default and only accepted value is claude-opus-5. An explicit
+#   --model must equal that anchor. An empty/default/unresolvable/mismatched model
+#   or a raw Claude launch fails closed before endpoint creation.
 #   Account routing is independently default-off. Its precedence and off/observe/
 #   enforce resolution is owned by fm-account-routing-lib.sh. Direct account-
 #   directory launch currently covers ship/scout crewmates only; secondmate
@@ -2245,15 +2245,16 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
 fi
 
 if [ "$KIND" != secondmate ] && [ "$HARNESS" = claude ]; then
+  CLAUDE_CREW_MODEL=$("$SCRIPT_DIR/fm-harness.sh" claude-crew-model) || exit 1
   [ "$RAW_LAUNCH" != 1 ] || {
     echo "error: raw Claude crew/scout launch cannot prove its resolved model; use --harness claude with an optional explicit --model" >&2
     exit 1
   }
   if [ -z "$MODEL" ] && [ "$MODEL_SET" -eq 0 ]; then
-    MODEL=$("$SCRIPT_DIR/fm-harness.sh" claude-crew-model) || exit 1
+    MODEL=$CLAUDE_CREW_MODEL
   fi
-  [ -n "$MODEL" ] && [ "$MODEL" != default ] || {
-    echo "error: Claude crew/scout launch requires an explicitly resolved model; set config/claude-crew-model or pass --model" >&2
+  [ "$MODEL" = "$CLAUDE_CREW_MODEL" ] || {
+    echo "error: Claude crew/scout model '$MODEL' does not match the installed Opus 5 anchor '$CLAUDE_CREW_MODEL'" >&2
     exit 1
   }
 fi

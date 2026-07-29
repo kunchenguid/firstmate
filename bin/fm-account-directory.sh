@@ -10,9 +10,10 @@
 # Account homes are discovered under the current passwd user's
 # .local/share/agent-fleet/accounts/<vendor>/ tree without fixed counts.
 # Agent Fleet's read-only profile list is the source of pool eligibility:
-# direct crew selection considers only real homes registered in the fixed
-# <vendor>-crew pool, so a manual-only profile is never a crew candidate and no
-# caller-supplied compatibility alias can weaken that boundary.
+# direct crew selection considers only enabled worker profiles with real homes
+# registered in the fixed <vendor>-crew pool, so a disabled, manual-only, or
+# non-worker profile is never a crew candidate and no caller-supplied
+# compatibility alias can weaken that boundary.
 # Claude may also declare a separate claude-crew-last-resort pool.
 # It is consulted only when no usable claude-crew profile remains; Firstmate
 # never guesses that membership from credentials or identity metadata.
@@ -296,7 +297,7 @@ last_resort_pool() { # <vendor>
 }
 
 eligible_account_homes() { # <vendor> <pool>
-  local vendor=$1 pool=$2 root vendor_dir fleet_bin profiles candidate eligible matched marker marker_root marker_dir
+  local vendor=$1 pool=$2 root vendor_dir fleet_bin profiles candidate eligible matched reason marker marker_root marker_dir
   root=$(account_root) || return 1
   vendor_dir=$root/$vendor
   [ -d "$vendor_dir" ] && [ ! -L "$vendor_dir" ] || {
@@ -326,6 +327,8 @@ eligible_account_homes() { # <vendor> <pool>
               and (.pools? | type) == "array"
               and (.pools | all(type == "string"))
               and ((.pools | index($pool)) != null)
+              and (.enabled? == true)
+              and (.safety_policy? == "worker")
             )
           | .home]
       | unique[]
@@ -346,7 +349,27 @@ eligible_account_homes() { # <vendor> <pool>
 $eligible
 EOF
     if [ "$matched" != 1 ]; then
-      log "$vendor account $candidate excluded from $pool: registry pool membership does not allow crew selection"
+      reason=$(printf '%s\n' "$profiles" | jq -r \
+        --arg vendor "$vendor" --arg pool "$pool" --arg home "$candidate" '
+          [.profiles[]
+            | select(
+                (.provider? == $vendor)
+                and (.home? == $home)
+                and (.pools? | type) == "array"
+                and (.pools | all(type == "string"))
+                and ((.pools | index($pool)) != null)
+              )]
+          | if length == 0 then
+              "registry pool membership does not allow crew selection"
+            elif any(.[]; .enabled? != true) then
+              "profile is disabled"
+            elif any(.[]; .safety_policy? != "worker") then
+              "safety policy is not worker"
+            else
+              "registry eligibility does not allow crew selection"
+            end
+        ' 2>/dev/null) || reason="registry eligibility could not be verified"
+      log "$vendor account $candidate excluded from $pool: $reason"
       continue
     fi
     if [ "$vendor" = claude ]; then
@@ -357,6 +380,33 @@ EOF
         || [ ! -d "$marker_dir" ] || [ -L "$marker_dir" ] \
         || [ ! -f "$marker" ] || [ -L "$marker" ]; then
         log "claude account $candidate excluded from $pool: missing quota-axi's non-secret Keychain access marker; captain approval is required"
+        continue
+      fi
+      if ! PERL5LIB='' PERL5OPT='' "$(system_perl)" -e '
+          use strict;
+          use warnings;
+          use Fcntl qw(:DEFAULT);
+          my ($path) = @ARGV;
+          my @before = lstat($path);
+          exit 1 unless @before && -f _ && !-l _;
+          exit 1 unless ($before[2] & 07777) == 0600;
+          exit 1 unless $before[4] == $< && $before[3] == 1;
+          sysopen(my $fh, $path, O_RDONLY) or exit 1;
+          binmode($fh);
+          my @opened = stat($fh);
+          exit 1 unless @opened;
+          local $/;
+          my $payload = <$fh>;
+          exit 1 unless defined($payload) && $payload eq "granted\n";
+          exit 1 unless close($fh);
+          my @after = lstat($path);
+          exit 1 unless @after;
+          for my $index (0, 1, 2, 3, 4, 5, 7, 9, 10) {
+            exit 1 unless $before[$index] == $opened[$index]
+              && $opened[$index] == $after[$index];
+          }
+        ' "$marker" 2>/dev/null; then
+        log "claude account $candidate excluded from $pool: invalid quota-axi Keychain approval marker; expected exact granted payload, mode 0600, current-user ownership, one link, real path components, and stable metadata"
         continue
       fi
     fi

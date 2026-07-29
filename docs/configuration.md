@@ -152,10 +152,10 @@ Primary-session watcher wake protocols are rendered at session start by [`bin/fm
 Claude and Grok use background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
 When it is absent or contains `default`, crewmates mirror the firstmate's own harness.
-Claude crewmate and scout launches additionally require a resolved model before endpoint creation.
-An explicit `--model` wins; otherwise `fm-harness.sh claude-crew-model` reads the one-value local `config/claude-crew-model` anchor, whose absent-file default is `claude-opus-5`.
+Claude crewmate and scout launches additionally require the exact installed Opus 5 model before endpoint creation.
+`fm-harness.sh claude-crew-model` resolves the one-value local `config/claude-crew-model` anchor, whose absent-file default and only accepted value is `claude-opus-5`; an explicit `--model` must equal that resolved anchor.
 The anchor is inherited into secondmate homes so the same rule governs their Claude crews.
-An empty, invalid, or `default` anchor and a raw Claude launch fail closed rather than inheriting the Claude CLI's ambient model.
+An empty, invalid, mismatched, or `default` anchor, a mismatched explicit model, and a raw Claude launch fail closed rather than inheriting or selecting another Claude model.
 The resolved model is both passed through Claude's `--model` flag and recorded as `model=` in task metadata.
 Fresh launches and recovery share this final resolution guard: recovery preserves an explicit recorded model, while legacy `model=default` metadata resolves through the anchor before relaunch and is rewritten to the value actually used.
 `config/secondmate-harness` is a separate local, gitignored file containing the adapter the primary uses to launch secondmate agents, optionally followed by model and effort tokens on the same line.
@@ -178,8 +178,8 @@ The exact discovery, fresh-usage, health, fallback, and Herdr-hook mechanics are
 The selected provider command receives `CLAUDE_CONFIG_DIR=<home>` or `CODEX_HOME=<home>`, and task metadata records the non-secret `account_home=<home>` for observability.
 New ship/scout launches never ask Agent Fleet to enable a profile, establish identity, install a bundle, or acquire a lease.
 They use Agent Fleet's read-only profile listing as the authoritative pool-membership registry.
-Only real account homes registered in the provider's crew pool are eligible, so a profile reserved to a manual-only pool cannot be selected for crew work.
-Claude candidates must additionally carry quota-axi's exact non-secret per-directory `claude-keychain-access-granted` marker.
+Only enabled worker profiles with real account homes registered in the provider's crew pool are eligible, so disabled, non-worker, and manual-only profiles cannot be selected for crew work.
+Claude candidates must additionally carry quota-axi's exact non-secret per-directory `claude-keychain-access-granted` marker with the exact `granted` newline payload, mode 0600, current-user ownership, one link, non-symlink path components, and stable metadata.
 Pool filtering and the marker check happen before fallback selection; if no Claude candidate survives, launch fails closed with the reserved and captain-approval-required reasons instead of borrowing a manual profile.
 The optional declared `claude-crew-last-resort` pool is checked only after no usable `claude-crew` profile remains and is announced loudly when used.
 Because Claude account identity is not machine-readable per directory, pool membership is the only ownership policy: the selector never infers an account from `.claude.json`, a hidden quota identity, or the nondiscriminating Keychain account label.

@@ -242,7 +242,7 @@ The shell scripts never parse or match the natural-language rules; firstmate doe
 
 Per-harness model/effort flags: `harness-adapters` (loaded before every spawn per section 4's closing trigger).
 Claude crewmate and scout launches resolve a non-default model before endpoint creation.
-An explicit `--model` wins; otherwise `fm-harness.sh claude-crew-model` reads the captain-changeable `config/claude-crew-model` anchor and defaults its absence to `claude-opus-5`.
+`fm-harness.sh claude-crew-model` resolves the exact installed Opus 5 anchor from `config/claude-crew-model`, defaulting its absence to `claude-opus-5`, and an explicit `--model` must equal that anchor.
 An empty, invalid, or `default` anchor and a raw Claude launch fail closed, and `state/<id>.meta` records the same resolved value passed through Claude's `--model`.
 
 Secondmates can run on a different harness than crewmates.

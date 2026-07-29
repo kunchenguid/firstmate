@@ -174,7 +174,11 @@ resolve_claude_crew_model() {
       return 1
       ;;
   esac
-  printf '%s\n' "$model"
+  [ "$model" = "$CLAUDE_CREW_MODEL_DEFAULT" ] || {
+    echo "error: config/claude-crew-model must equal the installed Opus 5 anchor '$CLAUDE_CREW_MODEL_DEFAULT', not '$model'" >&2
+    return 1
+  }
+  printf '%s\n' "$CLAUDE_CREW_MODEL_DEFAULT"
 }
 
 case "${1:-}" in
