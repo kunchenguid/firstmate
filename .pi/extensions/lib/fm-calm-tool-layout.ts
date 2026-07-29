@@ -26,7 +26,7 @@ type CalmToolLayoutPatch = {
 };
 
 type CalmTurnBoundaryPatch = {
-  beginTurn: () => void;
+  owners: Map<string, object>;
 };
 
 type CalmToolResult = {
@@ -54,7 +54,16 @@ const ANSI_SEQUENCE = /\u001B\[[0-9;?]*[ -/]*[@-~]/g;
 const TAB_COLUMNS = "   ";
 
 const calmErrorTexts = new WeakMap<object, string>();
-const calmErrorTurn = { owners: new Map<string, object>(), scoped: false };
+
+// The turn scope lives on the shared registry entry, never in module scope: Pi re-evaluates
+// this module on every extension reload while the prototype wrappers installed by the first
+// evaluation survive, so any module-scoped copy would diverge from the live one.
+function calmTurnScope(): CalmTurnBoundaryPatch | undefined {
+  const registry = globalThis as typeof globalThis & {
+    [key: symbol]: CalmTurnBoundaryPatch | undefined;
+  };
+  return registry[CALM_TOOL_ERROR_TURN_PATCH];
+}
 
 function calmResultText(result: CalmToolResult): string {
   return (result.content ?? [])
@@ -70,10 +79,11 @@ function calmResultText(result: CalmToolResult): string {
 // text, including when a whole session history replays in one synchronous pass. Without the
 // turn-boundary adapter the owner is always the recording row, so every error stays visible.
 function calmErrorTextOwner(text: string, component: object): object {
-  if (!calmErrorTurn.scoped) return component;
-  const owner = calmErrorTurn.owners.get(text);
+  const scope = calmTurnScope();
+  if (!scope) return component;
+  const owner = scope.owners.get(text);
   if (owner) return owner;
-  calmErrorTurn.owners.set(text, component);
+  scope.owners.set(text, component);
   return component;
 }
 
@@ -143,17 +153,12 @@ export function installCalmToolErrorTurnBoundary(): void {
   const registry = globalThis as typeof globalThis & {
     [key: symbol]: CalmTurnBoundaryPatch | undefined;
   };
-  const beginTurn = (): void => {
-    calmErrorTurn.owners = new Map();
-  };
   const installed = registry[CALM_TOOL_ERROR_TURN_PATCH];
   if (installed) {
-    installed.beginTurn = beginTurn;
-    calmErrorTurn.scoped = true;
+    installed.owners = new Map();
     return;
   }
 
-  const patch: CalmTurnBoundaryPatch = { beginTurn };
   const AssistantMessageComponent = PiCodingAgent.AssistantMessageComponent;
   if (typeof AssistantMessageComponent !== "function") {
     throw new Error("Firstmate Calm requires Pi AssistantMessageComponent");
@@ -167,12 +172,12 @@ export function installCalmToolErrorTurnBoundary(): void {
     this: PiAssistantMessageComponent,
     message: Parameters<PiAssistantMessageComponent["updateContent"]>[0],
   ): void {
-    patch.beginTurn();
+    const scope = calmTurnScope();
+    if (scope) scope.owners = new Map();
     originalUpdateContent.call(this, message);
   };
 
-  registry[CALM_TOOL_ERROR_TURN_PATCH] = patch;
-  calmErrorTurn.scoped = true;
+  registry[CALM_TOOL_ERROR_TURN_PATCH] = { owners: new Map() };
 }
 
 export function installCalmToolLayout(): void {

@@ -18,7 +18,7 @@ Presentation must remain inactive in RPC, JSON, print, and untrusted contexts.
 Only `genuine-user-prompt` and `genuine-agent-response` are policy-visible while Calm is active.
 `.pi/extensions/lib/fm-calm-assistant-layout.ts` removes thinking blocks from the shallow presentation copy before Pi calculates assistant layout.
 `.pi/extensions/lib/fm-calm-tool-layout.ts` returns zero rows from Pi's exported `ToolExecutionComponent` while Calm is active, which removes calls, results, framing, and image children together, and keeps only the width-clamped error text of a row whose result is an error.
-`.pi/extensions/lib/fm-calm-tool-layout.ts` also owns the tool-error turn boundary that scopes identical-error ownership to one assistant turn.
+`.pi/extensions/lib/fm-calm-tool-layout.ts` also owns the tool-error turn boundary that scopes identical-error ownership to one assistant turn, holding that turn state on the shared patch registry so an extension reload cannot split it from the surviving prototype wrappers.
 `.pi/extensions/lib/fm-calm-operational-user-layout.ts` renders canonically classified text-only Firstmate operational user rows at zero height.
 `bin/fm-operational-input.sh` remains the single owner of operational-input construction and parsing.
 The seven built-in definitions and `fm_watch_arm_pi` retain per-renderer zero-height behavior as an independent fallback if the complete tool-row adapter is unavailable.
@@ -78,6 +78,7 @@ ok - Pi calm resolves its persistent home independently of Pi's launch directory
 ok - Pi calm compatibility evidence never rejects a Pi version for being newer than 0.82.0, and still fails closed on a missing or malformed version
 ok - a missing collapsed-thinking presentation API degrades only that Calm adapter with a clear skip reason, while the rest of Calm still registers
 ok - missing Pi presentation class exports and error-surface seams reach the independent adapter degradation path
+ok - reloading the Calm adapters keeps actionable tool errors scoped to one assistant turn without stacking Pi wrappers
 ok - Pi calm centralizes transcript visibility, preserves execution/export data, hides working activity, and persists its choice across session starts
 ok - Pi operational follow-up E2E processes exact user-role notifications once while Calm hides current and adjacent rows, Calm off and absent render them, and restart preserves semantics
 ok - Pi Calm native /skill:ahoy geometry keeps every thinking and tool block at zero height while preserving history, restart, and Calm-off rendering

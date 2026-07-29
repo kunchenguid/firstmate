@@ -110,7 +110,9 @@ test_static_contract() {
   assert_contains "$tool_layout" 'return calmErrorLines(this, width, columns)' "Pi Calm tool layout does not remove complete tool rows"
   assert_contains "$tool_layout" 'errorResult?.isError && !isPartial ? calmResultText(errorResult) : ""' "Pi Calm tool layout does not restrict its visible tool text to actionable errors"
   assert_contains "$tool_layout" 'calmErrorTextOwner(errorText, this) === this' "Pi Calm tool layout repeats one turn's actionable error across sibling tool rows"
-  assert_contains "$tool_layout" 'if (!calmErrorTurn.scoped) return component' "Pi Calm tool layout deduplicates actionable errors without a Pi-supported turn boundary"
+  assert_contains "$tool_layout" 'if (!scope) return component' "Pi Calm tool layout deduplicates actionable errors without a Pi-supported turn boundary"
+  assert_contains "$tool_layout" 'return registry[CALM_TOOL_ERROR_TURN_PATCH]' "Pi Calm tool layout keeps turn state outside the registry shared across extension reloads"
+  assert_not_contains "$tool_layout" 'const calmErrorTurn' "Pi Calm tool layout still holds reload-split turn state in module scope"
   assert_contains "$tool_layout" 'AssistantMessageComponent.prototype.updateContent' "Pi Calm tool-error turn boundary does not use the one-per-assistant-message Pi seam"
   assert_not_contains "$tool_layout" 'queueMicrotask' "Pi Calm tool layout still infers turn boundaries from the scheduler that spans transcript replay"
   assert_contains "$text" 'installCalmPresentationAdapter("tool-error-turn", installCalmToolErrorTurnBoundary)' "Pi Calm extension does not install its degradable tool-error turn boundary"
@@ -512,6 +514,135 @@ JS
     [ -z "$out" ] || fail "Pi calm missing $seam seam test printed output: $out"
   done
   pass "missing Pi presentation class exports and error-surface seams reach the independent adapter degradation path"
+}
+
+test_adapter_reload_turn_scope() {
+  local fixture out status
+  if ! command -v node >/dev/null 2>&1; then
+    echo "skip: node not found for Pi calm adapter reload test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/adapter-reload"
+  mkdir -p "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  cp "$TOOL_LAYOUT" "$fixture/lib/fm-calm-tool-layout.ts"
+  cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
+
+  out=$(cd "$fixture" && PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const [{ AssistantMessageComponent }, { ToolExecutionComponent }, { initTheme }, { setCapabilities }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/assistant-message.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/tool-execution.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
+  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+]);
+initTheme("dark");
+setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+
+const layoutUrl = pathToFileURL(`${process.cwd()}/lib/fm-calm-tool-layout.ts`).href;
+const visibility = await import(pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href);
+visibility.setCalmPresentation(true);
+
+const renderUi = { requestRender() {} };
+const turnMessage = {
+  role: "assistant",
+  api: "calm-reload-test",
+  provider: "calm-reload-test",
+  model: "deterministic",
+  usage: {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  },
+  stopReason: "stop",
+  timestamp: 1,
+  content: [{ type: "text", text: "CALM_RELOAD_TURN" }],
+};
+
+// Two separately interrupted turns replayed back to back with no scheduler gap, exactly as
+// renderSessionItems rebuilds a transcript right after a reload.
+function replayInterruptedTurns(generation) {
+  return [0, 1].map((turn) => {
+    new AssistantMessageComponent(turnMessage, true);
+    const rows = ["a", "b"].map((slot) => {
+      const row = new ToolExecutionComponent("bash", `reload-${generation}-${turn}-${slot}`, { command: "printf CALM_RELOAD_ARGS" }, { showImages: false }, undefined, renderUi, process.cwd());
+      row.markExecutionStarted();
+      return row;
+    });
+    for (const row of rows) {
+      row.updateResult({ content: [{ type: "text", text: "Operation aborted" }], details: {}, isError: true });
+    }
+    return rows;
+  });
+}
+
+function assertOneErrorPerTurn(generation) {
+  const turns = replayInterruptedTurns(generation);
+  for (const [turn, rows] of turns.entries()) {
+    const rendered = rows.map((row) => row.render(100));
+    const surfaced = rendered.filter((lines) => lines.join("\n").includes("Operation aborted"));
+    if (surfaced.length !== 1) {
+      throw new Error(
+        `generation ${generation} turn ${turn} surfaced its abort text ${surfaced.length} times instead of once`,
+      );
+    }
+    if (rendered.filter((lines) => lines.length !== 0).length !== 1) {
+      throw new Error(`generation ${generation} turn ${turn} kept a residual duplicate abort row`);
+    }
+    if (rendered.flat().join("\n").includes("CALM_RELOAD_ARGS")) {
+      throw new Error(`generation ${generation} turn ${turn} exposed routine tool call content`);
+    }
+  }
+}
+
+let wrappers;
+for (const generation of [1, 2, 3]) {
+  const layout = await import(`${layoutUrl}?generation=${generation}`);
+  layout.installCalmToolLayout();
+  layout.installCalmToolErrorTurnBoundary();
+  const current = {
+    render: ToolExecutionComponent.prototype.render,
+    updateResult: ToolExecutionComponent.prototype.updateResult,
+    updateContent: AssistantMessageComponent.prototype.updateContent,
+  };
+  if (wrappers) {
+    for (const key of Object.keys(current)) {
+      if (current[key] !== wrappers[key]) {
+        throw new Error(`reload generation ${generation} stacked another ${key} wrapper on Pi`);
+      }
+    }
+  }
+  wrappers = current;
+  assertOneErrorPerTurn(generation);
+}
+
+visibility.setCalmPresentation(false);
+const stockRow = new ToolExecutionComponent("bash", "reload-stock", { command: "printf CALM_RELOAD_ARGS" }, { showImages: false }, undefined, renderUi, process.cwd());
+stockRow.markExecutionStarted();
+stockRow.setArgsComplete();
+stockRow.updateResult({ content: [{ type: "text", text: "Operation aborted" }], details: {}, isError: true });
+if (!stockRow.render(100).join("\n").includes("Operation aborted")) {
+  throw new Error("Calm-off rendering lost the stock errored tool row after adapter reloads");
+}
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi calm adapter reload turn scope failed: $out"
+  [ -z "$out" ] || fail "Pi calm adapter reload test printed output: $out"
+  pass "reloading the Calm adapters keeps actionable tool errors scoped to one assistant turn without stacking Pi wrappers"
 }
 
 test_rendering_and_session_lifecycle() {
@@ -2542,6 +2673,7 @@ test_home_resolution
 test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports
+test_adapter_reload_turn_scope
 test_rendering_and_session_lifecycle
 test_operational_followup_turn_e2e
 test_hidden_block_geometry_e2e
