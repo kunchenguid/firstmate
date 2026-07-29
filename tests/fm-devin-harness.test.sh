@@ -183,7 +183,7 @@ test_lock_recognizes_devin_holder() {
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  *"comm="*) printf '%s\n' '/Users/test/.local/bin/devin'; exit 0 ;;
+  *"comm="*) printf '%s\n' '/opt/devin/bin/devin'; exit 0 ;;
   *"args="*) printf '%s\n' 'devin'; exit 0 ;;
 esac
 exit 1
@@ -224,7 +224,7 @@ test_lock_recognizes_devin_interpreter_script() {
 #!/usr/bin/env bash
 case "$*" in
   *"comm="*) printf '%s\n' '/usr/local/bin/node'; exit 0 ;;
-  *"args="*) printf '%s\n' 'node /Users/test/.local/lib/devin'; exit 0 ;;
+  *"args="*) printf '%s\n' 'node /opt/devin/lib/devin'; exit 0 ;;
 esac
 exit 1
 SH

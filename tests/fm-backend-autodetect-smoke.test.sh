@@ -50,7 +50,6 @@ export FM_GATE_REFUSE_BYPASS=1
 # it was launched in must not follow spawn into that session as a cross-session
 # parent identity; the spawn below sets HERDR_ENV explicitly.
 herdr_forget_inherited_pane
-
 # TMP_ROOT is physically resolved (mktemp -d "$(pwd -P)"-relative) to keep this
 # real-herdr smoke fixture free of unrelated OS symlink noise.
 # The old fm-spawn bug that originally motivated this fixture shape was fixed in
@@ -59,23 +58,29 @@ herdr_forget_inherited_pane
 # The dedicated regression is
 # tests/fm-backend.test.sh:test_spawn_symlinked_project_prefix_avoids_false_refusal.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-backend-autodetect-smoke.XXXXXX")
-SESSION="fm-lab-autodetect-smoke-$$"
-export HERDR_SESSION="$SESSION"
+HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-autodetect-smoke-concurrency-h3) || {
+  rm -rf "$TMP_ROOT"
+  fail "could not generate an isolated Herdr lab session name"
+}
+export HERDR_SESSION="$HERDR_LAB_SESSION"
 ID="autodetectsmoke1"
 WT=
 cleanup_all() {
+  local cleanup_status=0
   [ -n "$WT" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT" >/dev/null 2>&1
-  herdr_safe_stop_and_delete "$SESSION"
+  "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || cleanup_status=$?
   rm -rf "$TMP_ROOT"
+  return "$cleanup_status"
 }
-trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION"
-PREPARE_RC=$?
-if [ "$PREPARE_RC" -eq 2 ]; then
-  echo "skip: running default Herdr session required by the fleet-state tripwire"
-  exit 0
-fi
-[ "$PREPARE_RC" -eq 0 ] || fail "could not prepare isolated Herdr lab session"
+on_exit() {
+  local status=$?
+  cleanup_all || status=$?
+  trap - EXIT
+  exit "$status"
+}
+trap on_exit EXIT
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" || fail "could not provision isolated Herdr lab session"
 
 # --- scratch world: FM_HOME with NO backend config, one throwaway project ---
 
