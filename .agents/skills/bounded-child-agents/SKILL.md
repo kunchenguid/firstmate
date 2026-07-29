@@ -41,8 +41,8 @@ Create the child from anywhere inside the parent's recorded working copy:
 ```
 
 The helper allows at most three concurrently live direct children.
-The returned pane stays in the parent's recorded Herdr tab and uses the same working copy.
-The child inherits the parent's recorded harness, model, and effort profile through the existing harness launch rules.
+After the helper validates the parent's launch profile, the returned pane stays in the parent's recorded Herdr tab and uses the same working copy.
+The child then inherits the parent's recorded harness, model, and effort profile through the existing harness launch rules.
 The helper does not offer a backend, provider, model, effort, worktree, tab, or window override.
 
 ## Child authority

@@ -122,7 +122,7 @@ Enter is retried (Enter only, never a retype) until the backend confirms the
 submit landed.
 For tmux that confirmation is a cleared composer, using the same corrected,
 border-aware detector as the composer guard.
-For herdr, normal idle-baseline submits are confirmed by native agent-state showing a real turn started; the ANSI-aware composer classifier remains the affirmative-empty pre-injection guard and conservative fallback for non-idle or unreadable baselines.
+For herdr, [`docs/herdr-backend.md`](../../../docs/herdr-backend.md#current-transport-behavior) owns the native-state and composer confirmation split.
 A bordered-empty or ghost-only composer is recognized as empty where that backend uses composer confirmation, rather than mistaken for a swallowed Enter.
 `fm-send.sh` uses the same primitive and exits non-zero
 when a steer's Enter is positively swallowed, so firstmate learns an instruction
@@ -203,7 +203,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
   primitive reports `empty` as its caller-facing success verdict.
   For tmux that verdict means the shared-ghost-aware and border-aware composer
   cleared.
-  For herdr's normal idle-baseline path it means native agent-state observed a real turn start; herdr uses the ANSI-aware structural classifier for the pre-injection composer guard and fallback paths.
+  For herdr, it follows the native-state and composer confirmation split linked above.
   This lets ghost-only or bordered-empty composers count as empty where a composer read is the active confirmation signal.
 - **Marker strip** - `strip_injection_marker` removes the current operational
   prefix or legacy bare marker before classification or relay, so the digest

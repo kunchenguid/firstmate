@@ -55,7 +55,7 @@ Closing its last tab can remove the workspace, and the next spawn recreates it.
 
 ## Bounded child agent panes
 
-An ordinary Herdr-backed ship or scout worker may optionally create up to three direct child agents with `bin/fm-child.sh`.
+An eligible ordinary Herdr-backed ship or scout worker may optionally create up to three direct child agents with `bin/fm-child.sh`.
 This is worker-local bounded parallelism inside one existing task, not another FirstMate task layer.
 FirstMate, secondmates, unsupported backends, and child agents cannot invoke the supported create path.
 
@@ -76,7 +76,7 @@ The child cannot recursively invoke `fm-child.sh` and reports only through its p
 The `FM_CHILD_AGENT=1` marker also makes FirstMate's managed global Grok and Kimi turn-end hooks inert, while Claude, OpenCode, and Pi child launches suppress their parent-facing project integrations and Codex receives no parent notify command.
 The complete child contract remains in private `launch.md`; delivery sends only one operationally encoded absolute-file pointer through the same `fm_backend_herdr_send_text_submit` owner used by `fm-send`.
 Its exact `empty` verdict confirms delivery directly.
-A child-only `pending` verdict receives the same rendered-busy corroboration owned by `fm-crew-state.sh`: the exact registered agent must still match the inherited harness, and only that harness's verified `fm_busy_lines_match` signature in the bounded pane tail confirms delivery.
+A child-only `pending` verdict first requires the exact registered agent to still match the inherited harness, then uses the same harness-scoped `fm_busy_lines_match` corroboration as `fm-crew-state.sh` against the bounded pane tail.
 Transcript text alone never confirms delivery, and another harness's busy token cannot match.
 A verdict that remains unconfirmed preserves the raw pre-injection baseline, private startup log, and a bounded ANSI-stripped, credential-redacted composer capture before the exact child pane is stopped.
 These are orchestration boundaries rather than an operating-system sandbox, so parent path design and review remain mandatory.
@@ -97,7 +97,7 @@ Focused fake-CLI coverage lives in `tests/fm-child.test.sh`, and the real named-
 
 Current limits:
 
-- Child panes are available only to ordinary Herdr ship and scout workers.
+- Child panes are available only to ordinary Herdr ship and scout workers with a canonical verified harness launch profile; a raw launch-command profile is refused because it cannot be replayed exactly.
 - The supported depth is one, with at most three live children per parent and no recursive delegation.
 - Concurrent paths must be statically disjoint; the helper does not merge, reconcile, or isolate edits.
 - Children have no independent FirstMate supervision, backlog item, status channel, branch, worktree, validation run, publication authority, or recovery launch.

@@ -176,7 +176,7 @@ Do not add model-specific versions of that policy.
 
 `secondmate-provisioning` owns secondmate harness pins and inherited local material, while `harness-adapters` owns the harness consequences.
 Dispatch only on a backend that `fm-spawn` validates as spawn-capable.
-A live ordinary Herdr ship or scout worker may optionally create bounded same-tab child panes only after loading `bounded-child-agents`; `bin/fm-child.sh` owns the entire child lifecycle, and firstmate, secondmates, non-Herdr workers, and child agents never invoke it.
+An eligible live ordinary Herdr ship or scout worker may optionally create bounded same-tab child panes only after loading `bounded-child-agents`; `bin/fm-child.sh` owns the entire child lifecycle and its eligibility checks, and firstmate, secondmates, non-Herdr workers, and child agents never invoke it.
 A missing dependency, authentication failure, unsupported backend, or version refusal is a blocker; never silently retry on another backend.
 
 ## 5. Recovery

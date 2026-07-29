@@ -1083,8 +1083,8 @@ window_for_task() {  # <task-key> [state]
 #     Enter leaves our text in the composer, and retyping would concatenate two
 #     sentinel-prefixed digests into one corrupted turn.
 #   - SUBMIT ACK = the backend submit primitive reports `empty` after Enter.
-#     For tmux that means a cleared composer; for herdr's normal idle-baseline
-#     path it means native agent-state observed a real turn start.
+#     For tmux that means a cleared composer; for herdr it means its verified
+#     native-state or composer-clearance confirmation succeeded.
 #     Pending means Enter was swallowed; unknown is treated as undelivered by
 #     this strict daemon path.
 #   - COMPOSER GUARD before typing: if the cursor line already has real content
