@@ -10,6 +10,10 @@
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
+#                 "MODEL_REGISTRY: invalid config/models.json - <reason>",
+#                 "MODEL_REGISTRY: <model> <integrity problem>",
+#                 "MODEL_PRICE: <model> <price drift>",
+#                 "MODEL_VERIFY: <model> <probe problem>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
@@ -114,6 +118,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-model-registry-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-model-registry-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -721,6 +727,68 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
+# Model registry checks, all detect-only and free: a schema validation, the
+# referential-integrity check that binds config/crew-dispatch.json to
+# config/models.json, and the local price-drift comparison.
+#
+# The integrity check is the entire reason the registry is a second file: it
+# catches a bad model at CONFIG-EDIT time, before any worker is launched against
+# it. A dispatch rule naming a model with no probe record, or one whose recorded
+# status is rejected, fails here.
+#
+# The no-registry branch is what keeps the ruled "inert but never silent" posture
+# honest: with no config/models.json the spawn-time refusal cannot run, so if the
+# dispatch config routes to any provider-prefixed model this says so plainly
+# rather than leaving the zero-budget rule quietly unenforced.
+model_registry_validate() {
+  local reg dispatch err drift routed
+  reg="$CONFIG/models.json"
+  dispatch="$CONFIG/crew-dispatch.json"
+
+  if [ ! -f "$reg" ]; then
+    [ -f "$dispatch" ] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    routed=$(jq -r '
+      def profiles($v):
+        if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
+      [ (((.rules // [])[]? | profiles(.use?)[]?), (profiles(.default // null)[]?))
+        | .model? // empty ]
+      | map(select(type == "string" and (. != "default") and (test("/"))))
+      | unique | join(", ")' "$dispatch" 2>/dev/null || true)
+    if [ -n "$routed" ]; then
+      echo "MODEL_REGISTRY: no config/models.json, so the zero-budget rule is not enforced for routed provider models: $routed"
+    fi
+    return 0
+  fi
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "MISSING: jq (install: $(install_cmd jq))"
+    return 0
+  fi
+  if ! err=$(fm_model_registry_validate "$reg"); then
+    echo "MODEL_REGISTRY: invalid config/models.json - $err"
+    return 0
+  fi
+  fm_model_registry_integrity "$dispatch" "$reg" || true
+  drift=$(fm_model_price_drift "$reg" || true)
+  [ -z "$drift" ] || printf '%s\n' "$drift"
+}
+
+# The entitlement probe half of the observation floor. A MUTATING sweep: it makes
+# live requests and writes state/model-health.json, so it runs only when this
+# session actually holds the fleet lock, alongside the other mutating sweeps.
+#
+# Interval-gated by each model's observation level, so the steady-state cost is
+# usually zero probes and one file read rather than ~4s per routed model on every
+# session start. fm-model-verify.sh owns the probe mechanics, the hard timeout,
+# and the closed stdin.
+model_probe_sweep() {
+  local out
+  [ -f "$CONFIG/models.json" ] || return 0
+  out=$("$SCRIPT_DIR/fm-model-verify.sh" 2>/dev/null || true)
+  [ -z "$out" ] || printf '%s\n' "$out"
+}
+
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -900,6 +968,7 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != 
   echo "BOOTSTRAP_INFO: crew harness override active: $crew"
 fi
 crew_dispatch_validate
+model_registry_validate
 if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "BOOTSTRAP_INFO: tasks-axi available"
@@ -909,5 +978,6 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync
   x_mode_setup
   fleet_sync
+  model_probe_sweep
 fi
 exit 0

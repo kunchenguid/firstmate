@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, MODEL_REGISTRY, MODEL_PRICE, MODEL_VERIFY, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -29,6 +29,16 @@ When any diagnostic needs captain attention, report the plain consequence and re
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
 - `STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>` - the visible startup-memory budget is not a safe one-line positive decimal file; do not infer the default or propagate it. Correct the local primary file, then rerun session start so the normal convergence path can deliver the validated value to secondmate homes.
 - `CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>` - the optional dispatch profile file exists but failed low-cost bootstrap validation; stop profile-based dispatch, report the actionable error, and require correction of the malformed schema, unverified harness name, or invalid harness/effort pair rather than falling back around it or selecting a bad profile.
+- `MODEL_REGISTRY: invalid config/models.json - <reason>` - the model registry exists but failed schema validation, so every provider-prefixed model is now refused at spawn until it is corrected.
+  Fix the registry; never delete it to clear the error, because deleting it silently disables zero-budget enforcement rather than restoring it.
+- `MODEL_REGISTRY: <model> <problem>` - the dispatch config and the registry disagree: the model is unregistered, carries a non-approved status, or has no current live-probe record.
+  This is the check that catches a bad model before any worker is launched against it, so correct the dispatch rule or complete the model's admission; do not weaken the check to make the line go away.
+- `MODEL_REGISTRY: no config/models.json, ...` - routed provider models exist but nothing enforces the zero-budget rule for them.
+  This is a standing gap rather than a failure, and it stays inert by design; raise it with the captain rather than treating it as a startup blocker.
+- `MODEL_PRICE: <model> ... no longer zero` - an allowlisted model is no longer free at its provider, which is the exposure a name-only allowlist cannot see.
+  Suspend that route immediately, then re-verify its cost class before it is routed to again.
+- `MODEL_PRICE: <model> price drifted ...` or `... catalogue source is unreadable` - re-verify the cost class and update the recorded price, or repair the declared catalogue path so the check stops being blind.
+- `MODEL_VERIFY: <model> ...` - a live probe failed. Load `model-onboarding` and read the shape before reacting: a provider refusal means this account can never use that model and it must leave routing, while a local failure is a configuration error on this machine and not a provider fact.
 - `FLEET_SYNC: <repo>: skipped: <reason>` - a benign one-off skip (offline, no origin, local-only); bootstrap continued, investigate only if it blocks work.
   A skip can also report the bounded fleet-refresh timeout (`FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT`, or a fleet-size-aware default with a 20 second floor); a timeout never blocks startup.
 - `FLEET_SYNC: <repo>: recovered: <detail>` - the clone had drifted onto a clean detached HEAD holding no unique commits and the sync self-healed it (re-attached the default branch and fast-forwarded); no action needed, it is reported only so the self-heal is visible.

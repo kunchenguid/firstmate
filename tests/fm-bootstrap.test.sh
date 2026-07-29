@@ -766,6 +766,11 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]},{"when":"legacy feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"quota-balanced"}],"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5","effort":"high"},{"harness":"grok","model":"grok-4.5","effort":"high"}]}' > "$case_dir/home/config/crew-dispatch.json"
+  # This fixture routes one provider-prefixed model, so it needs the matching
+  # registry entry to stay silent. Silent-by-default is the contract for a FULLY
+  # configured home; a home routing provider models with no registry is
+  # deliberately loud, and tests/fm-model-zero-budget.test.sh owns that case.
+  printf '%s\n' '{"schema":"fm-model-registry.v1","providers":{"anthropic":{"access_class":"A","cost_posture":"subscription-flat"}},"models":{"anthropic/claude-sonnet-5":{"provider":"anthropic","model_id":"claude-sonnet-5","cost_class":"subscription-flat","status":"approved-primary","observation_level":"O4","evidence":{"probe":{"result":"ok","rc":0,"at":"2026-07-27T01:20:00Z"}}}},"observation":{"levels":{"O4":{"probe_max_age_days":36500}}}}' > "$case_dir/home/config/models.json"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
 
@@ -781,6 +786,38 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   pass "bootstrap surfaces active crew-dispatch rules only as verbose BOOTSTRAP_INFO"
 }
 
+# Derive a registry that covers every provider-prefixed model a dispatch body
+# names, so a fixture exercising DISPATCH validation is not also exercising
+# registry absence. Every provider is declared subscription-flat and every model
+# approved and probed: these fixtures are about schema validation, not cost class.
+# tests/fm-model-zero-budget.test.sh owns the registry-absence behavior.
+write_covering_registry() {
+  local body=$1 out=$2
+  printf '%s\n' "$body" | jq '
+    def profiles($v):
+      if ($v | type) == "array" then $v
+      elif ($v | type) == "object" then [$v]
+      else [] end;
+    [ (((.rules // [])[]? | profiles(.use?)[]?), (profiles(.default // null)[]?))
+      | .model? // empty ]
+    | map(select(type == "string" and (. != "default") and (test("/"))))
+    | unique
+    | { schema: "fm-model-registry.v1",
+        providers: (map({ key: (split("/")[0]),
+                          value: { access_class: "A", cost_posture: "subscription-flat" } })
+                    | from_entries),
+        models: (map({ key: ., value: {
+                        provider: (split("/")[0]),
+                        model_id: (split("/") | .[1:] | join("/")),
+                        cost_class: "subscription-flat",
+                        status: "approved-primary",
+                        observation_level: "O4",
+                        evidence: { probe: { result: "ok", rc: 0, at: "2026-07-27T01:20:00Z" } } } })
+                 | from_entries),
+        observation: { levels: { O4: { probe_max_age_days: 36500 } } } }
+  ' > "$out" 2>/dev/null || printf '%s\n' '{"schema":"fm-model-registry.v1"}' > "$out"
+}
+
 test_crew_dispatch_validation() {
   local label body expect mode case_dir fakebin out n
   n=0
@@ -791,6 +828,7 @@ test_crew_dispatch_validation() {
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     printf '%s\n' "$body" > "$case_dir/home/config/crew-dispatch.json"
+    write_covering_registry "$body" "$case_dir/home/config/models.json"
     fakebin=$(make_fake_toolchain "$case_dir")
     add_real_jq "$fakebin"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \

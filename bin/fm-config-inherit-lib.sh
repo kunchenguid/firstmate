@@ -3,7 +3,8 @@
 # set of LOCAL (gitignored) config items down into each secondmate home's
 # config/, so a secondmate's OWN crewmates inherit the primary's settings
 # (e.g. primary config/crew-dispatch.json makes a secondmate use the same dispatch
-# profile rules, primary config/crew-harness=codex makes a secondmate's crewmates
+# profile rules, primary config/models.json subjects that home's own crewmates to
+# the same zero-budget allowlist, primary config/crew-harness=codex makes a secondmate's crewmates
 # spawn on codex too, primary config/backlog-backend=manual makes that home
 # hand-edit backlog files too, primary config/backend pins that home's local
 # runtime-backend default for future spawns, primary config/startup-memory-budget
@@ -46,7 +47,12 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget}"
+# models.json travels WITH crew-dispatch.json and must not be separated from it:
+# the registry is what the dispatch config's model names are validated against, so
+# inheriting the rules without the registry would both leave a secondmate's own
+# crewmates outside zero-budget enforcement and make every inherited model read as
+# unregistered in that home.
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json models.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget}"
 
 fm_inherit_file_mode() {
   if [ "$(uname)" = Darwin ]; then

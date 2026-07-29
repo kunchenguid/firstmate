@@ -153,6 +153,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/model-onboarding/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/project-management/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -234,6 +238,10 @@
     },
     {
       "path": "docs/examples/crew-dispatch.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/models.json",
       "audience": "operator-example"
     },
     {
