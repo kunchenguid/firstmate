@@ -12,16 +12,20 @@
 # repository and a marker deleted at tip is still published forever.
 #
 # A CONTRIBUTOR IDENTITY IS NOT A LEAK
-# The local account name and a forge owner are published by construction the
-# moment a pull request carries its own commits, so finding one in the AUTHOR or
-# COMMITTER field is expected rather than a finding. It is reported once per
-# marker as a NOTICE that still prints on an otherwise clean run, and it never
-# sets failure or changes the exit code. Nothing else is relaxed: a marker in a
-# subject, a body, or a file, and any other marker in an identity field, all
-# still fail. The allowlist is deliberately NOT the answer here, because it drops
-# a name at derivation time - allowing the account name to quiet this would also
-# blind the tip scan to machine-local /home/<account>/ paths, buying a green run
-# by removing a real protection.
+# The local account name and the forge owner of one of THIS repo's own remotes
+# are published by construction the moment a pull request carries its own
+# commits, so finding one in the AUTHOR or COMMITTER field is expected rather
+# than a finding. It is reported once per marker as a NOTICE that still prints on
+# an otherwise clean run, and it never sets failure or changes the exit code.
+# The allowance is exactly that pair and nothing else. It still FAILS, hard, on:
+# a project clone's forge owner, which is a private organisation by definition
+# and the most sensitive name in the set; a registered project name; a secondmate
+# id; an operator-declared marker; and any marker at all found anywhere other
+# than the author or committer identity fields - a subject, a body, or a file.
+# The allowlist is deliberately NOT the answer here, because it drops a name at
+# derivation time - allowing the account name to quiet this would also blind the
+# tip scan to machine-local /home/<account>/ paths, buying a green run by
+# removing a real protection.
 #
 # WHY THIS EXISTS
 # Firstmate is a toolbox and orchestration repo whose tracked surface is meant to
@@ -211,9 +215,12 @@ DECLARED=""
 SRC_COUNT=0
 
 # Names a published commit carries by construction: the account that authors
-# commits in this checkout, and the forge owners it and its clones push to.
-# Tracked separately from DERIVED because it changes how an author or committer
-# field is judged, and nothing else.
+# commits in this checkout, and the forge owners of THIS repo's own remotes -
+# the places a pull request from here actually goes. A project clone's forge
+# owner is deliberately excluded: it is a private organisation by definition and
+# has no business riding into this repo's published history, in an identity
+# field or anywhere else. Tracked separately from DERIVED because it changes how
+# an author or committer field is judged, and nothing else.
 IDENT_ORIGIN="$NL"
 
 add_ident_origin() {
@@ -300,8 +307,11 @@ fi
 #    A directory whose remotes cannot be read is a gap, not a silent zero, and so
 #    is a remote URL this parser cannot resolve to an owner: dropping one quietly
 #    would leave a forge owner unscanned while the run still read as covered.
+#    <publishes> marks the repository whose remotes this repo actually pushes to;
+#    only those owners are published by construction, so only they relax an
+#    identity field. A project clone passes 0 and its owner stays a hard failure.
 collect_remote_owners() {
-  local dir=$1 label=$2 line key url rest path owner rc urls
+  local dir=$1 label=$2 publishes=$3 line key url rest path owner rc urls
   if ! git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
     gap "$label is not a git repository, so its forge owners could not be read"
     return 0
@@ -339,16 +349,18 @@ collect_remote_owners() {
          continue ;;
     esac
     add_derived "$owner"
-    add_ident_origin "$owner"
+    if [ "$publishes" -eq 1 ]; then
+      add_ident_origin "$owner"
+    fi
   done <<EOF
 $urls
 EOF
 }
 SRC_COUNT=0
-collect_remote_owners "$ROOT" "this repo"
+collect_remote_owners "$ROOT" "this repo" 1
 if [ -d "$HOME_DIR/projects" ]; then
   for d in "$HOME_DIR/projects"/*; do
-    [ -d "$d" ] && collect_remote_owners "$d" "project clone $(basename "$d")"
+    [ -d "$d" ] && collect_remote_owners "$d" "project clone $(basename "$d")" 0
   done
 fi
 report_enumerated "git remote owners" "$SRC_COUNT"
@@ -513,10 +525,12 @@ if [ "$SCAN_HISTORY" -eq 1 ]; then
   tr '\n' ' ' < "$TMPD/msg.raw" | tr '\0' '\n' > "$META_MSG"
 fi
 
-# The account that writes commits here, and the forge owners this repo pushes
-# to, ride along on every published commit, so seeing one in an identity field
-# is expected. An operator-declared marker never is: declaring a token is the
-# strongest available statement that it must not be published anywhere.
+# The account that writes commits here, and the forge owners of this repo's own
+# remotes, ride along on every published commit, so seeing one in an identity
+# field is expected. Nothing else qualifies - a project clone's owner is not in
+# IDENT_ORIGIN and so lands in the failing branch below. An operator-declared
+# marker never qualifies either: declaring a token is the strongest available
+# statement that it must not be published anywhere.
 is_expected_identity() {
   case "$NL$DECLARED" in *"$NL$1$NL"*) return 1 ;; esac
   case "$IDENT_ORIGIN" in *"$NL$1$NL"*) return 0 ;; esac

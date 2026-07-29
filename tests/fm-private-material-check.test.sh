@@ -24,7 +24,9 @@ fm_git_identity
 # STOPWORDS entry or shorter than MIN_LEN, that raises a coverage gap and
 # downgrades every case here that asserts a clean run - so the suite's result
 # would depend on who is running it. Shim `id` to a synthetic name instead, used
-# by every case including the real-surface one at the end.
+# by every case including the real-surface one at the end. The one deliberate
+# exception is the real-account case beside it, which needs the host's own name
+# on the surface and so states plainly when that name cannot be derived.
 # The name is generated rather than written literally: the real-surface case
 # scans THIS repo's tracked files, and a literal would sit in this very file and
 # match itself. Generating it also hardcodes no real account name.
@@ -176,6 +178,8 @@ base=$(new_case allowlist-repo-directory-name)
 clone "$base" "$(basename "$base/repo")"
 track "$base" docs/guide.md 'Nothing private here.'
 out=$(run_check "$base") && code=0 || code=$?
+expect_code 0 "$code" \
+  "the repo-directory name is allowed, and the account-name marker still proves the run clean"
 assert_contains "$out" "allowed: \"$(basename "$base/repo")\" (this repo's own directory name)" \
   "the implicit repo-directory allowance must be reported, never applied silently"
 pass "a derived name dropped as this repo's own directory name is reported, not silent"
@@ -446,6 +450,48 @@ assert_not_contains "$out" "AT HEAD" \
   "a shifted line number must not re-report a known hit as committed-only"
 pass "the committed-hit dedup compares path and content, so a line shift does not mislabel a hit"
 
+# --- this repo's own remote owner is the other half of the allowance ----------
+# A pull request from here goes to this repo's own forge owner, so that name is
+# on every published commit by construction, exactly like the account name.
+
+base=$(new_case own-remote-owner-identity)
+clone "$base" localclone
+git -C "$base/repo" remote add origin 'https://github.com/Publish-Target/tool.git'
+track "$base" docs/guide.md 'Nothing private in the text.'
+printf 'more\n' >> "$base/repo/docs/guide.md"
+git -C "$base/repo" add docs/guide.md
+GIT_AUTHOR_NAME='Publish Target' GIT_AUTHOR_EMAIL='bot@publish-target.example' \
+GIT_COMMITTER_NAME='Publish Target' GIT_COMMITTER_EMAIL='bot@publish-target.example' \
+  git -C "$base/repo" commit -qm 'ordinary subject'
+out=$(run_check "$base" --history) && code=0 || code=$?
+expect_code 0 "$code" "this repo's own forge owner must not fail --history in an identity field"
+assert_contains "$out" "NOTICE" "the owner must still be reported on a clean run"
+assert_not_contains "$out" "PRIVATE MATERIAL" "an expected identity must not read as a finding"
+pass "the forge owner of this repo's own remote is a standing notice in an identity field"
+
+# --- a project clone's forge owner is NOT excused in an identity field -------
+# A clone under projects/ is a private repository by definition, so its forge
+# owner is a private organisation and the most sensitive name in the marker set.
+# Nothing publishes it from here, so it must fail as hard in an author field as
+# it does in a tracked file - the allowance covers the publishing target only.
+
+base=$(new_case clone-owner-identity)
+clone "$base" localclone
+git -C "$base/home/projects/localclone" remote add origin 'https://github.com/Acme-Private-Org/widget.git'
+track "$base" docs/guide.md 'Nothing private in the text.'
+printf 'more\n' >> "$base/repo/docs/guide.md"
+git -C "$base/repo" add docs/guide.md
+GIT_AUTHOR_NAME='CI Bot' GIT_AUTHOR_EMAIL='ci@acme-private-org.example' \
+GIT_COMMITTER_NAME='CI Bot' GIT_COMMITTER_EMAIL='ci@acme-private-org.example' \
+  git -C "$base/repo" commit -qm 'ordinary subject'
+out=$(run_check "$base" --history) && code=0 || code=$?
+expect_code 1 "$code" "a project clone's forge owner in an author identity must fail"
+assert_contains "$out" "COMMIT METADATA" "the clone owner must be reported as a finding"
+assert_contains "$out" "acme-private-org" "the failure must name the private organisation"
+assert_not_contains "$out" "NOTICE" \
+  "a private organisation must never be downgraded to an expected-identity notice"
+pass "a project clone's forge owner stays a hard failure in an author or committer field"
+
 # --- a multi-line commit body cannot hide a marker from the line scan ---------
 
 base=$(new_case commit-body)
@@ -479,6 +525,32 @@ if [ -n "${FM_HOME:-}" ] && { [ -d "$FM_HOME/data" ] || [ -d "$FM_HOME/projects"
   expect_code 0 "$code" \
     "firstmate's own tracked surface must be PROVED clean (exit 0); exit 3 means the run proved nothing"$'\n'"$out"
   pass "this repo's tracked surface is free of every marker derived from FM_HOME"
+
+  # The case above is deterministic precisely because the account name is
+  # synthetic - which also means it can never match anything. A tracked
+  # /home/<real-account>/ path is the exact leak the account-name marker source
+  # exists for, so run once WITHOUT the shim to put that name on the surface.
+  # The host coupling that the shim removes is real, so it is handled by naming
+  # it rather than by accepting a weaker result: if the host account name is
+  # filtered out before the scan, this case proved nothing and says so loudly
+  # instead of reporting a pass. It either proves clean, or says it could not
+  # look; there is no third answer where a run that did not look reads as ok.
+  host_acct=$(id -un 2>/dev/null | tr '[:upper:]' '[:lower:]') || host_acct=""
+  out=$("$CHECK" --root "$ROOT" --home "$FM_HOME" 2>&1) && code=0 || code=$?
+  if [ -z "$host_acct" ]; then
+    printf 'skip: the real-account case did NOT run - the host account name could not be read,\n'
+    printf '#      so no machine-local home path was scanned. This is NOT a pass.\n'
+  elif printf '%s\n' "$out" | grep -qF "derived name \"$host_acct\"" \
+    || printf '%s\n' "$out" | grep -qF "allowed: \"$host_acct\""; then
+    # Generic, too short, or the same word as this checkout's directory name.
+    printf 'skip: the real-account case did NOT run - the host account name is filtered out\n'
+    printf '#      before the scan (the run above names which filter), so no machine-local\n'
+    printf '#      home path was scanned. This is NOT a pass.\n'
+  else
+    expect_code 0 "$code" \
+      "the tracked surface must be PROVED clean of the real account name (exit 0)"$'\n'"$out"
+    pass "this repo's tracked surface carries no machine-local path for the real account"
+  fi
 else
   # Deliberately not an "ok -" line: a case that never ran must never be
   # counted, read, or parsed as a passing one.
