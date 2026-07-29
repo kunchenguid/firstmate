@@ -37,9 +37,15 @@ assert_contains_local() {  # <haystack> <needle> <msg>
   esac
 }
 
-command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
-command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
+# Gate on the precondition this test actually needs - an isolated lab session it
+# can provision - instead of on "herdr" being on PATH, which proves nothing about
+# session state (bin/fm-herdr-lab.sh owns the verdict and the reason text).
+HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
+if ! HERDR_LAB_GATE_REASON=$("$HERDR_LAB_HELPER" gate); then
+  echo "skip: $HERDR_LAB_GATE_REASON"
+  exit 0
+fi
 
 export FM_GATE_REFUSE_BYPASS=1
 
@@ -51,7 +57,6 @@ export FM_GATE_REFUSE_BYPASS=1
 # The dedicated regression is
 # tests/fm-backend.test.sh:test_spawn_symlinked_project_prefix_avoids_false_refusal.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-backend-autodetect-smoke.XXXXXX")
-HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-autodetect-smoke-concurrency-h3) || {
   rm -rf "$TMP_ROOT"
   fail "could not generate an isolated Herdr lab session name"

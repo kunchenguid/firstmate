@@ -27,11 +27,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
-command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
-
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+
+# Gate on the precondition this test actually needs - an isolated lab session it
+# can provision - instead of on "herdr" being on PATH, which proves nothing about
+# session state (bin/fm-herdr-lab.sh owns the verdict and the reason text).
+herdr_lab_gate_or_skip 'herdr prune-safety e2e' || exit 0
 
 SESSION="fm-lab-prune-safety-e2e-$$"
 export HERDR_SESSION="$SESSION"

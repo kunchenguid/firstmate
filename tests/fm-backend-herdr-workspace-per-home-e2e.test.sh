@@ -47,12 +47,15 @@ assert_not_contains_local() {  # <haystack> <needle> <msg>
   esac
 }
 
-command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
-command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
-command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
-
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+
+command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
+
+# Gate on the precondition this test actually needs - an isolated lab session it
+# can provision - instead of on "herdr" being on PATH, which proves nothing about
+# session state (bin/fm-herdr-lab.sh owns the verdict and the reason text).
+herdr_lab_gate_or_skip 'herdr workspace-per-home e2e' || exit 0
 
 # TMP_ROOT is physically resolved (mktemp -d "$(pwd -P)"-relative) for the same
 # low-noise scratch fixture shape used by

@@ -815,10 +815,12 @@ unit_flag_write_failure_aborts() {
 # E2E herdr: topology invariant.
 # ---------------------------------------------------------------------------
 e2e_herdr() {
-  command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found (herdr e2e)"; return 0; }
-  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (herdr e2e)"; return 0; }
   # shellcheck source=tests/herdr-test-safety.sh
   . "$ROOT/tests/herdr-test-safety.sh"
+  # Gate on the precondition this case actually needs - an isolated lab session it
+  # can provision - instead of on "herdr" being on PATH, which proves nothing about
+  # session state (bin/fm-herdr-lab.sh owns the verdict and the reason text).
+  herdr_lab_gate_or_skip 'herdr e2e' || return 0
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-backend.sh"
 
