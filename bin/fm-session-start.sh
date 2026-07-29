@@ -141,6 +141,20 @@ print_backlog_pointer() {
   printf 'Full task bodies remain available on demand: tasks-axi show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
 }
 
+append_cost_to_line() {
+  local line="$1" taskid cost
+  if [[ "$line" =~ fm-[a-z0-9-]+ ]]; then
+    taskid="${BASH_REMATCH[0]}"
+    if [ -f "$STATE/${taskid}.meta" ]; then
+      cost=$("$SCRIPT_DIR/fm-format-task-cost.sh" "$taskid" 2>/dev/null || echo "")
+      if [ -n "$cost" ]; then
+        line="${line% } $cost"
+      fi
+    fi
+  fi
+  echo "$line"
+}
+
 print_backlog_manual_compact() {
   local path=$1 reason=$2
   printf 'compact backlog listing (%s; max %s item(s); indented task bodies omitted)\n' "$reason" "$BACKLOG_LIMIT"
