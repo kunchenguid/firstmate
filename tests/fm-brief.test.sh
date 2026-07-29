@@ -507,6 +507,41 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+test_browser_contract_applies_to_workers_and_scouts_only() {
+  local home kind id brief charter
+  home="$TMP_ROOT/browser-contract-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="browser-contract-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Browser environment" "$brief" "$kind brief omitted the browser environment contract"
+    assert_grep "Do not unset or replace \`CHROME_DEVTOOLS_AXI_SESSION\` or \`CHROME_DEVTOOLS_AXI_CHROME_ARGS\`" "$brief" \
+      "$kind brief permits replacement of the inherited browser identity"
+    assert_grep "run \`chrome-devtools-axi stop\` once" "$brief" \
+      "$kind brief omitted the one-restart recovery bound"
+    assert_grep "reopen the same page once" "$brief" "$kind brief omitted the bounded reopen"
+    assert_grep "append \`blocked:\` with the exact infrastructure error and stop" "$brief" \
+      "$kind brief omitted repeated-failure escalation"
+    assert_grep "not generically command-compatible" "$brief" \
+      "$kind brief falsely implies AXI-to-Playwright translation"
+    assert_grep "task-specific Playwright route remains possible only after firstmate approves" "$brief" \
+      "$kind brief omitted the explicit fallback handoff"
+    assert_no_grep "disable-dev-shm-usage" "$brief" "$kind brief added an unsupported shared-memory workaround"
+  done
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='browser-free supervisor' \
+    "$ROOT/bin/fm-brief.sh" browser-contract-sm --secondmate --no-projects >/dev/null 2>&1
+  charter="$home/data/browser-contract-sm/brief.md"
+  assert_no_grep "# Browser environment" "$charter" \
+    "persistent secondmate charter received an ordinary worker browser session"
+  pass "fm-brief.sh: workers and scouts receive the bounded browser recovery and Playwright handoff contract"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -542,4 +577,5 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_browser_contract_applies_to_workers_and_scouts_only
 test_scout_and_secondmate_scaffold

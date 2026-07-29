@@ -57,6 +57,8 @@ fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-chrome-axi-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
@@ -1377,6 +1379,114 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   pass "herdr projection teardown retains the stale journal and attempts no workspace cleanup when exact-pane close is unconfirmed"
 }
 
+add_recording_chrome_axi() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+printf 'session=%s args=%s\n' "${CHROME_DEVTOOLS_AXI_SESSION:-<unset>}" "$*" >> "${FM_CHROME_AXI_LOG:?}"
+[ -z "${FM_CHROME_AXI_FAIL:-}" ] || exit 9
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/chrome-devtools-axi"
+}
+
+append_bound_chrome_session() {
+  local case_dir=$1 session
+  session=$(fm_chrome_axi_session_name "$ROOT" task-x1) || return 1
+  printf 'chrome_devtools_axi_session=%s\n' "$session" >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' "$session"
+}
+
+test_chrome_axi_cleanup_stops_only_exact_recorded_session() {
+  local case_dir log expected line
+  case_dir=$(make_case chrome-axi-exact-stop)
+  write_meta "$case_dir" local-only ship
+  expected=$(append_bound_chrome_session "$case_dir")
+  log="$case_dir/chrome.log"; : > "$log"
+  add_recording_chrome_axi "$case_dir"
+
+  FM_CHROME_AXI_LOG="$log" run_teardown "$case_dir" --force >/dev/null 2> "$case_dir/stderr" \
+    || fail "exact recorded Chrome DevTools AXI session cleanup failed"
+  line=$(cat "$log")
+  [ "$line" = "session=$expected args=stop" ] \
+    || fail "cleanup did not stop only the exact recorded session: $line"
+  assert_not_contains "$line" "session=default" "cleanup touched the shared default browser session"
+  pass "fm-teardown stops only the exact recorded Chrome DevTools AXI session"
+}
+
+test_chrome_axi_legacy_cleanup_never_guesses_default() {
+  local case_dir log
+  case_dir=$(make_case chrome-axi-legacy-noop)
+  write_meta "$case_dir" local-only ship
+  log="$case_dir/chrome.log"; : > "$log"
+  add_recording_chrome_axi "$case_dir"
+
+  FM_CHROME_AXI_LOG="$log" run_teardown "$case_dir" --force >/dev/null 2> "$case_dir/stderr" \
+    || fail "legacy cleanup without a browser field failed"
+  [ ! -s "$log" ] || fail "legacy cleanup guessed a browser session: $(cat "$log")"
+  pass "legacy teardown metadata never falls back to a default or global browser stop"
+}
+
+test_chrome_axi_cleanup_runs_after_unlanded_refusal() {
+  local case_dir log rc
+  case_dir=$(make_case chrome-axi-refusal-order)
+  write_meta "$case_dir" local-only ship
+  append_bound_chrome_session "$case_dir" >/dev/null
+  wt_commit "$case_dir" "unlanded browser task work"
+  log="$case_dir/chrome.log"; : > "$log"
+  add_recording_chrome_axi "$case_dir"
+
+  set +e
+  FM_CHROME_AXI_LOG="$log" run_teardown "$case_dir" >/dev/null 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "unlanded task must refuse before browser cleanup"
+  [ ! -s "$log" ] || fail "browser session was stopped before unlanded-work refusal: $(cat "$log")"
+  assert_present "$case_dir/state/task-x1.meta" "unlanded refusal removed task metadata"
+  pass "unlanded-work refusal happens before any browser stop"
+}
+
+test_chrome_axi_stop_failure_preserves_task_for_retry() {
+  local case_dir log rc
+  case_dir=$(make_case chrome-axi-stop-failure)
+  write_meta "$case_dir" local-only ship
+  append_bound_chrome_session "$case_dir" >/dev/null
+  log="$case_dir/chrome.log"; : > "$log"
+  add_recording_chrome_axi "$case_dir"
+
+  set +e
+  FM_CHROME_AXI_LOG="$log" FM_CHROME_AXI_FAIL=1 run_teardown "$case_dir" --force \
+    >/dev/null 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "browser-stop failure must abort cleanup"
+  assert_grep "failed to stop exact Chrome DevTools AXI session" "$case_dir/stderr" \
+    "browser-stop failure was not explicit"
+  assert_present "$case_dir/state/task-x1.meta" "browser-stop failure removed retry metadata"
+  assert_present "$case_dir/wt" "browser-stop failure destroyed the task worktree"
+  pass "browser-stop failure is explicit and preserves the task for an exact retry"
+}
+
+test_chrome_axi_mismatched_binding_refuses_without_stop() {
+  local case_dir log rc other
+  case_dir=$(make_case chrome-axi-mismatch)
+  write_meta "$case_dir" local-only ship
+  other=$(fm_chrome_axi_session_name "$ROOT" other-task)
+  printf 'chrome_devtools_axi_session=%s\n' "$other" >> "$case_dir/state/task-x1.meta"
+  log="$case_dir/chrome.log"; : > "$log"
+  add_recording_chrome_axi "$case_dir"
+
+  set +e
+  FM_CHROME_AXI_LOG="$log" run_teardown "$case_dir" --force >/dev/null 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "another task's valid browser session must be refused"
+  [ ! -s "$log" ] || fail "mismatched browser session was stopped: $(cat "$log")"
+  assert_grep "does not match its home/task identity" "$case_dir/stderr" \
+    "mismatched binding refusal was not explicit"
+  pass "cleanup refuses another task's valid named browser session without touching it"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -1388,6 +1498,11 @@ test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
+test_chrome_axi_cleanup_stops_only_exact_recorded_session
+test_chrome_axi_legacy_cleanup_never_guesses_default
+test_chrome_axi_cleanup_runs_after_unlanded_refusal
+test_chrome_axi_stop_failure_preserves_task_for_retry
+test_chrome_axi_mismatched_binding_refuses_without_stop
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows

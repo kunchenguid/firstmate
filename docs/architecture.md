@@ -116,6 +116,14 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 
+### Browser process isolation at the launch boundary
+
+`fm-spawn.sh` applies Chrome DevTools AXI isolation once to the converged launch command, after every session-provider endpoint and harness template resolves but before the agent process starts.
+That position makes the same task/home-derived session and root correction reach Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and raw verification commands across tmux, Herdr, Zellij, Orca, and cmux without adapter-specific policy.
+The exact named session is durable metadata rather than a value reconstructed during cleanup.
+`fm-teardown.sh` validates the recorded session against its home/task identity before mutation and invokes its exact stop only after the existing destructive-cleanup authorization checks.
+[`bin/fm-chrome-axi-lib.sh`](../bin/fm-chrome-axi-lib.sh) is the mechanism owner, generated ship/scout instructions own bounded worker recovery, and [`verification/chrome-devtools-axi.md`](verification/chrome-devtools-axi.md) records current evidence.
+
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.

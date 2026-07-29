@@ -34,6 +34,8 @@
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Every ship/scout brief also carries the bounded Chrome DevTools AXI recovery
+# contract for the task-isolated, root-correct environment applied by fm-spawn.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
@@ -226,6 +228,19 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+IFS= read -r -d '' BROWSER_SECTION <<'EOF' || true
+# Browser environment
+Firstmate has already applied a task-unique Chrome DevTools AXI named session and the root-correct Chrome arguments before this worker started.
+Do not unset or replace `CHROME_DEVTOOLS_AXI_SESSION` or `CHROME_DEVTOOLS_AXI_CHROME_ARGS`, set a fixed `CHROME_DEVTOOLS_AXI_PORT`, attach to an external/interactive Chrome, or select a shared user-data directory.
+
+On `Protocol error: Target closed`, run `chrome-devtools-axi stop` once; it stops only this task's inherited named session.
+Then reopen the same page once with `chrome-devtools-axi open <url>` and retry the failed AXI operation once with the inherited environment unchanged.
+If `Target closed` repeats, append `blocked:` with the exact infrastructure error and stop instead of experimenting further, killing browser processes, or touching any default or other task session.
+Chrome DevTools AXI commands and Playwright code are not generically command-compatible, so do not claim or attempt an automatic translation.
+A task-specific Playwright route remains possible only after firstmate approves that explicit fallback for the affected browser interaction.
+EOF
+BROWSER_SECTION=${BROWSER_SECTION%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -234,6 +249,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
+
+$BROWSER_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -342,6 +359,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
+
+$BROWSER_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.

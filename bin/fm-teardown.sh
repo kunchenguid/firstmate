@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, release the Orca
-# worktree, or retire a secondmate home; kill the recorded runtime endpoint,
-# clear volatile state, refresh/prune the project's clone for PR-based ship
+# worktree, or retire a secondmate home; stop the exact recorded Chrome DevTools
+# AXI named session, kill the recorded runtime endpoint, clear volatile state,
+# refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
@@ -34,6 +35,12 @@
 # device. It refuses and preserves task state when that proof fails; otherwise
 # it removes the task's check, trust record, PR sidecar, publication record, and
 # quarantine entries with the rest of the volatile state.
+# New ship/scout metadata also carries chrome_devtools_axi_session=. Teardown
+# validates its exact home/task binding before mutation, then stops only that
+# named session after all landed-work/report/decision checks pass and before
+# worktree or endpoint cleanup. Legacy records are a no-op and never stop the
+# default session; a stop failure preserves metadata and aborts for a safe retry.
+# bin/fm-chrome-axi-lib.sh owns the exact field validation and stop environment.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -106,6 +113,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-chrome-axi-lib.sh
+. "$SCRIPT_DIR/fm-chrome-axi-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -123,6 +132,7 @@ META="$STATE/$ID.meta"
 # complete before fm-guard, a backend command, file removal, branch deletion,
 # worktree return, registry change, or process termination can run.
 fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
+fm_chrome_axi_validate_meta_session "$META" "$ID" "$FM_HOME" || exit 1
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)
@@ -947,6 +957,7 @@ validate_firstmate_home_children_removal() {
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
     fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
+    fm_chrome_axi_validate_meta_session "$child_meta" "$child_id" "$home" || return 1
     validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
     child_wt=$(meta_value "$child_meta" worktree)
     child_kind=$(meta_value "$child_meta" kind)
@@ -994,6 +1005,7 @@ cleanup_firstmate_home_children() {
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       fi
     fi
+    fm_chrome_axi_stop_meta_session "$child_meta" "$child_id" "$home" || return 1
     if [ -n "$child_t" ]; then
       if [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
@@ -1116,6 +1128,11 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     fi
   fi
 fi
+
+# This is the first browser lifecycle action. Every destructive authorization
+# check above has passed, and a failure here leaves the worktree, endpoint, and
+# metadata intact so the exact recorded session can be retried safely.
+fm_chrome_axi_stop_meta_session "$META" "$ID" "$FM_HOME" || exit 1
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then

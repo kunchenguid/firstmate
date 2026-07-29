@@ -53,6 +53,13 @@
 #   Every single-task invocation holds one task-id-scoped lock across backend
 #   creation through metadata publication, so concurrent same-id spawns serialize
 #   even when they select different backends.
+#   Every ship/scout launch also receives a deterministic home/task-isolated
+#   Chrome DevTools AXI named session through the shared launch-command boundary.
+#   The exact session is recorded as chrome_devtools_axi_session= for teardown;
+#   root launches preserve ambient Chrome arguments and add --no-sandbox once.
+#   Fixed ports, external-browser attachment, and shared user-data directories are
+#   cleared from the worker environment so the named bridge owns an isolated Chrome.
+#   bin/fm-chrome-axi-lib.sh owns naming, argument, validation, and cleanup details.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -141,6 +148,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-chrome-axi-lib.sh
+. "$SCRIPT_DIR/fm-chrome-axi-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -291,6 +300,7 @@ spawn_abort_cleanup() {
             echo "mode=${MODE:-no-mistakes}"
             echo "yolo=${YOLO:-off}"
             echo "tasktmp=${TASK_TMP:-}"
+            [ -z "${CHROME_AXI_SESSION:-}" ] || echo "chrome_devtools_axi_session=$CHROME_AXI_SESSION"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
             echo "backend=orca"
@@ -377,6 +387,12 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+CHROME_AXI_SESSION=
+CHROME_AXI_ARGS=
+if [ "$KIND" != secondmate ]; then
+  CHROME_AXI_SESSION=$(fm_chrome_axi_session_name "$FM_HOME" "$ID") || exit 1
+  CHROME_AXI_ARGS=$(fm_chrome_axi_args_for_uid "$(id -u)" "${CHROME_DEVTOOLS_AXI_CHROME_ARGS:-}")
+fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2
@@ -1443,6 +1459,7 @@ META_WINDOW=$T
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
+  [ -z "$CHROME_AXI_SESSION" ] || echo "chrome_devtools_axi_session=$CHROME_AXI_SESSION"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   # backend= is written only for a non-default (non-tmux) backend, so the
@@ -1500,6 +1517,9 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 # an unset value is the single-store default and needs no prefix.
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+if [ "$KIND" != secondmate ]; then
+  LAUNCH="CHROME_DEVTOOLS_AXI_SESSION=$(shell_quote "$CHROME_AXI_SESSION") CHROME_DEVTOOLS_AXI_CHROME_ARGS=$(shell_quote "$CHROME_AXI_ARGS") CHROME_DEVTOOLS_AXI_PORT='' CHROME_DEVTOOLS_AXI_AUTO_CONNECT='' CHROME_DEVTOOLS_AXI_BROWSER_URL='' CHROME_DEVTOOLS_AXI_USER_DATA_DIR='' $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
