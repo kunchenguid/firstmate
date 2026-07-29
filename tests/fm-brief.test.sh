@@ -598,6 +598,52 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# Checkpoint-commit discipline must reach every worker that produces artifacts,
+# so both the ship and scout scaffolds carry it. The rule is judged by cost to
+# reproduce rather than task size, which is the part a bare "commit often"
+# instruction loses, so that distinction is pinned here too.
+test_commit_discipline_in_ship_and_scout() {
+  local home id brief
+  home="$TMP_ROOT/commit-discipline-home"
+  write_registry "$home"
+
+  for id_args in \
+    "commit-ship-nomistakes:no-registry-proj" \
+    "commit-ship-directpr:direct-proj" \
+    "commit-ship-localonly:local-proj" \
+    "commit-scout:no-registry-proj --scout"; do
+    id=${id_args%%:*}
+    # shellcheck disable=SC2086 # Deliberate word splitting: the fixture carries an optional --scout flag.
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" ${id_args##*:} >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_grep "# Commit discipline" "$brief" \
+      "$id: brief lost the commit-discipline section"
+    assert_grep "as raw evidence the moment it exists, in its own commit, before any analysis or polishing drawn from it" "$brief" \
+      "$id: brief did not require expensive evidence to be committed ahead of analysis"
+    assert_grep "Never go more than about 15 minutes of changed files without a checkpoint commit" "$brief" \
+      "$id: brief lost the checkpoint-commit interval"
+    assert_grep "cost to reproduce, not task size" "$brief" \
+      "$id: brief lost the cost-to-reproduce distinction that task size cannot express"
+    assert_grep "a successor will not trust loose output it does not remember producing" "$brief" \
+      "$id: brief lost the handoff reason for committing early"
+    assert_grep "while a pipeline owns your branch, follow Definition of done and do not commit into the run" "$brief" \
+      "$id: brief lost the active-validation-run carve-out"
+    # The discipline is an addition, never a replacement: the scaffold's existing
+    # safety contracts must survive alongside it.
+    assert_grep "# Definition of done" "$brief" "$id: brief lost its Definition of done section"
+    assert_grep "# Herdr lifecycle declaration - NOT ENABLED" "$brief" \
+      "$id: brief lost the Herdr declaration"
+    assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
+  done
+
+  assert_grep "Verify isolation before anything else" "$home/data/commit-ship-nomistakes/brief.md" \
+    "ship brief lost the worktree-isolation assertion"
+  assert_grep "SCOUT task" "$home/data/commit-scout/brief.md" \
+    "scout brief lost its scout declaration"
+  pass "fm-brief.sh: ship and scout scaffolds carry checkpoint-commit discipline"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -634,4 +680,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_commit_discipline_in_ship_and_scout
 test_scout_and_secondmate_scaffold
