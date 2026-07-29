@@ -431,7 +431,9 @@ signal_reason_is_actionable() {  # <file> ...
 
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from bin/fm-crew-state.sh's one authoritative current-state line
-# ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
+# ("state: <s> · source: <src> · age: <age> · <detail>"; the source token comes
+# from "${line#*source: }", so the trailing fields do not affect it).
+# Prints exactly one token:
 #   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
 #             pane; the crew is legitimately mid-work on a static-looking pane
 #             (e.g. waiting on CI);

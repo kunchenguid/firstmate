@@ -70,10 +70,12 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 # The exact command every generated status instruction embeds so each append
-# carries its own UTC time. fm-classify-lib.sh owns the format; the scaffold
-# inlines the command rather than a helper script so the instruction stays one
-# self-contained line a worker can copy with nothing else on its PATH.
-STATUS_STAMP_CMD=${FM_STATUS_STAMP_CMD:-$FM_STATUS_STAMP_CMD_DEFAULT}
+# carries its own UTC time. fm-classify-lib.sh is the sole owner of the format
+# and is not overridable here: its strippers match a fixed stamp glob, so a
+# writer-side override could only ever desync the writer from every parser. The
+# scaffold inlines the command rather than a helper script so the instruction
+# stays one self-contained line a worker can copy with nothing else on its PATH.
+STATUS_STAMP_CMD=$FM_STATUS_STAMP_CMD_DEFAULT
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
