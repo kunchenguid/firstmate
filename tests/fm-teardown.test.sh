@@ -90,6 +90,31 @@ with open(state, "w", encoding="utf-8") as stream:
 PY
 }
 
+write_treehouse_returned() {
+  local worktree=$1 slot pool state
+  slot=$(cd "$(dirname "$worktree")" && pwd -P)
+  pool=$(cd "$(dirname "$slot")" && pwd -P)
+  state="$pool/treehouse-state.json"
+  python3 - "$state" "$(cd "$worktree" && pwd -P)" <<'PY'
+import json
+import sys
+
+state, path = sys.argv[1:]
+with open(state, "w", encoding="utf-8") as stream:
+    json.dump(
+        {
+            "worktrees": [
+                {
+                    "name": "1",
+                    "path": path,
+                }
+            ]
+        },
+        stream,
+    )
+PY
+}
+
 prepare_secondmate_home_fixture() {
   local case_dir=$1 id=${2:-task-x1} root_default default root_tip exclude home_abs
   mkdir -p "$case_dir/data" "$case_dir/wt/data" "$case_dir/wt/state" "$case_dir/wt/config" \
@@ -1397,6 +1422,113 @@ test_dirty_worktree_refuses() {
   grep -q REFUSED "$case_dir/stderr" || fail "dirty-wt: no REFUSED line in stderr"
   grep -q "uncommitted changes" "$case_dir/stderr" || fail "dirty-wt: refusal did not cite uncommitted changes"
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
+}
+
+test_already_returned_worktree_finishes_bookkeeping() {
+  local case_dir rc
+  case_dir=$(make_case already-returned)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "landed task work"
+  add_fork_with_pushed_branch "$case_dir"
+  write_treehouse_returned "$case_dir/wt"
+  rm -f "$case_dir/fakebin/.tmux-live"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+echo "treehouse return must not run for an already-returned worktree" >&2
+exit 99
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "already-returned: teardown should finish bookkeeping after proving landed work"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "already-returned: teardown left orphaned task metadata"
+  assert_present "$case_dir/wt" \
+    "already-returned: teardown tried to return the unleased worktree again"
+  assert_no_grep "treehouse return must not run" "$case_dir/stderr" \
+    "already-returned: teardown invoked Treehouse after the lease was already released"
+  pass "already-returned landed worktree completes bookkeeping without a second return"
+}
+
+test_watchman_cookies_do_not_block_teardown() {
+  local case_dir rc
+  case_dir=$(make_case watchman-cookie)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'watchman cookie\n' \
+    > "$case_dir/wt/.watchman-cookie-test-host-123-456"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "watchman-cookie: a listed Watchman artifact should not constitute unlanded work"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "watchman-cookie: teardown left task metadata behind"
+  pass "explicitly listed Watchman cookies do not block teardown"
+}
+
+test_preserve_scratch_captures_then_reclaims_dirty_worktree() {
+  local case_dir rc scratch_capture
+  case_dir=$(make_case preserve-scratch)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "landed task work"
+  add_fork_with_pushed_branch "$case_dir"
+  printf '%s\n' "staged post-merge correction" > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  printf '%s\n' "untracked recovery payload" > "$case_dir/wt/recovery note.txt"
+
+  set +e
+  run_teardown "$case_dir" --preserve-scratch \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "preserve-scratch: explicit preservation should reclaim landed dirty work"
+  scratch_capture=$(find "$case_dir/data/task-x1/scratch" -mindepth 1 -maxdepth 1 \
+    -type d -print -quit)
+  [ -n "$scratch_capture" ] || fail \
+    "preserve-scratch: no durable scratch capture was written"
+  assert_grep "staged post-merge correction" "$scratch_capture/staged.patch" \
+    "preserve-scratch: staged diff was not captured"
+  assert_grep "recovery note.txt" "$scratch_capture/untracked.txt" \
+    "preserve-scratch: untracked inventory was not captured"
+  tar -tf "$scratch_capture/untracked.tar" | grep -Fx "recovery note.txt" >/dev/null \
+    || fail "preserve-scratch: untracked payload was not archived"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "preserve-scratch: teardown left task metadata behind"
+  pass "preserve-then-reclaim captures dirty work before cleaning"
+}
+
+test_preserve_scratch_never_cleans_unlanded_commits() {
+  local case_dir rc
+  case_dir=$(make_case preserve-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt unlanded "unlanded task work"
+  printf '%s\n' "uncommitted follow-up" > "$case_dir/wt/feature.txt"
+
+  set +e
+  run_teardown "$case_dir" --preserve-scratch \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "preserve-unlanded: preservation must not bypass the landed-commit proof"
+  assert_grep "uncommitted follow-up" "$case_dir/wt/feature.txt" \
+    "preserve-unlanded: teardown cleaned uncommitted work before proving commits landed"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "preserve-unlanded: teardown cleared metadata for unlanded work"
+  assert_grep "work not on any remote and not landed" "$case_dir/stderr" \
+    "preserve-unlanded: refusal did not cite the unlanded commit"
+  pass "preserve-scratch never bypasses the landed-commit proof"
 }
 
 test_gh_error_and_content_absent_refuses() {
@@ -3877,7 +4009,8 @@ old_ifs=$IFS
 IFS=,
 set -- $FM_TREEHOUSE_RETURN_BOUNDARY_FDS
 IFS=$old_ifs
-[ "$#" -ge 2 ] || exit 95
+[ "$#" -eq 1 ] || exit 95
+[ "$1" = "$FM_TREEHOUSE_RETURN_ROOT_FD" ] || exit 99
 for descriptor in "$@"; do
   [ -d "/dev/fd/$descriptor" ] || exit 96
 done
@@ -4500,6 +4633,31 @@ if [ "${FM_TEST_FOCUSED:-}" = review-round-13-network ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = reclaim-regressions ]; then
+  test_already_returned_worktree_finishes_bookkeeping
+  test_watchman_cookies_do_not_block_teardown
+  test_preserve_scratch_captures_then_reclaims_dirty_worktree
+  test_preserve_scratch_never_cleans_unlanded_commits
+  test_no_mistakes_truly_unpushed_refuses
+  test_dirty_worktree_refuses
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = already-returned ]; then
+  test_already_returned_worktree_finishes_bookkeeping
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = watchman-cookie ]; then
+  test_watchman_cookies_do_not_block_teardown
+  exit 0
+fi
+
+if [ "${FM_TEST_FOCUSED:-}" = preserve-scratch ]; then
+  test_preserve_scratch_captures_then_reclaims_dirty_worktree
+  exit 0
+fi
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -4586,6 +4744,10 @@ test_content_fallback_honors_shared_checkout_lock
 test_locked_return_reuses_checkout_lock_for_landing_recheck
 test_treehouse_return_timeout_reaps_children_before_unlock
 test_dirty_worktree_refuses
+test_already_returned_worktree_finishes_bookkeeping
+test_watchman_cookies_do_not_block_teardown
+test_preserve_scratch_captures_then_reclaims_dirty_worktree
+test_preserve_scratch_never_cleans_unlanded_commits
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses

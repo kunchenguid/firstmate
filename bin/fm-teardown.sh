@@ -31,6 +31,14 @@
 # worktree, and task lease, then quiesces the endpoint before its final safety checks.
 # Each locked Treehouse return repeats repository, lease, and landed-work checks
 # immediately before the destructive return command.
+# A cleanly unleased Treehouse slot means an operator already returned it.
+# Teardown still repeats the landed-work proof under the checkout lock, skips a
+# second return, and clears only the orphaned task bookkeeping.
+# Only the explicit patterns in teardown_path_is_known_tool_artifact are excluded
+# from dirty-work detection.
+# --preserve-scratch first proves committed work landed, captures tracked diffs
+# and untracked payloads under data/<task-id>/scratch/, then cleans and repeats
+# the ordinary safety proof before reclaim proceeds.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge on the captain's approval) as a fallback
 # for the common case where there is no remote at all.
@@ -52,9 +60,12 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force]
+# Usage: fm-teardown.sh <task-id> [--force] [--preserve-scratch]
 #   --force permits recursive kind=secondmate retirement. It never bypasses
 #   dirty, untracked, stash, landed-work, endpoint, identity, or report proofs.
+#   --preserve-scratch permits a ship/scout teardown to preserve tracked diffs
+#   and untracked files under data/<task-id>/scratch/ before cleaning them.
+#   Committed work must still pass the ordinary landed-work proof first.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crewmate process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -123,8 +134,36 @@ case "$TEARDOWN_UPSTREAM_TIMEOUT" in
     exit 2
     ;;
 esac
+[ "$#" -ge 1 ] || {
+  echo "usage: fm-teardown.sh <task-id> [--force] [--preserve-scratch]" >&2
+  exit 2
+}
 ID=$1
-FORCE=${2:-}
+shift
+FORCE=
+PRESERVE_SCRATCH=0
+for option in "$@"; do
+  case "$option" in
+    --force)
+      [ -z "$FORCE" ] || {
+        echo "error: duplicate teardown option: --force" >&2
+        exit 2
+      }
+      FORCE=--force
+      ;;
+    --preserve-scratch)
+      [ "$PRESERVE_SCRATCH" -eq 0 ] || {
+        echo "error: duplicate teardown option: --preserve-scratch" >&2
+        exit 2
+      }
+      PRESERVE_SCRATCH=1
+      ;;
+    *)
+      echo "error: unknown teardown option: $option" >&2
+      exit 2
+      ;;
+  esac
+done
 
 META="$STATE/$ID.meta"
 
@@ -283,6 +322,10 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
   echo "error: task kind changed while teardown waited for lifecycle ownership" >&2
   exit 1
 }
+if [ "$PRESERVE_SCRATCH" -eq 1 ] && [ "$KIND" = secondmate ]; then
+  echo "error: --preserve-scratch is supported only for ship and scout worktrees" >&2
+  exit 2
+fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 REPORT_GATED=0
@@ -987,7 +1030,7 @@ treehouse_state_for_worktree() {
   printf '%s\n' "$state"
 }
 
-require_treehouse_task_lease() {
+treehouse_task_lease_state() {
   local worktree=$1 expected_holder=$2 state
   state=$(treehouse_state_for_worktree "$worktree") || {
     echo "error: cannot resolve authoritative Treehouse state for $worktree" >&2
@@ -1017,14 +1060,22 @@ try:
     if len(matches) != 1:
         raise ValueError("expected exactly one matching worktree entry")
     entry = matches[0]
-    if entry.get("leased") is not True:
-        raise ValueError("worktree is not durably leased")
-    if entry.get("lease_holder") != expected_holder:
-        raise ValueError(
-            f"lease holder is {entry.get('lease_holder')!r}, expected {expected_holder!r}"
-        )
     if entry.get("destroying") is True:
         raise ValueError("worktree is already being destroyed")
+    if entry.get("leased") is True:
+        if entry.get("lease_holder") != expected_holder:
+            raise ValueError(
+                f"lease holder is {entry.get('lease_holder')!r}, "
+                f"expected {expected_holder!r}"
+            )
+        print("leased")
+    elif entry.get("leased") in (None, False) and entry.get("lease_holder") in (
+        None,
+        "",
+    ):
+        print("returned")
+    else:
+        raise ValueError("worktree lease state is neither owned nor cleanly returned")
 except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
     print(
         f"error: Treehouse ownership for {expected_path} is unprovable: {error}",
@@ -1032,6 +1083,27 @@ except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error
     )
     raise SystemExit(1)
 PY
+}
+
+require_treehouse_task_lease() {
+  local state
+  state=$(treehouse_task_lease_state "$1" "$2") || return 1
+  [ "$state" = leased ] || {
+    echo "error: Treehouse ownership for $1 is unprovable: worktree is not durably leased" >&2
+    return 1
+  }
+}
+
+TREEHOUSE_TARGET_ALREADY_RETURNED=0
+require_treehouse_task_lease_or_returned() {
+  local state
+  TREEHOUSE_TARGET_ALREADY_RETURNED=0
+  state=$(treehouse_task_lease_state "$1" "$2") || return 1
+  case "$state" in
+    leased) ;;
+    returned) TREEHOUSE_TARGET_ALREADY_RETURNED=1 ;;
+    *) return 1 ;;
+  esac
 }
 
 require_treehouse_return_authority() {
@@ -1083,7 +1155,7 @@ validate_teardown_target_identity() {
     echo "error: teardown worktree is not registered to the recorded project: $worktree_root" >&2
     return 1
   }
-  require_treehouse_task_lease "$worktree_root" "firstmate-$ID"
+  require_treehouse_task_lease_or_returned "$worktree_root" "firstmate-$ID"
 }
 
 retry_wait_secs_is_valid() {
@@ -1318,12 +1390,38 @@ cleanup_returned_worktree() {
   remove_worktree_compatibility_artifacts "$worktree" "returned worktree"
 }
 
-validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch stash_list
-  [ -d "$WT" ] || return 0
-  case "$KIND" in
-    secondmate) return 0 ;;
+teardown_path_is_known_tool_artifact() {
+  local path=$1
+  case "$path" in
+    .claude/settings.local.json|.opencode/plugins/fm-turn-end.js|.fm-grok-turnend)
+      return 0
+      ;;
+    .watchman-cookie-*)
+      case "$path" in
+        */*) return 1 ;;
+        *) return 0 ;;
+      esac
+      ;;
   esac
+  return 1
+}
+
+first_actionable_dirty_status() {
+  local line path
+  while IFS= read -r line; do
+    case "$line" in
+      '?? '*)
+        path=${line#?? }
+        teardown_path_is_known_tool_artifact "$path" && continue
+        ;;
+    esac
+    printf '%s\n' "$line"
+    return 0
+  done
+}
+
+validate_worktree_stash_absent() {
+  local stash_list
   stash_list=$(git -C "$WT" stash list 2>/dev/null) || {
     echo "REFUSED: cannot inspect worktree $WT for retained stash history." >&2
     return 1
@@ -1332,19 +1430,10 @@ validate_worktree_teardown_safety() {
     echo "REFUSED: worktree $WT has retained stash history." >&2
     return 1
   }
+}
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain=v1 --untracked-files=all 2>/dev/null); then
-    if worktree_safety_blocked_by_lock "uncommitted changes"; then
-      return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
-    fi
-    echo "REFUSED: cannot inspect worktree $WT for uncommitted changes." >&2
-    echo "Restore the git index state, then retry teardown." >&2
-    return 1
-  fi
-  dirty=$(printf '%s\n' "$dirty_raw" \
-    | grep -vE '^\?\? (\.claude/settings\.local\.json|\.opencode/plugins/fm-turn-end\.js|\.fm-grok-turnend)$' \
-    | head -1 || true)
-
+validate_worktree_committed_landing() {
+  local unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
@@ -1366,18 +1455,12 @@ validate_worktree_teardown_safety() {
       return 1
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
-    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
+    if [ -n "$unmerged" ]; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
-      [ -n "$dirty" ] && echo "uncommitted changes present" >&2
-      [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
+      printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push it to a fork or remote, then retry teardown." >&2
       return 1
     fi
-  elif [ -n "$dirty" ]; then
-    echo "REFUSED: worktree $WT has uncommitted changes." >&2
-    echo "uncommitted changes present" >&2
-    echo "Commit and land them, then retry teardown." >&2
-    return 1
   elif [ -n "$unpushed" ]; then
     branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
     if [ -z "$branch" ]; then
@@ -1391,6 +1474,236 @@ validate_worktree_teardown_safety() {
       return 1
     fi
   fi
+}
+
+validate_worktree_teardown_safety() {
+  local dirty_raw dirty
+  [ -d "$WT" ] || return 0
+  case "$KIND" in
+    secondmate) return 0 ;;
+  esac
+  validate_worktree_stash_absent || return 1
+
+  if ! dirty_raw=$(git -C "$WT" status --porcelain=v1 --untracked-files=all 2>/dev/null); then
+    if worktree_safety_blocked_by_lock "uncommitted changes"; then
+      return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+    fi
+    echo "REFUSED: cannot inspect worktree $WT for uncommitted changes." >&2
+    echo "Restore the git index state, then retry teardown." >&2
+    return 1
+  fi
+  dirty=$(printf '%s\n' "$dirty_raw" | first_actionable_dirty_status || true)
+
+  validate_worktree_committed_landing || return $?
+  if [ -n "$dirty" ]; then
+    echo "REFUSED: worktree $WT has uncommitted changes." >&2
+    echo "uncommitted changes present" >&2
+    if [ "$PRESERVE_SCRATCH" -eq 1 ]; then
+      echo "The requested scratch preservation did not complete; the worktree is unchanged." >&2
+    else
+      echo "Retry with --preserve-scratch to capture the diff and untracked files before cleaning, or commit and land them first." >&2
+    fi
+    return 1
+  fi
+}
+
+filter_preservable_untracked_paths() {
+  local source=$1 destination=$2 path
+  while IFS= read -r -d '' path; do
+    teardown_path_is_known_tool_artifact "$path" && continue
+    printf '%s\0' "$path"
+  done < "$source" > "$destination"
+}
+
+capture_worktree_scratch() {
+  local task_dir scratch_root capture_dir all_untracked
+  [ -d "$DATA" ] || mkdir -p "$DATA" || return 1
+  [ -d "$DATA" ] && [ ! -L "$DATA" ] || {
+    echo "REFUSED: scratch data root is not a real directory: $DATA" >&2
+    return 1
+  }
+  task_dir="$DATA/$ID"
+  [ -e "$task_dir" ] || mkdir "$task_dir" || return 1
+  [ -d "$task_dir" ] && [ ! -L "$task_dir" ] || {
+    echo "REFUSED: task report directory is not a real directory: $task_dir" >&2
+    return 1
+  }
+  scratch_root="$task_dir/scratch"
+  [ -e "$scratch_root" ] || mkdir "$scratch_root" || return 1
+  [ -d "$scratch_root" ] && [ ! -L "$scratch_root" ] || {
+    echo "REFUSED: task scratch path is not a real directory: $scratch_root" >&2
+    return 1
+  }
+  capture_dir="$scratch_root/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  [ ! -e "$capture_dir" ] || {
+    echo "REFUSED: scratch capture path already exists: $capture_dir" >&2
+    return 1
+  }
+  umask 077
+  mkdir "$capture_dir" || return 1
+  all_untracked="$capture_dir/.all-untracked.paths"
+
+  git -C "$WT" status --porcelain=v1 --untracked-files=all \
+    > "$capture_dir/status.txt" || return 1
+  git -C "$WT" diff --binary --full-index HEAD -- \
+    > "$capture_dir/tracked.patch" || return 1
+  git -C "$WT" diff --binary --full-index --cached -- \
+    > "$capture_dir/staged.patch" || return 1
+  git -C "$WT" diff --binary --full-index -- \
+    > "$capture_dir/unstaged.patch" || return 1
+  git -C "$WT" ls-files --others --exclude-standard -z -- \
+    > "$all_untracked" || return 1
+  filter_preservable_untracked_paths \
+    "$all_untracked" "$capture_dir/untracked.paths" || return 1
+  rm -f "$all_untracked"
+
+  python3 - "$WT" "$capture_dir" <<'PY'
+import hashlib
+import json
+import os
+import stat
+import sys
+import tarfile
+
+root, capture = sys.argv[1:]
+with open(os.path.join(capture, "untracked.paths"), "rb") as stream:
+    paths = [item.decode("utf-8", "surrogateescape") for item in stream.read().split(b"\0") if item]
+
+def snapshot(path):
+    metadata = os.lstat(path)
+    record = {
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "mode": metadata.st_mode,
+        "size": metadata.st_size,
+    }
+    if stat.S_ISREG(metadata.st_mode):
+        digest = hashlib.sha256()
+        with open(path, "rb", buffering=0) as stream:
+            opened = os.fstat(stream.fileno())
+            if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                raise OSError(f"untracked file identity changed: {path}")
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        record["sha256"] = digest.hexdigest()
+    elif stat.S_ISLNK(metadata.st_mode):
+        record["target"] = os.readlink(path)
+    return record
+
+manifest = []
+archive_path = os.path.join(capture, "untracked.tar")
+with tarfile.open(archive_path, "w", dereference=False) as archive:
+    for relative in paths:
+        normalized = os.path.normpath(relative)
+        if (
+            not relative
+            or os.path.isabs(relative)
+            or normalized == os.pardir
+            or normalized.startswith(os.pardir + os.sep)
+        ):
+            raise OSError(f"unsafe untracked path: {relative!r}")
+        source = os.path.join(root, relative)
+        before = snapshot(source)
+        archive.add(source, arcname=relative, recursive=False)
+        after = snapshot(source)
+        if before != after:
+            raise OSError(f"untracked file changed during capture: {relative}")
+        manifest.append({"path": relative, **before})
+
+with open(os.path.join(capture, "untracked.txt"), "w", encoding="utf-8") as stream:
+    for relative in paths:
+        stream.write(json.dumps(relative, ensure_ascii=False) + "\n")
+with open(os.path.join(capture, "untracked-manifest.json"), "w", encoding="utf-8") as stream:
+    json.dump(manifest, stream, indent=2, ensure_ascii=False)
+    stream.write("\n")
+PY
+  : > "$capture_dir/capture-complete"
+  PRESERVED_SCRATCH_CAPTURE=$capture_dir
+}
+
+verify_preserved_untracked_snapshot() {
+  local capture_dir=$1
+  python3 - "$WT" "$capture_dir/untracked-manifest.json" <<'PY'
+import hashlib
+import json
+import os
+import stat
+import sys
+
+root, manifest_path = sys.argv[1:]
+with open(manifest_path, encoding="utf-8") as stream:
+    manifest = json.load(stream)
+for expected in manifest:
+    path = os.path.join(root, expected["path"])
+    metadata = os.lstat(path)
+    actual = {
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "mode": metadata.st_mode,
+        "size": metadata.st_size,
+    }
+    if stat.S_ISREG(metadata.st_mode):
+        digest = hashlib.sha256()
+        with open(path, "rb", buffering=0) as stream:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        actual["sha256"] = digest.hexdigest()
+    elif stat.S_ISLNK(metadata.st_mode):
+        actual["target"] = os.readlink(path)
+    comparison = {key: expected[key] for key in actual}
+    if actual != comparison:
+        raise OSError(f"untracked file changed after capture: {expected['path']}")
+PY
+}
+
+clean_preserved_worktree_scratch() {
+  local capture_dir=$1 path
+  [ -f "$capture_dir/capture-complete" ] || return 1
+  verify_preserved_untracked_snapshot "$capture_dir" || return 1
+  git -C "$WT" reset --hard HEAD >/dev/null || return 1
+  while IFS= read -r -d '' path; do
+    git -C "$WT" clean -fd -- "$path" >/dev/null || return 1
+  done < "$capture_dir/untracked.paths"
+}
+
+prepare_preserved_worktree_scratch_locked() {
+  local dirty_raw dirty
+  validate_teardown_target_identity || return 1
+  validate_worktree_stash_absent || return 1
+  dirty_raw=$(git -C "$WT" status --porcelain=v1 --untracked-files=all 2>/dev/null) || {
+    echo "REFUSED: cannot inspect worktree $WT before scratch preservation." >&2
+    return 1
+  }
+  dirty=$(printf '%s\n' "$dirty_raw" | first_actionable_dirty_status || true)
+  [ -n "$dirty" ] || return 0
+  validate_worktree_committed_landing || return 1
+  PRESERVED_SCRATCH_CAPTURE=
+  capture_worktree_scratch || {
+    echo "REFUSED: failed to capture worktree scratch; no cleanup was attempted." >&2
+    return 1
+  }
+  clean_preserved_worktree_scratch "$PRESERVED_SCRATCH_CAPTURE" || {
+    echo "REFUSED: preserved scratch but could not safely clean the worktree." >&2
+    echo "Scratch capture: $PRESERVED_SCRATCH_CAPTURE" >&2
+    return 1
+  }
+  validate_worktree_teardown_safety || {
+    echo "REFUSED: worktree changed after scratch preservation; retaining it." >&2
+    echo "Scratch capture: $PRESERVED_SCRATCH_CAPTURE" >&2
+    return 1
+  }
+  echo "teardown: preserved worktree scratch at $PRESERVED_SCRATCH_CAPTURE"
+}
+
+prepare_preserved_worktree_scratch() {
+  fm_checkout_lock_run \
+    "$WT" "$CHECKOUT_LOCK_ROOT" prepare_preserved_worktree_scratch_locked
 }
 
 validate_child_worktree_landed_state() {
@@ -4035,6 +4348,13 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
+if [ "$PRESERVE_SCRATCH" -eq 1 ] && [ -d "$WT" ]; then
+  prepare_preserved_worktree_scratch || {
+    post_quiescence_safety_refusal
+    exit 1
+  }
+fi
+
 if [ -d "$WT" ]; then
   if validate_worktree_teardown_safety; then
     :
@@ -4090,6 +4410,20 @@ remove_orca_worktree_locked() {
   remove_worktree_compatibility_artifacts "$WT" "removed Orca worktree"
 }
 
+validate_returned_worktree_bookkeeping_locked() {
+  validate_teardown_target_identity || return 1
+  [ "$TREEHOUSE_TARGET_ALREADY_RETURNED" -eq 1 ] || {
+    echo "error: Treehouse lease state changed before returned-worktree bookkeeping" >&2
+    return 1
+  }
+  validate_worktree_teardown_safety || return 1
+  validate_teardown_target_identity || return 1
+  [ "$TREEHOUSE_TARGET_ALREADY_RETURNED" -eq 1 ] || {
+    echo "error: Treehouse lease state changed during returned-worktree bookkeeping" >&2
+    return 1
+  }
+}
+
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
@@ -4097,18 +4431,23 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   fm_checkout_lock_run "$WT" "$CHECKOUT_LOCK_ROOT" remove_orca_worktree_locked || exit 1
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  # Kills remaining processes in the worktree (including the agent), resets, returns
-  # to pool. treehouse resolves the pool from the working directory, so run it from
-  # the project. teardown_treehouse_return tolerates transient and stale git locks
-  # left by a killed crewmate process; see the script header for retry and stale-lock proof.
-  post_lock_cleanup_check=
-  if [ "$KIND" != secondmate ]; then
+  if [ "$TREEHOUSE_TARGET_ALREADY_RETURNED" -eq 1 ]; then
+    fm_checkout_lock_run \
+      "$WT" "$CHECKOUT_LOCK_ROOT" validate_returned_worktree_bookkeeping_locked \
+      || exit 1
+    echo "teardown: worktree lease was already returned; landed-work proof passed and bookkeeping will be cleared"
+  else
+    # Kills remaining processes in the worktree (including the agent), resets,
+    # and returns it to the pool. Treehouse resolves the pool from the working
+    # directory, so run it from the project.
+    # teardown_treehouse_return tolerates transient and stale git locks left by
+    # a killed crewmate process; see the script header for the retry proof.
     post_lock_cleanup_check=validate_worktree_teardown_safety
+    teardown_treehouse_return "$WT" "$PROJ" "worktree" "firstmate-$ID" "$post_lock_cleanup_check" cleanup_returned_worktree || {
+      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+      exit 1
+    }
   fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "firstmate-$ID" "$post_lock_cleanup_check" cleanup_returned_worktree || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
 fi
 
 if [ "$DIRECT_SPAWN_CLEANUP" = pending ] && [ -n "$DIRECT_SPAWN_BACKUP" ]; then

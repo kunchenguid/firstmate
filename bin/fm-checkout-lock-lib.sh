@@ -377,42 +377,55 @@ parent_metadata = os.stat(parent)
 if opened.st_dev != parent_metadata.st_dev or os.path.ismount(target):
     raise SystemExit(74)
 root_device = opened.st_dev
-descriptors = [descriptor]
-pending = [(descriptor, target)]
+pending = [([], target)]
 while pending:
-    directory_fd, path = pending.pop()
-    for name in sorted(os.listdir(directory_fd)):
-        item = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        # A symlink INSIDE the tree is skipped, never refused and never
-        # descended. Refusing outright made this boundary reject any repository
-        # whose own committed layout uses symlinks - relvino puts 177 in every
-        # worktree (its CLAUDE.md -> AGENTS.md convention and symlinked skills),
-        # so no crewmate there could ever be reaped. What this walk exists to prove
-        # is that the destructive return cannot ESCAPE the tree, and a symlink
-        # entry cannot cause that here: it is inspected with
-        # follow_symlinks=False, it is not a directory so it is never queued,
-        # and every descent below
-        # opens with O_NOFOLLOW and re-proves dev/ino, single-device, and
-        # non-mount. The path-component loop above still refuses a symlinked
-        # ANCESTOR, which is the real redirection vector.
-        if stat.S_ISLNK(item.st_mode) or not stat.S_ISDIR(item.st_mode):
-            continue
-        child_path = os.path.join(path, name)
-        child = os.open(name, flags, dir_fd=directory_fd)
-        child_opened = os.fstat(child)
-        if (
-            (item.st_dev, item.st_ino) != (child_opened.st_dev, child_opened.st_ino)
-            or child_opened.st_dev != root_device
-            or os.path.ismount(child_path)
-        ):
-            os.close(child)
-            raise SystemExit(74)
-        descriptors.append(child)
-        pending.append((child, child_path))
-for retained in descriptors:
-    os.set_inheritable(retained, True)
+    chain, path = pending.pop()
+    directory_fd = os.dup(descriptor)
+    try:
+        for component, expected_identity in chain:
+            child = os.open(component, flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = child
+            opened_child = os.fstat(directory_fd)
+            if (
+                (opened_child.st_dev, opened_child.st_ino) != expected_identity
+                or opened_child.st_dev != root_device
+            ):
+                raise SystemExit(74)
+        for name in sorted(os.listdir(directory_fd)):
+            item = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            # A symlink INSIDE the tree is skipped, never refused and never
+            # descended. Refusing outright made this boundary reject any repository
+            # whose own committed layout uses symlinks - relvino puts 177 in every
+            # worktree (its CLAUDE.md -> AGENTS.md convention and symlinked skills),
+            # so no crewmate there could ever be reaped. What this walk exists to prove
+            # is that the destructive return cannot ESCAPE the tree, and a symlink
+            # entry cannot cause that here: it is inspected with
+            # follow_symlinks=False, it is not a directory so it is never queued,
+            # and every descent below opens with O_NOFOLLOW and re-proves dev/ino,
+            # single-device, and non-mount. The path-component loop above still
+            # refuses a symlinked ANCESTOR, which is the real redirection vector.
+            if stat.S_ISLNK(item.st_mode) or not stat.S_ISDIR(item.st_mode):
+                continue
+            child_path = os.path.join(path, name)
+            child = os.open(name, flags, dir_fd=directory_fd)
+            try:
+                child_opened = os.fstat(child)
+                child_identity = (child_opened.st_dev, child_opened.st_ino)
+                if (
+                    (item.st_dev, item.st_ino) != child_identity
+                    or child_opened.st_dev != root_device
+                    or os.path.ismount(child_path)
+                ):
+                    raise SystemExit(74)
+            finally:
+                os.close(child)
+            pending.append((chain + [(name, child_identity)], child_path))
+    finally:
+        os.close(directory_fd)
+os.set_inheritable(descriptor, True)
 os.environ["FM_TREEHOUSE_RETURN_ROOT_FD"] = str(descriptor)
-os.environ["FM_TREEHOUSE_RETURN_BOUNDARY_FDS"] = ",".join(map(str, descriptors))
+os.environ["FM_TREEHOUSE_RETURN_BOUNDARY_FDS"] = str(descriptor)
 os.environ["FM_TREEHOUSE_RETURN_PROJECT"] = project
 os.fchdir(descriptor)
 bound = os.stat(".")

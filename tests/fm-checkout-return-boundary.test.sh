@@ -79,6 +79,19 @@ run_boundary() {  # <project> <target> [cd-dir] -> exit status
   printf '%s' "$status"
 }
 
+run_boundary_low_fd() {  # <project> <target> <open-file-limit> -> exit status
+  local project=$1 target=$2 open_file_limit=$3 fakebin status
+  fakebin=$(fm_fakebin "$(dirname "$project")/fake-low-fd")
+  fm_fake_exit0 "$fakebin" treehouse
+  (
+    ulimit -n "$open_file_limit" || exit 70
+    cd "$project" || exit 71
+    PATH="$fakebin:$PATH" python3 "$BOUNDARY_PY" "$target" "$project"
+  ) >/dev/null 2>&1
+  status=$?
+  printf '%s' "$status"
+}
+
 test_in_tree_symlinks_are_accepted() {
   local rec case_dir project worktree status
   rec=$(make_case in-tree-symlinks)
@@ -158,9 +171,26 @@ EOF
   pass "a project/cwd mismatch is refused"
 }
 
+test_wide_tree_does_not_exhaust_descriptors() {
+  local rec case_dir project worktree status directory
+  rec=$(make_case wide-tree-low-fd)
+  read -r case_dir project worktree <<EOF
+$rec
+EOF
+  : "$case_dir"
+  for directory in $(seq 1 160); do
+    mkdir -p "$worktree/directory-$directory"
+  done
+  status=$(run_boundary_low_fd "$project" "$worktree" 64)
+  expect_code 0 "$status" \
+    "a wide worktree must not exhaust the Treehouse boundary proof descriptor table"
+  pass "wide Treehouse boundary proof stays within a low descriptor limit"
+}
+
 extract_boundary_program
 test_in_tree_symlinks_are_accepted
 test_symlink_escaping_the_tree_is_still_not_followed
 test_symlinked_ancestor_is_refused
 test_non_directory_target_is_refused
 test_project_cwd_mismatch_is_refused
+test_wide_tree_does_not_exhaust_descriptors
