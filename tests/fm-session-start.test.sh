@@ -175,6 +175,14 @@ for arg in "\$@"; do
   prev="\$arg"
 done
 case "\$*" in
+  *"lstart="*)
+    if [ "\$pid" = "$holder_pid" ]; then
+      printf 'Tue Jul 29 01:00:00 2026 pi\n'
+    else
+      printf 'Tue Jul 29 01:00:00 2026 zsh\n'
+    fi
+    exit 0
+    ;;
   *"comm="*)
     if [ "\$pid" = "$holder_pid" ]; then
       printf '/usr/local/bin/pi\n'

@@ -41,6 +41,7 @@ if [ "${1:-}" = "status" ]; then
 fi
 
 me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+incomplete_reason=
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
@@ -63,6 +64,11 @@ trap release_claim_lock EXIT
 trap 'exit 1' HUP INT TERM
 fm_lock_acquire_wait "$CLAIM_LOCK"
 CLAIM_LOCK_HELD=1
+
+if ! incomplete_reason=$(fm_primary_suspend_incomplete_clear); then
+  echo "error: ${incomplete_reason:-unresolved suspend-incomplete primary-session handoff}; operate read-only until resolved" >&2
+  exit 1
+fi
 
 if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
   if [ ! -f "$LOCK" ] || [ -L "$LOCK" ]; then
@@ -91,7 +97,11 @@ if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
   exit 1
 fi
 if ! fm_primary_owner_publish "$STATE" "$me"; then
-  echo "error: cannot publish verified primary-session owner metadata; lock remains held by this live session and it must operate read-only until resolved" >&2
+  if fm_primary_lock_rollback_if_exact_owner "$STATE" "$me"; then
+    echo "error: cannot publish verified primary-session owner metadata; rolled back this session lock claim; operate read-only until resolved" >&2
+  else
+    echo "error: cannot publish verified primary-session owner metadata; could not prove safe rollback of this session lock claim; operate read-only until resolved" >&2
+  fi
   exit 1
 fi
 release_claim_lock

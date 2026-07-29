@@ -57,6 +57,12 @@ fm_primary_receipt_append_state() {
   } >> "$receipt"
 }
 
+fm_primary_receipt_append_resolution() {
+  local receipt=$1 now
+  now=$(fm_primary_now_utc) || return 1
+  fm_primary_receipt_append_state "$receipt" suspend-resolved suspend_resolved_at "$now"
+}
+
 fm_primary_paseo_home() {
   if [ -n "${PASEO_HOME:-}" ]; then
     printf '%s\n' "$PASEO_HOME"
@@ -121,6 +127,66 @@ fm_primary_mark_reacquired_receipts() {
       printf 'state=restored\n'
     } >> "$receipt" || return 1
   done
+}
+
+fm_primary_suspend_incomplete_clear() {
+  local fingerprint receipt receipt_home receipt_state remaining token pid live_pids blocked=0 resolved=0
+  local block_reason=
+  local -a tokens
+  [ -d "$FM_PRIMARY_LIB_DATA/primary-session-handoffs" ] || return 0
+  fingerprint=$(fm_primary_home_fingerprint) || return 1
+  for receipt in "$FM_PRIMARY_LIB_DATA"/primary-session-handoffs/*.receipt; do
+    [ -e "$receipt" ] || continue
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || continue
+    [ "$(fm_primary_receipt_last_value "$receipt" schema 2>/dev/null || true)" = "fm-primary-session-handoff.v1" ] || continue
+    receipt_home=$(fm_primary_receipt_last_value "$receipt" home_fingerprint 2>/dev/null || true)
+    [ "$receipt_home" = "$fingerprint" ] || continue
+    receipt_state=$(fm_primary_receipt_last_value "$receipt" state 2>/dev/null || true)
+    [ "$receipt_state" = suspend-incomplete ] || continue
+    remaining=$(fm_primary_receipt_last_value "$receipt" remaining_pids 2>/dev/null || true)
+    if [ -z "$remaining" ]; then
+      block_reason="unresolved suspend-incomplete primary-session receipt lacks a provable remaining process set: $receipt"
+      blocked=1
+      continue
+    fi
+    live_pids=
+    IFS=, read -r -a tokens <<< "$remaining"
+    for token in "${tokens[@]}"; do
+      pid=${token%%:*}
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      if fm_process_pid_running "$pid"; then
+        live_pids="${live_pids}${live_pids:+,}${pid}"
+      fi
+    done
+    if [ -n "$live_pids" ]; then
+      block_reason="unresolved suspend-incomplete primary-session receipt still has live captured pids ($live_pids): $receipt"
+      blocked=1
+      continue
+    fi
+    fm_primary_receipt_append_resolution "$receipt" || {
+      block_reason="unresolved suspend-incomplete primary-session receipt could not be safely resolved: $receipt"
+      blocked=1
+      continue
+    }
+    resolved=1
+  done
+  if [ "$blocked" -ne 0 ]; then
+    printf '%s\n' "$block_reason"
+    return 1
+  fi
+  [ "$resolved" -eq 0 ] || return 0
+  return 0
+}
+
+fm_primary_lock_rollback_if_exact_owner() {
+  local state=$1 owner_pid=$2 lock current
+  lock="$state/.lock"
+  case "$owner_pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -f "$lock" ] && [ ! -L "$lock" ] || return 1
+  current=$(cat "$lock" 2>/dev/null) || return 1
+  [ "$current" = "$owner_pid" ] || return 1
+  rm -f "$lock" || return 1
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] || return 1
 }
 
 fm_primary_owner_publish() {

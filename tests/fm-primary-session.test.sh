@@ -333,6 +333,24 @@ run_restore() {
   ) || RUN_RC=$?
 }
 
+run_lock_acquire() {
+  RUN_RC=0
+  # shellcheck disable=SC2016
+  RUN_OUT=$(
+    env -u PASEO_AGENT_ID \
+      FM_HOME="$W_ROOT" \
+      FM_ROOT_OVERRIDE="$W_ROOT" \
+      PASEO_HOME="$W_PASEO" \
+      PATH="$W_FAKEBIN:$PATH" \
+      "$W_FAKE_CLAUDE" -c '
+        "$1/bin/fm-lock.sh"
+        rc=$?
+        :
+        exit "$rc"
+      ' _ "$W_ROOT" 2>&1
+  ) || RUN_RC=$?
+}
+
 only_receipt() {
   local -a receipts
   receipts=("$W_ROOT"/data/primary-session-handoffs/*.receipt)
@@ -446,7 +464,34 @@ test_suspend_failure_and_live_tree_refuse() {
   receipt=$(only_receipt) || fail "live-tree failure did not publish its recovery receipt"
   [ "$(record_last_value "$receipt" state)" = suspend-incomplete ] \
     || fail "live-tree receipt did not record suspend-incomplete"
-  pass "primary-session: suspend failure and surviving owner process tree never claim the lock"
+  [ "$(record_last_value "$receipt" remaining_pids)" = "$OWNER_PID" ] \
+    || fail "live-tree receipt did not record the surviving pid set"
+  run_lock_acquire
+  [ "$RUN_RC" -ne 0 ] || fail "ordinary stale-lock acquisition bypassed suspend-incomplete receipt"
+  assert_contains "$RUN_OUT" "unresolved suspend-incomplete primary-session receipt still has live captured pids" \
+    "ordinary lock refusal did not cite the unresolved incomplete handoff"
+  [ "$(cat "$W_ROOT/state/.lock")" = "$OWNER_PID" ] || fail "blocked stale acquisition changed the old lock"
+  kill "$OWNER_PID" 2>/dev/null || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$OWNER_PID" 2>/dev/null || break
+    sleep 0.05
+  done
+  run_lock_acquire
+  [ "$RUN_RC" -eq 0 ] || fail "ordinary stale-lock acquisition did not proceed after captured tree exited: $RUN_OUT"
+  [ "$(record_last_value "$receipt" state)" = suspend-resolved ] \
+    || fail "ordinary stale-lock acquisition did not resolve the incomplete receipt"
+  pass "primary-session: suspend failure and surviving owner process tree block stale-lock acquisition until resolved"
+}
+
+test_lock_publish_failure_rolls_back_own_claim() {
+  new_world publish-failure
+  mkdir "$W_ROOT/state/.lock.owner"
+  run_lock_acquire
+  [ "$RUN_RC" -ne 0 ] || fail "lock acquisition unexpectedly succeeded despite descriptor publication failure"
+  assert_contains "$RUN_OUT" "rolled back this session lock claim" \
+    "lock publication failure did not report a safe rollback"
+  [ ! -e "$W_ROOT/state/.lock" ] || fail "failed descriptor publication left this session's numeric lock behind"
+  pass "fm-lock: descriptor publication failure rolls back only its own numeric claim"
 }
 
 test_successful_takeover_preserves_fleet_and_records_receipt() {
@@ -609,6 +654,7 @@ test_owner_mismatch_refuses_without_archive
 test_busy_pending_and_unknown_refuse
 test_wedged_and_attached_child_refuse
 test_suspend_failure_and_live_tree_refuse
+test_lock_publish_failure_rolls_back_own_claim
 test_successful_takeover_preserves_fleet_and_records_receipt
 test_rate_limited_takeover_is_distinct_and_recoverable
 test_concurrent_takeovers_admit_one_successor

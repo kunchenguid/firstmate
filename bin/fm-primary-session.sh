@@ -417,6 +417,18 @@ wait_tree_gone() {
   done
 }
 
+remaining_pid_atoms() {
+  local remaining=$1 token pid out=
+  local -a tokens
+  IFS=, read -r -a tokens <<< "$remaining"
+  for token in "${tokens[@]}"; do
+    pid=${token%%:*}
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    out="${out}${out:+,}${pid}"
+  done
+  printf '%s\n' "$out"
+}
+
 receipt_prepare() {
   local agent_id=$1 owner_pid=$2 owner_harness=$3 provider=$4 classification=$5
   local provider_session fingerprint identity identity_hash receipt_stamp draft receipt_id
@@ -479,7 +491,7 @@ release_claim_lock() {
 
 takeover() {
   local agent_id=$1 new_owner_pid owner_pid owner_harness classification reason inspect provider
-  local tree draft archive_out post receipt new_lock_pid now rc=0
+  local tree draft archive_out post receipt new_lock_pid now remaining rc=0
   fm_primary_atom_valid "$agent_id" || die "invalid Paseo agent id"
   require_takeover_tools
   primary_scope_required
@@ -522,6 +534,13 @@ takeover() {
     die "Paseo archive returned success but the target is not archived"
   fi
   if ! wait_tree_gone "$tree"; then
+    remaining=$(remaining_pid_atoms "$FM_PRIMARY_REMAINING_PIDS")
+    if [ -n "$remaining" ]; then
+      printf 'remaining_pids=%s\n' "$remaining" >> "$draft" \
+        || die "owner process tree remained alive and the remaining process receipt could not be recorded"
+    else
+      die "owner process tree remained alive and the remaining process receipt could not be recorded"
+    fi
     receipt=$(receipt_publish "$draft" suspend-incomplete suspend_incomplete_at) \
       || die "owner process tree remained alive and the incomplete handoff receipt could not be published"
     die "owner process tree remained alive after soft archive ($FM_PRIMARY_REMAINING_PIDS); lock was left untouched; receipt: $receipt"
