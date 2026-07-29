@@ -33,6 +33,9 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
+# Ship and scout scaffolds share one browser rule and its matching rule 2
+# exemption; the BROWSER_RULE and BROWSER_PATH_EXEMPTION heredocs in this
+# script own that text and its scope.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Ship briefs also carry a test-discipline section (agree the test seam first,
 # named anti-patterns) so every ship task builds test-first; it is folded into
@@ -229,6 +232,26 @@ EOF
 )
 fi
 
+# The rule 2 carve-out is shared by the ship and scout scaffolds so the one
+# exemption driving a real browser needs has a single owner, while each variant
+# keeps its own distinct outside-the-worktree wording ahead of it.
+BROWSER_PATH_EXEMPTION=$(cat <<'EOF'
+   One narrow exemption: the profile and cache directories a browser or its driver creates and manages for itself. Outside this worktree, no other path a browser or driver touches is exempt - not project or repository paths elsewhere on disk - and this changes nothing else in this rule.
+EOF
+)
+
+# Rule 3 is shared by the ship and scout scaffolds so the browser-as-a-user
+# contract has one owner and cannot drift between the two variants.
+BROWSER_RULE=$(cat <<'EOF'
+3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   When the task involves user-visible web behavior, reproduce and verify it by driving the browser AS A REAL USER; reading code, API responses, or database rows never proves what a page actually rendered.
+   Use `chrome-devtools-axi` to drive a real browser interactively and inspect live rendered state, and the project's Playwright/e2e harness for a scripted, repeatable run of the same user flow; when such a task needs e2e tooling this project does not have yet, adding it is part of that work.
+   On such a task, if a bundled interactive browser cannot launch in this environment, drive the system browser with Playwright instead of falling back to code reading.
+   On such a task, if you cannot successfully drive a browser by any available means, append `blocked: cannot drive a browser to verify {the behavior}` and stop - never silently skip the browser check and report success on rendered behavior you never saw.
+   That reproduction becomes the regression test once a fix is authorized; record it, and any e2e tooling it needed, where this task's deliverable lives - on the branch for a ship task, in the report for a scout.
+EOF
+)
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -247,11 +270,12 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+$BROWSER_PATH_EXEMPTION
    Do not \`cd\`: your shell keeps its working directory across calls, so one stray \`cd\` silently relocates
    every later command, and in a firstmate home checkout a guard denies it before it runs
    under the allow list \`docs/cd-guard.md\` owns there.
    Reach another directory with an absolute path, \`git -C <dir>\`, or a scoped \`(cd <dir> && ...)\` subshell instead.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+$BROWSER_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -373,11 +397,12 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
+$BROWSER_PATH_EXEMPTION
    Do not \`cd\`: your shell keeps its working directory across calls, so one stray \`cd\` silently relocates
    every later command, and in a firstmate home checkout a guard denies it before it runs
    under the allow list \`docs/cd-guard.md\` owns there.
    Reach another directory with an absolute path, \`git -C <dir>\`, or a scoped \`(cd <dir> && ...)\` subshell instead.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+$BROWSER_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

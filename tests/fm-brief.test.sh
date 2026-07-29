@@ -419,6 +419,114 @@ test_ship_and_scout_carry_cwd_rule() {
   pass "fm-brief.sh: ship and scout scaffolds carry the no-cd cwd rule"
 }
 
+# Rule 3 in full: everything from its own first line up to rule 4.
+browser_rule_block() {
+  awk '/^4\. Report status/{exit} /^3\. Use gh-axi/{inside=1} inside' "$1"
+}
+
+# The rule 2 carve-out in full: everything after the variant's own last rule 2
+# line and before rule 3, so each variant's distinct rule 2 wording is excluded
+# while the whole shared block is compared.
+browser_carve_out_block() {
+  awk '/^3\. Use gh-axi/{printf "%s", buf; exit} /^2\. /{buf=""; next} {buf = buf $0 "\n"}' "$1"
+}
+
+# An extraction that comes back empty makes the drift diff pass vacuously, so
+# each block must be proven present at its own rule boundary before comparison.
+assert_block_non_empty() {
+  [ -n "$1" ] || fail "$2"
+}
+
+# The browser-as-a-user rule has a single owner shared by the ship and scout
+# scaffolds, so it must render identically in both rather than drifting into
+# two divergent copies.
+test_browser_as_user_rule_reaches_ship_and_scout() {
+  local home brief kind
+  home="$TMP_ROOT/browser-rule-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-browser-ship some-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-browser-scout some-proj --scout >/dev/null 2>&1
+  for kind in ship scout; do
+    brief="$home/data/brief-browser-$kind/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    assert_grep "Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations." "$brief" \
+      "$kind brief lost the unconditional browser-operations tool clause"
+    assert_grep "driving the browser AS A REAL USER" "$brief" \
+      "$kind brief lost the drive-the-browser-as-a-user instruction"
+    assert_grep "never proves what a page actually rendered" "$brief" \
+      "$kind brief lost the reason code and database reads are insufficient"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    assert_grep 'Use `chrome-devtools-axi` to drive a real browser interactively' "$brief" \
+      "$kind brief lost the interactive browser tool"
+    assert_grep "Playwright/e2e harness for a scripted, repeatable run" "$brief" \
+      "$kind brief lost the scripted repeatable reproduction path"
+    assert_grep "On such a task, if a bundled interactive browser cannot launch in this environment, drive the system browser with Playwright instead of falling back to code reading" "$brief" \
+      "$kind brief lost the environment-agnostic system-browser fallback, or stopped scoping it to a web task"
+    assert_grep "adding it is part of that work" "$brief" \
+      "$kind brief no longer allows a web task to add the e2e tooling it needs"
+    assert_grep "On such a task, if you cannot successfully drive a browser by any available means, append" "$brief" \
+      "$kind brief lost the outcome-keyed cannot-drive-a-browser escalation, or stopped scoping it to a web task"
+    assert_grep "never silently skip the browser check and report success" "$brief" \
+      "$kind brief no longer makes an omitted browser check visible"
+    assert_grep "That reproduction becomes the regression test once a fix is authorized;" "$brief" \
+      "$kind brief lost the reproduction-becomes-the-regression-test rule"
+    assert_grep "record it, and any e2e tooling it needed, where this task's deliverable lives - on the branch for a ship task, in the report for a scout." "$brief" \
+      "$kind brief no longer preserves the reproduction with the task's deliverable"
+    assert_no_grep "do not introduce a harness for it" "$brief" \
+      "$kind brief still forbids the e2e harness adoption the browser rule can require"
+    assert_grep "the profile and cache directories a browser or its driver creates and manages for itself" "$brief" \
+      "$kind brief lost the rule 2 browser profile and cache carve-out"
+    assert_grep "Outside this worktree, no other path a browser or driver touches is exempt" "$brief" \
+      "$kind brief no longer bounds the rule 2 carve-out to browser paths outside the worktree"
+    assert_no_grep "not project paths, not repository paths" "$brief" \
+      "$kind brief carve-out again reads as forbidding the in-worktree writes the browser rule requires"
+    assert_grep "this changes nothing else in this rule" "$brief" \
+      "$kind brief carve-out no longer leaves the rest of rule 2 intact"
+    assert_no_grep "Nothing else outside this worktree is exempt" "$brief" \
+      "$kind brief carve-out still overrides rule 2's own outside-the-worktree permissions"
+  done
+  assert_grep "Stay inside this worktree; modify nothing outside it" \
+    "$home/data/brief-browser-ship/brief.md" \
+    "ship rule 2 lost its own outside-the-worktree wording"
+  assert_grep "the only files you may write outside it are the report and the status file" \
+    "$home/data/brief-browser-scout/brief.md" \
+    "scout rule 2 lost its own outside-the-worktree wording"
+  # Both shared blocks are extracted by their surrounding rule boundaries, not
+  # by their own current wording, so a divergent per-variant line added anywhere
+  # inside either block is caught rather than falling outside the range.
+  local ship_rule scout_rule ship_carve_out scout_carve_out
+  ship_rule=$(browser_rule_block "$home/data/brief-browser-ship/brief.md")
+  scout_rule=$(browser_rule_block "$home/data/brief-browser-scout/brief.md")
+  ship_carve_out=$(browser_carve_out_block "$home/data/brief-browser-ship/brief.md")
+  scout_carve_out=$(browser_carve_out_block "$home/data/brief-browser-scout/brief.md")
+  assert_block_non_empty "$ship_rule" \
+    "ship brief has no rule 3 block between rule 3 and rule 4"
+  assert_block_non_empty "$scout_rule" \
+    "scout brief has no rule 3 block between rule 3 and rule 4"
+  assert_block_non_empty "$ship_carve_out" \
+    "ship brief has no browser carve-out between its rule 2 and rule 3"
+  assert_block_non_empty "$scout_carve_out" \
+    "scout brief has no browser carve-out between its rule 2 and rule 3"
+  [ "$ship_rule" = "$scout_rule" ] \
+    || fail "ship and scout browser rules diverged; they must share one owner"
+  [ "$ship_carve_out" = "$scout_carve_out" ] \
+    || fail "ship and scout rule 2 browser carve-outs diverged; they must share one owner"
+  # The secondmate charter supervises rather than doing web work and has no rule
+  # 3 at all, so its exclusion from both shared blocks is pinned like the
+  # ship/scout inclusion is.
+  local charter
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='browser rule exclusion' \
+    FM_SECONDMATE_SCOPE='supervision only' \
+    "$ROOT/bin/fm-brief.sh" brief-browser-secondmate --secondmate --no-projects >/dev/null 2>&1
+  charter="$home/data/brief-browser-secondmate/brief.md"
+  assert_present "$charter" "secondmate charter was not scaffolded"
+  assert_no_grep "driving the browser AS A REAL USER" "$charter" \
+    "secondmate charter picked up the ship/scout browser rule it deliberately excludes"
+  assert_no_grep "the profile and cache directories a browser or its driver creates and manages for itself" "$charter" \
+    "secondmate charter picked up the ship/scout rule 2 browser carve-out it deliberately excludes"
+  pass "fm-brief.sh: ship and scout share one browser-as-a-user rule"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -455,4 +563,5 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_ship_briefs_carry_test_discipline
 test_ship_and_scout_carry_cwd_rule
+test_browser_as_user_rule_reaches_ship_and_scout
 test_scout_and_secondmate_scaffold
