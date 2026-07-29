@@ -702,6 +702,8 @@ test_preservation_creation_symbolic_race_does_not_write_through() {
   old=$(head_sha "$clone")
   anchor=$(preservation_ref_for "$clone" main "$old")
   target=refs/fm-test/dangling-preservation-target
+  ! git -C "$clone" show-ref --verify --quiet "$target" \
+    || fail "symbolic preservation race target is not dangling"
   fakebin="$home/fb-preservation-symbolic-race"; mkdir -p "$fakebin"
   git_symbolic_preservation_creation_race "$fakebin"
   out="$home/out-preservation-symbolic-race"; err="$home/err-preservation-symbolic-race"
@@ -719,6 +721,34 @@ test_preservation_creation_symbolic_race_does_not_write_through() {
   ! git -C "$clone" show-ref --verify --quiet "$target" \
     || fail "preservation creation wrote through the dangling symbolic ref"
   pass "preservation creation cannot write through a symbolic race"
+}
+
+test_resolving_preservation_creation_symbolic_race_refuses() {
+  local home clone fakebin out err old anchor target
+  home=$(new_home)
+  clone=$(build_tree_identical_squash_pair "$home" preservation-resolving-symbolic-race)
+  old=$(head_sha "$clone")
+  anchor=$(preservation_ref_for "$clone" main "$old")
+  target=refs/fm-test/resolving-preservation-target
+  git -C "$clone" update-ref --no-deref "$target" "$old" ""
+  fakebin="$home/fb-preservation-resolving-symbolic-race"; mkdir -p "$fakebin"
+  git_symbolic_preservation_creation_race "$fakebin"
+  out="$home/out-preservation-resolving-symbolic-race"
+  err="$home/err-preservation-resolving-symbolic-race"
+  export GIT_RACE_CLONE="$clone"
+  export GIT_SYMBOLIC_RACE_REF="$anchor"
+  export GIT_SYMBOLIC_RACE_TARGET="$target"
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" preservation-resolving-symbolic-race
+  unset GIT_RACE_CLONE GIT_SYMBOLIC_RACE_REF GIT_SYMBOLIC_RACE_TARGET
+
+  assert_contains "$(cat "$out")" "cannot create preservation ref" \
+    "resolving symbolic preservation creation race did not refuse during preparation"
+  [ "$(head_sha "$clone")" = "$old" ] || fail "resolving symbolic preservation race moved the branch"
+  [ "$(git -C "$clone" symbolic-ref "$anchor")" = "$target" ] \
+    || fail "resolving symbolic preservation race replaced the named ref"
+  [ "$(git -C "$clone" rev-parse "$target")" = "$old" ] \
+    || fail "resolving symbolic preservation race moved its referent"
+  pass "resolving symbolic preservation creation refuses during preparation"
 }
 
 test_tree_identical_expected_old_transaction_refusal() {
@@ -1163,6 +1193,7 @@ test_active_git_operations_refuse_before_preservation
 test_operation_starting_after_preservation_refuses_before_transaction
 test_symbolic_reconciliation_refs_are_refused
 test_preservation_creation_symbolic_race_does_not_write_through
+test_resolving_preservation_creation_symbolic_race_refuses
 test_tree_identical_expected_old_transaction_refusal
 test_symbolic_transaction_races_do_not_write_through
 test_symbolic_rollback_race_does_not_write_through
