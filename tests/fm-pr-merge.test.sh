@@ -20,6 +20,9 @@
 #   (k) --torn-down accepts a completed backlog entry as cleanup evidence
 #   (l) --torn-down is refused for an id with no surviving record of a task
 #   (m) --torn-down writes no ledger line when the merge itself fails
+#   (n) a hand-edited Done row with no title separator is cleanup evidence
+#   (o) irregular task metadata is refused as itself, not as live metadata,
+#       so the caller is never bounced between two refusals
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -491,6 +494,112 @@ test_torn_down_merge_failure_writes_no_ledger_line() {
   pass "fm-pr-merge --torn-down records no ledger line when the merge itself fails"
 }
 
+# A home on the manual backlog backend hand-edits data/backlog.md, so a Done row
+# can carry a free-form title with no " - " separator after the id. That row is
+# still a completed task record, and the id stays a whole token so a longer id
+# sharing its prefix never counts as evidence for it.
+test_torn_down_accepts_a_separatorless_done_row() {
+  local case_dir rc
+  case_dir="$TMP_ROOT/torn-down-backlog-freeform"
+  mkdir -p "$case_dir/state" "$case_dir/fakebin" "$case_dir/data"
+  cat > "$case_dir/data/backlog.md" <<'MD'
+# Backlog
+
+## Done
+- [x] gone-x5-late landed locally
+- [x] gone-x5 landed locally
+MD
+  add_gh_mocks "$case_dir" dddddddd11111111222222223333333344444444
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" --torn-down gone-x5 https://github.com/example/repo/pull/43 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "torn-down-backlog-freeform: a Done row with no title separator should satisfy --torn-down"
+  assert_grep "$(printf '\tgone-x5\thttps://github.com/example/repo/pull/43')" \
+    "$case_dir/data/merged-prs.log" "torn-down-backlog-freeform: the merge was not recorded in the durable ledger"
+  grep -qxF 'pr merge 43 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "torn-down-backlog-freeform: gh-axi pr merge was not invoked"
+  pass "fm-pr-merge --torn-down accepts a hand-edited Done row with no title separator"
+}
+
+# A Done row for a longer id must not satisfy --torn-down for a shorter id that
+# happens to be its prefix, or a typo could merge an arbitrary PR.
+test_torn_down_refuses_a_prefix_of_another_id() {
+  local case_dir rc
+  case_dir="$TMP_ROOT/torn-down-backlog-prefix"
+  mkdir -p "$case_dir/state" "$case_dir/fakebin" "$case_dir/data"
+  cat > "$case_dir/data/backlog.md" <<'MD'
+# Backlog
+
+## Done
+- [x] gone-x6-real landed locally
+MD
+  add_gh_mocks "$case_dir" eeeeeeee55555555666666667777777788888888
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" --torn-down gone-x6 https://github.com/example/repo/pull/45 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "torn-down-backlog-prefix: a prefix of another id must not satisfy --torn-down"
+  assert_grep 'no record of a cleaned-up task gone-x6' "$case_dir/stderr" \
+    "torn-down-backlog-prefix: refusal did not name the unrecorded task"
+  assert_grep 'done-archive.md' "$case_dir/stderr" \
+    "torn-down-backlog-prefix: refusal did not name the archive it also consulted"
+  assert_absent "$case_dir/data/merged-prs.log" \
+    "torn-down-backlog-prefix: a ledger line was written for an unrecorded task"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "torn-down-backlog-prefix: gh-axi pr merge was invoked for an unrecorded task"
+  pass "fm-pr-merge --torn-down refuses an id that is only a prefix of a completed row"
+}
+
+# A symlink at state/<id>.meta is neither live metadata nor a cleaned-up task.
+# Both paths must name it as the thing to inspect, so the caller is never sent
+# from one refusal to a flag that refuses too.
+test_irregular_meta_refused_as_itself() {
+  local case_dir rc
+  case_dir="$TMP_ROOT/irregular-meta"
+  mkdir -p "$case_dir/state" "$case_dir/fakebin" "$case_dir/data"
+  ln -s "$case_dir/state/nowhere.meta" "$case_dir/state/gone-x7.meta"
+  add_gh_mocks "$case_dir" 99999999aaaaaaaabbbbbbbbccccccccdddddddd
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" --torn-down gone-x7 https://github.com/example/repo/pull/47 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "irregular-meta: --torn-down should refuse an irregular metadata path"
+  assert_grep 'irregular task metadata' "$case_dir/stderr" \
+    "irregular-meta: --torn-down refusal did not name the irregular metadata"
+  assert_no_grep 'merge it without --torn-down' "$case_dir/stderr" \
+    "irregular-meta: --torn-down refusal misdescribed a broken symlink as live metadata"
+
+  set +e
+  run_pr_merge "$case_dir" gone-x7 https://github.com/example/repo/pull/47 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr.ordinary"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "irregular-meta: the ordinary path should refuse an irregular metadata path"
+  assert_grep 'irregular task metadata' "$case_dir/stderr.ordinary" \
+    "irregular-meta: the ordinary refusal did not name the irregular metadata"
+  assert_no_grep 'with --torn-down' "$case_dir/stderr.ordinary" \
+    "irregular-meta: the ordinary refusal bounced the caller to --torn-down"
+  assert_absent "$case_dir/data/merged-prs.log" \
+    "irregular-meta: a ledger line was written for an irregular metadata path"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "irregular-meta: gh-axi pr merge was invoked for an irregular metadata path"
+  pass "fm-pr-merge refuses irregular task metadata as itself on both paths"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -507,3 +616,6 @@ test_torn_down_guards_run_before_the_ledger
 test_torn_down_accepts_a_completed_backlog_entry
 test_torn_down_refused_without_a_task_record
 test_torn_down_merge_failure_writes_no_ledger_line
+test_torn_down_accepts_a_separatorless_done_row
+test_torn_down_refuses_a_prefix_of_another_id
+test_irregular_meta_refused_as_itself

@@ -12,17 +12,21 @@
 # merge keeps the guarded path instead of reaching around it to a raw merge
 # command. It requires the task metadata to be genuinely absent, refusing when
 # the task is still live so it can never be used to skip recording or the merge
-# poll for a task that has both. Absent metadata alone is not enough, because an
-# invented or mistyped id has none either, so the flag also requires positive
-# evidence that the task existed and was cleaned up: either the
-# data/<task-id>/brief.md that teardown leaves in place, or a completed backlog
-# entry for the id in data/backlog.md or data/done-archive.md.
+# poll for a task that has both. An irregular metadata path is refused by both
+# paths as something to inspect rather than merged around. Absent metadata alone
+# is not enough, because an invented or mistyped id has none either, so the flag
+# also requires positive evidence that the task genuinely existed: either the
+# data/<task-id>/brief.md that bin/fm-brief.sh writes at brief time and teardown
+# leaves in place, or a completed backlog entry for the id in data/backlog.md or
+# data/done-archive.md.
 # With no metadata to record into and no live task for a merge poll to wake, the
 # merge is recorded in the durable ledger data/merged-prs.log as one
 # <utc-timestamp><TAB><task-id><TAB><pr-url> line. The ledger path is validated
 # before the merge, but the line is appended only after gh-axi pr merge reports
 # success, so the ledger never asserts a merge that did not happen; a failed
-# merge writes no line and exits with the merge command's own status.
+# merge writes no line and exits with the merge command's own status. Every
+# failure after that successful merge names the merge as done and the recording
+# step that failed, so a non-zero exit is never read as an unmerged PR.
 # Usage: fm-pr-merge.sh [--torn-down] <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 
@@ -86,10 +90,14 @@ reject_repo_overrides() {
 
 reject_repo_overrides "$@" || exit 1
 
-# Positive evidence that a torn-down task genuinely existed and was cleaned up:
-# teardown leaves data/<id>/brief.md in place, and the task's completed backlog
-# row survives in data/backlog.md until retention rolls it into the archive. A
-# row counts as completed when it is checked or sits under a Done heading.
+# Positive evidence that a torn-down task genuinely existed: bin/fm-brief.sh
+# writes data/<id>/brief.md at brief time and teardown leaves it in place, and
+# the task's completed backlog row survives in data/backlog.md until retention
+# rolls it into the archive. A row counts as completed when it is checked or sits
+# under a Done heading. The row shape matches backlog_key_section in
+# bin/fm-backlog-handoff.sh - the id is the first whitespace-delimited token
+# after the marker, compared whole - so a hand-edited row with no title
+# separator still counts and no other id's prefix can match.
 torn_down_task_recorded() {  # <task-id>
   local id=$1 file
   [ -f "$DATA/$id/brief.md" ] && return 0
@@ -106,15 +114,15 @@ torn_down_task_recorded() {  # <task-id>
       {
         row = ""
         checked = 0
-        if (match($0, /^[-*][ \t]+\[[ xX]\][ \t]+[^ \t]+[ \t]+-[ \t]+/)) {
-          row = substr($0, RSTART, RLENGTH)
-          checked = (row ~ /\[[xX]\]/)
-          sub(/^[-*][ \t]+\[[ xX]\][ \t]+/, "", row)
-          sub(/[ \t]+-[ \t]+$/, "", row)
-        } else if (match($0, /^[-*][ \t]+\*\*[^*]+\*\*[ \t]+-[ \t]+/)) {
+        if (match($0, /^[-*][ \t]+\[[ xX]\][ \t]+/)) {
+          checked = (substr($0, RSTART, RLENGTH) ~ /\[[xX]\]/)
+          row = substr($0, RSTART + RLENGTH)
+          sub(/[ \t].*$/, "", row)
+          sub(/\r$/, "", row)
+        } else if (match($0, /^[-*][ \t]+\*\*[^*]+\*\*/)) {
           row = substr($0, RSTART, RLENGTH)
           sub(/^[-*][ \t]+\*\*/, "", row)
-          sub(/\*\*[ \t]+-[ \t]+$/, "", row)
+          sub(/\*\*$/, "", row)
         }
         if (row == id && (checked || in_done)) {
           hit = 1
@@ -130,13 +138,20 @@ torn_down_task_recorded() {  # <task-id>
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
 LEDGER=
+# A symlink, directory, or other irregular metadata path is neither live
+# metadata nor a cleaned-up task, so both paths refuse it as something to
+# inspect rather than sending the caller to a flag that also refuses.
+if [ -L "$META" ] || { [ -e "$META" ] && [ ! -f "$META" ]; }; then
+  echo "error: irregular task metadata at $META; inspect it before merging task $ID's PR" >&2
+  exit 1
+fi
 if [ "$TORN_DOWN" = 1 ]; then
-  if [ -e "$META" ] || [ -L "$META" ]; then
+  if [ -e "$META" ]; then
     echo "error: task $ID still has metadata; merge it without --torn-down" >&2
     exit 1
   fi
   if ! torn_down_task_recorded "$ID"; then
-    echo "error: no record of a cleaned-up task $ID; --torn-down needs $DATA/$ID/brief.md or a completed $ID entry in $DATA/backlog.md" >&2
+    echo "error: no record of a cleaned-up task $ID; --torn-down needs $DATA/$ID/brief.md or a completed $ID entry in $DATA/backlog.md or $DATA/done-archive.md" >&2
     exit 1
   fi
   LEDGER="$DATA/merged-prs.log"
@@ -147,12 +162,8 @@ if [ "$TORN_DOWN" = 1 ]; then
     exit 1
   fi
 else
-  if [ ! -e "$META" ] && [ ! -L "$META" ]; then
+  if [ ! -e "$META" ]; then
     echo "error: task metadata is unavailable; merge a cleaned-up task's PR with --torn-down" >&2
-    exit 1
-  fi
-  if [ ! -f "$META" ] || [ -L "$META" ]; then
-    echo "error: task metadata is unavailable" >&2
     exit 1
   fi
 
@@ -178,5 +189,8 @@ if [ -n "$LEDGER" ]; then
     echo "error: PR $URL merged but merge ledger recording failed" >&2
     exit 1
   }
-  chmod 0600 "$LEDGER" || exit 1
+  chmod 0600 "$LEDGER" || {
+    echo "error: PR $URL merged and recorded but tightening merge ledger permissions failed" >&2
+    exit 1
+  }
 fi
