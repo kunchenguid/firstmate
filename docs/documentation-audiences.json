@@ -24,6 +24,7 @@
     "operator-example"
   ],
   "readmeSetupTargets": [
+    "docs/launcher.md",
     "docs/configuration.md",
     "docs/wedge-alarm.md",
     "docs/tmux-backend.md",
@@ -253,6 +254,10 @@
     },
     {
       "path": "docs/herdr-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/launcher.md",
       "audience": "operator-current"
     },
     {

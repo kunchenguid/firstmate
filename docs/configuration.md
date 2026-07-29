@@ -31,6 +31,15 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Fleet launcher menu (config/launch-presets.json / state/.launch-last)
+
+`bin/fm-launch.sh` reads its menu from gitignored `config/launch-presets.json` under the effective Firstmate home, and falls back to a built-in five-entry menu when that file is absent, so a fresh home needs no configuration.
+Each entry is an object with `id`, `label`, and `harness`, plus optional `model` and `effort` that both default to `default`; an entry never carries a launch command, because `bin/fm-launch-lib.sh` remains the single owner of every verified launch command.
+A present but malformed file refuses at the door rather than silently falling back to the built-in menu, and an entry naming an adapter with no verified primary shape renders unavailable rather than launching.
+The launcher records the last successfully launched entry id in `state/.launch-last`, written atomically so an interrupted launcher cannot corrupt the default.
+Neither file is part of secondmate inherited configuration: a secondmate home is provisioned and launched by the primary through `bin/fm-spawn.sh`, never through this front door, so there is no consumer for an inherited menu there.
+[docs/launcher.md](launcher.md) is the operator-facing owner of launcher behavior and setup.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.

@@ -111,6 +111,13 @@ The hidden operational inputs remain ordinary user-role messages with unchanged 
 The preference persists for the effective Firstmate home, and toggling it off restores ordinary rendering.
 [Calm's current behavior and supported limits](docs/calm.md) are separate from its [version-scoped maintainer evidence](docs/calm-mode-feasibility.md).
 
+### Optional: launch from a menu
+
+If you run the Herdr backend, `bin/fm-launch.sh` offers the same launch as a short menu instead of a remembered command, starts the session in this home's Herdr workspace, and attaches to it.
+It shows every configured harness with honest availability, remembers your last choice, and refuses rather than starting a second session in a home that already has one.
+Herdr is required for this path; launching a harness directly, as above, stays fully supported on every backend.
+See [docs/launcher.md](docs/launcher.md).
+
 ### Talk to it
 
 ```sh
@@ -198,6 +205,7 @@ Firstmate's skills live in two separate places with different audiences:
 
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional X mode, the files you set, and harness support.
+- [docs/launcher.md](docs/launcher.md) - the optional harness menu that starts and attaches one primary session in a home.
 - [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior and supported presentation limits.
 - [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for an away-mode escalation delivery that gets stuck.
 - [docs/tmux-backend.md](docs/tmux-backend.md) - current setup and limits for the tmux reference backend.
