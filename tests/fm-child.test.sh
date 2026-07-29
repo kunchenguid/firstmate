@@ -424,10 +424,25 @@ assert_success "accepts ASCII ownership on a case-insensitive filesystem" \
 assert_success "stops the ASCII case-insensitive child" run_parent stop ascii-case
 assert_success "cleans the ASCII case-insensitive child" run_parent cleanup
 git -C "$WORKTREE" config core.ignorecase false
-assert_success "accepts byte-distinct Unicode ownership on a case-sensitive filesystem" \
-  run_parent create unicode-sensitive --instructions "$INSTRUCTIONS" --path 'Å.txt'
-assert_success "stops the Unicode case-sensitive child" run_parent stop unicode-sensitive
-assert_success "cleans the Unicode case-sensitive child" run_parent cleanup
+COMPOSED_PATH=$(printf '\303\251.txt')
+DECOMPOSED_PATH=$(printf 'e\314\201.txt')
+NORMALIZATION_PANES_BEFORE=$(cat "$FAKE_STATE/panes")
+NORMALIZATION_SPLITS_BEFORE=$(grep -c 'CALL <pane> <split>' "$FAKE_STATE/log" || true)
+assert_failure_contains "rejects composed Unicode when case sensitivity cannot prove normalization identity" \
+  "exact Unicode filesystem equivalence is not proven" \
+  run_parent create unicode-composed --instructions "$INSTRUCTIONS" --path "$COMPOSED_PATH"
+assert_failure_contains "rejects decomposed Unicode when case sensitivity cannot prove normalization identity" \
+  "exact Unicode filesystem equivalence is not proven" \
+  run_parent create unicode-decomposed --instructions "$INSTRUCTIONS" --path "$DECOMPOSED_PATH"
+NORMALIZATION_SPLITS_AFTER=$(grep -c 'CALL <pane> <split>' "$FAKE_STATE/log" || true)
+if [ ! -e "$TASK_TMP/children/unicode-composed" ] \
+   && [ ! -e "$TASK_TMP/children/unicode-decomposed" ] \
+   && [ "$(cat "$FAKE_STATE/panes")" = "$NORMALIZATION_PANES_BEFORE" ] \
+   && [ "$NORMALIZATION_SPLITS_AFTER" -eq "$NORMALIZATION_SPLITS_BEFORE" ]; then
+  ok "normalization-variant refusals start no child and publish no private record"
+else
+  not_ok "normalization-variant refusals start no child and publish no private record"
+fi
 
 touch "$FAKE_STATE/pause-split"
 run_parent create readiness-race --instructions "$INSTRUCTIONS" --path b.txt >"$TMP/create-race.out" 2>"$TMP/create-race.err" &

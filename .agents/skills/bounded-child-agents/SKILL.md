@@ -28,7 +28,7 @@ Assign every writable path explicitly relative to the repository root.
 Assign the narrowest practical file or directory paths.
 Paths for concurrent children must be disjoint, including ancestor and descendant overlap.
 Do not assign `.git`, `.no-mistakes`, symlinks, glob patterns, or ambiguous traversal paths.
-Use ASCII ownership paths on a case-insensitive working copy because the helper refuses Unicode specifications it cannot compare with exact portable filesystem semantics.
+Use ASCII ownership paths because the helper refuses Unicode specifications without positive proof that the working filesystem preserves normalization-sensitive distinctions.
 The parent retains every unassigned path.
 
 Create the child from anywhere inside the parent's recorded working copy:

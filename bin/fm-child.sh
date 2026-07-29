@@ -285,8 +285,8 @@ fm_child_path_ascii() {  # <relative-path>
 }
 
 fm_child_path_identity() {  # <relative-path>
+  fm_child_path_ascii "$1" || return 1
   if [ "$FM_CHILD_CASE_INSENSITIVE" = 1 ]; then
-    fm_child_path_ascii "$1" || return 1
     printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]'
   else
     printf '%s' "$1"
@@ -774,8 +774,8 @@ fm_child_create() {
   [ -n "$instructions" ] || die "create requires --instructions <file>"
   [ "${#paths[@]}" -gt 0 ] || die "create requires at least one --path assignment"
   for path in "${paths[@]}"; do
-    if [ "$FM_CHILD_CASE_INSENSITIVE" = 1 ] && ! fm_child_path_ascii "$path"; then
-      die "path assignment '$path' contains non-ASCII bytes; use an ASCII repository-relative ownership path on this case-insensitive filesystem"
+    if ! fm_child_path_ascii "$path"; then
+      die "path assignment '$path' contains non-ASCII bytes; use an ASCII repository-relative ownership path because exact Unicode filesystem equivalence is not proven for this working copy"
     fi
   done
 
