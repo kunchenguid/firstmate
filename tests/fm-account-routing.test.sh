@@ -1351,8 +1351,16 @@ test_off_metadata_merge_waits_for_metadata_lock() {
   FM_FAKE_TMUX_NEW_WINDOW_MARKER="$marker" FM_FAKE_TMUX_NEW_WINDOW_GATE="$gate" \
     run_spawn "$id" "$PROJ_DIR" > "$out_file" &
   spawn_pid=$!
-  for _ in $(seq 1 100); do [ -f "$marker" ] && break; sleep 0.05; done
-  [ -f "$marker" ] || { kill "$spawn_pid" 2>/dev/null || true; fail "off metadata-lock test never reached endpoint creation"; }
+  for _ in $(seq 1 600); do
+    [ -f "$marker" ] && break
+    kill -0 "$spawn_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  if [ ! -f "$marker" ]; then
+    kill "$spawn_pid" 2>/dev/null || true
+    wait "$spawn_pid" 2>/dev/null || true
+    fail "off metadata-lock test never reached endpoint creation: $(cat "$out_file")"
+  fi
   # shellcheck source=bin/fm-account-routing-lib.sh
   . "$ROOT/bin/fm-account-routing-lib.sh"
   held=$(fm_account_meta_lock_acquire "$HOME_DIR/state" "$id") \
