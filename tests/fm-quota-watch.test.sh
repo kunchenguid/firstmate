@@ -107,6 +107,7 @@ run_watch() {
   FM_TEST_SEND_LOG="$case_dir/send.log" \
   FM_QUOTA_PAUSE_THRESHOLD=80 \
   FM_QUOTA_RESUME_THRESHOLD=65 \
+  FM_TEST_SEND_FAIL_ID="${FM_TEST_SEND_FAIL_ID:-}" \
     "$QUOTA_WATCH" "$@" > "$OUT" 2> "$ERR"
   RC=$?
 }
@@ -360,6 +361,43 @@ test_credits_window_ignored_during_resume_decision() {
   pass "recovery is decided from session/weekly alone, even while the credits window stays high"
 }
 
+# --- (k) resume retries a failed send instead of dropping the pause -----------
+
+test_resume_retries_failed_send() {
+  local case_dir
+  case_dir=$(make_case resume-retry)
+  write_crew_meta "$case_dir" task-a ship claude
+  write_crew_meta "$case_dir" task-b scout opencode
+  quota_json_pct 88 > "$case_dir/quota.json"
+  run_watch "$case_dir"
+  expect_code 0 "$RC" "pause run exits 0"
+  assert_present "$case_dir/state/.quota-paused" "flag created on cross"
+
+  quota_json_pct 50 > "$case_dir/quota.json"
+  FM_TEST_SEND_FAIL_ID=task-b run_watch "$case_dir"
+  expect_code 0 "$RC" "resume run (one delivery failure) exits 0"
+
+  assert_present "$case_dir/state/.quota-paused" "flag is kept when a resume note fails to deliver"
+  assert_no_grep "task=task-a" "$case_dir/state/.quota-paused" "successfully-notified crew is dropped from the retry flag"
+  assert_grep "task=task-b" "$case_dir/state/.quota-paused" "failed-delivery crew stays recorded for a retry"
+  assert_grep "task-a Quota recovered" "$case_dir/send.log" "task-a still got its resume note"
+
+  local task_b_attempts_first
+  task_b_attempts_first=$(grep -c 'task-b Quota recovered' "$case_dir/send.log")
+  [ "$task_b_attempts_first" -eq 1 ] || fail "expected exactly 1 delivery attempt to task-b, got $task_b_attempts_first"
+
+  run_watch "$case_dir"
+  expect_code 0 "$RC" "retry run (delivery now succeeds) exits 0"
+  assert_absent "$case_dir/state/.quota-paused" "flag is cleared once the retried note is delivered"
+  local task_a_total task_b_total
+  task_a_total=$(grep -c 'task-a Quota recovered' "$case_dir/send.log")
+  task_b_total=$(grep -c 'task-b Quota recovered' "$case_dir/send.log")
+  [ "$task_a_total" -eq 1 ] || fail "task-a resume note was resent on retry ($task_a_total deliveries)"
+  [ "$task_b_total" -eq 2 ] || fail "expected exactly 2 delivery attempts to task-b (1 failed + 1 retried), got $task_b_total"
+
+  pass "resume retries a failed send instead of dropping pause tracking, without re-notifying already-resumed crew"
+}
+
 # --- run -----------------------------------------------------------------
 
 test_pause_crosses_threshold
@@ -373,3 +411,4 @@ test_unknown_harness_refuses_to_guess
 test_status_flag_smoke
 test_credits_window_never_drives_pause
 test_credits_window_ignored_during_resume_decision
+test_resume_retries_failed_send

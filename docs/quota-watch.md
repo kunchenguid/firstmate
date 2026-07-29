@@ -31,8 +31,12 @@ Once per invocation: read Claude's current usage, take the highest
 - **Below the resume threshold** (default 65%, deliberately lower than the
   pause threshold so a reading oscillating near 80% does not flap crew back
   and forth): send one short note to every crewmate this script paused and
-  clear the flag. A crewmate that declared its own unrelated `paused:` wait is
-  left alone - only crew recorded in `state/.quota-paused` are resumed.
+  clear the flag once every note delivers. A crewmate that declared its own
+  unrelated `paused:` wait is left alone - only crew recorded in
+  `state/.quota-paused` are resumed. If a note fails to deliver, that
+  crewmate stays recorded in the flag for a retry on the next run instead of
+  being dropped from tracking; crew that already received their note are not
+  re-notified on the retry.
 - **Between the two thresholds, or below the pause threshold with nothing
   paused**: no-op.
 - **No usable reading** - `quota-axi` missing, `auth_required`, or malformed
