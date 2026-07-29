@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+# fm-verify-delivered.sh - MECHANISM, not a promise.
+#
+# Firstmate repeatedly reported work as delivered without checking the merged
+# result against what was asked (2026-07-28/29: Stage 6 "every comparison
+# through NS" when 16 files still used strings; PR 657 merged with 11 files
+# still string-only after "solve every brand-related bug").
+#
+# Run this BEFORE telling the captain a PR delivered a capability, and BEFORE
+# marking a task done. It checks the CLAIM against the CODE, not the report.
+#
+# Usage:
+#   fm-verify-delivered.sh brand-identity [--no-fetch]
+#                                    who still decides brand identity by string
+#   fm-verify-delivered.sh <task-id>  acceptance claims in a brief, to check by hand
+#   fm-verify-delivered.sh --help     print this header
+#
+# The exit status is the verdict, and only 0 may be read as delivered:
+#   0  CLEAN              inspected one or more files and found no violation
+#                         (in task-id mode: acceptance claims were extracted,
+#                         which is a checklist to work through, not a verdict)
+#   1  VIOLATIONS         found violations, listed above the verdict line
+#   2  USAGE              bad invocation
+#   3  INSPECTED NOTHING  the search matched no files, so it proves nothing
+#   4  SEARCH FAILED      the search itself errored, so the answer is unknown
+#
+# Outcomes 3 and 4 exist because this verifier twice printed a clean result
+# while checking nothing. First its pathspec matched no files, and git grep
+# reports that as an ordinary no-match, so zero files inspected read as zero
+# violations found. Then a git grep no-match status aborted the whole run under
+# `set -o pipefail`, so it printed its header and stopped. A verifier that
+# cannot say "I do not know" converts unknown into clean, which is worse than
+# having no verifier at all. Every git search below therefore classifies its own
+# exit status, and every count of what was actually inspected is checked before
+# any clean verdict is allowed to print.
+#
+# tests/fm-verify-delivered.test.sh holds one regression test per outcome.
+#
+# Environment:
+#   FM_VERIFY_REPO  repo brand-identity inspects; overrides the repo path
+#                   recorded for inception in data/projects.md
+#   FM_VERIFY_REV   rev brand-identity inspects (default: origin/main)
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+REV="${FM_VERIFY_REV:-origin/main}"
+
+# brand-identity's definition of the migration: which files are candidates, who
+# is allowed to own string comparison, and what counts as consulting the graph.
+BRAND_PATHSPEC="schema-generator/app"
+BRAND_CANDIDATE_RE='is_same_brand|normalize_entity|is_competitor_reference'
+BRAND_GRAPH_RE='graph_directives|brand_relations|ns_comparison|brand_graph|referability'
+
+SELF="$SCRIPT_DIR/fm-verify-delivered.sh"
+ERRLOG=""
+# shellcheck disable=SC2329 # Registered by the EXIT trap below.
+cleanup() { [ -z "$ERRLOG" ] || rm -f "$ERRLOG"; }
+trap cleanup EXIT
+
+# --- outcome emitters -------------------------------------------------------
+#
+# One function per outcome so no code path can invent a fifth one, and so a
+# clean verdict is only reachable from the single place that has already
+# counted what was inspected.
+
+usage_error() {
+  printf 'fm-verify-delivered.sh: %s\n' "$1" >&2
+  printf 'usage: fm-verify-delivered.sh brand-identity [--no-fetch] | fm-verify-delivered.sh <task-id>\n' >&2
+  exit 2
+}
+
+inspected_nothing() {
+  printf 'INSPECTED NOTHING: %s\n' "$1"
+  printf '  >>> NOT a clean result. The check examined no files, so it proved nothing.\n'
+  printf '  >>> Fix the search before reporting anything about this claim.\n'
+  exit 3
+}
+
+search_failed() {
+  printf 'SEARCH FAILED: %s\n' "$1"
+  printf '  >>> NOT a clean result. The answer is unknown, not negative.\n'
+  exit 4
+}
+
+# Any failure this script did not classify itself lands here rather than
+# escaping as some other status. An unhandled failure is an unknown answer.
+trap 'search_failed "unhandled command failure at line $LINENO"' ERR
+
+# --- helpers ---------------------------------------------------------------
+
+# Count the lines in a captured command substitution, where empty means zero
+# rather than one blank line.
+count_lines() {
+  [ -n "$1" ] || { printf '0\n'; return 0; }
+  printf '%s\n' "$1" | wc -l | tr -d '[:space:]'
+}
+
+# Resolve the repo brand-identity inspects: an explicit override first, then the
+# path data/projects.md records for inception, then the standard clone location.
+# No personal absolute path is baked into this shared script.
+resolve_brand_repo() {
+  local registry="$DATA/projects.md" from_registry=""
+  if [ -n "${FM_VERIFY_REPO:-}" ]; then
+    printf '%s\n' "$FM_VERIFY_REPO"
+    return 0
+  fi
+  if [ -f "$registry" ]; then
+    from_registry=$(sed -n 's/^- inception .*repo at \([^ ,)]*\).*$/\1/p' "$registry" | sed -n 1p)
+  fi
+  if [ -n "$from_registry" ]; then
+    printf '%s\n' "$from_registry"
+    return 0
+  fi
+  printf '%s\n' "$FM_HOME/projects/inception"
+}
+
+# --- brand-identity mode ---------------------------------------------------
+
+verify_brand_identity() {
+  local fetch=1 repo candidate_out st scope_out scope_n cand_n
+  local unmigrated=0 migrated=0 line f
+  local -a candidates=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --no-fetch) fetch=0 ;;
+      *) usage_error "unknown brand-identity option '$1'" ;;
+    esac
+    shift
+  done
+
+  repo=$(resolve_brand_repo)
+  ERRLOG=$(mktemp "${TMPDIR:-/tmp}/fm-verify-delivered.XXXXXX")
+
+  if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>"$ERRLOG"; then
+    search_failed "$repo is not a git repository ($(tr '\n' ' ' <"$ERRLOG")); set FM_VERIFY_REPO"
+  fi
+  if [ "$fetch" -eq 1 ]; then
+    if ! git -C "$repo" fetch origin -q 2>"$ERRLOG"; then
+      printf 'WARNING: could not fetch origin in %s; %s may be stale.\n' "$repo" "$REV"
+    fi
+  fi
+  if ! git -C "$repo" rev-parse --verify --quiet "$REV^{commit}" >/dev/null 2>"$ERRLOG"; then
+    search_failed "cannot resolve rev '$REV' in $repo; nothing was searched"
+  fi
+
+  printf '=== files deciding brand identity by STRING, no graph consultation ===\n'
+  printf '  repo: %s\n  rev:  %s\n  path: %s\n' "$repo" "$REV" "$BRAND_PATHSPEC"
+
+  # Bug 1's shape: a pathspec that matches no files. git grep reports that as an
+  # ordinary no-match, so the scope has to be counted separately from the search.
+  st=0
+  scope_out=$(git -C "$repo" ls-tree -r --name-only "$REV" -- "$BRAND_PATHSPEC" 2>"$ERRLOG") || st=$?
+  if [ "$st" -ne 0 ]; then
+    search_failed "git ls-tree failed with status $st: $(tr '\n' ' ' <"$ERRLOG")"
+  fi
+  scope_n=$(count_lines "$scope_out")
+  if [ "$scope_n" -eq 0 ]; then
+    inspected_nothing "pathspec '$BRAND_PATHSPEC' matches no file at $REV in $repo"
+  fi
+
+  # git grep: 0 means matches, 1 means a legitimate no-match, anything higher is
+  # a real failure. Only the first two are results.
+  st=0
+  candidate_out=$(git -C "$repo" grep -lE "$BRAND_CANDIDATE_RE" "$REV" -- "$BRAND_PATHSPEC" 2>"$ERRLOG") || st=$?
+  case "$st" in
+    0 | 1) : ;;
+    *) search_failed "git grep for candidates failed with status $st: $(tr '\n' ' ' <"$ERRLOG")" ;;
+  esac
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    f=${line#"$REV:"}
+    # The two owners of string matching are allowed to compare strings.
+    case "$f" in
+      */name_matching.py | */competitor_guards.py) continue ;;
+    esac
+    candidates+=("$f")
+  done <<<"$candidate_out"
+
+  cand_n=${#candidates[@]}
+  if [ "$cand_n" -eq 0 ]; then
+    inspected_nothing "no file among the $scope_n under '$BRAND_PATHSPEC' matches /$BRAND_CANDIDATE_RE/; the candidate pattern found nothing to check"
+  fi
+
+  for f in "${candidates[@]}"; do
+    st=0
+    git -C "$repo" grep -qE "$BRAND_GRAPH_RE" "$REV" -- "$f" 2>"$ERRLOG" || st=$?
+    case "$st" in
+      0) migrated=$((migrated + 1)) ;;
+      1)
+        printf '  UNMIGRATED: %s\n' "${f#schema-generator/}"
+        unmigrated=$((unmigrated + 1))
+        ;;
+      *) search_failed "git grep for graph consultation failed on $f with status $st: $(tr '\n' ' ' <"$ERRLOG")" ;;
+    esac
+  done
+
+  printf '  INSPECTED: %s candidate file(s) out of %s under %s\n' "$cand_n" "$scope_n" "$BRAND_PATHSPEC"
+  if [ "$unmigrated" -gt 0 ]; then
+    printf 'VIOLATIONS: %s of %s inspected file(s) decide brand identity by string with no graph consultation.\n' \
+      "$unmigrated" "$cand_n"
+    printf '  >>> DO NOT report brand-identity work as complete.\n'
+    exit 1
+  fi
+  printf 'CLEAN: all %s inspected file(s) consult the graph; %s migrated, 0 unmigrated.\n' "$cand_n" "$migrated"
+  exit 0
+}
+
+# --- task-id mode ----------------------------------------------------------
+
+verify_task_claims() {
+  local id=$1 brief claims st=0
+  brief="$DATA/$id/brief.md"
+  [ -f "$brief" ] || usage_error "no brief for '$id' at $brief"
+
+  claims=$(grep -nE "^[0-9]+\.|^\*\*[0-9]|must |MUST |every |EVERY |all " "$brief") || st=$?
+  case "$st" in
+    0 | 1) : ;;
+    *) search_failed "grep over $brief failed with status $st" ;;
+  esac
+  if [ -z "$claims" ]; then
+    inspected_nothing "no acceptance-shaped line in $brief; the claim pattern extracted nothing to verify"
+  fi
+
+  printf '=== ACCEPTANCE CLAIMS in the brief for %s - verify EACH against merged main ===\n' "$id"
+  # sed, not head: head can close the pipe early, and under pipefail that turns
+  # a long claim list into a spurious failure.
+  printf '%s\n' "$claims" | sed -n '1,40p'
+  printf '\n'
+  printf '>>> For each line above: does merged main actually satisfy it? Check, do not assume.\n'
+  printf ">>> A worker's 'done' is a claim. The code is the evidence.\n"
+  printf 'CHECKLIST: %s claim line(s) extracted. This is a checklist, NOT a clean verdict.\n' "$(count_lines "$claims")"
+  exit 0
+}
+
+case "${1:-}" in
+  brand-identity)
+    shift
+    verify_brand_identity "$@"
+    ;;
+  -h | --help)
+    # Print this file's leading comment block, so the header stays the one owner
+    # of the usage text and no line range has to be kept in sync.
+    awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$SELF"
+    exit 0
+    ;;
+  "")
+    usage_error "no mode given"
+    ;;
+  -*)
+    usage_error "unknown option '$1'"
+    ;;
+  *)
+    verify_task_claims "$1"
+    ;;
+esac
