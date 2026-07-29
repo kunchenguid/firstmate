@@ -38,6 +38,8 @@ Host shadowbyte-agent
     ServerAliveCountMax 3
     ExitOnForwardFailure yes
     ClearAllForwardings yes
+    ControlMaster no
+    ControlPath none
 ```
 
 | Placeholder | What it is | Where to read the real value |
@@ -57,6 +59,7 @@ Host shadowbyte-agent
 | `ServerAliveInterval 30` and `ServerAliveCountMax 3` | An idle attach or tunnel that a NAT or a sleeping laptop has already dropped is ended within about 90 seconds instead of hanging silently. |
 | `ExitOnForwardFailure yes` | A forward that cannot bind its local port ends the connection with a visible error instead of leaving SSH connected with a dead tunnel. |
 | `ClearAllForwardings yes` | Clears inherited `LocalForward` and `DynamicForward` entries so this alias cannot carry ambient tunnels. |
+| `ControlMaster no` and `ControlPath none` | Disables connection sharing and prevents this alias from reusing a master created with different connection settings. |
 
 No step in this path needs agent forwarding, which is why `ForwardAgent no` costs nothing and removes a real risk.
 Check the entry on the Mac without connecting:
@@ -116,6 +119,8 @@ Host shadowbyte-agent
     ServerAliveInterval 30
     ServerAliveCountMax 3
     ExitOnForwardFailure yes
+    ControlMaster no
+    ControlPath none
 ```
 
 The `-F` option makes this tunnel read the minimal file instead of the normal user and system SSH configuration, so no ambient `LocalForward` or `DynamicForward` can be added.

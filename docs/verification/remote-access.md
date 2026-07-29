@@ -28,7 +28,7 @@ The documented `~/.ssh/config` block was written to a standalone file and expand
 
 ```sh
 ssh -F <config-file> -G shadowbyte-agent |
-  grep -iE '^(host|hostname|user|forwardagent|serveralive|exitonforwardfailure|clearallforwardings|port) '
+  grep -iE '^(host|hostname|user|forwardagent|serveralive|exitonforwardfailure|clearallforwardings|controlmaster|controlpath|port) '
 ```
 
 Observed output, with the real host and account rendered as the same placeholders [`../remote-access.md`](../remote-access.md) uses:
@@ -40,6 +40,7 @@ hostname <server-host>.<tailnet>.ts.net
 port 22
 exitonforwardfailure yes
 clearallforwardings yes
+controlmaster false
 serveralivecountmax 3
 serveraliveinterval 30
 forwardagent no
@@ -47,6 +48,7 @@ forwardagent no
 
 The check ran with concrete values in those two fields; only their spelling is substituted here, and every other line is as observed.
 Every documented directive survives expansion, and the alias resolves to the intended host and user.
+OpenSSH's `ssh -G` omits `controlpath` when `ControlPath none` resolves to no control socket.
 The reader-facing page uses this alias for attach only because `ClearAllForwardings yes` also clears command-line forwards.
 Its Lavish tunnel uses a dedicated `-F` file so the explicit local forward cannot inherit unrelated user or system forwarding entries.
 
