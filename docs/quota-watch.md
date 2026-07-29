@@ -93,9 +93,24 @@ or pulling firstmate changes nothing about your machine's scheduler.
 Run `bin/fm-quota-watch-install.sh` yourself once to see the exact line, or add
 `--install-crontab` to append it directly (idempotent: it refuses if an entry
 for this script is already present).
-It resolves `quota-axi` to an absolute path and bakes an explicit `PATH` into
-the generated entry, because both `cron` and `launchd` run with a minimal
-`PATH` that will not see a Node version manager's install directory on its own.
+It resolves `quota-axi`, `jq`, and every session-backend CLI it finds
+installed (`tmux`, `herdr`, `zellij`, `cmux`) to absolute paths and bakes an
+explicit `PATH` into the generated entry, because both `cron` and `launchd`
+run with a minimal `PATH` that will not see a Node version manager's install
+directory or a Homebrew-installed backend CLI on its own.
+`quota-axi` and `jq` are required (the script cannot function without them,
+so a missing one is a hard failure); a backend CLI is included only if it is
+actually installed, since `fm-quota-watch.sh` calls `bin/fm-send.sh`, which
+dispatches through whichever backend a live crewmate happens to use.
+Every resolved binary is then re-checked against the generated PATH under a
+scrubbed environment before printing, so a stale or inconsistent PATH is
+caught here rather than failing silently on every cron firing - the real
+production failure this guards against: `quota-axi` resolved fine (so quota
+*reading* always worked), while `herdr` lived in a directory the generated
+PATH omitted, so every interrupt/resume *send* through `fm-send.sh` failed
+silently until diagnosed live.
+The printed `PATH will include: ...` line names exactly what was found -
+double-check it names every backend you actually use before installing.
 
 ```sh
 bin/fm-quota-watch-install.sh                    # print a crontab line
@@ -106,10 +121,6 @@ bin/fm-quota-watch-install.sh --launchd          # print a launchd plist instead
 A 5-minute default cadence is frequent enough to catch a crossing quickly
 relative to the shortest quota window (the multi-hour session window) without
 meaningfully adding to system load; `--interval-minutes` overrides it.
-If your session backend needs its own CLI on `PATH` (`tmux`, `herdr`,
-`zellij`, ...), extend the printed `PATH` value the same way before installing
-it, since `fm-quota-watch.sh` calls `bin/fm-send.sh`, which dispatches through
-that backend.
 
 `quota-axi` itself needs Claude auth once per machine: if `--status` (or a
 real run) reports no usable reading and `quota-axi --json` shows
@@ -127,3 +138,10 @@ reruns, picking up crew spawned mid-pause, the hysteresis band, recovery,
 `credits` reading never driving a pause or blocking a resume while
 `session`/`weekly` stay low, all against fixture quota JSON and a fake sender -
 no real quota reading, backend, or live fleet involved.
+
+`tests/fm-quota-watch-install.test.sh` covers the install script itself: every
+resolved binary (`quota-axi`, `jq`, and whichever of `tmux`/`herdr` are present)
+actually resolves through the generated crontab and launchd `PATH` under a
+fully scrubbed environment - the regression coverage for the silent-send-
+failure production bug above - plus a not-installed backend CLI being omitted
+without error, and missing `quota-axi`/`jq` each being a clear hard failure.
