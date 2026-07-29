@@ -231,14 +231,30 @@ test_claude_threads_model_and_effort() {
   rec=$(make_spawn_case profile-claude claude "$id")
   read_case_record "$rec"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model sonnet --effort high)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model claude-opus-5 --effort high)
   status=$?
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude claude-opus-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
+  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'claude-opus-5' --effort 'high'" \
     "claude launch did not thread model and effort flags"
-  pass "claude receives --model and --effort profile flags"
+  pass "Claude receives the explicit Opus 5 model and effort flags"
+}
+
+test_claude_rejects_mismatched_explicit_model() {
+  local rec id out status
+  id=profile-claude-mismatch-z16
+  rec=$(make_spawn_case profile-claude-mismatch claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model sonnet --effort high)
+  status=$?
+  expect_code 1 "$status" "Claude spawn with a mismatched explicit model should fail"
+  assert_contains "$out" "Claude crew/scout model 'sonnet' does not match the installed Opus 5 anchor 'claude-opus-5'" \
+    "Claude mismatch refusal did not name the required and requested models"
+  assert_absent "$HOME_DIR/state/$id.meta" "Claude mismatch should fail before meta is written"
+  [ ! -s "$LAUNCH_LOG" ] || fail "Claude mismatch silently rewrote and launched another model"
+  pass "Claude mismatched explicit models fail closed before endpoint creation"
 }
 
 test_codex_threads_model_and_effort() {
@@ -409,6 +425,7 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
+test_claude_rejects_mismatched_explicit_model
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
