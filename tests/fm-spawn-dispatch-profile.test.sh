@@ -156,6 +156,55 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
   pass "relative home overrides become absolute before spawn launch construction"
 }
 
+test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
+  local rec relative_id absolute_id out status launch home_real linked_home
+  relative_id=profile-relative-home-defaults-z1c
+  absolute_id=profile-absolute-home-defaults-z1d
+  rec=$(make_spawn_case profile-home-defaults pi "$relative_id" "$absolute_id")
+  read_case_record "$rec"
+  home_real=$(cd "$HOME_DIR" && pwd -P)
+
+  : > "$LAUNCH_LOG"
+  out=$(
+    cd "$CASE_DIR" || exit 1
+    FM_ROOT_OVERRIDE='' FM_HOME=home \
+      FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+      FM_PROJECTS_OVERRIDE=home/projects FM_CONFIG_OVERRIDE=home/config \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+      GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
+      "$SPAWN" "$relative_id" "$PROJ_DIR" 2>&1
+  )
+  status=$?
+  expect_code 0 "$status" "spawn with relative FM_HOME defaults should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "-e '$home_real/state/$relative_id.pi-ext.ts'" \
+    "relative FM_HOME leaked into Pi's default cross-process extension path"
+  assert_contains "$launch" "< '$home_real/data/$relative_id/brief.md'" \
+    "relative FM_HOME leaked into the default cross-process brief path"
+
+  linked_home="$CASE_DIR/home-link"
+  ln -s "$HOME_DIR" "$linked_home"
+  : > "$LAUNCH_LOG"
+  out=$(
+    FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" \
+      FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+      FM_PROJECTS_OVERRIDE="$linked_home/projects" FM_CONFIG_OVERRIDE="$linked_home/config" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+      GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
+      "$SPAWN" "$absolute_id" "$PROJ_DIR" 2>&1
+  )
+  status=$?
+  expect_code 0 "$status" "spawn with absolute symlink-spelled FM_HOME defaults should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "-e '$linked_home/state/$absolute_id.pi-ext.ts'" \
+    "absolute FM_HOME spelling changed in Pi's default cross-process extension path"
+  assert_contains "$launch" "< '$linked_home/data/$absolute_id/brief.md'" \
+    "absolute FM_HOME spelling changed in the default cross-process brief path"
+  pass "FM_HOME defaults resolve relative paths and preserve absolute spellings"
+}
+
 test_absolute_override_spelling_is_preserved_in_launch_paths() {
   local rec id out status launch linked_home
   id=profile-absolute-paths-z1c
@@ -189,6 +238,17 @@ test_unresolvable_relative_overrides_fail_loudly() {
   id=profile-unresolvable-paths-z1d
   rec=$(make_spawn_case profile-unresolvable-paths pi "$id")
   read_case_record "$rec"
+
+  out=$(
+    cd "$CASE_DIR" || exit 1
+    FM_ROOT_OVERRIDE='' FM_HOME=missing-home \
+      FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+      "$SPAWN" "$id" "$PROJ_DIR" 2>&1
+  )
+  status=$?
+  expect_code 1 "$status" "spawn with an unresolvable relative home should fail"
+  assert_contains "$out" "FM_HOME directory cannot be resolved: missing-home" \
+    "spawn did not name the unresolvable FM_HOME"
 
   out=$(
     cd "$CASE_DIR" || exit 1
@@ -596,6 +656,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 
 test_no_profile_keeps_claude_profile_defaults
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
+test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths
 test_unresolvable_relative_overrides_fail_loudly
 test_active_dispatch_profile_requires_explicit_harness_for_ship
