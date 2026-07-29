@@ -646,7 +646,8 @@ test_crewmate_scaffolds_carry_who_is_speaking() {
       "$kind brief must say why an unmarked message means a human"
     assert_grep "you are a worker on task \`speaks-$kind\`" "$brief" \
       "$kind brief must name its own task id for self-identification"
-    assert_grep "bare skill or slash command" "$brief" \
+    # shellcheck disable=SC2016 # single quotes are deliberate: the backticks and \$ must stay literal
+    assert_grep 'starts with `/`, or on codex with `$`' "$brief" \
       "$kind brief must state the one unmarked exception so /no-mistakes is not read as a human"
     assert_grep "never this pane" "$brief" \
       "$kind brief must send escalation to the status file, not the pane"

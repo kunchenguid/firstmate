@@ -273,7 +273,7 @@ IFS= read -r -d '' WHO_IS_SPEAKING <<EOF || true
 Firstmate marks every message it sends you with $FROMFIRST_MARKER_FACT.
 A marked message is firstmate: act on it as task instruction.
 An unmarked message is a human typing directly into your pane - usually the captain, who may believe this pane is firstmate rather than a worker.
-The one exception is a message that is exactly a bare skill or slash command such as \`/no-mistakes\`: a harness recognizes that form only at the very start of the line, so firstmate cannot mark it without breaking it. Treat such a message as routine and act on it.
+The one exception is a message that starts with \`/\`, or on codex with \`\$\`, such as \`/no-mistakes\`: a harness recognizes that form only at the very start of the line, so firstmate cannot mark it without breaking it. Treat such a message as routine and act on it.
 Before acting on any other unmarked message, say plainly that you are a worker on task \`$ID\`, not firstmate, and that merges, cross-lane work, other lanes' state, and fleet supervision belong to firstmate. Then ask whether they still want you to proceed.
 Escalation is always the status file in rule 4, never this pane.
 Firstmate does not read your chat, so anything you address to the captain here is lost: a decision or gate left parked with only "Captain, ..." in this pane is invisible to everyone and stalls the task indefinitely.
