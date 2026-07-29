@@ -16,7 +16,8 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#                 "FMX: X mode on ..." or "FMX: X mode off ...",
+#                 "FMTG: Telegram mode on ..." or "FMTG: Telegram mode off ...".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
 #          an origin fetch) AND its loaded instruction surface (AGENTS.md, bin/,
@@ -58,6 +59,10 @@
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
+#          Telegram mode is likewise OPTIONAL and inert unless the flag file
+#          config/telegram-mode exists. When opted in, bootstrap writes the
+#          inbox poll shim and 30s cadence config (no tool dependencies) and
+#          prints an FMTG line.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
@@ -67,15 +72,15 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          x_mode_setup, fleet_sync) while still printing every read-only detect line
+#          x_mode_setup, tg_mode_setup, fleet_sync) while still printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
-#          PR-check artifacts, secondmate homes, X-mode artifacts, project
-#          clones, or repair instructions.
+#          PR-check artifacts, secondmate homes, X-mode or Telegram-mode
+#          artifacts, project clones, or repair instructions.
 #          Unset/0 (the default) runs every sweep exactly as before - this flag
 #          is purely additive.
 #        fm-bootstrap.sh install <tool>...
@@ -99,6 +104,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-tg-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-tg-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
 
@@ -701,6 +708,80 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
+# Telegram mode (opt-in): when this home has the flag file config/telegram-mode,
+# wire the phone-inbox pending poll into the existing authenticated watcher
+# dispatch. A strict sibling of x_mode_setup with the same artifact contract:
+#   state/tg-watch.check.sh - byte-static identity shim; the watcher validates
+#                             its bytes and invokes bin/fm-tg-poll.sh directly
+#   config/tg-mode.env      - exports FM_CHECK_INTERVAL=30, sourced by the
+#                             watcher arm so only an opted-in instance polls at
+#                             the 30s cadence
+# On opt-out (flag removed) it removes any such artifacts. Absent the flag AND
+# with no leftover artifacts it is a complete no-op (nothing written, nothing
+# printed), so a home that never opted in sees zero change. The poll reads only
+# the local pending directory, so unlike X mode there are no tool dependencies
+# and no secret anywhere: the phone-inbox project owns the bot token and no
+# firstmate-side code reads it.
+tg_mode_setup() {
+  local shim cadence shim_body cadence_body
+  shim="$STATE/tg-watch.check.sh"
+  cadence="$CONFIG/tg-mode.env"
+
+  tg_mode_remove_artifacts() {
+    local failed=0
+    x_mode_remove_artifact "$shim" || failed=1
+    x_mode_remove_artifact "$cadence" || failed=1
+    [ "$failed" -eq 0 ]
+  }
+
+  tg_mode_supervision_repair() {
+    local out
+    out=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --repair-line 2>/dev/null) \
+      || out='repair missing watcher supervision according to the session-start operating block.'
+    printf '%s\n' "$out"
+  }
+
+  if ! fmtg_enabled "$FM_HOME"; then
+    # Opt-out (or never opted in): drop any Telegram artifacts; stay silent
+    # unless we actually removed something.
+    if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
+      if tg_mode_remove_artifacts; then
+        echo "FMTG: Telegram mode off - removed inbox poll shim and 30s cadence; default cadence applies on the next supervision cycle; $(tg_mode_supervision_repair)"
+      else
+        echo "FMTG: Telegram mode off - failed to remove inbox poll shim or 30s cadence"
+      fi
+    fi
+    return 0
+  fi
+
+  fmtg_arm_failed() {
+    if tg_mode_remove_artifacts; then
+      echo "FMTG: Telegram mode off - failed to arm inbox poll shim or 30s cadence"
+    else
+      echo "FMTG: Telegram mode off - failed to arm inbox poll shim or 30s cadence; stale artifacts remain"
+    fi
+  }
+
+  mkdir -p "$STATE" "$CONFIG" 2>/dev/null || { fmtg_arm_failed; return 0; }
+
+  shim_body=$(fmtg_poll_shim_content "$FM_HOME" "$FM_ROOT")
+  x_mode_write_if_changed "$shim" "$shim_body" 700 || { fmtg_arm_failed; return 0; }
+  fmtg_poll_shim_valid "$shim" "$FM_HOME" "$FM_ROOT" \
+    || { fmtg_arm_failed; return 0; }
+
+  cadence_body=$(cat <<'EOF'
+# Auto-generated by fm-bootstrap.sh - Telegram mode watcher cadence.
+# Source this before the active harness protocol starts a watcher process so
+# fm-watch.sh polls the Telegram check every 30s. Non-opted-in instances have
+# no such file and keep the default 300s cadence.
+export FM_CHECK_INTERVAL=30
+EOF
+)
+  x_mode_write_if_changed "$cadence" "$cadence_body" 600 || { fmtg_arm_failed; return 0; }
+
+  echo "FMTG: Telegram mode on - inbox poll armed via state/tg-watch.check.sh; 30s watcher cadence in config/tg-mode.env"
+}
+
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -872,6 +953,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_liveness_sweep
   secondmate_sync
   x_mode_setup
+  tg_mode_setup
   fleet_sync
 fi
 exit 0

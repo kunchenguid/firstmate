@@ -11,7 +11,7 @@ When this session owns supervision and away mode is not active:
 4. On a `Stop hook feedback` watcher-failure wake (`watcher: FAILED ...`), treat it as an alarm: drain, then repair supervision before ending the turn.
 5. Manual arm is recovery only.
    When a repair is genuinely needed - the Stop hook did not claim this home, or a forced restart is required - run `bin/fm-watch-arm.sh` (or `bin/fm-watch-arm.sh --restart`) as its own Claude Code background task, never bundled with other commands, never with shell `&`.
-   Source `__FM_X_MODE_ENV__` first when X mode is active.
+   Source `__FM_X_MODE_ENV__` first when X mode is active, and `__FM_TG_MODE_ENV__` first when Telegram mode is active.
    A shell `&`, a truncating pipe, or bundling is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) registered in `.claude/settings.json`.
 6. Treat `watcher: started ...` and `watcher: attached ...` inside arm output as proof that one live cycle exists.
    On attach, the arm follows verified identity-matched successors instead of exiting when the first cycle ends.

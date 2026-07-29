@@ -127,10 +127,13 @@ write_epoch() {  # <outcome>
 
 write_epoch arming
 
-# X mode cadence: source the generated config so an X instance polls at its
-# 30s cadence (fm-bootstrap.sh x_mode_setup contract).
+# X/Telegram mode cadence: source the generated configs so an opted-in
+# instance polls at its 30s cadence (fm-bootstrap.sh x_mode_setup and
+# tg_mode_setup contracts).
 # shellcheck source=/dev/null
 [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
+# shellcheck source=/dev/null
+[ -f "$CONFIG/tg-mode.env" ] && . "$CONFIG/tg-mode.env"
 
 # --- foreground the real arm wrapper ------------------------------------------
 # NO shell &: this hook process tree is the harness-owned lifecycle. The arm

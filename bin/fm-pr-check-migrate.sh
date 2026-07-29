@@ -4,8 +4,9 @@
 # Pending validated merged-poll retirements finish first. Canonical polls are
 # then rebuilt from validated metadata, remaining provenance-bound polls and
 # registered custom checks remain armed, and every other task poll is
-# quarantined for private review. A current X-mode shim is preserved by exact
-# content, while the recognized older byte-static shim is refreshed in place.
+# quarantined for private review. Current X-mode and Telegram-mode shims are
+# preserved by exact content, while the recognized older byte-static X shim is
+# refreshed in place.
 # Usage: fm-pr-check-migrate.sh [--checks-safe]
 set -u
 
@@ -37,6 +38,8 @@ fi
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-tg-lib.sh
+. "$SCRIPT_DIR/fm-tg-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
 
@@ -82,6 +85,10 @@ current_checks_authenticated() {
     [ -e "$check" ] || [ -L "$check" ] || continue
     if [ "$(basename "$check")" = x-watch.check.sh ] \
       && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+      continue
+    fi
+    if [ "$(basename "$check")" = tg-watch.check.sh ] \
+      && fmtg_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
       continue
     fi
     id=$(basename "$check" .check.sh)
@@ -254,9 +261,16 @@ x_shim_locked_scan_needed() {
   return 0
 }
 
+tg_shim_locked_scan_needed() {
+  local shim="$STATE/tg-watch.check.sh"
+  [ -e "$shim" ] || [ -L "$shim" ] || return 1
+  fmtg_poll_shim_valid "$shim" "$FM_HOME" "$FM_ROOT" && return 1
+  return 0
+}
+
 # Marker short-circuits apply only when generated artifact identities are current.
 # Otherwise watcher exclusion comes before every check scan and state mutation.
-if ! x_shim_locked_scan_needed; then
+if ! x_shim_locked_scan_needed && ! tg_shim_locked_scan_needed; then
   migration_complete && exit 0
   [ "$ALLOW_INCOMPLETE_REPAIRS" -eq 1 ] && scan_complete && exit 0
 fi
@@ -378,6 +392,10 @@ migration_needed() {
       && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
       continue
     fi
+    if [ "$(basename "$check")" = tg-watch.check.sh ] \
+      && fmtg_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+      continue
+    fi
     id=$(basename "$check" .check.sh)
     fm_custom_check_registered "$STATE" "$id" && continue
     if ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE"; then
@@ -393,6 +411,10 @@ unsafe_checks_absent() {
     [ -e "$check" ] || [ -L "$check" ] || continue
     if [ "$(basename "$check")" = x-watch.check.sh ] \
       && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+      continue
+    fi
+    if [ "$(basename "$check")" = tg-watch.check.sh ] \
+      && fmtg_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
       continue
     fi
     id=$(basename "$check" .check.sh)
@@ -1025,6 +1047,10 @@ if migration_needed; then
     [ -e "$check" ] || [ -L "$check" ] || continue
     if [ "$(basename "$check")" = x-watch.check.sh ] \
       && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+      continue
+    fi
+    if [ "$(basename "$check")" = tg-watch.check.sh ] \
+      && fmtg_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
       continue
     fi
     id=$(basename "$check" .check.sh)

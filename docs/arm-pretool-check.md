@@ -96,11 +96,11 @@ Approved setup nodes are:
 
 - `cd <one path word>`.
 - `export NAME=<one shell word>` with no command substitution, process substitution, or redirection.
-- `source <x-mode path>` or `. <x-mode path>`.
-- `[ -f <x-mode path> ] && source <x-mode path>` and the equivalent dot form.
+- `source <cadence-env path>` or `. <cadence-env path>`.
+- `[ -f <cadence-env path> ] && source <cadence-env path>` and the equivalent dot form.
 
-The allowed x-mode paths are `config/x-mode.env`, `./config/x-mode.env`, and an absolute path that normalizes to `<active-firstmate-home>/config/x-mode.env`.
-An absolute x-mode path outside the active home is not an approved setup node.
+The allowed cadence-env paths are `config/x-mode.env` and `config/tg-mode.env`, each also accepted with a `./` prefix or as an absolute path that normalizes to that file under `<active-firstmate-home>`.
+An absolute cadence-env path outside the active home is not an approved setup node.
 
 Approved nodes may be separated by `;`, a real newline, or `&&`.
 `&&` is accepted after setup so a failed `cd`, `export`, or source prevents the protected call from running under the wrong setup.

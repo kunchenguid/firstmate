@@ -9,7 +9,7 @@ firstmate's always-loaded operating contract and routing index for conditional p
 ## Event-driven supervision
 
 A zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet, classifies detected wakes in bash, and wakes the first mate only when something is actionable.
-Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, authenticated check output such as PR merge polling or an X-mode mention, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS`, declared external waits that remain paused past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
+Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, authenticated check output such as PR merge polling, an X-mode mention, or a Telegram note, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS`, declared external waits that remain paused past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
 When a canonical validated PR poll returns exactly `merged`, the watcher appends that durable notification before publishing a private receipt bound to the poll's registration, bytes, file identities, metadata, provider, URL, and task ID.
@@ -51,7 +51,7 @@ When only an owned child's current classification is unavailable, the home class
 A bounded direct-report terminal tail can help diagnose a mismatch by showing that historical parent wording is still visible, but it is untrusted supplemental evidence because scrollback, prompts, copied output, idle shells, and agent prose are not durable state.
 The snapshot strips control sequences, retains only capture metadata and literal event-corroboration flags, and never lets terminal evidence override a valid structured classification.
 The default path remains local-only; live GitHub enrichment exists only behind the bearings `--include-prs` opt-in.
-Optional X mode integrates with the watcher only after explicit opt-in; [configuration.md](configuration.md#x-mode-env) owns its generated-artifact and dispatch mechanics.
+Optional X mode and Telegram mode integrate with the watcher only after explicit opt-in; their generated-artifact and dispatch mechanics are owned by [configuration.md](configuration.md#x-mode-env) and [configuration.md](configuration.md#telegram-mode-configtelegram-mode) respectively.
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
 That block owns the live wait shape for the running primary harness: Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked primary extensions, and OpenCode uses its TUI plugin.
@@ -224,6 +224,17 @@ If an image is attached to a split reply, the relay puts it on the first/opener 
 For preview testing, `FMX_DRY_RUN` makes `fm-x-reply.sh` and `fm-x-dismiss.sh` skip the public post or dismiss call and record the would-be payload under `state/x-outbox/`, including `texts` when the reply would be a thread and an `endpoint` marker when the preview is a completion follow-up or dismiss, while the rest of the poll -> compose -> would-post loop still succeeds.
 Attached images are recorded as compact `{media_type, bytes, source_path}` metadata in dry-run instead of base64 bytes.
 X mode remains layered on top of the existing check mechanism without changing its request-handling behavior.
+
+## Optional Telegram mode
+
+Telegram mode is opt-in two-way chat between the captain's phone and the main firstmate, layered on the watcher the same way X mode is.
+A user enables it by creating the gitignored flag file `config/telegram-mode` in the firstmate home; presence alone is the standing authorization, because the bot token lives entirely in the separate phone-inbox deployment and no firstmate-side code reads it.
+That flag is consent for private replies and normal reversible lifecycle actions from phone notes; destructive, irreversible, and security-sensitive asks are escalated to a trusted session instead of being executed from a phone message.
+On the locked session-start bootstrap step the flag creates `state/tg-watch.check.sh` and `config/tg-mode.env`, the polling and 30s watcher-cadence artifacts described in the [Telegram mode configuration reference](configuration.md#telegram-mode-configtelegram-mode); without the flag that step removes them on opt-out and otherwise stays silent, so non-Telegram users see no behavior change.
+`bin/fm-tg-poll.sh` reads only the local phone-inbox pending directory - no network, no token - claims a durable marker per note at `state/tg-offered/<id>`, and wakes firstmate with note IDS ONLY, because note bodies and the filename slugs derived from them are untrusted phone text.
+The `fmtg-respond` agent-only skill claims each note through phone-inbox's `inbox claim`, classifies it as work, a question, or a pure acknowledgment, runs actionable reversible requests through firstmate's normal lifecycle, and replies in the same chat through `inbox reply`.
+Work that spawns a longer-running task is linked by `bin/fm-tg-link.sh` (`tg_note=`, `tg_note_ts=`, `tg_followups=` in that task's meta), and later milestone and completion wakes send up to three bounded follow-ups through `bin/fm-tg-followup.sh`, with `--final` always clearing the link.
+Every live send notifies the captain's phone, so this mode never sends as a test.
 
 ## Project memory belongs to projects
 

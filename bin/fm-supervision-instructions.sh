@@ -14,12 +14,13 @@ HARNESS=
 READ_ONLY=0
 AFK=0
 X_MODE=0
+TG_MODE=0
 REPAIR_LINE=0
 QUEUE_PENDING=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
+Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--x-mode 0|1] [--tg-mode 0|1] [--repair-line] [--queue-pending 0|1]
 
 Print the current primary harness's supervision operating instructions.
 With --repair-line, print one concise repair instruction for guard and hook messages.
@@ -53,6 +54,11 @@ while [ "$#" -gt 0 ]; do
     --x-mode)
       [ "$#" -gt 1 ] || { echo "error: --x-mode requires 0 or 1" >&2; exit 2; }
       X_MODE=$(bool_value "$2")
+      shift 2
+      ;;
+    --tg-mode)
+      [ "$#" -gt 1 ] || { echo "error: --tg-mode requires 0 or 1" >&2; exit 2; }
+      TG_MODE=$(bool_value "$2")
       shift 2
       ;;
     --queue-pending)
@@ -91,6 +97,7 @@ checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
 pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
 x_mode_env="$CONFIG/x-mode.env"
+tg_mode_env="$CONFIG/tg-mode.env"
 
 shell_quote() {
   printf "'"
@@ -99,9 +106,13 @@ shell_quote() {
 }
 
 x_mode_env_sh=$(shell_quote "$x_mode_env")
+tg_mode_env_sh=$(shell_quote "$tg_mode_env")
 
 if [ "$X_MODE" -eq 0 ] && [ -f "$x_mode_env" ]; then
   X_MODE=1
+fi
+if [ "$TG_MODE" -eq 0 ] && [ -f "$tg_mode_env" ]; then
+  TG_MODE=1
 fi
 
 render_snippet() {
@@ -111,6 +122,8 @@ render_snippet() {
     line=${line//__FM_PI_TURNEND_EXT__/$pi_turnend_ext}
     line=${line//__FM_X_MODE_ENV_SH__/$x_mode_env_sh}
     line=${line//__FM_X_MODE_ENV__/$x_mode_env}
+    line=${line//__FM_TG_MODE_ENV_SH__/$tg_mode_env_sh}
+    line=${line//__FM_TG_MODE_ENV__/$tg_mode_env}
     printf '%s\n' "$line"
   done < "$SNIPPET"
 }
@@ -129,8 +142,12 @@ repair_line() {
   if [ "$QUEUE_PENDING" -eq 1 ]; then
     prefix='After draining queued wakes, '
   fi
-  if [ "$X_MODE" -eq 1 ]; then
+  if [ "$X_MODE" -eq 1 ] && [ "$TG_MODE" -eq 1 ]; then
+    prefix="${prefix}source ${x_mode_env_sh} and ${tg_mode_env_sh} first, then "
+  elif [ "$X_MODE" -eq 1 ]; then
     prefix="${prefix}source ${x_mode_env_sh} first, then "
+  elif [ "$TG_MODE" -eq 1 ]; then
+    prefix="${prefix}source ${tg_mode_env_sh} first, then "
   fi
 
   case "$HARNESS" in
@@ -201,7 +218,15 @@ fi
 if [ "$X_MODE" -eq 1 ]; then
   printf '%s%s%s\n' '- X mode: active; source ' "$x_mode_env" ' before launching any watcher process so the 30s cadence is inherited.'
 else
-  printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
+  printf '%s\n' '- X mode: inactive.'
+fi
+if [ "$TG_MODE" -eq 1 ]; then
+  printf '%s%s%s\n' '- Telegram mode: active; source ' "$tg_mode_env" ' before launching any watcher process so the 30s cadence is inherited.'
+else
+  printf '%s\n' '- Telegram mode: inactive.'
+fi
+if [ "$X_MODE" -eq 0 ] && [ "$TG_MODE" -eq 0 ]; then
+  printf '%s\n' '- Watcher cadence: default; no mode overrides it.'
 fi
 ordinary_wake_line
 printf '\n'

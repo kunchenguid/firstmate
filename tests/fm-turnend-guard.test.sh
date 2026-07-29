@@ -1049,7 +1049,7 @@ test_hook_claude_mode_reblocks_x_mode_without_tasks() {
   : > "$dir/state/x-watch.check.sh"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
   expect_code 2 "$status" "--claude mode must re-block an X-mode-only stop when no auto-arm claims recovery"
-  assert_contains "$out" "X-mode relay polling needs supervision" "--claude X-mode re-block must name the active supervision need"
+  assert_contains "$out" "X-mode or Telegram-mode polling needs supervision" "--claude X-mode re-block must name the active supervision need"
   [ -f "$dir/state/.turnend-claude-blocks" ] || fail "--claude X-mode re-block must consume the shared block budget"
   pass "fm-turnend-guard --claude: X-mode-only homes re-block when auto-arm recovery is absent"
 }

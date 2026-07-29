@@ -144,6 +144,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/fmtg-respond/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/fmx-respond/SKILL.md",
       "audience": "agent-runtime"
     },

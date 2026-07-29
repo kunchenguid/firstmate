@@ -29,9 +29,10 @@
 #                       mutating step runs.
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
-#                       diagnostics always run. Bootstrap's five MUTATING sweeps
+#                       diagnostics always run. Bootstrap's six MUTATING sweeps
 #                       (legacy PR-check migration, secondmate fast-forward,
-#                       secondmate liveness, X-mode artifact writes, fleet sync)
+#                       secondmate liveness, X-mode artifact writes,
+#                       Telegram-mode artifact writes, fleet sync)
 #                       also run only when locked.
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
@@ -310,6 +311,8 @@ AFK_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_PRESENT=1
 X_MODE_PRESENT=0
 [ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
+TG_MODE_PRESENT=0
+[ -f "$CONFIG/tg-mode.env" ] && TG_MODE_PRESENT=1
 
 if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
   PI_EXT="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
@@ -330,7 +333,8 @@ fi
   --harness "$PRIMARY_HARNESS" \
   --read-only "$READ_ONLY" \
   --afk "$AFK_PRESENT" \
-  --x-mode "$X_MODE_PRESENT"
+  --x-mode "$X_MODE_PRESENT" \
+  --tg-mode "$TG_MODE_PRESENT"
 
 # --- 4. context digest -----------------------------------------------------
 section "CONTEXT"
@@ -410,10 +414,10 @@ load /afk and ensure the daemon is running, because the daemon owns watcher
 supervision.
 
 EOF
-elif [ -f "$CONFIG/x-mode.env" ]; then
+elif [ -f "$CONFIG/x-mode.env" ] || [ -f "$CONFIG/tg-mode.env" ]; then
   cat <<EOF
 Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
-X mode is active, so the emitted block's cadence instruction applies.
+A 30s-cadence mode (X or Telegram) is active, so the emitted block's cadence instruction applies.
 This script never starts supervision itself.
 
 EOF

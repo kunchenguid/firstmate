@@ -11,7 +11,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
-`state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated X-mode artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated X-mode and Telegram-mode artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the guarded exceptions in `AGENTS.md`.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
@@ -363,6 +363,36 @@ In dry-run, `fm-x-dismiss.sh` records `{request_id, endpoint:"dismiss"}` to the 
 The live answer and follow-up bodies intentionally stay the same shape, including optional `image`; the relay distinguishes them by endpoint, and dismiss stays `{request_id}`.
 These paths need `jq` to build the JSON payload, but they run before token and network checks, so they need neither `FMX_PAIRING_TOKEN` nor `curl`.
 
+## Telegram mode (config/telegram-mode)
+
+Telegram mode lets the main firstmate answer the captain's phone messages: the separate phone-inbox project captures each Telegram message from the captain's single claimed chat as a pending note file, and firstmate claims, acts on, and replies to those notes through phone-inbox's durable bridge commands.
+It is off unless the firstmate home contains the gitignored flag file `config/telegram-mode` (a regular file, not a symlink; content ignored).
+The flag is presence-only opt-in consent for private replies and normal reversible lifecycle actions from phone notes; destructive, irreversible, and security-sensitive actions still require the captain in a trusted session.
+Unlike X mode there is no credential anywhere on the firstmate side: the phone-inbox deployment owns the bot token and no firstmate-side code reads its config.
+Exactly one home opts in - the main home on the machine that owns the phone inbox - and phone-inbox's atomic note claim is the backstop that keeps two homes from ever both answering one note.
+
+The locked session-start bootstrap step turns the flag into local generated state, the same contract as X mode.
+It writes `state/tg-watch.check.sh`, a byte-static identity shim for `bin/fm-tg-poll.sh`, and `config/tg-mode.env`, which exports `FM_CHECK_INTERVAL=30` for watcher processes in that home.
+The watcher accepts the shim only when its bytes match the expected generated content, then invokes the trusted repository poll script directly instead of executing state-file source.
+This section is the single owner of the Telegram-mode cadence contract: an opted-in instance polls every 30 seconds instead of the default 300, only an opted-in instance speeds up because a non-opted-in home has no `config/tg-mode.env`, and the session-start supervision operating block includes the cadence instruction when that file exists.
+The active primary-harness supervision protocol owns how that sourced cadence reaches the watcher process, and cadence transitions are applied by restarting the home-scoped watcher through the emitted harness protocol, exactly as for X mode.
+While away mode is active the daemon owns the watcher and its default cadence applies; away-mode Telegram cadence shares the X-mode deferral.
+When the flag is removed, the next locked session-start bootstrap step removes those artifacts.
+Steady-state off is silent and writes nothing, so a fresh clone behaves identically with the feature absent.
+
+`bin/fm-tg-poll.sh` reads only the local pending directory (`PHONE_INBOX_ROOT` overrides the default `~/.claude/inbox`); it makes no network calls and reads no token.
+It surfaces each pending note id at most once per offer by atomically claiming a durable marker at `state/tg-offered/<id>`, prints the wake payload `tg-message <id> [<id>...]`, and re-offers a note still unclaimed after `FMTG_REOFFER_SECS` (default 1800) so a firstmate that died between wake and claim self-heals.
+Markers are pruned when their note leaves pending, which bounds retention.
+The wake payload carries note ids only: note bodies are untrusted phone text and pending filenames embed the body as a slug, so neither ever appears in a wake payload, a marker name, or poll output.
+Inbox or offer-claim problems are reported once as `tg-mode-error ...` until recovery; the dedupe records live in the poll-owned private directory `state/tg-poll/` (`error`, `claim-error`), so deduplication holds regardless of how the home's `state/` was created.
+
+The `fmtg-respond` skill owns the note lifecycle: claim through phone-inbox's `inbox claim`, classify, act through the normal lifecycle within the authority boundary, reply via `inbox reply` (stdin only), and archive pure acknowledgments with `inbox done`.
+Work spawned from a note is linked with `bin/fm-tg-link.sh <task-id> <note-id>` (`tg_note=`, `tg_note_ts=`, `tg_followups=` in the task's meta, with `--carry-count`/`--carry-ts` preserving budget across a recovery relink).
+Completion follow-ups go through `bin/fm-tg-followup.sh`, which sends through the phone-inbox `tg` client with the text on stdin (`FMTG_TG_BIN` overrides the default `~/dev/phone-inbox/tg`, e.g. for tests).
+`FMTG_FOLLOWUP_MAX_COUNT` (default 3) and `FMTG_FOLLOWUP_MAX_AGE_SECS` (default 604800) are local anti-spam policy, not a transport cap; `--final` always clears the link.
+Follow-ups are deliberately not gated on the opt-in flag: removing the flag stops new notes and new links, but a task linked before opt-out may still finish its follow-up thread within the same cap and window, so a request the captain made from his phone always gets its outcome.
+Every live send notifies the captain's phone, so nothing in this mode sends as a test.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
@@ -396,7 +426,7 @@ FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operatio
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
-FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
+FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode/Telegram-mode dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
@@ -411,6 +441,11 @@ FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; val
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting X-mode completion follow-ups (7 days)
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on X-mode completion follow-ups per linked mention
+PHONE_INBOX_ROOT=       # phone-inbox root read by the Telegram poll; unset means ~/.claude/inbox
+FMTG_REOFFER_SECS=1800  # seconds before a still-unclaimed Telegram note is offered again
+FMTG_TG_BIN=            # phone-inbox outbound client used for Telegram follow-ups; unset means ~/dev/phone-inbox/tg
+FMTG_FOLLOWUP_MAX_AGE_SECS=604800   # local window for sending Telegram-mode completion follow-ups (7 days)
+FMTG_FOLLOWUP_MAX_COUNT=3   # local cap on Telegram-mode completion follow-ups per linked note
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800   # milliseconds the --claude turn-end guard waits for the Stop auto-arm's claim, health, or fresh rewake epoch before re-blocking
