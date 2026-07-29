@@ -265,6 +265,57 @@ jobs:
             ${{ runner.temp }}/fm-herdr/default-server.log
           if-no-files-found: warn
 
+  tests-herdr-macos-focus:
+    name: Behavior tests (Herdr macOS focus)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Require macOS focus and Herdr tools
+        run: |
+          set -eu
+          command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
+          command -v python3 >/dev/null || { echo "::error::python3 is required"; exit 1; }
+          command -v swift >/dev/null || { echo "::error::swift is required"; exit 1; }
+          command -v osascript >/dev/null || { echo "::error::osascript is required"; exit 1; }
+      - name: Install pinned Herdr and Treehouse
+        run: |
+          set -eu
+          bin/fm-install-herdr.sh "$RUNNER_TEMP/bin"
+          bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Start default Herdr session for fleet-state tripwire
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/fm-herdr-macos"
+          nohup herdr server >"$RUNNER_TEMP/fm-herdr-macos/default-server.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/fm-herdr-macos/default-server.pid"
+          attempt=0
+          while [ "$attempt" -lt 150 ]; do
+            running=$(herdr status --json 2>/dev/null | jq -r '.server.running // false' || echo false)
+            if [ "$running" = true ]; then
+              echo "default Herdr session is running"
+              exit 0
+            fi
+            sleep 0.2
+            attempt=$((attempt + 1))
+          done
+          echo "::error::default Herdr server did not become ready"
+          cat "$RUNNER_TEMP/fm-herdr-macos/default-server.log" || true
+          exit 1
+      - name: Run projected spawn macOS activation regression
+        env:
+          FM_REQUIRE_MACOS_FOCUS_AUDIT: 1
+        run: tests/fm-backend-herdr-presentation-e2e.test.sh
+      - name: Stop default Herdr server
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/fm-herdr-macos/default-server.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/fm-herdr-macos/default-server.pid")" 2>/dev/null || true
+          fi
+
   # Aggregate per-lane timing into one summary artifact for critical-path review.
   tests-timing-aggregate:
     name: Behavior timing aggregate

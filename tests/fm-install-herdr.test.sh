@@ -74,6 +74,12 @@ test_cleanup_only_targets_job_owned_lab_sessions() {
 
 test_ci_wires_installers_and_required_lane() {
   assert_grep 'tests-herdr:' "$CI" "CI must define the required Herdr Behavior job"
+  assert_grep 'tests-herdr-macos-focus:' "$CI" \
+    "CI must define the required macOS Herdr focus job"
+  assert_grep 'FM_REQUIRE_MACOS_FOCUS_AUDIT: 1' "$CI" \
+    "macOS Herdr CI must require the NSWorkspace activation audit"
+  assert_grep 'fm-backend-herdr-presentation-e2e.test.sh' "$CI" \
+    "macOS Herdr CI must run the projected spawn regression"
   assert_grep 'fm-install-herdr.sh' "$CI" "CI must call the Herdr installer"
   assert_grep 'fm-install-treehouse.sh' "$CI" "CI must call the Treehouse installer"
   assert_grep 'fm-herdr-ci-cleanup.sh snapshot' "$CI" "CI must snapshot sessions before the suite"

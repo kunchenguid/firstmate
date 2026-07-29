@@ -27,7 +27,7 @@ An auto-detected Herdr spawn prints an opt-out notice.
 Spawn stops before creating a Herdr container or acquiring a task worktree when `herdr`, `jq`, or the protocol floor is unavailable.
 No separate first-run provisioning is required.
 
-The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`.
+Required Herdr CI coverage uses the pinned installers in `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`.
 Those script headers own release assets, checksums, download bounds, and post-install gates.
 Real harness credential tests remain opt-in rather than part of default CI.
 
@@ -43,6 +43,7 @@ Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.s
 
 Workspace and tab creation use `--no-focus`.
 The first workspace in a completely empty Herdr session must become focused because no prior target exists, but later task creation does not intentionally steal focus.
+Herdr workspace and tab focus is distinct from macOS frontmost-app activation.
 
 Herdr does not enforce workspace or tab label uniqueness.
 Firstmate adopts the first workspace matching its derived home label and refuses duplicate task tabs inside it.
@@ -80,6 +81,7 @@ A foreign, ambiguous, detached, or manually interleaved child makes ordering ski
 Fresh projected ordering failure never fails the task spawn.
 On that fresh path, Firstmate does not retry projection, adopt, reuse, close, delete, or rename anything in response to an unavailable method, lock contention, ambiguous socket, lost response, failed move, or verification mismatch.
 The worker remains on the ordinary flat or Herdr-current-order path.
+The complete projected spawn must also preserve the macOS frontmost app.
 
 Normal task metadata remains the sole endpoint authority after creation.
 Cleanup closes only the exact recorded task pane and never calls `workspace close`.
@@ -123,7 +125,7 @@ Operational compromises:
 - Regaining a dedicated space after degradation requires stopping the flat task, manually checking the stale projection, and clearing its journal before a genuinely fresh launch.
 - The visible token is only a restart-stable correlator and never substitutes for the exact binding.
 
-`tests/fm-backend-herdr-presentation-e2e.test.sh` covers multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path.
+`tests/fm-backend-herdr-presentation-e2e.test.sh` covers multi-home ordering, concurrency, lock contention, legacy coexistence, logical focus and macOS app-activation preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path.
 `tests/fm-herdr-session-cleanup.test.sh` covers every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary.
 `tests/fm-herdr-session-cleanup-e2e.test.sh` covers the restored-shell cleanup in a guarded non-default named lab; [`verification/runtime-backends.md`](verification/runtime-backends.md#per-home-and-presentation-topology) owns the active versioned evidence.
 
