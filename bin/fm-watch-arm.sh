@@ -349,12 +349,18 @@ if [ "$mode" = restart ]; then
       clear_stale_recorded_watcher_lock
     fi
   fi
+  if healthy_watcher; then
+    cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
+    cycle_begin "$HEALTHY_PID" attached
+    report_attached
+    attach_and_wait "$HEALTHY_PID"
+    exit $?
+  fi
 fi
 
 # If a genuinely live+fresh watcher already holds the lock, do not start a second
 # one - attach to that cycle and wait until it ends so the harness notify fires
-# then, not as an immediate empty wake. (--restart skips this: it just stopped
-# this home's watcher and wants a fresh one.)
+# then, not as an immediate empty wake.
 if [ "$mode" = arm ] && healthy_watcher; then
   cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
   cycle_begin "$HEALTHY_PID" attached

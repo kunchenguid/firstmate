@@ -27,6 +27,33 @@ record_pi_version_evidence() {
   [ -n "$version" ] || fail "$context could not determine the installed Pi version"
 }
 
+pi_version_at_least() {
+  local version=$1 minimum=$2 v_major v_minor v_patch m_major m_minor m_patch
+  IFS=. read -r v_major v_minor v_patch <<EOF
+$version
+EOF
+  IFS=. read -r m_major m_minor m_patch <<EOF
+$minimum
+EOF
+  for part in v_major v_minor v_patch m_major m_minor m_patch; do
+    case "${!part:-0}" in ''|*[!0-9]*) return 1 ;; esac
+  done
+  [ "$v_major" -gt "$m_major" ] && return 0
+  [ "$v_major" -lt "$m_major" ] && return 1
+  [ "$v_minor" -gt "$m_minor" ] && return 0
+  [ "$v_minor" -lt "$m_minor" ] && return 1
+  [ "${v_patch:-0}" -ge "${m_patch:-0}" ]
+}
+
+skip_old_pi_calm_e2e() {
+  local version=$1 context=$2
+  if ! pi_version_at_least "$version" 0.81.1; then
+    echo "skip: $context requires Pi >= 0.81.1 (found $version)"
+    return 0
+  fi
+  return 1
+}
+
 cleanup() {
   if command -v tmux >/dev/null 2>&1; then
     tmux -L "$TMUX_SOCKET" kill-server 2>/dev/null || true
@@ -1067,6 +1094,7 @@ test_operational_followup_turn_e2e() {
   fi
   version=$(pi --version 2>/dev/null || true)
   record_pi_version_evidence "$version" "Pi operational follow-up E2E"
+  skip_old_pi_calm_e2e "$version" "Pi operational follow-up E2E" && return 0
 
   project="$TMP_ROOT/followup-project"
   home="$TMP_ROOT/followup-home"
@@ -1420,6 +1448,7 @@ test_hidden_block_geometry_e2e() {
   fi
   version=$(pi --version 2>/dev/null || true)
   record_pi_version_evidence "$version" "Pi Calm hidden-block geometry E2E"
+  skip_old_pi_calm_e2e "$version" "Pi Calm hidden-block geometry E2E" && return 0
 
   project="$TMP_ROOT/geometry-project"
   home="$TMP_ROOT/geometry-home"
@@ -1660,6 +1689,7 @@ test_interactive_terminal_e2e() {
   fi
   version=$(pi --version 2>/dev/null || true)
   record_pi_version_evidence "$version" "Pi calm interactive E2E"
+  skip_old_pi_calm_e2e "$version" "Pi calm interactive E2E" && return 0
 
   project="$TMP_ROOT/e2e-project"
   config="$TMP_ROOT/e2e-config"
