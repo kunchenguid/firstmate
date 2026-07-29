@@ -111,11 +111,10 @@ assert_meta_profile() {
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
-  local rec id out status expected launch home_real
+  local rec id out status expected launch
   id=profile-off-z1
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
-  home_real=$(cd "$HOME_DIR" && pwd -P)
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
@@ -124,7 +123,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$home_real/data/$id/brief.md')\""
+  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -155,6 +154,64 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
   assert_contains "$launch" "< '$home_real/data/$id/brief.md'" \
     "relative FM_DATA_OVERRIDE leaked into the cross-process brief path"
   pass "relative home overrides become absolute before spawn launch construction"
+}
+
+test_absolute_override_spelling_is_preserved_in_launch_paths() {
+  local rec id out status launch linked_home
+  id=profile-absolute-paths-z1c
+  rec=$(make_spawn_case profile-absolute-paths pi "$id")
+  read_case_record "$rec"
+  linked_home="$CASE_DIR/home-link"
+  ln -s "$HOME_DIR" "$linked_home"
+  : > "$LAUNCH_LOG"
+
+  out=$(
+    FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" \
+      FM_STATE_OVERRIDE="$linked_home/state" FM_DATA_OVERRIDE="$linked_home/data" \
+      FM_PROJECTS_OVERRIDE="$linked_home/projects" FM_CONFIG_OVERRIDE="$linked_home/config" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+      GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
+      "$SPAWN" "$id" "$PROJ_DIR" 2>&1
+  )
+  status=$?
+  expect_code 0 "$status" "spawn with absolute symlink-spelled overrides should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "-e '$linked_home/state/$id.pi-ext.ts'" \
+    "absolute FM_STATE_OVERRIDE spelling changed in Pi's cross-process extension path"
+  assert_contains "$launch" "< '$linked_home/data/$id/brief.md'" \
+    "absolute FM_DATA_OVERRIDE spelling changed in the cross-process brief path"
+  pass "absolute override spellings are preserved in spawn launch paths"
+}
+
+test_unresolvable_relative_overrides_fail_loudly() {
+  local rec id out status
+  id=profile-unresolvable-paths-z1d
+  rec=$(make_spawn_case profile-unresolvable-paths pi "$id")
+  read_case_record "$rec"
+
+  out=$(
+    cd "$CASE_DIR" || exit 1
+    FM_ROOT_OVERRIDE='' FM_HOME=home \
+      FM_STATE_OVERRIDE=missing-state FM_DATA_OVERRIDE=home/data \
+      "$SPAWN" "$id" "$PROJ_DIR" 2>&1
+  )
+  status=$?
+  expect_code 1 "$status" "spawn with an unresolvable relative state override should fail"
+  assert_contains "$out" "FM_STATE_OVERRIDE directory cannot be resolved: missing-state" \
+    "spawn did not name the unresolvable FM_STATE_OVERRIDE"
+
+  out=$(
+    cd "$CASE_DIR" || exit 1
+    FM_ROOT_OVERRIDE='' FM_HOME=home \
+      FM_STATE_OVERRIDE=home/state FM_DATA_OVERRIDE=missing-data \
+      "$SPAWN" "$id" "$PROJ_DIR" 2>&1
+  )
+  status=$?
+  expect_code 1 "$status" "spawn with an unresolvable relative data override should fail"
+  assert_contains "$out" "FM_DATA_OVERRIDE directory cannot be resolved: missing-data" \
+    "spawn did not name the unresolvable FM_DATA_OVERRIDE"
+  pass "unresolvable relative spawn overrides fail with named diagnostics"
 }
 
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
@@ -539,6 +596,8 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 
 test_no_profile_keeps_claude_profile_defaults
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
+test_absolute_override_spelling_is_preserved_in_launch_paths
+test_unresolvable_relative_overrides_fail_loudly
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
