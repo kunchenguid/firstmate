@@ -6,10 +6,13 @@
 # work (a state/<id>.meta exists) or an X-mode relay poll
 # (state/x-watch.check.sh), and whether its watcher has a fresh liveness beacon
 # (state/.last-watcher-beat, touched every poll cycle, within the grace window).
-# bin/fm-guard.sh keeps its task-specific grace-based warning predicate;
-# bin/fm-turnend-guard.sh uses the status fields here for its banner but performs
-# its end-of-turn block decision with the live watcher lock check in
-# bin/fm-wake-lib.sh.
+# bin/fm-guard.sh and bin/fm-turnend-guard.sh both gate on FM_SUP_NEEDED, so a
+# relay-armed home with no in-flight task is supervised exactly like one with
+# work in flight, on every primary harness. bin/fm-turnend-guard.sh uses the
+# status fields here for its banner but performs its end-of-turn block decision
+# with the live watcher lock check in bin/fm-wake-lib.sh.
+# fm_supervision_unhealthy below stays deliberately task-only; it is the narrow
+# in-flight predicate, not the supervision-need predicate.
 
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {

@@ -1104,6 +1104,107 @@ test_hook_claude_mode_secondmate_reblocks_like_primary() {
   pass "fm-turnend-guard --claude: secondmate home re-blocks unclaimed and allows auto-arm-claimed stops"
 }
 
+# --- CHANNEL-ARMED IDLE HOME: the cross-harness supervision-need matrix ------
+#
+# A home with an armed relay poll and NO task in flight still needs a live
+# supervision cycle (AGENTS.md section 14). Before this matrix the shared guard
+# gated the default cross-harness mode on the task count alone, so codex,
+# opencode, pi, grok and the no-capability-field fallback all ended the turn
+# blind on a channel-only home while only --claude honoured the need predicate.
+# Each row below runs the exact delegation its harness registration performs.
+
+# The literal payload .opencode/plugins/fm-primary-turnend-guard.js and
+# .pi/extensions/fm-primary-turnend-guard.ts write to the guard's stdin.
+PASSIVE_ADAPTER_PAYLOAD='{"stop_hook_active":false}'
+
+run_shared_guard_payload() {
+  local dir=$1 payload=$2 home
+  home=$(cd "$dir" && pwd)
+  printf '%s' "$payload" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+}
+
+assert_channel_armed_blocks() {
+  local label=$1 dir=$2 payload=$3 out status
+  : > "$dir/state/x-watch.check.sh"
+  out=$(run_shared_guard_payload "$dir" "$payload"); status=$?
+  expect_code 2 "$status" "$label: a channel-armed idle home must not end the turn blind"
+  assert_contains "$out" "TURN WOULD END BLIND" "$label: block must carry the blind-turn banner"
+  assert_contains "$out" "X-mode relay polling needs supervision" \
+    "$label: block must name the channel supervision need, not a task count"
+}
+
+test_channel_armed_idle_home_blocks_on_every_primary_harness() {
+  local dir out status
+  # codex: .codex/hooks.json pipes the real Stop payload to the shared guard.
+  dir=$(make_primary_dir "$TMP_ROOT/channel-codex")
+  assert_channel_armed_blocks codex "$dir" '{"stop_hook_active":false,"session_id":"codex-1"}'
+
+  # opencode: the plugin pipes its fixed payload and forces one follow-up on 2.
+  dir=$(make_primary_dir "$TMP_ROOT/channel-opencode")
+  assert_channel_armed_blocks opencode "$dir" "$PASSIVE_ADAPTER_PAYLOAD"
+
+  # pi and pi-signed: the extension pipes the identical fixed payload.
+  dir=$(make_primary_dir "$TMP_ROOT/channel-pi")
+  assert_channel_armed_blocks pi "$dir" "$PASSIVE_ADAPTER_PAYLOAD"
+
+  # unknown fallback: a payload carrying neither loop-guard spelling.
+  dir=$(make_primary_dir "$TMP_ROOT/channel-unknown")
+  assert_channel_armed_blocks unknown-fallback "$dir" '{"hook_event_name":"Stop"}'
+
+  # claude: --claude already honoured the need predicate; hold that line here too.
+  dir=$(make_primary_dir "$TMP_ROOT/channel-claude")
+  : > "$dir/state/x-watch.check.sh"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "claude: a channel-armed idle home must not end the turn blind"
+  assert_contains "$out" "X-mode relay polling needs supervision" \
+    "claude: block must name the channel supervision need"
+
+  # grok has no exit status to delegate on this adapter, so its channel-armed
+  # proof is the forced pre-native resume asserted in the next test.
+
+  pass "fm-turnend-guard: a channel-armed idle home blocks on every primary harness path"
+}
+
+# The grok pre-native fallback has no exit status to delegate, so its proof is
+# that it actually queues the one bounded resume for a channel-armed idle home.
+test_channel_armed_idle_home_forces_grok_legacy_resume() {
+  local dir fakebin log out status
+  dir=$(make_primary_dir "$TMP_ROOT/channel-grok-legacy")
+  : > "$dir/state/x-watch.check.sh"
+  fakebin=$(fm_fakebin "$TMP_ROOT/channel-grok-legacy-bin")
+  log="$TMP_ROOT/channel-grok-legacy.log"
+  printf '#!/usr/bin/env bash\nprintf called >> %q\n' "$log" > "$fakebin/grok"
+  chmod +x "$fakebin/grok"
+  out=$(printf '%s' '{"sessionId":"legacy","hookEventName":"stop"}' \
+    | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 0 "$status" "grok legacy adapter must fail open after queuing its resume"
+  [ -z "$out" ] || fail "grok legacy adapter printed output: $out"
+  [ -e "$log" ] || fail "grok legacy: a channel-armed idle home did not force the bounded resume"
+  pass "fm-turnend-guard-grok: a channel-armed idle home forces the pre-native bounded resume"
+}
+
+# The need predicate must still be exactly two conditions: an unarmed idle home
+# stays silent on every path, so this fix cannot turn every quiet turn into a block.
+test_unarmed_idle_home_stays_silent_on_every_primary_harness() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/idle-default")
+  out=$(run_shared_guard_payload "$dir" "$PASSIVE_ADAPTER_PAYLOAD"); status=$?
+  expect_code 0 "$status" "default mode must stay silent on an unarmed idle home"
+  [ -z "$out" ] || fail "default mode produced output on an unarmed idle home: $out"
+
+  dir=$(make_primary_dir "$TMP_ROOT/idle-claude")
+  out=$(run_hook_claude "$dir" false); status=$?
+  expect_code 0 "$status" "--claude mode must stay silent on an unarmed idle home"
+  [ -z "$out" ] || fail "--claude mode produced output on an unarmed idle home: $out"
+
+  dir=$(make_primary_dir "$TMP_ROOT/idle-grok")
+  out=$(printf '%s' '{"sessionId":"legacy","hookEventName":"stop"}' \
+    | GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 0 "$status" "grok must stay silent on an unarmed idle home"
+  [ -z "$out" ] || fail "grok produced output on an unarmed idle home: $out"
+  pass "fm-turnend-guard: an unarmed idle home stays silent on every primary harness path"
+}
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -1154,3 +1255,6 @@ test_hook_claude_mode_block_budget_then_degraded_allow
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
+test_channel_armed_idle_home_blocks_on_every_primary_harness
+test_channel_armed_idle_home_forces_grok_legacy_resume
+test_unarmed_idle_home_stays_silent_on_every_primary_harness

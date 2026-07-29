@@ -133,17 +133,14 @@ budget_reset() {
   rm -f "$BUDGET_FILE" 2>/dev/null || true
 }
 
+# One supervision-need predicate for every primary harness: in-flight work OR an
+# armed relay poll (state/x-watch.check.sh). A channel-armed home with no task
+# still needs a live cycle so an incoming mention can wake it, so no harness
+# branch may exit on the task count alone.
 fm_supervision_status "$STATE" "$GRACE"
-if [ "$CLAUDE_MODE" -eq 1 ]; then
-  if [ "$FM_SUP_NEEDED" = false ]; then
-    budget_reset
-    exit 0
-  fi
-else
-  if [ "$FM_SUP_IN_FLIGHT" -eq 0 ]; then
-    budget_reset
-    exit 0
-  fi
+if [ "$FM_SUP_NEEDED" = false ]; then
+  budget_reset
+  exit 0
 fi
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   budget_reset

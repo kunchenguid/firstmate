@@ -240,7 +240,36 @@ test_read_only_never_mutates_stale_banner_state_files() {
   pass "fm-guard stale banner: read-only never mutates stale-banner state files"
 }
 
+fm_guard_clear_episode() {
+  rm -f "$1/state/.guard-watcher-stale-banner"
+}
+
+# A home with an armed relay poll and no task in flight still needs a live
+# supervision cycle (AGENTS.md section 14), so the pull guard must not exit
+# before the watcher-down banner on the task count alone.
+test_channel_armed_idle_home_still_gets_the_banner() {
+  local dir home out
+  dir=$(make_guard_case channel-armed-idle)
+  home=$(case_home "$dir")
+  rm -f "$home/state/task.meta"
+  : > "$home/state/x-watch.check.sh"
+  out=$(run_guard_case "$dir")
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "channel-armed idle home did not get the watcher-down banner: $out"
+  assert_contains "$out" "X-mode relay polling needs supervision" \
+    "channel-armed banner must name the channel need rather than a task count"
+  assert_not_contains "$out" "task(s) in flight" \
+    "channel-armed banner must not claim in-flight tasks"
+
+  rm -f "$home/state/x-watch.check.sh"
+  fm_guard_clear_episode "$home"
+  out=$(run_guard_case "$dir")
+  [ -z "$out" ] || fail "an unarmed idle home must stay silent, got: $out"
+  pass "fm-guard: a channel-armed idle home is guarded, an unarmed idle home stays silent"
+}
+
 test_first_stale_call_prints_full_banner
+test_channel_armed_idle_home_still_gets_the_banner
 test_repeated_same_episode_prints_reminder_only
 test_healthy_recovery_rearms_next_stale_episode
 test_concurrent_same_episode_prints_one_full_banner
