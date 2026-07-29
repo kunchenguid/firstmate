@@ -1,6 +1,6 @@
 ---
 name: stow
-description: Sweep the current session for uncaptured durable knowledge and file it to disk before a context reset. Use when the captain invokes /stow (e.g. "/stow", "stow what you've learned"), before a session reset or context compaction, or periodically to keep operational memory current.
+description: Sweep the current session for uncaptured durable knowledge and file it to disk before a context reset, and own the supervision context-recycling cadence. Use when the captain invokes /stow (e.g. "/stow", "stow what you've learned"), before a session reset or context compaction, when a long-lived supervision session's remaining context falls below about a third of its window, or periodically to keep operational memory current.
 user-invocable: true
 metadata:
   internal: true
@@ -55,6 +55,62 @@ The goal is a session that is safe to reset or destroy because everything durabl
 5. **Report to the captain.**
    Summarize, in plain outcome language (section 9): what was stowed and where, what was filed to the backlog, and whether the session is now safe to reset or destroy - i.e. whether every durable finding from this sweep now lives on disk rather than only in this conversation.
    If something could not be captured yet (for example, project-intrinsic knowledge waiting on a crewmate to land it), say so explicitly rather than reporting the session fully safe.
+
+## Context recycling
+
+Firstmate's own running cost is calls times context size times rate, so a supervision session that never resets re-reads its entire accumulated history on every wake.
+`AGENTS.md` section 8 states the trigger that loads this skill; this section is the single owner of the threshold, the safe-point test, and the reset handoff.
+
+### Threshold
+
+Recycle when either of these holds:
+
+- This session's remaining context has fallen below about a third of its window.
+- The harness has warned that automatic compaction is imminent, whatever percentage it reports.
+
+Evaluate this only at the end of a wake-handling turn, never in the middle of one.
+One reading below the threshold is enough; do not wait for a second, because every further wake costs more than the reset would have.
+
+### Safe-point test
+
+Recycle only when every condition below holds.
+If any condition fails, do not recycle: handle that item, keep working, and re-test at the next resting point.
+
+1. The durable wake queue is drained and empty, and every wake drained this turn has been carried to a resting point - acted on, escalated, or filed as a backlog item.
+2. No steer is outstanding: no worker is holding an instruction whose reply only this conversation is waiting for, and no marked secondmate request is awaiting a correlated reply that exists nowhere on disk.
+3. No captain-facing escalation is unsent, and no captain decision received this session is still unrelayed to the worker that needs it.
+4. Every unresolved decision is on disk as a backlog hold under `decision-hold-lifecycle`, not only in conversation.
+5. No landing is half-done: no merge is started without its outcome recorded, and no teardown decision about unlanded work rests only on this session's memory.
+6. The sweep above has run to completion, and every finding it produced is either already written to disk or dispatched as durable tracked work.
+   Dispatched means the backlog item and brief are already on disk before the worker starts, not merely that firstmate intends to file it, so an outstanding crewmate task satisfies this condition rather than blocking the recycle.
+7. A live supervision cycle is armed, so every wake arriving before the reset is queued durably.
+   An in-process reset keeps that cycle, while a full harness restart ends it, because the watcher is armed as the harness's own tracked background task and dies with it.
+   Nothing is lost across that gap: the next session-start digest drains the durable wake queue and re-reads every status and metadata record.
+
+### Why nothing in flight is lost
+
+A reset destroys conversation, never durable state.
+
+- Queued wakes live in the home's durable wake queue on disk, and the next session's one-shot session-start digest drains them under the session lock as its first work queue.
+- Signals not yet queued live in each task's durable status and metadata records, which the watcher re-reads on its next poll and the session-start fleet digest re-reads in full.
+- The session lock survives either reset shape, because it records the harness process id: an in-process reset re-acquires its own lock, and a full harness restart leaves a lock whose recorded process is dead, which the next acquire replaces.
+- Whatever existed only in conversation is exactly what the sweep above just wrote to disk or handed to a worker as an already-recorded task, which is why condition 6 is a precondition rather than an afterthought.
+
+If any of those cannot be confirmed for this home, treat the session as not safe to reset and say so plainly instead of recycling anyway.
+
+### Reset handoff
+
+Firstmate cannot reset its own session, so the captain performs the reset.
+Once the sweep passes, tell the captain in plain outcome language that everything durable is on disk and the session is safe to restart, then keep supervising normally until they do it.
+Tell them to end this session before starting the replacement, because the session lock refuses a second acquire while a different live process still holds it, and the new session would otherwise come up read-only with no ability to spawn, steer, merge, or drain queued wakes.
+Do not stop supervising, tear anything down, or hold new work back while waiting.
+
+That announcement is a claim about the moment it is made, and continuing to supervise re-accumulates exactly the conversation-only state conditions 2 and 3 guard.
+So the safe-point test stays live for as long as the announcement stands: re-run it at the end of every wake-handling turn after announcing, and again immediately before the reset if the captain says when they are about to do it.
+When a re-test fails, retract the announcement in the same turn rather than letting the captain reset on a stale guarantee.
+Retracting means telling the captain plainly that the session is no longer safe to restart, naming the specific item that changed - the correction still only in this conversation, the unrelayed decision, the unsent escalation - then carrying that item to a resting point on disk, and re-announcing only after the whole test passes again.
+Because the captain may reset at any moment once told it is safe, keep the window small while the announcement stands: file each new steer, decision, and escalation to its durable destination as it happens rather than deferring it to a later sweep.
+While away mode is active the captain is not present to reset, so complete the sweep, keep supervising, and raise the reset when they return.
 
 ## Scope exclusion: no skill storage
 

@@ -10,6 +10,12 @@
 #
 # Usage: fm-check-register.sh <id>
 #        fm-check-register.sh --help
+#
+# Writes state/<id>.check-trust, the private content binding for an intentional
+# custom check: a mode-0600 record holding the format tag and the SHA-256 of
+# state/<id>.check.sh at registration time. The watcher runs that check only
+# while its current bytes still match this binding, so re-register after any
+# deliberate edit. fm-teardown.sh removes it with the task.
 set -u
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then

@@ -55,6 +55,13 @@
 #      hard 8-consecutive-block override - then allow degraded with a visible
 #      systemMessage so the session can always end.
 # Any allow resets the consecutive-block budget.
+# That budget lives in state/.turnend-claude-blocks, written by this script in
+# --claude mode only: two lines, "session=<claude session id>" and
+# "count=<consecutive blocks>". A different session id restarts the count, an
+# allow deletes the file, and the file's absence means no blocks have been spent
+# this session. It records only how much of the block budget is left, never
+# whether supervision is healthy, so deleting it hides spent blocks rather than
+# repairing anything.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

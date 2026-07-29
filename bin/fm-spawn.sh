@@ -126,6 +126,15 @@
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# That token is state/<id>.grok-turnend-token, and Kimi's equivalent per-task
+# pointer is state/<id>.kimi-turnend-token: each holds the firstmate-owned hook
+# registry entry name for this task, is written here at launch, and is removed
+# by fm-teardown.sh when the task ends.
+# Task metadata written to state/<id>.meta always records model= (the concrete
+# model axis resolved for this spawn, or the literal default when the harness
+# keeps its own)
+# and tasktmp= (the per-task temp root /tmp/fm-<id>/ created here, read back by
+# fm-teardown.sh so the scratch directory is removed with the task).
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, projects=, and label=.

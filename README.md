@@ -174,7 +174,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/grill`           | Interview the captain to sharpen a fuzzy feature request into a short spec at `data/spec-<project>-<slug>.md` - the problem, the smallest thing that fixes it, the scope boundary, and the open questions - before any work is dispatched; it plans and never builds |
 | `/decompose`       | Break a sharpened spec into dependency-ordered, independently shippable vertical-slice backlog items sized to one crewmate, wiring `blocked-by` edges between slices via `tasks-axi`, before any work is dispatched; it plans and never builds |
 | `/updatefirstmate` | Merge upstream origin into this fleet's `fork/main`, self-update the running firstmate and its secondmates to it with fast-forward-only pulls, then re-read instructions and nudge secondmates |
-| `/stow`            | Sweep the session for uncaptured durable knowledge, route each finding to its disk home per AGENTS.md, file undone next steps to the backlog, and report what is now safe to reset |
+| `/stow`            | Sweep the session for uncaptured durable knowledge, route each finding to its disk home per AGENTS.md, file undone next steps to the backlog, and report what is now safe to reset; it also owns the context-recycling cadence for a long-running supervision session, refusing the reset while any in-flight wake, decision, or landing still lives only in the conversation |
 
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
 

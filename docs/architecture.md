@@ -258,6 +258,12 @@ Memory writes use inspect-then-update: read the current destination first, then 
 Task-scoped notes use `tasks-axi show <id> --full` followed by `tasks-axi update <id> --body-file <path>`, adding `--archive-body` when the prior body should remain recoverable.
 Generalizable firstmate knowledge goes to shared tracked docs through the normal PR pipeline; the firstmate-internal `/stow` deliberately never stores findings in either skill directory.
 
+The same skill owns firstmate's own context-recycling cadence, because a supervision session that never resets re-reads its whole accumulated history on every wake and pays for it again on every call.
+[`AGENTS.md`](../AGENTS.md) keeps only the always-loaded trigger - remaining context below about a third of the window, or a harness warning that automatic compaction is near - while the skill owns the threshold, the safe-point test, and the reset handoff.
+The recycle is gated rather than scheduled: an undrained wake, an outstanding steer, an unsent escalation, an unresolved decision that exists only in conversation, or a half-done landing refuses the reset and keeps the session running until that item reaches a resting point on disk.
+Nothing in flight is lost when the reset does happen, because queued wakes are durable in `state/.wake-queue` and the next session-start digest drains them under the session lock, and the lock itself records the harness process id so either reset shape re-acquires cleanly.
+Firstmate cannot reset its own session, so it reports the safe point in plain outcome language and the captain performs the reset; the announcement is re-tested at the end of every later wake and retracted if it stops holding.
+
 ## Local clones stay fresh
 
 The locked session-start bootstrap step, PR-based teardown, and merged-PR wake handling refresh remote-backed project clones when the clone is safe to move.
@@ -282,6 +288,7 @@ Fleet state lives in each task's session-provider backend (tmux by hard default,
 For herdr, respawning after a server-restored layout closes and replaces confirmed no-agent or dead task-tab husks instead of requiring manual tab cleanup.
 At session start, confirmed-dead secondmate agent endpoints are closed and relaunched through the same secondmate spawn path, while ambiguous liveness reads are left untouched to avoid duplicate supervisors.
 Use `/stow` before an intentional reset when the conversation may hold durable knowledge that has not yet been written to disk; after that, the next firstmate session can reconcile and carry on.
+Firstmate also raises that reset itself once its own supervision context runs low, under the recycling cadence in "Operational memory routing" above.
 
 ## Development notes
 

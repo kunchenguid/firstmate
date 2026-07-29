@@ -8,7 +8,15 @@
     {
       "when": "The task is a trivial mechanical edit such as a rote rename, formatting sweep, targeted typo fix, or simple file gathering.",
       "use": { "harness": "claude", "model": "haiku", "effort": "low" },
-      "why": "Use the cheapest fast profile when the task is narrow and low ambiguity."
+      "why": "Cheapest fast tier. The task is narrow and low ambiguity, so a strong model buys nothing and costs several times as much per turn."
+    },
+    {
+      "when": "The task is routine implementation: a well-understood change with clear acceptance criteria, no design ambiguity, and an existing test seam to extend.",
+      "use": [
+        { "harness": "claude", "model": "claude-sonnet-5", "effort": "medium" },
+        { "harness": "codex", "model": "gpt-5.5", "effort": "medium" }
+      ],
+      "why": "Mid tier. This is the cheapest profile that still drives a full validation pipeline end to end, and most ship tasks land here rather than in the strong tier."
     },
     {
       "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
@@ -16,7 +24,7 @@
         { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
         { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
       ],
-      "why": "Firstmate compares every candidate with current relevant quota before dispatch, so use a strong coding profile."
+      "why": "Strong tier. Firstmate compares every candidate with current relevant quota before dispatch, so use a strong coding profile."
     }
   ],
   "default": [
