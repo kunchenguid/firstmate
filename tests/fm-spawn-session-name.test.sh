@@ -104,27 +104,27 @@ EOF
 
 test_registry_label_threads_claude_name_flag() {
   local rec id sm out status launch
-  id='sm-cnc'
+  id='sm-api'
   rec=$(make_spawn_case registry-label claude "$id")
   read_case_record "$rec"
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
-  register_secondmate "$HOME_DIR" "$id" "$sm" "SM CNC"
+  register_secondmate "$HOME_DIR" "$id" "$sm" "SM API"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
   status=$?
   expect_code 0 "$status" "secondmate spawn with a registry label should succeed"
   assert_contains "$out" "spawned $id harness=claude kind=secondmate" "spawn did not report claude secondmate"
-  assert_grep "label=SM CNC" "$HOME_DIR/state/$id.meta" "meta missing label=SM CNC"
+  assert_grep "label=SM API" "$HOME_DIR/state/$id.meta" "meta missing label=SM API"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--name 'SM CNC'" "claude secondmate launch did not carry the registry label"
-  assert_not_contains "$launch" "SM Cnc" "registry label must beat the derived title-case fallback"
+  assert_contains "$launch" "--name 'SM API'" "claude secondmate launch did not carry the registry label"
+  assert_not_contains "$launch" "SM Api" "registry label must beat the derived title-case fallback"
   pass "registry label: field threads claude's --name flag and lands in meta"
 }
 
 test_derived_label_when_registry_has_no_label() {
   local rec id sm out status launch
-  id='sm-portal'
+  id='sm-web'
   rec=$(make_spawn_case derived-label claude "$id")
   read_case_record "$rec"
   sm="$CASE_DIR/secondmate-home"
@@ -134,15 +134,15 @@ test_derived_label_when_registry_has_no_label() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
   status=$?
   expect_code 0 "$status" "secondmate spawn without a registry label should succeed"
-  assert_grep "label=SM Portal" "$HOME_DIR/state/$id.meta" "meta missing derived label=SM Portal"
+  assert_grep "label=SM Web" "$HOME_DIR/state/$id.meta" "meta missing derived label=SM Web"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--name 'SM Portal'" "claude secondmate launch did not derive SM Portal from sm-portal"
+  assert_contains "$launch" "--name 'SM Web'" "claude secondmate launch did not derive SM Web from sm-web"
   pass "missing registry label falls back to the derived SM <Title-cased suffix> label"
 }
 
 test_derived_label_title_cases_multiword_suffix() {
   local rec id sm out status launch
-  id='sm-portal-api'
+  id='sm-web-api'
   rec=$(make_spawn_case derived-multiword claude "$id")
   read_case_record "$rec"
   sm="$CASE_DIR/secondmate-home"
@@ -151,29 +151,29 @@ test_derived_label_title_cases_multiword_suffix() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
   status=$?
   expect_code 0 "$status" "secondmate spawn with a multiword id should succeed"
-  assert_grep "label=SM Portal Api" "$HOME_DIR/state/$id.meta" "meta missing derived multiword label"
+  assert_grep "label=SM Web Api" "$HOME_DIR/state/$id.meta" "meta missing derived multiword label"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--name 'SM Portal Api'" "derived label did not title-case each hyphen-separated word"
+  assert_contains "$launch" "--name 'SM Web Api'" "derived label did not title-case each hyphen-separated word"
   pass "derived fallback title-cases every hyphen-separated id word"
 }
 
 test_meta_label_backfills_missing_registry_label() {
   local rec id sm out status launch
-  id='sm-fw'
+  id='sm-svc'
   rec=$(make_spawn_case meta-backfill claude "$id")
   read_case_record "$rec"
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
   register_secondmate "$HOME_DIR" "$id" "$sm"
-  printf 'home=%s\nlabel=SM Firmware\n' "$sm" > "$HOME_DIR/state/$id.meta"
+  printf 'home=%s\nlabel=SM Service\n' "$sm" > "$HOME_DIR/state/$id.meta"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
   status=$?
   expect_code 0 "$status" "respawn with a prior meta label should succeed"
-  assert_grep "label=SM Firmware" "$HOME_DIR/state/$id.meta" "respawn meta lost the carried-over label"
+  assert_grep "label=SM Service" "$HOME_DIR/state/$id.meta" "respawn meta lost the carried-over label"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--name 'SM Firmware'" "respawn did not carry the prior meta label"
-  assert_not_contains "$launch" "SM Fw" "prior meta label must beat the derived fallback"
+  assert_contains "$launch" "--name 'SM Service'" "respawn did not carry the prior meta label"
+  assert_not_contains "$launch" "SM Svc" "prior meta label must beat the derived fallback"
   pass "a prior meta label= backfills a registry line without a label field"
 }
 
@@ -198,18 +198,18 @@ test_ampersand_label_survives_launch_substitution() {
 
 test_codex_secondmate_records_label_but_omits_name_flag() {
   local rec id sm out status launch
-  id='sm-cnc-codex'
+  id='sm-api-codex'
   rec=$(make_spawn_case codex-omits codex "$id")
   read_case_record "$rec"
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
-  register_secondmate "$HOME_DIR" "$id" "$sm" "SM CNC"
+  register_secondmate "$HOME_DIR" "$id" "$sm" "SM API"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
   status=$?
   expect_code 0 "$status" "codex secondmate spawn should succeed without a name flag"
   assert_contains "$out" "spawned $id harness=codex kind=secondmate" "spawn did not report codex secondmate"
-  assert_grep "label=SM CNC" "$HOME_DIR/state/$id.meta" "codex meta must still record the resolved label"
+  assert_grep "label=SM API" "$HOME_DIR/state/$id.meta" "codex meta must still record the resolved label"
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "--name" "codex has no verified session-name flag; it must be omitted"
   assert_contains "$launch" "codex " "codex launch command was not sent"

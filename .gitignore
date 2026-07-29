@@ -8,13 +8,8 @@ data/
 __pycache__/
 *.pyc
 .env
-config/crew-harness
-config/crew-dispatch.json
-config/secondmate-harness
-config/backlog-backend
-config/backend
-config/calm
-config/x-mode.env
-config/cmux-socket-password
-config/wedge-alarm
-config/herdr-presentation-spaces
+# config/ holds this home's local operating choices and is private in full.
+# Ignore the directory rather than each known file: an enumeration leaves every
+# future config file tracked by default, so a new one would leak on the commit
+# that creates it. Shipped example configs live in docs/examples/ instead.
+config/

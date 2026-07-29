@@ -39,6 +39,9 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   `.agents/skills/` holds agent-loaded skills that assume a live firstmate home and carry `metadata.internal: true` so installers such as [skills.sh](https://skills.sh) hide them from discovery; `skills/` holds standalone, installer-facing public skills with no firstmate dependency (see the README's "Two-tier skill layout").
   The vendored third-party `/watch` skill in `.agents/skills/watch/` carries the same flag for the other reason: firstmate's installer surface must not redistribute third-party code, which keeps its own upstream `LICENSE` in that directory.
   Everything personal to one captain's fleet (`.env`, `data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`) is gitignored; never commit it.
+  `bin/fm-private-material-check.sh` guards the other direction: it derives markers from those private dirs at runtime and fails when one reaches a tracked file, so a leak cannot ride along in the next commit.
+  Run it before publishing tracked changes anywhere public, because publishing cannot be undone by a later commit.
+  It matches names only, so it cannot see private strategy written as ordinary prose; its header owns the full limits, and [`docs/examples/private-material-allow`](docs/examples/private-material-allow) documents the local allowlist for an identity that is legitimately public.
   The root `.tasks.toml` is tracked `tasks-axi` config for `data/backlog.md`; compatible `tasks-axi` is the default backend for routine backlog mutations, with the compatibility definition owned by [`docs/configuration.md`](docs/configuration.md) ("Backlog backend").
   A local `config/backlog-backend=manual` opt-out forces firstmate's routine backlog updates to hand-editing and stays gitignored; validated secondmate handoffs still delegate through `tasks-axi mv`.
   A local `config/backend` file explicitly overrides runtime auto-detection for new task endpoints and stays gitignored; spawn-supported values are `tmux` plus experimental `herdr`, `zellij`, `orca`, and `cmux`, while `codex-app` is documented only in `docs/codex-app-backend.md`.
@@ -75,6 +78,7 @@ Check and test the toolbelt before pushing:
 ```sh
 while IFS= read -r script; do /bin/bash -n "$script" || exit; done < <(bin/fm-lint.sh --list-files)   # syntax-check the canonical shell surface
 bin/fm-lint.sh   # lint the toolbelt and behavior tests; the single owner CI and the no-mistakes gate both run
+bin/fm-private-material-check.sh   # refuse private fleet material in tracked files (add --history before publishing)
 bin/fm-test-run.sh tests/<subject>.test.sh   # one script (primary local focus path, timed)
 bin/fm-test-run.sh --family pure-contract-unit   # ordinary family-scoped local path (serial, timed)
 bin/fm-test-run.sh --changed   # conservative changed-file-informed set (never silent full suite)
