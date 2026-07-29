@@ -349,7 +349,7 @@ test_sweep_respawns_confirmed_dead_secondmate() {
 
   assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawned" \
     "a successfully respawned secondmate should be handled silently"
-  assert_contains "$(cat "$log")" "kill-window -t firstmate:fm-sm1" \
+  assert_contains "$(cat "$log")" "kill-window -t =firstmate:=fm-sm1" \
     "the stale endpoint must be killed before respawn (tmux refuses a same-named window over a live one)"
   assert_contains "$(cat "$log")" "new-window" \
     "a confirmed-dead secondmate should actually be relaunched"
