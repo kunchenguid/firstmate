@@ -34,7 +34,7 @@ No input event is intercepted, no message role is rewritten, and no provider con
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including operational-marker near misses. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
 | `assistant-thinking` | Thinking content in `AssistantMessageComponent` | Zero height whether Pi's thinking display is collapsed or expanded. |
-| `assistant-tool-call`, `tool-result`, `tool-image` | `ToolExecutionComponent` | Complete row is zero height for built-in and custom tools while the result is routine. An errored result keeps only its plain error text, capped at six lines with an explicit hidden-line count. |
+| `assistant-tool-call`, `tool-result`, `tool-image` | `ToolExecutionComponent` | Complete row is zero height for built-in and custom tools while the result is routine. An errored result keeps only its plain error text, capped at six lines with an explicit hidden-line count, and one turn's identical text attached to several pending rows is surfaced once. |
 | `working-status` | Pi working status indicator | Hidden through `ExtensionUIContext.setWorkingVisible(false)`. |
 | `synthetic-user` | Firstmate session-start, watcher, turn-end, away-supervisor, from-firstmate, and launch-brief input | Exact user-role content and ordering are retained, while the TUI row is zero height. |
 | Legacy Calm operational entries | Registered custom-entry renderer | Retained in session data and rendered at zero height. |

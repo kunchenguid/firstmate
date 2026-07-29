@@ -108,7 +108,8 @@ test_static_contract() {
   assert_not_contains "$assistant_layout" 'state.hideThinkingBlock' "Pi Calm assistant layout still reveals internal thinking when expanded"
   assert_contains "$tool_layout" 'ToolExecutionComponent.prototype.render' "Pi Calm tool layout does not own complete tool-row presentation"
   assert_contains "$tool_layout" 'return calmErrorLines(this, width, columns)' "Pi Calm tool layout does not remove complete tool rows"
-  assert_contains "$tool_layout" 'if (errorResult?.isError && !isPartial)' "Pi Calm tool layout does not restrict its visible tool text to actionable errors"
+  assert_contains "$tool_layout" 'errorResult?.isError && !isPartial ? calmResultText(errorResult) : ""' "Pi Calm tool layout does not restrict its visible tool text to actionable errors"
+  assert_contains "$tool_layout" 'calmErrorTextOwner(errorText, this) === this' "Pi Calm tool layout repeats one turn's actionable error across sibling tool rows"
   assert_contains "$tool_layout" 'ToolExecutionComponent.prototype.updateResult' "Pi Calm tool layout does not read errors through a declared Pi seam"
   assert_contains "$tool_layout" 'Firstmate Calm requires Pi ToolExecutionComponent.updateResult' "Pi Calm tool layout does not probe the seam carrying actionable tool errors"
   assert_contains "$tool_layout" 'Firstmate Calm requires Pi TUI visibleWidth, truncateToWidth, and wrapTextWithAnsi' "Pi Calm tool layout does not probe the Pi column helpers it measures with"
@@ -841,10 +842,15 @@ const errorCases = [
     visible: ["Command failed with exit code 1", "no such file: missing.txt"],
   },
 ];
-const errorFixtures = errorCases.map((errorCase) => {
+// Pi surfaces identical error text from a single turn once, so unrelated fixtures below
+// are applied in separate turns exactly as separate Pi turns arrive.
+const nextErrorTurn = () => new Promise((resolve) => setTimeout(resolve, 0));
+const errorFixtures = [];
+for (const errorCase of errorCases) {
+  await nextErrorTurn();
   const baseline = new ToolExecutionComponent("bash", `error-baseline-${errorCase.key}`, routineArgs, { showImages: false }, undefined, renderUi, process.cwd());
   const actual = new ToolExecutionComponent("bash", `error-actual-${errorCase.key}`, routineArgs, { showImages: false }, bashDefinition, renderUi, process.cwd());
-  for (const row of [baseline, actual]) {
+  for (const row of [actual, baseline]) {
     row.markExecutionStarted();
     row.setArgsComplete();
     row.updateResult(errorCase.result);
@@ -852,11 +858,27 @@ const errorFixtures = errorCases.map((errorCase) => {
   if (JSON.stringify(actual.render(100)) !== JSON.stringify(baseline.render(100))) {
     throw new Error(`${errorCase.key} error rendering changed while calm mode was off`);
   }
-  return { ...errorCase, baseline, actual };
-});
+  errorFixtures.push({ ...errorCase, baseline, actual });
+}
+await nextErrorTurn();
 const pendingAbortRow = new ToolExecutionComponent("bash", "error-actual-pending", routineArgs, { showImages: false }, bashDefinition, renderUi, process.cwd());
 pendingAbortRow.markExecutionStarted();
 pendingAbortRow.updateResult({ content: [{ type: "text", text: "Operation aborted" }], isError: true });
+await nextErrorTurn();
+const parallelAbortRows = ["parallel-a", "parallel-b", "parallel-c"].map((id) =>
+  new ToolExecutionComponent("bash", `error-actual-${id}`, routineArgs, { showImages: false }, bashDefinition, renderUi, process.cwd()));
+for (const row of parallelAbortRows) row.markExecutionStarted();
+for (const row of parallelAbortRows) {
+  row.updateResult({ content: [{ type: "text", text: "Operation aborted" }], isError: true });
+}
+await nextErrorTurn();
+const parallelDistinctRows = ["distinct-a", "distinct-b"].map((id) =>
+  new ToolExecutionComponent("bash", `error-actual-${id}`, routineArgs, { showImages: false }, bashDefinition, renderUi, process.cwd()));
+for (const row of parallelDistinctRows) row.markExecutionStarted();
+parallelDistinctRows.forEach((row, index) => {
+  row.updateResult({ content: [{ type: "text", text: `Error: CALM_DISTINCT_FAILURE_${index}` }], isError: true });
+});
+await nextErrorTurn();
 const noisyErrorRow = new ToolExecutionComponent("bash", "error-actual-noisy", routineArgs, { showImages: false }, bashDefinition, renderUi, process.cwd());
 noisyErrorRow.markExecutionStarted();
 noisyErrorRow.setArgsComplete();
@@ -1173,6 +1195,18 @@ if (!noisyRendered.join("\n").includes("6 earlier error lines hidden")) {
 if (!noisyRendered.join("\n").includes("error line 12") || noisyRendered.join("\n").includes("error line 6")) {
   throw new Error("Calm did not keep the trailing lines of a noisy tool error");
 }
+const parallelAbortRendered = parallelAbortRows.map((row) => row.render(100));
+if (parallelAbortRendered.filter((rendered) => rendered.length !== 0).length !== 1) {
+  throw new Error("Calm repeated shared abort text across its parallel pending tool rows");
+}
+if (!parallelAbortRendered.flat().join("\n").includes("Operation aborted")) {
+  throw new Error("Calm dropped the abort text shared by parallel pending tool rows");
+}
+for (const [index, row] of parallelDistinctRows.entries()) {
+  if (!row.render(100).join("\n").includes(`Error: CALM_DISTINCT_FAILURE_${index}`)) {
+    throw new Error(`Calm hid distinct actionable error ${index} from a parallel tool row`);
+  }
+}
 if (partialErrorRow.render(100).length !== 0) {
   throw new Error("Calm exposed a streaming partial tool result as an actionable error");
 }
@@ -1250,6 +1284,11 @@ if (JSON.stringify(imageRow.render(100)) !== JSON.stringify(imageVisibleBefore))
 for (const fixture of errorFixtures) {
   if (JSON.stringify(fixture.actual.render(100)) !== JSON.stringify(fixture.baseline.render(100))) {
     throw new Error(`${fixture.key} error row did not restore stock Pi rendering when Calm was turned off`);
+  }
+}
+for (const row of parallelAbortRows) {
+  if (!row.render(100).join("\n").includes("Operation aborted")) {
+    throw new Error("turning Calm off did not restore every parallel pending tool row");
   }
 }
 if (JSON.stringify(watchActual.render(100)) !== JSON.stringify(watchBaseline.render(100))) {

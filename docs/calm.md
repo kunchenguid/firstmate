@@ -10,6 +10,7 @@ The hidden operational kinds are session start, watcher, turn-end guard, away su
 Calm adds no enable banner, footer chip, replacement status, or other presentation row.
 Interactive dialogs and explicit Pi errors remain visible so the captain can respond.
 An errored tool row keeps only its plain error text, so aborts, provider failures, and tool failures stay visible without exposing routine tool call, result, image, or shell content.
+When one turn attaches the same text to several pending tool rows, Calm shows that message once and keeps distinct errors separate.
 
 Calm changes presentation only.
 Tool execution, operational input delivery, ordering, model context, session storage, diagnostics, and `/export` and `/share` data remain unchanged.

@@ -43,16 +43,31 @@ const CALM_ERROR_MAX_LINES = 6;
 const ANSI_SEQUENCE = /\u001B\[[0-9;?]*[ -/]*[@-~]/g;
 const TAB_COLUMNS = "   ";
 
-const calmErrorResults = new WeakMap<object, CalmToolResult>();
+const calmErrorTexts = new WeakMap<object, string>();
+let calmErrorBatch: Map<string, object> | undefined;
 
-function calmErrorText(component: object): string {
-  const result = calmErrorResults.get(component);
-  if (!result) return "";
+function calmResultText(result: CalmToolResult): string {
   return (result.content ?? [])
     .filter((block) => block?.type === "text")
     .map((block) => (block.text ?? "").replace(ANSI_SEQUENCE, "").replace(/\r/g, ""))
     .join("\n")
     .trim();
+}
+
+// Pi attaches one turn's abort, provider-failure, or tool-failure text to every pending
+// tool row in a single synchronous pass, so the first row to record a given text owns it
+// and identical siblings from that pass stay silent instead of repeating it.
+function calmErrorTextOwner(text: string, component: object): object {
+  if (!calmErrorBatch) {
+    calmErrorBatch = new Map();
+    queueMicrotask(() => {
+      calmErrorBatch = undefined;
+    });
+  }
+  const owner = calmErrorBatch.get(text);
+  if (owner) return owner;
+  calmErrorBatch.set(text, component);
+  return component;
 }
 
 function calmErrorLines(
@@ -61,7 +76,7 @@ function calmErrorLines(
   columns: CalmColumnHelpers,
 ): string[] {
   if (width <= 0) return [];
-  const text = calmErrorText(component);
+  const text = calmErrorTexts.get(component);
   if (!text) return [];
 
   const pad = width >= 2 ? " " : "";
@@ -148,10 +163,11 @@ export function installCalmToolLayout(): void {
     isPartial?: boolean,
   ): void {
     const errorResult = result as CalmToolResult;
-    if (errorResult?.isError && !isPartial) {
-      calmErrorResults.set(this, errorResult);
+    const errorText = errorResult?.isError && !isPartial ? calmResultText(errorResult) : "";
+    if (errorText && calmErrorTextOwner(errorText, this) === this) {
+      calmErrorTexts.set(this, errorText);
     } else {
-      calmErrorResults.delete(this);
+      calmErrorTexts.delete(this);
     }
     originalUpdateResult.call(this, result, isPartial);
   };
