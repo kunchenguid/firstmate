@@ -66,7 +66,7 @@ skills/              standalone public installer-facing skills, committed; not l
 bin/                 helper scripts, committed; read each script's header before first use
 .env                 optional X-mode pairing token; LOCAL, gitignored; presence-gates section 14
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
-config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
+config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Also carries the optional inert-by-default `_scheduling.admission_control` fleet-admission policy (section 7). Inherited by secondmate homes
 config/models.json  optional model registry and enforced zero-budget allowlist; LOCAL, gitignored; binds every routed model to verified cost-class and entitlement evidence (section 4; docs/configuration.md). Inherited by secondmate homes
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
 config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = default tasks-axi backend, "manual" = force routine backlog updates to hand-editing; inherited by secondmate homes (section 10)
@@ -486,6 +486,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `ask-user-authority` - load before deciding any ask-user finding, regardless of the project's `yolo` posture.
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi output.
 - `model-onboarding` - load before adding or changing a model in routing config, before probing a model, before acting on an entitlement or price-drift alarm, and before deciding a model promotion or demotion.
+- `fleet-admission` - load at intake before dispatching new work in a home with an active admission policy, and whenever an admission band other than preferred is returned, released, or overridden.
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `firstmate-orca` - load before switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.
 - `project-management` - load before adding, creating, removing, or initializing a project.

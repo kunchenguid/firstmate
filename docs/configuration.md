@@ -389,6 +389,163 @@ Valid, current registries stay silent.
 See [`docs/examples/models.json`](examples/models.json) for a starting point to copy into local `config/models.json`, and `bin/fm-model-verify.sh --help` for the probe and drift mechanics.
 Rollback is deleting the file: every check becomes a no-op.
 
+## Fleet admission control (`_scheduling.admission_control`)
+
+Admission control is the third layer above routing and scheduling.
+Routing decides who is capable, scheduling decides when accepted work runs, and admission decides whether the fleet should accept another task at all right now.
+It is a property of the fleet, not of any task: admission reads only the fleet snapshot, never the incoming task's tier, project, model, priority, urgency, token estimate, or file overlap, so the same snapshot returns the same band for every task.
+That boundary is what keeps it a separate layer instead of scheduling under a new name.
+
+The policy lives in the optional local, gitignored `config/crew-dispatch.json` under `_scheduling.admission_control`, alongside the dispatch rules above.
+This section is the single owner of the schema and its per-field semantics.
+`bin/fm-admission-lib.sh` owns the executable check of that schema, `bin/fm-admission.sh` owns the evaluator and its decision record, and [`fleet-admission`](../.agents/skills/fleet-admission/SKILL.md) owns what firstmate does with each band.
+
+Admission ships inert.
+A home with no `admission_control` object, or one carrying only `_`-prefixed operator notes, changes nothing about dispatch and costs one cheap config read.
+Enabling it adds no concurrency cap: every numeric threshold ships `null` with `enforce: false`, and `enforcement_mode: "safety-only"` makes numeric enforcement structurally unreachable until an evidence-gated mode is added.
+The standing contract that isolated work dispatches immediately with no concurrency cap is therefore unchanged.
+
+```json
+{
+  "_scheduling": {
+    "admission_control": {
+      "schema_version": 1,
+      "enabled": true,
+      "enforcement_mode": "safety-only",
+      "fleet_id": "<fleet-id>",
+      "combine": "most_restrictive",
+      "severity_order": ["preferred", "soft", "hard"],
+      "unknown_band": "hard",
+
+      "bands": {
+        "preferred": { "action": "admit" },
+        "soft": { "action": "queue", "hold_kind": "load", "auto_reconsider": true },
+        "hard": { "action": "refuse", "hold_kind": "load", "auto_reconsider": true }
+      },
+
+      "signals": {
+        "census_integrity": {
+          "enabled": true, "required": true,
+          "source": "fresh-authority-census",
+          "unknown_band": "hard",
+          "max_snapshot_age_seconds": null
+        },
+        "backlog_consistency": {
+          "enabled": true, "enforce": false,
+          "source": "main-inventory",
+          "unknown_band": "hard"
+        },
+        "admission_queue_pressure": {
+          "enabled": true, "enforce": false,
+          "source": "tasks-axi-load-holds-plus-ledger",
+          "queued_soft_count": null, "queued_hard_count": null,
+          "oldest_wait_soft_seconds": null, "oldest_wait_hard_seconds": null
+        },
+        "active_workers": {
+          "enabled": true, "enforce": false,
+          "source": "fresh-authority-census",
+          "soft_count": null, "hard_count": null
+        },
+        "coordination_debt": {
+          "enabled": false, "enforce": false,
+          "source": "wake-outcome-ledger",
+          "pending_wakes_soft_count": null, "pending_wakes_hard_count": null,
+          "oldest_unhandled_wake_soft_seconds": null, "oldest_unhandled_wake_hard_seconds": null,
+          "handled_wake_latency_window_seconds": null,
+          "handled_wake_latency_soft_seconds": null, "handled_wake_latency_hard_seconds": null
+        },
+        "host_resources": {
+          "enabled": false, "enforce": false,
+          "source": "node-summaries",
+          "metrics": {}
+        },
+        "reservation_pressure": {
+          "enabled": false, "enforce": false,
+          "source": "admission-registry",
+          "soft_count": null, "hard_count": null
+        }
+      },
+
+      "authority": {
+        "mode": "single-primary",
+        "authority_id": "<authority-id>",
+        "config_mismatch_band": "hard",
+        "unreachable_band": "hard"
+      },
+      "reservations": {
+        "enabled": false,
+        "ttl_seconds": null, "heartbeat_seconds": null, "clock_skew_tolerance_seconds": null,
+        "release_on": ["spawn-failure", "teardown"],
+        "reconcile_on": ["session-start"]
+      },
+      "queue": {
+        "substrate": "tasks-axi hold --kind load",
+        "release_triggers": ["teardown", "session-start"],
+        "already_empty_fleet_recheck": "session-start-only"
+      },
+      "notifications": {
+        "policy_ref": "/_scheduling/notification_bands",
+        "episode_dedupe_seconds": null
+      },
+      "telemetry": {
+        "sink": "wake-outcome-ledger",
+        "record_every_decision": true, "record_signal_values": true,
+        "record_config_paths": true, "record_config_digest": true,
+        "credentials_forbidden": true
+      },
+      "dormant_triggers": {
+        "<trigger-name>": { "<measurable-condition>": 1, "checkpoint": "<named review point>" }
+      }
+    }
+  }
+}
+```
+
+Values shown as `<...>` are operator-supplied, not defaults.
+`null` means unmeasured or disabled; it never means zero or infinity.
+Keys beginning with `_` are operator notes and are ignored, matching the surrounding scheduling config's convention.
+
+### Fields
+
+`schema_version` must be `1`, and `enabled` turns the whole layer on.
+`enforcement_mode` accepts only `safety-only` today: the deterministic safety conditions (admission authority, census integrity, snapshot freshness) may set a band, and no other signal may.
+`fleet_id` names the set of sessions sharing this policy and capacity.
+`combine` accepts only `most_restrictive` and `severity_order` only `["preferred","soft","hard"]`, so no combination rule can average a hard result away.
+`unknown_band` is the band a missing or contradictory required signal maps to; it accepts only `soft` or `hard`, because missing evidence must never resolve to "probably fine".
+
+`bands` binds each band to its action: `preferred` admits, `soft` queues, and `hard` refuses.
+Both non-preferred bands must name `hold_kind: "load"` - admission never opens a second queue, and a load hold can never masquerade as a captain decision.
+
+Each entry under `signals` carries `enabled`, a fixed recognized `source`, and its own thresholds.
+`census_integrity` is the required safety signal and is the only one that may set a band under `safety-only`; its `max_snapshot_age_seconds` bounds how old a reused snapshot may be before the decision is treated as unknown.
+`backlog_consistency` is deliberately separate from `census_integrity`: a backlog record that contradicts task metadata must be reported and repaired, but it is not evidence that the fleet is physically saturated, and collapsing both into one health bit would close the fleet for an unrelated bookkeeping error.
+`admission_queue_pressure` counts `hold_kind=load` requests; its oldest-wait age stays unmeasured because backlog age is task age, not admission wait age.
+`active_workers` records the live worker count as an explanatory baseline with no cap.
+`coordination_debt`, `host_resources`, and `reservation_pressure` have no collector in this home yet and must stay `enabled: false`; enabling one would record an invented value instead of an observation.
+
+`authority` accepts only `mode: "single-primary"`.
+The existing per-home session lock supplies that authority, so admission adds no new process, daemon, or reservation store; a session that does not hold the lock is not the admission authority and gets `unreachable_band`.
+`reservations` must stay disabled until a second intake authority or a remote node is registered; its durations exist so the distributed contract is settled in advance, not so it can be switched on early.
+`queue` pins the substrate and the two release triggers, and names the known already-empty-fleet gap that is deliberately left to session start rather than cured with a timer.
+`telemetry` names the sink for decision records; while admission is enabled, `record_every_decision` and `credentials_forbidden` must both be true.
+Each entry under `dormant_triggers` needs a named `checkpoint`, so no dormant mechanism can be reconsidered without a stated review point.
+
+### Validation
+
+When the file exists, bootstrap validates the policy with `jq` on every session start, including in a read-only session that did not get the fleet lock.
+A home with no policy, or a note-only policy, stays silent; with `FM_BOOTSTRAP_VERBOSE_FACTS=1` bootstrap emits `BOOTSTRAP_INFO: fleet admission control absent|inert|active`.
+Anything malformed is reported as `ADMISSION_CONTROL: invalid config/crew-dispatch.json _scheduling.admission_control - <reason>` and must be corrected rather than worked around.
+
+Validation refuses a policy that has an unknown field at any level, a threshold that is not null or a non-negative number, a soft threshold more restrictive than its hard counterpart, a threshold key without a `_count` or `_seconds` unit suffix, an unrecognized signal source, a signal enabled while its source is uncollectable, `enforce` set while its signal is disabled or while `enforcement_mode` is `safety-only`, a queue action naming any hold kind other than `load`, a second queue substrate, telemetry disabled while admission is enabled, reservations or a non-single-primary authority enabled before their dormant trigger fires, or a dormant trigger with no named checkpoint.
+Unknown fields are refused rather than ignored so a typo cannot silently disable a safety condition.
+
+`bin/fm-admission.sh` prints the band and its explanation and exits `0` for preferred, `3` for soft, `4` for hard, and `2` when the policy is malformed or the census cannot be evaluated, so a caller that ignores the output still stops safely.
+Every rule in that explanation names the observed value, its source and freshness, the exact JSON configuration path, the configured value, and the resulting band.
+The decision record from `--json` is the unit of admission telemetry; when the wake-outcome ledger exposes its extension seam, that record is what gets appended, and admission never opens a competing store.
+
+See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a copyable starting point.
+Secondmate homes inherit `config/crew-dispatch.json` from the primary, so an admission policy applies in each inheriting home against that home's own fleet.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
