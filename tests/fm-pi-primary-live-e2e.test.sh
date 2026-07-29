@@ -278,20 +278,13 @@ sleep 1
 
 send_prompt "/calm"
 sleep 0.2
-send_prompt "Reply exactly CALM_LIVE_WORKING_VISIBLE"
-i=0
-while [ "$i" -lt 240 ]; do
-  pane=$(capture)
-  if printf '%s\n' "$pane" | grep -Fq "Working..."; then
-    break
-  fi
-  sleep 0.05
-  i=$((i + 1))
-done
+send_prompt "Reply exactly CALM_LIVE_REPLY"
+sleep 0.1
+pane=$(capture)
 printf '%s\n' "$pane" | grep -Fq "Working..." \
-  || fail "Calm hid Pi's built-in Working row on the credentialed provider path"
-wait_for_exact_line "CALM_LIVE_WORKING_VISIBLE" 120 \
-  || fail "Pi did not settle the Calm Working-row provider probe"
+  && fail "Calm rendered Pi's built-in Working row on the credentialed provider path"
+wait_for_exact_line "CALM_LIVE_REPLY" 120 \
+  || fail "Pi did not settle the Calm hidden-working provider probe"
 pane=$(capture)
 printf '%s\n' "$pane" | grep -Fq "calm transcript" \
   && fail "Calm added a persistent Calm status row on the credentialed provider path"
@@ -336,4 +329,4 @@ wait_for_text "PI_EXIT=0" 60 || fail "Pi did not exit cleanly"
 wait_pid_dead "$watcher_pid" || fail "watcher child survived clean Pi exit"
 wait_pid_dead "$arm_pid" || fail "arm child survived clean Pi exit"
 
-printf 'ok - Pi %s live E2E covered native Calm Working visibility, Ahoy first/later messages, legacy transcripts, near misses, and watcher continuity\n' "$PI_VERSION"
+printf 'ok - Pi %s live E2E covered native Calm working suppression, Ahoy first/later messages, legacy transcripts, near misses, and watcher continuity\n' "$PI_VERSION"
