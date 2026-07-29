@@ -12,10 +12,17 @@
 # merge keeps the guarded path instead of reaching around it to a raw merge
 # command. It requires the task metadata to be genuinely absent, refusing when
 # the task is still live so it can never be used to skip recording or the merge
-# poll for a task that has both. With no metadata to record into and no live
-# task for a merge poll to wake, the merge is recorded in the durable ledger
-# data/merged-prs.log as one <utc-timestamp><TAB><task-id><TAB><pr-url> line,
-# written before the merge exactly as pr= is on the ordinary path.
+# poll for a task that has both. Absent metadata alone is not enough, because an
+# invented or mistyped id has none either, so the flag also requires positive
+# evidence that the task existed and was cleaned up: either the
+# data/<task-id>/brief.md that teardown leaves in place, or a completed backlog
+# entry for the id in data/backlog.md or data/done-archive.md.
+# With no metadata to record into and no live task for a merge poll to wake, the
+# merge is recorded in the durable ledger data/merged-prs.log as one
+# <utc-timestamp><TAB><task-id><TAB><pr-url> line. The ledger path is validated
+# before the merge, but the line is appended only after gh-axi pr merge reports
+# success, so the ledger never asserts a merge that did not happen; a failed
+# merge writes no line and exits with the merge command's own status.
 # Usage: fm-pr-merge.sh [--torn-down] <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
 
@@ -79,25 +86,71 @@ reject_repo_overrides() {
 
 reject_repo_overrides "$@" || exit 1
 
+# Positive evidence that a torn-down task genuinely existed and was cleaned up:
+# teardown leaves data/<id>/brief.md in place, and the task's completed backlog
+# row survives in data/backlog.md until retention rolls it into the archive. A
+# row counts as completed when it is checked or sits under a Done heading.
+torn_down_task_recorded() {  # <task-id>
+  local id=$1 file
+  [ -f "$DATA/$id/brief.md" ] && return 0
+  for file in "$DATA/backlog.md" "$DATA/done-archive.md"; do
+    [ -f "$file" ] || continue
+    awk -v id="$id" '
+      /^##[ \t]+/ {
+        heading = $0
+        sub(/^##[ \t]+/, "", heading)
+        sub(/[ \t]+$/, "", heading)
+        in_done = (heading == "Done")
+        next
+      }
+      {
+        row = ""
+        checked = 0
+        if (match($0, /^[-*][ \t]+\[[ xX]\][ \t]+[^ \t]+[ \t]+-[ \t]+/)) {
+          row = substr($0, RSTART, RLENGTH)
+          checked = (row ~ /\[[xX]\]/)
+          sub(/^[-*][ \t]+\[[ xX]\][ \t]+/, "", row)
+          sub(/[ \t]+-[ \t]+$/, "", row)
+        } else if (match($0, /^[-*][ \t]+\*\*[^*]+\*\*[ \t]+-[ \t]+/)) {
+          row = substr($0, RSTART, RLENGTH)
+          sub(/^[-*][ \t]+\*\*/, "", row)
+          sub(/\*\*[ \t]+-[ \t]+$/, "", row)
+        }
+        if (row == id && (checked || in_done)) {
+          hit = 1
+          exit
+        }
+      }
+      END { exit(hit ? 0 : 1) }
+    ' "$file" && return 0
+  done
+  return 1
+}
+
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
+LEDGER=
 if [ "$TORN_DOWN" = 1 ]; then
   if [ -e "$META" ] || [ -L "$META" ]; then
     echo "error: task $ID still has metadata; merge it without --torn-down" >&2
     exit 1
   fi
+  if ! torn_down_task_recorded "$ID"; then
+    echo "error: no record of a cleaned-up task $ID; --torn-down needs $DATA/$ID/brief.md or a completed $ID entry in $DATA/backlog.md" >&2
+    exit 1
+  fi
   LEDGER="$DATA/merged-prs.log"
+  umask 077
   mkdir -p "$DATA" || exit 1
   if [ -L "$LEDGER" ] || { [ -e "$LEDGER" ] && [ ! -f "$LEDGER" ]; }; then
     echo "error: merge ledger is unavailable" >&2
     exit 1
   fi
-  printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ID" "$URL" >> "$LEDGER" || {
-    echo "error: merge ledger recording failed" >&2
-    exit 1
-  }
-  chmod 0600 "$LEDGER" || exit 1
 else
+  if [ ! -e "$META" ] && [ ! -L "$META" ]; then
+    echo "error: task metadata is unavailable; merge a cleaned-up task's PR with --torn-down" >&2
+    exit 1
+  fi
   if [ ! -f "$META" ] || [ -L "$META" ]; then
     echo "error: task metadata is unavailable" >&2
     exit 1
@@ -115,4 +168,15 @@ if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+MERGE_RC=0
+gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@" \
+  || MERGE_RC=$?
+[ "$MERGE_RC" -eq 0 ] || exit "$MERGE_RC"
+
+if [ -n "$LEDGER" ]; then
+  printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ID" "$URL" >> "$LEDGER" || {
+    echo "error: PR $URL merged but merge ledger recording failed" >&2
+    exit 1
+  }
+  chmod 0600 "$LEDGER" || exit 1
+fi

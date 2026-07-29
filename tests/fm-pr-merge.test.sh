@@ -17,6 +17,9 @@
 #   (i) --torn-down merges a cleaned-up task's PR and records the durable ledger
 #   (j) --torn-down is refused while the task is still live, and its guards run
 #       before the ledger is written
+#   (k) --torn-down accepts a completed backlog entry as cleanup evidence
+#   (l) --torn-down is refused for an id with no surviving record of a task
+#   (m) --torn-down writes no ledger line when the merge itself fails
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -177,6 +180,8 @@ test_missing_meta_refuses_before_merge() {
   expect_code 1 "$rc" "missing-meta: fm-pr-merge should refuse"
   assert_grep 'error: task metadata is unavailable' "$case_dir/stderr" \
     "missing-meta: refusal did not explain missing meta"
+  assert_grep '--torn-down' "$case_dir/stderr" \
+    "missing-meta: refusal did not name --torn-down as the remedy for a cleaned-up task"
   [ ! -s "$case_dir/gh-axi.log" ] || fail "missing-meta: gh-axi pr merge was invoked"
   assert_absent "$case_dir/state/missing-x1.check.sh" \
     "missing-meta: fm-pr-check should not arm a poll for an unknown task"
@@ -305,6 +310,14 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+# Teardown leaves data/<id>/brief.md behind, so a torn-down task keeps that
+# proof it genuinely existed even after its metadata is gone. Args: case_dir id
+add_torn_down_brief() {
+  local case_dir=$1 id=$2
+  mkdir -p "$case_dir/data/$id"
+  printf '%s\n' "# Brief for $id" > "$case_dir/data/$id/brief.md"
+}
+
 # A late merge - a held PR, a rebase, a review that landed after cleanup - must
 # keep the guarded path rather than reaching around it to a raw merge command.
 # There is no meta to record into and no live task for a merge poll to wake, so
@@ -313,6 +326,7 @@ test_torn_down_merges_and_records_the_durable_ledger() {
   local case_dir rc
   case_dir="$TMP_ROOT/torn-down"
   mkdir -p "$case_dir/state" "$case_dir/fakebin"
+  add_torn_down_brief "$case_dir" gone-x1
   add_gh_mocks "$case_dir" aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee
   : > "$case_dir/gh-axi.log"
 
@@ -361,6 +375,7 @@ test_torn_down_guards_run_before_the_ledger() {
   local case_dir rc
   case_dir="$TMP_ROOT/torn-down-repo-override"
   mkdir -p "$case_dir/state" "$case_dir/fakebin"
+  add_torn_down_brief "$case_dir" gone-x2
   add_gh_mocks "$case_dir" 4444444455555555666666667777777788888888
   : > "$case_dir/gh-axi.log"
 
@@ -380,6 +395,102 @@ test_torn_down_guards_run_before_the_ledger() {
   pass "fm-pr-merge --torn-down runs its merge guards before writing the ledger"
 }
 
+# A brief can be gone while the task's completed backlog row is still there, so
+# the backlog row is evidence of a real cleaned-up task in its own right.
+test_torn_down_accepts_a_completed_backlog_entry() {
+  local case_dir rc
+  case_dir="$TMP_ROOT/torn-down-backlog"
+  mkdir -p "$case_dir/state" "$case_dir/fakebin" "$case_dir/data"
+  cat > "$case_dir/data/backlog.md" <<'MD'
+# Backlog
+
+## In flight
+
+## Queued
+
+## Done
+- [x] gone-x3 - Land the late PR (kind: ship) (done 2026-07-30)
+MD
+  add_gh_mocks "$case_dir" bbbbbbbbccccccccddddddddeeeeeeeeffffffff
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" --torn-down gone-x3 https://github.com/example/repo/pull/37 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "torn-down-backlog: a completed backlog entry should satisfy --torn-down"
+  assert_grep "$(printf '\tgone-x3\thttps://github.com/example/repo/pull/37')" \
+    "$case_dir/data/merged-prs.log" "torn-down-backlog: the merge was not recorded in the durable ledger"
+  grep -qxF 'pr merge 37 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "torn-down-backlog: gh-axi pr merge was not invoked"
+  pass "fm-pr-merge --torn-down accepts a completed backlog entry as cleanup evidence"
+}
+
+# Absent metadata is equally true for an id that never existed, so a typo or an
+# invented id must never merge an arbitrary PR through the guarded path.
+test_torn_down_refused_without_a_task_record() {
+  local case_dir rc
+  case_dir="$TMP_ROOT/torn-down-unknown"
+  mkdir -p "$case_dir/state" "$case_dir/fakebin" "$case_dir/data"
+  cat > "$case_dir/data/backlog.md" <<'MD'
+# Backlog
+
+## In flight
+
+## Queued
+- [ ] other-x9 - Some other queued task (kind: ship)
+
+## Done
+MD
+  add_gh_mocks "$case_dir" ccccccccddddddddeeeeeeeeffffffff00000000
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" --torn-down bogus-x9 https://github.com/example/repo/pull/39 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "torn-down-unknown: fm-pr-merge should refuse an id with no task record"
+  assert_grep 'no record of a cleaned-up task bogus-x9' "$case_dir/stderr" \
+    "torn-down-unknown: refusal did not name the unknown task"
+  assert_grep 'brief.md' "$case_dir/stderr" \
+    "torn-down-unknown: refusal did not name the missing evidence"
+  assert_absent "$case_dir/data/merged-prs.log" \
+    "torn-down-unknown: a ledger line was written for a task that never existed"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "torn-down-unknown: gh-axi pr merge was invoked for a task that never existed"
+  pass "fm-pr-merge refuses --torn-down for an id with no surviving task record"
+}
+
+# The ledger's whole value is that it records merges that really happened, so a
+# refused or failed merge must leave no line claiming success.
+test_torn_down_merge_failure_writes_no_ledger_line() {
+  local case_dir rc
+  case_dir="$TMP_ROOT/torn-down-merge-fails"
+  mkdir -p "$case_dir/state" "$case_dir/fakebin"
+  add_torn_down_brief "$case_dir" gone-x4
+  add_gh_mocks_merge_fails "$case_dir"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" --torn-down gone-x4 https://github.com/example/repo/pull/41 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "torn-down-merge-fails: fm-pr-merge should propagate the gh-axi merge failure"
+  if [ -e "$case_dir/data/merged-prs.log" ]; then
+    assert_no_grep 'gone-x4' "$case_dir/data/merged-prs.log" \
+      "torn-down-merge-fails: the ledger claimed a merge that never happened"
+  fi
+  grep -qxF 'pr merge 41 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "torn-down-merge-fails: gh-axi pr merge was not attempted"
+  pass "fm-pr-merge --torn-down records no ledger line when the merge itself fails"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -393,3 +504,6 @@ test_parses_pr_url_for_gh_axi
 test_torn_down_merges_and_records_the_durable_ledger
 test_torn_down_refused_while_task_is_live
 test_torn_down_guards_run_before_the_ledger
+test_torn_down_accepts_a_completed_backlog_entry
+test_torn_down_refused_without_a_task_record
+test_torn_down_merge_failure_writes_no_ledger_line
