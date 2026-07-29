@@ -117,10 +117,35 @@ fm_backend_tmux_send_literal() {  # <target> <text>
   tmux send-keys -t "$1" -l "$2"
 }
 
-# fm_backend_tmux_kill: remove the task's window, best-effort. Mirrors
-# fm-teardown.sh's `tmux kill-window -t "$T" 2>/dev/null || true`.
+# fm_backend_tmux_kill: remove one explicitly named task window, best-effort.
+# Empty, omitted, and malformed targets return nonzero before invoking tmux so
+# tmux can never interpret an empty target as the caller's current window.
 fm_backend_tmux_kill() {  # <target>
-  tmux kill-window -t "$1" 2>/dev/null || true
+  local target=${1:-} session window
+  # A tmux window id (@N) is already unique server-wide, so it is passed through
+  # as-is: it needs neither session qualification nor the '=' exactness markers
+  # the name form requires, and it cannot resolve to a lookalike window. fm-spawn's
+  # settle abort addresses the window it created this way on purpose - at that
+  # point the window may not yet carry its final name, so a name lookup could miss
+  # it or hit a different window entirely.
+  case "$target" in
+    @[0-9]*)
+      case ${target#@} in ''|*[!0-9]*) return 1 ;; esac
+      tmux kill-window -t "$target" 2>/dev/null || true
+      return 0
+      ;;
+  esac
+  case "$target" in
+    *:*)
+      session=${target%%:*}
+      window=${target#*:}
+      ;;
+    *) return 1 ;;
+  esac
+  case "$session:$window" in
+    :*|*:|*:*:*) return 1 ;;
+  esac
+  tmux kill-window -t "=$session:=$window" 2>/dev/null || true
 }
 
 # fm_backend_tmux_current_command: <target>'s live foreground process name -
@@ -181,7 +206,7 @@ fm_backend_tmux_agent_state() {  # <target>
   }
   comm=${comm#-}
   case "$comm" in
-    *claude*|*codex*|*opencode*|*grok*|*kimi*) printf 'alive' ;;
+    *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'alive' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
     '') printf 'unreadable' ;;
     *) printf 'ambiguous' ;;

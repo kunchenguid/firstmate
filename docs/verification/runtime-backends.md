@@ -30,7 +30,53 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Claude, Codex, OpenCode, and Grok were observed under their own process names.
 Kimi Code CLI 0.29.1 was observed under `kimi` on 2026-07-25.
-Pi remained a generic `node` process and is intentionally inconclusive.
+Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
+
+Installed-wrapper checks:
+
+```sh
+basename "$(command -v pi-signed)"
+pi-signed --version
+pi --version
+```
+
+Observed bounded output:
+
+```text
+pi-signed
+0.82.0
+0.82.0
+```
+
+The isolated process and endpoint checks used:
+
+```sh
+tmux display-message -p -t "$target" '#{pane_current_command}'
+ps -o comm= -p "$wrapper_pid"
+ps -o comm= -p "$engine_pid"
+FM_HOME="$fixture_home" bin/fm-crew-state.sh "$task_id"
+```
+
+Observed bounded shapes:
+
+```text
+pi-launcher
+.../pi-signed
+.../Pi Launcher.app/Contents/Resources/pi/pi
+state: done ...
+```
+
+Both launches executed a submitted tool instruction and touched the generated `turn_end` marker.
+The pi-signed launch retained `harness=pi-signed`, while the plain comparison retained `harness=pi`.
+The exact wrapper ancestry was `pi-signed` parent to Pi engine child, and the plain Pi Launcher path also traversed the signed wrapper on this installation.
+That shared plain-Pi path is retained as disconfirming evidence against using ancestry as runtime-selection authority.
+Firstmate therefore sets the exact `FM_PI_HARNESS` selection marker on both worker launch paths, while an unmarked Pi-family process remains `pi`.
+Both recorded runtime identities now classify the exact `pi-launcher` foreground command as `alive`.
+
+Backend applicability was reviewed across every spawn adapter.
+Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identities for recovery-grade liveness.
+Herdr uses native registered-agent state and needs no process-name branch.
+Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
 
 The structural multi-row composer reader, Kimi pointer-delivery path, and OpenCode 1.18.4 busy-queue behavior are pinned by:
 
@@ -42,6 +88,50 @@ tests/fm-tmux-submit-busy.test.sh
 
 Expected structural matrix: real text on any content row is pending; all-empty complete boxes are empty; unreadable, incomplete, or unsafe boxes are unknown; and non-bordered panes retain cursor-row compatibility.
 Expected submit matrix: proven pending plus busy is accepted as queued; proven pending plus idle remains pending; ambiguous pending is never converted by the busy exception; and only a proven empty composer succeeds directly.
+
+### Cleanup endpoint identity
+
+The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.
+
+```sh
+tests/fm-teardown-endpoint-safety.test.sh
+tests/fm-teardown.test.sh
+tests/fm-backend-herdr.test.sh
+tests/fm-backend-zellij.test.sh
+tests/fm-backend-orca.test.sh
+tests/fm-backend-cmux.test.sh
+```
+
+Bounded output from the incident regression:
+
+```text
+ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
+ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses
+ok - tmux backend: direct empty target returns nonzero without invoking tmux
+ok - process cleanup: creation-time PID identity removes only the exact child and preserves the control child
+ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and valid cleanup removes only the exact target
+```
+
+The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
+Valid cleanup removed only the exact task-bound target and left the control window live.
+The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
+Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi share that backend cleanup boundary; their harness-specific hook files and token cleanup run only after it, so no harness needs a separate endpoint parser.
+
+The tmux window-id kill path used by `fm-spawn.sh`'s settle abort was validated on 2026-07-29 with tmux 3.6 through the same script.
+
+```sh
+tests/fm-teardown-endpoint-safety.test.sh
+```
+
+Observed bounded output:
+
+```text
+ok - tmux backend: a window id target is killed verbatim, without session qualification or '=' markers
+ok - tmux backend: a malformed window id refuses without invoking tmux
+```
+
+A `@N` target reached tmux as `kill-window -t @7` with no session qualification and no `=` markers, while `@7:x`, `@`, `@7a`, `@7@8`, and `@1@` each returned nonzero with tmux never invoked.
+The `<session>:<window>` form keeps its `=` exactness markers, so neither shape can close a lookalike window.
 
 ## Herdr
 

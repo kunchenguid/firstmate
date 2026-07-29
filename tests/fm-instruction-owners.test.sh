@@ -163,13 +163,15 @@ test_agent_owned_quota_array_dispatch_contract() {
     'Firstmate alone resolves a matched profile array' \
     'run `quota-axi --json` at that intake' \
     'evaluate every configured candidate against that current output' \
-    'choose the candidate with the most real headroom' \
+    'inspectable real headroom including quota-window pace' \
     'if any harness/model/provider relationship, applicable quota data, or interpretation cannot be established, stop and report that candidate' \
     'instead of omitting it, guessing, falling back, or calling the result quota-informed' \
     'Preserve malformed profile configuration as an actionable error' \
     "preserve the captain's strongest-reasoning class rather than silently downgrading it" \
     'Break genuine headroom ties without array-order or harness bias' \
-    '`quota-axi` owns how model or product windows relate to bounding account windows'; do
+    '`quota-axi` owns how model or product windows relate to bounding account windows' \
+    'remains data-only' \
+    'Load `quota-array-dispatch` before choosing among a matched profile array'; do
     assert_grep "$phrase" "$AGENTS" "array-dispatch contract lost '$phrase'"
   done
 
@@ -177,7 +179,7 @@ test_agent_owned_quota_array_dispatch_contract() {
     '| claude | Open the current interactive session' \
     '| codex | Open the current interactive session' \
     '| opencode | Run `opencode models [provider]`' \
-    '| pi | Run `pi --list-models [search]`' \
+    '| pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`' \
     '| grok | Run `grok models`' \
     "For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing" \
     'If those sources do not establish the relationship needed for dispatch, fail loudly and report the unresolved candidate.'; do
@@ -185,12 +187,16 @@ test_agent_owned_quota_array_dispatch_contract() {
   done
   assert_grep 'not as a permanent namespace or provider mapping' "$HARNESS" \
     "model discovery guidance permits a fixed provider table"
-  assert_grep '`AGENTS.md` section 4 owns the dispatch and array-selection procedure.' "$CONFIG" \
-    "configuration docs do not point to the agent-owned array procedure"
+  assert_grep 'load `quota-array-dispatch` for the pace-aware candidate choice' "$HARNESS" \
+    "harness-adapters lost the quota-array-dispatch handoff"
+  assert_grep '`quota-array-dispatch` owns the pace-aware profile-array selection procedure' "$CONFIG" \
+    "configuration docs do not point to quota-array-dispatch"
   assert_grep 'quota-axi is required for the' "$BOOTSTRAP" \
     "bootstrap docs lost the quota-axi dependency pointer"
-  assert_grep 'agent-owned dispatch-profile array procedure in AGENTS.md section 4.' "$BOOTSTRAP" \
+  assert_grep 'agent-owned dispatch-profile array procedure in AGENTS.md section 4' "$BOOTSTRAP" \
     "bootstrap docs do not point to the agent-owned array procedure"
+  assert_grep 'quota-array-dispatch/SKILL.md' "$BOOTSTRAP" \
+    "bootstrap docs do not point to quota-array-dispatch"
   pass "firstmate directly compares every quota candidate with authoritative model discovery"
 }
 

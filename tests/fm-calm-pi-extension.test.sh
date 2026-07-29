@@ -16,14 +16,15 @@ PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
 TMUX_SOCKET="fm-calm-$$"
 TMUX_SESSION="fm-calm-e2e"
-PI_COMPAT_VERSIONS="0.81.1 0.82.0"
-
-require_pi_compat_version() {
+# Verified against Pi 0.81.1 and 0.82.0 (docs/calm-mode-feasibility.md). This is
+# known-good evidence, not a support ceiling: the fixtures below run against whatever
+# Pi is actually installed, and record_pi_version_evidence never rejects a newer
+# version. The tracked presentation adapters probe the exact API they patch (see
+# .pi/extensions/fm-calm.ts) instead of relying on version inference, so a version
+# string is evidence for the record, not a gate.
+record_pi_version_evidence() {
   local version=$1 context=$2
-  case " $PI_COMPAT_VERSIONS " in
-    *" $version "*) return 0 ;;
-    *) fail "$context requires Pi $PI_COMPAT_VERSIONS, found $version" ;;
-  esac
+  [ -n "$version" ] || fail "$context could not determine the installed Pi version"
 }
 
 cleanup() {
@@ -91,10 +92,13 @@ test_static_contract() {
   assert_contains "$text" 'ctx.ui.setWorkingVisible(true)' "Pi calm extension does not preserve Pi's live working row"
   assert_not_contains "$text" 'ctx.ui.setWorkingVisible(!active)' "Pi calm extension still hides Pi's live working row"
   assert_contains "$text" 'ctx.ui.setHiddenThinkingLabel(active ? "" : undefined)' "Pi calm extension does not hide collapsed thinking labels"
-  assert_contains "$text" 'installCalmAssistantLayout()' "Pi Calm extension does not install its zero-height assistant layout"
-  assert_contains "$text" 'installCalmOperationalUserLayout()' "Pi Calm extension does not install its operational-user layout"
+  assert_contains "$text" 'installCalmPresentationAdapter("collapsed-thinking", installCalmAssistantLayout)' "Pi Calm extension does not install its zero-height assistant layout"
+  assert_contains "$text" 'installCalmPresentationAdapter("operational-user-row", installCalmOperationalUserLayout)' "Pi Calm extension does not install its operational-user layout"
+  assert_contains "$text" 'function installCalmPresentationAdapter' "Pi Calm extension does not degrade a missing presentation adapter independently with a diagnostic"
+  assert_contains "$assistant_layout" 'import * as PiCodingAgent' "Pi Calm assistant layout still requires its optional runtime class as a named import"
   assert_contains "$assistant_layout" 'AssistantMessageComponent.prototype.updateContent' "Pi Calm assistant layout does not control the exported component presentation path"
   assert_contains "$assistant_layout" 'block.type !== "thinking"' "Pi Calm assistant layout does not remove thinking from its presentation copy"
+  assert_contains "$operational_user_layout" 'import * as PiCodingAgent' "Pi Calm operational-user layout still requires its optional runtime class as a named import"
   assert_contains "$operational_user_layout" 'InteractiveMode.prototype' "Pi Calm operational-user layout does not control the transcript owner"
   assert_contains "$operational_user_layout" 'classifyFirstmateCurrentOperationalText(text)' "Pi Calm operational-user layout bypasses canonical current classification"
   assert_contains "$operational_user_layout" 'text.includes("\u2063")' "Pi Calm operational-user layout spawns its classifier for ordinary captain rows"
@@ -135,7 +139,7 @@ test_home_resolution() {
     return 0
   fi
   version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
-  require_pi_compat_version "$version" "Pi calm compatibility assumptions"
+  record_pi_version_evidence "$version" "Pi calm compatibility assumptions"
 
   fixture="$TMP_ROOT/home-resolution"
   mkdir -p \
@@ -233,6 +237,173 @@ JS
   pass "Pi calm resolves its persistent home independently of Pi's launch directory"
 }
 
+test_pi_compat_no_upper_bound() {
+  local version
+  for version in 0.83.0 0.90.0 1.0.0 2.3.4 0.82.1 10.20.30; do
+    record_pi_version_evidence "$version" "synthetic newer Pi" \
+      || fail "record_pi_version_evidence rejected Pi $version solely for being newer than 0.82.0"
+  done
+  if (record_pi_version_evidence "" "malformed Pi version probe") 2>/dev/null; then
+    fail "record_pi_version_evidence accepted a missing/malformed Pi version"
+  fi
+  pass "Pi calm compatibility evidence never rejects a Pi version for being newer than 0.82.0, and still fails closed on a missing or malformed version"
+}
+
+test_pi_compat_degraded_adapter() {
+  local fixture out status
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi calm degraded-adapter test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/degraded-adapter"
+  mkdir -p \
+    "$fixture/project/.pi/extensions/lib" \
+    "$fixture/project/node_modules/@earendil-works"
+  cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+
+  out=$(cd "$fixture/project" && \
+    EXT="$fixture/project/.pi/extensions/fm-calm.ts" \
+    PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+    node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const { AssistantMessageComponent } = await import(
+  pathToFileURL(`${packageRoot}/dist/modes/interactive/components/assistant-message.js`).href
+);
+const originalUpdateContent = AssistantMessageComponent.prototype.updateContent;
+if (typeof originalUpdateContent !== "function") {
+  throw new Error(
+    "fixture precondition failed: installed Pi lacks AssistantMessageComponent.prototype.updateContent",
+  );
+}
+delete AssistantMessageComponent.prototype.updateContent;
+
+const diagnostics = [];
+const originalConsoleError = console.error;
+console.error = (...args) => diagnostics.push(args.join(" "));
+
+let calmCommand;
+const handlers = new Map();
+const pi = {
+  events: { emit() {}, on() {} },
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand(name, command) {
+    if (name === "calm") calmCommand = command;
+  },
+  registerEntryRenderer() {},
+  registerTool() {},
+};
+
+let threw = false;
+try {
+  const extension = await import(`${pathToFileURL(process.env.EXT).href}?degraded=${Date.now()}`);
+  extension.default(pi);
+} catch {
+  threw = true;
+}
+console.error = originalConsoleError;
+
+if (threw) {
+  throw new Error(
+    "a missing presentation API crashed the whole Calm extension instead of degrading just that adapter",
+  );
+}
+if (!calmCommand || !handlers.has("session_start")) {
+  throw new Error(
+    "Calm command/session lifecycle did not register when only one presentation adapter was unavailable",
+  );
+}
+if (typeof AssistantMessageComponent.prototype.updateContent !== "undefined") {
+  throw new Error(
+    "the degraded adapter path patched updateContent anyway despite the missing API, which would claim false success",
+  );
+}
+const sawClearSkipReason = diagnostics.some(
+  (line) => line.includes("collapsed-thinking") && /unavailable|skip/i.test(line),
+);
+if (!sawClearSkipReason) {
+  throw new Error(
+    `missing a clear skip reason for the degraded collapsed-thinking adapter; saw: ${JSON.stringify(diagnostics)}`,
+  );
+}
+
+AssistantMessageComponent.prototype.updateContent = originalUpdateContent;
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi calm degraded-adapter path failed: $out"
+  [ -z "$out" ] || fail "Pi calm degraded-adapter test printed output: $out"
+  pass "a missing collapsed-thinking presentation API degrades only that Calm adapter with a clear skip reason, while the rest of Calm still registers"
+}
+
+test_pi_compat_missing_adapter_exports() {
+  local fixture out status
+  if ! command -v node >/dev/null 2>&1; then
+    echo "skip: node not found for Pi calm missing-adapter-export test"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/missing-adapter-exports"
+  mkdir -p \
+    "$fixture/project/.pi/extensions/lib" \
+    "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+  printf '%s\n' \
+    '{"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}' \
+    >"$fixture/project/node_modules/@earendil-works/pi-coding-agent/package.json"
+  printf '%s\n' \
+    'export function getMarkdownTheme() { return {}; }' \
+    'export class UserMessageComponent {}' \
+    >"$fixture/project/node_modules/@earendil-works/pi-coding-agent/index.js"
+
+  out=$(cd "$fixture/project" && node --input-type=module 2>&1 <<'JS'
+const assistant = await import("./.pi/extensions/lib/fm-calm-assistant-layout.ts");
+const operational = await import("./.pi/extensions/lib/fm-calm-operational-user-layout.ts");
+
+for (const [name, install, expected] of [
+  ["collapsed-thinking", assistant.installCalmAssistantLayout, "AssistantMessageComponent"],
+  ["operational-user-row", operational.installCalmOperationalUserLayout, "InteractiveMode"],
+]) {
+  let reason;
+  try {
+    install();
+  } catch (error) {
+    reason = error instanceof Error ? error.message : String(error);
+  }
+  if (!reason?.includes(expected)) {
+    throw new Error(
+      `${name} adapter did not load and report its missing runtime export: ${String(reason)}`,
+    );
+  }
+}
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi calm missing-adapter-export path failed: $out"
+  [ -z "$out" ] || fail "Pi calm missing-adapter-export test printed output: $out"
+  pass "missing Pi presentation class exports reach the independent adapter degradation path"
+}
+
 test_rendering_and_session_lifecycle() {
   local fixture out status version
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
@@ -244,7 +415,7 @@ test_rendering_and_session_lifecycle() {
     return 0
   fi
   version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
-  require_pi_compat_version "$version" "Pi calm compatibility assumptions"
+  record_pi_version_evidence "$version" "Pi calm compatibility assumptions"
 
   fixture="$TMP_ROOT/renderer"
   mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
@@ -895,7 +1066,7 @@ test_operational_followup_turn_e2e() {
     return 0
   fi
   version=$(pi --version 2>/dev/null || true)
-  require_pi_compat_version "$version" "Pi operational follow-up E2E"
+  record_pi_version_evidence "$version" "Pi operational follow-up E2E"
 
   project="$TMP_ROOT/followup-project"
   home="$TMP_ROOT/followup-home"
@@ -1248,7 +1419,7 @@ test_hidden_block_geometry_e2e() {
     return 0
   fi
   version=$(pi --version 2>/dev/null || true)
-  require_pi_compat_version "$version" "Pi Calm hidden-block geometry E2E"
+  record_pi_version_evidence "$version" "Pi Calm hidden-block geometry E2E"
 
   project="$TMP_ROOT/geometry-project"
   home="$TMP_ROOT/geometry-home"
@@ -1488,7 +1659,7 @@ test_interactive_terminal_e2e() {
     return 0
   fi
   version=$(pi --version 2>/dev/null || true)
-  require_pi_compat_version "$version" "Pi calm interactive E2E"
+  record_pi_version_evidence "$version" "Pi calm interactive E2E"
 
   project="$TMP_ROOT/e2e-project"
   config="$TMP_ROOT/e2e-config"
@@ -1977,6 +2148,9 @@ JS
 
 test_static_contract
 test_home_resolution
+test_pi_compat_no_upper_bound
+test_pi_compat_degraded_adapter
+test_pi_compat_missing_adapter_exports
 test_rendering_and_session_lifecycle
 test_operational_followup_turn_e2e
 test_hidden_block_geometry_e2e

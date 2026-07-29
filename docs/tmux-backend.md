@@ -46,12 +46,11 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 A target-existence check proves only that the pane exists.
 The deeper tmux agent-liveness probe first verifies exact window membership, then reads `#{pane_current_command}` to distinguish a running harness process from a bare idle shell.
-It classifies recognized Claude, Codex, OpenCode, Grok, and Kimi process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
+It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
 
-Pi runs through a generic `node` process name and cannot be attributed confidently from the tmux foreground-process field.
-An existing Pi pane is therefore reported as ambiguous rather than auto-healed, while an authoritatively missing Pi window can be relaunched safely.
-This is the active tmux liveness limitation.
+The verified Pi Launcher path reports the exact foreground command `pi-launcher` for both pi and pi-signed, while direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly.
+Similar or prefixed process names are not accepted through those exact Pi-family entries.
 
 Agent liveness and composer safety are separate checks.
 For a bordered composer, the tmux reader locates the complete box structurally and classifies every content row through the shared ANSI and ghost handling in `bin/fm-composer-lib.sh`.
@@ -77,10 +76,16 @@ After the normal retry budget, only structurally proven pending text in a provab
 Ambiguous pending text never receives the busy-queue conversion.
 `tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
 
+Endpoint cleanup closes one explicitly named window and never guesses a target.
+A `<session>:<window>` target is addressed with tmux's `=` exactness markers on both halves, so a lookalike or prefix-matching window name can never be closed instead of the recorded one.
+A bare tmux window id (`@N`) is already unique server-wide, so it is passed through verbatim without session qualification or `=` markers, which would ask tmux for a window literally named `@N`.
+That is the form `fm-spawn.sh` uses to remove the window it just created when the settle poll aborts a launch, because the window may not yet carry its final `fm-<id>` name there, so a name lookup could miss it or resolve a different window entirely.
+An empty, omitted, or otherwise malformed target - including a bare `@`, a window id with trailing characters, or a name carrying extra colons - returns nonzero before tmux is invoked at all.
+[`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns the metadata-only endpoint identity validation that runs before any of this.
+
 ## Limits and regression entry points
 
 - tmux is the reference path and supports secondmate homes.
-- Existing Pi agent-process liveness is inconclusive, while an authoritatively missing Pi window can trigger recovery.
 - The OpenCode busy-queue exception is tmux-specific; Herdr retains its separately documented gap.
 
 ```sh
@@ -88,6 +93,7 @@ tests/fm-backend-tmux-smoke.test.sh
 tests/fm-composer-ghost.test.sh
 tests/fm-kimi-harness.test.sh
 tests/fm-tmux-submit-busy.test.sh
+tests/fm-teardown-endpoint-safety.test.sh
 tests/fm-bootstrap.test.sh
 ```
 

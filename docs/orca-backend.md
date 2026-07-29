@@ -42,6 +42,7 @@ worktree=<absolute Orca worktree path>
 
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
+[`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared metadata semantics, including the `endpoint_task_id=` cleanup binding every task records.
 
 ## Current lifecycle and safety
 
@@ -60,6 +61,7 @@ Before release, cleanup resolves the recorded Orca worktree id and verifies its 
 A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
 After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command.
 It never raw-deletes an Orca worktree.
+When a launch aborts and the Orca worktree cannot be released, `fm-spawn.sh` records the task's metadata, including that cleanup binding, so `bin/fm-teardown.sh <id>` can still reclaim the leftover terminal and worktree instead of leaving an unowned one behind.
 
 ## Active limits
 
