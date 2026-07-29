@@ -68,6 +68,10 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+export FM_HOME
+[ -n "${FM_ROOT_OVERRIDE:-}" ] && export FM_ROOT_OVERRIDE
+[ -n "${FM_STATE_OVERRIDE:-}" ] && export FM_STATE_OVERRIDE
+[ -n "${FM_CONFIG_OVERRIDE:-}" ] && export FM_CONFIG_OVERRIDE
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
