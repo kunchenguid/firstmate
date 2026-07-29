@@ -11,6 +11,18 @@
 # subject, body), because a pull request carries all of that into the target
 # repository and a marker deleted at tip is still published forever.
 #
+# A CONTRIBUTOR IDENTITY IS NOT A LEAK
+# The local account name and a forge owner are published by construction the
+# moment a pull request carries its own commits, so finding one in the AUTHOR or
+# COMMITTER field is expected rather than a finding. It is reported once per
+# marker as a NOTICE that still prints on an otherwise clean run, and it never
+# sets failure or changes the exit code. Nothing else is relaxed: a marker in a
+# subject, a body, or a file, and any other marker in an identity field, all
+# still fail. The allowlist is deliberately NOT the answer here, because it drops
+# a name at derivation time - allowing the account name to quiet this would also
+# blind the tip scan to machine-local /home/<account>/ paths, buying a green run
+# by removing a real protection.
+#
 # WHY THIS EXISTS
 # Firstmate is a toolbox and orchestration repo whose tracked surface is meant to
 # be shareable: it must let a fleet orchestrate private repositories without the
@@ -67,6 +79,11 @@
 # Operator-declared markers are never dropped: they bypass the length and
 # stopword filters, because declaring a token is the strongest available
 # statement that it is private.
+# An allowlisted name is not a gap - it is a decision the operator recorded, not
+# a name that went missing - but it is still printed as an "allowed:" line beside
+# the source counts, including the implicit allowance of this repo's own
+# directory name, so a clean run never hides which names were removed before the
+# scan.
 #
 # WHAT THIS CANNOT CATCH - state this plainly rather than trusting a green run:
 #   - Private strategy, delivery posture, or fleet-internal decisions written as
@@ -85,6 +102,14 @@
 #     run it before ANY push, not only before contributing to a third party.
 #     Defining the scanned surface once as the push range would remove this
 #     hole; until then the limit is stated here rather than left to be found.
+#   - Anything inside a tracked BINARY file. The content scans skip them by
+#     design (git grep -I, and a binary blob yields no patch text for git log
+#     -G), so a marker in the metadata of a checked-in image or archive is never
+#     read - and, unlike a filtered name, it raises no gap because the file is
+#     never opened.
+#   - The INDEX. The scanned surfaces are the working tree and HEAD, so a marker
+#     staged with git add and then edited back out of the working tree is in
+#     neither and passes, right up until the commit that publishes it.
 # Human review of the diff remains the real control; this only makes the
 # mechanical, repeatable part of it impossible to forget.
 #
@@ -184,6 +209,19 @@ report_enumerated() { SOURCES="${SOURCES}  $1: $2 name(s)${NL}"; }
 DERIVED=""
 DECLARED=""
 SRC_COUNT=0
+
+# Names a published commit carries by construction: the account that authors
+# commits in this checkout, and the forge owners it and its clones push to.
+# Tracked separately from DERIVED because it changes how an author or committer
+# field is judged, and nothing else.
+IDENT_ORIGIN="$NL"
+
+add_ident_origin() {
+  local m
+  m=$(trim "$1")
+  [ -n "$m" ] || return 0
+  IDENT_ORIGIN="${IDENT_ORIGIN}$(lower "$m")${NL}"
+}
 
 add_derived() {
   local m
@@ -301,6 +339,7 @@ collect_remote_owners() {
          continue ;;
     esac
     add_derived "$owner"
+    add_ident_origin "$owner"
   done <<EOF
 $urls
 EOF
@@ -322,6 +361,7 @@ if [ -d "$HOME_DIR/data" ] || [ -d "$HOME_DIR/projects" ]; then
   SRC_COUNT=0
   if acct=$(id -un 2>"$ERRLOG") && [ -n "$acct" ]; then
     add_derived "$acct"
+    add_ident_origin "$acct"
     report_source "the local account name" "$SRC_COUNT"
   else
     SOURCES="${SOURCES}  the local account name: unreadable${NL}"
@@ -344,15 +384,22 @@ fi
 # Allowlist: identities that are legitimately public for this home. Entries are
 # newline-delimited and compared whole, so a multi-word entry never also allows
 # its interior words as standalone markers.
-ALLOW="$NL"
+ALLOW_CONFIG="$NL"
 ALLOW_FILE="$HOME_DIR/config/private-material-allow"
 if [ -f "$ALLOW_FILE" ]; then
   while IFS= read -r line; do
-    ALLOW="${ALLOW}$(lower "$line")${NL}"
+    ALLOW_CONFIG="${ALLOW_CONFIG}$(lower "$line")${NL}"
   done < <(read_config_lines "$ALLOW_FILE")
 fi
-# This repo's own directory name is never a marker: it names the tool, not a fleet.
-ALLOW="${ALLOW}$(lower "$(basename "$ROOT")")${NL}"
+# This repo's own directory name is never a marker: it names the tool, not a
+# fleet. Kept apart from the config entries so an "allowed:" line can say which
+# of the two removed the name.
+ALLOW="${ALLOW_CONFIG}$(lower "$(basename "$ROOT")")${NL}"
+
+# An allowlisted name is a recorded decision rather than a coverage gap, but it
+# still narrows what was scanned, so it is accounted for by name and source.
+ALLOWED=""
+allowed_note() { ALLOWED="${ALLOWED}  allowed: \"$1\" ($2)${NL}"; }
 
 STOPWORD_SET=" $(printf '%s' "$STOPWORDS" | tr '\n' ' ') "
 
@@ -380,7 +427,14 @@ done < <(printf '%s' "$DECLARED" | sort -u)
 while IFS= read -r m; do
   [ -n "$m" ] || continue
   case "$SEEN" in *"$NL$m$NL"*) continue ;; esac
-  case "$ALLOW" in *"$NL$m$NL"*) continue ;; esac
+  case "$ALLOW" in
+    *"$NL$m$NL"*)
+      case "$ALLOW_CONFIG" in
+        *"$NL$m$NL"*) allowed_note "$m" "config/private-material-allow" ;;
+        *) allowed_note "$m" "this repo's own directory name" ;;
+      esac
+      continue ;;
+  esac
   if [ "${#m}" -lt "$MIN_LEN" ]; then
     gap "derived name \"$m\" is shorter than $MIN_LEN characters and was NOT scanned"
     continue
@@ -395,6 +449,7 @@ done < <(printf '%s' "$DERIVED" | sort -u)
 
 printf 'fm-private-material-check: marker sources under %s:\n' "$HOME_DIR"
 printf '%s' "$SOURCES"
+[ -z "$ALLOWED" ] || printf '%s' "$ALLOWED"
 [ "$GAP_COUNT" -eq 0 ] || printf '%s' "$GAPS"
 
 if [ -z "$MARKERS" ]; then
@@ -437,18 +492,37 @@ scan_failed() {
 # multi-line body cannot hide a marker from a line-oriented grep. Built once,
 # before the marker loop, so a failure here is caught before any marker is
 # reported clean.
-META="$TMPD/meta"
+# Identity and message are collected separately because they are judged
+# differently: an author or committer field carries whoever pushes, while a
+# subject or body is authored text that can carry anything.
+META_IDENT="$TMPD/meta-identity"
+META_MSG="$TMPD/meta-message"
 TIPHITS="$TMPD/tip"
 # A repository with no commits has no committed surface to scan; that is not a
 # gap, because nothing has been published from it.
 HAVE_HEAD=0
 git -C "$ROOT" rev-parse --verify -q HEAD >/dev/null 2>&1 && HAVE_HEAD=1
 if [ "$SCAN_HISTORY" -eq 1 ]; then
-  git -C "$ROOT" log --all -z --format='%h %an <%ae> %cn <%ce> %s %b' \
-    >"$TMPD/meta.raw" 2>"$ERRLOG" && rc=0 || rc=$?
-  [ "$rc" -eq 0 ] || scan_failed "$rc" "reading commit metadata"
-  tr '\n' ' ' < "$TMPD/meta.raw" | tr '\0' '\n' > "$META"
+  git -C "$ROOT" log --all -z --format='%h %an <%ae> %cn <%ce>' \
+    >"$TMPD/ident.raw" 2>"$ERRLOG" && rc=0 || rc=$?
+  [ "$rc" -eq 0 ] || scan_failed "$rc" "reading commit identities"
+  tr '\n' ' ' < "$TMPD/ident.raw" | tr '\0' '\n' > "$META_IDENT"
+  git -C "$ROOT" log --all -z --format='%h %s %b' \
+    >"$TMPD/msg.raw" 2>"$ERRLOG" && rc=0 || rc=$?
+  [ "$rc" -eq 0 ] || scan_failed "$rc" "reading commit messages"
+  tr '\n' ' ' < "$TMPD/msg.raw" | tr '\0' '\n' > "$META_MSG"
 fi
+
+# The account that writes commits here, and the forge owners this repo pushes
+# to, ride along on every published commit, so seeing one in an identity field
+# is expected. An operator-declared marker never is: declaring a token is the
+# strongest available statement that it must not be published anywhere.
+is_expected_identity() {
+  case "$NL$DECLARED" in *"$NL$1$NL"*) return 1 ;; esac
+  case "$IDENT_ORIGIN" in *"$NL$1$NL"*) return 0 ;; esac
+  return 1
+}
+NOTICES=""
 
 status=0
 count=0
@@ -469,14 +543,19 @@ while IFS= read -r m; do
   if [ "$HAVE_HEAD" -eq 1 ]; then
     headhits=$(git -C "$ROOT" grep -n -I -i -E -e "$pat" HEAD 2>"$ERRLOG") && rc=0 || rc=$?
     [ "$rc" -le 1 ] || scan_failed "$rc" "scanning the committed tree for marker \"$m\""
-    printf '%s\n' "$hits" > "$TIPHITS" 2>"$ERRLOG" \
+    # Dedup on path plus content, never on path:line:content: any working-tree
+    # edit shifts line numbers, and comparing the whole string would then
+    # re-report an already reported hit as committed-only. That label is what
+    # tells the operator whether a tip fix is enough, so it must not lie.
+    printf '%s\n' "$hits" | sed 's/^\([^:]*\):[0-9]\{1,\}:/\1:/' > "$TIPHITS" 2>"$ERRLOG" \
       || scan_failed 2 "recording working-tree hits for marker \"$m\""
-    # grep exit 2 is an ERROR and exit 1 is "nothing left after dedup". Reading
-    # them the same way would silently drop every committed-only hit, which is
-    # the one thing this HEAD scan exists to surface.
     headhits=$(printf '%s\n' "$headhits" | sed 's/^HEAD://' \
-      | grep -Fxv -f "$TIPHITS") && rc=0 || rc=$?
-    [ "$rc" -le 1 ] || scan_failed "$rc" "de-duplicating committed hits for marker \"$m\""
+      | awk -v keys="$TIPHITS" '
+          BEGIN { while ((getline k < keys) > 0) seen[k] = 1 }
+          { p = $0; sub(/:.*/, "", p)
+            c = $0; sub(/^[^:]*:[0-9]+:/, "", c)
+            if (!((p ":" c) in seen)) print }') && rc=0 || rc=$?
+    [ "$rc" -eq 0 ] || scan_failed "$rc" "de-duplicating committed hits for marker \"$m\""
     if [ -n "$headhits" ]; then
       status=1
       printf '\nPRIVATE MATERIAL AT HEAD: marker "%s" is committed, beyond what the working tree shows:\n' "$m"
@@ -495,16 +574,31 @@ while IFS= read -r m; do
       printf '%s\n' "$hist" | sed 's/^/  /'
       history_remedy
     fi
-    meta=$(grep -i -E -- "$pat" "$META" 2>"$ERRLOG") && rc=0 || rc=$?
-    [ "$rc" -le 1 ] || scan_failed "$rc" "scanning commit metadata for marker \"$m\""
+    meta=$(grep -i -E -- "$pat" "$META_MSG" 2>"$ERRLOG") && rc=0 || rc=$?
+    [ "$rc" -le 1 ] || scan_failed "$rc" "scanning commit messages for marker \"$m\""
     if [ -n "$meta" ]; then
       status=1
-      printf '\nPRIVATE MATERIAL IN COMMIT METADATA: marker "%s" appears in:\n' "$m"
+      printf '\nPRIVATE MATERIAL IN COMMIT METADATA: marker "%s" appears in the subject or body of:\n' "$m"
       printf '%s\n' "$meta" | cut -c1-160 | sed 's/^/  /' | head -20
       history_remedy
     fi
+    ident=$(grep -i -E -- "$pat" "$META_IDENT" 2>"$ERRLOG") && rc=0 || rc=$?
+    [ "$rc" -le 1 ] || scan_failed "$rc" "scanning commit identities for marker \"$m\""
+    if [ -n "$ident" ]; then
+      if is_expected_identity "$m"; then
+        ident_n=$(printf '%s\n' "$ident" | wc -l | tr -d '[:space:]')
+        NOTICES="${NOTICES}NOTICE: marker \"$m\" appears in the author or committer identity of $ident_n commit(s). A contributor identity is published by construction, so this is expected and is NOT a failure; it is reported so the run never hides it.${NL}"
+      else
+        status=1
+        printf '\nPRIVATE MATERIAL IN COMMIT METADATA: marker "%s" appears in the author or committer identity of:\n' "$m"
+        printf '%s\n' "$ident" | cut -c1-160 | sed 's/^/  /' | head -20
+        history_remedy
+      fi
+    fi
   fi
 done < <(printf '%s' "$MARKERS")
+
+[ -z "$NOTICES" ] || printf '\n%s' "$NOTICES"
 
 if [ "$status" -eq 0 ]; then
   if [ "$GAP_COUNT" -gt 0 ]; then

@@ -23,11 +23,14 @@ fm_git_identity
 # The script derives a marker from `id -un`. On a host whose account name is a
 # STOPWORDS entry or shorter than MIN_LEN, that raises a coverage gap and
 # downgrades every case here that asserts a clean run - so the suite's result
-# would depend on who is running it. Shim `id` to a synthetic name instead:
-# deterministic everywhere, and it hardcodes no real account name.
+# would depend on who is running it. Shim `id` to a synthetic name instead, used
+# by every case including the real-surface one at the end.
+# The name is generated rather than written literally: the real-surface case
+# scans THIS repo's tracked files, and a literal would sit in this very file and
+# match itself. Generating it also hardcodes no real account name.
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 REAL_ID=$(command -v id)
-TEST_ACCOUNT=fmtestacct
+TEST_ACCOUNT="fmacct$$"
 cat > "$FAKEBIN/id" <<SH
 #!/usr/bin/env bash
 [ "\$*" = "-un" ] && { printf '%s\n' '$TEST_ACCOUNT'; exit 0; }
@@ -159,7 +162,23 @@ track "$base" docs/guide.md 'See https://github.com/Acme-Private-Org/widget for 
 printf '# public upstream\nAcme-Private-Org\n' > "$base/home/config/private-material-allow"
 out=$(run_check "$base") && code=0 || code=$?
 expect_code 0 "$code" "an allowlisted identity must stop failing"
-pass "an identity recorded in the allowlist is no longer treated as private"
+# Suppression is the one thing a clean run must never do quietly: an operator
+# reading OK cannot tell what the allowlist removed unless the run says so.
+assert_contains "$out" 'allowed: "acme-private-org" (config/private-material-allow)' \
+  "an allowlisted name must be accounted for by name and by the source that allowed it"
+pass "an identity recorded in the allowlist is no longer treated as private, and the drop is reported"
+
+# --- the implicit repo-directory allowance is accounted for too --------------
+# A checkout that happens to sit in a directory named after a registered project
+# loses that marker, and the only way an operator can know is if the run says so.
+
+base=$(new_case allowlist-repo-directory-name)
+clone "$base" "$(basename "$base/repo")"
+track "$base" docs/guide.md 'Nothing private here.'
+out=$(run_check "$base") && code=0 || code=$?
+assert_contains "$out" "allowed: \"$(basename "$base/repo")\" (this repo's own directory name)" \
+  "the implicit repo-directory allowance must be reported, never applied silently"
+pass "a derived name dropped as this repo's own directory name is reported, not silent"
 
 # --- operator-supplied markers cover what nothing can derive ----------------
 
@@ -352,7 +371,80 @@ expect_code 0 "$code" "a marker only in commit metadata must not fail the tip sc
 out=$(run_check "$base" --history) && code=0 || code=$?
 expect_code 1 "$code" "--history must catch a marker carried in an author identity"
 assert_contains "$out" "COMMIT METADATA" "metadata failure must be labelled distinctly"
+assert_not_contains "$out" "NOTICE" \
+  "a marker that is not a contributor identity must never be downgraded to a notice"
 pass "--history catches a marker in commit metadata that no file-content scan sees"
+
+# --- a contributor's own identity is expected, not a leak --------------------
+# The local account name and a forge owner are published by construction the
+# moment a pull request carries its own commits, so flagging them would make
+# --history permanently red on every branch and train operators to ignore it.
+# It must still be SAID, so it is a notice that survives an otherwise clean run.
+
+base=$(new_case contributor-identity)
+clone "$base" widget-store
+track "$base" docs/guide.md 'Nothing private in the text.'
+printf 'more\n' >> "$base/repo/docs/guide.md"
+git -C "$base/repo" add docs/guide.md
+GIT_AUTHOR_NAME="$TEST_ACCOUNT" GIT_AUTHOR_EMAIL="$TEST_ACCOUNT@example.invalid" \
+GIT_COMMITTER_NAME="$TEST_ACCOUNT" GIT_COMMITTER_EMAIL="$TEST_ACCOUNT@example.invalid" \
+  git -C "$base/repo" commit -qm 'ordinary subject'
+out=$(run_check "$base" --history) && code=0 || code=$?
+expect_code 0 "$code" "the contributor's own identity must not fail --history"
+assert_contains "$out" "NOTICE" "the identity must still be reported on a clean run"
+assert_contains "$out" "$TEST_ACCOUNT" "the notice must name the marker it is standing down on"
+assert_not_contains "$out" "PRIVATE MATERIAL" "an expected identity must not read as a finding"
+pass "a contributor identity in the author field is a standing notice, not a failure"
+
+# --- the same name in a subject or body is still a hard failure --------------
+# Only the identity fields are published by construction; authored text is not,
+# so the relaxation must not leak sideways into the message.
+
+base=$(new_case contributor-identity-in-subject)
+clone "$base" widget-store
+track "$base" docs/guide.md 'Nothing private in the text.'
+printf 'more\n' >> "$base/repo/docs/guide.md"
+git -C "$base/repo" add docs/guide.md
+GIT_AUTHOR_NAME="$TEST_ACCOUNT" GIT_AUTHOR_EMAIL="$TEST_ACCOUNT@example.invalid" \
+GIT_COMMITTER_NAME="$TEST_ACCOUNT" GIT_COMMITTER_EMAIL="$TEST_ACCOUNT@example.invalid" \
+  git -C "$base/repo" commit -qm "ran it as $TEST_ACCOUNT"
+out=$(run_check "$base" --history) && code=0 || code=$?
+expect_code 1 "$code" "the same name in a commit subject must still fail"
+assert_contains "$out" "subject or body" "the failure must name the surface it was found on"
+pass "the identity allowance is scoped to the identity fields and does not cover the message"
+
+# --- a declared marker is never excused as a contributor identity ------------
+# Declaring a token is the strongest available statement that it is private, so
+# it outranks the identity allowance even when it is also the account name.
+
+base=$(new_case declared-beats-identity)
+clone "$base" widget-store
+track "$base" docs/guide.md 'Nothing private in the text.'
+printf 'more\n' >> "$base/repo/docs/guide.md"
+git -C "$base/repo" add docs/guide.md
+printf '%s\n' "$TEST_ACCOUNT" > "$base/home/config/private-material-markers"
+GIT_AUTHOR_NAME="$TEST_ACCOUNT" GIT_AUTHOR_EMAIL="$TEST_ACCOUNT@example.invalid" \
+GIT_COMMITTER_NAME="$TEST_ACCOUNT" GIT_COMMITTER_EMAIL="$TEST_ACCOUNT@example.invalid" \
+  git -C "$base/repo" commit -qm 'ordinary subject'
+out=$(run_check "$base" --history) && code=0 || code=$?
+expect_code 1 "$code" "an operator-declared marker must fail even in an identity field"
+assert_contains "$out" "COMMIT METADATA" "the declared marker must be reported as a finding"
+pass "an operator-declared token outranks the contributor-identity allowance"
+
+# --- a working-tree line shift does not fake a committed-only hit ------------
+# The AT HEAD label drives the remedy - tip fix or committed fix - so it must
+# not fire for a hit the working tree already reported at a different line.
+
+base=$(new_case head-dedup-line-shift)
+clone "$base" widget-store
+track "$base" docs/guide.md 'Deploy the widget-store service.'
+printf 'An added first line.\nDeploy the widget-store service.\n' > "$base/repo/docs/guide.md"
+out=$(run_check "$base") && code=0 || code=$?
+expect_code 1 "$code" "the marker is still in the working tree, so the run must fail"
+assert_contains "$out" "docs/guide.md:2" "the working-tree hit must be reported at its current line"
+assert_not_contains "$out" "AT HEAD" \
+  "a shifted line number must not re-report a known hit as committed-only"
+pass "the committed-hit dedup compares path and content, so a line shift does not mislabel a hit"
 
 # --- a multi-line commit body cannot hide a marker from the line scan ---------
 
@@ -375,7 +467,11 @@ pass "a marker buried in a multi-line commit body is still caught"
 # quietly - a skip here must never read as "the tracked surface is clean".
 
 if [ -n "${FM_HOME:-}" ] && { [ -d "$FM_HOME/data" ] || [ -d "$FM_HOME/projects" ]; }; then
-  out=$("$CHECK" --root "$ROOT" --home "$FM_HOME" 2>&1) && code=0 || code=$?
+  # The same `id` shim as every other case: without it the account name is
+  # whoever runs the suite, so a host account that is a STOPWORD or shorter than
+  # MIN_LEN raises a gap and fails the assertion below for a reason that has
+  # nothing to do with the tracked surface.
+  out=$(PATH="$FAKEBIN:$PATH" "$CHECK" --root "$ROOT" --home "$FM_HOME" 2>&1) && code=0 || code=$?
   # Exit 0 specifically: 3 would mean the run proved nothing, and accepting it
   # here would report a guard as passing on the strength of a run that did not
   # look. Exit 3 on a real home means the run itself named what it could not
