@@ -64,6 +64,7 @@ A task's busy, idle, unknown, or dead verdict comes from the semantic busy-state
 The one remaining rendered-tail reader is Grok's isolated fallback inside that contract, which can only classify a Grok task.
 The submit acknowledgement and away-mode supervisor-pane busy guard below still consult rendered output, but only to decide whether input can be delivered, never to decide recorded task state.
 The supervisor guard selects only the detected primary harness's signature rather than a global union of vendor patterns.
+Each harness's rendered signature lives in its `bin/harnesses/<name>.sh` adapter, dispatched by [`bin/fm-harness-adapter.sh`](../bin/fm-harness-adapter.sh).
 
 `bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics.
 It types a message once and retries Enter only until the composer clears.
