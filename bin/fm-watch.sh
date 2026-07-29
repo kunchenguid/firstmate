@@ -38,6 +38,9 @@
 #                          the durable topic listener appended its own check
 #                          record, then used the home-scoped USR1 fast path;
 #                          poll-boundary queue checks recover a missed signal
+#   check: rejected unauthenticated PR poll retirement receipts: <paths>
+#                          invalid pending retirements were preserved without
+#                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
@@ -51,29 +54,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 mkdir -p "$STATE"
 
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
-# Shared wake classifier (captain-relevant verbs + signal/stale/heartbeat
-# predicates), the SAME library the away-mode daemon uses, so the triage policy
-# has one definition.
-# shellcheck source=bin/fm-classify-lib.sh
-. "$SCRIPT_DIR/fm-classify-lib.sh"
-# The DEFAULT EVENT SOURCE: this watcher's poll loop over the pull primitives
-# (capture, recorded windows, backend busy-state, and the BUSY_REGEX fallback)
-# synthesizes the signal/stale/check/heartbeat wake vocabulary for backends with
-# no native event push. tmux always reports unknown busy-state, preserving the
-# original regex path. A push-capable backend (herdr) additionally replaces this
-# watcher's blind terminal sleep with a bounded wait on its native event stream
-# (event_wait_or_sleep below), so a crew entering `blocked` wakes its supervisor
-# sub-second; the poll loop stays live every cycle as the permanent fail-closed
-# backstop. See bin/fm-backend.sh and docs/herdr-backend.md.
-# shellcheck source=bin/fm-backend.sh
-. "$SCRIPT_DIR/fm-backend.sh"
-# Shared normalized-transition accessors and the single-owner status->action
-# policy table, so the event-wait splice reads transition records the same way
-# the herdr subscriber writes them (bin/fm-transition-lib.sh).
-# shellcheck source=bin/fm-transition-lib.sh
-. "$SCRIPT_DIR/fm-transition-lib.sh"
+# The native event fast-path and only its true dependencies have one narrow
+# production owner. The Herdr event-wait smoke test consumes this same owner
+# without sourcing the entire watcher graph.
+# shellcheck source=bin/fm-push-transition-lib.sh
+. "$SCRIPT_DIR/fm-push-transition-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
@@ -119,11 +104,13 @@ CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
-# Busy signatures per harness, OR-ed. Extend via env when new adapters are verified.
+# Busy signatures are selected by recorded harness unless FM_BUSY_REGEX globally
+# overrides them.
 # claude/codex: "esc to interrupt"; opencode: "esc interrupt"; pi: "Working...";
-# grok: "Ctrl+c:cancel" (the mid-turn cancel hint in grok's keybind bar, shown iff a
-# turn is running; absent when idle - verified grok 0.2.73, ASCII to avoid the
-# locale fragility of matching grok's braille spinner glyph directly).
+# grok: "Ctrl+c:cancel". Claude's current spinner signature is matched only for
+# a recorded Claude task because an ellipsis followed by elapsed time is not a
+# safe shared signature for arbitrary harness output. Kimi's moon-plus-middot
+# spinner signature is likewise matched only for a recorded Kimi task.
 BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
@@ -151,8 +138,6 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
-TRIAGE_LOG="$STATE/.watch-triage.log"
-TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
 # of this watcher process and the loop reverts to pure polling (report section
@@ -220,20 +205,6 @@ fm_interruptible_sleep() {
 # digest/injection layer would never see the wake.
 afk_present() { [ -e "$STATE/.afk" ]; }
 
-# Append one line to the triage debug log explaining an absorbed (benign) wake,
-# size-capped so a long benign stretch cannot grow it without bound. Best-effort:
-# a logging hiccup never affects supervision.
-triage_log() {
-  local sz
-  printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$1" >> "$TRIAGE_LOG" 2>/dev/null || return 0
-  sz=$(wc -c < "$TRIAGE_LOG" 2>/dev/null | tr -d '[:space:]')
-  case "$sz" in ''|*[!0-9]*) return 0 ;; esac
-  if [ "$sz" -ge "$TRIAGE_LOG_MAX_BYTES" ]; then
-    tail -n 2000 "$TRIAGE_LOG" > "$TRIAGE_LOG.tmp" 2>/dev/null && mv -f "$TRIAGE_LOG.tmp" "$TRIAGE_LOG" 2>/dev/null
-    rm -f "$TRIAGE_LOG.tmp" 2>/dev/null || true
-  fi
-}
-
 hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
@@ -241,19 +212,24 @@ hash_pane() {
 # window_is_busy: 0 (busy) iff the task's harness is actively working. Prefers
 # a backend's native semantic busy state (fm_backend_busy_state - herdr's
 # agent.get; herdr-addendum "busy state" row, "the first backend where
-# fm_session_busy_state gets real semantics"); falls back to the existing
-# pane-tail regex ONLY when the backend reports unknown (tmux always does, so
-# its path is unchanged byte-for-byte). <tail40> is the same bounded capture
-# already read for hashing, so this adds no extra backend calls on the
-# regex-fallback path.
+# fm_session_busy_state gets real semantics"); when the backend reports unknown,
+# falls back to the recorded harness's verified pane-tail signature. <tail40> is
+# the same bounded capture already read for hashing, so this adds no extra
+# backend calls on the regex-fallback path.
 window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 bs
+  local w=$1 tail40=$2 bs harness lines
   bs=$(fm_backend_busy_state "$(window_backend "$w")" "$w" 2>/dev/null)
   case "$bs" in
     busy) return 0 ;;
     idle) return 1 ;;
     *)
-      printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"
+      lines=$(printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12)
+      harness=$(window_harness "$w")
+      if [ -n "${FM_BUSY_REGEX:-}" ]; then
+        printf '%s' "$lines" | grep -qiE "$BUSY_REGEX"
+      else
+        printf '%s' "$lines" | fm_busy_lines_match "$harness"
+      fi
       ;;
   esac
 }
@@ -285,6 +261,13 @@ window_backend() {
   echo tmux
 }
 
+window_harness() {
+  local w=$1 meta
+  meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
+  [ -n "$meta" ] || return 0
+  grep '^harness=' "$meta" | cut -d= -f2- || true
+}
+
 window_label() {
   local w=$1 task
   task=$(window_to_task "$w" "$STATE")
@@ -303,18 +286,6 @@ recorded_windows() {
     seen="$seen|$w|"
     printf '%s\n' "$w"
   done
-}
-
-# Exit reporting a wake. Consecutive heartbeats with no other wake in between
-# mean an idle fleet, so the heartbeat interval backs off exponentially
-# (base * 2^streak, capped at HEARTBEAT_MAX); any real wake resets the cadence.
-wake() {
-  case "$1" in
-    heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
-    *) echo 0 > "$STATE/.heartbeat-streak" ;;
-  esac
-  echo "$1"
-  exit 0
 }
 
 # Return the latest durable topic-board reason without consuming the queue.
@@ -344,7 +315,6 @@ surface_queued_topic_board_wake() {
     *) wake "check: topic-board: external event queued" ;;
   esac
 }
-
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
 # (default 3): a pane that keeps re-wedging on the SAME stale hash - each
 # escalation gets absorbed again as "still validating" one poll later, since the
@@ -616,27 +586,8 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
-# Surfaced-marker bookkeeping for the heartbeat backstop. The watcher records the
-# captain-relevant status line it SURFACED (woke firstmate for) in
-# .hb-surfaced-<task>, the watcher's analogue of the daemon's
-# .subsuper-seen-status. Unlike .seen-* (a size:mtime signature advanced on BOTH
-# surface and absorb), .hb-surfaced is advanced ONLY on surface, so the heartbeat
-# fleet-scan can tell apart a captain-relevant status that already woke firstmate
-# from one that has not - the latter being a per-wake-path miss it must surface.
-_hb_surfaced_path() { printf '%s/.hb-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr ':/.' '___')"; }
-
-# Record a status file's captain-relevant last line as surfaced (no-op for a
-# non-captain-relevant or empty status). Call AFTER the wake is enqueued, so the
-# enqueue-before-suppress ordering holds for this marker too.
-mark_surfaced() {  # <status-file>
-  local f=$1 task last
-  task=$(basename "$f"); task="${task%.status}"
-  last=$(last_status_line "$f")
-  [ -n "$last" ] || return 0
-  status_is_captain_relevant "$last" || return 0
-  printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
-}
-
+# Surfaced-marker bookkeeping for the heartbeat backstop is owned by
+# fm-push-transition-lib.sh because push and poll paths must write one format.
 # Mark every current captain-relevant status as surfaced. Called after the
 # heartbeat backstop enqueues its wake, so the same statuses are not re-surfaced
 # by the next heartbeat.
@@ -755,34 +706,6 @@ event_wait_or_sleep() {
   esac
 }
 
-# handle_push_transition: act on a fresh actionable (blocked) transition record
-# the backend returned. Maps the pane back to its window and task, applies the
-# declared-pause exemption (a crew waiting on a known external dependency is not
-# a surprise block - absorb it on the poll loop's long pause cadence instead),
-# and otherwise enqueues an immediate `stale` wake and wakes the supervisor. The
-# `stale` kind is deliberate: the supervisor's handler for it ("peek the pane to
-# diagnose") is exactly right for a blocked crew, and the drain/dedupe/guard
-# machinery already understands it (queued by key=window, so a later poll-path
-# stale for the same pane collapses on drain).
-handle_push_transition() {  # <backend> <session> <record>
-  local backend=$1 session=$2 record=$3 pane_id to window task reason
-  pane_id=$(fm_transition_pane_id "$record")
-  to=$(fm_transition_to_status "$record")
-  [ -n "$pane_id" ] || { sleep 1; return; }
-  window="$session:$pane_id"
-  task=$(window_to_task "$window" "$STATE")
-  if status_is_paused "$(last_status_line "$STATE/$task.status")"; then
-    triage_log "absorbed push $to (declared pause, awaiting external): $window"
-    fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
-    return
-  fi
-  reason="stale: $window (herdr: agent $to - waiting on human, escalated immediately, not via wedge timer)"
-  fm_wake_append stale "$window" "$reason" || exit 1
-  fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
-  mark_surfaced "$STATE/$task.status"
-  wake "$reason"
-}
-
 # --- Main entry: the runtime below runs only when this file is executed as a
 # script. When sourced (unit tests loading the functions above), return here
 # before acquiring the singleton lock or entering the blocking loop.
@@ -843,6 +766,16 @@ fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
+# A merged poll may have queued its terminal wake and then lost the process
+# between receipt publication and fixed-path removal.
+# Finish only identity-bound retirement receipts before any check can run.
+if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+  reason="check: rejected unauthenticated PR poll retirement receipts:$FM_PR_POLL_RETIREMENT_REJECTED"
+  fm_wake_append check pr-poll-retirement "$reason" || exit 1
+  touch "$STATE/.last-check"
+  wake "$reason"
+fi
+
 while :; do
   # Self-eviction: if the singleton lock no longer names this process, a second
   # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
@@ -879,6 +812,7 @@ while :; do
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
+      is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
@@ -890,12 +824,13 @@ while :; do
         fi
       else
         id=$(basename "$c" .check.sh)
-        if fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
-          provider=$FM_PR_DATA_PROVIDER
-          url=$FM_PR_DATA_URL
-          host=$FM_PR_DATA_HOST
-          path=$FM_PR_DATA_PATH
-          number=$FM_PR_DATA_NUMBER
+        if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+          is_pr_poll=1
+          provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
+          url=$FM_PR_POLL_SNAPSHOT_URL
+          host=$FM_PR_POLL_SNAPSHOT_HOST
+          path=$FM_PR_POLL_SNAPSHOT_PATH
+          number=$FM_PR_POLL_SNAPSHOT_NUMBER
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
@@ -913,6 +848,14 @@ while :; do
       if [ -n "$out" ]; then
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
+        if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
+          if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
+            fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+              || triage_log "merged PR poll retirement remains recoverable for $id"
+          else
+            triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"
+          fi
+        fi
         touch "$STATE/.last-check"
         wake "$reason"
       fi

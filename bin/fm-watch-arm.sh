@@ -6,8 +6,11 @@
 # daemon owns triage and the watcher exits on every wake for the daemon to
 # classify. Reliability depends on arming through a mechanism that SURVIVES the
 # call and NOTIFIES on exit, so firstmate must run this script as the harness's
-# own tracked background task (e.g. run_in_background). Run it as its own
-# standalone background task, never bundled onto the tail of another command.
+# own tracked background task (e.g. run_in_background), or - for a Claude
+# primary - inside the Stop asyncRewake hook's foreground process tree
+# (bin/fm-claude-stop-autoarm.sh), where the harness owns the process group and
+# the hook's exit-2 rewake is the notification. Run it as its own standalone
+# background task, never bundled onto the tail of another command.
 # NEVER fire it and forget with a shell `&` inside another call: that backgrounded
 # child is reaped when the call returns, leaving NO watcher running and a false
 # "already running" off the dying process. That exact mistake silently took
@@ -80,7 +83,13 @@ BEAT="$STATE/.last-watcher-beat"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
-CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-10}
+# Git Bash/MSYS pays a much higher fork cost while the watcher completes its
+# required pre-lock migration, so its bounded default covers that cold start.
+case "${OSTYPE:-}" in
+  msys*|mingw*|cygwin*) ARM_CONFIRM_DEFAULT=30 ;;
+  *) ARM_CONFIRM_DEFAULT=10 ;;
+esac
+CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"

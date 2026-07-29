@@ -22,11 +22,12 @@
 # meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
 #
 # From-firstmate marker: when the resolved target is a task selector whose meta
-# records kind=secondmate, the text is prefixed with the from-firstmate marker
-# (bin/fm-marker-lib.sh) so the secondmate routes its reply via its status file
-# or a status-pointed doc instead of stranding it in chat the main firstmate
-# never reads. A crewmate/scout target, an explicit backend-target escape-hatch
-# target, and the --key path are never marked - their behavior is unchanged.
+# records kind=secondmate, the text uses the live-charter-compatible
+# from-firstmate carrier owned by bin/fm-operational-input.sh so the secondmate
+# routes its reply via its status file or a status-pointed doc instead of
+# stranding it in chat the main firstmate never reads. A crewmate/scout target,
+# an explicit backend-target escape-hatch target, and the --key path are never
+# marked - their behavior is unchanged.
 #
 # Parent-owned pending-reply expectation: every newly marked secondmate request
 # also receives a privacy-safe correlation id and a durable parent record under
@@ -267,8 +268,8 @@ else
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
-  # Type once, submit, verify. Lenient: only a positively-confirmed swallow
-  # (text still in the composer) is an error; an unreadable pane is assumed sent.
+  # Type once, submit, verify. Only exact empty confirms delivery; every other
+  # verdict preserves the loud refusal boundary.
   if ! verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
     if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
       fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
@@ -277,18 +278,20 @@ else
     exit 1
   fi
   case "$verdict" in
-    pending)
-      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-      fi
-      echo "error: text not submitted to $T (Enter swallowed; text left in composer; tried $RESOLUTION_TRIED)" >&2
-      exit 1
+    empty)
       ;;
     send-failed)
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
       echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
+      exit 1
+      ;;
+    *)
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: text not submitted to $T (delivery unconfirmed; verdict=${verdict:-unknown}; tried $RESOLUTION_TRIED)" >&2
       exit 1
       ;;
   esac
@@ -307,8 +310,8 @@ else
       exit 1
     fi
   fi
-  # Submit landed (verdict was not pending/send-failed). Confirmation only proves
-  # the text was accepted; the harness still needs a beat to spin up the
+  # Submit landed with exact empty. Confirmation only proves the text was
+  # accepted; the harness still needs a beat to spin up the
   # turn before its busy footer shows. Pause so an immediate peek catches the
   # crewmate actually working instead of the stale idle pane. FM_SEND_SETTLE=0
   # disables it. Scoped to this path only, never the shared submit core.

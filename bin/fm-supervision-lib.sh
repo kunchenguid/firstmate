@@ -2,11 +2,12 @@
 # Shared "supervision missing" predicate.
 # Usage: . bin/fm-supervision-lib.sh
 #
-# True exactly when a firstmate home needs live supervision because it has
-# in-flight work or an enabled Telegram topic board, but no watcher has a fresh
-# liveness beacon (state/.last-watcher-beat, touched every poll cycle, within the
-# grace window).
-# bin/fm-guard.sh uses this grace-based warning predicate directly.
+# Reports whether a firstmate home needs supervision because it has in-flight
+# work (a state/<id>.meta exists), an X-mode relay poll
+# (state/x-watch.check.sh), or an enabled Telegram topic board or direct-message
+# line, and whether its watcher has a fresh liveness beacon
+# (state/.last-watcher-beat, touched every poll cycle, within the grace window).
+# bin/fm-guard.sh keeps its task-or-Telegram grace-based warning predicate;
 # bin/fm-turnend-guard.sh uses the status fields here for its banner but performs
 # its end-of-turn block decision with the live watcher lock check in
 # bin/fm-wake-lib.sh.
@@ -24,7 +25,8 @@ fm_sup_stat_mtime() {
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
 #   FM_SUP_TOPIC_BOARD    true/false - a local topic-board or direct-message-line credential file exists (both demand a live watcher; docs/dm-line.md)
-#   FM_SUP_REQUIRED       true/false - work or the topic board needs a live watcher
+#   FM_SUP_REQUIRED       true/false - work or Telegram intake needs a live watcher
+#   FM_SUP_NEEDED         true/false - required supervision or an X-mode relay poll
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
@@ -36,6 +38,7 @@ fm_supervision_status() {
   FM_SUP_IN_FLIGHT=0
   FM_SUP_TOPIC_BOARD=false
   FM_SUP_REQUIRED=false
+  FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false
   FM_SUP_BEACON_DESC=never
   FM_SUP_QUEUE_PENDING=false
@@ -44,7 +47,6 @@ fm_supervision_status() {
     [ -e "$meta" ] || continue
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
   done
-
   data=${FM_TOPIC_DATA_DIR:-$home/data/fm-telegram-topics}
   if [ -n "${FM_TOPIC_CONFIG:-}" ]; then
     config=$FM_TOPIC_CONFIG
@@ -65,6 +67,9 @@ fm_supervision_status() {
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || [ "$FM_SUP_TOPIC_BOARD" = true ]; then
     FM_SUP_REQUIRED=true
   fi
+  if [ "$FM_SUP_REQUIRED" = true ] || [ -f "$state/x-watch.check.sh" ]; then
+    FM_SUP_NEEDED=true
+  fi
 
   beat="$state/.last-watcher-beat"
   if [ -e "$beat" ]; then
@@ -82,6 +87,14 @@ fm_supervision_status() {
   # shellcheck disable=SC2034 # Read by callers (fm-guard.sh) after sourcing.
   [ -s "$state/.wake-queue" ] && FM_SUP_QUEUE_PENDING=true
   return 0
+}
+
+# fm_supervision_needed <state-dir> [grace-seconds]
+# Exit 0 (true) exactly when in-flight work or an X-mode relay poll needs a
+# watcher. Exit 1 (false) for an idle home.
+fm_supervision_needed() {
+  fm_supervision_status "$@"
+  [ "$FM_SUP_NEEDED" = true ]
 }
 
 # fm_supervision_unhealthy <state-dir> [grace-seconds]

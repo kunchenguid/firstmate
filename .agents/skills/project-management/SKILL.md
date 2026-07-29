@@ -36,7 +36,7 @@ Choose the delivery mode when adding or creating the project:
 
 The optional `+yolo` posture changes routine approval authority but does not change the delivery mode.
 Default it off, and enable it only on the captain's explicit instruction.
-Destructive, irreversible, and security-sensitive decisions still require captain approval when it is on.
+`AGENTS.md` section 7 owns the complete authority boundary and exceptions when it is on.
 
 ## Add or clone an existing project
 

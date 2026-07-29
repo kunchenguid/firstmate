@@ -30,10 +30,9 @@ When you see a background-task-completed system reminder for the arm:
    Re-arm attaches to an existing healthy cycle when one is already present and follows its verified successor chain.
    See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer successor and clean-close failure contract.
 
-Grok Stop hooks are passive.
-The primary project hook runs `bin/fm-turnend-guard-grok.sh`, which forces at most one same-session follow-up via `grok --resume` when a turn would end blind.
-That is a backstop, not the normal wake path.
-After any forced follow-up, arm the watcher with the background protocol above.
+The primary project Stop hook runs `bin/fm-turnend-guard-grok.sh` as a backstop, not the normal wake path.
+[`turnend-guard.md`](../turnend-guard.md) owns its running-payload capability selection between native same-process blocking and the pre-native bounded resume fallback.
+After any forced continuation, arm the watcher with the background protocol above.
 
 Interactive TUI primary sessions are the supported supervision host.
 Headless `grok -p` may wait for background process exit but does not reliably surface full auto-wake model output; do not run the primary firstmate as a one-shot headless process.
