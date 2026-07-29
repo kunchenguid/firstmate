@@ -96,7 +96,7 @@ test_crontab_path_resolves_every_included_binary() {
   [ -n "$generated_path" ] || fail "could not extract PATH= from generated crontab line"
 
   for bin in quota-axi jq tmux herdr; do
-    env -i PATH="$generated_path" command -v "$bin" >/dev/null 2>&1 \
+    env -i PATH="$generated_path" sh -c 'command -v "$1"' _ "$bin" >/dev/null 2>&1 \
       || fail "generated crontab PATH does not resolve '$bin' the way a real cron invocation would (PATH=$generated_path)"
   done
 
@@ -104,7 +104,7 @@ test_crontab_path_resolves_every_included_binary() {
   # PATH must not claim to resolve them either - a false resolution here would
   # mean the install script fabricated a directory it never actually checked.
   for bin in zellij cmux; do
-    if env -i PATH="$generated_path" command -v "$bin" >/dev/null 2>&1; then
+    if env -i PATH="$generated_path" sh -c 'command -v "$1"' _ "$bin" >/dev/null 2>&1; then
       fail "generated crontab PATH unexpectedly resolves '$bin', which was never installed on the generation PATH"
     fi
   done
@@ -132,7 +132,7 @@ test_launchd_path_resolves_every_included_binary() {
   [ -n "$generated_path" ] || fail "could not extract the PATH string from the generated launchd plist"
 
   for bin in quota-axi jq tmux herdr; do
-    env -i PATH="$generated_path" command -v "$bin" >/dev/null 2>&1 \
+    env -i PATH="$generated_path" sh -c 'command -v "$1"' _ "$bin" >/dev/null 2>&1 \
       || fail "generated launchd PATH does not resolve '$bin' the way launchd's own scrubbed environment would (PATH=$generated_path)"
   done
 
