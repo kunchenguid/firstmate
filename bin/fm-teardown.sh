@@ -78,6 +78,11 @@
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
 #
+# Once the task record is removed and its backlog transition has committed,
+# this script also appends a durable "teardown" record to
+# data/dispatch-log.jsonl; bin/fm-dispatch-log.sh's header owns that log's
+# format and query CLI.
+#
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
 # non-linked worktree, .git/index.lock) that makes `treehouse return --force` fail
@@ -2910,6 +2915,20 @@ else
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
+
+# Durable dispatch record (bin/fm-dispatch-log.sh header owns the log format).
+# Appended once the task record has been removed and its backlog transition has
+# committed, so a teardown that failed and will be retried leaves no record.
+# Best-effort and non-fatal: a logging failure must never fail an otherwise
+# successful teardown. Deliberately minimal (id only) - see the header
+# cross-reference.
+{
+  mkdir -p "$DATA" 2>/dev/null
+  printf '{"event":"teardown","ts":"%s","id":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ID" \
+    >> "$DATA/dispatch-log.jsonl"
+} 2>/dev/null || true
+
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

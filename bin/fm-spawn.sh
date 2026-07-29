@@ -217,6 +217,10 @@
 #   identity is owned by the parent home that holds its task metadata, while the
 #   pane export happens on the remote host (bin/fm-remote-secondmate-control.sh).
 #   Local spawns never pass it and resolve their own carrier exactly as before.
+# After the task record is published and its backlog In-flight transition
+# commits, this script also appends a durable "spawn" record to
+# data/dispatch-log.jsonl; bin/fm-dispatch-log.sh's header owns that log's
+# format and query CLI.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -3138,6 +3142,30 @@ if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
 fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
+
+# Durable dispatch record (bin/fm-dispatch-log.sh header owns the log format).
+# Appended once the task record is published AND its backlog In-flight
+# transition has committed, so a spawn that was rolled back never leaves a
+# dispatch record behind. Best-effort and non-fatal: it reuses the variables
+# already resolved above for meta, never recomputes anything, and a logging
+# failure (missing/unwritable data/, full disk, ...) must never fail an
+# otherwise-successful spawn.
+{
+  mkdir -p "$DATA" 2>/dev/null
+  printf '{"event":"spawn","ts":"%s","id":"%s","harness":"%s","model":"%s","effort":"%s","kind":"%s","repo":"%s","mode":"%s","backend":"%s","yolo":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$(json_escape "$ID")" \
+    "$(json_escape "$HARNESS")" \
+    "$(json_escape "${MODEL:-default}")" \
+    "$(json_escape "${EFFORT:-default}")" \
+    "$(json_escape "$KIND")" \
+    "$(json_escape "$PROJ_ABS")" \
+    "$(json_escape "$MODE")" \
+    "$(json_escape "$BACKEND")" \
+    "$(json_escape "$YOLO")" \
+    >> "$DATA/dispatch-log.jsonl"
+} 2>/dev/null || true
+
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   case "$SPAWN_DEFERRED_SIGNAL" in
     HUP) SPAWN_DEFERRED_SIGNAL_STATUS=129 ;;
