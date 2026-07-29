@@ -240,8 +240,14 @@ fm_backend_detect_cmux_app_is_ancestor() {
 # notice names the winning signal, so a fallback-detected cmux (bundle id or
 # ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
 # distinct from the primary-marker case.
-fm_backend_name() {
-  local line v detected marker
+# fm_backend_configured_name: the backend EXPLICITLY selected for this home -
+# FM_BACKEND env, then config/backend's first non-empty line - or empty when
+# nothing is configured and fm_backend_name would fall through to runtime
+# auto-detection. Local reads only: it never touches a backend server, so a
+# caller that must stay off every socket (bin/fm-launch.sh's front door) can
+# consult it before painting anything.
+fm_backend_configured_name() {
+  local line v
   if [ -n "${FM_BACKEND:-}" ]; then
     printf '%s' "$FM_BACKEND"
     return 0
@@ -254,6 +260,16 @@ fm_backend_name() {
         return 0
       fi
     done < "$FM_BACKEND_CONFIG_DIR/backend"
+  fi
+  return 0
+}
+
+fm_backend_name() {
+  local configured detected marker
+  configured=$(fm_backend_configured_name)
+  if [ -n "$configured" ]; then
+    printf '%s' "$configured"
+    return 0
   fi
   # Called directly (not in a command substitution) so the detect signal
   # globals survive into the notice below.
