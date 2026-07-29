@@ -19,8 +19,8 @@ captain or an agent needing to be present.
 ## What it does
 
 Once per invocation: read Claude's current usage, take the highest
-`percentUsed` across every reported window (session, weekly, credits - if any
-one window is close to exhausted, further turns are constrained), and act:
+`percentUsed` across the rate-limit-style windows only (`kind` `session` and
+`weekly`), and act:
 
 - **At or above the pause threshold** (default 80%): interrupt every live
   `kind=ship`/`kind=scout` crewmate of this home with its harness's verified
@@ -40,6 +40,21 @@ one window is close to exhausted, further turns are constrained), and act:
 
 Rerunning while still above the pause threshold does not resend interrupts or
 duplicate the flag; it only picks up crew spawned since the last pause.
+
+## Why the credits window is ignored
+
+`quota-axi`'s claude reading reports three window kinds: `session` (the
+multi-hour rate limit), `weekly`, and `credits` (paid overage spend, tracked
+separately from the free session/weekly allowance).
+Only `session` and `weekly` drive the pause/resume decision.
+The `credits` window measures money spent, not the free allowance this script
+exists to conserve - pausing crew because paid credits are high would work
+against the actual goal of using the free session/weekly quota as fully as
+possible, so a high `credits` reading alone never pauses anything and a still-high
+`credits` reading never blocks a resume once `session`/`weekly` recover.
+If neither `session` nor `weekly` is present in a reading, that is treated the
+same as no usable reading at all (see below) rather than falling back to
+`credits`.
 
 ## Why no separate supervision code was needed
 
@@ -108,6 +123,7 @@ solves.
 
 `tests/fm-quota-watch.test.sh` covers crossing the pause threshold, idempotent
 reruns, picking up crew spawned mid-pause, the hysteresis band, recovery,
-`auth_required`/missing-tool/unknown-harness no-ops, and `--status`, all
-against fixture quota JSON and a fake sender - no real quota reading, backend,
-or live fleet involved.
+`auth_required`/missing-tool/unknown-harness no-ops, `--status`, and a high
+`credits` reading never driving a pause or blocking a resume while
+`session`/`weekly` stay low, all against fixture quota JSON and a fake sender -
+no real quota reading, backend, or live fleet involved.

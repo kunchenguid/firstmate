@@ -24,6 +24,8 @@
 #       recorded as paused
 #   (i) --status prints the resolved config and current reading and takes no
 #       action
+#   (j) a high credits (paid overage) window never drives a pause when
+#       session/weekly are both low - only the rate-limit-style windows count
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -34,9 +36,16 @@ TMP_ROOT=$(fm_test_tmproot fm-quota-watch-tests)
 
 # --- fixtures ----------------------------------------------------------------
 
-# Minimal quota-axi --provider claude --json shape with one window at <pct>.
+# Minimal quota-axi --provider claude --json shape with one kind=session
+# window at <pct>, matching the real schema's rate-limit-style window shape.
 quota_json_pct() {  # <pct>
-  printf '{"providers":[{"provider":"claude","windows":[{"id":"five_hour","percentUsed":%s}],"state":{"status":"fresh"}}]}\n' "$1"
+  printf '{"providers":[{"provider":"claude","windows":[{"id":"five_hour","kind":"session","percentUsed":%s}],"state":{"status":"fresh"}}]}\n' "$1"
+}
+
+# All three real window kinds present: session, weekly, and credits (paid
+# overage spend). Lets a test independently control each.
+quota_json_windows() {  # <session_pct> <weekly_pct> <credits_pct>
+  printf '{"providers":[{"provider":"claude","windows":[{"id":"five_hour","kind":"session","percentUsed":%s},{"id":"seven_day","kind":"weekly","percentUsed":%s},{"id":"extra_usage","kind":"credits","percentUsed":%s}],"state":{"status":"fresh"}}]}\n' "$1" "$2" "$3"
 }
 
 quota_json_auth_required() {
@@ -313,6 +322,44 @@ test_status_flag_smoke() {
   pass "--status reports config/reading without acting"
 }
 
+# --- (j) the credits window never drives pause/resume -------------------------
+
+test_credits_window_never_drives_pause() {
+  local case_dir
+  case_dir=$(make_case credits-ignored)
+  write_crew_meta "$case_dir" task-a ship claude
+  quota_json_windows 20 30 95 > "$case_dir/quota.json"
+
+  run_watch "$case_dir" --status
+  expect_code 0 "$RC" "--status exits 0"
+  assert_contains "$(cat "$case_dir/out.log")" "pct=30" "status reflects max(session,weekly), ignoring the higher credits reading"
+
+  run_watch "$case_dir"
+  expect_code 0 "$RC" "run with high credits but low session/weekly exits 0"
+  assert_absent "$case_dir/state/.quota-paused" "a high credits window alone never triggers a pause"
+  [ ! -s "$case_dir/send.log" ] || fail "a high credits window alone must never send anything to crew"
+
+  pass "a high credits (paid overage) window never drives a pause when session/weekly are low"
+}
+
+test_credits_window_ignored_during_resume_decision() {
+  local case_dir
+  case_dir=$(make_case credits-ignored-resume)
+  write_crew_meta "$case_dir" task-a ship claude
+  quota_json_windows 85 30 20 > "$case_dir/quota.json"
+  run_watch "$case_dir"
+  expect_code 0 "$RC" "pause run (high session) exits 0"
+  assert_present "$case_dir/state/.quota-paused" "high session window paused the crew"
+
+  quota_json_windows 40 30 99 > "$case_dir/quota.json"
+  run_watch "$case_dir"
+  expect_code 0 "$RC" "resume run exits 0"
+  assert_absent "$case_dir/state/.quota-paused" "session/weekly dropping below the resume threshold resumes crew even while credits is high"
+  assert_grep "task-a Quota recovered" "$case_dir/send.log" "resume note sent based on session/weekly, not the still-high credits window"
+
+  pass "recovery is decided from session/weekly alone, even while the credits window stays high"
+}
+
 # --- run -----------------------------------------------------------------
 
 test_pause_crosses_threshold
@@ -324,3 +371,5 @@ test_auth_required_is_harmless_noop
 test_missing_quota_axi_tool_is_harmless_noop
 test_unknown_harness_refuses_to_guess
 test_status_flag_smoke
+test_credits_window_never_drives_pause
+test_credits_window_ignored_during_resume_decision

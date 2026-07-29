@@ -11,9 +11,12 @@
 #
 # What it does, once per invocation:
 #   1. Read current claude quota via `quota-axi --provider claude --json` and
-#      take the MAX percentUsed across all reported windows (session/weekly/
-#      credits): if any window is close to exhausted, further turns are
-#      constrained, so the tightest window governs the pause decision.
+#      take the MAX percentUsed across the rate-limit-style windows only
+#      (kind session and weekly - the free allowance this script conserves).
+#      The credits window (kind "credits") measures PAID overage spend, not
+#      that free allowance, and is deliberately excluded: pausing crew because
+#      paid credits are being spent would work against maximizing use of the
+#      free session/weekly quota, the opposite of the intent.
 #   2. No usable reading (tool missing, auth_required, malformed output, empty
 #      windows) is treated as "nothing to do" - never a pause, never a crash.
 #   3. pct >= pause threshold (default 80, see below): interrupt every LIVE
@@ -81,7 +84,7 @@ FM_QUOTA_SEND_BIN="${FM_QUOTA_SEND_BIN:-$SCRIPT_DIR/fm-send.sh}"
 PAUSE_FLAG="$STATE/.quota-paused"
 
 fm_quota_watch_usage() {
-  sed -n '2,58{s/^# \{0,1\}//;p;}' "$SCRIPT_DIR/fm-quota-watch.sh"
+  sed -n '2,66{s/^# \{0,1\}//;p;}' "$SCRIPT_DIR/fm-quota-watch.sh"
 }
 
 STATUS_ONLY=0
@@ -150,11 +153,18 @@ if ! FM_QUOTA_AXI_RESOLVED=$(command -v "$FM_QUOTA_AXI_BIN" 2>/dev/null); then
 fi
 
 QUOTA_JSON=$("$FM_QUOTA_AXI_RESOLVED" --provider claude --json 2>/dev/null)
-# Max percentUsed across every reported claude window. Empty output means no
-# usable window was reported (auth_required, error, or malformed JSON) - the
-# jq filter itself never fails loudly, it just yields nothing to act on.
+# Max percentUsed across only the rate-limit-style windows (kind session or
+# weekly - the actual quota this script conserves). The credits window (kind
+# "credits", e.g. id extra_usage) measures PAID overage spend, not the free
+# session/weekly allowance, and deliberately never drives the pause decision:
+# pausing crew because paid credits are being spent would work against
+# maximizing use of the free session/weekly quota, the opposite of the intent.
+# Empty output means no session/weekly window was reported (auth_required,
+# error, malformed JSON, or a schema with neither kind present) - the jq
+# filter itself never fails loudly, it just yields nothing to act on.
 PCT=$(printf '%s' "$QUOTA_JSON" | jq -r '
-  ([.providers[]? | select(.provider=="claude") | .windows[]?.percentUsed | numbers]
+  ([.providers[]? | select(.provider=="claude") | .windows[]?
+    | select(.kind=="session" or .kind=="weekly") | .percentUsed | numbers]
    | if length > 0 then (max | floor | tostring) else empty end)
 ' 2>/dev/null)
 
