@@ -237,10 +237,11 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 Claude Code passes a host-computed `context_window` object to status-line commands with `remaining_percentage`, `used_percentage`, `total_tokens`, and `current_usage`.
 Firstmate's tracked Claude settings send that payload to [`bin/fm-context-statusline.sh`](../bin/fm-context-statusline.sh), which displays the real used and remaining percentages rather than estimating pressure from transcript text.
 At 70 percent used or higher, the display adds `COMPACT NOW: /compact` so the existing compaction doctrine has an instrument-backed trigger.
-A spawned Claude crewmate also receives a git-excluded local setting that writes the same complete `context_window` reading and the derived `compact_recommended` boolean atomically to `/tmp/fm-<task-id>/context-pressure.json`.
+Only `used_percentage` and `remaining_percentage` are required; when the optional `total_tokens` or `current_usage` is missing or invalid, the real percentages and the 70 percent trigger keep rendering and each missing optional field is named in the display, so the instrument never invents a value and never degrades silently.
+A spawned Claude crewmate also receives a git-excluded local setting that writes the `context_window` fields actually present, a `missing_optional_fields` list when any optional field is absent, and the derived `compact_recommended` boolean atomically to `/tmp/fm-<task-id>/context-pressure.json`.
 Generated crewmate instructions tell the worker to use that snapshot as the source of truth at phase boundaries and run `/compact` when the boolean becomes true.
 The snapshot stays in the existing per-task temporary root, so ordinary cleanup removes it without adding fleet state or a new completion signal.
-Malformed or incomplete payloads produce no display, remove the optional stale snapshot, and leave the Claude session running normally.
+Payloads without both valid percentages produce no display, remove the optional stale snapshot, and leave the Claude session running normally.
 This is presentation and worker advisory only: it does not emit fleet notifications or change routing, supervision, worker lifecycle, isolation, or completion detection.
 The other verified worker runtimes do not expose this verified Claude `statusLine` payload contract, so their adapters and behavior remain unchanged.
 

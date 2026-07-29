@@ -2,8 +2,9 @@
 # Behavior tests for Claude Code context-window status-line telemetry.
 #
 # These use the verified statusLine payload shape as fixtures and cover display,
-# the exact 70%-used trigger, complete task snapshots, malformed-input cleanup,
-# and the tracked primary/secondmate settings entry point.
+# the exact 70%-used trigger, complete task snapshots, visible degradation when
+# optional fields are missing, malformed-input cleanup, and the tracked
+# primary/secondmate settings entry point.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -34,6 +35,7 @@ if (snapshot.context_window.total_tokens !== 200000) process.exit(1);
 if (snapshot.context_window.current_usage.input_tokens !== 1234) process.exit(1);
 if (snapshot.compact_at_used_percentage !== 70) process.exit(1);
 if (snapshot.compact_recommended !== false) process.exit(1);
+if ("missing_optional_fields" in snapshot) process.exit(1);
 NODE
   pass "context status line displays and records the host-computed reading below 70%"
 }
@@ -100,6 +102,43 @@ test_record_failure_keeps_display_and_last_valid_snapshot() {
   pass "a failed snapshot write never blanks telemetry or drops the last snapshot"
 }
 
+test_missing_optional_fields_degrade_visibly_and_keep_the_trigger() {
+  local record out
+  record="$TMP_ROOT/degraded/context-pressure.json"
+  mkdir -p "${record%/*}"
+  out=$(printf '{"context_window":{"remaining_percentage":29,"used_percentage":71}}\n' | "$STATUSLINE" --record "$record")
+  [ "$out" = 'CTX 71% used / 29% left [missing: total_tokens, current_usage] | COMPACT NOW: /compact' ] \
+    || fail "missing optional fields did not degrade visibly while keeping the trigger: $out"
+  assert_present "$record" "percentage-only reading was not recorded"
+  node - "$record" <<'NODE' || fail "degraded snapshot did not keep present fields plus missing-field information"
+const snapshot = JSON.parse(require("fs").readFileSync(process.argv[2], "utf8"));
+if (snapshot.context_window.used_percentage !== 71) process.exit(1);
+if (snapshot.context_window.remaining_percentage !== 29) process.exit(1);
+if ("total_tokens" in snapshot.context_window) process.exit(1);
+if ("current_usage" in snapshot.context_window) process.exit(1);
+if (JSON.stringify(snapshot.missing_optional_fields) !== '["total_tokens","current_usage"]') process.exit(1);
+if (snapshot.compact_recommended !== true) process.exit(1);
+NODE
+  pass "missing optional fields are named while the percentages and trigger keep firing"
+}
+
+test_invalid_optional_field_is_named_not_passed_through() {
+  local record out
+  record="$TMP_ROOT/invalid-optional/context-pressure.json"
+  mkdir -p "${record%/*}"
+  out=$(printf '{"context_window":{"remaining_percentage":30.5,"used_percentage":69.5,"total_tokens":"unknown","current_usage":{"input_tokens":1234}}}\n' | "$STATUSLINE" --record "$record")
+  [ "$out" = 'CTX 69.5% used / 30.5% left [missing: total_tokens]' ] \
+    || fail "invalid total_tokens was not named as missing: $out"
+  node - "$record" <<'NODE' || fail "snapshot passed through an invalid optional value"
+const snapshot = JSON.parse(require("fs").readFileSync(process.argv[2], "utf8"));
+if ("total_tokens" in snapshot.context_window) process.exit(1);
+if (snapshot.context_window.current_usage.input_tokens !== 1234) process.exit(1);
+if (JSON.stringify(snapshot.missing_optional_fields) !== '["total_tokens"]') process.exit(1);
+if (snapshot.compact_recommended !== false) process.exit(1);
+NODE
+  pass "an invalid optional field is named as missing and never passed through"
+}
+
 test_invalid_payload_is_silent_and_clears_stale_snapshot() {
   local record out status
   record="$TMP_ROOT/invalid/context-pressure.json"
@@ -143,6 +182,8 @@ test_threshold_is_exact_and_fireable
 test_display_truncates_below_the_exact_threshold
 test_reaped_snapshot_directory_is_recreated
 test_record_failure_keeps_display_and_last_valid_snapshot
+test_missing_optional_fields_degrade_visibly_and_keep_the_trigger
+test_invalid_optional_field_is_named_not_passed_through
 test_invalid_payload_is_silent_and_clears_stale_snapshot
 test_tracked_claude_settings_use_the_telemetry_command
 test_record_requires_absolute_path

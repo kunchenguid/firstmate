@@ -6,10 +6,17 @@
 # Claude Code invokes a statusLine command with its JSON payload on stdin.
 # This command reads context_window.remaining_percentage, used_percentage,
 # total_tokens, and current_usage. It prints one compact display line and, when
-# --record is present, atomically writes the complete reading plus the derived
+# --record is present, atomically writes the reading plus the derived
 # 70%-compaction advisory as JSON for the worker named by a generated brief.
-# Invalid or incomplete input prints nothing, removes any requested stale
-# snapshot, and exits zero so telemetry can never disrupt the host session.
+# Only used_percentage and remaining_percentage are required: they alone drive
+# the display and the 70% trigger. total_tokens and current_usage are optional;
+# when either is missing or invalid, the percentages and trigger still render,
+# each missing optional field is named in the display, and the snapshot keeps
+# only the fields actually present plus a missing_optional_fields list, so
+# degradation is visible and no value is ever invented.
+# Input without both valid percentages prints nothing, removes any requested
+# stale snapshot, and exits zero so telemetry can never disrupt the host
+# session.
 # Snapshot persistence is best-effort: the parent directory is recreated when
 # missing, and a failed write never suppresses the display line nor removes
 # the last valid snapshot. Percentages display truncated to one decimal so a
@@ -49,9 +56,7 @@ function clearStaleRecord() {
   if (!record) return;
   try {
     fs.unlinkSync(record);
-  } catch (error) {
-    if (error.code !== "ENOENT") return;
-  }
+  } catch (_) {}
 }
 
 function finiteNumber(value) {
@@ -81,8 +86,11 @@ try {
   const currentUsage = contextWindow.current_usage;
   if (!finiteNumber(used) || used < 0 || used > 100) throw new Error("invalid used_percentage");
   if (!finiteNumber(remaining) || remaining < 0 || remaining > 100) throw new Error("invalid remaining_percentage");
-  if (!finiteNumber(total) || total <= 0) throw new Error("invalid total_tokens");
-  if (!currentUsage || typeof currentUsage !== "object" || Array.isArray(currentUsage)) throw new Error("invalid current_usage");
+  const hasTotal = finiteNumber(total) && total > 0;
+  const hasCurrentUsage = Boolean(currentUsage) && typeof currentUsage === "object" && !Array.isArray(currentUsage);
+  const missingOptional = [];
+  if (!hasTotal) missingOptional.push("total_tokens");
+  if (!hasCurrentUsage) missingOptional.push("current_usage");
 
   const compactRecommended = used >= 70;
   if (record) {
@@ -90,11 +98,15 @@ try {
       const parent = path.dirname(record);
       fs.mkdirSync(parent, { recursive: true });
       const temporary = path.join(parent, `.${path.basename(record)}.${process.pid}.tmp`);
+      const recordedWindow = { ...contextWindow };
+      if (!hasTotal) delete recordedWindow.total_tokens;
+      if (!hasCurrentUsage) delete recordedWindow.current_usage;
       const snapshot = {
-        context_window: contextWindow,
+        context_window: recordedWindow,
         compact_at_used_percentage: 70,
         compact_recommended: compactRecommended,
       };
+      if (missingOptional.length > 0) snapshot.missing_optional_fields = missingOptional;
       fs.writeFileSync(temporary, `${JSON.stringify(snapshot, null, 2)}\n`, { mode: 0o600 });
       try {
         fs.renameSync(temporary, record);
@@ -105,7 +117,9 @@ try {
     } catch (_) {}
   }
 
-  let line = `CTX ${formatPercentage(used)}% used / ${formatPercentage(remaining)}% left (${formatTokens(total)})`;
+  let line = `CTX ${formatPercentage(used)}% used / ${formatPercentage(remaining)}% left`;
+  if (hasTotal) line += ` (${formatTokens(total)})`;
+  if (missingOptional.length > 0) line += ` [missing: ${missingOptional.join(", ")}]`;
   if (compactRecommended) line += " | COMPACT NOW: /compact";
   process.stdout.write(line);
 } catch (_) {
