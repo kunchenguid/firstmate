@@ -550,6 +550,71 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+# The captain commonly answers a decision after the dependent work has already
+# shipped, which is the ordinary shape whenever a hold outlives its own work item.
+# Finished work still carrying the hold's dependency edge is real routing, so
+# resolve must close through the owner tool instead of forcing a hand edit. A
+# routed task with no edge at all stays refused, and that refusal must name the
+# exact command that declares the edge.
+test_resolve_accepts_done_routed_work_and_names_the_block_remedy() {
+  local home origin hold_shipped hold_unrouted show
+  home=$(make_home done-routed-work)
+  origin=sample-late-answer-review
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Late captain answer review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create late-answer origin"
+  write_origin_meta "$home" "$origin"
+  printf 'done: report complete\n' > "$home/state/$origin.status"
+  printf '# Late answer review\n\nOne shipped route and one undeclared control.\n' > "$home/data/$origin/report.md"
+
+  hold_shipped=$(run_decisions "$home" hold "$origin" shipped \
+    --title "Choose the shipped route" --reason "captain shipped route pending" --repo sample) \
+    || fail "could not register shipped-route hold"
+  hold_unrouted=$(run_decisions "$home" hold "$origin" unrouted \
+    --title "Choose the unrouted control" --reason "captain unrouted control pending" --repo sample) \
+    || fail "could not register unrouted-control hold"
+
+  tasks_in "$home" add dep-shipped "Apply the shipped route" --kind ship --repo sample >/dev/null \
+    || fail "could not create shipped dependent"
+  tasks_in "$home" block dep-shipped --by "$hold_shipped" >/dev/null \
+    || fail "could not route shipped dependent behind its hold"
+  tasks_in "$home" "done" dep-shipped >/dev/null || fail "could not complete the shipped dependent"
+  show=$(tasks_in "$home" show dep-shipped --full)
+  assert_contains "$show" "state: done" "shipped fixture must be Done before resolve"
+  assert_contains "$show" "blocked_by: $hold_shipped" "shipped fixture must retain its durable routing edge"
+
+  printf 'Use the shipped route.\n' > "$home/shipped-decision.txt"
+  if ! run_decisions "$home" resolve "$origin" shipped --decision-file "$home/shipped-decision.txt" \
+    --routed-to dep-shipped > "$home/shipped.out" 2> "$home/shipped.err"; then
+    fail "resolve refused a Done routed task that carried the hold's edge: $(cat "$home/shipped.err")"
+  fi
+  show=$(tasks_in "$home" show "$hold_shipped" --full)
+  assert_contains "$show" "state: done" "hold routed to Done work did not close"
+  assert_contains "$show" "Resolution recorded by fm-decision-hold" "closed hold lost its decision record"
+  show=$(tasks_in "$home" show dep-shipped --full)
+  assert_contains "$show" "blocked: no" "resolve did not clear the Done dependent's routing edge"
+
+  run_decisions "$home" resolve "$origin" shipped --decision-file "$home/shipped-decision.txt" \
+    --routed-to dep-shipped >/dev/null 2>&1 \
+    || fail "identical Done-route resolution retry was not idempotent"
+
+  tasks_in "$home" add dep-unrouted "Apply the unrouted control" --kind ship --repo sample >/dev/null \
+    || fail "could not create unrouted dependent"
+  tasks_in "$home" "done" dep-unrouted >/dev/null || fail "could not complete the unrouted dependent"
+  printf 'Use the unrouted control.\n' > "$home/unrouted-decision.txt"
+  if run_decisions "$home" resolve "$origin" unrouted --decision-file "$home/unrouted-decision.txt" \
+    --routed-to dep-unrouted > "$home/unrouted.out" 2> "$home/unrouted.err"; then
+    fail "resolve accepted a routed task with no declared dependency edge"
+  fi
+  assert_grep "tasks-axi block dep-unrouted --by $hold_unrouted" "$home/unrouted.err" \
+    "the undeclared-edge refusal did not name the exact remedy command"
+  show=$(tasks_in "$home" show "$hold_unrouted" --full)
+  assert_contains "$show" "state: queued" "failed undeclared-edge resolve closed the hold"
+  assert_contains "$show" "held: yes" "failed undeclared-edge resolve released the hold"
+
+  pass "resolve accepts Done routed work and names the block remedy for an undeclared edge"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -560,3 +625,4 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
+test_resolve_accepts_done_routed_work_and_names_the_block_remedy

@@ -14,6 +14,9 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) --torn-down merges a cleaned-up task's PR and records the durable ledger
+#   (j) --torn-down is refused while the task is still live, and its guards run
+#       before the ledger is written
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -88,6 +91,7 @@ run_pr_merge() {
   local case_dir=$1 rc; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
@@ -301,6 +305,81 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+# A late merge - a held PR, a rebase, a review that landed after cleanup - must
+# keep the guarded path rather than reaching around it to a raw merge command.
+# There is no meta to record into and no live task for a merge poll to wake, so
+# the durable ledger carries the merge record instead.
+test_torn_down_merges_and_records_the_durable_ledger() {
+  local case_dir rc
+  case_dir="$TMP_ROOT/torn-down"
+  mkdir -p "$case_dir/state" "$case_dir/fakebin"
+  add_gh_mocks "$case_dir" aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" --torn-down gone-x1 https://github.com/example/repo/pull/31 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "torn-down: fm-pr-merge should merge a cleaned-up task's PR"
+  assert_grep "$(printf '\tgone-x1\thttps://github.com/example/repo/pull/31')" \
+    "$case_dir/data/merged-prs.log" "torn-down: the merge was not recorded in the durable ledger"
+  grep -qxF 'pr merge 31 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "torn-down: gh-axi pr merge was not invoked with number, --repo, and default --squash"
+  assert_absent "$case_dir/state/gone-x1.check.sh" \
+    "torn-down: a merge poll was armed for a task that no longer exists"
+  assert_absent "$case_dir/state/gone-x1.meta" \
+    "torn-down: task metadata was recreated for a cleaned-up task"
+  pass "fm-pr-merge --torn-down merges a cleaned-up task's PR and records the durable ledger"
+}
+
+test_torn_down_refused_while_task_is_live() {
+  local case_dir rc
+  case_dir=$(make_case torn-down-live)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" ffffffff00000000111111112222222233333333
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" --torn-down task-x1 https://github.com/example/repo/pull/33 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "torn-down-live: fm-pr-merge should refuse --torn-down for a live task"
+  assert_grep 'still has metadata; merge it without --torn-down' "$case_dir/stderr" \
+    "torn-down-live: refusal did not name the ordinary path"
+  assert_absent "$case_dir/data/merged-prs.log" \
+    "torn-down-live: a ledger line was written for a live task"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "torn-down-live: gh-axi pr merge was invoked for a live task"
+  pass "fm-pr-merge refuses --torn-down while the task is still live"
+}
+
+test_torn_down_guards_run_before_the_ledger() {
+  local case_dir rc
+  case_dir="$TMP_ROOT/torn-down-repo-override"
+  mkdir -p "$case_dir/state" "$case_dir/fakebin"
+  add_gh_mocks "$case_dir" 4444444455555555666666667777777788888888
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" --torn-down gone-x2 https://github.com/right/repo/pull/35 -- --repo wrong/repo \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "torn-down-repo-override: fm-pr-merge should refuse repo override flags"
+  assert_grep 'extra merge arguments must not override the repository' "$case_dir/stderr" \
+    "torn-down-repo-override: refusal did not explain the repo override"
+  assert_absent "$case_dir/data/merged-prs.log" \
+    "torn-down-repo-override: a ledger line was written before the guards passed"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "torn-down-repo-override: gh-axi pr merge was invoked despite repo override"
+  pass "fm-pr-merge --torn-down runs its merge guards before writing the ledger"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -311,3 +390,6 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_torn_down_merges_and_records_the_durable_ledger
+test_torn_down_refused_while_task_is_live
+test_torn_down_guards_run_before_the_ledger

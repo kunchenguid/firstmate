@@ -37,6 +37,13 @@
 # It writes the captain decision and routed identities into the hold body, clears
 # those dependency edges, and only then marks the hold Done. A failure before the
 # final step leaves the captain hold open.
+#
+# A routed task that has already reached Done is accepted: the captain commonly
+# answers a decision after the dependent work shipped, and finished work carrying
+# the hold's dependency edge is stronger evidence of real routing than queued work.
+# The edge itself is never created here, because declaring the dependency is the
+# caller's deliberate act; a routed task with no edge is refused with the exact
+# `tasks-axi block` command that would declare it.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -368,7 +375,7 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked hold_show hold_body
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -406,15 +413,11 @@ command_resolve() {
   case "$hold_body" in
     *"Resolution recorded by fm-decision-hold."*)
       verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
-      resolution_recorded=1
       ;;
   esac
 
   for dep in $routed; do
     show=$(task_show "$dep") || fail "routed task $dep does not exist in the active home"
-    state=$(show_field "$show" state)
-    [ "$state" != "done" ] || [ "$resolution_recorded" = 1 ] \
-      || fail "routed task $dep is already done"
     # tasks-axi quotes multi-entry blocked_by as "a,b,c"; strip so edge ids match.
     blocked=$(show_field "$show" blocked_by | tr -d '[:space:]')
     blocked=${blocked#\"}
@@ -424,7 +427,7 @@ command_resolve() {
       *)
         case "$hold_body" in
           *"Resolution recorded by fm-decision-hold."*"- $dep"*) : ;;
-          *) fail "routed task $dep is not durably blocked by $id" ;;
+          *) fail "routed task $dep is not durably blocked by $id; declare that dependency first with: tasks-axi block $dep --by $id" ;;
         esac
         ;;
     esac

@@ -26,6 +26,8 @@ The `--force` path remains the explicit captain-approved discard escape hatch.
 The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
 It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
+A routed task that has already reached Done is accepted, because the captain commonly answers a decision after its dependent work shipped and finished work carrying the edge is stronger routing evidence than queued work.
+The edge itself is never created by `resolve`, and a routed task with no edge is refused with the exact `tasks-axi block <task> --by <hold>` command that declares it.
 A failed intermediate step leaves the hold open.
 
 ## Structured read surfaces
@@ -43,11 +45,13 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Done-routed acceptance and remedy-naming refusal verification date: 2026-07-29.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
+A further regression covers a Done routed task that still carries the hold's edge, and asserts that a routed task with no edge is refused with the exact `tasks-axi block` command naming both real ids.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -62,6 +66,7 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+ok - resolve accepts Done routed work and names the block remedy for an undeclared edge
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly
