@@ -35,7 +35,8 @@ bin/fm-parallelism.sh set auto --goal goal-1
 Resolution precedence is request override, goal configuration, project configuration, and global configuration.
 The request override may be supplied as `--request MODE` or `FM_PARALLELISM_OVERRIDE`.
 Status reports selected lower scopes as `uninspected` while a request override shadows them.
-The goal and project selectors use safe identifiers containing 1 to 64 ASCII letters, digits, dots, underscores, or hyphens.
+Goal selectors use the WorkGraph `goal_id` grammar: 1 to 64 ASCII letters, digits, dots, underscores, or hyphens, beginning with a letter or digit.
+Project selectors use 1 to 64 ASCII letters, digits, dots, underscores, or hyphens.
 Malformed persisted files, unsafe identifiers, and unknown modes fail closed.
 
 [`configuration.md`](configuration.md#workgraph-storage-and-parallelism) owns the global, project, and goal storage locations.
@@ -47,7 +48,7 @@ Parallelism mode is separate from the existing project delivery `mode=` vocabula
 [`bin/fm-workgraph.sh`](../bin/fm-workgraph.sh) owns Slice-2 graph and contract validation and status presentation.
 The graph is a JSON object with `schema_version` `workgraph/v1`, a safe `goal_id`, and exactly one `slices` reference.
 The reference contains a safe `slice_id`, a safe relative `contract_path`, and a lowercase `contract_sha256` digest.
-Contract paths reject traversal, empty segments, and Unicode control characters.
+Contract paths reject traversal, empty segments, Unicode control characters, and Unicode line and paragraph separators.
 The referenced contract is an independently stored JSON file below the graph directory.
 The validator captures its bytes once and hashes and parses that same captured sequence.
 
@@ -58,7 +59,7 @@ The allowed slice types are `ship`, `scout`, `audit`, and `integration`.
 Each immutable input has a `path` and a lowercase SHA-256 `sha256` digest.
 Each claim has a `resource` and one of `read`, `write`, or `exclusive`.
 The one-node contract has an empty `depends_on` array.
-The context budget contains positive `source_tokens` and `report_words` integers.
+The context budget contains positive safe `source_tokens` and `report_words` integers no greater than 9007199254740991.
 
 Validate or inspect a graph with these commands.
 

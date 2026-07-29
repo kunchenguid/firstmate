@@ -27,9 +27,19 @@ die() {
 }
 
 safe_id() {
+  local LC_ALL=C
   case "$1" in
     ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;;
     *) [ "${#1}" -le 64 ] ;;
+  esac
+}
+
+safe_goal_id() {
+  local LC_ALL=C
+  safe_id "$1" || return 1
+  case "$1" in
+    [A-Za-z0-9]*) return 0 ;;
+    *) return 1 ;;
   esac
 }
 
@@ -56,7 +66,11 @@ require_mode() {
 
 parse_id() {
   local kind=$1 value=$2
-  safe_id "$value" || die "unsafe $kind id '$value'"
+  case "$kind" in
+    goal) safe_goal_id "$value" ;;
+    project) safe_id "$value" ;;
+    *) return 1 ;;
+  esac || die "unsafe $kind id '$value'"
 }
 
 REQUEST_MODE=

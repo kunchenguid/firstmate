@@ -56,8 +56,8 @@
       "additionalProperties": false,
       "required": ["source_tokens", "report_words"],
       "properties": {
-        "source_tokens": {"type": "integer", "exclusiveMinimum": 0},
-        "report_words": {"type": "integer", "exclusiveMinimum": 0}
+        "source_tokens": {"type": "integer", "exclusiveMinimum": 0, "maximum": 9007199254740991},
+        "report_words": {"type": "integer", "exclusiveMinimum": 0, "maximum": 9007199254740991}
       }
     },
     "gates": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},

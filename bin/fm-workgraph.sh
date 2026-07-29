@@ -328,7 +328,7 @@ const pathParts = contractPath.split(/[\\/]/);
 if (
   path.isAbsolute(contractPath)
   || pathParts.some((part) => part === "" || part === "." || part === "..")
-  || /[\u0000-\u001f\u007f-\u009f]/u.test(contractPath)
+  || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(contractPath)
 ) {
   fail("WG-E-ID", "graph.slices[0].contract_path must be a safe relative path");
 }

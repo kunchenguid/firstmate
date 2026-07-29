@@ -111,6 +111,8 @@ if (mutation === "control-path-lf") value.slices[0].contract_path = "contracts/\
 if (mutation === "control-path-cr") value.slices[0].contract_path = "contracts/\rslice-1.json";
 if (mutation === "control-path-del") value.slices[0].contract_path = "contracts/\u007fslice-1.json";
 if (mutation === "control-path-c1") value.slices[0].contract_path = "contracts/\u0085slice-1.json";
+if (mutation === "control-path-line-separator") value.slices[0].contract_path = "contracts/\u2028slice-1.json";
+if (mutation === "control-path-paragraph-separator") value.slices[0].contract_path = "contracts/\u2029slice-1.json";
 fs.writeFileSync(target, JSON.stringify(value, null, 2) + "\n");
 NODE
 }
@@ -146,6 +148,8 @@ if (mutation === "unknown-root") value.unexpected = true;
 if (mutation === "unknown-input") value.immutable_inputs[0].unexpected = true;
 if (mutation === "unknown-claim") value.claims[0].unexpected = true;
 if (mutation === "unknown-context") value.context_budget.unexpected = true;
+if (mutation === "unsafe-source-tokens") value.context_budget.source_tokens = 9007199254740992;
+if (mutation === "unsafe-report-words") value.context_budget.report_words = 9007199254740992;
 fs.writeFileSync(target, JSON.stringify(value, null, 2) + "\n");
 NODE
   mv "$contract.tmp" "$contract"
@@ -225,6 +229,17 @@ test_precedence_and_scopes() {
   pass "parallelism: request > goal > project > global"
 }
 
+test_goal_identifier_alignment() {
+  local goal_id
+  new_home
+  for goal_id in .goal _goal -goal 'égoal'; do
+    run_parallelism set off --goal "$goal_id"
+    [ "$RC" -ne 0 ] || fail "goal id '$goal_id' was accepted"
+  done
+  [ ! -e "$TEST_HOME/data/workgraphs" ] || fail "invalid goal ids materialized goal configuration"
+  pass "parallelism: goal selectors match WorkGraph goal identifiers"
+}
+
 test_atomic_scoped_and_metadata_unchanged() {
   local expected_meta expected_fixture
   new_home
@@ -302,7 +317,7 @@ test_graph_negative_cases() {
   for mutation in \
     bad-contract-schema bad-claim missing-field object-output \
     unknown-root unknown-input unknown-claim unknown-context \
-    duplicate-root duplicate-claim
+    duplicate-root duplicate-claim unsafe-source-tokens unsafe-report-words
   do
     root=$(mktemp -d "$TMP_ROOT/contract-$mutation.XXXXXX")
     write_valid_graph "$root"
@@ -315,7 +330,10 @@ test_graph_negative_cases() {
 
 test_contract_path_control_characters() {
   local mutation case_root
-  for mutation in control-path-lf control-path-cr control-path-del control-path-c1; do
+  for mutation in \
+    control-path-lf control-path-cr control-path-del control-path-c1 \
+    control-path-line-separator control-path-paragraph-separator
+  do
     case_root=$(mktemp -d "$TMP_ROOT/$mutation.XXXXXX")
     write_valid_graph "$case_root"
     mutate_json "$case_root/graph.json" "$case_root/bad.json" "$mutation"
@@ -385,6 +403,17 @@ if (contract.properties.outputs.items.type !== "string") {
 if (parallelism.enum.includes("auto")) {
   throw new Error("persisted parallelism schema permits auto");
 }
+const pathPattern = new RegExp(graph.properties.slices.items.properties.contract_path.pattern, "u");
+for (const separator of ["\u2028", "\u2029"]) {
+  if (pathPattern.test(`contracts/${separator}slice-1.json`)) {
+    throw new Error("workgraph schema permits a Unicode line separator");
+  }
+}
+for (const field of ["source_tokens", "report_words"]) {
+  if (contract.properties.context_budget.properties[field].maximum !== Number.MAX_SAFE_INTEGER) {
+    throw new Error(`slice-contract ${field} exceeds the executable safe-integer limit`);
+  }
+}
 NODE
   pass "schemas: object shapes and persisted modes are strict"
 }
@@ -392,6 +421,7 @@ NODE
 test_mode_round_trips
 test_auto_and_invalid_values
 test_precedence_and_scopes
+test_goal_identifier_alignment
 test_atomic_scoped_and_metadata_unchanged
 test_nonregular_mode_targets
 test_valid_graph_and_status
