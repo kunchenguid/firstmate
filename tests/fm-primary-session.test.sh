@@ -471,6 +471,12 @@ test_suspend_failure_and_live_tree_refuse() {
   assert_contains "$RUN_OUT" "unresolved suspend-incomplete primary-session receipt still has live captured pids" \
     "ordinary lock refusal did not cite the unresolved incomplete handoff"
   [ "$(cat "$W_ROOT/state/.lock")" = "$OWNER_PID" ] || fail "blocked stale acquisition changed the old lock"
+  receipt_id=$(record_last_value "$receipt" receipt_id)
+  run_restore "$receipt_id"
+  [ "$RUN_RC" -ne 0 ] || fail "restore bypassed unresolved suspend-incomplete receipt"
+  assert_contains "$RUN_OUT" "unresolved suspend-incomplete primary-session receipt still has live captured pids" \
+    "restore refusal did not cite the unresolved incomplete handoff"
+  [ "$(grep -c '^reload ' "$W_PASEO/calls.log" || true)" -eq 0 ] || fail "refused suspend-incomplete restore invoked reload"
   kill "$OWNER_PID" 2>/dev/null || true
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     kill -0 "$OWNER_PID" 2>/dev/null || break

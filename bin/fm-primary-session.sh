@@ -577,7 +577,7 @@ resolve_receipt() {
 
 restore() {
   local receipt_id=$1 receipt fingerprint receipt_home state agent_id manager harness provider inspect out
-  local deadline post now lock_pid
+  local deadline post now lock_pid incomplete_reason
   require_read_tools
   primary_scope_required
   receipt=$(resolve_receipt "$receipt_id") || die "receipt not found or invalid: $receipt_id"
@@ -586,11 +586,6 @@ restore() {
   fingerprint=$(fm_primary_home_fingerprint) || die "cannot fingerprint this Firstmate home"
   receipt_home=$(fm_primary_receipt_last_value "$receipt" home_fingerprint 2>/dev/null || true)
   [ "$receipt_home" = "$fingerprint" ] || die "receipt belongs to a different Firstmate home"
-  state=$(fm_primary_receipt_last_value "$receipt" state 2>/dev/null || true)
-  case "$state" in
-    active-successor|suspended|suspend-incomplete|restore-failed) ;;
-    *) die "receipt state '$state' is not eligible for restore" ;;
-  esac
   manager=$(fm_primary_receipt_last_value "$receipt" manager 2>/dev/null || true)
   harness=$(fm_primary_receipt_last_value "$receipt" harness 2>/dev/null || true)
   provider=$(fm_primary_receipt_last_value "$receipt" provider 2>/dev/null || true)
@@ -605,6 +600,14 @@ restore() {
   trap release_claim_lock EXIT
   trap 'exit 1' HUP INT TERM
   acquire_claim_lock
+  if ! incomplete_reason=$(fm_primary_suspend_incomplete_clear); then
+    die "${incomplete_reason:-unresolved suspend-incomplete primary-session handoff}; restore refused until resolved"
+  fi
+  state=$(fm_primary_receipt_last_value "$receipt" state 2>/dev/null || true)
+  case "$state" in
+    active-successor|suspended|suspend-resolved|restore-failed) ;;
+    *) die "receipt state '$state' is not eligible for restore" ;;
+  esac
   if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     [ -f "$LOCK" ] && [ ! -L "$LOCK" ] || die "session lock is not a regular file"
     lock_pid=$(cat "$LOCK" 2>/dev/null) || die "session lock is unreadable"
