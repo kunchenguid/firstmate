@@ -69,6 +69,16 @@ It leads with a prominent bordered tangle banner, while `bin/fm-guard.sh` owns t
 On every verified primary harness, tracked hook integration gives the primary session a push-based backstop: when work is in flight and no identity-matched watcher lock with a fresh beacon is live, direct Stop hooks block and passive turn-end hooks force one bounded follow-up.
 The guard covers the main primary and genuinely marked secondmate homes, exempts child crewmate/scout worktrees, is loop-safe per harness, and is documented in [turnend-guard.md](turnend-guard.md).
 
+## Primary-session handoff
+
+The session lock is the authority for exactly one mutable first mate, while `state/.lock.owner` is a recoverable identity descriptor published after ordinary lock acquisition.
+`bin/fm-primary-session.sh` can transfer that authority away from an idle or quota-paused local Paseo-hosted Claude or Codex primary by proving the visible Paseo session owns the current numeric lock, writing a privacy-safe receipt under `data/primary-session-handoffs/`, soft-archiving the provider, verifying the captured owner process tree has exited, and then using the same stale-lock path as normal session start.
+Restore is explicit and remains separate from lock authority: the archived provider can be reloaded from its receipt only after the successor is no longer live, and that provider must run the native session-start nudge and reacquire the normal lock before any mutation.
+Unsupported hosts and providers, child agents, captain-action markers, pending permissions, busy turns, wedges, unknown evidence, and incomplete suspensions all refuse without deleting or weakening a live lock.
+The operator contract and supported-combination table live in [primary-session-handoff.md](primary-session-handoff.md), with deterministic fake-provider coverage recorded in [verification/primary-session-handoff.md](verification/primary-session-handoff.md).
+
+## Away-mode supervision
+
 A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) extends this for walk-away supervision: the `/afk` skill starts it through the tracked foreground helper `bin/fm-afk-start.sh`, after which the watcher reverts to daemon-managed one-shot mode and the daemon self-handles routine wakes in bash.
 The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs, declared-external-wait vocabulary, and status-scan primitives.
 Terminal verbs remain captain-relevant, while a nonterminal progress verb cannot become terminal merely because its prose contains a legacy free-text token such as `merged`; bare legacy free-text lines remain compatible.
