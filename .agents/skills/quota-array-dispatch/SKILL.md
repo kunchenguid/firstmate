@@ -45,7 +45,7 @@ Conservation pressure is present for effective pace status `ahead`, effective pa
 Apply only among candidates satisfying required fit and strongest reasoning class.
 Never use pace or raw headroom to silently replace that reasoning class.
 
-1. Unresolved relationship, auth, or quota: stop and report the tuple and concrete evidence.
+1. Unresolved relationship or quota: stop and report the tuple and concrete evidence.
 2. All-tight: keep strongest reasoning; dispatch inside it or report if blocked.
 3. Comparable fit/reasoning: prefer no ahead pressure over pressure, even with higher raw headroom.
 4. Among pressured candidates, prefer the least-negative worst applicable reserve.
@@ -60,6 +60,6 @@ Never use pace or raw headroom to silently replace that reasoning class.
    Report duplicate concrete profiles as a configuration error.
 
 Name the inspectable facts used for every candidate.
-Check auth only through the selected tuple's surface; another harness CLI cannot block it.
+After selecting, check auth only through that tuple's surface; another harness CLI cannot block it.
 A blocked credential report must name `harness`, `model`, authentication surface, and concrete failure evidence; never emit a bare `Grok unauthenticated` statement.
 Never conclude with an unexplained "best quota" label.

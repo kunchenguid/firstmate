@@ -94,6 +94,14 @@ def select(case):
             "candidates": sorted(c["id"] for c in winners),
         }
     winner = winners[0]
+    if winner.get("authAvailable") is False:
+        return {
+            "error": "selected candidate authentication unavailable",
+            "harness": winner["harness"],
+            "model": winner["model"],
+            "authenticationSurface": winner["authenticationSurface"],
+            "failureEvidence": winner["authFailure"],
+        }
     return {
         "id": winner["id"],
         "pressured": conservation_pressure(winner),
@@ -174,6 +182,8 @@ test_owner_contains_selection_procedure() {
     'Do not select by array order, harness name, or another arbitrary identity ordering' \
     'Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-specific policy' \
     'Report duplicate concrete profiles as a configuration error' \
+    'Unresolved relationship or quota: stop and report the tuple and concrete evidence' \
+    'After selecting, check auth only through that tuple'\''s surface' \
     'Name the inspectable facts used for every candidate'; do
     assert_grep "$phrase" "$OWNER" "quota-array-dispatch procedure lost '$phrase'"
   done
@@ -273,8 +283,10 @@ test_dispatch_identity_and_blocked_report() {
   local reports
   assert_grep '`harness-adapters` owns identity' "$OWNER" \
     "quota-array-dispatch does not point to the adapter identity owner"
-  assert_grep "another harness CLI cannot block it" "$OWNER" \
+  assert_grep "After selecting, check auth only through that tuple's surface; another harness CLI cannot block it" "$OWNER" \
     "quota-array-dispatch does not scope evidence to the concrete tuple"
+  assert_no_grep 'Unresolved relationship, auth, or quota' "$OWNER" \
+    "quota-array-dispatch checks authentication before selecting a candidate"
   assert_grep 'A blocked credential report must name `harness`, `model`, authentication surface, and concrete failure evidence' "$OWNER" \
     "blocked reports do not preserve the minimum identity and evidence fields"
   assert_grep 'The concrete `harness` field owns adapter identity independently of the model provider' "$HARNESS" \
