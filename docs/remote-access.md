@@ -46,7 +46,7 @@ Host shadowbyte-agent
 | --- | --- | --- |
 | `<server-host>.<tailnet>.ts.net` | The server's Tailscale MagicDNS name. | `tailscale status` on either device, or the machine's row in the tailnet admin console. |
 | `<server-user>` | The Linux account on the server that owns the Firstmate operational home. | `whoami` in a shell on the server. |
-| `<launcher-dir>` | The directory on the server holding the operator's own Firstmate launcher script used in Terminal 1. | Wherever you keep that script; it is not part of this repository. |
+| `<launcher-path>` | The full path on the server to the operator's own Firstmate launcher script used in Terminal 1. | Wherever you keep that script; it is not part of this repository. |
 | `<session-id>` | The id inside a Lavish session URL. | The `lavish-axi` session listing on the server. |
 
 `shadowbyte-agent` is not a placeholder; it is a local alias that exists only in the Mac's own `~/.ssh/config`, so any name works as long as the commands below use the same one.
@@ -94,7 +94,7 @@ Before relying on the OpenSSH path as a fallback, verify that a usable public ke
 ## Terminal 1: attach to Firstmate
 
 ```sh
-ssh -t shadowbyte-agent /home/<server-user>/<launcher-dir>/launch-firstmate.sh
+ssh -t shadowbyte-agent <launcher-path>
 ```
 
 That launcher is the operator's own script on the server and is not tracked in this repository, so the path above is a placeholder for wherever yours lives.
