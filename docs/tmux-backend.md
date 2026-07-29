@@ -77,7 +77,6 @@ After the normal retry budget, only structurally proven pending text in a provab
 Ambiguous pending text never receives the busy-queue conversion.
 `tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
 The shared process classifier accepts exact verified harness executables and harness-bearing interpreter scripts while rejecting unrelated names that merely contain a harness substring.
-Devin CLI 3000.1.27 was confirmed on 2026-07-13 to remain the literal `devin` foreground process throughout an interactive turn.
 
 ## Limits and regression entry points
 
