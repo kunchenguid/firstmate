@@ -88,6 +88,21 @@ fm_fakebin() {
   printf '%s\n' "$fakebin"
 }
 
+# fm_path_without <cmd>: echo $PATH with every directory containing an
+# executable named <cmd> removed. Lets a test simulate <cmd> being genuinely
+# absent from PATH even when the host machine has it installed (e.g. parlay).
+fm_path_without() {
+  local cmd=$1 dir
+  local -a kept_dirs=()
+  local IFS=:
+  # shellcheck disable=SC2086
+  for dir in $PATH; do
+    [ -x "$dir/$cmd" ] && continue
+    kept_dirs+=("$dir")
+  done
+  printf '%s\n' "${kept_dirs[*]}"
+}
+
 fm_fake_exit0() {
   local fakebin=$1 tool
   shift

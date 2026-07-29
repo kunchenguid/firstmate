@@ -1377,6 +1377,69 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   pass "herdr projection teardown retains the stale journal and attempts no workspace cleanup when exact-pane close is unconfirmed"
 }
 
+test_teardown_deregisters_parlay_when_present() {
+  local case_dir calls_log pid
+  case_dir=$(make_case parlay-present)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  calls_log="$case_dir/parlay-calls.log"
+  cat > "$case_dir/fakebin/parlay" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$calls_log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/parlay"
+
+  sleep 6600 &
+  pid=$!
+  printf '%s\n' "$pid" > "$case_dir/state/task-x1.parlay-listen-pid"
+
+  run_teardown "$case_dir" >/dev/null 2>&1 \
+    || fail "parlay-present: teardown should succeed"
+
+  ! kill -0 "$pid" 2>/dev/null \
+    || { kill "$pid" 2>/dev/null || true; fail "parlay-present: recorded parlay-listen pid was not killed"; }
+  assert_grep "agent-down task-x1" "$calls_log" \
+    "parlay-present: parlay was not invoked as 'agent-down task-x1'"
+  assert_absent "$case_dir/state/task-x1.parlay-listen-pid" \
+    "parlay-present: teardown did not remove the parlay-listen-pid file"
+  pass "a clean teardown kills the recorded parlay-listen pid and calls 'parlay agent-down <id>'"
+}
+
+test_teardown_kills_pid_even_when_parlay_absent() {
+  local case_dir safe_path pid rc
+  case_dir=$(make_case parlay-absent)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  sleep 6600 &
+  pid=$!
+  printf '%s\n' "$pid" > "$case_dir/state/task-x1.parlay-listen-pid"
+
+  # No fakebin/parlay is installed, and the host machine's real parlay (if any)
+  # is stripped out of PATH too - the genuine absent-from-PATH case.
+  safe_path=$(fm_path_without parlay)
+
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:$safe_path" \
+    "$TEARDOWN" task-x1 >/dev/null 2>&1
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "parlay-absent: teardown should still succeed without parlay on PATH"
+  ! kill -0 "$pid" 2>/dev/null \
+    || { kill "$pid" 2>/dev/null || true; fail "parlay-absent: recorded parlay-listen pid was not killed without parlay on PATH"; }
+  assert_absent "$case_dir/state/task-x1.parlay-listen-pid" \
+    "parlay-absent: teardown did not remove the parlay-listen-pid file"
+  pass "a clean teardown still kills the recorded parlay-listen pid even when parlay is absent from PATH"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -1409,3 +1472,5 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+test_teardown_deregisters_parlay_when_present
+test_teardown_kills_pid_even_when_parlay_absent
