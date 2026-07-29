@@ -405,6 +405,12 @@ case "\$cmd \$sub" in
       printf '{"error":{"code":"agent_not_found","message":"gone"}}\n' >&2
     fi
     ;;
+  "agent send")
+    if [ "\$arg" = "${stale#*:}" ]; then
+      exit 1
+    fi
+    exit 0
+    ;;
   "pane send-text"|"pane run"|"pane send-keys")
     if [ "\$arg" = "${stale#*:}" ]; then
       exit 1
