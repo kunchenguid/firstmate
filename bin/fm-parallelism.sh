@@ -6,9 +6,10 @@
 #   fm-parallelism.sh set MODE [--goal ID | --project ID]
 #   fm-parallelism.sh status [--request MODE] [--goal ID] [--project ID]
 #
-# The persisted vocabulary is off|eco|on|max.  auto is accepted only as a CLI
-# input alias and is always canonicalized to on.  This command is deliberately
-# independent of task lifecycle and never reads or changes task metadata.
+# schemas/workgraph/parallelism-v1.json owns the persisted vocabulary.
+# auto is accepted only as a command-line alias and is canonicalized to on.
+# FM_PARALLELISM_OVERRIDE and persisted files accept canonical values only.
+# Writes use an atomic same-directory rename independently of task lifecycle and never read or change task metadata.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

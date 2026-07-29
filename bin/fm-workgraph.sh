@@ -5,9 +5,9 @@
 #   fm-workgraph.sh validate <workgraph.json>
 #   fm-workgraph.sh status <workgraph.json>
 #
-# The graph and contract format is owned by schemas/workgraph/ and
-# docs/workgraph.md.  Slice 2 validates one node only and performs no resource,
-# wave, lease, gate, integration, or dispatch enforcement.
+# schemas/workgraph/ owns the exact graph and contract formats.
+# docs/workgraph.md owns the operator behavior and non-enforcement boundary.
+# Slice 2 validates one node only and performs no resource, wave, lease, gate, integration, or dispatch enforcement.
 set -eu
 
 usage() {
