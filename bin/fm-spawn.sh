@@ -2247,7 +2247,7 @@ fi
 if [ "$KIND" != secondmate ] && [ "$HARNESS" = claude ]; then
   CLAUDE_CREW_MODEL=$("$SCRIPT_DIR/fm-harness.sh" claude-crew-model) || exit 1
   [ "$RAW_LAUNCH" != 1 ] || {
-    echo "error: raw Claude crew/scout launch cannot prove its resolved model; use --harness claude with an optional explicit --model" >&2
+    echo "error: Claude crew/scout launch does not accept raw launch commands because they cannot prove the resolved model; use --harness claude with an optional explicit --model" >&2
     exit 1
   }
   if [ -z "$MODEL" ] && [ "$MODEL_SET" -eq 0 ]; then
