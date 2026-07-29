@@ -49,22 +49,34 @@ test_session_names_are_safe_and_isolated() {
 
 test_root_and_nonroot_chrome_arguments() {
   local out
+  out=$(fm_chrome_axi_args_for_uid 1000 '')
+  [ -z "$out" ] || fail "empty non-root arguments gained a value: $out"
+
+  out=$(fm_chrome_axi_args_for_uid 0 '')
+  [ "$out" = '--no-sandbox' ] || fail "empty root arguments lacked the exact token: $out"
+
   out=$(fm_chrome_axi_args_for_uid 1000 '--enable-gpu')
   [ "$out" = '--enable-gpu' ] || fail "non-root launch changed ambient Chrome arguments: $out"
 
   out=$(fm_chrome_axi_args_for_uid 0 '--enable-gpu')
   [ "$out" = '--enable-gpu --no-sandbox' ] || fail "root launch did not preserve ambient args and append the exact token: $out"
 
-  out=$(fm_chrome_axi_args_for_uid 0 '--no-sandbox --enable-gpu')
-  [ "$out" = '--no-sandbox --enable-gpu' ] || fail "root launch duplicated or reordered an existing token: $out"
-  [ "$(count_token "$out" '--no-sandbox')" -eq 1 ] || fail "exact root token appeared more than once"
+  out=$(fm_chrome_axi_args_for_uid 0 '--no-sandbox --enable-gpu --no-sandbox')
+  [ "$out" = '--enable-gpu --no-sandbox' ] || fail "root launch did not normalize duplicate exact tokens: $out"
+  [ "$(count_token "$out" '--no-sandbox')" -eq 1 ] || fail "normalized root token did not appear exactly once"
+
+  out=$(fm_chrome_axi_args_for_uid 1000 '--no-sandbox --enable-gpu --no-sandbox')
+  [ "$out" = '--enable-gpu' ] || fail "non-root launch retained an exact sandbox weakening: $out"
 
   out=$(fm_chrome_axi_args_for_uid 0 '--no-sandboxed')
   [ "$out" = '--no-sandboxed --no-sandbox' ] || fail "root token detection accepted a prefix instead of an exact token: $out"
 
+  out=$(fm_chrome_axi_args_for_uid 1000 '--no-sandboxed --enable-gpu')
+  [ "$out" = '--no-sandboxed --enable-gpu' ] || fail "non-root normalization removed a non-exact substring: $out"
+
   out=$(fm_chrome_axi_args_for_uid 0 $'--enable-gpu\t--no-sandbox')
-  [ "$out" = $'--enable-gpu\t--no-sandbox' ] || fail "whitespace-delimited exact token was duplicated"
-  pass "Chrome arguments preserve ambient values and add --no-sandbox exactly once only for root"
+  [ "$out" = '--enable-gpu --no-sandbox' ] || fail "whitespace-delimited exact token was not normalized"
+  pass "Chrome arguments preserve other tokens and enforce --no-sandbox exactly once only for root"
 }
 
 make_spawn_fakebin() {

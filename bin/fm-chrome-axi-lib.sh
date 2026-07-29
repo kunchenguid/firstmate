@@ -13,9 +13,10 @@
 #
 # Chrome arguments are whitespace-separated tokens, matching
 # chrome-devtools-axi's own contract.
-# When the launching worker uid is 0, the exact --no-sandbox token is appended
-# only when absent; every ambient argument is otherwise preserved byte-for-byte.
-# Non-root launches receive the ambient arguments unchanged.
+# Every exact --no-sandbox token is removed while all other tokens retain their
+# original order.
+# When the launching worker uid is 0, one exact --no-sandbox token is appended;
+# non-root launches receive no sandbox weakening.
 #
 # fm-teardown.sh validates that any recorded session exactly matches the
 # home/task-derived identity before cleanup can mutate anything.
@@ -72,9 +73,18 @@ fm_chrome_axi_session_name() {  # <firstmate-home> <task-id>
 }
 
 fm_chrome_axi_args_for_uid() {  # <uid> <ambient-arguments>
-  local uid=$1 args=${2-}
-  if [ "$uid" = 0 ] \
-     && ! printf '%s\n' "$args" | grep -Eq '(^|[[:space:]])--no-sandbox([[:space:]]|$)'; then
+  local uid=$1 args=${2-} token
+  local -a kept=() tokens=()
+  read -r -d '' -a tokens < <(printf '%s\0' "$args") || true
+  for token in "${tokens[@]}"; do
+    [ "$token" = --no-sandbox ] || kept+=("$token")
+  done
+  args=
+  if [ "${#kept[@]}" -gt 0 ]; then
+    printf -v args '%s ' "${kept[@]}"
+    args=${args% }
+  fi
+  if [ "$uid" = 0 ]; then
     args="${args:+$args }--no-sandbox"
   fi
   printf '%s' "$args"

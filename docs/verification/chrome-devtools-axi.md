@@ -109,7 +109,7 @@ Relevant bounded output:
 
 ```text
 ok - Chrome DevTools AXI sessions are deterministic, task/home-isolated, safe, and non-default
-ok - Chrome arguments preserve ambient values and add --no-sandbox exactly once only for root
+ok - Chrome arguments preserve other tokens and enforce --no-sandbox exactly once only for root
 ok - the shared launch boundary publishes one isolated root-safe browser environment before every worker runtime
 ok - browser cleanup metadata accepts only one exact home/task binding and keeps legacy records inert
 ok - fm-brief.sh: workers and scouts receive the bounded browser recovery and Playwright handoff contract
@@ -120,5 +120,5 @@ ok - browser-stop failure is explicit and preserves the task for an exact retry
 ok - cleanup refuses another task's valid named browser session without touching it
 ```
 
-The root/non-root argument matrix preserves ambient arguments, adds only the exact `--no-sandbox` token for uid 0, rejects prefix lookalikes, and does not add `--disable-dev-shm-usage`.
+The root/non-root argument matrix preserves every other token in order, removes every exact `--no-sandbox` occurrence, appends exactly one for uid 0 and none for non-root, rejects prefix lookalikes, and does not add `--disable-dev-shm-usage`.
 The cleanup matrix proves exact-session stop, inert legacy records, another-task refusal, authorization ordering, and retry-safe behavior when the exact stop fails.

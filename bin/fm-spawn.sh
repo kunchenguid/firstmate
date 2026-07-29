@@ -56,7 +56,8 @@
 #   Every ship/scout launch also receives a deterministic home/task-isolated
 #   Chrome DevTools AXI named session through the shared launch-command boundary.
 #   The exact session is recorded as chrome_devtools_axi_session= for teardown;
-#   root launches preserve ambient Chrome arguments and add --no-sandbox once.
+#   root launches normalize ambient Chrome arguments to one exact --no-sandbox
+#   token, while non-root launches remove every exact occurrence.
 #   Fixed ports, external-browser attachment, and shared user-data directories are
 #   cleared from the worker environment so the named bridge owns an isolated Chrome.
 #   bin/fm-chrome-axi-lib.sh owns naming, argument, validation, and cleanup details.
