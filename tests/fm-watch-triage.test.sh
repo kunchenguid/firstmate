@@ -808,7 +808,105 @@ test_declared_pause_with_missing_endpoint_still_surfaces() {
   wait_for_exit "$pid" 40 || fail "a missing endpoint did not escalate past the wedge threshold"
   grep -F "possible wedge" "$out" >/dev/null || fail "a missing endpoint's escalation omitted its wedge reason"
   grep -F "awaiting external" "$out" >/dev/null && fail "a missing endpoint was mislabeled a paused recheck"
+
+  # A NEW hash under the same missing endpoint surfaces as an ordinary stale
+  # pane, and must not re-arm the pause markers it was just decided not to use:
+  # stamping the re-surface throttle here would silence the legitimate
+  # PAUSE_RESURFACE_SECS recheck for a whole fresh window once the endpoint
+  # becomes readable again, without one recheck ever having been delivered.
+  rm -f "$state/.stale-since-$key" "$state/.wedge-escalations-$key" "$state/.paused-resurfaced-$key"
+  printf 'idle awaiting external (token 2)\n' > "$capture_file"
+  printf '%s' "$(hash_text 'idle awaiting external (token 2)')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a missing endpoint on a new hash did not surface as an ordinary stale pane"
+  grep -F "stale: $window" "$out" >/dev/null || fail "a missing endpoint on a new hash did not print a stale wake"
+  grep -F "awaiting external" "$out" >/dev/null && fail "a missing endpoint on a new hash was mislabeled a paused recheck"
+  [ ! -e "$state/.paused-$key" ] || fail "an ordinary surface re-armed the pause cadence marker for a missing endpoint"
+  [ ! -e "$state/.paused-resurfaced-$key" ] || fail "an ordinary surface stamped the paused re-surface throttle for a missing endpoint"
   pass "a declared pause is overridden by a confirmed-missing endpoint, which still surfaces on the ordinary wedge cadence"
+}
+
+# The reconciliation read behind a declared pause (crew_is_provably_working ->
+# fm-crew-state.sh, which can make a bounded no-mistakes call) must stay on the
+# STALE_ESCALATE_SECS cadence for EVERY verdict, including the two that clear the
+# pause markers while the status log keeps declaring the pause: a
+# confirmed-missing endpoint and an authoritative working override. Neither ever
+# self-heals from the log, so a marker cleared out from under the cadence would
+# put that read back on the per-poll path forever.
+test_declared_pause_reconciliation_read_is_throttled() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid calls n since
+  dir=$(make_case paused-recheck-throttle-missing); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/throttle.status"
+  calls="$dir/crew-state.calls"; window="test:fm-throttle"
+  printf 'idle awaiting external\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/throttle.meta"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-throttle_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting external")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+
+  # FM_FAKE_TMUX_WINDOW unset - a confirmed-missing endpoint, so every poll takes
+  # the branch that drops the pause markers, over several polls of FM_POLL=1
+  # inside one FM_STALE_ESCALATE_SECS window.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release' \
+    FM_FAKE_CREW_STATE_CALLS="$calls" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 45; then
+    reap "$pid"; fail "a missing-endpoint declared pause exited instead of accumulating its wedge timer: $(cat "$out")"
+  fi
+  reap "$pid"
+  n=$(wc -l < "$calls" 2>/dev/null | tr -d ' '); n=${n:-0}
+  [ "$n" -eq 1 ] || fail "a missing-endpoint declared pause ran the costly crew-state read $n times inside one cadence window"
+
+  dir=$(make_case paused-recheck-throttle-working); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/throttle.status"
+  calls="$dir/crew-state.calls"; window="test:fm-throttle"
+  printf 'idle awaiting external\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/throttle.meta"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-throttle_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting external")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+
+  # The other marker-clearing verdict: an authoritative active run overriding a
+  # stale paused: line. The cached verdict must also keep that decision STABLE
+  # across polls - a poll that silently fell back to the pause absorb would
+  # restart the wedge timer and hide a genuinely frozen run.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+    FM_FAKE_CREW_STATE_CALLS="$calls" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "an authoritative working override did not start wedge tracking"; }
+  since=$(cat "$state/.stale-since-$key")
+  if ! wait_live "$pid" 45; then
+    reap "$pid"; fail "an authoritative working override exited instead of accumulating its wedge timer: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ ! -e "$state/.paused-$key" ] || fail "an authoritative working override fell back to the pause absorb on a later poll"
+  [ "$(cat "$state/.stale-since-$key" 2>/dev/null || true)" = "$since" ] \
+    || fail "an authoritative working override restarted its wedge timer on a later poll"
+  n=$(wc -l < "$calls" 2>/dev/null | tr -d ' '); n=${n:-0}
+  [ "$n" -eq 1 ] || fail "an authoritative working override ran the costly crew-state read $n times inside one cadence window"
+  pass "the costly declared-pause reconciliation read and its verdict stay on the bounded cadence across polls"
 }
 
 # FM_CLASSIFY_PAUSED_VERB (fm-classify-lib.sh's single owner of the declared-
@@ -1382,6 +1480,7 @@ test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_declared_pause_is_bounded_regardless_of_agent_liveness
 test_declared_pause_with_missing_endpoint_still_surfaces
+test_declared_pause_reconciliation_read_is_throttled
 test_custom_paused_verb_honored_by_stale_detector
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

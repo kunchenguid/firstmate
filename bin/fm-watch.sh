@@ -317,12 +317,16 @@ handle_paused_stale() {  # <window> <task> <hash>
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
 }
 
+# Clears the two pause-absorb markers only. The reconciliation marker
+# .paused-rechecked-<key> is deliberately NOT touched: it is owned end to end by
+# pause_state_class (see there), and a caller that removes it collapses the
+# bounded reconciliation cadence into a costly crew-state read on every poll.
 clear_pause_state() {  # <window>
   local win=$1 key
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-resurfaced-$key"
 }
 
 clear_pause_tracking() {  # <window>
@@ -346,7 +350,14 @@ clear_pause_tracking() {  # <window>
 #   - the crew is PROVABLY working (an active run-step or busy pane) despite
 #     a stale paused: log line - reconciled on the bounded STALE_ESCALATE_SECS
 #     cadence rather than every poll, since crew_is_provably_working can shell
-#     out to no-mistakes;
+#     out to no-mistakes. The reconciliation marker .paused-rechecked-<key>
+#     carries both halves of that cadence - its mtime is when the last read
+#     ran, its contents are what that read decided - so a repeat poll inside
+#     the window reuses the verdict instead of re-reading, and the verdict
+#     stays stable across polls without any caller having to force a re-read.
+#     Its whole lifecycle belongs to this function: it is stamped here when the
+#     cadence comes due and removed here the moment the declared verb goes
+#     away, and no caller may delete it (see clear_pause_state);
 #   - the recorded endpoint is authoritatively `missing` (the window/pane
 #     itself is gone, not merely idle or exited to a shell) - the pause
 #     quiets idleness pings, never death detection.
@@ -354,7 +365,7 @@ clear_pause_tracking() {  # <window>
 # healthy by design (AGENTS.md section 8), so only the working-override
 # applies to them.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file state
+  local win=$1 task=$2 key last recheck_file recheck state
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
@@ -366,11 +377,18 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ "$(age_of "$recheck_file")" -ge "$STALE_ESCALATE_SECS" ]; then
-    date +%s > "$recheck_file"
     if crew_is_provably_working "$task"; then
-      printf 'working'
-      return
+      recheck=working
+    else
+      recheck=idle
     fi
+    printf '%s\n' "$recheck" > "$recheck_file"
+  else
+    recheck=$(cat "$recheck_file" 2>/dev/null || true)
+  fi
+  if [ "$recheck" = working ]; then
+    printf 'working'
+    return
   fi
   if [ "$(window_kind "$win")" != secondmate ]; then
     state=$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null) || state=unreadable
@@ -382,21 +400,20 @@ pause_state_class() {  # <window> <task>
   printf 'paused'
 }
 
+# Surface an ordinary (non-pause) stale pane. Only ever reached for a window
+# pause_state_class decided is NOT on the pause cadence, so the pause-absorb
+# markers are cleared rather than armed: a declared pause that lands here did so
+# because its endpoint is confirmed missing, and stamping the re-surface
+# throttle for that would silence the legitimate PAUSE_RESURFACE_SECS recheck
+# for a fresh window once the endpoint becomes readable again, without any
+# recheck ever having been delivered.
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last
+  local win=$1 h=$2 key
   key=$(printf '%s' "$win" | tr ':/.' '___')
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
-  task=$(window_to_task "$win" "$STATE")
-  last=$(last_status_line "$STATE/$task.status")
-  if status_is_paused_or_captain_held "$last"; then
-    : > "$STATE/.paused-$key"
-    date +%s > "$STATE/.paused-rechecked-$key"
-    date +%s > "$STATE/.paused-resurfaced-$key"
-  else
-    rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
-  fi
+  clear_pause_state "$win"
   wake "stale: $win"
 }
 

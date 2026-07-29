@@ -100,6 +100,10 @@ SH
 # A per-id override FM_FAKE_CREW_STATE_<sanitized-id> wins; otherwise the shared
 # FM_FAKE_CREW_STATE; otherwise an unknown verdict (NOT provably working), the
 # safe default so a test that forgets to set one surfaces rather than absorbs.
+# FM_FAKE_CREW_STATE_CALLS names a file the fake appends one line to per
+# invocation, so a test can assert HOW OFTEN this read runs - the real binary can
+# make a bounded no-mistakes call, so the watcher's cadences exist to keep it off
+# the per-poll path.
 make_fake_crew_state() {  # <fakebin>
   local fakebin=$1
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
@@ -109,6 +113,7 @@ id=${1:-}
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
 var="FM_FAKE_CREW_STATE_$key"
 val=${!var:-${FM_FAKE_CREW_STATE:-}}
+[ -n "${FM_FAKE_CREW_STATE_CALLS:-}" ] && printf '%s\n' "$id" >> "$FM_FAKE_CREW_STATE_CALLS"
 printf '%s\n' "${val:-state: unknown · source: none · fake default}"
 exit 0
 SH
