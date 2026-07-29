@@ -28,6 +28,8 @@ After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervi
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.
 A declared external wait trades that silence for one bounded recheck per pause window, so a forgotten pause cannot remain invisible indefinitely.
 Crew status files are append-only wake-event logs, not current-state fields.
+Every append carries a leading ISO-8601 UTC stamp whose format `bin/fm-classify-lib.sh` owns, so an event dates itself instead of relying on file mtime, which only ever dated the last line.
+`bin/fm-crew-state.sh` reports that as the age of the evidence behind its verdict - `live` for a run-step or pane read, the line's own elapsed time for a status-log read - and an untimestamped legacy line reports an unknown age rather than a guessed one.
 `bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
 The script header owns the exact run-head ancestry rules.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.

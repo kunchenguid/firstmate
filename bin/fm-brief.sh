@@ -39,6 +39,9 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Every generated status instruction is one copy-pasteable line that stamps the
+# append with UTC time, so a supervisor can tell a fresh event from a stale one;
+# fm-classify-lib.sh owns the stamp format (FM_STATUS_STAMP_CMD_DEFAULT).
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -66,6 +69,11 @@ esac
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+# The exact command every generated status instruction embeds so each append
+# carries its own UTC time. fm-classify-lib.sh owns the format; the scaffold
+# inlines the command rather than a helper script so the instruction stays one
+# self-contained line a worker can copy with nothing else on its PATH.
+STATUS_STAMP_CMD=${FM_STATUS_STAMP_CMD:-$FM_STATUS_STAMP_CMD_DEFAULT}
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -185,8 +193,9 @@ A message with NO marker is the captain typing directly into your pane: treat it
 # Escalation to main firstmate
 Handle routine work yourself.
 Report only true captain-relevant outcomes or a declared external wait by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   \`echo "\$($STATUS_STAMP_CMD) {state}: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+Keep the leading UTC stamp on every append: it is how the main firstmate tells a report you just wrote from one that has been sitting in the log for hours.
 Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
 This is also how you return the answer to a marked from-firstmate request above.
@@ -267,8 +276,10 @@ The report is the only thing that survives, so anything worth keeping must be in
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   \`echo "\$($STATUS_STAMP_CMD) {state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   Keep the leading UTC stamp on every append: it is how firstmate tells a report you
+   just wrote from one that has been sitting in the log for hours.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
@@ -378,8 +389,10 @@ $RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   \`echo "\$($STATUS_STAMP_CMD) {state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   Keep the leading UTC stamp on every append: it is how firstmate tells a report you
+   just wrote from one that has been sitting in the log for hours.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;

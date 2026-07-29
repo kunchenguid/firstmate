@@ -68,6 +68,8 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-tmux-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$_FM_PENDING_REPLY_LIB_DIR/fm-classify-lib.sh"
 
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
@@ -798,8 +800,10 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
   esac
   [ -n "$parent_status" ] || return 1
   mkdir -p "$(dirname "$parent_status")" 2>/dev/null || return 1
-  if ! grep -Fqx "blocked: $payload" "$parent_status" 2>/dev/null; then
-    printf 'blocked: %s\n' "$payload" >> "$parent_status" 2>/dev/null || return 1
+  # Substring, not whole-line: the append carries a leading timestamp
+  # (bin/fm-classify-lib.sh), so the payload no longer ends up alone on the line.
+  if ! grep -Fq "blocked: $payload" "$parent_status" 2>/dev/null; then
+    printf '%s blocked: %s\n' "$(fm_status_stamp)" "$payload" >> "$parent_status" 2>/dev/null || return 1
   fi
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1

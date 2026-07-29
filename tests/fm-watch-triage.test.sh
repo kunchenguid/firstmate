@@ -121,6 +121,71 @@ test_scan_captain_relevant_statuses_classifier() {
   pass "scan_captain_relevant_statuses lists only captain-relevant statuses"
 }
 
+# Status appends carry a leading ISO-8601 UTC stamp so a supervisor can tell a
+# fresh event from one that has sat in the log for hours. Two properties matter
+# equally: a stamped line must classify EXACTLY like the unstamped line it
+# replaced (the stamp's own colons must never be read as the verb separator),
+# and a legacy unstamped line must keep working with an unknown age rather than
+# a guessed one.
+test_status_timestamp_contract() {
+  local dir state stamp now open activity
+  dir=$(make_case classify-stamps); state="$dir/state"
+  stamp=$(fm_status_stamp)
+  [ -n "$(status_line_stamp "$stamp x")" ] \
+    || fail "fm_status_stamp does not emit the recognized stamp format: $stamp"
+
+  # Epoch arithmetic is pinned to known instants: a silently misparsed stamp
+  # would report a confidently wrong age, which is worse than no stamp at all.
+  [ "$(status_stamp_epoch 1970-01-01T00:00:00Z)" = 0 ] || fail "epoch zero misparsed"
+  [ "$(status_stamp_epoch 2000-03-01T00:00:00Z)" = 951868800 ] || fail "2000-03-01 misparsed"
+  [ "$(status_stamp_epoch 2024-02-29T12:00:00Z)" = 1709208000 ] || fail "leap day misparsed"
+  [ "$(status_stamp_epoch 2026-07-29T09:44:07Z)" = 1785318247 ] || fail "sample stamp misparsed"
+  status_stamp_epoch "not-a-stamp" && fail "a non-stamp must not yield an epoch"
+  status_stamp_epoch "2026-13-01T00:00:00Z" && fail "an impossible month must not yield an epoch"
+
+  # A stamped line parses to the same verb, note, and key as its bare form.
+  [ "$(status_line_verb "$stamp done: shipped")" = "done" ] || fail "stamped verb misparsed"
+  [ "$(status_line_note "$stamp done: shipped")" = shipped ] || fail "stamped note misparsed"
+  [ "$(status_line_body "$stamp done: shipped")" = "done: shipped" ] || fail "stamp not stripped"
+  [ "$(status_line_body "done: shipped")" = "done: shipped" ] || fail "legacy body altered"
+  status_is_captain_relevant "$stamp done: PR https://x/pull/9 checks green" \
+    || fail "stamped done: lost captain relevance"
+  status_is_terminal_verb "$stamp failed: build broke" || fail "stamped failed: not terminal"
+  status_is_paused "$stamp paused: upstream release" || fail "stamped paused: not recognized"
+  status_is_captain_relevant "$stamp working: rebased onto merged #76" \
+    && fail "stamped working: prose wrongly captain-relevant"
+  FM_CAPTAIN_RE='^custom-verb:' status_is_captain_relevant "$stamp custom-verb: x" \
+    || fail "a leading stamp broke an anchored FM_CAPTAIN_RE override"
+
+  # Keyed folds over a file mixing stamped and legacy lines.
+  printf '%s needs-decision [key=api]: a or b\nworking: legacy line\n%s working [key=p8]: phase 8\n' \
+    "$stamp" "$stamp" > "$state/stamped.status"
+  open=$(status_open_decisions "$state/stamped.status")
+  printf '%s' "$open" | grep -F $'api\tneeds-decision\ta or b' >/dev/null \
+    || fail "a stamped keyed decision did not enter the open set"
+  activity=$(status_open_activities "$state/stamped.status")
+  printf '%s' "$activity" | grep -F $'p8\tworking\tphase 8' >/dev/null \
+    || fail "a stamped keyed activity did not enter the open set"
+  printf '%s resolved [key=api]: chose a\n' "$stamp" >> "$state/stamped.status"
+  [ -z "$(status_open_decisions "$state/stamped.status")" ] \
+    || fail "a stamped resolved event did not close its keyed decision"
+
+  # Age: elapsed for a stamped line, unknown (not guessed) for a legacy one, and
+  # clamped for a stamp ahead of the reader's clock.
+  now=$(status_stamp_epoch 2026-07-29T12:00:00Z)
+  [ "$(status_line_age_secs "2026-07-29T09:46:00Z done: x" "$now")" = 8040 ] \
+    || fail "stamped age not computed from the line's own time"
+  [ "$(status_line_age_secs "2026-07-29T13:00:00Z done: x" "$now")" = 0 ] \
+    || fail "a future stamp must clamp to zero, not go negative"
+  status_line_age_secs "done: legacy" && fail "a legacy line must report no age, not a guess"
+  [ "$(fm_format_age 45)" = 45s ] || fail "seconds age misformatted"
+  [ "$(fm_format_age 720)" = 12m ] || fail "minutes age misformatted"
+  [ "$(fm_format_age 8040)" = 2h14m ] || fail "hours age misformatted"
+  [ "$(fm_format_age 273600)" = 3d4h ] || fail "days age misformatted"
+  [ "$(fm_format_age "")" = unknown ] || fail "an unknown age must render as unknown"
+  pass "status timestamps: stamped lines classify like bare ones, legacy lines age as unknown"
+}
+
 test_classifier_primitives() {
   local dir state open activity
   dir=$(make_case classify-primitives); state="$dir/state"
@@ -1273,6 +1338,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
+test_status_timestamp_contract
 test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier

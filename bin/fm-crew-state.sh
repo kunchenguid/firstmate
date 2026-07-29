@@ -16,7 +16,14 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · age: <age> · <detail>
+#
+# `age` is how old the EVIDENCE behind the reported state is, so a `done` from two
+# hours ago never reads the same as one from ten seconds ago:
+#   live       the run-step or pane was just observed, so the state is current
+#   <duration> the reported status-log line's own timestamp, e.g. 2h14m
+#   unknown    no evidence age is available - an untimestamped legacy status line
+#              (fm-classify-lib.sh's stamp contract), or no source at all
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -78,9 +85,26 @@ FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
 
+# Age of the evidence behind a state reported from <source>. A run-step or pane
+# verdict was read from the live system moments ago; a status-log verdict is only
+# as current as the line it came from, which is exactly the distinction that was
+# invisible before status appends carried a timestamp.
+evidence_age() {  # <source>
+  local secs
+  case "$1" in
+    run-step|pane) printf 'live'; return ;;
+    status-log) ;;
+    *) printf 'unknown'; return ;;
+  esac
+  secs=$(status_line_age_secs "${LOG_LINE:-}") || { printf 'unknown'; return; }
+  fm_format_age "$secs"
+}
+
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
-  local line="state: $1${SEP}source: $2"
+  local line age
+  age=$(evidence_age "$2")
+  line="state: $1${SEP}source: $2${SEP}age: $age"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
   exit 0

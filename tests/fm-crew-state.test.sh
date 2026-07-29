@@ -34,6 +34,14 @@ set -u
 
 CREW_STATE="$ROOT/bin/fm-crew-state.sh"
 TMP_ROOT=$(fm_test_tmproot fm-crew-state)
+# The reported "age:" field prefix, for scale assertions that must not race the clock.
+SEP_AGE='age: '
+
+# ISO-8601 UTC stamp for an epoch, across BSD (-r) and GNU (-d @) date dialects.
+stamp_at() {  # <epoch>
+  date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ
+}
 fm_git_identity fmtest fmtest@example.invalid
 
 # A real git repo checked out on <branch>, so the helper's branch attribution
@@ -877,6 +885,63 @@ test_no_run_idle_pane_uses_log() {
   pass "no run + idle pane uses the status-log verb"
 }
 
+# The 2026-07-29 incident: a `done:` read out of the status log was relayed as
+# current work when the line was actually hours old. Every verdict now carries
+# the age of the evidence behind it, so a two-hour-old done and a ten-second-old
+# done cannot look identical. A live run-step or pane read is `live`; an
+# untimestamped legacy line is `unknown` rather than a guess from file mtime.
+test_reported_state_carries_evidence_age() {
+  reset_fakes
+  local d out old
+  d=$(new_case age)
+  make_repo_on_branch "$d/wt" fm/feat-age
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-age.meta" "window=fm:fm-feat-age" "worktree=$d/wt" "kind=scout"
+
+  old=$(( $(date -u +%s) - 8040 ))
+  printf '%s done: PR https://x/y/pull/1 checks green\n' "$(stamp_at "$old")" \
+    > "$d/state/feat-age.status"
+  out=$(run_crew_state "$d" feat-age)
+  assert_contains "$out" "state: done" "stamped log line still classifies as done"
+  assert_contains "$out" "source: status-log" "stamped log line still reports its source"
+  assert_contains "$out" "age: 2h14m" "an old done must report how old it is"
+
+  printf '%s done: PR https://x/y/pull/1 checks green\n' "$(stamp_at "$(date -u +%s)")" \
+    > "$d/state/feat-age.status"
+  out=$(run_crew_state "$d" feat-age)
+  # Seconds, not hours: pinning an exact value would race the clock, so this
+  # asserts the scale that distinguishes a fresh report from a stale one.
+  case "$out" in
+    *"${SEP_AGE}"[0-9]s*|*"${SEP_AGE}"[0-9][0-9]s*) : ;;
+    *) fail "a just-written done must read as seconds old, got: $out" ;;
+  esac
+
+  # Legacy file with untimestamped lines: parsed, not guessed and not crashed.
+  printf 'working: started\nneeds-decision: which database?\n' > "$d/state/feat-age.status"
+  out=$(run_crew_state "$d" feat-age)
+  assert_contains "$out" "state: parked" "legacy untimestamped log still classifies"
+  assert_contains "$out" "age: unknown" "legacy untimestamped log must report an unknown age"
+
+  # A live pane read is current by construction.
+  FM_FAKE_BUSY=1
+  out=$(run_crew_state "$d" feat-age)
+  assert_contains "$out" "source: pane" "busy pane still reports the pane source"
+  assert_contains "$out" "age: live" "a live pane read must report a live age"
+
+  # So is a live run-step read.
+  reset_fakes
+  fm_write_meta "$d/state/feat-age.meta" "window=fm:fm-feat-age" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-age)"
+  out=$(run_crew_state "$d" feat-age)
+  assert_contains "$out" "source: run-step" "run-step verdict unchanged"
+  assert_contains "$out" "age: live" "a live run-step read must report a live age"
+
+  # Missing metadata has no evidence to age at all.
+  out=$(run_crew_state "$d" no-such-task)
+  assert_contains "$out" "age: unknown" "a sourceless verdict must report an unknown age"
+  pass "reported state carries the age of the evidence behind it"
+}
+
 test_no_run_idle_pane_uses_keyed_log() {
   reset_fakes
   local d; d=$(new_case keyed-idle)
@@ -1261,6 +1326,7 @@ test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane
 test_no_run_herdr_idle_agent_status_and_idle_pane_stays_idle
 test_no_run_idle_pane_uses_log
+test_reported_state_carries_evidence_age
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
