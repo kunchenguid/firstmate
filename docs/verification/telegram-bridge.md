@@ -3,8 +3,7 @@
 Active empirical evidence for the guarantees the private Telegram bridge claims.
 Behavior, setup, and tunables are owned by [`configuration.md`](../configuration.md#telegram-bridge-env); design rationale by [`architecture.md`](../architecture.md#optional-telegram-bridge).
 Re-run everything here after changing `bin/fm-tg-*`, `bin/fm-private-artifact-lib.sh`, `bin/fm-message-split-lib.sh`, `bin/fm-env-file-lib.sh`, the watcher check sweep, the PR-check migration, the arm command policy, or the Claude Stop auto-arm.
-`bin/fm-test-run.sh` encodes most of that list, so a change to those paths selects this suite automatically.
-Two of them are not encoded and need this family re-run by hand: `bin/fm-pr-check-migrate.sh` still maps to `pr-forge` alone, and `bin/fm-arm-command-policy.mjs` to `pure-contract-unit` alone, even though the bridge regressions for both live here.
+`bin/fm-test-run.sh` encodes that list, so a change to any of them selects this suite automatically, and `test_changed_selection_pins_bridge_disarming_sources` pins the two entries that also belong to another family (`bin/fm-pr-check-migrate.sh` to `pr-forge`, `bin/fm-arm-command-policy.mjs` to `pure-contract-unit`).
 
 Recorded 2026-07-29 on macOS (Darwin 25.5.0, arm64), GNU bash 5.3.9, ShellCheck 0.11.0, after the security repair described below.
 

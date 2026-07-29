@@ -112,7 +112,8 @@ init_changed_fixture_repo() {
     fm-bearings-snapshot.test.sh \
     fm-backend-cmux.test.sh \
     fm-backend-zellij.test.sh \
-    fm-backend-orca.test.sh; do
+    fm-backend-orca.test.sh \
+    fm-telegram-bridge.test.sh; do
     printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
   done
@@ -183,6 +184,46 @@ test_changed_dependency_selection_and_unmapped_failure() {
     || fail "unmapped changed source failure is not actionable: $(cat "$tmp/err")"
   rm -rf "$tmp"
   pass "changed selection covers dependents and fails closed for unmapped source"
+}
+
+# Two sources outside bin/fm-tg-* can disarm the bridge, and the only tests that
+# prove they do not live in the bridge family. Editing either must therefore
+# select that family in addition to the family the file already belongs to.
+test_changed_selection_pins_bridge_disarming_sources() {
+  local tmp repo listed
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-bridge.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  : >"$repo/bin/fm-pr-check-migrate.sh"
+  : >"$repo/bin/fm-arm-command-policy.mjs"
+  git -C "$repo" add bin
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm bridge-sources
+
+  printf '\n' >>"$repo/bin/fm-pr-check-migrate.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-telegram-bridge.test.sh" \
+    "poll migration must select the bridge suite that pins its shim exemption"
+  assert_contains "$listed" "tests/fm-pr-merge.test.sh" \
+    "poll migration must keep selecting its own pr-forge family"
+  case "$listed" in
+    *fm-backend-orca.test.sh*|*fm-backend-zellij.test.sh*)
+      fail "poll migration selection broadened to unrelated backend families" ;;
+  esac
+  git -C "$repo" add bin/fm-pr-check-migrate.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm migrate-change
+
+  printf '\n' >>"$repo/bin/fm-arm-command-policy.mjs"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-telegram-bridge.test.sh" \
+    "arm seatbelt must select the bridge suite that pins its arm command"
+  assert_contains "$listed" "tests/fm-brief.test.sh" \
+    "arm seatbelt must keep selecting its own pure-contract-unit family"
+  case "$listed" in
+    *fm-pr-merge.test.sh*)
+      fail "arm seatbelt selection broadened into the pr-forge family" ;;
+  esac
+  rm -rf "$tmp"
+  pass "changed selection re-runs the bridge suite for both bridge-disarming sources"
 }
 
 test_empty_selection_emits_summary() {
@@ -682,6 +723,7 @@ test_family_selection
 test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
+test_changed_selection_pins_bridge_disarming_sources
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior

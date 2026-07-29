@@ -681,6 +681,13 @@ families_for_changed_path() {
     bin/fm-lock*)
       printf '%s\n' session-bootstrap
       ;;
+    # The task-poll migration is also the path that can quarantine the bridge's
+    # own poll shim and disarm it, so it must re-run the suite that pins the
+    # shim's survival - not just the forge suite it lives next to.
+    bin/fm-pr-check-migrate.sh)
+      printf '%s\n' pr-forge
+      printf '%s\n' telegram-bridge
+      ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
@@ -711,6 +718,14 @@ families_for_changed_path() {
     # Supervision renders the bridge's cadence line and its arm command, which
     # the bridge suite pins for every harness.
     bin/fm-supervision*)
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' telegram-bridge
+      ;;
+    # The arm seatbelt decides whether that rendered arm command survives at all,
+    # and the bridge suite is what pins that it blesses no source node. Named
+    # explicitly because reference resolution only reaches the seatbelt's own
+    # contract tests, which never exercise a bridge home.
+    bin/fm-arm-command-policy.mjs)
       printf '%s\n' pure-contract-unit
       printf '%s\n' telegram-bridge
       ;;
