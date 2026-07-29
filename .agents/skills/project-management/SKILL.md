@@ -24,6 +24,7 @@ Do not turn the registry into project documentation.
 
 Before any main-home project add, clone, create, or registry mutation, inspect the authoritative `data/secondmates.md` routing table, judge every existing natural-language `scope:` against the proposed project, domain, or registry change, and apply `AGENTS.md` section 7's authoritative secondmate routing rules.
 Absence from the main `data/projects.md` registry is never evidence that no registered secondmate scope owns the domain.
+If the owning secondmate cannot accept the route, identify the concrete blocker or obtain explicit captain redirection before creating or registering a duplicate main-home clone.
 
 Resolve the project name, destination, delivery mode, and autonomy posture before changing local or remote state.
 Keep a newly added clone and its registry entry consistent, and roll back only artifacts created by the incomplete operation when a later initialization step fails and that rollback is safe.
