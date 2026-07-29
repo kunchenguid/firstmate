@@ -1938,10 +1938,6 @@ test_managed_teardown_locks_generation_before_endpoint_cleanup() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  list-windows)
-    [ -f "$FM_FAKE_ALLOW_KILL" ] || printf '%s\n' 'fm-task-x1'
-    exit 0
-    ;;
   kill-window)
     : > "$FM_FAKE_KILL_STARTED"
     while [ ! -f "$FM_FAKE_ALLOW_KILL" ]; do sleep 0.01; done
@@ -1957,17 +1953,11 @@ SH
     FM_FAKE_KILL_STARTED="$kill_started" FM_FAKE_ALLOW_KILL="$allow_kill" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" &
   teardown_pid=$!
-  for _ in $(seq 1 600); do
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
     [ -f "$kill_started" ] && break
-    kill -0 "$teardown_pid" 2>/dev/null || break
     sleep 0.05
   done
-  [ -f "$kill_started" ] || {
-    : > "$allow_kill"
-    kill "$teardown_pid" 2>/dev/null || true
-    wait "$teardown_pid" 2>/dev/null || true
-    fail "managed generation teardown never reached endpoint cleanup"
-  }
+  [ -f "$kill_started" ] || { kill "$teardown_pid" 2>/dev/null || true; fail "managed generation teardown never reached endpoint cleanup"; }
 
   set +e
   FM_ACCOUNT_LIFECYCLE_LOCK_WAIT_SECONDS=0 bash -c '
@@ -2044,10 +2034,6 @@ test_managed_child_teardown_locks_generation_before_snapshot() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  list-windows)
-    [ -f "$FM_FAKE_ALLOW_KILL" ] || printf '%s\n' 'fm-child-lock-x3'
-    exit 0
-    ;;
   kill-window)
     case "$*" in
       *fm-child-lock-x3*)
@@ -2070,15 +2056,12 @@ SH
     FM_EXPECT_CHILD_LINEAGE_MARKER="$case_dir/child-lineage-verified" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" &
   teardown_pid=$!
-  for _ in $(seq 1 600); do
+  for _ in $(seq 1 100); do
     [ -f "$kill_started" ] && break
-    kill -0 "$teardown_pid" 2>/dev/null || break
     sleep 0.05
   done
   [ -f "$kill_started" ] || {
-    : > "$allow_kill"
     kill "$teardown_pid" 2>/dev/null || true
-    wait "$teardown_pid" 2>/dev/null || true
     fail "managed child teardown never reached endpoint cleanup: $(cat "$case_dir/stderr")"
   }
 
