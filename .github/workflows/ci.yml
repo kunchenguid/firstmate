@@ -363,6 +363,14 @@ jobs:
             exit 1
           }
 
+          brief_output=$(/bin/bash tests/fm-brief.test.sh)
+          printf '%s\n' "$brief_output"
+          brief_count=$(printf '%s\n' "$brief_output" | grep -c '^ok - ')
+          [ "$brief_count" -eq 16 ] || {
+            echo "::error::expected 16 fm-brief tests, got $brief_count"
+            exit 1
+          }
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
