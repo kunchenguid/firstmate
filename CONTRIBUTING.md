@@ -47,6 +47,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   Only exit status 0 (`OK`) is a clean result: 1 means a marker is present, 3 means the run proved nothing (`SKIPPED` if it had nothing to derive, `INCOMPLETE` if something went unscanned), and 2 means it could not run at all.
   Those are distinct codes on purpose, so neither a person nor a later gate has to read the prose to learn whether the run proved anything.
   It matches names only, so it cannot see private strategy written as ordinary prose; its header owns the full limits, and [`docs/examples/private-material-allow`](docs/examples/private-material-allow) documents the local allowlist for an identity that is legitimately public.
+  [`docs/configuration.md`](docs/configuration.md) ("Private-material markers") owns the two optional local files that tune it: `config/private-material-allow` for a public identity, and `config/private-material-markers` for a private name nothing local can derive.
   Its default mode scans the working tree and HEAD but not the commits between the merge-base and HEAD, so run it with `--history` before any push rather than only before contributing upstream.
   `--history` is not scoped to what you are about to push: it walks every ref, meaning all local branches, all remote-tracking refs, and the stash.
   So a hit may sit on an abandoned local branch, or in an upstream commit reachable only through `refs/remotes` that is not yours to rewrite; check which ref carries the commit before choosing a remedy, as the finding itself tells you to.
