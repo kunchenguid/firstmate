@@ -10,6 +10,9 @@
 # read what is INSIDE each tracked file and what each tracked file is CALLED: a
 # path publishes its own name to anyone who lists the directory, so a file or
 # directory named after a private project leaks it without anyone opening it.
+# Content is read from the working tree and from HEAD; NAMES are read from the
+# index and from HEAD, so a path staged with git add is already covered.
+# --history adds no name coverage at all - see WHAT THIS CANNOT CATCH.
 # --history adds past commit content AND commit metadata (author and committer
 # identity, subject, body), because a pull request carries all of that into the
 # target repository and a marker deleted at tip is still published forever.
@@ -117,14 +120,26 @@
 #     the push range would remove this hole and would also stop --history
 #     reporting refs you are not publishing; until then both limits are stated
 #     here rather than left to be found.
+#   - A PATHNAME in any commit other than HEAD, in EITHER mode - and --history
+#     does NOT mitigate this one, unlike the gap above. Names are read from the
+#     index and from HEAD only. git log -G matches patch TEXT and never a
+#     pathname, and a pure rename produces no patch text at all, so the history
+#     pass reads no name anywhere. A file or directory named after a private
+#     name that is added and then renamed or removed within unpushed commits is
+#     therefore published by the push that carries those commits, and NO mode
+#     reports it. Defining the scanned surface once as the push range is what
+#     would close this too.
 #   - Anything inside a tracked BINARY file. The content scans skip them by
 #     design (git grep -I, and a binary blob yields no patch text for git log
 #     -G), so a marker in the metadata of a checked-in image or archive is never
 #     read - and, unlike a filtered name, it raises no gap because the file is
 #     never opened.
-#   - The INDEX. The scanned surfaces are the working tree and HEAD, so a marker
-#     staged with git add and then edited back out of the working tree is in
-#     neither and passes, right up until the commit that publishes it.
+#   - The INDEX, for CONTENT. Content is read from the working tree and from
+#     HEAD, so a marker staged with git add and then edited back out of the
+#     working tree is in neither and passes, right up until the commit that
+#     publishes it. NAMES are not subject to this: the tracked-path list is
+#     git ls-files, which reads the index, so a staged path IS scanned, and a
+#     path deleted from the working tree while still staged is still reported.
 # Human review of the diff remains the real control; this only makes the
 # mechanical, repeatable part of it impossible to forget.
 #
@@ -547,25 +562,26 @@ fi
 # open, and no content scan can see it: git grep matches blob contents and
 # git log -G matches patch text, and neither reads a pathname. So the same marker
 # set, with the same matching rules, is applied to the tracked file lists
-# themselves - at both points the content scans already cover, and no further.
+# themselves - the index and HEAD, and no further. --history carries no path
+# coverage, because git log -G reads patch text and a rename produces none.
 # Built once, before the marker loop, so a failure here is caught before any
 # marker is reported clean.
-PATHS_WT="$TMPD/paths-worktree"
+PATHS_INDEX="$TMPD/paths-index"
 PATHS_HEAD="$TMPD/paths-head"
 # -z, so a path git would otherwise quote is compared in the same spelling the
 # markers are written in.
 git -C "$ROOT" ls-files -z >"$TMPD/paths.raw" 2>"$ERRLOG" && rc=0 || rc=$?
 [ "$rc" -eq 0 ] || scan_failed "$rc" "listing tracked paths"
-tr '\0' '\n' < "$TMPD/paths.raw" > "$PATHS_WT"
+tr '\0' '\n' < "$TMPD/paths.raw" > "$PATHS_INDEX"
 : > "$PATHS_HEAD"
 if [ "$HAVE_HEAD" -eq 1 ]; then
   git -C "$ROOT" ls-tree -r --name-only -z HEAD >"$TMPD/headpaths.raw" 2>"$ERRLOG" && rc=0 || rc=$?
   [ "$rc" -eq 0 ] || scan_failed "$rc" "listing committed paths"
-  # Keep only the committed paths the working-tree list does not already carry,
-  # so a path present at both points is named once, under the label whose remedy
+  # Keep only the committed paths the index list does not already carry, so a
+  # path present at both points is named once, under the label whose remedy
   # applies. grep exits 1 when nothing is left, which is an ordinary empty
   # result, not a failure.
-  tr '\0' '\n' < "$TMPD/headpaths.raw" | grep -vxF -f "$PATHS_WT" \
+  tr '\0' '\n' < "$TMPD/headpaths.raw" | grep -vxF -f "$PATHS_INDEX" \
     >"$PATHS_HEAD" 2>"$ERRLOG" && rc=0 || rc=$?
   [ "$rc" -le 1 ] || scan_failed "$rc" "separating committed-only paths"
 fi
@@ -598,7 +614,7 @@ while IFS= read -r m; do
   fi
   # Labelled apart from a content hit because the remedy is different: a path hit
   # is fixed by renaming or removing the file, not by editing what is inside it.
-  pathhits=$(grep -i -E -- "$pat" "$PATHS_WT" 2>"$ERRLOG") && rc=0 || rc=$?
+  pathhits=$(grep -i -E -- "$pat" "$PATHS_INDEX" 2>"$ERRLOG") && rc=0 || rc=$?
   [ "$rc" -le 1 ] || scan_failed "$rc" "scanning tracked paths for marker \"$m\""
   if [ -n "$pathhits" ]; then
     status=1
@@ -633,7 +649,7 @@ while IFS= read -r m; do
     [ "$rc" -le 1 ] || scan_failed "$rc" "scanning committed paths for marker \"$m\""
     if [ -n "$headpaths" ]; then
       status=1
-      printf '\nPRIVATE MATERIAL IN A COMMITTED PATH: marker "%s" is in the NAME of a path that is committed, beyond what the working tree tracks:\n' "$m"
+      printf '\nPRIVATE MATERIAL IN A COMMITTED PATH: marker "%s" is in the NAME of a path that is committed, beyond what the index tracks:\n' "$m"
       printf '%s\n' "$headpaths" | sed 's/^/  /'
     fi
   fi
