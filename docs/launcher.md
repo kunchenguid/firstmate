@@ -41,7 +41,8 @@ Unavailable entries stay visible and dimmed, each carrying the one thing that wo
 Two local checks decide it, and neither touches the network:
 
 - A native entry is available when its harness binary resolves on `PATH`.
-- A Pi-routed entry is available when `pi` resolves and the provider named in its model (the part before `/`) appears in `~/.pi/agent/auth.json`.
+- A Pi-routed entry - one whose harness is in the pi family, `pi` or `pi-signed` - is available when its own executable resolves on `PATH` and the provider named in its model (the part before `/`) appears in `~/.pi/agent/auth.json`.
+  Both family members share that one auth record, but not an executable: a `pi-signed` entry stays unavailable when only `pi` is installed, because `pi-signed` is a distinct identity that never falls back to `pi`.
 
 Because both checks are local file reads, the menu paints in well under a tenth of a second.
 The one thing that slows it is a `PATH` whose misses cross a slow filesystem, such as the Windows mounts a WSL shell inherits; `bin/fm-launch.sh` records the measured numbers.
@@ -78,6 +79,10 @@ If that entry later stops being available, `Enter` falls back to the first avail
 The launcher creates the session as a tab in this home's Herdr workspace, so Herdr must be installed and recent enough.
 It refuses with one actionable line if Herdr is missing or its protocol is older than firstmate's verified minimum, and it never falls back to a bare shell.
 The Herdr check runs after you choose, not before the menu, so choosing stays instant.
+
+The launcher also enforces that requirement against the home's own backend setting.
+If `FM_BACKEND` or `config/backend` explicitly selects anything other than `herdr`, it refuses before the menu is drawn, naming the configured value - otherwise the primary would start in Herdr while `fm-send`, `fm-watch`, and `fm-spawn` resolve the configured backend, and the one-primary-per-home guard could never see it.
+That check is a local read of the same setting the rest of firstmate honors; it contacts no Herdr server, so the menu still paints instantly.
 
 See [docs/herdr-backend.md](herdr-backend.md) for Herdr setup.
 
