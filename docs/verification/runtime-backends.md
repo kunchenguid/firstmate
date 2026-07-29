@@ -253,8 +253,8 @@ ok - exact cleanup removes only child panes and records while preserving parent,
 ```
 
 The real run also exercised the conservative delivery sequence that led to the final verified behavior: full contracts stayed in private `launch.md` files, only operationally encoded absolute-file pointers entered Pi, the shared Herdr submit owner sampled native state before injection, and its `pending` verdict was accepted only after exact Pi registration plus Pi's owned rendered-busy signature corroborated the live turn.
-`tests/fm-backend-herdr.test.sh` pins pre-injection idle, done, blocked, and working semantics, including pre-idle working-during-send, pre-blocked to working, and pre-blocked to blocked transitions.
-`tests/fm-child.test.sh` covers all seven inherited harness routes for both pending-plus-owned-busy acceptance and pending-without-owned-busy refusal, plus agent mismatch, path ownership, recursion, limits, dead reconciliation, private evidence, and teardown ordering.
+`tests/fm-backend-herdr.test.sh` pins pre-injection idle, done, blocked, and working semantics, including pre-idle working-during-send, pre-blocked to working, unchanged-blocked composer clearance, and unchanged-blocked pending refusal.
+`tests/fm-child.test.sh` covers all seven inherited harness routes, Kimi fallback resolution, Claude config-directory inheritance, lifecycle-lock readiness, filesystem-case-equivalent path ownership, pending-plus-owned-busy acceptance, pending-without-owned-busy refusal, agent mismatch, recursion, limits, dead reconciliation, private evidence, and teardown ordering.
 
 ### Composer and operational input
 

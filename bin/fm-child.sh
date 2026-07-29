@@ -41,6 +41,8 @@ fm_backend_source herdr || { echo "error: could not load the Herdr runtime adapt
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-launch-lib.sh
+. "$SCRIPT_DIR/fm-launch-lib.sh"
 
 FM_CHILD_MAX=3
 FM_CHILD_LOCK=
@@ -59,6 +61,7 @@ FM_CHILD_PARENT_EFFORT=
 FM_CHILD_PARENT_KIND=
 FM_CHILD_TASK_TMP=
 FM_CHILD_ROOT=
+FM_CHILD_CASE_INSENSITIVE=0
 
 usage() {
   sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
@@ -203,6 +206,12 @@ fm_child_load_parent_meta() {  # <meta> <expected-id>
   [ "$(git -C "$worktree_real" rev-parse --show-toplevel 2>/dev/null)" = "$worktree_real" ] \
     || die "parent working copy is not an isolated repository root"
   FM_CHILD_PARENT_WORKTREE=$worktree_real
+  if [ "$worktree_real/.git" -ef "$worktree_real/.GIT" ] \
+     || [ "$(git -C "$worktree_real" config --bool core.ignorecase 2>/dev/null || true)" = true ]; then
+    FM_CHILD_CASE_INSENSITIVE=1
+  else
+    FM_CHILD_CASE_INSENSITIVE=0
+  fi
   tasktmp=$(fm_child_meta_exact "$meta" tasktmp) || die "parent metadata has no private temporary area"
   [ "$tasktmp" = "/tmp/fm-$expected_id" ] || die "parent private temporary area is not the expected task-owned path"
   FM_CHILD_TASK_TMP=$tasktmp
@@ -260,11 +269,23 @@ fm_child_acquire_lock() {
 }
 
 fm_child_path_lexical_valid() {  # <relative-path>
+  local identity
+  identity=$(fm_child_path_identity "$1")
   case "$1" in
     ''|.|..|/*|./*|*/.|*/..|*//*|*'*'*|*'?'*|*'['*|*$'\n'*|*$'\r'*|*$'\t'*) return 1 ;;
+  esac
+  case "$identity" in
     .git|.git/*|.no-mistakes|.no-mistakes/*) return 1 ;;
   esac
   return 0
+}
+
+fm_child_path_identity() {  # <relative-path>
+  if [ "$FM_CHILD_CASE_INSENSITIVE" = 1 ]; then
+    printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]'
+  else
+    printf '%s' "$1"
+  fi
 }
 
 fm_child_path_valid() {  # <relative-path>
@@ -287,9 +308,12 @@ fm_child_path_valid() {  # <relative-path>
 }
 
 fm_child_paths_overlap() {  # <a> <b>
-  [ "$1" = "$2" ] && return 0
-  case "$1" in "$2"/*) return 0 ;; esac
-  case "$2" in "$1"/*) return 0 ;; esac
+  local a b
+  a=$(fm_child_path_identity "$1")
+  b=$(fm_child_path_identity "$2")
+  [ "$a" = "$b" ] && return 0
+  case "$a" in "$b"/*) return 0 ;; esac
+  case "$b" in "$a"/*) return 0 ;; esac
   return 1
 }
 
@@ -585,39 +609,29 @@ fm_child_profile_args() {  # <harness>, writes FM_CHILD_PROFILE_ARGS
   case "$harness" in
     claude)
       FM_CHILD_PROFILE_ARGS+=(--dangerously-skip-permissions --setting-sources user)
-      [ "$model" = default ] || FM_CHILD_PROFILE_ARGS+=(--model "$model")
-      case "$effort" in default) ;; *) FM_CHILD_PROFILE_ARGS+=(--effort "$effort") ;; esac
       ;;
     codex)
       FM_CHILD_PROFILE_ARGS+=(--dangerously-bypass-approvals-and-sandbox)
-      [ "$model" = default ] || FM_CHILD_PROFILE_ARGS+=(--model "$model")
-      case "$effort" in low|medium|high|xhigh) FM_CHILD_PROFILE_ARGS+=(-c "model_reasoning_effort=\"$effort\"") ;; esac
       ;;
     opencode)
       FM_CHILD_PROFILE_ARGS+=(--pure)
-      [ "$model" = default ] || FM_CHILD_PROFILE_ARGS+=(--model "$model")
       ;;
     pi)
       FM_CHILD_PROFILE_ARGS+=(--approve --no-extensions)
-      [ "$model" = default ] || FM_CHILD_PROFILE_ARGS+=(--model "$model")
-      case "$effort" in default) ;; *) FM_CHILD_PROFILE_ARGS+=(--thinking "$effort") ;; esac
       ;;
     pi-signed)
       FM_CHILD_PROFILE_ARGS+=(--approve --no-extensions)
-      [ "$model" = default ] || FM_CHILD_PROFILE_ARGS+=(--model "$model")
-      case "$effort" in default) ;; *) FM_CHILD_PROFILE_ARGS+=(--thinking "$effort") ;; esac
       ;;
     grok)
       FM_CHILD_PROFILE_ARGS+=(--always-approve)
-      [ "$model" = default ] || FM_CHILD_PROFILE_ARGS+=(--model "$model")
-      case "$effort" in low|medium|high) FM_CHILD_PROFILE_ARGS+=(--reasoning-effort "$effort") ;; esac
       ;;
     kimi)
       FM_CHILD_PROFILE_ARGS+=(--auto)
-      [ "$model" = default ] || FM_CHILD_PROFILE_ARGS+=(--model "$model")
       ;;
     *) return 1 ;;
   esac
+  fm_launch_profile_args "$harness" "$model" "$effort"
+  FM_CHILD_PROFILE_ARGS+=("${FM_LAUNCH_PROFILE_ARGS[@]}")
 }
 
 fm_child_shell_quote() {  # <value>
@@ -626,21 +640,18 @@ fm_child_shell_quote() {  # <value>
 
 fm_child_runtime_binary() {  # <harness>
   case "$1" in
-    claude|codex|opencode|pi|grok|kimi) command -v "$1" 2>/dev/null ;;
-    pi-signed) command -v pi-signed 2>/dev/null ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi) fm_launch_resolve_binary "$1" ;;
     *) return 1 ;;
   esac
 }
 
 fm_child_runtime_start() {  # <pane> <private-startup-log>
-  local pane=$1 startup_log=$2 binary command arg attempts=0 agent_out expected
+  local pane=$1 startup_log=$2 binary command prefix arg attempts=0 agent_out expected
   binary=$(fm_child_runtime_binary "$FM_CHILD_PARENT_HARNESS") || return 1
   [ -x "$binary" ] || return 1
   expected=$(fm_child_expected_agent "$FM_CHILD_PARENT_HARNESS") || return 1
-  command="exec $(fm_child_shell_quote "$binary")"
-  case "$FM_CHILD_PARENT_HARNESS" in
-    pi|pi-signed) command="FM_PI_HARNESS=$FM_CHILD_PARENT_HARNESS $command" ;;
-  esac
+  prefix=$(fm_launch_environment_prefix "$FM_CHILD_PARENT_HARNESS")
+  command="${prefix}exec $(fm_child_shell_quote "$binary")"
   for arg in "${FM_CHILD_PROFILE_ARGS[@]}"; do
     command="$command $(fm_child_shell_quote "$arg")"
   done
@@ -1002,6 +1013,7 @@ EOF
 
 fm_child_ready() {
   local dir state failures=0
+  fm_child_acquire_lock
   [ -d "$FM_CHILD_ROOT" ] || { echo "children ready"; return 0; }
   fm_child_validate_records
   while IFS= read -r dir; do

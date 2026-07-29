@@ -152,6 +152,7 @@ When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without 
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, grok, pi, opencode, and kimi while preserving the requested profile for later audit.
+`bin/fm-launch-lib.sh` owns verified harness binary resolution, model and effort flags, and inherited launch environment for both ordinary spawns and bounded child panes.
 
 ## Optional secondmates
 

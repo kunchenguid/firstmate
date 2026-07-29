@@ -2076,13 +2076,14 @@ EOF
 # FM_BACKEND_HERDR_SUBMIT_BASELINE_RAW to the exact pre-injection native status
 # for same-shell callers that need private failure evidence.
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline baseline_raw confirm_sleep
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline baseline_raw confirm_sleep confirmation_baseline
   FM_BACKEND_HERDR_SUBMIT_BASELINE_RAW=
   fm_backend_herdr_target_ready "$target" || { printf 'unknown'; return 0; }
   baseline_raw=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   # shellcheck disable=SC2034 # Same-shell callers consume this evidence output.
   FM_BACKEND_HERDR_SUBMIT_BASELINE_RAW=$baseline_raw
   baseline=$(fm_backend_herdr_classify_submit_baseline_status "$baseline_raw")
+  confirmation_baseline=$baseline_raw
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   # Keep the caller-owned popup settle after literal injection and before Enter.
   sleep "$settle"
@@ -2091,7 +2092,18 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     fm_backend_herdr_send_key "$target" Enter || true
     if [ "$baseline" = idle ]; then
       verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-        "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
+        "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS" "$confirmation_baseline")
+      if [ "$baseline_raw" = blocked ]; then
+        case "$verdict" in
+          idle-transition)
+            confirmation_baseline=idle
+            verdict=$(fm_backend_herdr_composer_state "$target")
+            ;;
+          idle)
+            verdict=$(fm_backend_herdr_composer_state "$target")
+            ;;
+        esac
+      fi
     else
       sleep "$sleep_s"
       verdict=$(fm_backend_herdr_composer_state "$target")
@@ -2132,8 +2144,8 @@ fm_backend_herdr_classify_agent_status() {  # <raw-agent_status>
 
 # Submission has asymmetric state semantics.
 # A pre-injection blocked agent is ready to receive a new steer just like idle
-# or done, while a post-injection blocked state proves the submitted turn
-# reached a human/tool boundary and therefore confirms delivery.
+# or done. A later blocked observation confirms delivery only after another
+# native state was observed or the composer independently cleared.
 fm_backend_herdr_classify_submit_baseline_status() {  # <raw-agent_status>
   case "$1" in
     working) printf 'busy' ;;
@@ -2230,8 +2242,8 @@ fm_backend_herdr_submit_confirm_budget() {  # <caller-budget-seconds>
   }' 2>/dev/null || printf '%s' "${1:-0}"
 }
 
-fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <polls>
-  local session=$1 pane_id=$2 budget=$3 polls=${4:-1} i interval raw bs saw_idle=0
+fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <polls> [baseline]
+  local session=$1 pane_id=$2 budget=$3 polls=${4:-1} baseline=${5:-} i interval raw bs saw_idle=0 saw_transition=0
   case "$polls" in ''|*[!0-9]*|0) polls=1 ;; esac
   interval=$(awk -v b="$budget" -v p="$polls" 'BEGIN { d = p - 1; if (d < 1) d = 1; v = b / d; if (v < 0) v = 0; printf "%.4f", v }' 2>/dev/null)
   case "$interval" in ''|*[!0-9.]*) interval=0 ;; esac
@@ -2240,14 +2252,27 @@ fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <p
       sleep "$interval"
     fi
     raw=$(fm_backend_herdr_agent_status_raw "$session" "$pane_id")
+    if [ -n "$raw" ] && [ "$raw" != "$baseline" ]; then
+      saw_transition=1
+    fi
     bs=$(fm_backend_herdr_classify_submit_confirmation_status "$raw")
     case "$bs" in
-      busy) printf 'busy'; return 0 ;;
+      busy)
+        if [ "$baseline" != blocked ] || [ "$raw" = working ] || [ "$saw_transition" -eq 1 ]; then
+          printf 'busy'
+          return 0
+        fi
+        saw_idle=1
+        ;;
       idle) saw_idle=1 ;;
     esac
   done
   if [ "$saw_idle" -eq 1 ]; then
-    printf 'idle'
+    if [ "$baseline" = blocked ] && [ "$saw_transition" -eq 1 ]; then
+      printf 'idle-transition'
+    else
+      printf 'idle'
+    fi
   else
     printf 'unknown'
   fi

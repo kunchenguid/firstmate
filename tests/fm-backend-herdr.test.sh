@@ -2235,20 +2235,38 @@ test_send_text_submit_preblocked_then_working_confirms() {
   pass "fm_backend_herdr_send_text_submit: pre-blocked to working confirms through native post-injection state"
 }
 
-test_send_text_submit_preblocked_then_blocked_confirms() {
+test_send_text_submit_preblocked_then_blocked_requires_composer_clearance() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-preblocked-blocked"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/1.out"
   printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/4.out"
+  printf '  \xe2\x9d\xaf \n' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "continue" 3 0.01 0.01' "$ROOT" )
-  [ "$out" = empty ] || fail "pre-blocked then blocked must confirm the submitted turn reached a boundary, got '$out'"
+  [ "$out" = empty ] || fail "an unchanged blocked state should confirm only after the composer independently reads empty, got '$out'"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 1 ] || fail "pre-blocked then blocked should submit one Enter, sent $enter_count"
-  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 0 ] \
-    || fail "pre-blocked baseline incorrectly forced composer fallback before blocked confirmation"
-  pass "fm_backend_herdr_send_text_submit: pre-blocked to blocked confirms through native post-injection state"
+  [ "$enter_count" -eq 1 ] || fail "independent composer clearance should confirm after one Enter, sent $enter_count"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 1 ] \
+    || fail "an unchanged pre-blocked state must require one composer-clearance read"
+  pass "fm_backend_herdr_send_text_submit: unchanged blocked state requires independent composer clearance"
+}
+
+test_send_text_submit_preblocked_unchanged_does_not_false_confirm() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-preblocked-unchanged"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/4.out"
+  printf '  \xe2\x9d\xaf continue\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/7.out"
+  printf '  \xe2\x9d\xaf continue\n' > "$resp/8.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "continue" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "an unchanged blocked state with retained composer text must remain pending, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 2 ] || fail "a swallowed Enter from pre-blocked state should retry only Enter, sent $enter_count"
+  pass "fm_backend_herdr_send_text_submit: unchanged pre-blocked state never proves delivery"
 }
 
 test_send_text_submit_detects_swallowed_enter() {
@@ -3139,7 +3157,8 @@ test_wait_for_working_treats_blocked_as_submit_active
 test_send_text_submit_detects_landed_send
 test_send_text_submit_preidle_then_working_during_send
 test_send_text_submit_preblocked_then_working_confirms
-test_send_text_submit_preblocked_then_blocked_confirms
+test_send_text_submit_preblocked_then_blocked_requires_composer_clearance
+test_send_text_submit_preblocked_unchanged_does_not_false_confirm
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter

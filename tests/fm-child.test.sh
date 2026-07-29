@@ -156,6 +156,10 @@ ROW
       printf '%s\n' "$counter" > "$state/counter"
       pane="p:child-$counter"
     fi
+    if [ -f "$state/pause-split" ]; then
+      : > "$state/split-entered"
+      while [ -f "$state/pause-split" ]; do sleep 0.02; done
+    fi
     if ! awk -F'|' -v pane="$pane" '$1 == pane { found=1 } END { exit !found }' "$state/panes"; then
       printf '%s|%s|%s|%s\n' "$pane" "$workspace" "$tab" "$cwd" >> "$state/panes"
     fi
@@ -309,6 +313,12 @@ assert_failure_contains "rejects duplicate child names" "already exists" \
   run_parent create alpha --instructions "$INSTRUCTIONS" --path b.txt
 assert_failure_contains "rejects overlapping ancestor path ownership" "overlaps child 'alpha'" \
   run_parent create overlap --instructions "$INSTRUCTIONS" --path src/one.txt
+git -C "$WORKTREE" config core.ignorecase true
+assert_failure_contains "rejects case-equivalent reserved Git ownership" "external, symlinked, globbed, or ambiguous" \
+  run_parent create reserved-case --instructions "$INSTRUCTIONS" --path .GIT/config
+assert_failure_contains "rejects case-equivalent ownership overlap" "overlaps child 'alpha'" \
+  run_parent create overlap-case --instructions "$INSTRUCTIONS" --path SRC/one.txt
+git -C "$WORKTREE" config core.ignorecase false
 assert_failure_contains "rejects duplicate paths in one request" "supplied more than once" \
   run_parent create duplicate --instructions "$INSTRUCTIONS" --path b.txt --path b.txt
 assert_failure_contains "rejects create without a path assignment" "at least one --path" \
@@ -395,6 +405,48 @@ else
   not_ok "cleanup preserves the shared working copy"
 fi
 
+touch "$FAKE_STATE/pause-split"
+run_parent create readiness-race --instructions "$INSTRUCTIONS" --path b.txt >"$TMP/create-race.out" 2>"$TMP/create-race.err" &
+CREATE_RACE_PID=$!
+for _ in $(seq 1 100); do
+  [ -f "$FAKE_STATE/split-entered" ] && break
+  kill -0 "$CREATE_RACE_PID" 2>/dev/null || break
+  sleep 0.02
+done
+if [ -f "$FAKE_STATE/split-entered" ]; then
+  run_parent ready >"$TMP/ready-race.out" 2>"$TMP/ready-race.err" &
+  READY_RACE_PID=$!
+  for _ in $(seq 1 20); do
+    kill -0 "$READY_RACE_PID" 2>/dev/null || break
+    sleep 0.02
+  done
+  if kill -0 "$READY_RACE_PID" 2>/dev/null; then
+    ok "readiness waits behind concurrent child creation"
+  else
+    not_ok "readiness waits behind concurrent child creation"
+  fi
+  rm -f "$FAKE_STATE/pause-split"
+  if wait "$CREATE_RACE_PID"; then
+    ok "concurrent child creation completes after releasing its lifecycle lock"
+  else
+    not_ok "concurrent child creation completes after releasing its lifecycle lock"
+    sed 's/^/  /' "$TMP/create-race.err" >&2
+  fi
+  if wait "$READY_RACE_PID"; then
+    not_ok "readiness inspects the child created while it waited"
+  elif grep -Fq 'state=running:' "$TMP/ready-race.err"; then
+    ok "readiness inspects the child created while it waited"
+  else
+    not_ok "readiness inspects the child created while it waited"
+    sed 's/^/  /' "$TMP/ready-race.err" >&2
+  fi
+else
+  not_ok "concurrent create reached the locked split boundary"
+  rm -f "$FAKE_STATE/pause-split"
+  wait "$CREATE_RACE_PID" 2>/dev/null || true
+fi
+assert_success "cleanup reconciles the readiness race child" run_parent cleanup
+
 assert_success "creates child allowed to replace its owned file with a symlink" \
   run_parent create symlink-edit --instructions "$INSTRUCTIONS" --path d.txt
 rm "$WORKTREE/d.txt"
@@ -471,6 +523,34 @@ ROW
   run_parent cleanup >/dev/null 2>&1 || not_ok "cleanup after uncorroborated $harness delivery"
   rm -f "$FAKE_STATE/send-pending" "$FAKE_STATE/pane-output"
 done
+
+set_profile kimi kimi-for-coding high kimi
+KIMI_FALLBACK_HOME="$TMP/kimi-home"
+mkdir -p "$KIMI_FALLBACK_HOME/.kimi-code/bin"
+mv "$FAKE_BIN/kimi" "$KIMI_FALLBACK_HOME/.kimi-code/bin/kimi"
+: > "$FAKE_STATE/log"
+if HOME="$KIMI_FALLBACK_HOME" run_parent create kimi-fallback --instructions "$INSTRUCTIONS" --path c.txt \
+    >"$TMP/out" 2>"$TMP/err" \
+   && grep -Fq "$KIMI_FALLBACK_HOME/.kimi-code/bin/kimi" "$FAKE_STATE/log"; then
+  ok "child Kimi launch reuses the parent fallback binary resolution"
+else
+  not_ok "child Kimi launch reuses the parent fallback binary resolution"
+  sed 's/^/  /' "$TMP/err" >&2
+fi
+assert_success "cleanup after Kimi fallback profile" run_parent cleanup
+mv "$KIMI_FALLBACK_HOME/.kimi-code/bin/kimi" "$FAKE_BIN/kimi"
+
+set_profile claude claude-sonnet-4-5 high claude
+: > "$FAKE_STATE/log"
+if CLAUDE_CONFIG_DIR="$TMP/claude-config" run_parent create claude-config --instructions "$INSTRUCTIONS" --path c.txt \
+    >"$TMP/out" 2>"$TMP/err" \
+   && grep -Fq "CLAUDE_CONFIG_DIR='$TMP/claude-config'" "$FAKE_STATE/log"; then
+  ok "child Claude launch inherits the parent config directory"
+else
+  not_ok "child Claude launch inherits the parent config directory"
+  sed 's/^/  /' "$TMP/err" >&2
+fi
+assert_success "cleanup after Claude config inheritance" run_parent cleanup
 
 set_profile pi openai-codex/gpt-5.6-sol xhigh pi
 touch "$FAKE_STATE/send-pending"

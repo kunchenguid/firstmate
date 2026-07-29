@@ -215,8 +215,8 @@ Slash and dollar-prefixed input uses the shared harness-aware settle before the 
 Text is typed once; only Enter is retried.
 
 The native baseline is sampled before literal text injection, while popup settle remains after injection and before Enter.
-On a pre-injection `idle`, `done`, or `blocked` baseline, submit confirmation waits for post-injection `working` or `blocked` across a bounded polling window, including a transition that begins during injection or settle.
-Pre-injection `blocked` is ready-like because a new steer may resume it, while post-injection `blocked` proves the submitted turn reached a tool or human boundary.
+On a pre-injection `idle`, `done`, or `blocked` baseline, submit confirmation waits for a post-injection active-state transition across a bounded polling window, including a transition that begins during injection or settle.
+Pre-injection `blocked` is ready-like because a new steer may resume it, but an unchanged blocked observation is not transition proof and requires independent composer clearance.
 On an already `working` or unreadable pre-injection baseline, it falls back to conservative composer clearance.
 A fully unreadable target stops retrying and reports unknown.
 The poll density bounds the residual possibility of an extremely fast complete turn; a missed transition can cause only a redundant Enter on an empty composer, never duplicate message text.
