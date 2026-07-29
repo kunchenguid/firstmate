@@ -1475,9 +1475,9 @@ META_WINDOW=$T
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
-sq_brief=$(shell_quote "$BRIEF")
+sq_brief=$(shell_quote "$BRIEF_REAL")
 sq_turnend=$(shell_quote "$TURNEND")
-sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+sq_piext=$(shell_quote "$STATE_REAL/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")

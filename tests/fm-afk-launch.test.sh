@@ -70,6 +70,33 @@ unit_clear_stale() {
   rm -rf "$st"
 }
 
+unit_relative_home_is_absolute_before_daemon_launch() {
+  local root home out status
+  root=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-relative-home.XXXXXX")
+  mkdir -p "$root/home"
+  home=$(cd "$root/home" && pwd -P)
+  out=$(
+    cd "$root" || exit 1
+    FM_HOME=home bash -c '. "$1"; printf "%s\n" "$FM_HOME"' _ "$LAUNCH"
+  )
+  if [ "$out" = "$home" ]; then
+    pass "launcher paths: relative FM_HOME is absolute before daemon command construction"
+  else
+    fail "launcher paths: relative FM_HOME remained cwd-dependent ($out)"
+  fi
+  out=$(
+    cd "$root" || exit 1
+    FM_HOME=missing-home "$LAUNCH" help 2>&1
+  )
+  status=$?
+  if [ "$status" -ne 0 ] && printf '%s\n' "$out" | grep -F "FM_HOME directory cannot be resolved: missing-home" >/dev/null; then
+    pass "launcher paths: unresolved relative FM_HOME fails loudly"
+  else
+    fail "launcher paths: unresolved relative FM_HOME did not name the bad input ($out)"
+  fi
+  rm -rf "$root"
+}
+
 # ---------------------------------------------------------------------------
 # UNIT 2: a FRESH entry clears; a REFRESH (daemon already alive) preserves the
 # current session's buffered escalations.
@@ -861,6 +888,7 @@ e2e_tmux() {
 }
 
 unit_clear_stale
+unit_relative_home_is_absolute_before_daemon_launch
 unit_fresh_vs_refresh
 unit_stop_ordering
 unit_stop_rejects_reused_pid

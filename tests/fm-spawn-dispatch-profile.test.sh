@@ -111,10 +111,11 @@ assert_meta_profile() {
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
-  local rec id out status expected launch
+  local rec id out status expected launch home_real
   id=profile-off-z1
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
+  home_real=$(cd "$HOME_DIR" && pwd -P)
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
@@ -123,9 +124,37 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$home_real/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
+}
+
+test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
+  local rec id out status launch home_real
+  id=profile-relative-paths-z1b
+  rec=$(make_spawn_case profile-relative-paths pi "$id")
+  read_case_record "$rec"
+  home_real=$(cd "$HOME_DIR" && pwd -P)
+  : > "$LAUNCH_LOG"
+
+  out=$(
+    cd "$CASE_DIR" || exit 1
+    FM_ROOT_OVERRIDE='' FM_HOME=home \
+      FM_STATE_OVERRIDE=home/state FM_DATA_OVERRIDE=home/data \
+      FM_PROJECTS_OVERRIDE=home/projects FM_CONFIG_OVERRIDE=home/config \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+      GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
+      "$SPAWN" "$id" "$PROJ_DIR" 2>&1
+  )
+  status=$?
+  expect_code 0 "$status" "spawn with relative home overrides should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "-e '$home_real/state/$id.pi-ext.ts'" \
+    "relative FM_STATE_OVERRIDE leaked into Pi's cross-process extension path"
+  assert_contains "$launch" "< '$home_real/data/$id/brief.md'" \
+    "relative FM_DATA_OVERRIDE leaked into the cross-process brief path"
+  pass "relative home overrides become absolute before spawn launch construction"
 }
 
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
@@ -509,6 +538,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_profile_defaults
+test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
