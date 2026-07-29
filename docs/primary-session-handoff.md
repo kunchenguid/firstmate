@@ -28,7 +28,8 @@ Only `idle` and `paused-rate-limited` are eligible for transfer.
 
 The privacy-safe receipt is stored under `data/primary-session-handoffs/`.
 It contains session identifiers, provider and harness identity, classification, timestamps, a home fingerprint, a captured pid set, and a process-identity hash, but no credentials, prompts, titles, permission descriptions, or transcript text.
-An `archive-requested` receipt blocks ordinary stale-lock acquisition while any captured pid remains live, and restore accepts it only after the same process proof has cleared and Paseo verifies the provider is actually archived.
+An `archive-requested` or `suspend-incomplete` receipt blocks ordinary stale-lock acquisition while any captured pid remains live.
+Restore accepts only restore-eligible receipt states after the same process proof has cleared and Paseo verifies the provider is actually archived.
 Task metadata, worktrees, wake records, secondmate homes, and provider transcripts are outside the transaction and remain untouched.
 
 ## Restoration
