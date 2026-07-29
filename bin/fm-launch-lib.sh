@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 FM_LAUNCH_PROFILE_CANONICAL=canonical
+# shellcheck disable=SC2034 # Read by fm-spawn.sh after sourcing this library.
 FM_LAUNCH_PROFILE_RAW=raw
 
 fm_launch_profile_is_child_replayable() {
