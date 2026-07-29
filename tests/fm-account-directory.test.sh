@@ -182,10 +182,13 @@ test_profile_eligibility_requires_enabled_worker() {
 }
 
 test_claude_approval_marker_contract() {
-  local marker out status
+  local account cache_dir marker marker_dir out status
   reset_accounts
   mkdir -p "$ACCOUNT_ROOT/claude/1/.agent-fleet-quota-cache/quota-axi"
-  marker="$ACCOUNT_ROOT/claude/1/.agent-fleet-quota-cache/quota-axi/claude-keychain-access-granted"
+  account="$ACCOUNT_ROOT/claude/1"
+  cache_dir="$account/.agent-fleet-quota-cache"
+  marker_dir="$cache_dir/quota-axi"
+  marker="$marker_dir/claude-keychain-access-granted"
   printf 'granted' > "$marker"
   chmod 600 "$marker"
   if out=$(run_selector select claude 2>&1); then status=0; else status=$?; fi
@@ -202,7 +205,22 @@ test_claude_approval_marker_contract() {
   ln "$marker" "$marker.link"
   if out=$(run_selector select claude 2>&1); then status=0; else status=$?; fi
   [ "$status" -ne 0 ] || fail "Claude selection accepted a multiply linked approval marker"
-  pass "Claude approval marker requires exact content, secure metadata, and one stable link"
+  rm "$marker.link"
+
+  chmod 770 "$account"
+  if out=$(run_selector select claude 2>&1); then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "Claude selection accepted a group-writable account directory"
+  chmod 700 "$account"
+
+  chmod 707 "$cache_dir"
+  if out=$(run_selector select claude 2>&1); then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "Claude selection accepted a world-writable marker ancestor"
+  chmod 700 "$cache_dir"
+
+  chmod 770 "$marker_dir"
+  if out=$(run_selector select claude 2>&1); then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "Claude selection accepted a group-writable marker parent"
+  pass "Claude approval marker requires secure stable parents and leaf metadata"
 }
 
 test_codex_picks_highest_fresh_minimum_and_skips_no_window() {
@@ -1229,6 +1247,12 @@ test_routing_off_keeps_default_provider_launch() {
 }
 
 make_spawn_fakebin "$FAKEBIN"
+
+if [ "${FM_TEST_FOCUSED:-}" = account-directory-trust ]; then
+  test_profile_eligibility_requires_enabled_worker
+  test_claude_approval_marker_contract
+  exit 0
+fi
 
 if [ "${FM_TEST_FOCUSED:-}" = direct-recovery-lifecycle ]; then
   test_direct_spawn_and_recovery_support_detached_worktree

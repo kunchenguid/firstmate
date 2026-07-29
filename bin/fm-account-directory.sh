@@ -54,6 +54,15 @@ set -u
 
 TEST_LAB_TOKEN=firstmate-account-directory-test-lab-v1
 
+case "${BASH_SOURCE[0]}" in
+  */*) FM_ACCOUNT_DIRECTORY_SOURCE_DIR=${BASH_SOURCE[0]%/*} ;;
+  *) FM_ACCOUNT_DIRECTORY_SOURCE_DIR=. ;;
+esac
+FM_ACCOUNT_DIRECTORY_BIN_DIR="$(cd "$FM_ACCOUNT_DIRECTORY_SOURCE_DIR" && pwd)"
+unset FM_ACCOUNT_DIRECTORY_SOURCE_DIR
+# shellcheck source=bin/fm-account-routing-lib.sh
+. "$FM_ACCOUNT_DIRECTORY_BIN_DIR/fm-account-routing-lib.sh"
+
 usage() {
   sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//' >&2
 }
@@ -158,17 +167,19 @@ herdr_command() {
 }
 
 agent_fleet_command() {
-  local home binary
+  local binary
   if test_lab_enabled && [ -n "${FM_ACCOUNT_DIRECTORY_AGENT_FLEET:-}" ]; then
-    printf '%s\n' "$FM_ACCOUNT_DIRECTORY_AGENT_FLEET"
-    return 0
+    binary=$(
+      FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1
+      FM_AGENT_FLEET_BIN=''
+      fm_account_fleet_bin "$FM_ACCOUNT_DIRECTORY_AGENT_FLEET"
+    ) || return 1
+  else
+    binary=$(fm_account_fleet_bin) || {
+      echo "error: agent-fleet is required to enforce direct crew-pool eligibility" >&2
+      return 1
+    }
   fi
-  home=$(passwd_home) || return 1
-  binary=$home/.local/bin/agent-fleet
-  [ -x "$binary" ] && [ -f "$binary" ] && [ ! -L "$binary" ] || {
-    echo "error: agent-fleet is required to enforce direct crew-pool eligibility" >&2
-    return 1
-  }
   printf '%s\n' "$binary"
 }
 
@@ -382,11 +393,34 @@ EOF
         log "claude account $candidate excluded from $pool: missing quota-axi's non-secret Keychain access marker; captain approval is required"
         continue
       fi
+      # shellcheck disable=SC2016
       if ! PERL5LIB='' PERL5OPT='' "$(system_perl)" -e '
           use strict;
           use warnings;
           use Fcntl qw(:DEFAULT);
-          my ($path) = @ARGV;
+
+          my ($account_home, $path) = @ARGV;
+          my @directories = (
+            $account_home,
+            "$account_home/.agent-fleet-quota-cache",
+            "$account_home/.agent-fleet-quota-cache/quota-axi",
+          );
+          for my $directory (@directories) {
+            my @before = lstat($directory);
+            exit 1 unless @before && -d _ && !-l _;
+            exit 1 unless $before[4] == $< && ($before[2] & 0022) == 0;
+            sysopen(my $directory_fh, $directory, O_RDONLY) or exit 1;
+            my @opened = stat($directory_fh);
+            exit 1 unless @opened && -d _;
+            my @after = lstat($directory);
+            exit 1 unless @after;
+            for my $index (0, 1, 2, 3, 4, 5, 7, 9, 10) {
+              exit 1 unless $before[$index] == $opened[$index]
+                && $opened[$index] == $after[$index];
+            }
+            close($directory_fh) or exit 1;
+          }
+
           my @before = lstat($path);
           exit 1 unless @before && -f _ && !-l _;
           exit 1 unless ($before[2] & 07777) == 0600;
@@ -405,7 +439,7 @@ EOF
             exit 1 unless $before[$index] == $opened[$index]
               && $opened[$index] == $after[$index];
           }
-        ' "$marker" 2>/dev/null; then
+        ' "$candidate" "$marker" 2>/dev/null; then
         log "claude account $candidate excluded from $pool: invalid quota-axi Keychain approval marker; expected exact granted payload, mode 0600, current-user ownership, one link, real path components, and stable metadata"
         continue
       fi
