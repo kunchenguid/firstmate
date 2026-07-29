@@ -193,6 +193,11 @@ That styled capture is internal to the boolean detector only.
 `fm-peek` and every other human or LLM-facing capture path stays plain `tmux capture-pane` with no escape codes.
 Note for a future reader: because those paths are plain, a peek of an IDLE secondmate can render its predicted next prompt as apparent typed input, bounded by AGENTS.md forbidding reads of a secondmate's chat and by the documented post-spawn trust-dialog peek above happening while the agent is still processing its charter, before any ghost renders.
 
+Claude's idle composer SHAPE is a separate verified fact from that ghost styling.
+Claude Code 2.1.220 draws it UNBORDERED as a bare `❯` (U+276F) followed by U+00A0, not the older bordered `│ ❯ │` box, and that no-break space is not ASCII whitespace.
+The shared owner's `fm_composer_trim` (`bin/fm-composer-lib.sh`) strips Unicode blanks from composer content so that row reads `empty` rather than `pending`; before that trim existed, away mode deferred every escalation into a live claude pane instead of delivering it.
+`docs/herdr-backend.md`'s 2026-07-26 incident record owns the captured bytes, the per-backend verdict matrix, and the residual gaps - including that orca and cmux discard that unbordered row before the shared classifier and read it `unknown`.
+
 **Primary-session guard fact (verified 2026-07-04, Claude Code 2.1.201; preserved 2026-07-08, Claude Code 2.1.204; Stop-owned auto-arm revalidated 2026-07-24, Claude Code 2.1.219).**
 This is separate from the per-task crewmate turn-end hook above (that one just `touch`es a marker file in a task's own `.claude/settings.local.json`).
 The firstmate PRIMARY's own `.claude/settings.json` registers two Stop hooks: `bin/fm-turnend-guard.sh --claude` and the Stop-owned auto-arm `bin/fm-claude-stop-autoarm.sh` (`asyncRewake: true`, `timeout: 28800`), and exiting the guard with status 2 plus stderr reliably forces the model to continue.
@@ -327,7 +332,7 @@ A freshly-dismissed, never-typed-into grok composer shows a placeholder ("Type a
 The shared ANSI-aware owner `fm_composer_strip_ghost` (`bin/fm-composer-lib.sh`) now drops a dark/muted truecolor foreground (perceived luminance below `FM_COMPOSER_GHOST_LUMA_MAX`, default 128) as well as dim/faint, so the placeholder is stripped and the row reads empty on both ANSI-capable backends (tmux and herdr route through the same owner).
 Verified live against grok 0.2.93: real input is the bright `38;2;224;222;244` (luminance ~225, kept), while grok's borders and placeholder/hint text are dark truecolor (`38;2;50;47;70` .. `38;2;110;106;134`, luminance ~51..110, dropped).
 This assumes a dark terminal theme, the fleet reality; the SGR-2 signal stays theme-independent.
-Regression coverage: `tests/fm-composer-ghost.test.sh` (`test_strip_ghost_drops_dark_truecolor_ghost`, `test_dark_truecolor_ghost_only_composer_is_not_pending`) and `tests/fm-backend-herdr.test.sh` (`test_composer_state_grok_dark_truecolor_placeholder_is_empty`, `test_composer_state_grok_bright_truecolor_real_text_is_pending`).
+Regression coverage: `tests/fm-composer-ghost.test.sh` (`test_strip_ghost_drops_dark_truecolor_ghost`, `test_dark_truecolor_ghost_only_composer_reads_empty`) and `tests/fm-backend-herdr.test.sh` (`test_composer_state_grok_dark_truecolor_placeholder_is_empty`, `test_composer_state_grok_bright_truecolor_real_text_is_pending`).
 
 **Tmux bottom-border cursor quirk (fixed):**
 In a pristine placeholder-only composer, tmux's `#{cursor_y}` can point at the box's bottom border instead of its text row.

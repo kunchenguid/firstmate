@@ -1124,13 +1124,16 @@ inject_msg() {  # <message> [state]
   #      fm_composer_classify_content, bin/fm-composer-lib.sh) reports 'pending'
   #      for real unsubmitted text (a human's half-typed line, or a swallowed
   #      prior injection) and 'unknown' for a bare dead-shell prompt (the agent
-  #      exited to its login shell) or an unreadable pane. Neither is a safe
+  #      exited to its login shell), an unreadable pane, or an unbordered row
+  #      emptied only by Unicode-blank trimming (no evidence it is a composer at
+  #      all; see the composer-emptiness contract in docs/herdr-backend.md). None
+  #      of those is a safe
   #      target - typing the escalation into a shell could execute it - so defer
   #      on anything that is not affirmatively 'empty'. A deferred escalation
   #      stays buffered for the next cycle or the catch-up flush.
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
-    log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+    log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, unreadable pane, or a row emptied only by Unicode blanks)"
     return 1
   fi
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never

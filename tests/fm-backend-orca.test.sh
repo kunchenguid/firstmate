@@ -197,6 +197,50 @@ test_composer_state_popup_placeholder_fill_is_pending() {
   pass "fm_backend_orca_composer_state: a slash-command popup's argument-hint placeholder still reads pending"
 }
 
+# A U+00A0 inside a BORDERED composer's content: ASCII whitespace trimming
+# leaves the no-break space behind, so the shared owner's fm_composer_trim (task
+# fm-afk-wedge-bgjob-pane) is what keeps it from reading as typed input here
+# too. This pins the shared trim reaching the orca adapter; it is NOT claude's
+# real idle composer, which is unbordered - see the unbordered test below.
+test_composer_state_bordered_nbsp_idle_is_empty() {
+  local out
+  orca_case composer-nbsp-idle
+  printf '{"ok":true,"result":{"terminal":{"tail":["  ╭────────────────────────╮","  │ ❯\xc2\xa0                     │","  ╰──────── Composer ─────╯"]}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state term-123' "$ROOT" )
+  [ "$out" = empty ] || fail "a bordered '❯'+U+00A0 composer row must read empty, got '$out'"
+  pass "fm_backend_orca_composer_state: a bordered '❯'+U+00A0 composer row reads empty"
+}
+
+test_composer_state_bordered_nbsp_with_text_is_pending() {
+  local out
+  orca_case composer-nbsp-text
+  printf '{"ok":true,"result":{"terminal":{"tail":["  ╭────────────────────────╮","  │ ❯\xc2\xa0hello captain        │","  ╰──────── Composer ─────╯"]}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state term-123' "$ROOT" )
+  [ "$out" = pending ] || fail "typed text after a bordered '❯'+U+00A0 must read pending, got '$out'"
+  pass "fm_backend_orca_composer_state: typed text after a bordered '❯'+U+00A0 still reads pending"
+}
+
+# Claude 2.1.220 renders its idle composer UNBORDERED: a bare `❯` (U+276F) plus
+# U+00A0, with no border glyphs on the row. fm_backend_orca_composer_state is
+# deliberately border-row based - it keeps only rows whose trimmed content both
+# starts and ends with a border glyph - so that row is discarded before the
+# shared classifier is ever reached and the verdict is `unknown`, with or
+# without the blank trim. This is a pre-existing structural limitation of the
+# orca adapter, independent of blank trimming; it is recorded here honestly so a
+# future change in that behaviour is caught rather than silently assumed.
+# `unknown` is non-`empty`, so away-mode injection is refused either way.
+test_composer_state_claude_unbordered_nbsp_row_is_unknown() {
+  local out
+  orca_case composer-unbordered-nbsp
+  printf '{"ok":true,"result":{"terminal":{"tail":["  ⏵⏵ accept edits on","❯\xc2\xa0","  ? for shortcuts"]}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_composer_state term-123' "$ROOT" )
+  [ "$out" = unknown ] || fail "claude's real unbordered '❯'+U+00A0 row has no border glyphs, so orca must read unknown, got '$out'"
+  pass "fm_backend_orca_composer_state: claude's real unbordered '❯'+U+00A0 idle row reads unknown (border-row based adapter never sees it)"
+}
+
 # Dead-shell injection safety (task fm-composer-shellglyph-safety): a pane whose
 # agent has exited to a bare login shell has no bordered composer row, so the
 # classifier finds nothing and reports `unknown` - NOT a safe (empty) injection
@@ -1286,6 +1330,9 @@ test_send_text_submit_verifies_empty_composer_after_enter
 test_send_text_submit_keeps_current_tail_when_limited
 test_send_text_submit_retries_when_composer_stays_pending
 test_composer_state_popup_placeholder_fill_is_pending
+test_composer_state_bordered_nbsp_idle_is_empty
+test_composer_state_bordered_nbsp_with_text_is_pending
+test_composer_state_claude_unbordered_nbsp_row_is_unknown
 test_composer_state_bare_shell_prompt_is_unknown
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_literal_constructs_non_enter_send

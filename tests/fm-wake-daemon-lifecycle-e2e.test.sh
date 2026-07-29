@@ -33,6 +33,13 @@ fi
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-daemon-e2e)
 
+# The cursor row of an idle, injectable supervisor pane: claude's real unbordered
+# composer, an agent prompt glyph followed by U+00A0. This is the shape a real
+# supervisor pane renders, and it is what the U+00A0 trim exists to read as empty.
+# A blank, glyph-less row also reads empty, as it always has; only a row emptied
+# purely by Unicode-blank trimming defers as unknown.
+IDLE_COMPOSER_ROW=$(printf '\xe2\x9d\xaf\xc2\xa0')
+
 # Run the daemon-managed watcher once: under the supervise-daemon (away mode) the
 # watcher is one-shot - it exits with a single reason line on EVERY wake and the
 # daemon does the triage. This e2e exercises exactly that path, so it runs with
@@ -94,7 +101,9 @@ test_routine_then_terminal_after_restart() {
   # submission (one typed line + one Enter), then the buffer clears.
   local sent
   sent="$dir/sent.log"; : > "$sent"
-  : > "$dir/pane.txt"
+  # An injectable supervisor pane rendered as a real IDLE AGENT COMPOSER, which
+  # is the faithful shape; a blank row would read empty too, but proves less.
+  printf '%s\n' "$IDLE_COMPOSER_ROW" > "$dir/pane.txt"
   afk_enter "$state"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \

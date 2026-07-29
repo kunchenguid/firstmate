@@ -119,6 +119,8 @@ Real tests share the captain's running app rather than creating an isolated cmux
 - The only-workspace cleanup path leaves a fresh default workspace and cannot close the window.
 - Label lookup and recovery are currently scoped to the current cmux window, so a task moved to a non-current window is a known recovery blind spot.
 - Workspace ids do not survive app relaunch and are never recovery authority.
+- The composer row finder requires a border row, so a no-break space inside a BORDERED composer's content is trimmed by the shared owner and reads `empty` (`tests/fm-backend-cmux.test.sh`'s `test_composer_state_bordered_nbsp_idle_is_empty`), while claude's current UNBORDERED idle composer - a bare `❯` plus U+00A0 - is discarded before the classifier and reads `unknown` (`test_composer_state_claude_unbordered_nbsp_row_is_unknown`).
+  That costs delivery, never safety - `unknown` is non-`empty`, so injection is refused - and the away-mode daemon accepts only tmux and herdr as supervisor backends in any case; `docs/herdr-backend.md`'s 2026-07-26 incident record owns the full contract.
 
 ## Regression entry points
 

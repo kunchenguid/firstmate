@@ -59,6 +59,7 @@ Real text on any content row is pending, while only an unambiguous box with ever
 Unreadable, incomplete, or structurally ambiguous boxes fail closed, and panes without a bordered composer retain the compatible cursor-row classification.
 The shared classifier accepts a shell glyph as an empty agent composer only inside a verified bordered composer.
 A bare shell prompt is `unknown`, so away-mode escalation is never injected into a dead shell.
+An agent prompt glyph padded with Unicode blanks is an empty composer, which is the shape claude's current unbordered composer renders; the captured byte evidence lives in [the 2026-07-26 incident](herdr-backend.md#incident-2026-07-26-away-mode-never-delivered-because-claudes-idle-composer-ends-in-a-no-break-space).
 
 Rendered busy detection is also harness-scoped.
 Task metadata selects only that harness's verified signature, so output from one harness cannot make another harness appear busy.

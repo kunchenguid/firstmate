@@ -93,8 +93,13 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 _buf=
+# The idle row is a real agent composer rather than a blank line, so the test
+# drives claude's actual unbordered idle composer, `❯` (U+276F) + U+00A0 - the
+# shape the blank trim exists to read as empty. A blank, glyph-less row reads
+# empty too, as it always has, but it would not exercise the trim.
+_prompt=$'\xE2\x9D\xAF\xC2\xA0'
 redraw() {
-  printf '\r\033[K%s' "$_buf"
+  printf '\r\033[K%s%s' "$_prompt" "$_buf"
 }
 submit_line() {
   local _line=$_buf _c _hex

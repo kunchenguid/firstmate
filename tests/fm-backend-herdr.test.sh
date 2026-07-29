@@ -1797,6 +1797,40 @@ test_composer_state_popup_placeholder_fill_is_pending() {
   pass "fm_backend_herdr_composer_state: a slash-command popup's argument-hint placeholder still reads pending (the incident fix)"
 }
 
+# Claude 2.1.220 draws its idle composer as `❯` (U+276F) followed by U+00A0, a
+# no-break space that ASCII whitespace trimming leaves behind. Herdr reads the
+# same shape as tmux does, and both route the verdict through the shared owner's
+# fm_composer_trim (task fm-afk-wedge-bgjob-pane), so neither backend can read an
+# idle claude pane as holding typed input.
+test_composer_state_claude_nbsp_idle_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-nbsp-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Bare (unbordered) row, the shape claude actually renders.
+  printf '\xe2\x9c\xbb Cogitated for 38s\n\n\x1b[38;5;246m\xe2\x9d\xaf\xc2\xa0\x1b[39m\n\n  Opus 5 (high)\n' > "$resp/1.out"
+  # Bordered row carrying the same no-break space.
+  printf '  \xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\n  \xe2\x94\x82 \xe2\x9d\xaf\xc2\xa0 \xe2\x94\x82\n  \xe2\x95\xb0\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xaf\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "an idle claude '❯'+U+00A0 bare row should read empty, got '$out'"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "an idle claude '❯'+U+00A0 bordered row should read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: claude's '❯'+U+00A0 idle composer reads empty, bare and bordered"
+}
+
+test_composer_state_claude_nbsp_with_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-nbsp-text"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The no-break space trim must never swallow the human's unsubmitted text.
+  printf '  \xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\n  \xe2\x94\x82 \xe2\x9d\xaf\xc2\xa0hello captain \xe2\x94\x82\n  \xe2\x95\xb0\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xaf\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "typed text after '❯'+U+00A0 should read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: typed text after '❯'+U+00A0 still reads pending"
+}
+
 test_composer_state_unknown_on_capture_failure() {
   local dir log resp fb out status
   dir="$TMP_ROOT/composer-capture-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -3051,6 +3085,8 @@ test_composer_state_bare_prompt_is_empty
 test_composer_state_ghost_placeholder_is_empty
 test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
+test_composer_state_claude_nbsp_idle_is_empty
+test_composer_state_claude_nbsp_with_text_is_pending
 test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found
 test_composer_state_pi_separator_idle_is_empty

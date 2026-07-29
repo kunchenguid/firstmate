@@ -11,8 +11,11 @@
 # These tests pin:
 #   1. fm_tmux_strip_ghost drops dim/faint AND dark-truecolor runs, keeping
 #      normal-intensity, brightly-coloured text.
-#   2. fm_pane_input_pending reads a ghost-only composer (either style) as NOT
-#      pending, while still treating real (normal/bright) text as pending.
+#   2. fm_tmux_composer_state reads a ghost-only composer (either style) as
+#      `empty`, while still treating real (normal/bright) text as `pending`.
+#      The idle rows assert `empty` rather than merely "not pending", because
+#      fm_pane_input_pending is also false for `unknown` and `unknown` is the
+#      state in which away mode never delivers at all.
 #   3. The tmux reader structurally scans every row of a multi-row composer.
 #   4. The human/LLM-facing capture path (fm-peek.sh) stays PLAIN - no escape codes
 #      ever reach firstmate's context.
@@ -164,32 +167,34 @@ test_strip_ghost_drops_dark_truecolor_ghost() {
 
 # --- fm_pane_input_pending: dim ghost is not pending ------------------------
 
-test_dim_ghost_only_composer_is_not_pending() {
-  local dir fb capture
+test_dim_ghost_only_composer_reads_empty() {
+  local dir fb capture out
   dir="$TMP_ROOT/ghost-only"; mkdir -p "$dir"
   fb=$(make_fake_tmux "$dir")
   capture="$dir/styled.txt"
   # The exact rendering claude emits: a normal prompt glyph + a DIM predicted prompt.
+  # This is an idle agent composer, so the verdict that matters is `empty` - the
+  # only state the away-mode injector delivers into. `unknown` would still be
+  # not-pending while wedging delivery, so assert the verdict itself.
   printf '\xe2\x9d\xaf \033[2mWhat is the largest country by area?\033[0m\n' > "$capture"
-  if PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
-     fm_pane_input_pending "fakepane"; then
-    fail "dim ghost-only composer falsely read as pending"
-  fi
-  pass "fm_pane_input_pending: a dim ghost-only composer is NOT pending"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] || fail "a dim ghost-only composer must read empty, got '$out'"
+  pass "fm_tmux_composer_state: a dim ghost-only composer reads empty"
 }
 
-test_dim_ghost_inside_bordered_composer_is_not_pending() {
-  local dir fb capture
+test_dim_ghost_inside_bordered_composer_reads_empty() {
+  local dir fb capture out
   dir="$TMP_ROOT/ghost-bordered"; mkdir -p "$dir"
   fb=$(make_fake_tmux "$dir")
   capture="$dir/styled.txt"
   # Bordered composer (claude box) holding only dim ghost text.
   printf '╭─────────────────────────────────────╮\n│ \033[2mtry the other approach instead\033[0m      │\n╰─────────────────────────────────────╯\n' > "$capture"
-  if PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
-     fm_pane_input_pending "fakepane"; then
-    fail "dim ghost in a bordered composer falsely read as pending"
-  fi
-  pass "fm_pane_input_pending: dim ghost inside a bordered composer is NOT pending"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] \
+    || fail "dim ghost in a bordered composer must read empty, got '$out'"
+  pass "fm_tmux_composer_state: dim ghost inside a bordered composer reads empty"
 }
 
 test_normal_text_still_pending() {
@@ -229,20 +234,21 @@ test_colored_text_with_2_payload_still_pending() {
   pass "fm_pane_input_pending: bright colored text with 2 payloads is still pending"
 }
 
-test_dark_truecolor_ghost_only_composer_is_not_pending() {
-  local dir fb capture
+test_dark_truecolor_ghost_only_composer_reads_empty() {
+  local dir fb capture out
   dir="$TMP_ROOT/grok-ghost"; mkdir -p "$dir"
   fb=$(make_fake_tmux "$dir")
   capture="$dir/styled.txt"
   # A grok-style pristine composer: bright prompt glyph + a dark/muted truecolor
-  # placeholder. It must read NOT pending (the grok TRUECOLOR gap, now covered by
-  # the same ANSI-aware owner as claude's dim ghost).
+  # placeholder. It is an idle agent composer, so it must read `empty` (the grok
+  # TRUECOLOR gap, now covered by the same ANSI-aware owner as claude's dim
+  # ghost); a merely not-pending `unknown` would leave the pane undeliverable.
   printf '\xe2\x9d\xaf \033[38;2;50;47;70mType a message...\033[0m\n' > "$capture"
-  if PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
-     fm_pane_input_pending "fakepane"; then
-    fail "dark truecolor ghost-only composer falsely read as pending"
-  fi
-  pass "fm_pane_input_pending: a dark truecolor ghost-only composer (grok placeholder) is NOT pending"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] \
+    || fail "a dark truecolor ghost-only composer (grok placeholder) must read empty, got '$out'"
+  pass "fm_tmux_composer_state: a dark truecolor ghost-only composer (grok placeholder) reads empty"
 }
 
 test_dark_truecolor_bare_shell_prompt_is_unknown() {
@@ -258,6 +264,83 @@ test_dark_truecolor_bare_shell_prompt_is_unknown() {
       || fail "dark truecolor bare shell prompt '$prompt' must read unknown, got '$out'"
   done
   pass "fm_tmux_composer_state: dark truecolor shell prompts read unknown"
+}
+
+# --- Claude's current unbordered `❯` + U+00A0 idle composer -----------------
+
+test_claude_nbsp_idle_composer_reads_empty() {
+  local dir fb capture out
+  dir="$TMP_ROOT/claude-nbsp"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  # The exact bytes claude 2.1.220 renders for a completely idle composer,
+  # captured from a live pane: a 256-colour grey `❯` (U+276F, E2 9D AF) followed
+  # by U+00A0 (C2 A0), unbordered. The no-break space is not ASCII whitespace, so
+  # before task fm-afk-wedge-bgjob-pane it survived the trim, read as typed text,
+  # and away mode deferred every escalation instead of delivering it.
+  # The assertion is the exact verdict, not merely "not pending":
+  # fm_pane_input_pending is false for `unknown` too, and `unknown` is the
+  # never-delivers state this incident is about - the away-mode injector proceeds
+  # only on an affirmative `empty`. A regression that flipped this row to
+  # `unknown` would restore the wedge and still satisfy a not-pending assertion.
+  printf '\033[38;5;246m\xe2\x9d\xaf\xc2\xa0\033[39m\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] \
+    || fail "claude's idle composer ('❯'+U+00A0) must read empty, got '$out'"
+  pass "fm_tmux_composer_state: claude's unbordered '❯'+U+00A0 idle composer reads empty"
+}
+
+test_claude_nbsp_composer_with_real_text_is_pending() {
+  local dir fb capture
+  dir="$TMP_ROOT/claude-nbsp-text"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  # The same row once a human starts typing: the U+00A0 trim must never swallow
+  # real unsubmitted input, or away mode would inject over a half-typed line.
+  printf '\033[38;5;246m\xe2\x9d\xaf\xc2\xa0\033[39mfix findings 1 and 3\n' > "$capture"
+  PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_pane_input_pending "fakepane" \
+    || fail "typed text after '❯'+U+00A0 was not detected as pending"
+  pass "fm_pane_input_pending: typed text after '❯'+U+00A0 is still pending"
+}
+
+# --- The blank trim widens no verdict it did not already own ----------------
+
+test_container_less_blank_composer_row_is_empty() {
+  local dir fb capture out
+  dir="$TMP_ROOT/containerless-blank"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  # Pi draws its composer as a region between two separator rules - no side
+  # border, no prompt glyph - so on the tmux path an idle Pi composer is just a
+  # blank cursor row with a reverse-video cursor cell. fm_tmux_composer_state has
+  # no separator-pair detection, so it arrives at the shared classifier
+  # unbordered and empty, and it must still read empty or away-mode delivery to a
+  # Pi primary in a tmux pane is lost.
+  printf '\033[0m\033[7m \033[0m      \n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] \
+    || fail "a container-less blank composer row must read empty (Pi on tmux), got '$out'"
+  pass "fm_tmux_composer_state: a container-less blank composer row reads empty"
+}
+
+test_unbordered_unicode_blank_only_row_is_unknown() {
+  local dir fb capture out
+  dir="$TMP_ROOT/unicode-blank-only"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  # A row of nothing but U+00A0 - no prompt glyph, no text, no container. Before
+  # the blank trim existed this read pending; the trim alone would flip it to
+  # empty, which is a NEW injection permission on a row carrying no evidence that
+  # it is an agent composer. That one flip is declined, so it reads unknown.
+  printf '\033[39m\xc2\xa0\033[0m\n' > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=0 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = unknown ] \
+    || fail "an unbordered row of only U+00A0 must read unknown, got '$out'"
+  pass "fm_tmux_composer_state: an unbordered Unicode-blank-only row reads unknown"
 }
 
 test_real_text_with_trailing_ghost_is_pending() {
@@ -608,12 +691,16 @@ test_strip_ghost_drops_dim_keeps_normal
 test_strip_ghost_handles_combined_and_boundary_codes
 test_strip_ghost_keeps_colored_text_with_2_payloads
 test_strip_ghost_drops_dark_truecolor_ghost
-test_dim_ghost_only_composer_is_not_pending
-test_dim_ghost_inside_bordered_composer_is_not_pending
+test_dim_ghost_only_composer_reads_empty
+test_dim_ghost_inside_bordered_composer_reads_empty
 test_normal_text_still_pending
 test_colored_text_with_2_payload_still_pending
-test_dark_truecolor_ghost_only_composer_is_not_pending
+test_dark_truecolor_ghost_only_composer_reads_empty
 test_dark_truecolor_bare_shell_prompt_is_unknown
+test_claude_nbsp_idle_composer_reads_empty
+test_claude_nbsp_composer_with_real_text_is_pending
+test_container_less_blank_composer_row_is_empty
+test_unbordered_unicode_blank_only_row_is_unknown
 test_real_text_with_trailing_ghost_is_pending
 test_two_row_composer_reads_text_above_empty_cursor_row
 test_wrapped_composer_reads_all_content_rows

@@ -23,6 +23,13 @@ fi
 
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 
+# The cursor row of an idle, injectable supervisor pane: claude's real unbordered
+# composer, an agent prompt glyph followed by U+00A0. This is the shape a real
+# supervisor pane renders, and it is what the U+00A0 trim exists to read as empty.
+# A blank, glyph-less row also reads empty, as it always has; only a row emptied
+# purely by Unicode-blank trimming defers as unknown.
+IDLE_COMPOSER_ROW=$(printf '\xe2\x9d\xaf\xc2\xa0')
+
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
@@ -519,7 +526,9 @@ test_escalate_batches_into_one_digest() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
+  # An injectable supervisor pane rendered as a real IDLE AGENT COMPOSER, which
+  # is the faithful shape; a blank row would read empty too, but proves less.
+  capture="$dir/pane.txt"; printf '%s\n' "$IDLE_COMPOSER_ROW" > "$capture"
   escalate_add "$state" "event A: done: PR 1"
   escalate_add "$state" "event B: done: PR 2"
   afk_enter "$state"
@@ -545,7 +554,7 @@ test_escalate_batch_age_uses_first_append() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
+  capture="$dir/pane.txt"; printf '%s\n' "$IDLE_COMPOSER_ROW" > "$capture"
   escalate_add "$state" "event A: done: PR 1"
   escalate_add "$state" "event B: done: PR 2"
   echo $(( $(date +%s) - 100 )) > "$state/.subsuper-escalations.since"
@@ -662,7 +671,8 @@ test_afk_absent_daemon_does_not_inject() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
+  # An otherwise injectable pane, so the refusal can only come from the afk gate.
+  capture="$dir/pane.txt"; printf '%s\n' "$IDLE_COMPOSER_ROW" > "$capture"
   escalate_add "$state" "done: PR 1"
   # afk flag deliberately NOT set
   if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \

@@ -158,7 +158,7 @@ For `no-mistakes` projects, seeding initializes only projects newly cloned into 
 After creating a secondmate, move existing main-backlog queued items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it is idempotent and refuses In flight, Done, or non-secondmate homes.
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
 Set `FM_SECONDMATE_LABEL` to record an optional trailing `label:` registry field pinning the secondmate's session display name (for example `SM CNC`); `bin/fm-spawn.sh --secondmate` re-resolves it on every relaunch and falls back to the derived `SM <Title-cased id suffix>` form when no explicit label exists, with exact resolution order and the per-harness name-flag contract owned by that script's header.
-The main firstmate session is launched by the captain, not by `fm-spawn`, so its `FM Main` display name comes from launching through `bin/fm-main.sh` (or an alias to it); that script's header owns the mechanics.
+The main firstmate session is launched by the captain, not by `fm-spawn`, so its `FM Main` display name comes from launching through `bin/fm-main.sh` (or an alias to it); set `FM_MAIN_SESSION_NAME` to override that label, and that script's header owns the mechanics.
 The seeded home's `data/charter.md` owns the standard secondmate lifecycle and escalation contract; the route file points to it through the existing `home:` field instead of adding another pointer.
 Each seed writes an `.fm-secondmate-home` identity marker at the home root.
 The tracked root `.gitignore` ignores that marker, so validation can read it without making a freshly seeded home appear dirty to porcelain-based safety checks.
@@ -446,7 +446,7 @@ FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=3        # fetch retries after fm-fleet-s
 FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=1 # seconds fm-fleet-sync.sh waits before each of those retries
 FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=30       # min mtime age before fm-fleet-sync.sh treats a leftover packed-refs.lock as provably stale
 FM_BUSY_REGEX=          # optional global override for every harness-scoped busy-pane matcher; unset uses each recorded harness's verified signature
-FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after ghost and border stripping
+FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after ghost, border, and blank stripping
 FM_COMPOSER_GHOST_LUMA_MAX=128   # fleet-wide: max perceived luminance (0.299R+0.587G+0.114B, 0-255) for a TRUECOLOR foreground to count as de-emphasised ghost/placeholder text and be stripped; dim/faint (SGR 2) is stripped regardless. Assumes a dark terminal theme (bin/fm-composer-lib.sh's fm_composer_strip_ghost, shared by the tmux and herdr composer readers)
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once

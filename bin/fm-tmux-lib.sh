@@ -45,8 +45,8 @@
 # as a known gap in `docs/herdr-backend.md` rather than patched here, so the
 # tmux adapter does not paper over a herdr-specific shape.
 #
-# Overrides: FM_COMPOSER_IDLE_RE matches an empty composer after ghost and
-# structural border stripping. FM_BUSY_REGEX globally overrides harness-scoped
+# Overrides: FM_COMPOSER_IDLE_RE matches an empty composer after ghost, blank,
+# and structural border stripping. FM_BUSY_REGEX globally overrides harness-scoped
 # busy-footer matching (mirrors fm-watch.sh / the daemon).
 #
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
@@ -307,6 +307,8 @@ EOF
 # requires positive proof: a genuinely empty composer, an all-empty unambiguous
 # box, an empty non-bordered fallback row, or the submit core's proven
 # busy-queued Enter conversion.
+# A non-bordered row that only Unicode-blank trimming emptied is not positive
+# proof and reads unknown; bin/fm-composer-lib.sh owns that rule.
 fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   local target=$1 cy raw pane plain box box_status top bottom geometry_ambiguous
   local row row_raw state unknown_seen=0

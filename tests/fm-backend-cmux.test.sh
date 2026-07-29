@@ -685,6 +685,57 @@ test_composer_state_bare_prompt_is_empty() {
   pass "fm_backend_cmux_composer_state: a bare '❯' composer row reads empty"
 }
 
+# A U+00A0 inside a BORDERED composer's content: ASCII whitespace trimming
+# leaves the no-break space behind, so the shared owner's fm_composer_trim (task
+# fm-afk-wedge-bgjob-pane) is what keeps it from reading as typed input here
+# too. This pins the shared trim reaching the cmux adapter; it is NOT claude's
+# real idle composer, which is unbordered - see the unbordered test below.
+test_composer_state_bordered_nbsp_idle_is_empty() {
+  local dir fb out
+  dir="$TMP_ROOT/composer-nbsp-idle"; mkdir -p "$dir/responses"
+  cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_read_screen_response "$dir" 2 $'  ╭────────────────────────╮\n  │ ❯\xc2\xa0                     │\n  ╰──────── Composer ─────╯'
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
+  [ "$out" = empty ] || fail "a bordered '❯'+U+00A0 composer row must read empty, got '$out'"
+  pass "fm_backend_cmux_composer_state: a bordered '❯'+U+00A0 composer row reads empty"
+}
+
+test_composer_state_bordered_nbsp_with_text_is_pending() {
+  local dir fb out
+  dir="$TMP_ROOT/composer-nbsp-text"; mkdir -p "$dir/responses"
+  cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_read_screen_response "$dir" 2 $'  ╭────────────────────────╮\n  │ ❯\xc2\xa0hello captain        │\n  ╰──────── Composer ─────╯'
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
+  [ "$out" = pending ] || fail "typed text after a bordered '❯'+U+00A0 must read pending, got '$out'"
+  pass "fm_backend_cmux_composer_state: typed text after a bordered '❯'+U+00A0 still reads pending"
+}
+
+# Claude 2.1.220 renders its idle composer UNBORDERED: a bare `❯` (U+276F) plus
+# U+00A0, with no border glyphs on the row. fm_backend_cmux_composer_state is
+# deliberately border-row based (see the contract comment on the function) - it
+# keeps only rows whose trimmed content both starts and ends with a border
+# glyph - so that row is discarded before the shared classifier is ever reached
+# and the verdict is `unknown`, with or without the blank trim. This is a
+# pre-existing structural limitation of the cmux adapter, independent of blank
+# trimming; it is recorded here honestly so a future change in that behaviour is
+# caught rather than silently assumed. `unknown` is non-`empty`, so away-mode
+# injection is refused either way.
+test_composer_state_claude_unbordered_nbsp_row_is_unknown() {
+  local dir fb out
+  dir="$TMP_ROOT/composer-unbordered-nbsp"; mkdir -p "$dir/responses"
+  cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_read_screen_response "$dir" 2 $'  ⏵⏵ accept edits on\n❯\xc2\xa0\n  ? for shortcuts'
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
+  [ "$out" = unknown ] || fail "claude's real unbordered '❯'+U+00A0 row has no border glyphs, so cmux must read unknown, got '$out'"
+  pass "fm_backend_cmux_composer_state: claude's real unbordered '❯'+U+00A0 idle row reads unknown (border-row based adapter never sees it)"
+}
+
 test_composer_state_ghost_placeholder_is_empty() {
   local dir fb out
   dir="$TMP_ROOT/composer-ghost"; mkdir -p "$dir/responses"
@@ -1044,6 +1095,9 @@ test_send_key_recovers_stale_target_by_label
 test_send_literal_uses_separator_for_option_shaped_text
 test_current_path_probes_with_marker
 test_composer_state_bare_prompt_is_empty
+test_composer_state_bordered_nbsp_idle_is_empty
+test_composer_state_bordered_nbsp_with_text_is_pending
+test_composer_state_claude_unbordered_nbsp_row_is_unknown
 test_composer_state_ghost_placeholder_is_empty
 test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending

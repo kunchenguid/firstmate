@@ -69,6 +69,10 @@ It never raw-deletes an Orca worktree.
 - Escape is unsupported.
 - Orca exposes no stable CLI version or protocol marker, so readiness is the compatibility gate rather than a version floor.
 - Only the verified terminal-handle and worktree result fields are accepted; speculative response shapes are rejected.
+- The composer row finder is border-row based, so an UNBORDERED composer row is discarded before the shared classifier is reached.
+  Claude's current idle composer is exactly that shape - a bare `❯` plus U+00A0 - and measures `unknown` here, with or without the shared Unicode-blank trim (`tests/fm-backend-orca.test.sh`'s `test_composer_state_claude_unbordered_nbsp_row_is_unknown`).
+  A blank inside a BORDERED composer's content is still trimmed by the shared owner and reads `empty`.
+  The gap costs delivery, never safety - `unknown` is non-`empty`, so injection is refused - and the away-mode daemon accepts only tmux and herdr as supervisor backends in any case; `docs/herdr-backend.md`'s 2026-07-26 incident record owns the full contract.
 
 ## Regression entry points
 
