@@ -700,6 +700,23 @@ test_bootstrap_activates_on_env_token() {
   pass "bootstrap activates X mode from an .env token, idempotently"
 }
 
+test_bootstrap_relative_home_writes_absolute_poll_shim() {
+  local root home out quoted_home
+  root="$TMP_ROOT/boot-relative-home"
+  mkdir -p "$root/home" "$root/cdpath/home"
+  home=$(cd "$root/home" && pwd -P)
+  printf 'FMX_PAIRING_TOKEN=tok-relative\n' > "$home/.env"
+  out=$(
+    cd "$root" || exit 1
+    CDPATH="$root/cdpath" FM_HOME=home "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
+  )
+  assert_contains "$out" "FMX: X mode on" "relative-home bootstrap must announce X mode"
+  quoted_home=$(printf '%q' "$home")
+  assert_grep "export FM_HOME=$quoted_home" "$home/state/x-watch.check.sh" \
+    "relative FM_HOME leaked into the durable X-mode poll shim"
+  pass "bootstrap ignores CDPATH when writing absolute FM_HOME into the durable X-mode poll shim"
+}
+
 test_bootstrap_reports_missing_x_dependency() {
   local home fakebin out tool tool_path
   home="$TMP_ROOT/boot-missing-x"; mkdir -p "$home"
@@ -2862,6 +2879,7 @@ test_followup_post_dry_run_increments_counter_keeps_link
 test_followup_post_dry_run_final_clears_link
 test_followup_usage_errors
 test_bootstrap_activates_on_env_token
+test_bootstrap_relative_home_writes_absolute_poll_shim
 test_bootstrap_reports_missing_x_dependency
 test_bootstrap_does_not_announce_when_arm_fails
 test_bootstrap_does_not_follow_x_artifact_symlinks

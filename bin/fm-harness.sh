@@ -49,7 +49,7 @@ detect_own() {
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(fm_ps_field "$pid" comm 2>/dev/null) || break
-    case "$(basename "$comm")" in
+    case "$(basename -- "$comm")" in
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;

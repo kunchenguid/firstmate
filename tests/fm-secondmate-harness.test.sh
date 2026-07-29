@@ -188,6 +188,57 @@ SH
   pass "pi-signed identity: authoritative launch selection distinguishes shared wrapper ancestry"
 }
 
+test_dash_leading_process_names_are_basename_operands() {
+  local dir fakebin got err status
+  dir="$TMP_ROOT/dash-leading-process-names"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  4242:comm=) printf '%s\n' '/opt/test/bin/codex' ;;
+  4242:args=) printf '%s\n' 'codex' ;;
+  4242:ppid=) printf '%s\n' 1 ;;
+  5252:comm=) printf '%s\n' '-codex' ;;
+  5252:args=) printf '%s\n' '-codex' ;;
+  5252:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' '-zsh' ;;
+  *:args=) printf '%s\n' '-zsh' ;;
+  *:ppid=) printf '%s\n' 4242 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  err="$dir/fm-harness.err"
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh" 2>"$err")
+  [ "$got" = codex ] || fail "dash-leading shell ancestry resolved '$got', expected codex"
+  [ ! -s "$err" ] || fail "fm-harness wrote basename option noise for literal -zsh: $(cat "$err")"
+
+  err="$dir/fm-session-lock-ancestry.err"
+  got=$(PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT" 2>"$err")
+  [ "$got" = 4242 ] || fail "session-lock dash-leading ancestry selected '$got', expected pid 4242"
+  [ ! -s "$err" ] || fail "session-lock ancestry wrote basename option noise for literal -zsh: $(cat "$err")"
+
+  err="$dir/fm-session-lock-alive.err"
+  PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 5252' \
+    "$ROOT" 2>"$err"; status=$?
+  expect_code 0 "$status" "session-lock liveness should accept literal -codex as a harness process name"
+  [ ! -s "$err" ] || fail "session-lock liveness wrote basename option noise for literal -codex: $(cat "$err")"
+
+  pass "harness identity: dash-leading ps command names are basename operands, not options"
+}
+
 # ===========================================================================
 # B) propagate_inheritable_config unit behavior
 # ===========================================================================
@@ -2246,6 +2297,7 @@ SH
 test_harness_resolution
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
+test_dash_leading_process_names_are_basename_operands
 test_propagate_lib
 test_spawn_split_and_inherit
 test_spawn_backward_compat_crew_fallback
