@@ -474,7 +474,7 @@ launch_template() {
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
-    kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto-approve' ;;
     *) return 1 ;;
   esac
 }
