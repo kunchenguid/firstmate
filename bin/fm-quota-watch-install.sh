@@ -116,6 +116,7 @@ done
 # is the exact class of bug a captain hit in production (quota-axi resolved so
 # reading always worked, herdr did not so every send silently failed).
 for b in $RESOLVED_BINS; do
+  # shellcheck disable=SC2016 # intentional: $1 expands in the inner sh -c, not here.
   if ! env -i PATH="$CRON_PATH" sh -c 'command -v "$1"' _ "$b" >/dev/null 2>&1; then
     echo "fm-quota-watch-install.sh: internal error: '$b' resolved during generation but not through the generated PATH ('$CRON_PATH'); refusing to print a broken entry" >&2
     exit 1
