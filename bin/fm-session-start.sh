@@ -191,7 +191,7 @@ print_backlog_manual_compact() {
         }
       }
     }
-  ' "$path"
+  ' "$path" | while IFS= read -r line; do append_cost_to_line "$line"; done
 }
 
 print_backlog_tasks_axi_compact() {
