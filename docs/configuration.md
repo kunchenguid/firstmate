@@ -535,7 +535,7 @@ Each entry under `dormant_triggers` needs a named `checkpoint`, so no dormant me
 ### Validation
 
 When the file exists, bootstrap validates the policy with `jq` on every session start, including in a read-only session that did not get the fleet lock.
-A home with no policy, or a note-only policy, stays silent; with `FM_BOOTSTRAP_VERBOSE_FACTS=1` bootstrap emits `BOOTSTRAP_INFO: fleet admission control absent|inert|active`.
+A home with no policy, or a note-only policy, stays silent; with `FM_BOOTSTRAP_VERBOSE_FACTS=1` bootstrap emits `BOOTSTRAP_INFO: fleet admission control inert|active` for a policy that exists, while an absent policy stays silent even then.
 Anything malformed is reported as `ADMISSION_CONTROL: invalid config/crew-dispatch.json _scheduling.admission_control - <reason>` and must be corrected rather than worked around.
 
 Validation refuses a policy that has an unknown field at any level, a threshold that is not null or a non-negative number, a soft threshold more restrictive than its hard counterpart, a threshold key without a `_count` or `_seconds` unit suffix, an unrecognized signal source, a signal enabled while its source is uncollectable, `enforce` set while its signal is disabled or while `enforcement_mode` is `safety-only`, a queue action naming any hold kind other than `load`, a `hold_kind` or `auto_reconsider` on the admitting `preferred` band, a `queue.release_triggers` value other than exactly `["teardown", "session-start"]`, a second queue substrate, telemetry disabled while admission is enabled, reservations or a non-single-primary authority enabled before their dormant trigger fires, or a dormant trigger with no named checkpoint.
