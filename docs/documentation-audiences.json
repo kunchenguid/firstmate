@@ -152,6 +152,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/playbot-operations/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/project-management/SKILL.md",
       "audience": "agent-runtime"
     },
