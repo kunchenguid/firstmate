@@ -42,7 +42,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_exit0 "$fakebin" treehouse pi-signed
   printf '%s\n' "$fakebin"
 }
 
@@ -84,10 +84,15 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
+  # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
+  # explicitly (empty by default) instead of leaking the invoking shell's value,
+  # which would make launch assertions depend on the developer's environment.
+  # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -342,13 +347,79 @@ test_pi_threads_model_and_max_effort() {
   expect_code 0 "$status" "pi spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "pi --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+  assert_contains "$launch" "FM_PI_HARNESS=pi pi --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
     "pi launch did not thread the requested model and max thinking level"
   assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
     "pi launch still exports the removed Calm input-reroute binding"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi launch lost the canonical typed launch-brief envelope"
   pass "pi receives --model and --thinking max profile flags"
+}
+
+test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
+  local rec id out status launch
+  id=profile-pi-signed-z8b
+  rec=$(make_spawn_case profile-pi-signed pi-signed "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort max)
+  status=$?
+  expect_code 0 "$status" "pi-signed spawn with max effort should succeed"
+  assert_contains "$out" "spawned $id harness=pi-signed" "pi-signed spawn did not preserve its visible identity"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed openai-codex/gpt-5.6-sol max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+    "pi-signed launch did not share Pi's model, thinking, and extension semantics"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
+    "pi-signed launch lost the canonical typed launch-brief envelope"
+  assert_present "$HOME_DIR/state/$id.pi-ext.ts" "pi-signed launch did not install Pi's turn-end extension"
+  pass "pi-signed shares Pi launch semantics while preserving its configured and recorded identity"
+}
+
+test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
+  local rec id out status
+  id=profile-pi-signed-missing-z8c
+  rec=$(make_spawn_case profile-pi-signed-missing pi-signed "$id")
+  read_case_record "$rec"
+  rm -f "$FAKEBIN_DIR/pi-signed"
+  : > "$LAUNCH_LOG"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$SPAWN" "$id" "$PROJ_DIR" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a missing pi-signed executable should refuse the spawn"
+  assert_contains "$out" "pi-signed executable not found on PATH" \
+    "missing pi-signed refusal did not name the actionable requirement"
+  assert_absent "$HOME_DIR/state/$id.meta" "missing pi-signed refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing pi-signed refusal typed a launch command"
+  pass "pi-signed refuses safely and actionably when the selected executable is unavailable"
+}
+
+test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
+  local rec id sm out status launch
+  id=profile-pi-signed-secondmate-z8d
+  rec=$(make_spawn_case profile-pi-signed-secondmate codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' pi-signed > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "pi-signed persistent secondmate spawn should succeed"
+  assert_contains "$out" "spawned $id harness=pi-signed kind=secondmate" \
+    "pi-signed secondmate spawn did not preserve its runtime identity"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed default default
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
+    "pi-signed secondmate did not share Pi's primary extension launch shape"
+  pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
 
 test_batch_forwards_shared_profile_flags() {
@@ -368,6 +439,55 @@ test_batch_forwards_shared_profile_flags() {
   assert_meta_profile "$HOME_DIR/state/$id1.meta" codex gpt-5 high
   assert_meta_profile "$HOME_DIR/state/$id2.meta" codex gpt-5 high
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
+}
+
+test_claude_forwards_firstmate_config_dir_when_set() {
+  local rec id out status launch
+  id=profile-claude-cfgdir-z17
+  rec=$(make_spawn_case profile-claude-cfgdir claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+    "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
+  pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
+}
+
+test_claude_omits_config_dir_prefix_when_unset() {
+  local rec id out status launch
+  id=profile-claude-nocfgdir-z18
+  rec=$(make_spawn_case profile-claude-nocfgdir claude "$id")
+  read_case_record "$rec"
+
+  # run_spawn pins CLAUDE_CONFIG_DIR empty by default, exercising the single-store
+  # default path where fm-spawn adds no prefix.
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn without CLAUDE_CONFIG_DIR should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
+    "claude launch must not add a config-dir prefix when firstmate has no CLAUDE_CONFIG_DIR set"
+  pass "claude omits the config-dir prefix when firstmate runs with the single-store default"
+}
+
+test_non_claude_harness_ignores_config_dir() {
+  local rec id out status launch
+  id=profile-codex-nocfgdir-z19
+  rec=$(make_spawn_case profile-codex-nocfgdir codex "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn with CLAUDE_CONFIG_DIR set should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
+    "non-claude harness launch must not receive the claude-specific config-dir prefix"
+  pass "non-claude harnesses do not receive the claude CLAUDE_CONFIG_DIR prefix"
 }
 
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
@@ -402,7 +522,13 @@ test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
+test_pi_signed_threads_shared_pi_profile_and_preserves_identity
+test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
+test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
+test_claude_forwards_firstmate_config_dir_when_set
+test_claude_omits_config_dir_prefix_when_unset
+test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"

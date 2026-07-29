@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|grok|kimi|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -36,7 +36,10 @@ detect_own() {
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
-  [ "${PI_CODING_AGENT:-}" = "true" ] && { echo pi; return; }
+  if [ "${PI_CODING_AGENT:-}" = "true" ]; then
+    if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
+    return
+  fi
   # grok sets GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
   # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so this marker
   # is unambiguous when firstmate runs natively on grok.
@@ -51,6 +54,7 @@ detect_own() {
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
       kimi) echo kimi; return ;;
+      pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
