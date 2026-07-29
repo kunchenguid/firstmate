@@ -1426,6 +1426,30 @@ test_dirty_worktree_refuses() {
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
 }
 
+test_nonignored_untracked_work_refuses_without_preservation() {
+  local case_dir rc
+  case_dir=$(make_case nonignored-untracked)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "landed task work"
+  add_fork_with_pushed_branch "$case_dir"
+  printf '%s\n' "non-ignored work" > "$case_dir/wt/operator-note.txt"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "nonignored-untracked: untracked work must block ordinary reclaim"
+  assert_present "$case_dir/wt/operator-note.txt" \
+    "nonignored-untracked: teardown discarded untracked work"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "nonignored-untracked: teardown cleared task metadata"
+  assert_grep "uncommitted changes" "$case_dir/stderr" \
+    "nonignored-untracked: refusal did not identify uncommitted work"
+  pass "non-ignored untracked work still requires preservation"
+}
+
 test_already_returned_worktree_finishes_bookkeeping() {
   local case_dir rc
   case_dir=$(make_case already-returned)
@@ -1509,15 +1533,50 @@ test_watchman_cookies_do_not_block_teardown() {
   pass "explicitly listed Watchman cookies do not block teardown"
 }
 
+test_ignored_worktree_content_is_summarized_without_blocking() {
+  local case_dir rc
+  case_dir=$(make_case ignored-summary)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" .gitignore $'ignored-cache/\n*.cache' \
+    "define ignored build output"
+  add_fork_with_pushed_branch "$case_dir"
+  mkdir -p "$case_dir/wt/ignored-cache/nested"
+  printf '%s\n' "ignored payload" \
+    > "$case_dir/wt/ignored-cache/nested/output.bin"
+  printf '%s\n' "ignored root payload" > "$case_dir/wt/root.cache"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "ignored-summary: ignored content must not block reclaim"
+  assert_grep 'count=2; top-level=["ignored-cache", "root.cache"]' \
+    "$case_dir/stdout" \
+    "ignored-summary: ignored content was not summarized before return"
+  assert_absent "$case_dir/data/task-x1/scratch" \
+    "ignored-summary: ignored content entered scratch preservation"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "ignored-summary: teardown left task metadata behind"
+  pass "ignored content stays exempt and receives a collapsed summary"
+}
+
 test_preserve_scratch_captures_then_reclaims_dirty_worktree() {
   local case_dir rc scratch_capture
   case_dir=$(make_case preserve-scratch)
   write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" .gitignore $'ignored-cache/\n*.cache' \
+    "define ignored build output"
   wt_commit_file "$case_dir" feature.txt landed "landed task work"
   add_fork_with_pushed_branch "$case_dir"
   printf '%s\n' "staged post-merge correction" > "$case_dir/wt/feature.txt"
   git -C "$case_dir/wt" add feature.txt
   printf '%s\n' "untracked recovery payload" > "$case_dir/wt/recovery note.txt"
+  mkdir -p "$case_dir/wt/ignored-cache/nested"
+  printf '%s\n' "ignored payload" \
+    > "$case_dir/wt/ignored-cache/nested/output.bin"
+  printf '%s\n' "ignored root payload" > "$case_dir/wt/root.cache"
 
   set +e
   run_teardown "$case_dir" --preserve-scratch \
@@ -1537,9 +1596,16 @@ test_preserve_scratch_captures_then_reclaims_dirty_worktree() {
     "preserve-scratch: untracked inventory was not captured"
   tar -tf "$scratch_capture/untracked.tar" | grep -Fx "recovery note.txt" >/dev/null \
     || fail "preserve-scratch: untracked payload was not archived"
+  assert_no_grep "ignored-cache" "$scratch_capture/untracked.txt" \
+    "preserve-scratch: ignored directory entered scratch inventory"
+  assert_no_grep "root.cache" "$scratch_capture/untracked.txt" \
+    "preserve-scratch: ignored file entered scratch inventory"
+  assert_grep 'count=2; top-level=["ignored-cache", "root.cache"]' \
+    "$case_dir/stdout" \
+    "preserve-scratch: ignored summary was missing or not directory-collapsed"
   assert_absent "$case_dir/state/task-x1.meta" \
     "preserve-scratch: teardown left task metadata behind"
-  pass "preserve-then-reclaim captures dirty work before cleaning"
+  pass "preserve-then-reclaim captures non-ignored work and summarizes ignored output"
 }
 
 test_preserve_scratch_never_cleans_unlanded_commits() {
@@ -4788,12 +4854,14 @@ if [ "${FM_TEST_FOCUSED:-}" = reclaim-regressions ]; then
   test_already_returned_worktree_finishes_bookkeeping
   test_already_returned_worktree_refuses_preservation_without_mutation
   test_watchman_cookies_do_not_block_teardown
+  test_ignored_worktree_content_is_summarized_without_blocking
   test_preserve_scratch_captures_then_reclaims_dirty_worktree
   test_preserve_scratch_never_cleans_unlanded_commits
   test_preserve_scratch_refuses_tracked_drift_before_cleanup
   test_preserve_scratch_refuses_index_drift_during_tracked_verification
   test_no_mistakes_truly_unpushed_refuses
   test_dirty_worktree_refuses
+  test_nonignored_untracked_work_refuses_without_preservation
   exit 0
 fi
 
@@ -4898,9 +4966,11 @@ test_content_fallback_honors_shared_checkout_lock
 test_locked_return_reuses_checkout_lock_for_landing_recheck
 test_treehouse_return_timeout_reaps_children_before_unlock
 test_dirty_worktree_refuses
+test_nonignored_untracked_work_refuses_without_preservation
 test_already_returned_worktree_finishes_bookkeeping
 test_already_returned_worktree_refuses_preservation_without_mutation
 test_watchman_cookies_do_not_block_teardown
+test_ignored_worktree_content_is_summarized_without_blocking
 test_preserve_scratch_captures_then_reclaims_dirty_worktree
 test_preserve_scratch_never_cleans_unlanded_commits
 test_preserve_scratch_refuses_tracked_drift_before_cleanup

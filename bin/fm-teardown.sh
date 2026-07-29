@@ -35,10 +35,13 @@
 # Teardown still repeats the landed-work proof under the checkout lock, skips a
 # second return, and clears only the orphaned task bookkeeping.
 # Only the explicit patterns in teardown_path_is_known_tool_artifact are excluded
-# from dirty-work detection.
+# from non-ignored dirty-work detection.
+# Git-ignored files do not block reclaim and are not preserved as scratch.
+# Before returning a leased worktree, teardown reports their directory-collapsed
+# count and deduplicated top-level paths without inventorying or archiving them.
 # --preserve-scratch first proves committed work landed, captures tracked diffs
-# and untracked payloads under data/<task-id>/scratch/, then cleans and repeats
-# the ordinary safety proof before reclaim proceeds.
+# and non-ignored untracked payloads under data/<task-id>/scratch/, then cleans
+# and repeats the ordinary safety proof before reclaim proceeds.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge on the captain's approval) as a fallback
 # for the common case where there is no remote at all.
@@ -64,7 +67,8 @@
 #   --force permits recursive kind=secondmate retirement. It never bypasses
 #   dirty, untracked, stash, landed-work, endpoint, identity, or report proofs.
 #   --preserve-scratch permits a ship/scout teardown to preserve tracked diffs
-#   and untracked files under data/<task-id>/scratch/ before cleaning them.
+#   and non-ignored untracked files under data/<task-id>/scratch/ before cleaning.
+#   Ignored files remain exempt and are summarized before a leased return.
 #   Committed work must still pass the ordinary landed-work proof first.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crewmate process
@@ -1505,6 +1509,45 @@ validate_worktree_teardown_safety() {
     fi
     return 1
   fi
+}
+
+summarize_ignored_worktree_paths() {
+  local summary
+  summary=$(
+    set -o pipefail
+    git -C "$WT" ls-files --others --ignored --exclude-standard \
+      --directory --no-empty-directory -z -- |
+      python3 -c '
+import json
+import sys
+
+entries = [
+    item.decode("utf-8", "surrogateescape")
+    for item in sys.stdin.buffer.read().split(b"\0")
+    if item
+]
+top_level = sorted(
+    {
+        entry.rstrip("/").split("/", 1)[0]
+        for entry in entries
+        if entry.rstrip("/")
+    }
+)
+print(
+    "teardown: ignored worktree summary: "
+    f"count={len(entries)}; top-level={json.dumps(top_level, ensure_ascii=True)}"
+)
+'
+  ) || {
+    echo "REFUSED: cannot summarize ignored files in worktree $WT." >&2
+    return 1
+  }
+  printf '%s\n' "$summary"
+}
+
+validate_worktree_teardown_safety_and_summarize_ignored() {
+  validate_worktree_teardown_safety || return 1
+  summarize_ignored_worktree_paths
 }
 
 filter_preservable_untracked_paths() {
@@ -4610,7 +4653,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     # directory, so run it from the project.
     # teardown_treehouse_return tolerates transient and stale git locks left by
     # a killed crewmate process; see the script header for the retry proof.
-    post_lock_cleanup_check=validate_worktree_teardown_safety
+    post_lock_cleanup_check=validate_worktree_teardown_safety_and_summarize_ignored
     teardown_treehouse_return "$WT" "$PROJ" "worktree" "firstmate-$ID" "$post_lock_cleanup_check" cleanup_returned_worktree || {
       echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
       exit 1
