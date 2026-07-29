@@ -55,6 +55,51 @@ test_threshold_is_exact_and_fireable() {
   pass "context status line fires /compact at exactly 70% used"
 }
 
+test_display_truncates_below_the_exact_threshold() {
+  local out
+  out=$(payload 69.99 30.01 | "$STATUSLINE")
+  [ "$out" = 'CTX 69.9% used / 30% left (200k)' ] \
+    || fail "sub-threshold reading rounded up past the exact trigger: $out"
+  assert_no_grep 'COMPACT NOW' <(printf '%s\n' "$out") \
+    "69.99% incorrectly fired the 70% compaction trigger"
+  pass "displayed percentage never rounds a sub-70% reading up to 70%"
+}
+
+test_reaped_snapshot_directory_is_recreated() {
+  local record out
+  record="$TMP_ROOT/reaped/task/context-pressure.json"
+  out=$(payload 71 29 | "$STATUSLINE" --record "$record")
+  assert_contains "$out" 'CTX 71% used / 29% left (200k)' \
+    "missing snapshot directory suppressed the host telemetry display"
+  assert_contains "$out" 'COMPACT NOW: /compact' \
+    "missing snapshot directory suppressed the compaction advisory"
+  assert_present "$record" "snapshot directory was not recreated after being reaped"
+  pass "a reaped snapshot directory is recreated and telemetry keeps flowing"
+}
+
+test_record_failure_keeps_display_and_last_valid_snapshot() {
+  local dir record out
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "record-failure resilience skipped: root ignores directory permissions"
+    return 0
+  fi
+  dir="$TMP_ROOT/readonly"
+  record="$dir/context-pressure.json"
+  mkdir -p "$dir"
+  payload 69.5 30.5 | "$STATUSLINE" --record "$record" >/dev/null
+  chmod 500 "$dir"
+  out=$(payload 71 29 | "$STATUSLINE" --record "$record")
+  chmod 700 "$dir"
+  assert_contains "$out" 'CTX 71% used / 29% left (200k)' \
+    "failed snapshot write suppressed the host telemetry display"
+  assert_contains "$out" 'COMPACT NOW: /compact' \
+    "failed snapshot write suppressed the compaction advisory"
+  assert_present "$record" "failed snapshot write unlinked the last valid snapshot"
+  assert_grep '"used_percentage": 69.5' "$record" \
+    "failed snapshot write corrupted the last valid snapshot"
+  pass "a failed snapshot write never blanks telemetry or drops the last snapshot"
+}
+
 test_invalid_payload_is_silent_and_clears_stale_snapshot() {
   local record out status
   record="$TMP_ROOT/invalid/context-pressure.json"
@@ -95,6 +140,9 @@ test_record_requires_absolute_path() {
 
 test_below_threshold_displays_real_pressure_and_records_complete_payload
 test_threshold_is_exact_and_fireable
+test_display_truncates_below_the_exact_threshold
+test_reaped_snapshot_directory_is_recreated
+test_record_failure_keeps_display_and_last_valid_snapshot
 test_invalid_payload_is_silent_and_clears_stale_snapshot
 test_tracked_claude_settings_use_the_telemetry_command
 test_record_requires_absolute_path

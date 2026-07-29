@@ -10,6 +10,10 @@
 # 70%-compaction advisory as JSON for the worker named by a generated brief.
 # Invalid or incomplete input prints nothing, removes any requested stale
 # snapshot, and exits zero so telemetry can never disrupt the host session.
+# Snapshot persistence is best-effort: the parent directory is recreated when
+# missing, and a failed write never suppresses the display line nor removes
+# the last valid snapshot. Percentages display truncated to one decimal so a
+# reading below 70 never shows as 70 without the compaction advisory.
 set -u
 
 usage() {
@@ -55,8 +59,9 @@ function finiteNumber(value) {
 }
 
 function formatPercentage(value) {
-  if (Number.isInteger(value)) return String(value);
-  return value.toFixed(1).replace(/\.0$/, "");
+  let text = value.toFixed(1);
+  if (Number(text) > value) text = (Number(text) - 0.1).toFixed(1);
+  return text.replace(/\.0$/, "");
 }
 
 function formatTokens(value) {
@@ -81,20 +86,23 @@ try {
 
   const compactRecommended = used >= 70;
   if (record) {
-    const parent = path.dirname(record);
-    const temporary = path.join(parent, `.${path.basename(record)}.${process.pid}.tmp`);
-    const snapshot = {
-      context_window: contextWindow,
-      compact_at_used_percentage: 70,
-      compact_recommended: compactRecommended,
-    };
-    fs.writeFileSync(temporary, `${JSON.stringify(snapshot, null, 2)}\n`, { mode: 0o600 });
     try {
-      fs.renameSync(temporary, record);
-    } catch (error) {
-      try { fs.unlinkSync(temporary); } catch (_) {}
-      throw error;
-    }
+      const parent = path.dirname(record);
+      fs.mkdirSync(parent, { recursive: true });
+      const temporary = path.join(parent, `.${path.basename(record)}.${process.pid}.tmp`);
+      const snapshot = {
+        context_window: contextWindow,
+        compact_at_used_percentage: 70,
+        compact_recommended: compactRecommended,
+      };
+      fs.writeFileSync(temporary, `${JSON.stringify(snapshot, null, 2)}\n`, { mode: 0o600 });
+      try {
+        fs.renameSync(temporary, record);
+      } catch (error) {
+        try { fs.unlinkSync(temporary); } catch (_) {}
+        throw error;
+      }
+    } catch (_) {}
   }
 
   let line = `CTX ${formatPercentage(used)}% used / ${formatPercentage(remaining)}% left (${formatTokens(total)})`;
