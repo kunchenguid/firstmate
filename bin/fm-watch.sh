@@ -154,7 +154,15 @@ _event_cap_fails=0
 afk_present() { [ -e "$STATE/.afk" ]; }
 
 hash_pane() {
-  if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
+  if command -v md5 >/dev/null 2>&1; then
+    md5 -q
+  elif [ -x /sbin/md5 ]; then
+    /sbin/md5 -q
+  elif command -v md5sum >/dev/null 2>&1; then
+    md5sum | cut -d' ' -f1
+  else
+    shasum | cut -d' ' -f1
+  fi
 }
 
 # window_is_busy: 0 (busy) iff the task's harness is actively working. Prefers
