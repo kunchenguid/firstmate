@@ -6,7 +6,7 @@ This record contains reusable evidence for the client-side guarantees in [`../re
 That page owns the current setup, the forwarding-safety classification, and troubleshooting.
 Task chronology, host service inventories, temporary directories, and delivery transcripts remain in private reports or PR evidence.
 
-Every check below runs entirely against an ephemeral loopback SSH server created for the run.
+The forwarding checks below run entirely against an ephemeral loopback SSH server created for the run.
 None of them changes a system SSH configuration, a user's `authorized_keys`, a firewall, or a Tailscale setting.
 
 ## Client version
