@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     # The pre-cutover suite reached 25m35s, and the exhaustive Bridge crash
     # matrix adds bounded work. Keep enough margin without masking a real hang.
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
         with:
