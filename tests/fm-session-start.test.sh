@@ -410,14 +410,22 @@ SH
 # codex and opencode have no env markers (ancestry only). Without this, a local
 # claude/pi/grok session fails cases that pin a different fake harness while CI
 # (no ambient markers) still passes.
+# HERDR_SESSION is dropped for the same reason one layer down: it is the runtime
+# backend's ambient session selection (bin/backends/herdr.sh
+# fm_backend_herdr_session, deliberately mirroring tmux's $TMUX), so a firstmate
+# running inside a NAMED herdr session would otherwise make every fake-herdr
+# fixture resolve that operator session instead of the "default" its recorded
+# metadata and assertions pin.
 run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
-    env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+    env -u CLAUDECODE -u GROK_AGENT -u HERDR_SESSION \
+      PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   else
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      -u HERDR_SESSION \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   fi
