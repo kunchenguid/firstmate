@@ -615,6 +615,7 @@ spawn_abort_cleanup() {
         if [ -d "$STATE" ]; then
           {
             echo "window=$W"
+            echo "endpoint_task_id=$ID"
             echo "worktree=${WT:-}"
             echo "project=$PROJ_ABS"
             echo "harness=$HARNESS"
