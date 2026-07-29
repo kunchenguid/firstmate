@@ -254,7 +254,8 @@ SH
 make_fixture_clone() {
   local destination=$1
   git clone -q --no-checkout "$ROOT" "$destination"
-  git -C "$destination" checkout -q -b main "$(git -C "$ROOT" rev-parse HEAD)"
+  # Push checkouts may already clone a local main; reset the disposable fixture either way.
+  git -C "$destination" checkout -q -B main "$(git -C "$ROOT" rev-parse HEAD)"
   git -C "$destination" update-ref refs/remotes/origin/main HEAD
   git -C "$destination" remote set-head origin main
 }
