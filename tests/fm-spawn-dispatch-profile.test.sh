@@ -134,11 +134,12 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
   rec=$(make_spawn_case profile-relative-paths pi "$id")
   read_case_record "$rec"
   home_real=$(cd "$HOME_DIR" && pwd -P)
+  mkdir -p "$CASE_DIR/cdpath/home/state" "$CASE_DIR/cdpath/home/data"
   : > "$LAUNCH_LOG"
 
   out=$(
     cd "$CASE_DIR" || exit 1
-    FM_ROOT_OVERRIDE='' FM_HOME=home \
+    CDPATH="$CASE_DIR/cdpath" FM_ROOT_OVERRIDE='' FM_HOME=home \
       FM_STATE_OVERRIDE=home/state FM_DATA_OVERRIDE=home/data \
       FM_PROJECTS_OVERRIDE=home/projects FM_CONFIG_OVERRIDE=home/config \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
@@ -153,7 +154,7 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
     "relative FM_STATE_OVERRIDE leaked into Pi's cross-process extension path"
   assert_contains "$launch" "< '$home_real/data/$id/brief.md'" \
     "relative FM_DATA_OVERRIDE leaked into the cross-process brief path"
-  pass "relative home overrides become absolute before spawn launch construction"
+  pass "relative home overrides ignore CDPATH and become absolute before spawn launch construction"
 }
 
 test_home_defaults_preserve_absolute_or_resolve_relative_paths() {

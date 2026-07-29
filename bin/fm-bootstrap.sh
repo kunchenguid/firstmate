@@ -686,7 +686,7 @@ x_mode_setup() {
   case "$FM_HOME" in
     /*) shim_home=$FM_HOME ;;
     *)
-      shim_home=$(cd "$FM_HOME" 2>/dev/null && pwd -P) \
+      shim_home=$(CDPATH= cd -- "$FM_HOME" 2>/dev/null && pwd -P) \
         || { fmx_arm_failed; return 0; }
       ;;
   esac

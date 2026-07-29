@@ -444,7 +444,9 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
   home="$root/home"
   data_override="$root/data-override"
   state_override="$root/state-override"
-  mkdir -p "$home/data" "$home/state" "$data_override" "$state_override"
+  mkdir -p "$home/data" "$home/state" "$data_override" "$state_override" \
+    "$root/cdpath/home/data" "$root/cdpath/home/state" \
+    "$root/cdpath/data-override" "$root/cdpath/state-override"
 
   brief="$home/data/relative-home/brief.md"
   FM_HOME="$home" FM_SECONDMATE_CHARTER=x \
@@ -454,7 +456,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
   rm -f "$brief"
   (
     cd "$root" || exit 1
-    FM_HOME=home FM_SECONDMATE_CHARTER=x \
+    CDPATH="$root/cdpath" FM_HOME=home FM_SECONDMATE_CHARTER=x \
       "$ROOT/bin/fm-brief.sh" relative-home --secondmate --no-projects >/dev/null 2>&1
   )
   cmp -s "$baseline" "$brief" \
@@ -470,7 +472,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
   rm -f "$brief"
   (
     cd "$root" || exit 1
-    FM_HOME="$home" FM_STATE_OVERRIDE=state-override FM_SECONDMATE_CHARTER=x \
+    CDPATH="$root/cdpath" FM_HOME="$home" FM_STATE_OVERRIDE=state-override FM_SECONDMATE_CHARTER=x \
       "$ROOT/bin/fm-brief.sh" relative-state --secondmate --no-projects >/dev/null 2>&1
   )
   cmp -s "$baseline" "$brief" \
@@ -486,7 +488,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
   rm -f "$brief"
   (
     cd "$root" || exit 1
-    FM_HOME="$home" FM_DATA_OVERRIDE=data-override FM_SECONDMATE_CHARTER=x \
+    CDPATH="$root/cdpath" FM_HOME="$home" FM_DATA_OVERRIDE=data-override FM_SECONDMATE_CHARTER=x \
       "$ROOT/bin/fm-brief.sh" relative-data --secondmate --no-projects >/dev/null 2>&1
   )
   cmp -s "$baseline" "$brief" \
@@ -522,7 +524,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
   assert_grep "FM_DATA_OVERRIDE directory cannot be resolved: missing-data" "$err" \
     "unresolved relative FM_DATA_OVERRIDE did not fail loudly"
 
-  pass "fm-brief.sh: relative directory inputs render stable absolute charter paths or fail loudly"
+  pass "fm-brief.sh: relative directory inputs ignore CDPATH, render stable absolute charter paths, or fail loudly"
 }
 
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {

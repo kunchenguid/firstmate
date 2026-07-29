@@ -73,16 +73,16 @@ unit_clear_stale() {
 unit_relative_paths_are_absolute_before_daemon_launch() {
   local root home state out status linked_home
   root=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-relative-home.XXXXXX")
-  mkdir -p "$root/home/state"
+  mkdir -p "$root/home/state" "$root/cdpath/home/state"
   home=$(cd "$root/home" && pwd -P)
   state="$home/state"
   out=$(
     cd "$root" || exit 1
-    FM_HOME=home FM_STATE_OVERRIDE=home/state \
+    CDPATH="$root/cdpath" FM_HOME=home FM_STATE_OVERRIDE=home/state \
       bash -c '. "$1"; printf "%s\n%s\n" "$FM_HOME" "$FM_AFK_LAUNCH_STATE"' _ "$LAUNCH"
   )
   if [ "$out" = "$home"$'\n'"$state" ]; then
-    pass "launcher paths: relative home and state are absolute before daemon command construction"
+    pass "launcher paths: relative home and state ignore CDPATH before daemon command construction"
   else
     fail "launcher paths: relative home or state remained cwd-dependent ($out)"
   fi
