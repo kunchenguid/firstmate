@@ -71,7 +71,7 @@ test_project_management_owner_covers_guarded_operations() {
     'Default it off' \
     'Creating a GitHub repository is outward-facing.' \
     "captain's explicit consent" \
-    'Never issue a raw removal command from Firstmate.' \
+    'authorizes firstmate to remove the clone directly' \
     'no-mistakes init && no-mistakes doctor'; do
     assert_grep "$phrase" "$PROJECT" "project-management owner is missing '$phrase'"
   done
