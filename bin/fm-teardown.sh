@@ -1686,7 +1686,7 @@ with open(manifest_file, "w", encoding="utf-8") as stream:
 PY
 }
 
-verify_preserved_tracked_snapshot() {
+verify_preserved_tracked_index_snapshot() {
   local capture_dir=$1 current_index
   current_index="$capture_dir/.tracked-index.current"
   git -C "$WT" ls-files --stage -v -z -- > "$current_index" || return 1
@@ -1696,7 +1696,12 @@ verify_preserved_tracked_snapshot() {
     return 1
   }
   rm -f "$current_index"
-  python3 - "$WT" "$capture_dir/tracked-manifest.json" <<'PY'
+}
+
+verify_preserved_tracked_snapshot() {
+  local capture_dir=$1
+  verify_preserved_tracked_index_snapshot "$capture_dir" || return 1
+  python3 - "$WT" "$capture_dir/tracked-manifest.json" <<'PY' || return 1
 import hashlib
 import json
 import os
@@ -1746,6 +1751,7 @@ for expected in manifest:
             f"{expected['path']}"
         )
 PY
+  verify_preserved_tracked_index_snapshot "$capture_dir"
 }
 
 verify_preserved_tracked_capture() {

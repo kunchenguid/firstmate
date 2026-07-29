@@ -60,6 +60,8 @@ PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
+REAL_PYTHON_FOR_TEST=$(command -v python3)
+export REAL_PYTHON_FOR_TEST
 REAL_STAT_FOR_TEST=$(command -v stat)
 export REAL_STAT_FOR_TEST
 
@@ -1617,6 +1619,67 @@ SH
   assert_present "$scratch_capture/tracked.patch" \
     "preserve-tracked-drift: tracked capture was not retained"
   pass "tracked drift before cleanup retains newer bytes and scratch capture"
+}
+
+test_preserve_scratch_refuses_index_drift_during_tracked_verification() {
+  local case_dir rc scratch_capture drift_count
+  case_dir=$(make_case preserve-index-drift)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "landed task work"
+  wt_commit_file "$case_dir" staged.txt baseline "add staging target"
+  add_fork_with_pushed_branch "$case_dir"
+  printf '%s\n' "captured correction" > "$case_dir/wt/feature.txt"
+  printf '%s\n' "newer staged state" > "$case_dir/wt/staged.txt"
+  drift_count="$case_dir/index-drift-count"
+  cat > "$case_dir/fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_PYTHON_FOR_TEST:?}
+"$real" "$@"
+rc=$?
+if [ "$rc" -eq 0 ] && [ "$#" -eq 3 ]; then
+  case "${3:-}" in
+    */tracked-manifest.json)
+      count=0
+      [ ! -f "${FM_FAKE_INDEX_DRIFT_COUNT:?}" ] \
+        || count=$(cat "$FM_FAKE_INDEX_DRIFT_COUNT")
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FM_FAKE_INDEX_DRIFT_COUNT"
+      if [ "$count" -eq 2 ]; then
+        "${REAL_GIT_FOR_TEST:?}" -C "${FM_FAKE_INDEX_DRIFT_WORKTREE:?}" \
+          add -- staged.txt
+      fi
+      ;;
+  esac
+fi
+exit "$rc"
+SH
+  chmod +x "$case_dir/fakebin/python3"
+
+  set +e
+  FM_FAKE_INDEX_DRIFT_WORKTREE="$case_dir/wt" \
+    FM_FAKE_INDEX_DRIFT_COUNT="$drift_count" \
+    run_teardown "$case_dir" --preserve-scratch \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "preserve-index-drift: cleanup must refuse late index drift"
+  assert_grep "newer staged state" "$case_dir/wt/staged.txt" \
+    "preserve-index-drift: working-tree bytes were discarded"
+  git -C "$case_dir/wt" diff --cached -- staged.txt \
+    > "$case_dir/staged.diff"
+  assert_grep "newer staged state" "$case_dir/staged.diff" \
+    "preserve-index-drift: newer staged state was discarded"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "preserve-index-drift: task metadata was cleared"
+  scratch_capture=$(find "$case_dir/data/task-x1/scratch" -mindepth 1 -maxdepth 1 \
+    -type d -print -quit)
+  [ -n "$scratch_capture" ] || fail \
+    "preserve-index-drift: scratch capture was not retained"
+  assert_present "$scratch_capture/tracked.patch" \
+    "preserve-index-drift: tracked capture was not retained"
+  pass "late index drift retains staged state, worktree, metadata, and capture"
 }
 
 test_gh_error_and_content_absent_refuses() {
@@ -4728,6 +4791,7 @@ if [ "${FM_TEST_FOCUSED:-}" = reclaim-regressions ]; then
   test_preserve_scratch_captures_then_reclaims_dirty_worktree
   test_preserve_scratch_never_cleans_unlanded_commits
   test_preserve_scratch_refuses_tracked_drift_before_cleanup
+  test_preserve_scratch_refuses_index_drift_during_tracked_verification
   test_no_mistakes_truly_unpushed_refuses
   test_dirty_worktree_refuses
   exit 0
@@ -4840,6 +4904,7 @@ test_watchman_cookies_do_not_block_teardown
 test_preserve_scratch_captures_then_reclaims_dirty_worktree
 test_preserve_scratch_never_cleans_unlanded_commits
 test_preserve_scratch_refuses_tracked_drift_before_cleanup
+test_preserve_scratch_refuses_index_drift_during_tracked_verification
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses
