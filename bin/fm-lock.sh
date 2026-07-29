@@ -5,6 +5,11 @@
 # PID of any one tool call, which is dead moments after it is written.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
+# A successful acquisition also atomically publishes state/.lock.owner.
+# That privacy-safe descriptor records the numeric owner, process-identity
+# hash, verified harness, visible-session manager, external session id, and
+# provider-native session id when available.
+# The numeric state/.lock remains the sole orchestration authority.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,6 +27,8 @@ mkdir -p "$STATE" 2>/dev/null || {
 # same identity contract.
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-primary-session-lib.sh
+. "$SCRIPT_DIR/fm-primary-session-lib.sh"
 
 if [ "${1:-}" = "status" ]; then
   if [ ! -f "$LOCK" ]; then echo "lock: free"; exit 0; fi
@@ -81,6 +88,10 @@ written=$(cat "$LOCK" 2>/dev/null) || {
 }
 if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
+  exit 1
+fi
+if ! fm_primary_owner_publish "$STATE" "$me"; then
+  echo "error: cannot publish verified primary-session owner metadata; lock remains held by this live session and it must operate read-only until resolved" >&2
   exit 1
 fi
 release_claim_lock

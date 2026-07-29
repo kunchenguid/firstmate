@@ -11,6 +11,94 @@
 # Known harness command names; extend when a new adapter is verified.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
 
+# A zombie has exited and cannot own fleet state even though kill -0 still
+# succeeds until its parent reaps the process table entry.
+fm_process_pid_running() {
+  local pid=$1 stat
+  kill -0 "$pid" 2>/dev/null || return 1
+  stat=$(ps -o stat= -p "$pid" 2>/dev/null) || return 0
+  [ -n "$stat" ] || return 0
+  case "$stat" in *Z*) return 1 ;; esac
+  return 0
+}
+
+# Print the canonical verified harness kind for a live process.
+# This is the named form of fm_harness_pid_alive's exact decision and lets the
+# primary-session handoff bind a Paseo provider to the numeric lock owner
+# without re-parsing process names elsewhere.
+fm_harness_pid_kind() {
+  local pid=$1 comm args bc candidate
+  fm_process_pid_running "$pid" || return 1
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+  args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+  bc=$(basename "$comm")
+  candidate=$bc
+  case "$comm" in
+    *node*|*python*) candidate=$args ;;
+  esac
+  case "$candidate" in
+    *claude*) echo claude ;;
+    *codex*) echo codex ;;
+    *opencode*) echo opencode ;;
+    *grok*) echo grok ;;
+    *kimi*) echo kimi ;;
+    pi-signed) echo pi-signed ;;
+    pi) echo pi ;;
+    *) return 1 ;;
+  esac
+}
+
+# Print one atom-valued environment variable from a live process.
+# Linux-compatible /proc is preferred.
+# macOS falls back to ps eww and accepts only a whitespace-delimited NAME=value
+# token, which is sufficient for Paseo and provider session UUIDs.
+fm_process_env_value() {
+  local pid=$1 name=$2 proc_root out
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$name" in ''|*[!A-Z0-9_]*) return 1 ;; esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/environ" ]; then
+    tr '\000' '\n' < "$proc_root/$pid/environ" 2>/dev/null \
+      | sed -n "s/^${name}=//p" \
+      | head -1
+    return "${PIPESTATUS[0]}"
+  fi
+  out=$(ps eww -p "$pid" -o command= 2>/dev/null) || return 1
+  printf '%s\n' "$out" | awk -v prefix="${name}=" '
+    {
+      for (i = 1; i <= NF; i++) {
+        if (index($i, prefix) == 1) {
+          print substr($i, length(prefix) + 1)
+          exit
+        }
+      }
+    }
+  '
+}
+
+# Return success only when a live process command contains an exact atom.
+# This is a compatibility proof for a provider session launched before
+# state/.lock.owner existed; substring matches are intentionally rejected.
+fm_process_command_has_atom() {
+  local pid=$1 atom=$2 out
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$atom" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  out=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
+  awk -v atom="$atom" '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i == atom) {
+          found = 1
+        }
+      }
+    }
+    END {
+      exit(found ? 0 : 1)
+    }
+  ' <<< "$out"
+}
+
 # Walk the current process ancestry (up to 16 hops) and print a harness pid.
 # For every harness except Claude, the first match wins (innermost pid), which
 # is where e.g. Pi's shared signed-wrapper ancestry actually holds the session:
@@ -66,19 +154,7 @@ fm_harness_ancestry_pid() {
 
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
-  local pid=$1 comm args
-  kill -0 "$pid" 2>/dev/null || return 1
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  if printf '%s' "$(basename "$comm")" | grep -qE "$FM_HARNESS_RE"; then
-    return 0
-  fi
-  case "$comm" in
-    *node*|*python*)
-      args=$(ps -o args= -p "$pid" 2>/dev/null)
-      printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"
-      ;;
-    *) return 1 ;;
-  esac
+  fm_harness_pid_kind "$1" >/dev/null
 }
 
 # True when state dir $1 holds a session lock whose pid is the harness ancestor

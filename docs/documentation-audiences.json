@@ -66,6 +66,10 @@
       "target": "docs/verification/supervision.md"
     },
     {
+      "source": "docs/primary-session-handoff.md",
+      "target": "docs/verification/primary-session-handoff.md"
+    },
+    {
       "source": "docs/turnend-guard.md",
       "target": "docs/verification/supervision.md"
     },
@@ -153,6 +157,10 @@
     },
     {
       "path": ".agents/skills/project-management/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/primary-session-handoff/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -260,6 +268,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/primary-session-handoff.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/scripts.md",
       "audience": "operator-current"
     },
@@ -305,6 +317,10 @@
     },
     {
       "path": "docs/verification/runtime-backends.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/primary-session-handoff.md",
       "audience": "maintainer-verification"
     },
     {
