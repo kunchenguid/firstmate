@@ -528,6 +528,22 @@ ok - forced secondmate teardown preflights every Herdr child before cleanup muta
 ok - forced secondmate teardown retains Herdr child identity until exact pane disappearance
 ok - forced teardown retains a nested secondmate home and its grandchild's Herdr identity when the grandchild close is unconfirmed
 ```
+#### macOS app activation
+
+A guarded non-default presentation lab on 2026-07-28 used Herdr 0.7.3 protocol 16 to separate Herdr's logical workspace and tab focus from macOS frontmost-app activation.
+Directly observed workspace creation, tab creation, pane execution, and raw projection `workspace.move` operations neither changed `NSWorkspace.frontmostApplication` nor emitted activation for a different bundle identifier.
+The same lab retained the existing exact active-workspace and active-tab assertions, so the evidence did not attribute the apparent focus steal to either Firstmate's projection path or the exercised Herdr core operations.
+
+The active macOS regression is:
+
+```sh
+FM_REQUIRE_MACOS_FOCUS_AUDIT=1 \
+  tests/fm-backend-herdr-presentation-e2e.test.sh
+```
+
+The test starts an `NSWorkspace.didActivateApplicationNotification` watcher before the complete projected spawn and keeps it active through a two-second settle window.
+It fails if any activation has an empty or different bundle identifier from the initially frontmost app.
+The required macOS Herdr-focus CI job makes an unavailable activation audit a hard failure, while non-macOS runs retain the logical focus checks without claiming app-activation coverage.
 
 ### Composer and operational input
 
