@@ -21,7 +21,7 @@
 # delete is available only through teardown.
 # Both paths perform a fresh refuse-default check immediately before each
 # destructive call.
-# Provision records the running default session as a fleet-state tripwire and
+# Provision records the default-session baseline as a fleet-state tripwire and
 # teardown requires that record to be identical afterward.
 set -u
 
@@ -65,21 +65,24 @@ fm_herdr_lab_fleet_state() { # <session>
     return 1
   }
   snapshot=$(printf '%s' "$sessions" | jq -c '
-    [.sessions[]? | select(.default == true)]
-    | if length == 1 and .[0].name == "default" and .[0].running == true
-      then .[0] | {name, default, running, socket_path}
-      else empty
-      end
+    if (.sessions | type) != "array" then empty
+    else [.sessions[] | select(.default == true)]
+      | if length == 0 then {default_session: null}
+        elif length == 1 and .[0].name == "default" and .[0].running == true
+          then {default_session: (.[0] | {name, default, running, socket_path})}
+        else empty
+        end
+    end
   ' 2>/dev/null)
   [ -n "$snapshot" ] || {
-    fm_herdr_lab_error "fleet-state tripwire requires exactly one running default session"
-    return 2
+    fm_herdr_lab_error "fleet-state tripwire requires either no default session or exactly one running default session"
+    return 1
   }
   printf '%s\n' "$snapshot"
 }
 
 fm_herdr_lab_prepare() { # <session>
-  local name=$1 sessions state_dir tripwire rc
+  local name=$1 sessions state_dir tripwire
   fm_herdr_lab_validate_name "$name" || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
@@ -101,9 +104,8 @@ fm_herdr_lab_prepare() { # <session>
     return 1
   }
   fm_herdr_lab_fleet_state "$name" > "$tripwire" || {
-    rc=$?
     rm -f "$tripwire"
-    return "$rc"
+    return 1
   }
 }
 
