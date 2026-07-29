@@ -23,7 +23,7 @@ RPC, JSON, print, and untrusted contexts keep stock presentation even when the h
 
 Calm has no numeric Pi version minimum or maximum and never refuses Pi solely because its version is newer than a previously verified version.
 Pi 0.81.1 through 0.82.1 are current empirical evidence.
-The assistant-thinking, complete-tool-row, and operational-user-row adapters probe the exact exported Pi method they patch.
+The assistant-thinking, complete-tool-row, and operational-user-row adapters probe the exact exported Pi methods they patch, including the tool-row result seam and column helpers behind the actionable-error surface.
 If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter while `/calm`, the remaining adapters, and unrelated Pi extensions continue to load.
 The seven built-in tool renderers remain independently wrapped as a supported-API fallback for text tool rows if the complete-tool-row adapter is unavailable.
 

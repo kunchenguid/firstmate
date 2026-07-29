@@ -1,7 +1,9 @@
-// Verified against Pi 0.82.1, which exports ToolExecutionComponent with a render method.
-// installCalmToolLayout() probes that exact method and throws if it is missing;
-// fm-calm.ts catches that and skips only this adapter with a diagnostic instead of
-// blocking Calm or Pi. It changes only transcript presentation and never tool execution.
+// Verified against Pi 0.82.1, which exports ToolExecutionComponent with declared render
+// and updateResult methods and pi-tui's visibleWidth, truncateToWidth, and
+// wrapTextWithAnsi column helpers. installCalmToolLayout() probes those exact members and
+// throws if one is missing; fm-calm.ts catches that and skips only this adapter with a
+// diagnostic instead of blocking Calm or Pi. It changes only transcript presentation and
+// never tool execution.
 //
 // Pi routes abort, provider-failure, and tool-failure text exclusively through the tool
 // row whenever the assistant turn contains a tool call
@@ -9,20 +11,26 @@
 // hasToolCalls is true, and InteractiveMode attaches the stop-reason text to every
 // pending tool row on both the live and rebuilt-transcript paths). So Calm keeps routine
 // call, result, image, and shell content hidden while still surfacing an errored row's
-// text as plain actionable lines.
+// text as plain actionable lines, measured in terminal columns because pi-tui treats an
+// over-wide rendered line as a fatal render error.
 import type { ToolExecutionComponent as PiToolExecutionComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
+import * as PiTui from "@earendil-works/pi-tui";
 import { calmPresentationHides } from "./fm-calm-visibility.ts";
 
 type CalmToolLayoutPatch = {
   hidesToolRows: () => boolean;
 };
 
-type CalmToolRowState = {
-  result?: {
-    content?: Array<{ type?: string; text?: string }>;
-    isError?: boolean;
-  };
+type CalmToolResult = {
+  content?: Array<{ type?: string; text?: string }>;
+  isError?: boolean;
+};
+
+type CalmColumnHelpers = {
+  visibleWidth: (text: string) => number;
+  truncateToWidth: (text: string, maxWidth: number, ellipsis?: string) => string;
+  wrapTextWithAnsi: (text: string, width: number) => string[];
 };
 
 // Keep the introduction-version symbol stable so a compatible upgrade cannot
@@ -33,10 +41,13 @@ const CALM_TOOL_LAYOUT_PATCH = Symbol.for(
 
 const CALM_ERROR_MAX_LINES = 6;
 const ANSI_SEQUENCE = /\u001B\[[0-9;?]*[ -/]*[@-~]/g;
+const TAB_COLUMNS = "   ";
 
-function calmErrorText(state: CalmToolRowState): string {
-  const result = state.result;
-  if (!result?.isError) return "";
+const calmErrorResults = new WeakMap<object, CalmToolResult>();
+
+function calmErrorText(component: object): string {
+  const result = calmErrorResults.get(component);
+  if (!result) return "";
   return (result.content ?? [])
     .filter((block) => block?.type === "text")
     .map((block) => (block.text ?? "").replace(ANSI_SEQUENCE, "").replace(/\r/g, ""))
@@ -44,29 +55,63 @@ function calmErrorText(state: CalmToolRowState): string {
     .trim();
 }
 
-function calmErrorLines(state: CalmToolRowState, width: number): string[] {
-  const text = calmErrorText(state);
+function calmErrorLines(
+  component: object,
+  width: number,
+  columns: CalmColumnHelpers,
+): string[] {
+  if (width <= 0) return [];
+  const text = calmErrorText(component);
   if (!text) return [];
 
-  const usable = Math.max(1, width - 1);
+  const pad = width >= 2 ? " " : "";
+  const usable = Math.max(1, width - pad.length);
+  const clamp = (line: string): string => {
+    if (!line) return "";
+    const fitted =
+      columns.visibleWidth(line) > usable
+        ? columns.truncateToWidth(line, usable, "")
+        : line;
+    return `${pad}${fitted}`;
+  };
+
   const wrapped: string[] = [];
-  for (const line of text.split("\n")) {
-    if (!line) {
+  for (const logical of text.split("\n")) {
+    if (!logical) {
       wrapped.push("");
       continue;
     }
-    for (let index = 0; index < line.length; index += usable) {
-      wrapped.push(line.slice(index, index + usable));
+    for (const line of columns.wrapTextWithAnsi(
+      logical.replace(/\t/g, TAB_COLUMNS),
+      usable,
+    )) {
+      wrapped.push(line);
     }
   }
 
   const skipped = Math.max(0, wrapped.length - CALM_ERROR_MAX_LINES);
   const shown = skipped > 0 ? wrapped.slice(-CALM_ERROR_MAX_LINES) : wrapped;
-  const lines = shown.map((line) => (line ? ` ${line}` : ""));
+  const lines = shown.map(clamp);
   if (skipped > 0) {
-    lines.unshift(` ... ${skipped} earlier error line${skipped === 1 ? "" : "s"} hidden`);
+    lines.unshift(
+      clamp(`... ${skipped} earlier error line${skipped === 1 ? "" : "s"} hidden`),
+    );
   }
   return ["", ...lines];
+}
+
+function requireColumnHelpers(): CalmColumnHelpers {
+  const { truncateToWidth, visibleWidth, wrapTextWithAnsi } = PiTui;
+  if (
+    typeof visibleWidth !== "function" ||
+    typeof truncateToWidth !== "function" ||
+    typeof wrapTextWithAnsi !== "function"
+  ) {
+    throw new Error(
+      "Firstmate Calm requires Pi TUI visibleWidth, truncateToWidth, and wrapTextWithAnsi",
+    );
+  }
+  return { truncateToWidth, visibleWidth, wrapTextWithAnsi };
 }
 
 export function installCalmToolLayout(): void {
@@ -91,14 +136,34 @@ export function installCalmToolLayout(): void {
   if (typeof originalRender !== "function") {
     throw new Error("Firstmate Calm requires Pi ToolExecutionComponent.render");
   }
+  const originalUpdateResult = ToolExecutionComponent.prototype.updateResult;
+  if (typeof originalUpdateResult !== "function") {
+    throw new Error("Firstmate Calm requires Pi ToolExecutionComponent.updateResult");
+  }
+  const columns = requireColumnHelpers();
+
+  ToolExecutionComponent.prototype.updateResult = function (
+    this: PiToolExecutionComponent,
+    result: Parameters<PiToolExecutionComponent["updateResult"]>[0],
+    isPartial?: boolean,
+  ): void {
+    const errorResult = result as CalmToolResult;
+    if (errorResult?.isError && !isPartial) {
+      calmErrorResults.set(this, errorResult);
+    } else {
+      calmErrorResults.delete(this);
+    }
+    originalUpdateResult.call(this, result, isPartial);
+  };
 
   ToolExecutionComponent.prototype.render = function (
+    this: PiToolExecutionComponent,
     width: number,
   ): string[] {
     if (patch.hidesToolRows()) {
-      return calmErrorLines(this as unknown as CalmToolRowState, width);
+      return calmErrorLines(this, width, columns);
     }
-    return originalRender.call(this as PiToolExecutionComponent, width);
+    return originalRender.call(this, width);
   };
 
   registry[CALM_TOOL_LAYOUT_PATCH] = patch;

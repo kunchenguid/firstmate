@@ -107,8 +107,13 @@ test_static_contract() {
   assert_contains "$assistant_layout" 'block.type !== "thinking"' "Pi Calm assistant layout does not remove thinking from its presentation copy"
   assert_not_contains "$assistant_layout" 'state.hideThinkingBlock' "Pi Calm assistant layout still reveals internal thinking when expanded"
   assert_contains "$tool_layout" 'ToolExecutionComponent.prototype.render' "Pi Calm tool layout does not own complete tool-row presentation"
-  assert_contains "$tool_layout" 'return calmErrorLines(this as unknown as CalmToolRowState, width)' "Pi Calm tool layout does not remove complete tool rows"
-  assert_contains "$tool_layout" 'if (!result?.isError) return ""' "Pi Calm tool layout does not restrict its visible tool text to actionable errors"
+  assert_contains "$tool_layout" 'return calmErrorLines(this, width, columns)' "Pi Calm tool layout does not remove complete tool rows"
+  assert_contains "$tool_layout" 'if (errorResult?.isError && !isPartial)' "Pi Calm tool layout does not restrict its visible tool text to actionable errors"
+  assert_contains "$tool_layout" 'ToolExecutionComponent.prototype.updateResult' "Pi Calm tool layout does not read errors through a declared Pi seam"
+  assert_contains "$tool_layout" 'Firstmate Calm requires Pi ToolExecutionComponent.updateResult' "Pi Calm tool layout does not probe the seam carrying actionable tool errors"
+  assert_contains "$tool_layout" 'Firstmate Calm requires Pi TUI visibleWidth, truncateToWidth, and wrapTextWithAnsi' "Pi Calm tool layout does not probe the Pi column helpers it measures with"
+  assert_contains "$tool_layout" 'columns.truncateToWidth(line, usable, "")' "Pi Calm tool layout can emit a line wider than Pi's fatal terminal-column limit"
+  assert_not_contains "$tool_layout" 'state.result' "Pi Calm tool layout still depends on an unprobed private Pi field"
   assert_contains "$operational_user_layout" 'import * as PiCodingAgent' "Pi Calm operational-user layout still requires its optional runtime class as a named import"
   assert_contains "$operational_user_layout" 'InteractiveMode.prototype' "Pi Calm operational-user layout does not control the transcript owner"
   assert_contains "$operational_user_layout" 'classifyFirstmateCurrentOperationalText(text)' "Pi Calm operational-user layout bypasses canonical current classification"
@@ -369,7 +374,7 @@ JS
 }
 
 test_pi_compat_missing_adapter_exports() {
-  local fixture out status
+  local fixture out status seam variant
   if ! command -v node >/dev/null 2>&1; then
     echo "skip: node not found for Pi calm missing-adapter-export test"
     return 0
@@ -378,7 +383,16 @@ test_pi_compat_missing_adapter_exports() {
   fixture="$TMP_ROOT/missing-adapter-exports"
   mkdir -p \
     "$fixture/project/.pi/extensions/lib" \
-    "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+    "$fixture/project/node_modules/@earendil-works/pi-coding-agent" \
+    "$fixture/project/node_modules/@earendil-works/pi-tui"
+  printf '%s\n' \
+    '{"name":"@earendil-works/pi-tui","type":"module","exports":"./index.js"}' \
+    >"$fixture/project/node_modules/@earendil-works/pi-tui/package.json"
+  printf '%s\n' \
+    'export function visibleWidth(text) { return text.length; }' \
+    'export function truncateToWidth(text, maxWidth) { return text.slice(0, maxWidth); }' \
+    'export function wrapTextWithAnsi(text) { return [text]; }' \
+    >"$fixture/project/node_modules/@earendil-works/pi-tui/index.js"
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$TOOL_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-tool-layout.ts"
@@ -420,7 +434,70 @@ JS
   status=$?
   [ "$status" -eq 0 ] || fail "Pi calm missing-adapter-export path failed: $out"
   [ -z "$out" ] || fail "Pi calm missing-adapter-export test printed output: $out"
-  pass "missing Pi presentation class exports reach the independent adapter degradation path"
+
+  for seam in updateResult wrapTextWithAnsi; do
+    variant="$TMP_ROOT/missing-error-seam-$seam"
+    mkdir -p \
+      "$variant/.pi/extensions/lib" \
+      "$variant/node_modules/@earendil-works/pi-coding-agent" \
+      "$variant/node_modules/@earendil-works/pi-tui"
+    cp "$TOOL_LAYOUT" "$variant/.pi/extensions/lib/fm-calm-tool-layout.ts"
+    cp "$VISIBILITY" "$variant/.pi/extensions/lib/fm-calm-visibility.ts"
+    printf '%s\n' '{"type":"module"}' >"$variant/package.json"
+    printf '%s\n' \
+      '{"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}' \
+      >"$variant/node_modules/@earendil-works/pi-coding-agent/package.json"
+    printf '%s\n' \
+      '{"name":"@earendil-works/pi-tui","type":"module","exports":"./index.js"}' \
+      >"$variant/node_modules/@earendil-works/pi-tui/package.json"
+    {
+      printf '%s\n' \
+        'export function getMarkdownTheme() { return {}; }' \
+        'export class UserMessageComponent {}'
+      if [ "$seam" = updateResult ]; then
+        printf '%s\n' 'export class ToolExecutionComponent { render() { return []; } }'
+      else
+        printf '%s\n' \
+          'export class ToolExecutionComponent { render() { return []; } updateResult() {} }'
+      fi
+    } >"$variant/node_modules/@earendil-works/pi-coding-agent/index.js"
+    {
+      printf '%s\n' \
+        'export function visibleWidth(text) { return text.length; }' \
+        'export function truncateToWidth(text, maxWidth) { return text.slice(0, maxWidth); }'
+      if [ "$seam" != wrapTextWithAnsi ]; then
+        printf '%s\n' 'export function wrapTextWithAnsi(text) { return [text]; }'
+      fi
+    } >"$variant/node_modules/@earendil-works/pi-tui/index.js"
+
+    out=$(cd "$variant" && FM_CALM_MISSING_SEAM="$seam" node --input-type=module 2>&1 <<'JS'
+const seam = process.env.FM_CALM_MISSING_SEAM;
+const tool = await import("./.pi/extensions/lib/fm-calm-tool-layout.ts");
+const { ToolExecutionComponent } = await import("@earendil-works/pi-coding-agent");
+const originalRender = ToolExecutionComponent.prototype.render;
+const originalUpdateResult = ToolExecutionComponent.prototype.updateResult;
+let reason;
+try {
+  tool.installCalmToolLayout();
+} catch (error) {
+  reason = error instanceof Error ? error.message : String(error);
+}
+if (!reason?.includes(seam)) {
+  throw new Error(`the tool-row adapter did not name its missing ${seam} seam: ${String(reason)}`);
+}
+if (
+  ToolExecutionComponent.prototype.render !== originalRender ||
+  ToolExecutionComponent.prototype.updateResult !== originalUpdateResult
+) {
+  throw new Error(`the tool-row adapter patched Pi anyway despite the missing ${seam} seam`);
+}
+JS
+)
+    status=$?
+    [ "$status" -eq 0 ] || fail "Pi calm missing $seam seam path failed: $out"
+    [ -z "$out" ] || fail "Pi calm missing $seam seam test printed output: $out"
+  done
+  pass "missing Pi presentation class exports and error-surface seams reach the independent adapter degradation path"
 }
 
 test_rendering_and_session_lifecycle() {
@@ -461,7 +538,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
-const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionComponent }, { UserMessageComponent }, { InteractiveMode }, { initTheme, theme }, { Text, getKeybindings, setCapabilities }, { createToolHtmlRenderer }] = await Promise.all([
+const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionComponent }, { UserMessageComponent }, { InteractiveMode }, { initTheme, theme }, { Text, getKeybindings, setCapabilities, visibleWidth }, { createToolHtmlRenderer }] = await Promise.all([
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/assistant-message.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/custom-entry.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/tool-execution.js`).href),
@@ -788,6 +865,28 @@ noisyErrorRow.updateResult({
   details: {},
   isError: true,
 });
+const widthErrorTexts = [
+  `\tmake: *** ${"deeply/nested/build/target ".repeat(12)}Error 1`,
+  `エラー: ${"幅の広い文字を含む失敗出力".repeat(8)}`,
+  `❌ ${"🚀🔥 build step failed ".repeat(10)}`,
+  `Error: ${"x".repeat(4000)}`,
+  Array.from({ length: 9 }, (_, index) => `\t${"wide 漢字 stderr ".repeat(6)}${index}`).join("\n"),
+];
+const widthErrorRows = widthErrorTexts.map((text, index) => {
+  const row = new ToolExecutionComponent("bash", `error-actual-width-${index}`, routineArgs, { showImages: false }, bashDefinition, renderUi, process.cwd());
+  row.markExecutionStarted();
+  row.setArgsComplete();
+  row.updateResult({ content: [{ type: "text", text }], details: {}, isError: true });
+  return row;
+});
+const partialErrorRow = new ToolExecutionComponent("bash", "error-actual-partial", routineArgs, { showImages: false }, bashDefinition, renderUi, process.cwd());
+partialErrorRow.markExecutionStarted();
+partialErrorRow.updateResult({ content: [{ type: "text", text: "CALM_PARTIAL_STREAM" }], details: {}, isError: true }, true);
+const clearedErrorRow = new ToolExecutionComponent("bash", "error-actual-cleared", routineArgs, { showImages: false }, bashDefinition, renderUi, process.cwd());
+clearedErrorRow.markExecutionStarted();
+clearedErrorRow.setArgsComplete();
+clearedErrorRow.updateResult({ content: [{ type: "text", text: "CALM_TRANSIENT_ERROR" }], details: {}, isError: true });
+clearedErrorRow.updateResult({ content: [{ type: "text", text: "CALM_RECOVERED_OUTPUT" }], details: {}, isError: false });
 
 const assistantBase = {
   role: "assistant",
@@ -1073,6 +1172,39 @@ if (!noisyRendered.join("\n").includes("6 earlier error lines hidden")) {
 }
 if (!noisyRendered.join("\n").includes("error line 12") || noisyRendered.join("\n").includes("error line 6")) {
   throw new Error("Calm did not keep the trailing lines of a noisy tool error");
+}
+if (partialErrorRow.render(100).length !== 0) {
+  throw new Error("Calm exposed a streaming partial tool result as an actionable error");
+}
+if (clearedErrorRow.render(100).length !== 0) {
+  throw new Error("Calm kept a superseded tool error visible after a successful result");
+}
+const widthProbeRows = [...errorFixtures.map((fixture) => fixture.actual), noisyErrorRow, ...widthErrorRows];
+for (const probeWidth of [1, 2, 8, 12, 40, 100, 180]) {
+  for (const row of widthProbeRows) {
+    for (const line of row.render(probeWidth)) {
+      if (visibleWidth(line) > probeWidth) {
+        throw new Error(
+          `Calm emitted a ${visibleWidth(line)}-column error line at terminal width ${probeWidth}`,
+        );
+      }
+    }
+  }
+}
+for (const row of widthProbeRows) {
+  if (row.render(0).length !== 0) {
+    throw new Error("Calm emitted an error line with no terminal columns available");
+  }
+}
+const wideRendered = widthErrorRows[1].render(40).join("\n");
+if (!wideRendered.includes("エラー")) {
+  throw new Error("Calm dropped the wide-character tool error text it must surface");
+}
+if (!widthErrorRows[4].render(40).some((line) => line.includes("earlier error lines hidden"))) {
+  throw new Error("Calm dropped its capped-error notice on a wrapped multi-line error");
+}
+if (!widthErrorRows[4].render(12).some((line) => line.startsWith(" ..."))) {
+  throw new Error("Calm dropped its capped-error notice on a narrow terminal");
 }
 if (assistantThinkingTool.render(100).length !== 0) {
   throw new Error("Calm-hidden thinking beside a tool call retained vertical height");

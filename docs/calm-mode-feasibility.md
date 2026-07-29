@@ -17,7 +17,7 @@ Presentation must remain inactive in RPC, JSON, print, and untrusted contexts.
 `.pi/extensions/lib/fm-calm-visibility.ts` owns the allowlist-style transcript policy.
 Only `genuine-user-prompt` and `genuine-agent-response` are policy-visible while Calm is active.
 `.pi/extensions/lib/fm-calm-assistant-layout.ts` removes thinking blocks from the shallow presentation copy before Pi calculates assistant layout.
-`.pi/extensions/lib/fm-calm-tool-layout.ts` returns zero rows from Pi's exported `ToolExecutionComponent` while Calm is active, which removes calls, results, framing, and image children together.
+`.pi/extensions/lib/fm-calm-tool-layout.ts` returns zero rows from Pi's exported `ToolExecutionComponent` while Calm is active, which removes calls, results, framing, and image children together, and keeps only the width-clamped error text of a row whose result is an error.
 `.pi/extensions/lib/fm-calm-operational-user-layout.ts` renders canonically classified text-only Firstmate operational user rows at zero height.
 `bin/fm-operational-input.sh` remains the single owner of operational-input construction and parsing.
 The seven built-in definitions and `fm_watch_arm_pi` retain per-renderer zero-height behavior as an independent fallback if the complete tool-row adapter is unavailable.
@@ -47,7 +47,7 @@ Serialized session entries are never modified by a presentation toggle.
 
 ## Compatibility review
 
-Pi 0.81.1 introduced the evidence baseline, Pi 0.82.0 preserved the original assistant and operational-user seams, and Pi 0.82.1 preserves those seams plus the exported `ToolExecutionComponent.render` seam used for complete tool-row suppression.
+Pi 0.81.1 introduced the evidence baseline, Pi 0.82.0 preserved the original assistant and operational-user seams, and Pi 0.82.1 preserves those seams plus the exported `ToolExecutionComponent.render` and `ToolExecutionComponent.updateResult` seams used for complete tool-row suppression and its actionable-error surface, and pi-tui's `visibleWidth`, `truncateToWidth`, and `wrapTextWithAnsi` column helpers used to keep every emitted error line inside the terminal width Pi enforces.
 Version strings are evidence rather than compatibility gates.
 A future version with a missing method degrades only that adapter.
 
@@ -75,7 +75,7 @@ ok - Pi calm extension is presentation-only with one persisted visibility choice
 ok - Pi calm resolves its persistent home independently of Pi's launch directory
 ok - Pi calm compatibility evidence never rejects a Pi version for being newer than 0.82.0, and still fails closed on a missing or malformed version
 ok - a missing collapsed-thinking presentation API degrades only that Calm adapter with a clear skip reason, while the rest of Calm still registers
-ok - missing Pi presentation class exports reach the independent adapter degradation path
+ok - missing Pi presentation class exports and error-surface seams reach the independent adapter degradation path
 ok - Pi calm centralizes transcript visibility, preserves execution/export data, hides working activity, and persists its choice across session starts
 ok - Pi operational follow-up E2E processes exact user-role notifications once while Calm hides current and adjacent rows, Calm off and absent render them, and restart preserves semantics
 ok - Pi Calm native /skill:ahoy geometry keeps every thinking and tool block at zero height while preserving history, restart, and Calm-off rendering
