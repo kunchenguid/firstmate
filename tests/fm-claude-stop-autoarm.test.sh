@@ -20,6 +20,7 @@ fm_git_identity fmtest fmtest@example.invalid
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
 ln -s /bin/bash "$FAKEBIN/claude"
 FAKE_CLAUDE="$FAKEBIN/claude"
+export FAKE_CLAUDE
 
 # Copy the hook and its sourced dependencies into a fixture checkout.
 install_autoarm_scripts() {
@@ -274,6 +275,37 @@ test_stale_lock_recovery_preserves_afk_and_need_gates() {
   pass "auto-arm: stale-owner recovery leaves the AFK and supervision-need gates unchanged"
 }
 
+test_resolves_outermost_claude_pid_in_nested_bgspare_chain() {
+  local dir out status inner_pid lock_pid
+  dir=$(make_primary_dir "$TMP_ROOT/nested-chain")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  # A genuine multi-level contiguous claude-named ancestry: the hook fires
+  # inside an inner fake-claude process (its recorded pid is distinct from its
+  # own parent, a second, outer fake-claude process holding the session lock -
+  # the bg-spare shape). Only the outer pid may own the lock; a
+  # first-match-wins walk would resolve to the inner pid instead and leave the
+  # hook inert. The inner process records its own pid before running the hook
+  # so bash cannot tail-exec-collapse it into the outer pid, which would
+  # collapse the two-hop chain this test depends on down to one hop.
+  out=$(printf '%s\n' '{"session_id":"nested"}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        "$FAKE_CLAUDE" -c "
+          printf \"%s\n\" \"\$\$\" > \"\$FM_HOME/state/inner-pid\"
+          \"\$FM_HOME/bin/fm-claude-stop-autoarm.sh\"
+        "
+      ' 2>&1); status=$?
+  inner_pid=$(cat "$dir/state/inner-pid" 2>/dev/null || true)
+  lock_pid=$(cat "$dir/state/.lock" 2>/dev/null || true)
+  [ -n "$inner_pid" ] && [ "$inner_pid" != "$lock_pid" ] \
+    || fail "test setup did not produce a genuine two-hop claude chain: inner=$inner_pid lock=$lock_pid"
+  expect_code 2 "$status" "a nested contiguous claude ancestry must resolve to the outer lock-owning pid and arm"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not resolve past the inner claude-named process to the outer lock owner"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "nested-chain arm must record outcome=rewake"
+  pass "auto-arm: resolves the outermost pid of a nested contiguous claude ancestry (bg-spare chain)"
+}
+
 test_inert_when_fleet_idle() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/idle")
@@ -413,6 +445,7 @@ test_reclaims_stale_session_lock_before_arming
 test_inert_when_lock_held_by_other_harness
 test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
+test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
 test_failed_close_rewakes_with_failure_banner
