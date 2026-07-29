@@ -2021,14 +2021,14 @@ EOF
 # superseded a composer-content read that itself replaced a delta-based check
 # for the 2026-07-03 incident): when the target is legibly idle-like (idle,
 # done, or blocked) before text injection, submission is confirmed by
-# fm_backend_herdr_wait_for_working
-# observing a submit-active agent_status after injection and Enter, NOT by
-# reading the composer's own row. The baseline must be sampled before
-# send_literal: Pi can begin working during the send plus popup-settle interval,
-# and sampling afterward misclassifies that successful transition as
-# preexisting work and falls into composer-text fallback. This makes the normal
-# confirmation path cross-agent: it is the same semantic signal regardless of
-# what text a harness's idle composer happens to display.
+# fm_backend_herdr_wait_for_working observing a submit-active agent_status
+# transition after Enter, NOT by reading the composer's own row. The
+# pre-injection baseline remains caller evidence, while each Enter gets a
+# separate native baseline after literal injection and popup settling. Activity
+# that began during injection therefore cannot prove that Enter consumed the
+# text. This makes the normal confirmation path cross-agent: it is the same
+# semantic signal regardless of what text a harness's idle composer happens to
+# display.
 #
 # Incident (2026-07-07, followed up on 2026-07-08): a redelivery loop in the
 # away-mode daemon. Root cause: composer-content submit confirmation was too
@@ -2076,27 +2076,27 @@ EOF
 # FM_BACKEND_HERDR_SUBMIT_BASELINE_RAW to the exact pre-injection native status
 # for same-shell callers that need private failure evidence.
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline baseline_raw confirm_sleep confirmation_baseline
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline baseline_raw confirm_sleep confirmation_baseline confirmation_class
   FM_BACKEND_HERDR_SUBMIT_BASELINE_RAW=
   fm_backend_herdr_target_ready "$target" || { printf 'unknown'; return 0; }
   baseline_raw=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   # shellcheck disable=SC2034 # Same-shell callers consume this evidence output.
   FM_BACKEND_HERDR_SUBMIT_BASELINE_RAW=$baseline_raw
   baseline=$(fm_backend_herdr_classify_submit_baseline_status "$baseline_raw")
-  confirmation_baseline=$baseline_raw
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   # Keep the caller-owned popup settle after literal injection and before Enter.
   sleep "$settle"
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
   while :; do
+    confirmation_baseline=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+    confirmation_class=$(fm_backend_herdr_classify_submit_baseline_status "$confirmation_baseline")
     fm_backend_herdr_send_key "$target" Enter || true
-    if [ "$baseline" = idle ]; then
+    if [ "$baseline" = idle ] && [ "$confirmation_class" = idle ]; then
       verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS" "$confirmation_baseline")
-      if [ "$baseline_raw" = blocked ]; then
+      if [ "$confirmation_baseline" = blocked ]; then
         case "$verdict" in
           idle-transition)
-            confirmation_baseline=idle
             verdict=$(fm_backend_herdr_composer_state "$target")
             ;;
           idle)

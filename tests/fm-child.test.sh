@@ -86,6 +86,7 @@ endpoint_task_id=$TASK_ID
 worktree=$WORKTREE
 project=$PROJECT
 harness=pi
+launch_profile=canonical
 model=openai-codex/gpt-5.6-sol
 effort=xhigh
 kind=ship
@@ -281,6 +282,31 @@ set_profile() {  # <harness> <model> <effort> <live-agent>
   mv "$FAKE_STATE/agents.tmp" "$FAKE_STATE/agents"
   printf '%s\n' "$agent" > "$FAKE_STATE/next-agent"
 }
+
+set_launch_profile() {
+  local profile=$1 tmp="$TMP/meta.tmp"
+  awk -F= -v profile="$profile" '
+    $1 == "launch_profile" { print "launch_profile=" profile; next }
+    { print }
+  ' "$STATE/$TASK_ID.meta" > "$tmp"
+  mv "$tmp" "$STATE/$TASK_ID.meta"
+}
+
+set_launch_profile raw
+RAW_PANES_BEFORE=$(cat "$FAKE_STATE/panes")
+RAW_SPLITS_BEFORE=$(grep -c 'CALL <pane> <split>' "$FAKE_STATE/log" || true)
+assert_failure_contains "refuses a raw parent launch that cannot be replayed exactly" \
+  "cannot be replayed exactly for child panes" \
+  run_parent create raw-parent --instructions "$INSTRUCTIONS" --path d.txt
+RAW_SPLITS_AFTER=$(grep -c 'CALL <pane> <split>' "$FAKE_STATE/log" || true)
+if [ ! -e "$TASK_TMP/children/raw-parent" ] \
+   && [ "$(cat "$FAKE_STATE/panes")" = "$RAW_PANES_BEFORE" ] \
+   && [ "$RAW_SPLITS_AFTER" -eq "$RAW_SPLITS_BEFORE" ]; then
+  ok "raw parent launch refusal creates no pane or private child record"
+else
+  not_ok "raw parent launch refusal creates no pane or private child record"
+fi
+set_launch_profile canonical
 
 assert_success "creates one exact same-tab child with explicit path ownership" \
   run_parent create alpha --instructions "$INSTRUCTIONS" --path src

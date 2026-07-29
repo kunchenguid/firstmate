@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 
+FM_LAUNCH_PROFILE_CANONICAL=canonical
+FM_LAUNCH_PROFILE_RAW=raw
+
+fm_launch_profile_is_child_replayable() {
+  [ "$1" = "$FM_LAUNCH_PROFILE_CANONICAL" ]
+}
+
 fm_launch_shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"

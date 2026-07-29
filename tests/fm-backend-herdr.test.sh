@@ -2108,12 +2108,13 @@ test_send_text_submit_applies_herdr_minimum_confirm_budget() {
   local dir log resp fb out sleep_log sleeps
   dir="$TMP_ROOT/submit-min-budget"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; sleep_log="$dir/sleeps"; : > "$log"; : > "$sleep_log"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/3.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/5.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/6.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/8.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/9.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/9.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/10.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_SLEEP_LOG="$sleep_log" FM_BACKEND_HERDR_SUBMIT_POLLS=6 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6 \
     bash -c '. "$0/bin/backends/herdr.sh"; sleep() { printf "sleep:%s\n" "$1" >> "$FM_SLEEP_LOG"; }; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 1 0.4 0' "$ROOT" )
@@ -2175,10 +2176,12 @@ test_send_text_submit_detects_landed_send() {
   dir="$TMP_ROOT/submit-ok"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   # 1: agent get - pre-injection baseline is idle
   # 2: send-text (literal, no output)
-  # 3: send-keys enter
-  # 4: agent get - agent_status working (a real turn started: submitted)
+  # 3: agent get - pre-Enter baseline is idle
+  # 4: send-keys enter
+  # 5: agent get - agent_status working (a real turn started: submitted)
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/3.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" )
@@ -2190,40 +2193,48 @@ test_send_text_submit_detects_landed_send() {
   pass "fm_backend_herdr_send_text_submit: reports 'empty' once agent_status reports working after one Enter, without ever reading the composer"
 }
 
-# Regression for child pointer delivery: Pi may transition from idle to working
-# during send-text plus settle, before the confirmation poll. The baseline must
-# be the native state before injection, or that successful transition is
-# mistaken for preexisting work and routed through composer-text fallback.
-test_send_text_submit_preidle_then_working_during_send() {
+test_send_text_submit_working_during_injection_uses_composer_proof() {
   local dir log resp fb out baseline_line send_line enter_count
-  dir="$TMP_ROOT/submit-working-during-send"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # 1: pre-injection agent get -> idle
-  # 2: send-text transitions Pi to working; its response body is ignored
-  # 3: Enter is retained for the verified submit sequence
-  # 4: first confirmation sample observes that working transition
+  dir="$TMP_ROOT/submit-working-during-injection"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/3.out"
+  printf '  \xe2\x9d\xaf \n' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "Read the private brief." 3 0.01 0.3' "$ROOT" )
-  [ "$out" = empty ] || fail "pre-idle then working-during-send must confirm delivery, got '$out'"
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "Read the private brief." 1 0.01 0.3' "$ROOT" )
+  [ "$out" = empty ] || fail "working during injection should confirm only from the cleared composer, got '$out'"
   baseline_line=$(grep -n $'\x1f''agent'$'\x1f''get'$'\x1f''w1:p2' "$log" | head -1 | cut -d: -f1)
   send_line=$(grep -n $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2' "$log" | head -1 | cut -d: -f1)
   [ -n "$baseline_line" ] && [ -n "$send_line" ] && [ "$baseline_line" -lt "$send_line" ] \
     || fail "native idle baseline was not sampled before literal injection: $(cat "$log")"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 1 ] || fail "working-during-send confirmation should retain exactly one Enter, sent $enter_count"
-  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 0 ] \
-    || fail "a pre-injection idle baseline must keep working-during-send on native confirmation, not composer fallback"
-  pass "fm_backend_herdr_send_text_submit: pre-injection idle then working during send confirms natively without composer fallback"
+  [ "$enter_count" -eq 1 ] || fail "working-during-injection confirmation should retain exactly one Enter, sent $enter_count"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 1 ] \
+    || fail "activity before Enter must require independent composer evidence"
+  pass "fm_backend_herdr_send_text_submit: activity during injection requires independent composer proof"
+}
+
+test_send_text_submit_working_during_injection_without_consumption_stays_pending() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-working-during-injection-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/3.out"
+  printf '  \xe2\x9d\xaf Read the private brief.\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "Read the private brief." 1 0.01 0.3' "$ROOT" )
+  [ "$out" = pending ] || fail "pre-Enter activity with retained composer text must not prove consumption, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "no-consumption case should send exactly one configured Enter, sent $enter_count"
+  pass "fm_backend_herdr_send_text_submit: pre-Enter activity without consumption remains pending"
 }
 
 test_send_text_submit_preblocked_then_working_confirms() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-preblocked-working"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/3.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "continue" 3 0.01 0.01' "$ROOT" )
@@ -2239,8 +2250,9 @@ test_send_text_submit_preblocked_then_blocked_requires_composer_clearance() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-preblocked-blocked"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/4.out"
-  printf '  \xe2\x9d\xaf \n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/3.out"
+  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/5.out"
+  printf '  \xe2\x9d\xaf \n' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "continue" 3 0.01 0.01' "$ROOT" )
@@ -2256,10 +2268,12 @@ test_send_text_submit_preblocked_unchanged_does_not_false_confirm() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-preblocked-unchanged"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/4.out"
-  printf '  \xe2\x9d\xaf continue\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/3.out"
+  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/5.out"
+  printf '  \xe2\x9d\xaf continue\n' > "$resp/6.out"
   printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/7.out"
-  printf '  \xe2\x9d\xaf continue\n' > "$resp/8.out"
+  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/9.out"
+  printf '  \xe2\x9d\xaf continue\n' > "$resp/10.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "continue" 2 0.01 0.01' "$ROOT" )
@@ -2275,8 +2289,10 @@ test_send_text_submit_detects_swallowed_enter() {
   # Every post-Enter agent-get read still reports idle: the Enter never
   # started a turn (swallowed), so wait_for_working never observes "busy".
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/3.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/5.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
@@ -2295,13 +2311,17 @@ test_send_text_submit_popup_autocomplete_requires_second_enter() {
   dir="$TMP_ROOT/submit-popup-autocomplete"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   # 1: agent get - pre-injection baseline is idle
   # 2: send-text "/compact"
-  # 3: send-keys enter (#1) - closes the popup, fills the placeholder; no turn starts
-  # 4: agent get -> idle (not submitted yet)
+  # 3: pre-Enter agent get -> idle
+  # 4: send-keys enter (#1) - closes the popup, fills the placeholder; no turn starts
+  # 5: agent get -> idle (not submitted yet)
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
-  # 5: send-keys enter (#2) - actually submits
-  # 6: agent get -> working (submitted)
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/3.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/5.out"
+  # 6: pre-Enter agent get -> idle
+  # 7: send-keys enter (#2) - actually submits
+  # 8: agent get -> working (submitted)
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "/compact" 3 0.01 1.2' "$ROOT" )
@@ -2315,8 +2335,8 @@ test_send_text_submit_confirms_blocked_after_enter() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-blocked"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/3.out"
-  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/3.out"
+  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "needs approval" 3 0.01 0.01' "$ROOT" )
@@ -2331,8 +2351,9 @@ test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
   dir="$TMP_ROOT/submit-preexisting-working-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/1.out"
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/3.out"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/4.out"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/6.out"
+  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/6.out"
+  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
@@ -2352,7 +2373,8 @@ test_send_text_submit_confirms_despite_codex_idle_tip_composer() {
   local dir log resp fb out
   dir="$TMP_ROOT/submit-codex-idle-tip"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/3.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "reply with just OK" 3 0.01 0.01' "$ROOT" )
@@ -2402,11 +2424,13 @@ test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmat
 test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-slow-transition"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # 1: baseline idle  2: send-text  3: send-keys enter  4,5: agent get -> idle  6: agent get -> working
+  # 1: baseline idle  2: send-text  3: pre-Enter idle  4: send-keys enter
+  # 5,6: agent get -> idle  7: agent get -> working
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/3.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/5.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=3 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.03 0.01' "$ROOT" )
@@ -2432,7 +2456,8 @@ test_send_text_submit_unknown_on_capture_failure() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-read-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
-  printf '1\n' > "$resp/4.exit"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/3.out"
+  printf '1\n' > "$resp/5.exit"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "x" 2 0.01 0.01' "$ROOT" )
@@ -3155,7 +3180,8 @@ test_wait_for_working_returns_idle_when_never_busy_but_readable
 test_wait_for_working_returns_unknown_when_never_readable
 test_wait_for_working_treats_blocked_as_submit_active
 test_send_text_submit_detects_landed_send
-test_send_text_submit_preidle_then_working_during_send
+test_send_text_submit_working_during_injection_uses_composer_proof
+test_send_text_submit_working_during_injection_without_consumption_stays_pending
 test_send_text_submit_preblocked_then_working_confirms
 test_send_text_submit_preblocked_then_blocked_requires_composer_clearance
 test_send_text_submit_preblocked_unchanged_does_not_false_confirm

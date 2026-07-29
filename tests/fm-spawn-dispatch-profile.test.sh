@@ -104,8 +104,9 @@ EOF
 }
 
 assert_meta_profile() {
-  local meta=$1 harness=$2 model=$3 effort=$4
+  local meta=$1 harness=$2 model=$3 effort=$4 launch_profile=${5:-canonical}
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
+  assert_grep "launch_profile=$launch_profile" "$meta" "meta missing launch_profile=$launch_profile"
   assert_grep "model=$model" "$meta" "meta missing model=$model"
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
@@ -207,10 +208,29 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   status=$?
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
+  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default raw
   launch=$(cat "$LAUNCH_LOG")
   [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
+}
+
+test_raw_supported_harness_records_unreplayable_profile() {
+  local rec id out status launch
+  id=profile-raw-pi-z17
+  rec=$(make_spawn_case profile-raw-pi claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "FOO=bar pi --custom")
+  status=$?
+  expect_code 0 "$status" "raw supported-harness launch should remain available"
+  assert_contains "$out" "spawned $id harness=pi" "spawn did not identify the raw Pi harness"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi default default raw
+  launch=$(cat "$LAUNCH_LOG")
+  [ "$launch" = "FM_PI_HARNESS=pi FOO=bar pi --custom" ] \
+    || fail "raw supported-harness command lost its environment or flags"$'\n'"actual: $launch"
+  pass "raw supported-harness launches retain unreplayable provenance"
 }
 
 test_claude_threads_model_and_effort() {
@@ -514,6 +534,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_raw_supported_harness_records_unreplayable_profile
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

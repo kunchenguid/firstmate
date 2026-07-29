@@ -91,6 +91,7 @@ endpoint_task_id=$TASK_ID
 worktree=$WORKTREE
 project=child-e2e
 harness=pi
+launch_profile=canonical
 model=openai-codex/gpt-5.6-sol
 effort=low
 kind=ship

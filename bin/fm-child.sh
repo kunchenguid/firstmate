@@ -57,6 +57,7 @@ FM_CHILD_PARENT_TAB=
 FM_CHILD_PARENT_PANE=
 FM_CHILD_PARENT_WORKTREE=
 FM_CHILD_PARENT_HARNESS=
+FM_CHILD_PARENT_LAUNCH_PROFILE=
 FM_CHILD_PARENT_MODEL=
 FM_CHILD_PARENT_EFFORT=
 FM_CHILD_PARENT_KIND=
@@ -196,6 +197,10 @@ fm_child_load_parent_meta() {  # <meta> <expected-id>
   FM_CHILD_PARENT_HARNESS=$(fm_child_meta_exact "$meta" harness) || die "parent metadata has no exact worker runtime"
   fm_child_expected_agent "$FM_CHILD_PARENT_HARNESS" >/dev/null \
     || die "parent runtime '$FM_CHILD_PARENT_HARNESS' is unsupported for child panes"
+  FM_CHILD_PARENT_LAUNCH_PROFILE=$(fm_child_meta_exact "$meta" launch_profile) \
+    || die "parent metadata has no exact launch profile"
+  fm_launch_profile_is_child_replayable "$FM_CHILD_PARENT_LAUNCH_PROFILE" \
+    || die "parent launch profile '$FM_CHILD_PARENT_LAUNCH_PROFILE' cannot be replayed exactly for child panes"
   FM_CHILD_PARENT_MODEL=$(fm_child_meta_exact "$meta" model) || die "parent metadata has no exact model profile"
   FM_CHILD_PARENT_EFFORT=$(fm_child_meta_exact "$meta" effort) || die "parent metadata has no exact effort profile"
   case "$FM_CHILD_PARENT_EFFORT" in

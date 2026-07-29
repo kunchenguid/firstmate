@@ -158,6 +158,7 @@ HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+LAUNCH_PROFILE=$FM_LAUNCH_PROFILE_CANONICAL
 POS=()
 want_value=
 for a in "$@"; do
@@ -289,6 +290,7 @@ spawn_abort_cleanup() {
             echo "worktree=${WT:-}"
             echo "project=$PROJ_ABS"
             echo "harness=$HARNESS"
+            echo "launch_profile=$LAUNCH_PROFILE"
             echo "kind=$KIND"
             echo "mode=${MODE:-no-mistakes}"
             echo "yolo=${YOLO:-off}"
@@ -464,6 +466,7 @@ launch_template() {
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
+    LAUNCH_PROFILE=$FM_LAUNCH_PROFILE_RAW
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
@@ -1361,6 +1364,7 @@ META_WINDOW=$T
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
+  echo "launch_profile=$LAUNCH_PROFILE"
   echo "kind=$KIND"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
