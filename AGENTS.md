@@ -483,6 +483,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, and on any milestone or terminal wake for an X-mode-linked task before posting its completion follow-up; relevant only when X mode is on.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
+- `fmtg-respond` - the Telegram bridge owner. Telegram mode is DISABLED (section 15), so never load this skill; it is retained only for the re-enable work described there.
 
 ## 14. X mode
 
@@ -493,6 +494,20 @@ That token is consent for public replies and normal reversible lifecycle actions
 An X-only home still requires the live supervision cycle so mentions can wake it without fleet work.
 On an `x-mention <request_id>` or `x-mode-error ...` check wake, load `fmx-respond`, which owns classification, public-safety policy, reply or dismissal, task linking, and follow-ups.
 For every X-linked terminal outcome, load that owner and post the final completion follow-up before teardown, regardless of earlier milestone follow-ups.
+
+## 15. Telegram mode (DISABLED - TODO)
+
+A private 1:1 Telegram bridge is implemented in this fork but is **switched off**, so it changes no behavior.
+Treat Telegram as unavailable: do not route captain replies, acknowledgements, or task follow-ups through it, and do not brief a crewmate to use it.
+
+The implementation is preserved, not deleted: `bin/fm-tg-*.sh`, `bin/fm-tg-webhook-server.py`, and the `fmtg-respond` skill.
+`tg_mode_setup` in `bin/fm-bootstrap.sh` is the single switch; it arms nothing and actively removes stale poll artifacts, even when `.env` carries `FMTG_BOT_TOKEN`.
+
+Why it is off: inbound messages landed in `state/tg-inbox/` but never woke firstmate, because the wake queue was written with a `tg` kind the watcher's classifier does not recognize.
+No wake fired, so captain messages accumulated unread - worse than having no bridge.
+
+TODO to re-enable: route Telegram wakes through the existing `check:` mechanism (the shape `x_mode_setup` already uses) instead of a bespoke `tg` wake kind, verify end to end that a real message yields a wake, a drained inbox, and a reply, then drop the `FMTG_ENABLE` guard and restore the full documentation here and in `docs/configuration.md`.
+`FMTG_ENABLE=1` arms it for that debugging work only.
 
 ## Maintaining this file
 

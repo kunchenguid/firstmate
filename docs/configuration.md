@@ -363,6 +363,23 @@ In dry-run, `fm-x-dismiss.sh` records `{request_id, endpoint:"dismiss"}` to the 
 The live answer and follow-up bodies intentionally stay the same shape, including optional `image`; the relay distinguishes them by endpoint, and dismiss stays `{request_id}`.
 These paths need `jq` to build the JSON payload, but they run before token and network checks, so they need neither `FMX_PAIRING_TOKEN` nor `curl`.
 
+## Telegram mode (.env) - DISABLED
+
+A private 1:1 Telegram bridge is implemented in this fork but is switched off; it arms nothing and produces no generated artifacts.
+Unlike X mode, `.env` presence does **not** activate it: `tg_mode_setup` in `bin/fm-bootstrap.sh` returns early even when `FMTG_BOT_TOKEN` and `FMTG_ALLOWED_USERS` are set, and removes any stale `state/tg-watch.check.sh` or `config/tg-mode.env` left over from when it was live.
+
+| Variable | Effect while disabled |
+| --- | --- |
+| `FMTG_BOT_TOKEN` | Ignored. Read only to report that a token is present but the bridge is off. |
+| `FMTG_ALLOWED_USERS` | Ignored. |
+| `FMTG_ENABLE=1` | Escape hatch that arms the bridge anyway, for the re-enable work only. |
+
+`config/tg-mode.env` is gitignored, like `config/x-mode.env`; it was tracked by mistake in an earlier commit and has been untracked.
+
+Why it is off, and what re-enabling requires, is documented in `AGENTS.md` section 15.
+In short: messages reached `state/tg-inbox/` but the wake queue used a `tg` kind the watcher's classifier does not recognize, so no wake ever fired and captain messages went unread.
+The fix is to route Telegram wakes through the existing `check:` mechanism that X mode already uses, verify end to end, then drop the guard.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):

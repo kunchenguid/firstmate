@@ -15,6 +15,7 @@ config/backlog-backend
 config/backend
 config/calm
 config/x-mode.env
+config/tg-mode.env
 config/cmux-socket-password
 config/wedge-alarm
 config/herdr-presentation-spaces
