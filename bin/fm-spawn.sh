@@ -1376,6 +1376,7 @@ EOF
       cat > "$GROK_HOOKS_DIR/fm-turn-end.sh" <<EOF
 #!/usr/bin/env bash
 set -u
+[ "\${FM_CHILD_AGENT:-}" != 1 ] || exit 0
 auth_dir=$sq_grok_auth_dir
 workspace=\${GROK_WORKSPACE_ROOT:-}
 [ -n "\$workspace" ] || exit 0

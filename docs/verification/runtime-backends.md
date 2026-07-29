@@ -230,6 +230,32 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: one exact home-local, journal-correlated, one-tab and one-pane childless idle shell was closed after restoration while the exact non-target focus and default fleet session remained unchanged, and a repeat run was a no-op.
 
+### Bounded child agent panes
+
+The bounded same-tab child lifecycle ran on 2026-07-29 against Herdr 0.7.5 protocol 16 and Pi 0.82.0 on Linux x86_64:
+
+```sh
+FM_CHILD_HERDR_E2E=1 \
+  tests/fm-child-herdr-e2e.test.sh
+```
+
+The test provisioned and destroyed one non-default named session only through `bin/fm-herdr-lab.sh`.
+It exercised the production `bin/fm-child.sh` helper rather than raw child-pane calls.
+
+Observed guarantees:
+
+```text
+ok - isolated lab has one parent task tab and one non-target control tab
+ok - two distinct child agent panes are concurrently present in the exact parent tab and shared worktree
+ok - both real Pi children completed independently and reported only through private records
+ok - disjoint edits and Git, validation, publication, and recursive-delegation refusals are preserved in private reports
+ok - exact cleanup removes only child panes and records while preserving parent, control tab, and shared edits
+```
+
+The real run also exercised the conservative delivery sequence that led to the final verified behavior: full contracts stayed in private `launch.md` files, only operationally encoded absolute-file pointers entered Pi, the shared Herdr submit owner sampled native state before injection, and its `pending` verdict was accepted only after exact Pi registration plus Pi's owned rendered-busy signature corroborated the live turn.
+`tests/fm-backend-herdr.test.sh` pins pre-injection idle, done, blocked, and working semantics, including pre-idle working-during-send, pre-blocked to working, and pre-blocked to blocked transitions.
+`tests/fm-child.test.sh` covers all seven inherited harness routes for both pending-plus-owned-busy acceptance and pending-without-owned-busy refusal, plus agent mismatch, path ownership, recursion, limits, dead reconciliation, private evidence, and teardown ordering.
+
 ### Composer and operational input
 
 Real captures verified these active distinctions:

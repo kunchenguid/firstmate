@@ -124,6 +124,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/bounded-child-agents/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },

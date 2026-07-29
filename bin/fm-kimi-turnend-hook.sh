@@ -75,6 +75,7 @@ HOOK_BYTES = b'''#!/usr/bin/env bash
 # Firstmate Kimi turn-end hook. Managed by fm-kimi-turnend-hook.sh.
 # This hook is deliberately passive: every path is silent and exits zero.
 set +e
+[ "${FM_CHILD_AGENT:-}" != 1 ] || exit 0
 exec >/dev/null 2>&1
 payload=
 IFS= read -r payload || [ -n "$payload" ] || exit 0

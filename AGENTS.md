@@ -176,6 +176,7 @@ Do not add model-specific versions of that policy.
 
 `secondmate-provisioning` owns secondmate harness pins and inherited local material, while `harness-adapters` owns the harness consequences.
 Dispatch only on a backend that `fm-spawn` validates as spawn-capable.
+A live ordinary Herdr ship or scout worker may optionally create bounded same-tab child panes only after loading `bounded-child-agents`; `bin/fm-child.sh` owns the entire child lifecycle, and firstmate, secondmates, non-Herdr workers, and child agents never invoke it.
 A missing dependency, authentication failure, unsupported backend, or version refusal is a blocker; never silently retry on another backend.
 
 ## 5. Recovery
@@ -454,6 +455,7 @@ Every ship brief must retain the worktree-isolation assertion and stop if launch
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
 If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if that need appears after an unguarded scaffold, stop and regenerate rather than adding commands by hand.
 The generated Herdr contract must use a named non-`default` isolated lab and its guarded helper for every lifecycle action.
+Every generated ordinary ship and scout brief includes the conditional `bounded-child-agents` discovery pointer; that skill is the full contract for up to three disjoint same-tab child panes and does not authorize task-specific raw Herdr lifecycle work.
 
 Load `secondmate-provisioning` before creating or using a charter brief and preserve its idle-by-default and marked-return-channel contracts.
 Status appends are sparse supervisor-actionable events, not routine progress; `bin/fm-classify-lib.sh` owns keyed open and resolved semantics.
@@ -483,6 +485,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, and on any milestone or terminal wake for an X-mode-linked task before posting its completion follow-up; relevant only when X mode is on.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
+- `bounded-child-agents` - load only when a live ordinary Herdr ship or scout worker wants optional direct child panes for genuinely independent edits on explicit disjoint paths; it owns parent authorization, shared-copy rules, private reports, readiness, and deterministic cleanup.
 
 ## 14. X mode
 

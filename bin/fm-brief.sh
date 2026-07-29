@@ -226,6 +226,18 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+CHILD_AGENT_SKILL=$(shell_quote "$FM_ROOT/.agents/skills/bounded-child-agents/SKILL.md")
+CHILD_AGENT_HELPER=$(shell_quote "$FM_ROOT/bin/fm-child.sh")
+IFS= read -r -d '' CHILD_AGENT_SECTION <<EOF || true
+# Conditional bounded child panes
+If and only if this ordinary worker is running in its recorded Herdr pane and the task has genuinely independent work on explicit disjoint paths, read and follow \`$CHILD_AGENT_SKILL\` before delegating.
+Use only \`$CHILD_AGENT_HELPER\`; never create, split, inspect, or close child panes with raw Herdr commands.
+This helper is the sole production exception to the Herdr lifecycle declaration above and does not enable task-specific Herdr experiments.
+The skill's private instruction file and helper-managed records and reports are the only additional allowed writes outside this working copy.
+If these conditions do not apply, work directly as before and do not create child agents.
+EOF
+CHILD_AGENT_SECTION=${CHILD_AGENT_SECTION%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -234,6 +246,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
+
+$CHILD_AGENT_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -342,6 +356,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
+
+$CHILD_AGENT_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.

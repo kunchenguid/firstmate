@@ -69,6 +69,7 @@ A backend spawn refusal from a missing dependency, version gate, or unauthentica
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 Every new task records `endpoint_task_id=` as the cleanup binding between the metadata filename and its opaque runtime endpoint.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
+When that task's ordinary worker uses bounded child panes, `bin/fm-child.sh` keeps child endpoint bindings, assigned paths, command guards, reports, and completion results below the task's exact `tasktmp=/tmp/fm-<id>` area; these are private runtime records, not task metadata, and [`herdr-backend.md`](herdr-backend.md#bounded-child-agent-panes) owns their lifecycle.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
 A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.

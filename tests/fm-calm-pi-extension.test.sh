@@ -1258,9 +1258,18 @@ TS
       fail "Pi follow-up $label case did not process the monitoring notification"
     fi
 
-    pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+    i=0
+    while [ "$i" -lt 120 ]; do
+      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+      if printf '%s\n' "$pane" | grep -Fq "CAPTAIN_ANSWER_$label" \
+         && printf '%s\n' "$pane" | grep -Fq "MONITOR_HANDLED_${label}_ONE"; then
+        break
+      fi
+      sleep 0.05
+      i=$((i + 1))
+    done
     [ "$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)" -eq 1 ] \
-      || fail "Pi follow-up $label case rendered a duplicate captain answer"
+      || fail "Pi follow-up $label case did not render exactly one captain answer"
     assert_contains "$pane" "CAPTAIN_PROMPT_$label" "Pi follow-up $label case hid the genuine captain prompt"
     assert_contains "$pane" "MONITOR_HANDLED_${label}_ONE" "Pi follow-up $label case did not render the intended processing result"
     if [ "$calm_state" = on ]; then
@@ -1863,7 +1872,10 @@ JSON
   while [ "$active_screen_wait" -lt 120 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$hidden_snapshot"
     if ! grep -Fq "CALM_E2E_OUTPUT" "$hidden_snapshot" &&
-      ! grep -Fq "/calm" "$hidden_snapshot"; then
+      ! grep -Fq "/calm" "$hidden_snapshot" &&
+      ! grep -Fq "Thinking..." "$hidden_snapshot" &&
+      ! grep -Fq "fm_watch_arm_pi" "$hidden_snapshot" &&
+      ! grep -Fq "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "$hidden_snapshot"; then
       break
     fi
     sleep 0.05

@@ -389,6 +389,13 @@ test_kimi_hook_is_silent_and_requires_registered_workspace_token() {
   assert_absent "$target" "tokenless Kimi hook invocation touched a task marker"
 
   printf 'token=%s\n' "$token" > "$WT_DIR/.fm-kimi-turnend"
+  out=$(printf '{"hook_event_name":"Stop","session_id":"child","cwd":"%s","stop_hook_active":false}\n' "$WT_DIR" \
+    | FM_CHILD_AGENT=1 HOME="$HOME_DIR" bash "$hook" 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "bounded child Kimi hook invocation did not exit zero"
+  [ -z "$out" ] || fail "bounded child Kimi hook invocation printed output: $out"
+  assert_absent "$target" "bounded child Kimi hook invocation touched the parent task marker"
+
   out=$(printf '{"hook_event_name":"Stop","session_id":"crew","cwd":"%s","stop_hook_active":false}\n' "$WT_DIR" \
     | HOME="$HOME_DIR" bash "$hook" 2>&1)
   rc=$?
@@ -405,7 +412,7 @@ test_kimi_hook_is_silent_and_requires_registered_workspace_token() {
   expect_code 0 "$rc" "Kimi hook without jq must still exit zero"
   [ -z "$out" ] || fail "Kimi hook without jq printed output: $out"
   assert_absent "$target" "Kimi hook without jq touched the turn-end marker"
-  pass "Kimi hook stays silent and inert without a Firstmate registry token"
+  pass "Kimi hook stays silent and inert without a Firstmate registry token and for bounded children"
 }
 
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation() {

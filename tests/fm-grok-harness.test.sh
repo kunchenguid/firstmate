@@ -90,9 +90,11 @@ EOF
   assert_absent "$target" "grok pointer accepted token outside the first line"
 
   printf 'token=%s\n' "$token" > "$wt/.fm-grok-turnend"
+  FM_CHILD_AGENT=1 GROK_WORKSPACE_ROOT="$wt" bash "$hook"
+  assert_absent "$target" "bounded child grok invocation touched the parent task turn-end file"
   GROK_WORKSPACE_ROOT="$wt" bash "$hook"
   assert_present "$target" "registered grok pointer did not touch the task turn-end file"
-  pass "grok global hook requires a firstmate registry token"
+  pass "grok global hook requires a firstmate registry token and stays inert for bounded children"
 }
 
 test_grok_teardown_removes_pointer_and_token() {

@@ -53,6 +53,54 @@ Existing task operations use recorded endpoint ids and do not move a live task w
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
+## Bounded child agent panes
+
+An ordinary Herdr-backed ship or scout worker may optionally create up to three direct child agents with `bin/fm-child.sh`.
+This is worker-local bounded parallelism inside one existing task, not another FirstMate task layer.
+FirstMate, secondmates, unsupported backends, and child agents cannot invoke the supported create path.
+
+Each child is an unfocused pane split from the exact recorded parent pane.
+The helper verifies the caller's pane, registered agent, task binding, workspace, tab, isolated Treehouse worktree, and recorded harness profile before the split.
+It then verifies the response-derived child pane remained in that same workspace and tab.
+There is no child option for a different session, workspace, tab, worktree, runtime, provider, model, or effort.
+
+Children share the parent's writable working copy and branch.
+The parent assigns one or more explicit repository-relative paths, and the helper rejects symlinks, traversal, globs, duplicate ownership, and ancestor or descendant overlap with any retained child record.
+The instruction source must be a bounded regular file outside the repository.
+Private metadata, reports, completion results, command guards, and startup instructions stay under the parent's exact `/tmp/fm-<task-id>/children/` area.
+
+The generated child contract reserves every Git mutation, final validation, no-mistakes run, publication, and PR operation for the parent.
+A private PATH guard blocks supported Git mutation and publication interfaces while retaining read-only Git inspection.
+The child cannot recursively invoke `fm-child.sh` and reports only through its private report and completion result, never FirstMate's status channel or captain chat.
+The `FM_CHILD_AGENT=1` marker also makes FirstMate's managed global Grok and Kimi turn-end hooks inert, while Claude, OpenCode, and Pi child launches suppress their parent-facing project integrations and Codex receives no parent notify command.
+The complete child contract remains in private `launch.md`; delivery sends only one operationally encoded absolute-file pointer through the same `fm_backend_herdr_send_text_submit` owner and exact `empty` confirmation required by `fm-send`.
+A child-only `pending` verdict receives the same rendered-busy corroboration owned by `fm-crew-state.sh`: the exact registered agent must still match the inherited harness, and only that harness's verified `fm_busy_lines_match` signature in the bounded pane tail confirms delivery.
+Transcript text alone never confirms delivery, and another harness's busy token cannot match.
+A verdict that remains unconfirmed preserves the raw pre-injection baseline, private startup log, and a bounded ANSI-stripped, credential-redacted composer capture before the exact child pane is stopped.
+These are orchestration boundaries rather than an operating-system sandbox, so parent path design and review remain mandatory.
+
+`list` and `inspect` reconcile private records against exact live pane relationships instead of labels.
+`stop` closes only the response-verified child pane and leaves sibling panes and shared edits intact.
+A disappeared pane becomes dead while its path ownership and private evidence remain available.
+Before any parent Git mutation or final validation, the parent must inspect reports, stop all children, and pass `fm-child.sh ready`.
+
+Normal `fm-teardown.sh` quiesces exact child panes before reading report and Git safety state.
+If teardown later refuses, child records and reports remain.
+After all safety checks pass, teardown removes the private records before returning the Treehouse worktree.
+Neither child stop nor child cleanup restores, resets, or discards shared edits.
+
+The full conditional worker procedure lives in [`.agents/skills/bounded-child-agents/SKILL.md`](../.agents/skills/bounded-child-agents/SKILL.md).
+Focused fake-CLI coverage lives in `tests/fm-child.test.sh`, and the real named-session proof lives in `tests/fm-child-herdr-e2e.test.sh`.
+[`verification/runtime-backends.md`](verification/runtime-backends.md#bounded-child-agent-panes) owns the current versioned evidence.
+
+Current limits:
+
+- Child panes are available only to ordinary Herdr ship and scout workers.
+- The supported depth is one, with at most three live children per parent and no recursive delegation.
+- Concurrent paths must be statically disjoint; the helper does not merge, reconcile, or isolate edits.
+- Children have no independent FirstMate supervision, backlog item, status channel, branch, worktree, validation run, publication authority, or recovery launch.
+- A dead child is never recreated automatically; the parent owns inspection and any manual completion.
+
 ## Optional presentation spaces
 
 Create local gitignored `config/herdr-presentation-spaces` to request a disposable one-task workspace for each new crewmate or scout.
@@ -166,8 +214,10 @@ Enter, Escape, and Ctrl-C are supported.
 Slash and dollar-prefixed input uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
 Text is typed once; only Enter is retried.
 
-On an idle or done native baseline, submit confirmation waits for `working` or `blocked` across a bounded polling window.
-On an already active or unreadable baseline, it falls back to conservative composer clearance.
+The native baseline is sampled before literal text injection, while popup settle remains after injection and before Enter.
+On a pre-injection `idle`, `done`, or `blocked` baseline, submit confirmation waits for post-injection `working` or `blocked` across a bounded polling window, including a transition that begins during injection or settle.
+Pre-injection `blocked` is ready-like because a new steer may resume it, while post-injection `blocked` proves the submitted turn reached a tool or human boundary.
+On an already `working` or unreadable pre-injection baseline, it falls back to conservative composer clearance.
 A fully unreadable target stops retrying and reports unknown.
 The poll density bounds the residual possibility of an extremely fast complete turn; a missed transition can cause only a redundant Enter on an empty composer, never duplicate message text.
 

@@ -2019,12 +2019,16 @@ EOF
 #
 # Confirmation signal (rewritten for the 2026-07-07 incident below;
 # superseded a composer-content read that itself replaced a delta-based check
-# for the 2026-07-03 incident): when the target is legibly idle before Enter,
-# submission is confirmed by fm_backend_herdr_wait_for_working observing a
-# submit-active agent_status after Enter, NOT by reading the composer's own
-# row. This makes the normal confirmation path cross-agent: it is the same
-# semantic signal regardless of what text a harness's idle composer happens
-# to display.
+# for the 2026-07-03 incident): when the target is legibly idle-like (idle,
+# done, or blocked) before text injection, submission is confirmed by
+# fm_backend_herdr_wait_for_working
+# observing a submit-active agent_status after injection and Enter, NOT by
+# reading the composer's own row. The baseline must be sampled before
+# send_literal: Pi can begin working during the send plus popup-settle interval,
+# and sampling afterward misclassifies that successful transition as
+# preexisting work and falls into composer-text fallback. This makes the normal
+# confirmation path cross-agent: it is the same semantic signal regardless of
+# what text a harness's idle composer happens to display.
 #
 # Incident (2026-07-07, followed up on 2026-07-08): a redelivery loop in the
 # away-mode daemon. Root cause: composer-content submit confirmation was too
@@ -2035,7 +2039,7 @@ EOF
 # native agent-state so delivery does not depend on composer text. Composer
 # content is retained for other callers (the away-mode daemon's PRE-injection
 # empty-box guard, still dispatched via fm_backend_composer_state /
-# fm_backend_herdr_composer_state) and for submit attempts whose pre-Enter
+# fm_backend_herdr_composer_state) and for submit attempts whose pre-injection
 # agent-state baseline is not legibly idle.
 #
 # This also still correctly handles the earlier 2026-07-03 incident (a
@@ -2068,14 +2072,20 @@ EOF
 # Echoes empty|pending|unknown|send-failed, a subset of the proof-carrying
 # submit vocabulary. Empty means confirmed submitted for every backend; how
 # each backend confirms it is an internal decision, and herdr's is no longer
-# literally "the composer read empty".
+# literally "the composer read empty". Also sets
+# FM_BACKEND_HERDR_SUBMIT_BASELINE_RAW to the exact pre-injection native status
+# for same-shell callers that need private failure evidence.
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
-  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline baseline_raw confirm_sleep
+  FM_BACKEND_HERDR_SUBMIT_BASELINE_RAW=
+  fm_backend_herdr_target_ready "$target" || { printf 'unknown'; return 0; }
+  baseline_raw=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+  # shellcheck disable=SC2034 # Same-shell callers consume this evidence output.
+  FM_BACKEND_HERDR_SUBMIT_BASELINE_RAW=$baseline_raw
+  baseline=$(fm_backend_herdr_classify_submit_baseline_status "$baseline_raw")
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
+  # Keep the caller-owned popup settle after literal injection and before Enter.
   sleep "$settle"
-  baseline=$(fm_backend_herdr_classify_submit_agent_status \
-    "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
   while :; do
     fm_backend_herdr_send_key "$target" Enter || true
@@ -2120,7 +2130,19 @@ fm_backend_herdr_classify_agent_status() {  # <raw-agent_status>
   esac
 }
 
-fm_backend_herdr_classify_submit_agent_status() {  # <raw-agent_status>
+# Submission has asymmetric state semantics.
+# A pre-injection blocked agent is ready to receive a new steer just like idle
+# or done, while a post-injection blocked state proves the submitted turn
+# reached a human/tool boundary and therefore confirms delivery.
+fm_backend_herdr_classify_submit_baseline_status() {  # <raw-agent_status>
+  case "$1" in
+    working) printf 'busy' ;;
+    idle|done|blocked) printf 'idle' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+fm_backend_herdr_classify_submit_confirmation_status() {  # <raw-agent_status>
   case "$1" in
     working|blocked) printf 'busy' ;;
     idle|done) printf 'idle' ;;
@@ -2218,7 +2240,7 @@ fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <p
       sleep "$interval"
     fi
     raw=$(fm_backend_herdr_agent_status_raw "$session" "$pane_id")
-    bs=$(fm_backend_herdr_classify_submit_agent_status "$raw")
+    bs=$(fm_backend_herdr_classify_submit_confirmation_status "$raw")
     case "$bs" in
       busy) printf 'busy'; return 0 ;;
       idle) saw_idle=1 ;;

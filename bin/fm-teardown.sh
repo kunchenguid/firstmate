@@ -1054,6 +1054,21 @@ remove_secondmate_registry_entry() {
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
+# Ordinary Herdr workers may own bounded child panes in this same working copy.
+# Stop them before any report or Git safety read so shared edits cannot race the
+# inspection. Keep their private reports and records until every teardown safety
+# check passes; a refused teardown must not lose that evidence.
+FM_CHILD_RECORDS_PRESENT=0
+if [ "$KIND" != secondmate ] \
+   && { [ -e "$TASK_TMP/children" ] || [ -L "$TASK_TMP/children" ]; }; then
+  FM_CHILD_RECORDS_PRESENT=1
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CHILD_TEARDOWN=1 \
+      "$FM_ROOT/bin/fm-child.sh" quiesce "$ID"; then
+    echo "REFUSED: task $ID child panes could not be quiesced exactly; preserving the working copy and private child records." >&2
+    exit 1
+  fi
+fi
+
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
@@ -1114,6 +1129,17 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     else
       exit 1
     fi
+  fi
+fi
+
+# Retire private child records only after every report and Git safety check has
+# passed, but before branch or working-copy cleanup begins. Child cleanup closes
+# exact panes only and never resets or discards shared edits.
+if [ "$FM_CHILD_RECORDS_PRESENT" = 1 ]; then
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CHILD_TEARDOWN=1 \
+      "$FM_ROOT/bin/fm-child.sh" cleanup "$ID"; then
+    echo "REFUSED: task $ID child records could not be cleaned exactly; preserving the working copy." >&2
+    exit 1
   fi
 fi
 
