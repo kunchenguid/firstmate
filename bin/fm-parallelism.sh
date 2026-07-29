@@ -6,7 +6,7 @@
 #   fm-parallelism.sh set MODE [--goal ID | --project ID]
 #   fm-parallelism.sh status [--request MODE] [--goal ID] [--project ID]
 #
-# The persisted vocabulary is off|eco|on|max.  auto is accepted only as an
+# The persisted vocabulary is off|eco|on|max.  auto is accepted only as a CLI
 # input alias and is always canonicalized to on.  This command is deliberately
 # independent of task lifecycle and never reads or changes task metadata.
 set -eu
@@ -46,21 +46,26 @@ safe_goal_id() {
 canonical_mode() {
   case "$1" in
     off|eco|on|max) printf '%s\n' "$1" ;;
-    auto) printf 'on\n' ;;
     *) return 1 ;;
   esac
 }
 
-persisted_mode() {
+cli_mode() {
   case "$1" in
-    off|eco|on|max) printf '%s\n' "$1" ;;
-    *) return 1 ;;
+    auto) printf 'on\n' ;;
+    *) canonical_mode "$1" ;;
   esac
 }
 
-require_mode() {
+require_cli_mode() {
   local raw=$1 canonical
-  canonical=$(canonical_mode "$raw") || die "invalid mode '$raw'; expected off|eco|on|max (auto aliases on)"
+  canonical=$(cli_mode "$raw") || die "invalid mode '$raw'; expected off|eco|on|max (auto aliases on)"
+  printf '%s\n' "$canonical"
+}
+
+require_canonical_mode() {
+  local raw=$1 canonical
+  canonical=$(canonical_mode "$raw") || die "invalid mode '$raw'; expected off|eco|on|max"
   printf '%s\n' "$canonical"
 }
 
@@ -88,13 +93,13 @@ while [ "$#" -gt 0 ]; do
     --request)
       [ "$#" -ge 2 ] || die '--request requires a mode'
       [ -z "$REQUEST_SOURCE" ] || die '--request may be supplied once'
-      REQUEST_MODE=$(require_mode "$2")
+      REQUEST_MODE=$(require_cli_mode "$2")
       REQUEST_SOURCE=cli
       shift 2
       ;;
     --request=*)
       [ -z "$REQUEST_SOURCE" ] || die '--request may be supplied once'
-      REQUEST_MODE=$(require_mode "${1#*=}")
+      REQUEST_MODE=$(require_cli_mode "${1#*=}")
       REQUEST_SOURCE=cli
       shift
       ;;
@@ -126,7 +131,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     off|eco|on|max|auto)
       [ -z "$SET_MODE" ] || die 'mode may be supplied once'
-      SET_MODE=$(require_mode "$1")
+      SET_MODE=$(require_cli_mode "$1")
       shift
       ;;
     *) die "unknown argument '$1'; use --help" ;;
@@ -146,7 +151,7 @@ case "$COMMAND" in
 esac
 
 if [ -z "$REQUEST_SOURCE" ] && [ -n "${FM_PARALLELISM_OVERRIDE:-}" ]; then
-  REQUEST_MODE=$(require_mode "$FM_PARALLELISM_OVERRIDE")
+  REQUEST_MODE=$(require_canonical_mode "$FM_PARALLELISM_OVERRIDE")
   REQUEST_SOURCE=environment
 fi
 
@@ -166,7 +171,7 @@ read_persisted() {
   value=$(awk 'NR == 1 { first=$0; next } { bad=1 } END { if (bad || NR != 1) exit 2; print first }' "$path") \
     || die "malformed $label configuration: $path"
   [ -n "$value" ] || die "malformed $label configuration: $path"
-  persisted_mode "$value" >/dev/null \
+  canonical_mode "$value" >/dev/null \
     || die "unknown $label mode '$value' in $path"
   PERSISTED_MODE=$value
   return 0

@@ -205,6 +205,8 @@ test_auto_and_invalid_values() {
   expect_code 0 "$RC" "auto is accepted"
   [ "$OUTPUT" = on ] || fail "auto output was not canonical on"
   [ "$(cat "$TEST_HOME/config/parallelism")" = on ] || fail "auto was not persisted as on"
+  FM_PARALLELISM_OVERRIDE=auto run_parallelism get
+  [ "$RC" -ne 0 ] || fail "environment auto alias was accepted"
   printf 'auto\n' > "$TEST_HOME/config/parallelism"
   run_parallelism get
   [ "$RC" -ne 0 ] || fail "manually persisted auto was accepted"
