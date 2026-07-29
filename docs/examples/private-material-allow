@@ -1,0 +1,27 @@
+# config/private-material-allow - identities that are legitimately public for
+# this home. Copy this into a local, gitignored config/private-material-allow
+# and edit. One entry per line, compared as a whole line, so a multi-word
+# identity such as a person's name is one entry; blank lines and "#" comments
+# are ignored.
+#
+# bin/fm-private-material-check.sh derives its markers at runtime from this
+# home's private dirs (project clone names, registered project and secondmate
+# ids, git remote owners, the local account name). That derivation is
+# deliberately blunt, so it also picks up identities that are already public and
+# must stay in the tracked surface - most commonly the upstream owner this repo
+# was forked from, whose name appears in install URLs, badges, and clone
+# instructions.
+#
+# List those here. The check refuses rather than guessing: silently allowing an
+# owner it could not classify would be exactly the failure mode that publishes
+# private material, so an unclassified owner fails loudly and you decide.
+#
+# Example - the upstream project this fleet forked from, and a vendor whose
+# name is in a tracked install URL:
+# upstream-owner
+# some-vendor
+
+# The sibling file config/private-material-markers uses the same format for the
+# opposite job - one entry per line, compared as a whole line, so a person's name
+# goes on one line rather than split into two useless markers. It holds what
+# nothing can derive from local state: a device serial, a customer, or a person.

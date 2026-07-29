@@ -13,6 +13,7 @@ The tracked code root contains the shared instruction, skill, documentation, wor
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
 `state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated X-mode artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the guarded exceptions in `AGENTS.md`.
+The tracked root `.gitignore` ignores the whole `/config/` directory rather than each known file, so a config file added later is private by default instead of being tracked by the commit that creates it; copyable examples are tracked under `docs/examples/` instead.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 The producing PR and X helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
@@ -131,6 +132,18 @@ It does not set `commands.test` to a complete `tests/*.test.sh` walk.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.
 Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](fm-test-portable-shards.md); [herdr-backend.md](herdr-backend.md#destructive-lab-safety) owns the real-Herdr lane's isolation boundary, and [runtime-backends.md](verification/runtime-backends.md#herdr) owns active evidence.
 
+## Private-material markers (config/private-material-markers / config/private-material-allow)
+
+`bin/fm-private-material-check.sh` refuses private fleet material in this repo's tracked surface, and derives its markers at runtime from local gitignored sources - project clone directory names, registered project and secondmate ids, git remote owners, and the local account name - so the tracked check itself names nothing about the fleet that runs it.
+Two optional local, gitignored files tune that derivation, both one entry per line compared as a whole line, with blank lines and `#` comments ignored, so a multi-word identity such as a person's name stays a single entry.
+`config/private-material-markers` adds what nothing can derive from local state, such as a device serial, a customer, or a person; a declared marker also bypasses the minimum-length and generic-stopword filters, because declaring a token is the strongest available statement that it is private.
+`config/private-material-allow` suppresses an identity that is legitimately public and must stay in the tracked surface, most often the upstream owner this repo was forked from.
+A remote owner you have not listed there stays a marker and fails the run rather than being guessed public for you, with one standing exception the allowlist is not needed for: under `--history`, this repo's own remote owners and the local account name in a commit's author or committer field print a `NOTICE` instead of failing, because a pull request carries that identity by construction.
+A name listed in both files stays a marker and is reported as a coverage gap.
+Both are read from the home selected by `--home`, then `FM_HOME`, then the repo root, not from `FM_CONFIG_OVERRIDE`, and neither is inherited by secondmate homes.
+Copy [`examples/private-material-allow`](examples/private-material-allow) into a local `config/private-material-allow` for a starting point; that file also documents the line format both files share.
+The script's header owns the full marker sources, matching rules, coverage-gap reporting, exit-code contract, and stated limits, and [CONTRIBUTING.md](../CONTRIBUTING.md) owns when to run it - including `--history` before any push.
+
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 
 Domain-local preferences for one captain's fleet live locally in each home's `data/captain.md`; it is gitignored and printed in the session-start context digest after `data/projects.md` and optional `data/secondmates.md`.
@@ -161,7 +174,7 @@ Secondmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` pro
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
 After creating a secondmate, move existing main-backlog queued items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it is idempotent and refuses In flight, Done, or non-secondmate homes.
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
-Set `FM_SECONDMATE_LABEL` to record an optional trailing `label:` registry field pinning the secondmate's session display name (for example `SM CNC`); `bin/fm-spawn.sh --secondmate` re-resolves it on every relaunch and falls back to the derived `SM <Title-cased id suffix>` form when no explicit label exists, with exact resolution order and the per-harness name-flag contract owned by that script's header.
+Set `FM_SECONDMATE_LABEL` to record an optional trailing `label:` registry field pinning the secondmate's session display name (for example `SM API`); `bin/fm-spawn.sh --secondmate` re-resolves it on every relaunch and falls back to the derived `SM <Title-cased id suffix>` form when no explicit label exists, with exact resolution order and the per-harness name-flag contract owned by that script's header.
 The main firstmate session is launched by the captain, not by `fm-spawn`, so its `FM Main` display name comes from launching through `bin/fm-main.sh` (or an alias to it); set `FM_MAIN_SESSION_NAME` to override that label, and that script's header owns the mechanics.
 The seeded home's `data/charter.md` owns the standard secondmate lifecycle and escalation contract; the route file points to it through the existing `home:` field instead of adding another pointer.
 Each seed writes an `.fm-secondmate-home` identity marker at the home root.

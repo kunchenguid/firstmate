@@ -88,7 +88,7 @@
 #   captain's phone app can tell persistent sessions apart. Resolution order:
 #   the registry line's optional "label: <display name>" field in
 #   data/secondmates.md, then a prior label= in state/<id>.meta, then the
-#   derived fallback "SM <Title-cased id suffix>" (sm-portal -> "SM Portal").
+#   derived fallback "SM <Title-cased id suffix>" (sm-web -> "SM Web").
 #   The resolved label is recorded as label= in meta on every spawn and passed
 #   only to harnesses with a verified session-name flag (claude: -n/--name);
 #   other harnesses keep the label in meta and emit no flag, the same omission
@@ -982,8 +982,8 @@ effort_flag_for_harness() {
 
 # Derived session-label fallback for a secondmate with no explicit label:
 # strip a leading "sm-", title-case each hyphen-separated word, prefix "SM ".
-# sm-portal -> "SM Portal"; an acronym or house name (sm-cnc -> "SM CNC",
-# sm-fw -> "SM Firmware") needs an explicit registry "label:" field instead.
+# sm-web -> "SM Web"; an acronym or house name (sm-api -> "SM API",
+# sm-svc -> "SM Service") needs an explicit registry "label:" field instead.
 secondmate_derived_label() {
   local id=$1 suffix word out first
   suffix=${id#sm-}

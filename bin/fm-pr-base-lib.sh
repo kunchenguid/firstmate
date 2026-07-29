@@ -93,8 +93,8 @@ fm_pr_base_url_identity() {
 }
 
 # Forge identities are compared case-insensitively: GitHub and GitLab both treat
-# owner and repository names that way, so "LuckyB-UF/firstmate" and
-# "luckyb-uf/firstmate" name one repository and must never read as a mismatch.
+# owner and repository names that way, so "Acme-Fleet/widget" and
+# "acme-fleet/widget" name one repository and must never read as a mismatch.
 fm_pr_base_identity_equal() {
   local a b
   local LC_ALL=C

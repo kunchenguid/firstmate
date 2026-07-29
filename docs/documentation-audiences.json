@@ -252,6 +252,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/private-material-allow",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/fm-test-isolation-proof.md",
       "audience": "maintainer-verification"
     },

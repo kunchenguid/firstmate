@@ -28,8 +28,8 @@
 #       and scope are derived from the filled charter brief.
 #       Set FM_SECONDMATE_LABEL='<display name>' to record an explicit session
 #       display name as a trailing "label:" registry field (for example
-#       "SM CNC"); fm-spawn passes it on every relaunch. Without it, fm-spawn
-#       derives "SM <Title-cased id suffix>" (sm-portal -> "SM Portal"), so set
+#       "SM API"); fm-spawn passes it on every relaunch. Without it, fm-spawn
+#       derives "SM <Title-cased id suffix>" (sm-web -> "SM Web"), so set
 #       the label whenever the derived form is wrong (acronyms, house names).
 #       The label must be a single line without ";", "(", or ")".
 #       Reseeding without FM_SECONDMATE_LABEL preserves an already-registered

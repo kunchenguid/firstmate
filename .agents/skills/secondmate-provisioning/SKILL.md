@@ -28,7 +28,7 @@ The `home:` path points to the seeded home containing `data/charter.md`; no extr
 The home-seeded `data/charter.md` is the sole owner of boilerplate idle-by-default behavior, the normal delegation lifecycle, and standard escalation contracts, so point to that charter rather than restating those contracts in the registry entry.
 The `scope:` field is used during intake.
 The `projects:` field is a non-exclusive clone list, not ownership.
-An optional trailing `; label: <display name>` field (after `added <date>`) pins the secondmate's session display name, for example `SM CNC`; `fm-spawn` re-reads it on every relaunch and derives `SM <Title-cased id suffix>` when it is absent, so set an explicit label whenever the derived form is wrong (acronyms, house names).
+An optional trailing `; label: <display name>` field (after `added <date>`) pins the secondmate's session display name, for example `SM API`; `fm-spawn` re-reads it on every relaunch and derives `SM <Title-cased id suffix>` when it is absent, so set an explicit label whenever the derived form is wrong (acronyms, house names).
 
 ## Charter and seed
 
