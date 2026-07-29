@@ -52,7 +52,7 @@ case "$FM_HOME" in
   /*) ;;
   *)
     FM_AFK_LAUNCH_HOME_INPUT=$FM_HOME
-    FM_HOME=$(CDPATH= cd -- "$FM_AFK_LAUNCH_HOME_INPUT" 2>/dev/null && pwd -P) || {
+    FM_HOME=$(CDPATH='' cd -- "$FM_AFK_LAUNCH_HOME_INPUT" 2>/dev/null && pwd -P) || {
       echo "error: FM_HOME directory cannot be resolved: $FM_AFK_LAUNCH_HOME_INPUT" >&2
       exit 1
     }
@@ -63,7 +63,7 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
     /*) ;;
     *)
       FM_AFK_LAUNCH_STATE_INPUT=$FM_STATE_OVERRIDE
-      FM_STATE_OVERRIDE=$(CDPATH= cd -- "$FM_AFK_LAUNCH_STATE_INPUT" 2>/dev/null && pwd -P) || {
+      FM_STATE_OVERRIDE=$(CDPATH='' cd -- "$FM_AFK_LAUNCH_STATE_INPUT" 2>/dev/null && pwd -P) || {
         echo "error: FM_STATE_OVERRIDE directory cannot be resolved: $FM_AFK_LAUNCH_STATE_INPUT" >&2
         exit 1
       }

@@ -130,7 +130,7 @@ resolve_directory_input() {
   case "$path" in
     /*) printf '%s\n' "$path"; return 0 ;;
   esac
-  resolved=$(CDPATH= cd -- "$path" 2>/dev/null && pwd -P) || {
+  resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || {
     echo "error: $name directory cannot be resolved: $path" >&2
     return 1
   }
