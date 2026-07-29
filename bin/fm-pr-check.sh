@@ -15,6 +15,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-pr-base-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-pr-base-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -37,6 +39,35 @@ META="$STATE/$ID.meta"
 if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
+fi
+
+WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+
+# Wrong-base backstop. bin/fm-pr-base.sh and bin/fm-worktree-base.sh converge
+# the configuration that decides where a pull request lands and what it is cut
+# from; this refuses the pull request when it landed wrong anyway, before the
+# task records it or arms any watch. Both axes are checked, because a pull
+# request on the right repository cut from the wrong default branch still
+# arrives as an unreviewable diff.
+#
+# The expectation comes from the TASK's own worktree, which carries the
+# project's real configuration - never from wherever the pull request was
+# opened, since a differently configured checkout opening it is the whole
+# failure. When no expectation can be established the check cannot refuse, and
+# says so rather than passing silently.
+if [ -n "$WT" ] && [ -d "$WT" ] && fm_pr_base_resolve "$WT"; then
+  if ! fm_pr_base_identity_equal "$HOST" "$PROJECT_PATH" "$FM_PR_BASE_HOST" "$FM_PR_BASE_PATH"; then
+    echo "error: $URL is on $HOST/$PROJECT_PATH, but this task's project opens pull requests against $FM_PR_BASE_HOST/$FM_PR_BASE_PATH; close it and re-open it there" >&2
+    exit 1
+  fi
+  BASE_BRANCH=$(fm_pr_base_default_branch "$WT" "$FM_PR_BASE_REMOTE" 2>/dev/null || true)
+  if [ -n "$FM_PR_BASE_REMOTE" ] && [ -n "$BASE_BRANCH" ] \
+    && fm_pr_base_foreign_commits "$WT" "$FM_PR_BASE_REMOTE" "$BASE_BRANCH" HEAD; then
+    echo "error: $URL carries $FM_PR_BASE_FOREIGN_COUNT commit(s) that are not this task's work: the branch was cut from $FM_PR_BASE_FOREIGN_IDENTITY's default branch instead of $FM_PR_BASE_HOST/$FM_PR_BASE_PATH's; rebase it onto $FM_PR_BASE_REMOTE/$BASE_BRANCH and re-open it" >&2
+    exit 1
+  fi
+elif [ -n "$WT" ]; then
+  echo "note: cannot confirm $URL is on the repository this task ships to; its local copy is gone or has no base repository configured" >&2
 fi
 
 # A prior exact merged result may have queued its durable wake immediately
@@ -69,7 +100,6 @@ fi
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
-WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \

@@ -1374,6 +1374,16 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
+# The worktree is isolated, but not necessarily on the branch this project
+# actually ships to: a worktree pool starts every worktree on origin's default
+# branch, which is the wrong repository's on a fleet that ships to its own fork.
+# Align it here, while it is provably empty and before the crewmate cuts its
+# branch - unlanded work is never touched, and a worktree that cannot be aligned
+# stops the spawn rather than producing an unreviewable pull request later.
+if [ "$KIND" != secondmate ] && [ -n "$WT" ]; then
+  "$SCRIPT_DIR/fm-worktree-base.sh" "$WT" "$PROJ_ABS" || exit 1
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside

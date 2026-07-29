@@ -84,6 +84,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
+| `fm-pr-base-lib.sh`      | Resolve the repository and default branch a checkout ships to, and spot branches cut from another one |
+| `fm-pr-base.sh`          | Keep the validation pipeline's own checkout pointed at the repository this home ships to |
+| `fm-worktree-base.sh`    | Put a fresh task worktree on the default branch its project ships to, before a branch is cut |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |

@@ -11,6 +11,7 @@
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
+#                 "PR_BASE: <problem> (<remediation>)",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
@@ -67,9 +68,14 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
+#          A "PR_BASE: <problem> (<remediation>)" line means this home's
+#          validation pipeline would open pull requests on the wrong repository;
+#          bin/fm-pr-base.sh owns that check and its silent convergence.
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          x_mode_setup, fleet_sync) while still printing every read-only detect line
+#          x_mode_setup, fleet_sync, pull-request base convergence - which
+#          downgrades to a read-only PR_BASE check) while still printing every
+#          read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
@@ -872,6 +878,14 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_liveness_sweep
   secondmate_sync
   x_mode_setup
+  # Keep the validation pipeline pointed at the repository this home ships to.
+  # It builds its own checkout and never sees this one's base-repository
+  # configuration, so the convergence is re-applied every locked session rather
+  # than assumed to have held. Ordered before the fleet refresh, which is the
+  # last thing this sweep launches.
+  "$SCRIPT_DIR/fm-pr-base.sh" repair "$FM_ROOT" || true
   fleet_sync
+else
+  "$SCRIPT_DIR/fm-pr-base.sh" check "$FM_ROOT" || true
 fi
 exit 0

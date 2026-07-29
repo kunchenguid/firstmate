@@ -126,6 +126,20 @@ Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 If another live session holds the fleet lock, both surfaces keep the alarm but switch to read-only wording with no repair command.
 Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
 
+## Where a pull request lands
+
+A fleet may ship to its own fork rather than to the repository it cloned.
+Firstmate models that as two remotes and keeps them separate on purpose: `origin` is the shared upstream and is ingest-only, a second remote is the fork, and `fm-update.sh` advances every home from the fork so the fleet's own adaptations are never stripped (see "Self-updates stay safe").
+`gh repo set-default` records which of the two is the pull-request base.
+
+Two tools that decide where work lands never see that record, because neither runs in this checkout.
+The worktree pool resets each worktree to `refs/remotes/origin/HEAD`, and the no-mistakes pipeline builds a worktree of a bare mirror whose only remote is whatever `origin` was when the gate was initialized.
+On a fork-shipping fleet both resolve the upstream, so pull requests open there and branches start on the upstream's default branch - which also makes every pull request carry the commits separating the two repositories.
+
+The boundary is therefore: firstmate converges those tools onto the configured base repository, and never renames or repoints the checkout's own remotes, because the `origin`/fork split is what the update path is built on.
+`bin/fm-pr-base.sh` converges the pipeline's mirror at each locked session start and reports what it cannot; `bin/fm-spawn.sh` calls `bin/fm-worktree-base.sh` to put a fresh worktree on the right default branch before a branch is cut from it, refusing rather than touching a worktree that holds work; and `bin/fm-pr-check.sh` refuses a pull request that reached the wrong repository or was cut from the wrong default branch anyway.
+Each script's header owns its mechanics, and the expected repository is always derived from configuration rather than named in code.
+
 ## No-mistakes gate authority boundary
 
 Firstmate's own no-mistakes gate runs agents inside a checkout that also contains the fleet-captain identity in `AGENTS.md`, so gate execution needs an authority boundary separate from ordinary crewmate worktree isolation.
