@@ -1863,8 +1863,8 @@ EOF
 
 # The /bearings skill is the one owner of the four-section chat-response contract.
 # Assert it states exactly the four fixed sections in order, each with its explicit
-# empty-state sentence, documents the At Anchor exclusion, and mandates a chat that is
-# materially shorter than and links to the report file.
+# empty-state sentence, documents the At Anchor exclusion, and keeps file-mode links
+# inside the four-section digest.
 test_chat_contract_four_sections() {
   local skill body headings report_headings expected
   skill="$ROOT/.agents/skills/bearings/SKILL.md"
@@ -1885,8 +1885,8 @@ test_chat_contract_four_sections() {
   assert_contains "$(cat "$skill")" 'Never read an earlier `data/status-report-*.md`' "prior reports must not influence current output"
   assert_contains "$(cat "$skill")" "bounded current recent-completions baseline" "Recently Landed must be a current baseline"
   assert_contains "$body" "no At Anchor section" "the At Anchor exclusion must be documented"
-  assert_contains "$body" "materially shorter" "the chat must be materially shorter than the report file"
-  assert_contains "$body" "links to" "the chat must link to the report file"
+  assert_contains "$body" "materially shorter" "the file-mode chat must be materially shorter than the report file"
+  assert_contains "$body" "report path or link" "file mode must link the report from inside the digest"
   pass "the /bearings skill states the four-section chat contract in order, with empty-states and the At Anchor exclusion"
 }
 
