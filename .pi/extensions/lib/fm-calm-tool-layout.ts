@@ -13,13 +13,20 @@
 // call, result, image, and shell content hidden while still surfacing an errored row's
 // text as plain actionable lines, measured in terminal columns because pi-tui treats an
 // over-wide rendered line as a fatal render error.
-import type { ToolExecutionComponent as PiToolExecutionComponent } from "@earendil-works/pi-coding-agent";
+import type {
+  AssistantMessageComponent as PiAssistantMessageComponent,
+  ToolExecutionComponent as PiToolExecutionComponent,
+} from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import { calmPresentationHides } from "./fm-calm-visibility.ts";
 
 type CalmToolLayoutPatch = {
   hidesToolRows: () => boolean;
+};
+
+type CalmTurnBoundaryPatch = {
+  beginTurn: () => void;
 };
 
 type CalmToolResult = {
@@ -38,13 +45,16 @@ type CalmColumnHelpers = {
 const CALM_TOOL_LAYOUT_PATCH = Symbol.for(
   "firstmate:calm-tool-layout:pi-0.82.1",
 );
+const CALM_TOOL_ERROR_TURN_PATCH = Symbol.for(
+  "firstmate:calm-tool-error-turn:pi-0.82.1",
+);
 
 const CALM_ERROR_MAX_LINES = 6;
 const ANSI_SEQUENCE = /\u001B\[[0-9;?]*[ -/]*[@-~]/g;
 const TAB_COLUMNS = "   ";
 
 const calmErrorTexts = new WeakMap<object, string>();
-let calmErrorBatch: Map<string, object> | undefined;
+const calmErrorTurn = { owners: new Map<string, object>(), scoped: false };
 
 function calmResultText(result: CalmToolResult): string {
   return (result.content ?? [])
@@ -55,18 +65,15 @@ function calmResultText(result: CalmToolResult): string {
 }
 
 // Pi attaches one turn's abort, provider-failure, or tool-failure text to every pending
-// tool row in a single synchronous pass, so the first row to record a given text owns it
-// and identical siblings from that pass stay silent instead of repeating it.
+// tool row of that turn, so the first row to record a given text within the turn owns it
+// and identical siblings stay silent instead of repeating it. Separate turns own their own
+// text, including when a whole session history replays in one synchronous pass. Without the
+// turn-boundary adapter the owner is always the recording row, so every error stays visible.
 function calmErrorTextOwner(text: string, component: object): object {
-  if (!calmErrorBatch) {
-    calmErrorBatch = new Map();
-    queueMicrotask(() => {
-      calmErrorBatch = undefined;
-    });
-  }
-  const owner = calmErrorBatch.get(text);
+  if (!calmErrorTurn.scoped) return component;
+  const owner = calmErrorTurn.owners.get(text);
   if (owner) return owner;
-  calmErrorBatch.set(text, component);
+  calmErrorTurn.owners.set(text, component);
   return component;
 }
 
@@ -127,6 +134,45 @@ function requireColumnHelpers(): CalmColumnHelpers {
     );
   }
   return { truncateToWidth, visibleWidth, wrapTextWithAnsi };
+}
+
+// Pi builds exactly one AssistantMessageComponent per assistant message and its
+// constructor calls updateContent, on the live streaming path and once per replayed
+// history message, so that call is the turn boundary for tool-row error ownership.
+export function installCalmToolErrorTurnBoundary(): void {
+  const registry = globalThis as typeof globalThis & {
+    [key: symbol]: CalmTurnBoundaryPatch | undefined;
+  };
+  const beginTurn = (): void => {
+    calmErrorTurn.owners = new Map();
+  };
+  const installed = registry[CALM_TOOL_ERROR_TURN_PATCH];
+  if (installed) {
+    installed.beginTurn = beginTurn;
+    calmErrorTurn.scoped = true;
+    return;
+  }
+
+  const patch: CalmTurnBoundaryPatch = { beginTurn };
+  const AssistantMessageComponent = PiCodingAgent.AssistantMessageComponent;
+  if (typeof AssistantMessageComponent !== "function") {
+    throw new Error("Firstmate Calm requires Pi AssistantMessageComponent");
+  }
+  const originalUpdateContent = AssistantMessageComponent.prototype.updateContent;
+  if (typeof originalUpdateContent !== "function") {
+    throw new Error("Firstmate Calm requires Pi AssistantMessageComponent.updateContent");
+  }
+
+  AssistantMessageComponent.prototype.updateContent = function (
+    this: PiAssistantMessageComponent,
+    message: Parameters<PiAssistantMessageComponent["updateContent"]>[0],
+  ): void {
+    patch.beginTurn();
+    originalUpdateContent.call(this, message);
+  };
+
+  registry[CALM_TOOL_ERROR_TURN_PATCH] = patch;
+  calmErrorTurn.scoped = true;
 }
 
 export function installCalmToolLayout(): void {

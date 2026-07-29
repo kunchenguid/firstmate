@@ -18,11 +18,13 @@ Presentation must remain inactive in RPC, JSON, print, and untrusted contexts.
 Only `genuine-user-prompt` and `genuine-agent-response` are policy-visible while Calm is active.
 `.pi/extensions/lib/fm-calm-assistant-layout.ts` removes thinking blocks from the shallow presentation copy before Pi calculates assistant layout.
 `.pi/extensions/lib/fm-calm-tool-layout.ts` returns zero rows from Pi's exported `ToolExecutionComponent` while Calm is active, which removes calls, results, framing, and image children together, and keeps only the width-clamped error text of a row whose result is an error.
+`.pi/extensions/lib/fm-calm-tool-layout.ts` also owns the tool-error turn boundary that scopes identical-error ownership to one assistant turn.
 `.pi/extensions/lib/fm-calm-operational-user-layout.ts` renders canonically classified text-only Firstmate operational user rows at zero height.
 `bin/fm-operational-input.sh` remains the single owner of operational-input construction and parsing.
 The seven built-in definitions and `fm_watch_arm_pi` retain per-renderer zero-height behavior as an independent fallback if the complete tool-row adapter is unavailable.
 
-All three class adapters are idempotent and probe their exact Pi export and prototype method before patching.
+All four class adapters are idempotent and probe their exact Pi export and prototype method before patching.
+The tool-error turn boundary uses `AssistantMessageComponent.updateContent`, which Pi calls exactly once per assistant message on both the streaming and replay paths, and while it is unavailable every actionable error stays visible instead of being de-duplicated.
 A missing seam produces one adapter-specific diagnostic and leaves the remaining Calm behavior and unrelated Pi extensions operational.
 The adapters consult presentation state at render time, so the patches are inert outside a trusted interactive TUI and while Calm is off.
 No input event is intercepted, no message role is rewritten, and no provider context is filtered.
@@ -34,7 +36,7 @@ No input event is intercepted, no message role is rewritten, and no provider con
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including operational-marker near misses. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
 | `assistant-thinking` | Thinking content in `AssistantMessageComponent` | Zero height whether Pi's thinking display is collapsed or expanded. |
-| `assistant-tool-call`, `tool-result`, `tool-image` | `ToolExecutionComponent` | Complete row is zero height for built-in and custom tools while the result is routine. An errored result keeps only its plain error text, capped at six lines with an explicit hidden-line count, and one turn's identical text attached to several pending rows is surfaced once. |
+| `assistant-tool-call`, `tool-result`, `tool-image` | `ToolExecutionComponent` | Complete row is zero height for built-in and custom tools while the result is routine. An errored result keeps only its plain error text, capped at six lines with an explicit hidden-line count, and identical text attached to several rows of the same assistant turn is surfaced once, live and during a full synchronous history replay. |
 | `working-status` | Pi working status indicator | Hidden through `ExtensionUIContext.setWorkingVisible(false)`. |
 | `synthetic-user` | Firstmate session-start, watcher, turn-end, away-supervisor, from-firstmate, and launch-brief input | Exact user-role content and ordering are retained, while the TUI row is zero height. |
 | Legacy Calm operational entries | Registered custom-entry renderer | Retained in session data and rendered at zero height. |
@@ -47,7 +49,7 @@ Serialized session entries are never modified by a presentation toggle.
 
 ## Compatibility review
 
-Pi 0.81.1 introduced the evidence baseline, Pi 0.82.0 preserved the original assistant and operational-user seams, and Pi 0.82.1 preserves those seams plus the exported `ToolExecutionComponent.render` and `ToolExecutionComponent.updateResult` seams used for complete tool-row suppression and its actionable-error surface, and pi-tui's `visibleWidth`, `truncateToWidth`, and `wrapTextWithAnsi` column helpers used to keep every emitted error line inside the terminal width Pi enforces.
+Pi 0.81.1 introduced the evidence baseline, Pi 0.82.0 preserved the original assistant and operational-user seams, and Pi 0.82.1 preserves those seams plus the exported `ToolExecutionComponent.render`, `ToolExecutionComponent.updateResult`, and `AssistantMessageComponent.updateContent` seams used for complete tool-row suppression and its actionable-error surface, and pi-tui's `visibleWidth`, `truncateToWidth`, and `wrapTextWithAnsi` column helpers used to keep every emitted error line inside the terminal width Pi enforces.
 Version strings are evidence rather than compatibility gates.
 A future version with a missing method degrades only that adapter.
 

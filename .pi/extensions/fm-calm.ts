@@ -37,7 +37,10 @@ import { Box, Container, getKeybindings, type Component } from "@earendil-works/
 import type { TSchema } from "typebox";
 import { installCalmAssistantLayout } from "./lib/fm-calm-assistant-layout.ts";
 import { installCalmOperationalUserLayout } from "./lib/fm-calm-operational-user-layout.ts";
-import { installCalmToolLayout } from "./lib/fm-calm-tool-layout.ts";
+import {
+  installCalmToolErrorTurnBoundary,
+  installCalmToolLayout,
+} from "./lib/fm-calm-tool-layout.ts";
 import {
   calmPresentationHides,
   calmPresentationIsActive,
@@ -97,6 +100,7 @@ function isTrustedInteractiveContext(
 export default function (pi: ExtensionAPI) {
   installCalmPresentationAdapter("collapsed-thinking", installCalmAssistantLayout);
   installCalmPresentationAdapter("tool-row", installCalmToolLayout);
+  installCalmPresentationAdapter("tool-error-turn", installCalmToolErrorTurnBoundary);
   installCalmPresentationAdapter("operational-user-row", installCalmOperationalUserLayout);
 
   let exportRendering = false;

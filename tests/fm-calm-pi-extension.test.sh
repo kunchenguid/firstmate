@@ -110,6 +110,10 @@ test_static_contract() {
   assert_contains "$tool_layout" 'return calmErrorLines(this, width, columns)' "Pi Calm tool layout does not remove complete tool rows"
   assert_contains "$tool_layout" 'errorResult?.isError && !isPartial ? calmResultText(errorResult) : ""' "Pi Calm tool layout does not restrict its visible tool text to actionable errors"
   assert_contains "$tool_layout" 'calmErrorTextOwner(errorText, this) === this' "Pi Calm tool layout repeats one turn's actionable error across sibling tool rows"
+  assert_contains "$tool_layout" 'if (!calmErrorTurn.scoped) return component' "Pi Calm tool layout deduplicates actionable errors without a Pi-supported turn boundary"
+  assert_contains "$tool_layout" 'AssistantMessageComponent.prototype.updateContent' "Pi Calm tool-error turn boundary does not use the one-per-assistant-message Pi seam"
+  assert_not_contains "$tool_layout" 'queueMicrotask' "Pi Calm tool layout still infers turn boundaries from the scheduler that spans transcript replay"
+  assert_contains "$text" 'installCalmPresentationAdapter("tool-error-turn", installCalmToolErrorTurnBoundary)' "Pi Calm extension does not install its degradable tool-error turn boundary"
   assert_contains "$tool_layout" 'ToolExecutionComponent.prototype.updateResult' "Pi Calm tool layout does not read errors through a declared Pi seam"
   assert_contains "$tool_layout" 'Firstmate Calm requires Pi ToolExecutionComponent.updateResult' "Pi Calm tool layout does not probe the seam carrying actionable tool errors"
   assert_contains "$tool_layout" 'Firstmate Calm requires Pi TUI visibleWidth, truncateToWidth, and wrapTextWithAnsi' "Pi Calm tool layout does not probe the Pi column helpers it measures with"
@@ -356,6 +360,14 @@ if (typeof AssistantMessageComponent.prototype.updateContent !== "undefined") {
     "the degraded adapter path patched updateContent anyway despite the missing API, which would claim false success",
   );
 }
+const sawTurnBoundarySkipReason = diagnostics.some(
+  (line) => line.includes("tool-error-turn") && /unavailable|skip/i.test(line),
+);
+if (!sawTurnBoundarySkipReason) {
+  throw new Error(
+    `missing a clear skip reason for the degraded tool-error-turn adapter; saw: ${JSON.stringify(diagnostics)}`,
+  );
+}
 const sawClearSkipReason = diagnostics.some(
   (line) => line.includes("collapsed-thinking") && /unavailable|skip/i.test(line),
 );
@@ -416,6 +428,7 @@ const tool = await import("./.pi/extensions/lib/fm-calm-tool-layout.ts");
 for (const [name, install, expected] of [
   ["collapsed-thinking", assistant.installCalmAssistantLayout, "AssistantMessageComponent"],
   ["tool-row", tool.installCalmToolLayout, "ToolExecutionComponent"],
+  ["tool-error-turn", tool.installCalmToolErrorTurnBoundary, "AssistantMessageComponent"],
   ["operational-user-row", operational.installCalmOperationalUserLayout, "InteractiveMode"],
 ]) {
   let reason;
@@ -842,14 +855,35 @@ const errorCases = [
     visible: ["Command failed with exit code 1", "no such file: missing.txt"],
   },
 ];
-// Pi surfaces identical error text from a single turn once, so unrelated fixtures below
-// are applied in separate turns exactly as separate Pi turns arrive.
-const nextErrorTurn = () => new Promise((resolve) => setTimeout(resolve, 0));
+// Identical error text from a single turn is surfaced once, so every group below opens a
+// new assistant turn exactly as Pi does. Nothing here awaits: this whole block is one
+// synchronous pass, matching how Pi replays a full session history.
+const turnBoundaryMessage = {
+  role: "assistant",
+  api: "calm-render-test",
+  provider: "calm-render-test",
+  model: "deterministic",
+  usage: {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  },
+  stopReason: "stop",
+  timestamp: 1,
+  content: [{ type: "text", text: "CALM_TURN_BOUNDARY" }],
+};
+const beginErrorTurn = () => new AssistantMessageComponent(turnBoundaryMessage, true);
+const newErrorRow = (id, definition = bashDefinition) =>
+  new ToolExecutionComponent("bash", `error-${id}`, routineArgs, { showImages: false }, definition, renderUi, process.cwd());
 const errorFixtures = [];
 for (const errorCase of errorCases) {
-  await nextErrorTurn();
-  const baseline = new ToolExecutionComponent("bash", `error-baseline-${errorCase.key}`, routineArgs, { showImages: false }, undefined, renderUi, process.cwd());
-  const actual = new ToolExecutionComponent("bash", `error-actual-${errorCase.key}`, routineArgs, { showImages: false }, bashDefinition, renderUi, process.cwd());
+  beginErrorTurn();
+  const actual = newErrorRow(`actual-${errorCase.key}`);
+  beginErrorTurn();
+  const baseline = newErrorRow(`baseline-${errorCase.key}`, undefined);
   for (const row of [actual, baseline]) {
     row.markExecutionStarted();
     row.setArgsComplete();
@@ -860,25 +894,34 @@ for (const errorCase of errorCases) {
   }
   errorFixtures.push({ ...errorCase, baseline, actual });
 }
-await nextErrorTurn();
-const pendingAbortRow = new ToolExecutionComponent("bash", "error-actual-pending", routineArgs, { showImages: false }, bashDefinition, renderUi, process.cwd());
+beginErrorTurn();
+const pendingAbortRow = newErrorRow("actual-pending");
 pendingAbortRow.markExecutionStarted();
 pendingAbortRow.updateResult({ content: [{ type: "text", text: "Operation aborted" }], isError: true });
-await nextErrorTurn();
-const parallelAbortRows = ["parallel-a", "parallel-b", "parallel-c"].map((id) =>
-  new ToolExecutionComponent("bash", `error-actual-${id}`, routineArgs, { showImages: false }, bashDefinition, renderUi, process.cwd()));
+beginErrorTurn();
+const parallelAbortRows = ["parallel-a", "parallel-b", "parallel-c"].map((id) => newErrorRow(`actual-${id}`));
 for (const row of parallelAbortRows) row.markExecutionStarted();
 for (const row of parallelAbortRows) {
   row.updateResult({ content: [{ type: "text", text: "Operation aborted" }], isError: true });
 }
-await nextErrorTurn();
-const parallelDistinctRows = ["distinct-a", "distinct-b"].map((id) =>
-  new ToolExecutionComponent("bash", `error-actual-${id}`, routineArgs, { showImages: false }, bashDefinition, renderUi, process.cwd()));
+beginErrorTurn();
+const parallelDistinctRows = ["distinct-a", "distinct-b"].map((id) => newErrorRow(`actual-${id}`));
 for (const row of parallelDistinctRows) row.markExecutionStarted();
 parallelDistinctRows.forEach((row, index) => {
   row.updateResult({ content: [{ type: "text", text: `Error: CALM_DISTINCT_FAILURE_${index}` }], isError: true });
 });
-await nextErrorTurn();
+// Four separately interrupted turns replayed back to back, exactly as renderSessionItems
+// rebuilds a resumed or reloaded transcript with no scheduler gap between turns.
+const replayedAbortTurns = [0, 1, 2, 3].map((turn) => {
+  beginErrorTurn();
+  const rows = ["a", "b"].map((slot) => newErrorRow(`replay-${turn}-${slot}`));
+  for (const row of rows) row.markExecutionStarted();
+  for (const row of rows) {
+    row.updateResult({ content: [{ type: "text", text: "Operation aborted" }], isError: true });
+  }
+  return rows;
+});
+beginErrorTurn();
 const noisyErrorRow = new ToolExecutionComponent("bash", "error-actual-noisy", routineArgs, { showImages: false }, bashDefinition, renderUi, process.cwd());
 noisyErrorRow.markExecutionStarted();
 noisyErrorRow.setArgsComplete();
@@ -1205,6 +1248,18 @@ if (!parallelAbortRendered.flat().join("\n").includes("Operation aborted")) {
 for (const [index, row] of parallelDistinctRows.entries()) {
   if (!row.render(100).join("\n").includes(`Error: CALM_DISTINCT_FAILURE_${index}`)) {
     throw new Error(`Calm hid distinct actionable error ${index} from a parallel tool row`);
+  }
+}
+for (const [turn, rows] of replayedAbortTurns.entries()) {
+  const rendered = rows.map((row) => row.render(100));
+  const surfaced = rendered.filter((lines) => lines.join("\n").includes("Operation aborted"));
+  if (surfaced.length !== 1) {
+    throw new Error(
+      `replayed interrupted turn ${turn} surfaced its abort text ${surfaced.length} times instead of once`,
+    );
+  }
+  if (rendered.filter((lines) => lines.length !== 0).length !== 1) {
+    throw new Error(`replayed interrupted turn ${turn} kept a residual duplicate abort row`);
   }
 }
 if (partialErrorRow.render(100).length !== 0) {
