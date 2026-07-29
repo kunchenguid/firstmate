@@ -59,7 +59,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cmd)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
@@ -389,7 +389,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cmd)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -455,6 +455,15 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    # cmd (local adapter): --yolo auto-approves every tool execution, which an
+    # unattended crewmate needs; --skip-onboarding suppresses the first-run
+    # wizard; CMD_ZDR=1 opts the session out of data retention. The model is
+    # pinned here rather than driven by __MODELFLAG__, so cmd is deliberately
+    # absent from model_flag_for_harness and a requested --model is recorded in
+    # meta for traceability without being forwarded.
+    # TODO: cmd has no verified turn-end signal, so its crewmates are noticed
+    # via stale-pane detection rather than a turn-end hook.
+    cmd) printf '%s' 'CMD_ZDR=1 cmd --yolo --skip-onboarding -m hy3 "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
