@@ -107,7 +107,7 @@ FM_PI_HARNESS=pi-signed pi-signed
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
-Pi's `/calm` toggle hides supported transcript chrome, including canonically classified Firstmate operational user rows, while retaining native working activity and all model context and session data.
+In a trusted interactive Pi TUI, `/calm` hides supported transcript chrome, including tool rows, Pi's working activity, and canonically classified Firstmate operational user rows, while retaining all model context and session data.
 The hidden operational inputs remain ordinary user-role messages with unchanged delivery, ordering, authority, persistence, and exports.
 The preference persists for the effective Firstmate home, and toggling it off restores ordinary rendering.
 [Calm's current behavior and supported limits](docs/calm.md) are separate from its [version-scoped maintainer evidence](docs/calm-mode-feasibility.md).
