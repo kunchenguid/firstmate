@@ -197,6 +197,8 @@ Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Grok uses backgro
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
 When pi-signed is selected, Firstmate launches the executable named `pi-signed` from `PATH` with `FM_PI_HARNESS=pi-signed` and refuses the launch if it is unavailable rather than falling back to pi.
 Plain Pi launches set `FM_PI_HARNESS=pi`, so a signed primary's environment cannot relabel a plain Pi worker.
+When firstmate itself runs under a non-default `CLAUDE_CONFIG_DIR`, claude crewmate launches carry that same value, because the long-lived runtime backend that creates the pane does not inherit firstmate's own environment.
+An unset `CLAUDE_CONFIG_DIR` is the single-store default and adds no prefix, and other harnesses are unaffected.
 When it is absent or contains `default`, crewmates mirror the firstmate's own harness.
 `config/secondmate-harness` is a separate local, gitignored file containing the adapter the primary uses to launch secondmate agents, optionally followed by model and effort tokens on the same line.
 The first non-empty, non-comment line is parsed as `<harness> [<model>] [<effort>]`.

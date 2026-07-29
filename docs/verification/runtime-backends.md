@@ -117,6 +117,22 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi share that backend cleanup boundary; their harness-specific hook files and token cleanup run only after it, so no harness needs a separate endpoint parser.
 
+The tmux window-id kill path used by `fm-spawn.sh`'s settle abort was validated on 2026-07-29 with tmux 3.6 through the same script.
+
+```sh
+tests/fm-teardown-endpoint-safety.test.sh
+```
+
+Observed bounded output:
+
+```text
+ok - tmux backend: a window id target is killed verbatim, without session qualification or '=' markers
+ok - tmux backend: a malformed window id refuses without invoking tmux
+```
+
+A `@N` target reached tmux as `kill-window -t @7` with no session qualification and no `=` markers, while `@7:x`, `@`, `@7a`, `@7@8`, and `@1@` each returned nonzero with tmux never invoked.
+The `<session>:<window>` form keeps its `=` exactness markers, so neither shape can close a lookalike window.
+
 ## Herdr
 
 The compatibility floor is protocol 14.

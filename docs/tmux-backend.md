@@ -76,6 +76,13 @@ After the normal retry budget, only structurally proven pending text in a provab
 Ambiguous pending text never receives the busy-queue conversion.
 `tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
 
+Endpoint cleanup closes one explicitly named window and never guesses a target.
+A `<session>:<window>` target is addressed with tmux's `=` exactness markers on both halves, so a lookalike or prefix-matching window name can never be closed instead of the recorded one.
+A bare tmux window id (`@N`) is already unique server-wide, so it is passed through verbatim without session qualification or `=` markers, which would ask tmux for a window literally named `@N`.
+That is the form `fm-spawn.sh` uses to remove the window it just created when the settle poll aborts a launch, because the window may not yet carry its final `fm-<id>` name there, so a name lookup could miss it or resolve a different window entirely.
+An empty, omitted, or otherwise malformed target - including a bare `@`, a window id with trailing characters, or a name carrying extra colons - returns nonzero before tmux is invoked at all.
+[`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns the metadata-only endpoint identity validation that runs before any of this.
+
 ## Limits and regression entry points
 
 - tmux is the reference path and supports secondmate homes.
@@ -86,6 +93,7 @@ tests/fm-backend-tmux-smoke.test.sh
 tests/fm-composer-ghost.test.sh
 tests/fm-kimi-harness.test.sh
 tests/fm-tmux-submit-busy.test.sh
+tests/fm-teardown-endpoint-safety.test.sh
 tests/fm-bootstrap.test.sh
 ```
 

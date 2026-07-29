@@ -34,6 +34,15 @@
 # device. It refuses and preserves task state when that proof fails; otherwise
 # it removes the task's check, trust record, PR sidecar, publication record, and
 # quarantine entries with the rest of the volatile state.
+# The FIRST authorization check is metadata-only endpoint identity: teardown
+# validates state/<id>.meta's recorded backend target and its endpoint_task_id=
+# binding before fm-guard, any backend command, file removal, branch deletion,
+# worktree return, registry change, or process termination. Missing, empty,
+# duplicate, malformed, backend-inconsistent, and task-mismatched endpoint
+# records are preserved and refused (see fm_backend_validate_task_endpoint in
+# bin/fm-backend.sh; docs/configuration.md "Runtime backend"). A --force
+# secondmate retirement validates each child's endpoint the same way before
+# removing it.
 # Before acting on the recorded worktree= at all, teardown verifies (via
 # treehouse's own `status`) that the recorded interactive treehouse slot has not
 # been re-handed to a DIFFERENT task after an outage. Recognition is anchored on
