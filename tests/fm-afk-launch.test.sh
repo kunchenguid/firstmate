@@ -253,10 +253,11 @@ unit_signal_exits_with_lock_cleanup() {
     fm_test_ready=$3
     fm_test_sleeper_file=$4
     fm_afk_launch_start() {
-      sleep 30 &
-      printf "%s\n" "$!" > "$fm_test_sleeper_file"
+      local sleeper
+      sleep 30 & sleeper=$!
+      printf "%s\n" "$sleeper" > "$fm_test_sleeper_file"
       : > "$fm_test_ready"
-      wait "$!"
+      wait "$sleeper"
     }
     fm_afk_launch_main start
     : > "$2"

@@ -437,6 +437,17 @@ test_watch_restart_rejects_reused_pid() {
   pass "watch restart refuses to signal a reused pid"
 }
 
+# Reap the restart peer before failing. fail() is exit 1 and the suite's EXIT
+# trap only removes temp dirs, so an unreaped peer would outlive the run for the
+# remaining five minutes of its timer and linger through every later shard. The
+# peer ignores SIGTERM on purpose, hence -KILL.
+fail_reaping_peer() {
+  local peer=$1
+  kill -KILL "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  fail "$2"
+}
+
 test_watch_restart_attaches_to_healthy_peer() {
   local dir state fakebin out peer identity armpid status i
   dir=$(make_case restart-healthy-peer)
@@ -454,8 +465,9 @@ test_watch_restart_attaches_to_healthy_peer() {
     sleep 0.1
     i=$((i + 1))
   done
-  [ -e "$dir/peer-ready" ] || fail "peer never reported its SIGTERM handler installed"
-  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
+  [ -e "$dir/peer-ready" ] || fail_reaping_peer "$peer" "peer never reported its SIGTERM handler installed"
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") \
+    || fail_reaping_peer "$peer" "could not identify peer pid"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
@@ -470,8 +482,10 @@ test_watch_restart_attaches_to_healthy_peer() {
     sleep 0.1
     i=$((i + 1))
   done
-  grep -qF "watcher: attached pid=$peer" "$out" || fail "restart did not attach to the verified healthy peer: $(cat "$out")"
-  is_live_non_zombie "$armpid" || fail "restart arm exited instead of following the healthy peer"
+  grep -qF "watcher: attached pid=$peer" "$out" \
+    || fail_reaping_peer "$peer" "restart did not attach to the verified healthy peer: $(cat "$out")"
+  is_live_non_zombie "$armpid" \
+    || fail_reaping_peer "$peer" "restart arm exited instead of following the healthy peer"
   is_live_non_zombie "$peer" || fail "restart killed a TERM-resistant peer unexpectedly"
   kill -KILL "$peer" 2>/dev/null || true
   wait "$peer" 2>/dev/null || true
