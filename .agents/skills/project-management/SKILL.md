@@ -22,6 +22,12 @@ Use the registry format and parser contract owned by the header of `bin/fm-proje
 Keep each registry description useful for identifying the project, but keep delivery posture, captain-private state, and detailed project knowledge in their existing designated homes.
 Do not turn the registry into project documentation.
 
+Before adding, cloning, creating, or registering a project in the main home, inspect the authoritative `data/secondmates.md` routing table and judge every existing natural-language `scope:` against the proposed project or domain.
+If an existing second mate's `scope:` owns that domain, route the project operation or work there instead of creating or registering a duplicate main-home clone.
+Absence from the main `data/projects.md` registry is never evidence that no second mate owns the domain.
+The second-mate `projects:` list is non-exclusive provisioning data; natural-language `scope:` is the routing authority.
+If the owning second mate cannot accept the route, report that concrete blocker or obtain an explicit captain redirection rather than silently duplicating the project in the main home.
+
 Resolve the project name, destination, delivery mode, and autonomy posture before changing local or remote state.
 Keep a newly added clone and its registry entry consistent, and roll back only artifacts created by the incomplete operation when a later initialization step fails and that rollback is safe.
 Do not overwrite or repurpose an existing path.
