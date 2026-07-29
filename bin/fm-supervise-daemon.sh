@@ -96,7 +96,7 @@
 #                                   (default 300)
 #          FM_HOUSEKEEPING_TICK     seconds between housekeeping passes while
 #                                   the watcher is mid-cycle (default 15)
-#          FM_BUSY_REGEX            OR-ed busy signatures (mirrors fm-watch.sh)
+#          FM_BUSY_REGEX            optional global busy-signature override
 #          FM_COMPOSER_IDLE_RE      empty-composer regex applied after dim-ghost
 #                                   and structural border stripping (default:
 #                                   bare prompt glyphs plus busy footers)
@@ -198,9 +198,8 @@ WEDGE_ALARM_NOTIFIER_PID=
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, scan_captain_relevant_statuses) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
-# Composer-empty detection and the tmux busy-footer fallback live in
-# bin/fm-tmux-lib.sh (FM_TMUX_BUSY_REGEX_DEFAULT / fm_tmux_composer_state);
-# FM_BUSY_REGEX still overrides the fallback busy set here, as before.
+# Composer-empty detection and harness-scoped busy-footer matching live in
+# bin/fm-tmux-lib.sh; FM_BUSY_REGEX still overrides every fallback here.
 INJECT_FAIL_SLEEP_DEFAULT=30
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
@@ -549,24 +548,21 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 # (one source of truth with fm-send.sh). These thin wrappers keep the daemon's
 # call sites and the unit tests stable.
 #
-# pane_input_pending returns 0 (pending) when the cursor line holds real
-# unsubmitted text - a human's half-typed line (the return race) or a previous
-# injection whose Enter was swallowed. The detector drops dim/faint ghost text and
-# strips the harness's composer box borders, so a ghost-only or idle bordered
-# claude composer ("│ > … │") is correctly read as empty, not pending (incidents
-# afk-invx-i5 and composer-robust).
+# pane_input_pending returns 0 unless the composer is positively proven empty.
+# This includes real unsubmitted text, ambiguous structure, unreadable state,
+# and future verdicts. The detector drops dim/faint ghost text and strips the
+# harness's composer box borders, so an aligned ghost-only or idle bordered
+# claude composer ("│ > … │") is correctly proven empty.
 # pane_is_busy / pane_input_pending: BACKEND-AWARE now (previously tmux-only
 # direct calls). <backend> defaults to tmux when omitted, so every existing
 # caller/test that passes only <target> is unaffected. Dispatch goes through
 # bin/fm-backend.sh's generic per-backend primitives (fm_backend_busy_state,
 # fm_backend_capture, fm_backend_composer_state) rather than hand-rolling a
-# case statement here, mirroring the same fallback pattern
-# stale_window_is_busy already uses for per-task panes: try the backend's
-# native busy-state first, and fall back to the shared regex-over-capture
-# reader whenever it does not report "busy" (tmux has no native busy-state
-# primitive, so it always takes this fallback path - byte-identical to the
-# pre-existing fm_pane_is_busy, since fm_backend_capture's tmux arm runs the
-# exact same `tmux capture-pane -p -t <target> -S -40`).
+# case statement here, mirroring the fallback order stale_window_is_busy uses
+# for per-task panes: try the backend's native busy state first, then match
+# captured output. The supervisor pane has no recorded task harness and uses
+# the historical combined fallback; stale task panes select the recorded
+# harness's verified signature.
 pane_is_busy() {  # <target> [backend]
   local target=$1 backend=${2:-tmux} bs tail40
   bs=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
@@ -574,22 +570,16 @@ pane_is_busy() {  # <target> [backend]
     busy) return 0 ;;
   esac
   tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
+    | fm_busy_lines_match
 }
 
-# pane_input_pending: the standalone "is there real unsubmitted text" predicate,
-# dispatching through fm_backend_composer_state (byte-identical to a direct
-# fm_tmux_composer_state call for the default/omitted-backend case). inject_msg
-# no longer routes its composer-guard through this boolean: a safe injection
-# target must be affirmatively 'empty', and a boolean pending/not-pending check
-# cannot distinguish an empty agent composer from a bare dead-shell prompt or an
-# unreadable pane (both 'unknown'), so inject_msg reads the full tri-state
-# verdict directly. This predicate is retained as the shared pending check and
-# as the vehicle for the composer-classifier dispatch regression tests.
+# pane_input_pending dispatches through fm_backend_composer_state and treats
+# every verdict except exact empty as unsafe. inject_msg reads the full verdict
+# directly and applies the same positive-proof boundary.
 pane_input_pending() {  # <target> [backend]
   local target=$1 backend=${2:-tmux}
-  [ "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)" = pending ]
+  [ "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)" != empty ]
 }
 
 task_window_backend() {  # <window> <state>
@@ -599,17 +589,25 @@ task_window_backend() {  # <window> <state>
   fm_backend_of_meta "$meta"
 }
 
+task_window_harness() {  # <window> <state>
+  local win=$1 state=$2 task meta
+  task=$(window_to_task "$win" "$state")
+  meta="$state/$task.meta"
+  grep '^harness=' "$meta" | cut -d= -f2- || true
+}
+
 stale_window_is_busy() {  # <window> <state>
-  local win=$1 state=$2 backend label tail40 bs
+  local win=$1 state=$2 backend harness label tail40 bs
   backend=$(task_window_backend "$win" "$state")
+  harness=$(task_window_harness "$win" "$state")
   label="fm-$(window_to_task "$win" "$state")"
   tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
   bs=$(fm_backend_busy_state "$backend" "$win" 2>/dev/null)
   case "$bs" in
     busy) return 0 ;;
   esac
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
-    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
+  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
+    | fm_busy_lines_match "$harness"
 }
 
 escalate_add() {  # <state> <distilled-item>

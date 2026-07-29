@@ -143,7 +143,12 @@ ingest_upstream() {
   fi
   # Point the local remote-tracking ref at what we just published, so the
   # advances below resolve the new tip without a second network round trip.
-  git -C "$dir" update-ref "refs/remotes/$fk" "$commit"
+  # A failure here would leave the advances resolving the stale pre-ingest tip
+  # and report every home "already current", so it stops the run instead.
+  if ! out=$(git -C "$dir" update-ref "refs/remotes/$fk" "$commit" 2>&1); then
+    echo "upstream: failed: pushed $commit to fork but could not update $fk locally: $(first_line "$out")"
+    return 1
+  fi
   echo "upstream: merged $up into $fk ($before..$(git -C "$dir" rev-parse --short "$commit"))"
   return 0
 }

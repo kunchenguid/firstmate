@@ -551,8 +551,8 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 }
 
 # fm_backend_send_text_submit: type text once, then submit and verify,
-# retrying only the submission (never retyping). Echoes the verdict
-# (empty|pending|unknown|send-failed for submit-verifying adapters).
+# retrying only the submission (never retyping). Echoes the backend's
+# proof-carrying verdict; callers require exact empty for confirmed delivery.
 fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local backend=$1
   shift
@@ -608,9 +608,9 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
 # native agent-state (herdr-addendum "busy state" row - the first backend
 # where this gets real semantics beyond pane-regex). Backends with no such
 # primitive (tmux) report unknown. Callers own the fallback policy: fm-watch.sh
-# uses unknown as the cue for its pane-hash + FM_BUSY_REGEX detection, while
-# fm-crew-state.sh also corroborates native idle verdicts before treating a
-# no-run crew as not busy.
+# uses unknown as the cue for harness-scoped pane-tail detection, while
+# fm-crew-state.sh also corroborates native idle verdicts with the recorded
+# harness's signature before treating a no-run crew as not busy.
 fm_backend_busy_state() {  # <backend> <target>
   local backend=$1
   shift
@@ -622,8 +622,8 @@ fm_backend_busy_state() {  # <backend> <target>
 }
 
 # fm_backend_composer_state: classify the composer/input row of <target> as
-# empty|pending|unknown for callers that need a pre-submit pending-input guard
-# or an adapter's conservative submit fallback. It is exposed generically so a
+# empty|pending|pending-unproven|unknown for callers that need a pre-submit
+# input guard or an adapter's conservative submit fallback. It is exposed so a
 # caller other than the send path (the away-mode daemon's supervisor-pane
 # pending-input guard, bin/fm-supervise-daemon.sh) can ask the same question
 # without duplicating per-backend composer-reading logic. tmux and herdr both
@@ -633,7 +633,7 @@ fm_backend_busy_state() {  # <backend> <target>
 # submit path uses an internal content-diff approach with no separately named
 # classifier, so it reports unknown here - callers fall back to their own
 # policy, exactly as an unknown fm_backend_busy_state already does.
-fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
+fm_backend_composer_state() {  # <backend> <target> -> empty|pending|pending-unproven|unknown
   local backend=$1
   shift
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
@@ -709,9 +709,9 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # Only `dead` and `missing` license recovery. The tmux adapter requires a
 # successful session inventory and returns `missing` only when it omits the
 # exact window; the Herdr adapter reuses its husk
-# classifier. Zellij remains unverified because its secondmate ghost-tab and
-# agent-process recovery path has not been empirically validated. Orca and cmux
-# do not support secondmate spawns.
+# classifier. Zellij remains unverified because its agent-process recovery path
+# has not been empirically validated. Zellij, orca, and cmux do not support
+# secondmate spawns.
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }

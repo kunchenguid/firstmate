@@ -262,14 +262,15 @@ test_claude_hook_registration_preserves_bash_seatbelts() {
       | . == ".*"
   ' "$SETTINGS" >/dev/null || fail "the guard matcher must match all tools"
   jq -e '
-    [.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[].command] as $bash
-      | ($bash | any(contains("fm-arm-pretool-check.sh")))
-      and ($bash | any(contains("fm-cd-pretool-check.sh")))
-      and ($bash | any(contains("fm-continuity-pretool-check.sh")))
-  ' "$SETTINGS" >/dev/null || fail "the existing Bash PreToolUse seatbelts changed"
+    [.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[].command]
+      == [
+        "\"$CLAUDE_PROJECT_DIR\"/bin/fm-arm-pretool-check.sh --claude",
+        "\"$CLAUDE_PROJECT_DIR\"/bin/fm-cd-pretool-check.sh --claude"
+      ]
+  ' "$SETTINGS" >/dev/null || fail "Claude Bash PreToolUse must retain only the arm-shape and persistent-cd seatbelts"
   jq -e '.hooks.Stop[0].hooks[0].command | contains("fm-turnend-guard.sh")' "$SETTINGS" >/dev/null \
     || fail "the Stop turn-end guard changed"
-  pass "Claude wires the guard while preserving the Bash seatbelts and the Stop guard"
+  pass "Claude wires the delegation guard, retains only non-status Bash seatbelts, and preserves the Stop guard"
 }
 
 test_tracked_settings_do_not_ship_permissions_deny

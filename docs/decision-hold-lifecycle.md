@@ -30,12 +30,17 @@ A failed intermediate step leaves the hold open.
 
 ## Structured read surfaces
 
-`bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)` and `(hold-kind: captain)` metadata alongside existing backlog fields.
+`bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)`, `(hold-kind: captain)`, and `(hold-until: ...)` metadata alongside existing backlog fields.
+Presence detection fails closed in a separate `held` boolean: any `hold:` key, in either the canonical paren form or the hand-written comma form, marks the record held even when its reason cannot be read cleanly, so an unparseable hold can never render as dispatchable.
+The paren form's reason is read verbatim because tasks-axi forbids `)` in a reason and can therefore carry commas, while the ambiguous hand-written comma form falls back to the shared metadata helper and truncates at the first comma rather than guessing.
 It resolves every repeated `blocked-by:` edge against structured Done records, keeps missing blockers unresolved, and classifies only an unblocked captain hold as actionable.
 Its secondmate-home summary classifies an actionable captain hold as `captain_decision` and preserves blocked captain holds as queued work in the owning home.
 
+`bin/fm-fleet-view.sh` renders one combined `Gate` column for queued and Done rows, joining a hold (`held: <reason> (<kind>)`) with any unresolved blockers, instead of the earlier blocker-only column.
+
 `bin/fm-bearings-snapshot.sh` projects actionable captain holds into `decisions_open` and leaves blocked captain holds in ordinary queued gates.
 It excludes completed kind `captain` records from Recently Landed.
+A queued gate's `blocked_by` names its unresolved blocker ids when any remain and otherwise renders `hold (<kind>)`, and a held item's hold reason leads that gate's reason field.
 The projection remains read-only and does not inspect historical prose.
 
 ## Verification record
@@ -43,11 +48,13 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Fail-closed hold detection, comma-bearing hold reason, and held-item gating verification date: 2026-07-27.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
+The newest regression pins the dispatch-gating half: a held item stays distinguishable from dispatchable queued work in both the snapshot and Bearings, and a comma-bearing hold reason survives the snapshot and the human view intact.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -67,12 +74,15 @@ $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly
 ok - durable captain-held transfer closes the duplicate live status decision
 ok - snapshot parses tasks-axi rows and respects operational overrides
+ok - held backlog items are distinguishable from dispatchable queued work
+ok - a hold reason survives its commas through snapshot and view
 
 $ bash tests/fm-bearings-snapshot.test.sh
 ok - a completed scout with decision-like report prose is a pointer, not pending
 ok - action-free items (working/done/queued/landed) do not leak into Captain's Call
 ok - mixed secondmate roles, partial state, and captain readiness project independently
 ok - main and secondmate captain actionability use the same blocker readiness
+ok - a held queued item is reported as gated rather than next work
 
 $ bash tests/fm-brief.test.sh
 ok - fm-brief.sh: investigation and visual-review completions load the shared decision policy
