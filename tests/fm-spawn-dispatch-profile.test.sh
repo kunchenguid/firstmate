@@ -327,12 +327,53 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   expect_code 0 "$status" "opencode spawn with model and ignored effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
-    "opencode launch did not thread model"
+  assert_contains "$launch" "opencode --agent build --model 'anthropic/claude-sonnet-4-5' --prompt" \
+    "opencode worker launch did not name the build agent and thread the model"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
-  pass "opencode receives --model and omits the unsupported effort axis"
+  pass "opencode workers name the build agent, receive --model, and omit the unsupported effort axis"
+}
+
+test_opencode_scout_names_build_agent() {
+  local rec id out status launch
+  id=profile-opencode-scout-z7b
+  rec=$(make_spawn_case profile-opencode-scout opencode "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model openai/gpt-5.6-terra --scout)
+  status=$?
+  expect_code 0 "$status" "opencode scout spawn should succeed"
+  assert_contains "$out" "spawned $id harness=opencode kind=scout" \
+    "opencode scout spawn did not preserve its task kind"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "opencode --agent build --model 'openai/gpt-5.6-terra' --prompt" \
+    "opencode scout launch did not name the build agent and thread the model"
+  pass "opencode scouts name the build agent and preserve the selected model"
+}
+
+test_opencode_secondmate_preserves_officer_agent_selection() {
+  local rec id sm out status launch
+  id=profile-opencode-secondmate-z7c
+  rec=$(make_spawn_case profile-opencode-secondmate opencode "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$sm" --model openai/gpt-5.6-sol --secondmate)
+  status=$?
+  expect_code 0 "$status" "opencode secondmate spawn should succeed"
+  assert_contains "$out" "spawned $id harness=opencode kind=secondmate" \
+    "opencode secondmate spawn did not preserve its officer task kind"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "opencode --model 'openai/gpt-5.6-sol' --prompt" \
+    "opencode secondmate launch did not preserve the selected model"
+  assert_not_contains "$launch" "--agent" \
+    "opencode secondmate launch must preserve its existing officer agent selection"
+  pass "opencode secondmates preserve officer agent selection while retaining the selected model"
 }
 
 test_pi_threads_model_and_max_effort() {
@@ -521,6 +562,8 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_opencode_threads_model_and_ignores_effort_axis
+test_opencode_scout_names_build_agent
+test_opencode_secondmate_preserves_officer_agent_selection
 test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
