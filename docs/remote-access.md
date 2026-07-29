@@ -9,11 +9,18 @@ This page owns the Mac-side setup for attaching to a server-resident Firstmate a
 
 - Every command, file, git worktree, and agent process stays on the server.
 - The Mac contributes a terminal and a browser and holds no project state.
-- The server keeps exactly one Firstmate primary agent on its own harness, and the launcher described under Terminal 1 is expected to attach to that agent's existing named session rather than start a second one.
+- Pi is the only Firstmate primary.
+- The authoritative Firstmate runs in the named Herdr session `firstmate`.
+- Claude Code, Codex, and every other harness are supervised crewmates only and must not start a competing primary.
+- The launcher described under Terminal 1 is expected to attach to that agent's existing named session rather than start a second one.
 - That launcher is the operator's own script living outside this repository, so the attach behavior is a property of that launcher pattern rather than a guarantee this repository keeps.
 - With such a launcher in place, attaching repeatedly from the Mac joins the one primary, and it does not change which harness the primary runs.
 - Nothing here publishes a service to the public internet, and nothing here changes a firewall, a service bind address, an SSH server configuration, or a service's own authentication.
 - Browser-facing tools stay bound to server loopback and are reached only through an explicit SSH local forward that exists for as long as you keep its terminal open.
+
+This public guide intentionally redacts private Tailscale hostnames, IP addresses, SSH usernames, launcher paths, and live Lavish URLs.
+The exact values belong in private operator documentation, and a current Lavish URL is ephemeral and must come from active session output.
+Private operator configuration was verified separately while this guide preserves the safe structure and commands.
 
 ## Mac `~/.ssh/config`
 
@@ -63,16 +70,16 @@ Confirm which one is active by reading `RunSSH` in `tailscale debug prefs` on th
 
 | | Tailscale SSH | Host OpenSSH |
 | --- | --- | --- |
-| Authentication | Tailnet identity plus the tailnet SSH policy; a `check` rule adds a periodic browser approval | A public key installed in the remote user's `~/.ssh/authorized_keys` |
-| Local port forwarding | Carried by `tailscaled` itself once some rule matches; the policy file has no field that grants or denies forwarding | Permitted unless the server disables TCP forwarding |
+| Authentication | Reachable tailnet TCP port 22 plus tailnet identity and an effective SSH rule matching source, destination, and user; a `check` action adds a periodic browser approval | A public key installed in the remote user's `~/.ssh/authorized_keys` |
+| Local port forwarding | The effective matched SSH action must allow local (`-L`) forwarding with `allowLocalPortForwarding`; authentication alone is insufficient | Permitted only if the server's forwarding policy, such as `AllowTcpForwarding`, allows it |
 | Key needed on the Mac | None | Yes |
 
 Both are reached by the same `~/.ssh/config` entry and the same commands below; only the authentication step differs.
-The tailnet SSH policy gates one thing here: whether any `ssh` rule matches this device and user at all.
-Its rules carry action, src, dst, users, checkPeriod, acceptEnv, and srcPosture, and none of those govern TCP forwarding, so forwarding is `tailscaled`'s own behavior rather than an operator-settable policy knob.
-Current Tailscale releases carry local (`-L`) forwarding, which is what this page needs; remote (`-R`) forwarding is unsupported.
-A tailnet policy change can therefore withdraw access entirely by removing the rule that matches the Mac, which surfaces as the authentication failure under troubleshooting, but it cannot selectively withdraw forwarding from a session that authenticates.
-These Tailscale statements come from Tailscale's own policy-syntax reference and its current forwarding support rather than from this page's verification record, which exercises an OpenSSH server only.
+For Tailscale SSH, check network reachability to the server's tailnet TCP port 22, SSH authorization by the effective matching rule, and local-forward permission in that rule's action as separate gates.
+`tailscale ping` can confirm the tailnet node path, but it does not prove that TCP port 22 is reachable, that the SSH rule authorizes this user, or that the action permits `-L` forwarding.
+An authenticated session can therefore still reject a local forward when `allowLocalPortForwarding` is not enabled by the effective action.
+Current Tailscale releases support local (`-L`) forwarding when that action permits it; remote (`-R`) forwarding is not part of this path.
+These Tailscale statements come from Tailscale's own policy-syntax and SSH action references rather than from this page's verification record, which exercises an OpenSSH server only.
 Before relying on the OpenSSH path as a fallback, verify that a usable public key is actually installed for the remote user, because installing one is a separate operator decision rather than part of this setup.
 
 ## Terminal 1: attach to Firstmate
@@ -146,7 +153,8 @@ Forward a service only after deciding that is acceptable for that specific servi
 | Service class | Forward it? | Reason |
 | --- | --- | --- |
 | Firstmate's review surface on loopback `4387` | Yes | It exists to be read by the operator, it serves the artifacts you asked for, and it has no other Mac-reachable path. |
-| A service already published to the tailnet, whether by a Tailscale proxy or by binding a non-loopback address | No forward needed | It already has a tailnet address; a second path through a tunnel only creates two ways to reach one service and two ways to get confused about which is live. |
+| A service verified reachable at a Tailscale address or through Tailscale Serve | No forward needed | It already has a verified tailnet path; a second path through a tunnel only creates two ways to reach one service and two ways to get confused about which is live. |
+| A service bound to an arbitrary non-loopback address without verified Tailscale or Serve reachability | Review separately | A non-loopback bind alone does not prove a tailnet route, ACL allowance, firewall access, or the intended service identity. |
 | Local model or inference servers on loopback | Not without a separate review | They are bound to loopback precisely because they expose an unauthenticated API to anything that can reach the port. |
 | Editor, IDE, and agent control ports | No | They carry code execution authority for the server account, and their ports are ephemeral and change on every restart. |
 | System daemons such as the DNS resolver stub or the print spooler | No | No operator value and no reason to widen their reach. |
@@ -160,7 +168,8 @@ Adding one to the routine setup means reviewing that service's own authenticatio
 
 `ssh: Could not resolve hostname` means the tailnet name is not resolvable from the Mac.
 Confirm the Mac is connected and the server is online with `tailscale status` on the Mac, and confirm MagicDNS is enabled for the tailnet.
-`tailscale ping <server-host>` proves tailnet reachability independently of SSH.
+`tailscale ping <server-host>` checks the tailnet node path independently of SSH, but it does not check TCP port 22.
+Check that the server's tailnet address accepts TCP port 22 before debugging SSH policy, because a reachable node and an unreachable SSH port fail at different layers.
 As a temporary check only, substituting the server's Tailscale IPv4 address for `HostName` isolates a DNS problem from a connectivity problem.
 
 ### Authentication fails or keeps re-prompting
@@ -170,7 +179,8 @@ Being asked to re-approve in a browser after that window expires is the configur
 Each terminal authenticates on its own, so an expired approval can stop a new tunnel from starting while an already-established attach keeps running.
 A permission-denied refusal under Tailscale SSH means no policy rule matched this device and user, which is a tailnet policy question rather than something to fix on the Mac.
 Under the host's OpenSSH server, the same refusal means the Mac's public key is not installed for the remote user.
-If authentication succeeds but the forward itself fails under Tailscale SSH, that is a `tailscaled` behavior or version question rather than a policy setting to change, because the tailnet policy has no forwarding field to toggle.
+If TCP 22 is reachable and authentication succeeds but the forward itself fails under Tailscale SSH, inspect the effective action for `allowLocalPortForwarding` before treating it as a `tailscaled` behavior or version question.
+For host OpenSSH, inspect the server's `AllowTcpForwarding` policy separately from public-key authentication.
 
 ### The local port is already in use
 
