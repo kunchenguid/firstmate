@@ -37,7 +37,7 @@
 # quarantine entries with the rest of the volatile state.
 # New ship/scout metadata also carries chrome_devtools_axi_session=. Teardown
 # validates its exact home/task binding before mutation, then stops only that
-# named session after all landed-work/report/decision checks pass and before
+# named session after existing destructive-cleanup authorization and before
 # worktree or endpoint cleanup. Legacy records are a no-op and never stop the
 # default session; a stop failure preserves metadata and aborts for a safe retry.
 # bin/fm-chrome-axi-lib.sh owns the exact field validation and stop environment.

@@ -1446,6 +1446,51 @@ test_chrome_axi_cleanup_runs_after_unlanded_refusal() {
   pass "unlanded-work refusal happens before any browser stop"
 }
 
+test_chrome_axi_cleanup_runs_after_scout_report_refusal() {
+  local case_dir log rc
+  case_dir=$(make_case chrome-axi-scout-report-order)
+  write_meta "$case_dir" no-mistakes scout
+  append_bound_chrome_session "$case_dir" >/dev/null
+  log="$case_dir/chrome.log"; : > "$log"
+  add_recording_chrome_axi "$case_dir"
+
+  set +e
+  FM_DATA_OVERRIDE="$case_dir/data" FM_CHROME_AXI_LOG="$log" \
+    run_teardown "$case_dir" >/dev/null 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "scout without a report must refuse before browser cleanup"
+  [ ! -s "$log" ] || fail "browser session was stopped before scout-report refusal: $(cat "$log")"
+  assert_grep "has no report" "$case_dir/stderr" \
+    "missing scout-report refusal was not explicit"
+  assert_present "$case_dir/state/task-x1.meta" "missing-report refusal removed task metadata"
+  pass "scout-report refusal happens before any browser stop"
+}
+
+test_chrome_axi_cleanup_runs_after_decision_inventory_refusal() {
+  local case_dir log rc
+  case_dir=$(make_case chrome-axi-decision-order)
+  write_meta "$case_dir" no-mistakes scout
+  append_bound_chrome_session "$case_dir" >/dev/null
+  mkdir -p "$case_dir/data/task-x1"
+  printf 'completed scout report\n' > "$case_dir/data/task-x1/report.md"
+  add_compatible_tasks_axi "$case_dir"
+  log="$case_dir/chrome.log"; : > "$log"
+  add_recording_chrome_axi "$case_dir"
+
+  set +e
+  FM_DATA_OVERRIDE="$case_dir/data" FM_CHROME_AXI_LOG="$log" \
+    run_teardown "$case_dir" >/dev/null 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "scout without a completed decision inventory must refuse before browser cleanup"
+  [ ! -s "$log" ] || fail "browser session was stopped before decision-inventory refusal: $(cat "$log")"
+  assert_grep "has not passed the unresolved-decision completion gate" "$case_dir/stderr" \
+    "unresolved-decision refusal was not explicit"
+  assert_present "$case_dir/state/task-x1.meta" "decision-inventory refusal removed task metadata"
+  pass "unresolved-decision refusal happens before any browser stop"
+}
+
 test_chrome_axi_stop_failure_preserves_task_for_retry() {
   local case_dir log rc
   case_dir=$(make_case chrome-axi-stop-failure)
@@ -1501,6 +1546,8 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_chrome_axi_cleanup_stops_only_exact_recorded_session
 test_chrome_axi_legacy_cleanup_never_guesses_default
 test_chrome_axi_cleanup_runs_after_unlanded_refusal
+test_chrome_axi_cleanup_runs_after_scout_report_refusal
+test_chrome_axi_cleanup_runs_after_decision_inventory_refusal
 test_chrome_axi_stop_failure_preserves_task_for_retry
 test_chrome_axi_mismatched_binding_refuses_without_stop
 test_squash_merged_branch_deleted_allows

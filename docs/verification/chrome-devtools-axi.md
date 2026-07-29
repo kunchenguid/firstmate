@@ -116,6 +116,8 @@ ok - fm-brief.sh: workers and scouts receive the bounded browser recovery and Pl
 ok - fm-teardown stops only the exact recorded Chrome DevTools AXI session
 ok - legacy teardown metadata never falls back to a default or global browser stop
 ok - unlanded-work refusal happens before any browser stop
+ok - scout-report refusal happens before any browser stop
+ok - unresolved-decision refusal happens before any browser stop
 ok - browser-stop failure is explicit and preserves the task for an exact retry
 ok - cleanup refuses another task's valid named browser session without touching it
 ```

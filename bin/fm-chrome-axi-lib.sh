@@ -22,8 +22,8 @@
 # home/task-derived identity before cleanup can mutate anything.
 # Legacy metadata without the field is a safe no-op and never falls back to the
 # default session.
-# After landed-work, report, and decision checks authorize destructive cleanup,
-# teardown runs chrome-devtools-axi stop with only that exact recorded session.
+# After the existing destructive-cleanup authorization checks pass, teardown
+# runs chrome-devtools-axi stop with only that exact recorded session.
 # A failed stop aborts cleanup while its metadata still exists for a retry.
 
 fm_chrome_axi_session_name_valid() {  # <name>
