@@ -35,8 +35,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
-# bin/fm-tangle-lib.sh owns fm_default_branch, the one default-branch resolution
-# rule in this repo (including its refusal to trust a dangling origin/HEAD).
+# bin/fm-tangle-lib.sh owns fm_default_branch, including its refusal to trust a
+# dangling origin/HEAD.
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 FM_LOCK_LOG_PREFIX=fleet-sync

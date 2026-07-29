@@ -121,8 +121,10 @@ Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.
 Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 
-`fm-tangle-lib.sh` resolves the default branch from `origin/HEAD`, then local `main` or `master`, and classifies that named non-default primary branch as the tangle.
-Its `fm_default_branch` is the one default-branch resolution rule in this repo, delegated to by every other consumer, and it trusts `origin/HEAD` only when the branch that ref names still exists, so a clone left pointing at a renamed or deleted default resolves nothing rather than an unusable branch name.
+`fm-tangle-lib.sh` owns `fm_default_branch` for firstmate's tangle and default-branch consumers: it resolves the default branch from a valid `origin/HEAD`, then local `main` or `master`, and classifies that named non-default primary branch as the tangle.
+It trusts `origin/HEAD` only when the branch that ref names still exists, so a clone left pointing at a renamed or deleted default resolves nothing rather than an unusable branch name.
+Treehouse-backed spawns have a separate base-ref preflight because treehouse chooses its allocation base itself; before opening a backend endpoint, `fm-spawn.sh` resolves the base treehouse would allocate from and refuses with the missing ref and present remote branches when that base does not exist.
+An unfetched clone with no remote-tracking branches is left to treehouse's fetch path rather than refused.
 `fm-guard.sh` prints the repair command on the next mutable fleet action, while `bin/fm-session-start.sh` reports the same condition through bootstrap as a `TANGLE:` line at session start.
 If another live session holds the fleet lock, both surfaces keep the alarm but switch to read-only wording with no repair command.
 Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.

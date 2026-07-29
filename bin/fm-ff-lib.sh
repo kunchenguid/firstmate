@@ -26,8 +26,8 @@
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 
-# bin/fm-tangle-lib.sh owns fm_default_branch, the one default-branch resolution
-# rule in this repo (including its refusal to trust a dangling origin/HEAD).
+# bin/fm-tangle-lib.sh owns fm_default_branch, including its refusal to trust a
+# dangling origin/HEAD.
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-tangle-lib.sh"
 

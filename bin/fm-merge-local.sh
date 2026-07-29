@@ -17,8 +17,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$FM_ROOT/bin/fm-guard.sh" || true
-# bin/fm-tangle-lib.sh owns fm_default_branch, the one default-branch resolution
-# rule in this repo (including its refusal to trust a dangling origin/HEAD).
+# bin/fm-tangle-lib.sh owns fm_default_branch, including its refusal to trust a
+# dangling origin/HEAD.
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 ID=${1:?usage: fm-merge-local.sh <task-id>}

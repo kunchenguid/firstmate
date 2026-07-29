@@ -106,8 +106,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-# bin/fm-tangle-lib.sh owns fm_default_branch, the one default-branch resolution
-# rule in this repo (including its refusal to trust a dangling origin/HEAD).
+# bin/fm-tangle-lib.sh owns fm_default_branch, including its refusal to trust a
+# dangling origin/HEAD.
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
