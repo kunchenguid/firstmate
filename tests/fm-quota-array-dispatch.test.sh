@@ -289,24 +289,35 @@ test_dispatch_identity_and_blocked_report() {
   reports=$(python3 - <<'PY'
 
 def auth_surface(harness, model, provider):
-    if harness == "pi" and model.startswith("xai/") and provider == "xai":
-        return "Pi xAI OAuth"
-    if harness == "grok":
-        return "Grok Build CLI"
-    raise AssertionError("unresolved concrete profile")
+    surfaces = {
+        ("pi", "xai/grok-4.5", "xai"): "Pi xAI OAuth",
+        ("grok", "grok-4.5", "grok"): "Grok Build CLI",
+    }
+    try:
+        return surfaces[(harness, model, provider)]
+    except KeyError:
+        raise AssertionError("unresolved concrete profile") from None
 
 def blocked(harness, model, provider, failure):
     surface = auth_surface(harness, model, provider)
     return (f"blocked: harness={harness} model={model} provider={provider} "
             f"authentication surface checked={surface} failure evidence={failure}")
 
-model = "xai/grok-4.5"
-provider = "xai"
-pi = blocked("pi", model, provider, "Pi xAI OAuth unavailable")
-grok = blocked("grok", model, provider, "Grok Build CLI login missing")
+pi = blocked("pi", "xai/grok-4.5", "xai", "Pi xAI OAuth unavailable")
+grok = blocked("grok", "grok-4.5", "grok", "Grok Build CLI login missing")
 assert "Grok Build CLI" not in pi
 assert "Pi xAI OAuth" in pi
 assert "Grok Build CLI" in grok
+for mismatched in (
+    ("grok", "xai/grok-4.5", "xai"),
+    ("pi", "grok-4.5", "grok"),
+):
+    try:
+        auth_surface(*mismatched)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(f"accepted mismatched profile: {mismatched}")
 print(pi)
 print(grok)
 PY
@@ -315,7 +326,7 @@ PY
     "Pi/xAI blocked evidence was not scoped to Pi"
   assert_not_contains "$reports" 'harness=pi model=xai/grok-4.5 provider=xai authentication surface checked=Grok Build CLI' \
     "Pi/xAI was reported with the standalone Grok CLI surface"
-  assert_contains "$reports" 'blocked: harness=grok model=xai/grok-4.5 provider=xai authentication surface checked=Grok Build CLI' \
+  assert_contains "$reports" 'blocked: harness=grok model=grok-4.5 provider=grok authentication surface checked=Grok Build CLI' \
     "explicit Grok candidate did not use the Grok Build CLI surface"
   for field in harness=pi model=xai/grok-4.5 provider=xai 'authentication surface checked=Pi xAI OAuth' 'failure evidence=Pi xAI OAuth unavailable'; do
     assert_contains "$reports" "$field" "Pi blocked report lost '$field'"
