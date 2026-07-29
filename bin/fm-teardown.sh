@@ -52,6 +52,10 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# A clean teardown best-effort deregisters the task from Parlay's live chat
+# panel (see bin/fm-spawn.sh's header for the enrollment contract): the recorded
+# `parlay listen` background pid is always killed, and `parlay agent-down` is
+# called only when `parlay` is on PATH. Neither ever blocks or fails teardown.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -289,6 +293,22 @@ retire_busy_state() {
     "$SCRIPT_DIR/fm-busy-event.sh" retire "$state_dir" "$id" --gen "$gen"
   elif [ -f "$state_dir/$id.busy-gen" ]; then
     "$SCRIPT_DIR/fm-busy-event.sh" retire "$state_dir" "$id" --current-gen
+  fi
+}
+
+# Best-effort Parlay deregistration (bin/fm-spawn.sh's header owns enrollment).
+# The recorded background pid is killed unconditionally so a `parlay` that went
+# missing from PATH between spawn and teardown never orphans it; only the final
+# `parlay agent-down` network call is gated on `parlay` being present.
+deregister_parlay_agent() {
+  local state_dir=$1 id=$2 pid_file pid
+  pid_file="$state_dir/$id.parlay-listen-pid"
+  pid=$(cat "$pid_file" 2>/dev/null || true)
+  case "$pid" in ''|*[!0-9]*) ;; *) kill "$pid" 2>/dev/null || true ;; esac
+  rm -f "$pid_file"
+  if command -v parlay >/dev/null 2>&1; then
+    parlay agent-down "$id" >/dev/null 2>&1 \
+      || echo "warning: parlay agent-down failed for $id (non-blocking)" >&2
   fi
 }
 
@@ -1124,6 +1144,7 @@ cleanup_firstmate_home_children() {
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
     remove_kimi_turnend_auth "$sub_state" "$child_id"
+    deregister_parlay_agent "$sub_state" "$child_id"
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     child_busy_gen=$(meta_value "$child_meta" busy_gen)
     if [ -z "$child_busy_gen" ]; then
@@ -1339,6 +1360,7 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 remove_kimi_turnend_auth "$STATE" "$ID"
+deregister_parlay_agent "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
