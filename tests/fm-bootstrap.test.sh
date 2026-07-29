@@ -804,7 +804,7 @@ SH
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1 \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_not_contains "$out" 'MISSING_MANUAL: agent-fleet' "account-routed dispatch profile still required Agent Fleet"
+  assert_contains "$out" 'MISSING_MANUAL: agent-fleet' "account-routed dispatch profile did not require the pool-membership registry"
   assert_contains "$out" 'CREW_DISPATCH: active config/crew-dispatch.json' "account dependency preflight suppressed dispatch validation"
 
   case_dir="$TMP_ROOT/account-routing-observe"
@@ -827,8 +827,9 @@ jq() {
 }
 SH
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    BASH_ENV="$bash_env" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_not_contains "$out" 'MISSING_MANUAL: agent-fleet' "observe mode treated Agent Fleet as a new-launch dependency"
+    BASH_ENV="$bash_env" FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" 'MISSING_MANUAL: agent-fleet' "observe mode did not require the pool-membership registry"
   assert_contains "$out" 'MISSING: jq' "observe mode did not report the direct selector dependency"
   assert_contains "$out" 'MISSING_MANUAL: herdr' "observe mode did not report the direct hook installer"
   case_dir="$TMP_ROOT/account-routing-legacy-recovery"
@@ -860,6 +861,7 @@ SH
   printf '%s\n' 'account_home=/accounts/codex/1' > "$case_dir/home/state/direct.meta"
   fakebin=$(make_fake_toolchain "$case_dir")
   rm -f "$fakebin/herdr"
+  rm -f "$fakebin/agent-fleet"
   bash_env="$case_dir/no-jq.bash"
   cat > "$bash_env" <<'SH'
 command() {
@@ -873,14 +875,15 @@ jq() {
 }
 SH
   out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1 \
     FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1 \
     FM_ACCOUNT_DIRECTORY_PERL_BIN="$case_dir/missing-perl" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$out" 'MISSING: jq' "direct metadata did not retain the selector dependency when routing was off"
   assert_contains "$out" 'MISSING_MANUAL: herdr' "direct metadata did not retain the hook dependency when routing was off"
   assert_contains "$out" 'MISSING_MANUAL: perl' "direct metadata did not preflight the fixed passwd-home resolver"
-  assert_not_contains "$out" 'MISSING_MANUAL: agent-fleet' "direct metadata incorrectly restored the legacy recovery dependency"
-  pass "bootstrap requires direct launch tools for crews and Agent Fleet for enforced secondmates or legacy recovery"
+  assert_contains "$out" 'MISSING_MANUAL: agent-fleet' "direct metadata did not retain the pool-membership registry dependency"
+  pass "bootstrap requires direct selector tools and the read-only pool registry for routed crews"
 }
 
 test_agent_fleet_install_requires_manual_release() {

@@ -13,6 +13,9 @@
 #                                        config/secondmate-harness, or empty when absent.
 #        fm-harness.sh secondmate-effort   print the optional EFFORT token from
 #                                        config/secondmate-harness, or empty when absent.
+#        fm-harness.sh claude-crew-model   print the required Claude crewmate/scout
+#                                        model anchor from config/claude-crew-model,
+#                                        defaulting to claude-opus-5 when absent.
 # config/secondmate-harness format: a single line "<harness> [<model>] [<effort>]",
 # whitespace-separated. A bare "<harness>" (today's format) behaves exactly as before:
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
@@ -26,6 +29,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+CLAUDE_CREW_MODEL_DEFAULT=claude-opus-5
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
@@ -136,10 +140,48 @@ resolve_secondmate_effort() {
   secondmate_field 3
 }
 
+resolve_claude_crew_model() {
+  local file=$CONFIG/claude-crew-model line model='' found=0
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    printf '%s\n' "$CLAUDE_CREW_MODEL_DEFAULT"
+    return 0
+  fi
+  [ -f "$file" ] && [ ! -L "$file" ] || {
+    echo "error: config/claude-crew-model must be a real file" >&2
+    return 1
+  }
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] || continue
+    case "$line" in
+      '#'*) continue ;;
+    esac
+    [ "$found" = 0 ] || {
+      echo "error: config/claude-crew-model must contain exactly one model value" >&2
+      return 1
+    }
+    model=$line
+    found=1
+  done < "$file"
+  [ "$found" = 1 ] || {
+    echo "error: config/claude-crew-model is present but has no model value" >&2
+    return 1
+  }
+  case "$model" in
+    default|*[[:space:]]*|''|-*|*[!A-Za-z0-9._:/-]*)
+      echo "error: config/claude-crew-model must contain one explicit Claude model id, not '$model'" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$model"
+}
+
 case "${1:-}" in
   crew) resolve_crew ;;
   secondmate) resolve_secondmate ;;
   secondmate-model) resolve_secondmate_model ;;
   secondmate-effort) resolve_secondmate_effort ;;
+  claude-crew-model) resolve_claude_crew_model ;;
   *) detect_own ;;
 esac

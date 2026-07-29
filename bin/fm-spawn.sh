@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# FM_ACCOUNT_DIRECTORY_CUTOVER: direct-observe-passwd-home-v2
+# FM_ACCOUNT_DIRECTORY_CUTOVER: direct-pool-rotation-v3
 # Spawn a direct report: a new crewmate in a treehouse worktree, an eligible
 # pre-cutover Orca direct recovery with empirically verified provider authority,
 # or a secondmate in its isolated firstmate home.
@@ -51,6 +51,11 @@
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
+#   Claude ship/scout launches never inherit the CLI's ambient model.
+#   Without an explicit --model, they resolve config/claude-crew-model (inherited
+#   into secondmate homes), whose absent-file default is claude-opus-5.
+#   An empty/default/unresolvable model or a raw Claude launch fails closed before
+#   endpoint creation because firstmate cannot prove which model it would run.
 #   Account routing is independently default-off. Its precedence and off/observe/
 #   enforce resolution is owned by fm-account-routing-lib.sh. Direct account-
 #   directory launch currently covers ship/scout crewmates only; secondmate
@@ -1263,8 +1268,8 @@ persist_failed_direct_recovery() {
     echo "mode=${MODE:-${RECORDED_MODE:-no-mistakes}}"
     echo "yolo=${YOLO:-${RECORDED_YOLO:-off}}"
     echo "tasktmp=${TASK_TMP:-${RECORDED_TASKTMP:-/tmp/fm-$ID}}"
-    echo "model=${RECORDED_MODEL:-${MODEL:-default}}"
-    echo "effort=${RECORDED_EFFORT:-${EFFORT:-default}}"
+    echo "model=${MODEL:-default}"
+    echo "effort=${EFFORT:-default}"
     echo "generation_id=${RECORDED_GENERATION:-${SPAWN_GENERATION_ID:-}}"
     [ "${RECORDED_REPORT_REQUIRED_SET:-0}" != 1 ] || echo "report_required=${RECORDED_REPORT_REQUIRED:-}"
     [ -z "$account_home" ] || echo "account_home=$account_home"
@@ -2237,6 +2242,20 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
       esac
     fi
   fi
+fi
+
+if [ "$KIND" != secondmate ] && [ "$HARNESS" = claude ]; then
+  [ "$RAW_LAUNCH" != 1 ] || {
+    echo "error: raw Claude crew/scout launch cannot prove its resolved model; use --harness claude with an optional explicit --model" >&2
+    exit 1
+  }
+  if [ -z "$MODEL" ] && [ "$MODEL_SET" -eq 0 ]; then
+    MODEL=$("$SCRIPT_DIR/fm-harness.sh" claude-crew-model) || exit 1
+  fi
+  [ -n "$MODEL" ] && [ "$MODEL" != default ] || {
+    echo "error: Claude crew/scout launch requires an explicitly resolved model; set config/claude-crew-model or pass --model" >&2
+    exit 1
+  }
 fi
 
 ACCOUNT_EXPLICIT=0

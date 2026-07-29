@@ -152,6 +152,12 @@ Primary-session watcher wake protocols are rendered at session start by [`bin/fm
 Claude and Grok use background-notify cycles, Codex uses bounded foreground checkpoints, Pi uses its two tracked primary extensions, and OpenCode uses its TUI plugin.
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
 When it is absent or contains `default`, crewmates mirror the firstmate's own harness.
+Claude crewmate and scout launches additionally require a resolved model before endpoint creation.
+An explicit `--model` wins; otherwise `fm-harness.sh claude-crew-model` reads the one-value local `config/claude-crew-model` anchor, whose absent-file default is `claude-opus-5`.
+The anchor is inherited into secondmate homes so the same rule governs their Claude crews.
+An empty, invalid, or `default` anchor and a raw Claude launch fail closed rather than inheriting the Claude CLI's ambient model.
+The resolved model is both passed through Claude's `--model` flag and recorded as `model=` in task metadata.
+Fresh launches and recovery share this final resolution guard: recovery preserves an explicit recorded model, while legacy `model=default` metadata resolves through the anchor before relaunch and is rewritten to the value actually used.
 `config/secondmate-harness` is a separate local, gitignored file containing the adapter the primary uses to launch secondmate agents, optionally followed by model and effort tokens on the same line.
 The first non-empty, non-comment line is parsed as `<harness> [<model>] [<effort>]`.
 A bare `<harness>` preserves the previous behavior: harness only, with no model or effort launch flag.
@@ -160,7 +166,7 @@ When the harness token is absent or `default`, secondmate launch falls back thro
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
 An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
-The primary propagates `config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`, and `config/account-routing-mode` into secondmate homes at secondmate spawn, during the locked session-start bootstrap secondmate sweep, and during explicit `bin/fm-config-push.sh` runs, so a secondmate's own crewmates use the primary dispatch and routing policy.
+The primary propagates `config/crew-dispatch.json`, `config/crew-harness`, `config/claude-crew-model`, `config/backlog-backend`, and `config/account-routing-mode` into secondmate homes at secondmate spawn, during the locked session-start bootstrap secondmate sweep, and during explicit `bin/fm-config-push.sh` runs, so a secondmate's own crewmates use the primary dispatch, model-anchor, and routing policy.
 `config/secondmate-harness` and `config/secondmate-account-pool` are not inherited because they are primary-owned knobs for launching secondmate agents.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
@@ -171,14 +177,23 @@ Firstmate routes new observe and enforce Claude and Codex ship/scout launches di
 The exact discovery, fresh-usage, health, fallback, and Herdr-hook mechanics are owned by `bin/fm-account-directory.sh`'s header and help output.
 The selected provider command receives `CLAUDE_CONFIG_DIR=<home>` or `CODEX_HOME=<home>`, and task metadata records the non-secret `account_home=<home>` for observability.
 New ship/scout launches never ask Agent Fleet to enable a profile, establish identity, install a bundle, or acquire a lease.
+They use Agent Fleet's read-only profile listing as the authoritative pool-membership registry.
+Only real account homes registered in the provider's crew pool are eligible, so a profile reserved to a manual-only pool cannot be selected for crew work.
+Claude candidates must additionally carry quota-axi's exact non-secret per-directory `claude-keychain-access-granted` marker.
+Pool filtering and the marker check happen before fallback selection; if no Claude candidate survives, launch fails closed with the reserved and captain-approval-required reasons instead of borrowing a manual profile.
+The optional declared `claude-crew-last-resort` pool is checked only after no usable `claude-crew` profile remains and is announced loudly when used.
+Because Claude account identity is not machine-readable per directory, pool membership is the only ownership policy: the selector never infers an account from `.claude.json`, a hidden quota identity, or the nondiscriminating Keychain account label.
+A profile assigned only to `claude-manual` remains a hard exclusion; declaring last-resort behavior requires adding the separate last-resort pool deliberately.
 They invoke Herdr's own integration installer against the selected profile directory and verify its per-profile hook file before launching.
 Account credentials remain captain-owned and read-only to Firstmate; selection never authenticates, logs in, or invokes a model.
 
 Codex health and usage are genuinely readable per account.
 Every selection performs a fresh per-account quota read instead of trusting a prior cache, and a Codex directory with no fresh general usage window is skipped.
 This means an account re-authenticated immediately before spawn is eligible on that spawn.
+Fresh quota is an opportunistic ranking layer: the highest minimum remaining percentage wins, exact best-score ties rotate, and if every eligible account's signal is unavailable the selector explicitly rotates across the whole eligible set.
 Claude's config-directory-specific macOS Keychain credential is not currently distinguishable through non-interactive quota reads.
-Claude therefore treats missing quota as unreadable rather than unhealthy, chooses the first real profile directory in stable sort order, and prints a loud `CLAUDE USAGE UNREADABLE` note explaining that keychain/quota-read gap.
+For candidates with prior Keychain approval, Claude treats missing quota as unreadable rather than unhealthy, rotates across eligible accounts in stable bytewise order, and prints a loud `CLAUDE USAGE UNREADABLE` note explaining that keychain/quota-read gap.
+The rotation cursor is persisted under the passwd user's `.local/state/firstmate/account-directory/` and guarded by an advisory lock, so concurrent selectors spread across the same deterministic candidate sequence instead of racing to its first element.
 
 Account routing remains default-off.
 An unchanged installation does not select an account directory, does not alter the provider launch, and adds no account field to task metadata.
@@ -188,7 +203,7 @@ Ambient `FM_ACCOUNT_ROUTING=off` cannot override the authoritative config.
 The valid modes are `off`, `observe`, and `enforce`.
 Bootstrap reports an `ACCOUNT_ROUTING` diagnostic when the configured policy is unreadable, contains multiple values, or names any other mode.
 `observe` and `enforce` both activate direct account-directory selection for a new Claude or Codex ship/scout launch on any supported runtime backend.
-Neither mode invokes Agent Fleet selection or leases for a new ship/scout launch.
+Neither mode invokes Agent Fleet selection or leases for a new ship/scout launch; the profile-list read is eligibility enforcement only.
 The existing `--account-pool`, `--account-profile`, and dispatch-profile fields remain compatibility activation inputs for those crewmates while the inactive-code removal is handled separately.
 Their legacy aliases do not constrain the new usage-based account choice.
 Secondmate integration is deferred: secondmate launches retain their pre-cutover Agent Fleet selection and lease behavior, including `config/secondmate-account-pool`.
@@ -200,7 +215,8 @@ It never creates `account_pool=`, `account_profile=`, `account_task=`, `account_
 Existing ship/scout tasks that already carry `account_profile=` metadata remain legacy Agent Fleet managed generations.
 That compatibility path is recovery-only for ordinary crewmates and is not used for any new ship/scout task.
 Secondmate launches continue to create and recover legacy Agent Fleet managed generations until their dedicated direct-account integration is designed.
-Bootstrap requires Agent Fleet for enforced secondmate routing and when legacy `account_profile=` or pending rollback metadata exists, while new direct ship/scout routing requires `jq`, `quota-axi`, and Herdr's integration installer instead.
+Bootstrap requires Agent Fleet for direct crew-pool eligibility, for enforced secondmate routing, and when legacy `account_profile=` or pending rollback metadata exists.
+New direct ship/scout routing also requires `jq`, `quota-axi`, and Herdr's integration installer.
 Same-profile recovery is sticky and fail-closed: `bin/fm-spawn.sh <id> --resume-account` validates existing task metadata and Agent Fleet's session mapping, uses `lease recover` rather than new-task quota selection, resumes the recorded provider session without replaying the brief as a new prompt, and requires a higher monotonic `session_event_seq` from a SessionStart accepted after its local launch gate before committing the recovered lease.
 Wall-clock `updated_at` remains diagnostic only and never decides launch freshness.
 Schema-1 mappings remain readable as virtual sequence zero; the next same-binding SessionStart atomically migrates them to schema 2 / sequence 1, while a changed binding is rejected without modifying the legacy record.
@@ -383,7 +399,7 @@ It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable sync 
 `NUDGE_SECONDMATES:` lists stable `fm-<id>` task selectors; the `bootstrap-diagnostics` skill owns the send procedure.
 The same bootstrap run also emits `SECONDMATE_LIVENESS:` outcomes for live secondmate endpoints; the `bootstrap-diagnostics` skill owns the response to handled, deferred, skipped, and failed outcomes.
 For a mid-session inherited config edit where tracked-file sync and reread nudges are not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, and `account-routing-mode` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero only for real propagation errors.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `claude-crew-model`, `backlog-backend`, and `account-routing-mode` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero only for real propagation errors.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 

@@ -130,10 +130,16 @@ The shell scripts validate the JSON shape and verified harness/effort combinatio
 The session-start bootstrap step surfaces either the active rule block or a concise invalid-config line at startup.
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
+Claude crewmate and scout launches independently fail closed unless they resolve a concrete model before endpoint creation.
+An explicit model wins; otherwise the inherited `config/claude-crew-model` anchor applies, with `claude-opus-5` as its absent-file default.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, grok, pi, and opencode while preserving the requested profile for later audit.
 New ship/scout observe and enforce account routing is backend-neutral and uses the direct profile-directory contract owned by [configuration.md](configuration.md#agent-fleet-account-routing).
 Routing remains default-off and adds no account field or provider environment override until an explicit account flag or observe/enforce policy enables it.
+The direct selector reads Agent Fleet only for pool membership, excludes manual-only profiles, requires Claude's non-secret per-directory Keychain approval marker, then uses fresh Codex quota opportunistically.
+If no usable Claude crew account survives eligibility, the launch fails closed before fallback selection.
+Claude can declare a separate last-resort crew pool, consulted only after its primary crew pool is empty; no identity inference participates in either tier.
+It serializes round-robin fallback and exact-score tie-breaking so unavailable usage and concurrent launches cannot collapse onto the stable first account.
 For quota-balanced account-pool candidates, new dispatch deterministically uses the ordered first profile and passes its compatibility alias to spawn only as the activation signal for direct per-account selection.
 The legacy Agent Fleet pool-summary selector is inactive deferred code tracked by `remove-fleet-routing-deadcode`; it is not available to new dispatches.
 
@@ -169,6 +175,7 @@ When the harness token is unset or `default`, launch falls back to `config/crew-
 Those optional tokens are re-read on every secondmate spawn or respawn and are overridden by explicit per-spawn `--model` or `--effort` flags.
 An explicit per-spawn harness or raw launch command does not inherit model or effort tokens from `config/secondmate-harness`.
 `config/crew-harness` remains the crewmate harness and is inherited into secondmate homes.
+`config/claude-crew-model` is inherited too, so Claude crews in every home use the same captain-changeable model anchor.
 `config/crew-dispatch.json` is inherited too; secondmates use the same natural-language dispatch profiles when spawning their own crewmates.
 `config/backlog-backend` is inherited too; absent or `tasks-axi` selects the default tasks-axi backlog backend, while `manual` forces routine backlog updates to hand-editing across the fleet without disabling validated handoff delegation.
 

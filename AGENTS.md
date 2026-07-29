@@ -78,6 +78,7 @@ bin/                 helper scripts, committed; read each script's header before
 tools/               independently versioned provider-neutral components, committed; Agent Fleet lives under tools/agent-fleet
 .env                 optional X-mode pairing token; LOCAL, gitignored; presence-gates section 14
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
+config/claude-crew-model  Claude crewmate/scout model anchor; LOCAL, gitignored, inherited, and absent = `claude-opus-5`. An unreadable, empty, or `default` value fails closed instead of inheriting Claude CLI state (section 4)
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
 config/checkout-refresh  optional extra checkout and shallow scan-root directives for this home's safe checkout refresher; LOCAL, gitignored; see docs/configuration.md "Checkout refresh"
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
@@ -219,6 +220,11 @@ Secondmate launches are exempt because they resolve through `fm-harness.sh secon
 
 `quota-balanced` selection is deterministic and owned by `bin/fm-dispatch-select.sh`; every real new ship/scout launch uses direct account-directory selection.
 When candidates carry account pools, the selector chooses the ordered first profile and passes its pool to spawn only as a compatibility activation input, never as an account choice or lease request.
+Direct selection reads Agent Fleet's profile registry only for pool membership, excludes profiles outside the provider's crew pool, and requires Claude's non-secret per-directory quota-axi Keychain approval marker before any fallback or rotation.
+When no usable Claude crew account survives those checks, selection fails closed and names the reserved or approval-required reasons.
+An explicitly declared `claude-crew-last-resort` pool is consulted only after `claude-crew` has no usable account; manual-only profiles remain excluded, and selector code never guesses account ownership from unreadable identity data.
+Fresh Codex quota is an opportunistic ranking signal.
+Exact best-score Codex ties and an all-unavailable quota result rotate across eligible accounts under a serialized persistent cursor; Claude always uses that rotation because its per-directory quota signal is unreadable.
 The now-unreachable Agent Fleet pool-summary implementation and inactive new-lease fixtures are legacy code deferred to follow-up task `remove-fleet-routing-deadcode`.
 Quota trouble must never block dispatch.
 
@@ -235,6 +241,9 @@ If a dispatch rule or default names an unverified harness, ignore that profile, 
 The shell scripts never parse or match the natural-language rules; firstmate does the matching and passes only concrete flags to `fm-spawn`.
 
 Per-harness model/effort flags: `harness-adapters` (loaded before every spawn per section 4's closing trigger).
+Claude crewmate and scout launches resolve a non-default model before endpoint creation.
+An explicit `--model` wins; otherwise `fm-harness.sh claude-crew-model` reads the captain-changeable `config/claude-crew-model` anchor and defaults its absence to `claude-opus-5`.
+An empty, invalid, or `default` anchor and a raw Claude launch fail closed, and `state/<id>.meta` records the same resolved value passed through Claude's `--model`.
 
 Secondmates can run on a different harness than crewmates.
 `config/secondmate-harness` (local, gitignored) is the harness the primary uses to launch SECONDMATE agents; resolve it with `bin/fm-harness.sh secondmate`, which follows the fallback chain `config/secondmate-harness` -> `config/crew-harness` -> your own harness.
@@ -242,7 +251,7 @@ An explicit per-spawn harness still overrides either kind, and every secondmate 
 
 `config/secondmate-harness` can also pin a model/effort for the secondmate agent in one line (`<harness> [<model>] [<effort>]`); format, accessors, and inheritance exceptions live in `secondmate-provisioning` (load before creating/seeding/launching/recovering a secondmate).
 
-`config/crew-dispatch.json`, `config/crew-harness`, `config/backlog-backend`, and `config/account-routing-mode` are inherited into every secondmate home; `config/secondmate-harness` and `config/secondmate-account-pool` are primary-owned launch knobs and are not inherited.
+`config/crew-dispatch.json`, `config/crew-harness`, `config/claude-crew-model`, `config/backlog-backend`, and `config/account-routing-mode` are inherited into every secondmate home; `config/secondmate-harness` and `config/secondmate-account-pool` are primary-owned launch knobs and are not inherited.
 `secondmate-provisioning` owns the propagation timing, mechanism, the literal-file inheritance nuance, and `bin/fm-config-push.sh`.
 
 Each adapter splits into mechanics and knowledge.

@@ -6,28 +6,48 @@
 #   fm-account-directory.sh prepare <claude|codex>
 #
 # This header is the single owner of the direct account-directory contract.
-# FM_ACCOUNT_DIRECTORY_CUTOVER: direct-observe-passwd-home-v2
+# FM_ACCOUNT_DIRECTORY_CUTOVER: direct-pool-rotation-v3
 # Account homes are discovered under the current passwd user's
 # .local/share/agent-fleet/accounts/<vendor>/ tree without fixed counts.
+# Agent Fleet's read-only profile list is the source of pool eligibility:
+# direct crew selection considers only real homes registered in the fixed
+# <vendor>-crew pool, so a manual-only profile is never a crew candidate and no
+# caller-supplied compatibility alias can weaken that boundary.
+# Claude may also declare a separate claude-crew-last-resort pool.
+# It is consulted only when no usable claude-crew profile remains; Firstmate
+# never guesses that membership from credentials or identity metadata.
+# Claude eligibility also requires quota-axi's exact, non-secret per-directory
+# Keychain access marker.
+# That check happens after pool filtering and before rotation, so a reserved
+# profile cannot become a fallback and an unapproved crew profile fails honestly.
 # Codex selection removes that account's quota-axi window cache immediately
 # before every read, sets CODEX_HOME plus the account-isolated XDG_CACHE_HOME,
 # accepts only a fresh result with at least one numeric five_hour or weekly
-# window, and picks the account with the highest minimum remaining percentage.
-# A Codex account with no such freshly readable window is skipped as unhealthy.
+# window, and finds the accounts with the highest minimum remaining percentage.
+# Accounts without a freshly readable window do not participate in quota
+# ranking while any readable account remains.
+# If every eligible Codex account lacks a readable window, selection degrades
+# explicitly to rotation across the whole eligible set instead of failing or
+# choosing the stable first directory.
 # Claude quota is not currently distinguishable per config directory because
 # quota-axi cannot non-interactively resolve Claude's config-dir-specific macOS
 # Keychain credential.
 # Claude therefore never treats a missing usage window as account failure and
-# selects the first real account directory in stable bytewise sort order.
+# rotates across every eligible account in stable bytewise order.
+# Codex uses the same rotation only to break exact best-score ties.
+# Rotation is machine-global, persisted under the passwd user's
+# .local/state/firstmate/account-directory/, and serialized by an advisory file
+# lock so concurrent selections spread deterministically instead of racing back
+# to the first candidate.
 # Selection prints only the chosen absolute account home on stdout and logs
 # health, fallback, and choice diagnostics on stderr.
 # prepare selects the account and idempotently runs Herdr's own integration
 # installer with CODEX_HOME or CLAUDE_CONFIG_DIR set to the chosen home.
 # It verifies the installed per-profile hook before printing the chosen home.
 #
-# Credential state is read-only.
+# Credential and profile-registry state is read-only.
 # This script never logs in, imports credentials, or invokes a provider model.
-# Test-only command, root, passwd-home, Perl, and timeout overrides require
+# Test-only command, root, state-root, passwd-home, Perl, and timeout overrides require
 # FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1.
 set -u
 
@@ -136,6 +156,56 @@ herdr_command() {
   }
 }
 
+agent_fleet_command() {
+  local home binary
+  if test_lab_enabled && [ -n "${FM_ACCOUNT_DIRECTORY_AGENT_FLEET:-}" ]; then
+    printf '%s\n' "$FM_ACCOUNT_DIRECTORY_AGENT_FLEET"
+    return 0
+  fi
+  home=$(passwd_home) || return 1
+  binary=$home/.local/bin/agent-fleet
+  [ -x "$binary" ] && [ -f "$binary" ] && [ ! -L "$binary" ] || {
+    echo "error: agent-fleet is required to enforce direct crew-pool eligibility" >&2
+    return 1
+  }
+  printf '%s\n' "$binary"
+}
+
+read_profile_registry() { # <agent-fleet-bin>
+  local passwd_root
+  if test_lab_enabled; then
+    "$1" --format json profile list
+  else
+    passwd_root=$(passwd_home) || return 1
+    /usr/bin/env -i \
+      HOME="$passwd_root" \
+      PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+      "$1" --format json profile list
+  fi
+}
+
+rotation_state_root() {
+  local root home
+  if test_lab_enabled && [ -n "${FM_ACCOUNT_DIRECTORY_STATE_ROOT:-}" ]; then
+    root=$FM_ACCOUNT_DIRECTORY_STATE_ROOT
+  else
+    home=$(passwd_home) || return 1
+    root=$home/.local/state/firstmate/account-directory
+  fi
+  case "$root" in
+    *$'\n'*|*$'\r'*)
+      echo "error: account rotation state root contains a line break" >&2
+      return 1
+      ;;
+    /*) ;;
+    *)
+      echo "error: account rotation state root must be absolute: $root" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$root"
+}
+
 quota_timeout_seconds() {
   local timeout=15
   if test_lab_enabled && [ -n "${FM_ACCOUNT_DIRECTORY_QUOTA_TIMEOUT_SECONDS:-}" ]; then
@@ -203,23 +273,169 @@ valid_account_home() { # <vendor-dir> <candidate>
   esac
 }
 
-first_account_home() { # <vendor>
-  local vendor=$1 root vendor_dir candidate
+valid_pool_id() {
+  case "$1" in
+    ''|.*|-*|*[!A-Za-z0-9._-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+crew_pool() { # <vendor>
+  local vendor=$1 pool=$1-crew
+  valid_pool_id "$pool" || {
+    echo "error: invalid direct account crew pool '$pool'" >&2
+    return 1
+  }
+  printf '%s\n' "$pool"
+}
+
+last_resort_pool() { # <vendor>
+  local vendor=$1 pool=$1-crew-last-resort
+  valid_pool_id "$pool" || return 1
+  printf '%s\n' "$pool"
+}
+
+eligible_account_homes() { # <vendor> <pool>
+  local vendor=$1 pool=$2 root vendor_dir fleet_bin profiles candidate eligible matched marker marker_root marker_dir
   root=$(account_root) || return 1
   vendor_dir=$root/$vendor
   [ -d "$vendor_dir" ] && [ ! -L "$vendor_dir" ] || {
     echo "error: no account-directory root for $vendor at $vendor_dir" >&2
     return 1
   }
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: jq is required for direct account pool eligibility" >&2
+    return 1
+  }
+  fleet_bin=$(agent_fleet_command) || return 1
+  profiles=$(read_profile_registry "$fleet_bin" 2>/dev/null) || {
+    echo "error: agent-fleet could not read the account profile registry for $vendor crew selection" >&2
+    return 1
+  }
+  printf '%s\n' "$profiles" | jq -e \
+    'type == "object" and (.profiles | type) == "array"' >/dev/null 2>&1 || {
+    echo "error: agent-fleet returned an invalid account profile registry" >&2
+    return 1
+  }
+  eligible=$(printf '%s\n' "$profiles" | jq -r \
+    --arg vendor "$vendor" --arg pool "$pool" '
+      [.profiles[]
+          | select(
+              (.provider? == $vendor)
+              and (.home? | type) == "string"
+              and (.pools? | type) == "array"
+              and (.pools | all(type == "string"))
+              and ((.pools | index($pool)) != null)
+            )
+          | .home]
+      | unique[]
+    ' 2>/dev/null) || {
+    echo "error: agent-fleet returned invalid profile fields for $vendor crew selection" >&2
+    return 1
+  }
   LC_ALL=C
   export LC_ALL
   for candidate in "$vendor_dir"/*; do
     valid_account_home "$vendor_dir" "$candidate" || continue
+    matched=0
+    while IFS= read -r registered; do
+      [ "$candidate" = "$registered" ] || continue
+      matched=1
+      break
+    done <<EOF
+$eligible
+EOF
+    if [ "$matched" != 1 ]; then
+      log "$vendor account $candidate excluded from $pool: registry pool membership does not allow crew selection"
+      continue
+    fi
+    if [ "$vendor" = claude ]; then
+      marker_root=$candidate/.agent-fleet-quota-cache
+      marker_dir=$marker_root/quota-axi
+      marker=$marker_dir/claude-keychain-access-granted
+      if [ ! -d "$marker_root" ] || [ -L "$marker_root" ] \
+        || [ ! -d "$marker_dir" ] || [ -L "$marker_dir" ] \
+        || [ ! -f "$marker" ] || [ -L "$marker" ]; then
+        log "claude account $candidate excluded from $pool: missing quota-axi's non-secret Keychain access marker; captain approval is required"
+        continue
+      fi
+    fi
     printf '%s\n' "$candidate"
-    return 0
   done
-  echo "error: no account directories found for $vendor under $vendor_dir" >&2
-  return 1
+}
+
+rotate_account_home() { # <vendor> <pool> <candidate>...
+  local vendor=$1 pool=$2 state_root perl_bin selected
+  shift 2
+  [ "$#" -gt 0 ] || {
+    echo "error: no eligible account directories remain for $vendor crew pool '$pool'" >&2
+    return 1
+  }
+  state_root=$(rotation_state_root) || return 1
+  if [ -e "$state_root" ] || [ -L "$state_root" ]; then
+    [ -d "$state_root" ] && [ ! -L "$state_root" ] || {
+      echo "error: account rotation state root is not a real directory: $state_root" >&2
+      return 1
+    }
+  else
+    mkdir -p "$state_root" || {
+      echo "error: cannot create account rotation state root: $state_root" >&2
+      return 1
+    }
+  fi
+  chmod 700 "$state_root" 2>/dev/null || {
+    echo "error: cannot secure account rotation state root: $state_root" >&2
+    return 1
+  }
+  perl_bin=$(system_perl) || return 1
+  # shellcheck disable=SC2016 # Perl source is intentionally single-quoted.
+  selected=$(PERL5LIB='' PERL5OPT='' "$perl_bin" -e '
+    use strict;
+    use warnings;
+    use Fcntl qw(:DEFAULT :flock);
+
+    my ($state_root, $vendor, $pool, @homes) = @ARGV;
+    die "no candidates\n" unless @homes;
+    my $stem = "$vendor-$pool";
+    my $lock_path = "$state_root/$stem.lock";
+    my $state_path = "$state_root/$stem.last";
+
+    sysopen(my $lock, $lock_path, O_CREAT | O_RDWR, 0600)
+      or die "cannot open rotation lock\n";
+    chmod 0600, $lock_path;
+    local $SIG{ALRM} = sub { die "rotation lock timed out\n" };
+    alarm 10;
+    flock($lock, LOCK_EX) or die "cannot lock rotation state\n";
+    alarm 0;
+
+    my $last = "";
+    if (open(my $state, "<", $state_path)) {
+      $last = <$state> // "";
+      close $state;
+      chomp $last;
+    }
+    my $index = 0;
+    for my $i (0 .. $#homes) {
+      if ($homes[$i] eq $last) {
+        $index = ($i + 1) % scalar(@homes);
+        last;
+      }
+    }
+    my $selected = $homes[$index];
+    my $tmp = "$state_path.$$";
+    unlink $tmp if -e $tmp;
+    sysopen(my $out, $tmp, O_CREAT | O_EXCL | O_WRONLY, 0600)
+      or die "cannot create rotation state\n";
+    print {$out} "$selected\n" or die "cannot write rotation state\n";
+    close $out or die "cannot close rotation state\n";
+    rename $tmp, $state_path or die "cannot publish rotation state\n";
+    chmod 0600, $state_path;
+    print "$selected\n";
+  ' "$state_root" "$vendor" "$pool" "$@" 2>/dev/null) || {
+    echo "error: deterministic account rotation failed for $vendor crew pool '$pool'" >&2
+    return 1
+  }
+  printf '%s\n' "$selected"
 }
 
 fresh_codex_usage_json() { # <account-home> <quota-command>
@@ -280,12 +496,20 @@ EOF
 }
 
 select_codex() {
-  local root vendor_dir quota_bin candidate usage score
-  local best_home='' best_score=''
-  root=$(account_root) || return 1
-  vendor_dir=$root/codex
-  [ -d "$vendor_dir" ] && [ ! -L "$vendor_dir" ] || {
-    echo "error: no account-directory root for codex at $vendor_dir" >&2
+  local pool quota_bin candidate usage score selected eligible
+  local best_score=''
+  local -a best_homes=()
+  local -a candidates=()
+  pool=$(crew_pool codex) || return 1
+  eligible=$(eligible_account_homes codex "$pool") || return 1
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    candidates+=("$candidate")
+  done <<EOF
+$eligible
+EOF
+  [ "${#candidates[@]}" -gt 0 ] || {
+    echo "error: no eligible account directories remain for codex crew pool '$pool'" >&2
     return 1
   }
   command -v jq >/dev/null 2>&1 || {
@@ -295,8 +519,7 @@ select_codex() {
   quota_bin=$(quota_command) || return 1
   LC_ALL=C
   export LC_ALL
-  for candidate in "$vendor_dir"/*; do
-    valid_account_home "$vendor_dir" "$candidate" || continue
+  for candidate in "${candidates[@]}"; do
     usage=$(fresh_codex_usage_json "$candidate" "$quota_bin") || usage=
     score=$(codex_score "$usage") || score=
     if [ -z "$score" ]; then
@@ -304,24 +527,57 @@ select_codex() {
       continue
     fi
     log "codex account $candidate fresh remaining score=$score"
-    if [ -z "$best_home" ] || awk -v candidate_score="$score" -v current_score="$best_score" \
+    if [ "${#best_homes[@]}" -eq 0 ] || awk -v candidate_score="$score" -v current_score="$best_score" \
       'BEGIN { exit !(candidate_score > current_score) }'; then
-      best_home=$candidate
+      best_homes=("$candidate")
       best_score=$score
+    elif awk -v candidate_score="$score" -v current_score="$best_score" \
+      'BEGIN { exit !(candidate_score == current_score) }'; then
+      best_homes+=("$candidate")
     fi
   done
-  [ -n "$best_home" ] || {
-    echo "error: no healthy Codex account has a freshly readable usage window" >&2
-    return 1
-  }
-  log "selected codex account $best_home with fresh remaining score=$best_score"
-  printf '%s\n' "$best_home"
+  if [ "${#best_homes[@]}" -eq 0 ]; then
+    selected=$(rotate_account_home codex "$pool" "${candidates[@]}") || return 1
+    log "CODEX USAGE UNAVAILABLE: no eligible account has a freshly readable usage window; round-robin selection across ${#candidates[@]} eligible $pool accounts chose $selected"
+    printf '%s\n' "$selected"
+    return 0
+  fi
+  selected=$(rotate_account_home codex "$pool" "${best_homes[@]}") || return 1
+  log "selected codex account $selected with fresh remaining score=$best_score; round-robin among ${#best_homes[@]} tied accounts"
+  printf '%s\n' "$selected"
 }
 
 select_claude() {
-  local selected
-  selected=$(first_account_home claude) || return 1
-  log "CLAUDE USAGE UNREADABLE: quota-axi cannot non-interactively resolve Claude's config-dir-specific macOS Keychain credential today; selecting the first account directory by stable sort: $selected"
+  local pool fallback_pool selected eligible candidate
+  local -a candidates=()
+  pool=$(crew_pool claude) || return 1
+  eligible=$(eligible_account_homes claude "$pool") || return 1
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    candidates+=("$candidate")
+  done <<EOF
+$eligible
+EOF
+  if [ "${#candidates[@]}" -eq 0 ]; then
+    fallback_pool=$(last_resort_pool claude) || return 1
+    eligible=$(eligible_account_homes claude "$fallback_pool") || return 1
+    while IFS= read -r candidate; do
+      [ -n "$candidate" ] || continue
+      candidates+=("$candidate")
+    done <<EOF
+$eligible
+EOF
+    if [ "${#candidates[@]}" -gt 0 ]; then
+      pool=$fallback_pool
+      log "CLAUDE LAST RESORT: no usable claude-crew account remains; using the explicitly declared $fallback_pool tier"
+    fi
+  fi
+  [ "${#candidates[@]}" -gt 0 ] || {
+    echo "error: no usable Claude account directories remain in claude-crew or claude-crew-last-resort; every profile is reserved outside those pools or still needs captain Keychain approval" >&2
+    return 1
+  }
+  selected=$(rotate_account_home claude "$pool" "${candidates[@]}") || return 1
+  log "CLAUDE USAGE UNREADABLE: quota-axi cannot non-interactively resolve Claude's config-dir-specific macOS Keychain credential today; round-robin selection across ${#candidates[@]} eligible $pool accounts chose $selected"
   printf '%s\n' "$selected"
 }
 

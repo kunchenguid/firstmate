@@ -14,10 +14,11 @@
 #      explicit per-spawn harness arg still wins.
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
-#      and config/backlog-backend - down into each secondmate home's config/, so
-#      the secondmate's OWN crewmates, dispatch profiles, and backlog backend
-#      inherit the primary's settings. It is primary-authoritative (re-pushed at
-#      secondmate spawn, on the bootstrap secondmate sweep, and by config push).
+#      config/claude-crew-model, and config/backlog-backend - down into each
+#      secondmate home's config/, so the secondmate's OWN crewmates, dispatch
+#      profiles, Claude model anchor, and backlog backend inherit the primary's
+#      settings. It is primary-authoritative (re-pushed at secondmate spawn, on
+#      the bootstrap secondmate sweep, and by config push).
 #      config/secondmate-harness is deliberately NOT inherited (secondmates do
 #      not spawn secondmates).
 #   C) Model/effort pin. config/secondmate-harness may carry optional model and
@@ -114,6 +115,30 @@ ROWS
   pass "C1 fm-harness.sh secondmate-model/secondmate-effort resolve the optional tokens; bare harness stays empty (backward-compat)"
 }
 
+test_claude_crew_model_anchor_resolution() {
+  local cfg out err status
+  cfg="$TMP_ROOT/claude-crew-model/config"
+  mkdir -p "$cfg"
+  out=$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" claude-crew-model)
+  [ "$out" = claude-opus-5 ] || fail "absent Claude crew model config did not resolve the Opus 5 anchor: $out"
+
+  printf 'claude-opus-5-custom\n' > "$cfg/claude-crew-model"
+  out=$(FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" claude-crew-model)
+  [ "$out" = claude-opus-5-custom ] || fail "configured Claude crew model override was ignored: $out"
+
+  printf 'default\n' > "$cfg/claude-crew-model"
+  err="$TMP_ROOT/claude-crew-model/invalid.err"
+  if FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" claude-crew-model > /dev/null 2>"$err"; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "Claude crew model resolver accepted an inherited-default sentinel"
+  assert_contains "$(cat "$err")" "must contain one explicit Claude model id" \
+    "invalid Claude crew model error was not actionable"
+  pass "C2 fm-harness.sh resolves the Opus 5 anchor, honors one local override, and rejects inherited defaults"
+}
+
 # ===========================================================================
 # B) propagate_inheritable_config unit behavior
 # ===========================================================================
@@ -127,6 +152,7 @@ test_propagate_lib() {
   # 1. present source is copied
   printf '{"default":{"harness":"codex"}}\n' > "$src/crew-dispatch.json"
   printf 'codex\n' > "$src/crew-harness"
+  printf 'claude-opus-5\n' > "$src/claude-crew-model"
   printf 'manual\n' > "$src/backlog-backend"
   stdout="$d/clean-copy.out"
   stderr="$d/clean-copy.err"
@@ -135,6 +161,7 @@ test_propagate_lib() {
   [ ! -s "$stderr" ] || fail "clean copy wrote to stderr"
   [ "$(cat "$dest/crew-dispatch.json")" = '{"default":{"harness":"codex"}}' ] || fail "crew-dispatch.json not propagated"
   [ "$(cat "$dest/crew-harness")" = codex ] || fail "crew-harness not propagated"
+  [ "$(cat "$dest/claude-crew-model")" = claude-opus-5 ] || fail "Claude crew model anchor not propagated"
   [ "$(cat "$dest/backlog-backend")" = manual ] || fail "backlog-backend not propagated"
 
   # 2. idempotent: an unchanged re-run does not churn the mtime
@@ -151,10 +178,12 @@ test_propagate_lib() {
   # 3. a changed source value converges downstream
   printf '{"default":{"harness":"claude"}}\n' > "$src/crew-dispatch.json"
   printf 'claude\n' > "$src/crew-harness"
+  printf 'claude-opus-5-custom\n' > "$src/claude-crew-model"
   printf 'tasks-axi\n' > "$src/backlog-backend"
   propagate_inheritable_config "$src" "$dest"
   [ "$(cat "$dest/crew-dispatch.json")" = '{"default":{"harness":"claude"}}' ] || fail "changed dispatch profile did not converge"
   [ "$(cat "$dest/crew-harness")" = claude ] || fail "changed value did not converge"
+  [ "$(cat "$dest/claude-crew-model")" = claude-opus-5-custom ] || fail "changed Claude model anchor did not converge"
   [ "$(cat "$dest/backlog-backend")" = tasks-axi ] || fail "changed backlog backend did not converge"
 
   outside="$d/outside-target"
@@ -168,10 +197,11 @@ test_propagate_lib() {
   [ "$(cat "$outside")" = outside ] || fail "destination symlink target was overwritten"
 
   # 4. removing the source mirrors absence downstream (primary-authoritative)
-  rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/backlog-backend"
+  rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/claude-crew-model" "$src/backlog-backend"
   propagate_inheritable_config "$src" "$dest"
   [ -e "$dest/crew-dispatch.json" ] && fail "dispatch profile absence not mirrored downstream"
   [ -e "$dest/crew-harness" ] && fail "absence not mirrored downstream"
+  [ -e "$dest/claude-crew-model" ] && fail "Claude model anchor absence not mirrored downstream"
   [ -e "$dest/backlog-backend" ] && fail "backlog-backend absence not mirrored downstream"
 
   rm -f "$dest/crew-harness"
@@ -193,6 +223,7 @@ test_propagate_lib() {
   printf 'grok\n' > "$src/secondmate-harness"
   printf '{"default":{"harness":"codex"}}\n' > "$src/crew-dispatch.json"
   printf 'codex\n' > "$src/crew-harness"
+  printf 'claude-opus-5\n' > "$src/claude-crew-model"
   printf 'manual\n' > "$src/backlog-backend"
   rm -rf "$d/dest2"
   mkdir -p "$d/dest2"
@@ -200,6 +231,7 @@ test_propagate_lib() {
   [ -e "$d/dest2/secondmate-harness" ] && fail "secondmate-harness was inherited (must not be)"
   [ "$(cat "$d/dest2/crew-dispatch.json")" = '{"default":{"harness":"codex"}}' ] || fail "crew-dispatch.json not propagated alongside"
   [ "$(cat "$d/dest2/crew-harness")" = codex ] || fail "crew-harness not propagated alongside"
+  [ "$(cat "$d/dest2/claude-crew-model")" = claude-opus-5 ] || fail "Claude crew model not propagated alongside"
   [ "$(cat "$d/dest2/backlog-backend")" = manual ] || fail "backlog-backend not propagated alongside"
 
   # 6. nothing to propagate -> destination dir is never created (a true no-op)
@@ -212,7 +244,7 @@ test_propagate_lib() {
   # stderr warning and a skip, not a silent miss.
   guard_repo="$d/guard-repo"
   git init -q -b main "$guard_repo"
-  printf 'config/crew-harness\nconfig/backlog-backend\n' > "$guard_repo/.gitignore"
+  printf 'config/crew-harness\nconfig/claude-crew-model\nconfig/backlog-backend\n' > "$guard_repo/.gitignore"
   printf 'guard\n' > "$guard_repo/README.md"
   git -C "$guard_repo" add -A
   git -C "$guard_repo" commit -qm guard
@@ -263,6 +295,7 @@ make_fixture_clone() {
 make_seeded_home() {
   local home=$1 id=$2
   make_fixture_clone "$home"
+  printf 'config/claude-crew-model\n' >> "$home/.git/info/exclude"
   mkdir -p "$home/data"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter\n' > "$home/data/charter.md"
@@ -316,6 +349,7 @@ test_spawn_split_and_inherit() {
   mkdir -p "$w/home/config"
   printf '{"default":{"harness":"claude","model":"haiku","effort":"low"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'claude\n' > "$w/home/config/crew-harness"
+  printf 'claude-opus-5\n' > "$w/home/config/claude-crew-model"
   printf 'codex\n' > "$w/home/config/secondmate-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   make_seeded_home "$sm" sm
@@ -330,6 +364,8 @@ test_spawn_split_and_inherit() {
     || fail "split: home crew-harness not inherited as claude (got '$(cat "$sm/config/crew-harness" 2>/dev/null)')"
   [ "$(cat "$sm/config/crew-dispatch.json" 2>/dev/null)" = '{"default":{"harness":"claude","model":"haiku","effort":"low"}}' ] \
     || fail "split: home crew-dispatch.json not inherited"
+  [ "$(cat "$sm/config/claude-crew-model" 2>/dev/null)" = claude-opus-5 ] \
+    || fail "split: home Claude crew model anchor not inherited"
   [ "$(cat "$sm/config/backlog-backend" 2>/dev/null)" = manual ] \
     || fail "split: home backlog-backend not inherited as manual"
   [ -e "$sm/config/secondmate-harness" ] \
@@ -735,7 +771,7 @@ new_world() {
   {
     printf 'projects/\nstate/\ndata/\n.no-mistakes/\n'
     [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
-    printf 'config/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n'
+    printf 'config/crew-harness\nconfig/claude-crew-model\nconfig/secondmate-harness\nconfig/backlog-backend\n'
   } > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
   printf 'r1\n' > "$w/main/README.md"
@@ -814,6 +850,7 @@ test_bootstrap_sweep_propagates_and_reconverges() {
   # Initial push: primary crew-harness=codex, secondmate-harness=grok (must NOT flow).
   printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'codex\n' > "$w/home/config/crew-harness"
+  printf 'claude-opus-5\n' > "$w/home/config/claude-crew-model"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'grok\n' > "$w/home/config/secondmate-harness"
   run_bootstrap "$w" >/dev/null
@@ -821,6 +858,8 @@ test_bootstrap_sweep_propagates_and_reconverges() {
     || fail "sweep: crew-harness not pushed into the live home"
   [ "$(cat "$w/sm/config/crew-dispatch.json" 2>/dev/null)" = '{"default":{"harness":"codex"}}' ] \
     || fail "sweep: crew-dispatch.json not pushed into the live home"
+  [ "$(cat "$w/sm/config/claude-crew-model" 2>/dev/null)" = claude-opus-5 ] \
+    || fail "sweep: Claude crew model anchor not pushed into the live home"
   [ "$(cat "$w/sm/config/backlog-backend" 2>/dev/null)" = manual ] \
     || fail "sweep: backlog-backend not pushed into the live home"
   [ -e "$w/sm/config/secondmate-harness" ] \
@@ -829,22 +868,28 @@ test_bootstrap_sweep_propagates_and_reconverges() {
   # Re-converge: primary changes inheritable values; the home follows on the next sweep.
   printf '{"default":{"harness":"claude"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'claude\n' > "$w/home/config/crew-harness"
+  printf 'claude-opus-5-custom\n' > "$w/home/config/claude-crew-model"
   printf 'tasks-axi\n' > "$w/home/config/backlog-backend"
   run_bootstrap "$w" >/dev/null
   [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = claude ] \
     || fail "sweep: home did not re-converge to the primary's new crew-harness"
   [ "$(cat "$w/sm/config/crew-dispatch.json" 2>/dev/null)" = '{"default":{"harness":"claude"}}' ] \
     || fail "sweep: home did not re-converge to the primary's new crew-dispatch.json"
+  [ "$(cat "$w/sm/config/claude-crew-model" 2>/dev/null)" = claude-opus-5-custom ] \
+    || fail "sweep: home did not re-converge to the primary's new Claude crew model anchor"
   [ "$(cat "$w/sm/config/backlog-backend" 2>/dev/null)" = tasks-axi ] \
     || fail "sweep: home did not re-converge to the primary's new backlog-backend"
 
   # Mirror absence: primary clears inheritable config; the home's copies are removed.
-  rm -f "$w/home/config/crew-dispatch.json" "$w/home/config/crew-harness" "$w/home/config/backlog-backend"
+  rm -f "$w/home/config/crew-dispatch.json" "$w/home/config/crew-harness" \
+    "$w/home/config/claude-crew-model" "$w/home/config/backlog-backend"
   run_bootstrap "$w" >/dev/null
   [ -e "$w/sm/config/crew-dispatch.json" ] \
     && fail "sweep: home crew-dispatch.json not removed after the primary cleared it"
   [ -e "$w/sm/config/crew-harness" ] \
     && fail "sweep: home crew-harness not removed after the primary cleared it"
+  [ -e "$w/sm/config/claude-crew-model" ] \
+    && fail "sweep: home Claude crew model anchor not removed after the primary cleared it"
   [ -e "$w/sm/config/backlog-backend" ] \
     && fail "sweep: home backlog-backend not removed after the primary cleared it"
   pass "B7 bootstrap sweep pushes, re-converges, and mirrors absence; never inherits secondmate-harness"
@@ -860,12 +905,15 @@ test_bootstrap_sweep_propagates_when_tracked_current() {
 
   printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'codex\n' > "$w/home/config/crew-harness"
+  printf 'claude-opus-5\n' > "$w/home/config/claude-crew-model"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   run_bootstrap "$w" >/dev/null
   [ "$(cat "$w/sm/config/crew-dispatch.json" 2>/dev/null)" = '{"default":{"harness":"codex"}}' ] \
     || fail "crew-dispatch.json did not propagate to a tracked-current home"
   [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = codex ] \
     || fail "config did not propagate to a tracked-current home"
+  [ "$(cat "$w/sm/config/claude-crew-model" 2>/dev/null)" = claude-opus-5 ] \
+    || fail "Claude model anchor did not propagate to a tracked-current home"
   [ "$(cat "$w/sm/config/backlog-backend" 2>/dev/null)" = manual ] \
     || fail "backlog-backend did not propagate to a tracked-current home"
   pass "B8 bootstrap sweep propagates config even when the home's tracked files are already current"
@@ -884,6 +932,7 @@ test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home() {
 
   printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'codex\n' > "$w/home/config/crew-harness"
+  printf 'claude-opus-5\n' > "$w/home/config/claude-crew-model"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   out=$(run_bootstrap "$w")
 
@@ -893,6 +942,8 @@ test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home() {
     || fail "stale dispatch: crew-dispatch.json was copied before the home ignored it"
   [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = codex ] \
     || fail "stale dispatch: existing ignored config stopped propagating"
+  [ "$(cat "$w/sm/config/claude-crew-model" 2>/dev/null)" = claude-opus-5 ] \
+    || fail "stale dispatch: Claude model anchor stopped propagating"
   [ "$(cat "$w/sm/config/backlog-backend" 2>/dev/null)" = manual ] \
     || fail "stale dispatch: backlog backend stopped propagating"
   status=$(git -C "$w/sm" status --porcelain -- config/crew-dispatch.json)
@@ -958,6 +1009,7 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
 
   printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'codex\n' > "$w/home/config/crew-harness"
+  printf 'claude-opus-5\n' > "$w/home/config/claude-crew-model"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   err="$w/config-push-basic.err"
   out=$(run_config_push "$w" 2>"$err"); status=$?
@@ -971,6 +1023,8 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
     "config push did not report crew-dispatch as pushed"
   assert_contains "$out" "crew-harness: pushed" \
     "config push did not report crew-harness as pushed"
+  assert_contains "$out" "claude-crew-model: pushed" \
+    "config push did not report Claude crew model as pushed"
   assert_contains "$out" "backlog-backend: pushed" \
     "config push did not report backlog-backend as pushed"
   assert_not_contains "$out" "NUDGE_SECONDMATES" \
@@ -985,6 +1039,8 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
     "idempotent config push did not report crew-dispatch as unchanged"
   assert_contains "$out2" "crew-harness: unchanged" \
     "idempotent config push did not report crew-harness as unchanged"
+  assert_contains "$out2" "claude-crew-model: unchanged" \
+    "idempotent config push did not report Claude crew model as unchanged"
   assert_contains "$out2" "backlog-backend: unchanged" \
     "idempotent config push did not report backlog-backend as unchanged"
   pass "B12 config-push propagates via shared live discovery, reports items, and does not fast-forward or nudge"
@@ -1060,6 +1116,7 @@ test_config_push_exits_nonzero_on_copy_error() {
 
 test_harness_resolution
 test_secondmate_model_effort_tokens
+test_claude_crew_model_anchor_resolution
 test_propagate_lib
 test_spawn_split_and_inherit
 test_spawn_backward_compat_crew_fallback

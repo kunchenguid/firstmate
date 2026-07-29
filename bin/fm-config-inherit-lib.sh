@@ -4,8 +4,9 @@
 # home's config/, so a secondmate's OWN crewmates inherit the primary's settings
 # (e.g. primary config/crew-dispatch.json makes a secondmate use the same dispatch
 # profile rules, primary config/crew-harness=codex makes a secondmate's crewmates
-# spawn on codex too, and primary config/backlog-backend=manual makes that home
-# hand-edit backlog files too).
+# spawn on codex too, primary config/claude-crew-model pins their Claude model,
+# and primary config/backlog-backend=manual makes that home hand-edit backlog
+# files too).
 #
 # Usage: . bin/fm-config-inherit-lib.sh   (no FM_* setup required)
 #
@@ -28,7 +29,7 @@
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend account-routing-mode}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness claude-crew-model backlog-backend account-routing-mode}"
 
 copy_inheritable_file() {
   local src=$1 dest=$2 dest_parent tmp
