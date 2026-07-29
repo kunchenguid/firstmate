@@ -2189,6 +2189,16 @@ fm_backend_herdr_busy_state() {  # <target>
 FM_BACKEND_HERDR_SUBMIT_POLLS=${FM_BACKEND_HERDR_SUBMIT_POLLS:-6}
 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=${FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP:-0.6}
 
+# FM_BACKEND_HERDR_BLOCKED_CONFIRM_DELAY (default 3): seconds to wait before
+# re-checking a `blocked` transition. herdr can emit transient `blocked` events
+# when the OpenCode TUI shows a brief input prompt between tool calls; the
+# re-check queries the live agent status and absorbs the transition if the
+# agent has already resumed `working`. This also covers long-running commands
+# (e.g. `sleep 600`) where herdr correctly reports `working` during execution.
+# A real wedge (permission dialog, stuck prompt) persists far longer than this
+# delay, so genuine escalations are only delayed by this many seconds.
+FM_BACKEND_HERDR_BLOCKED_CONFIRM_DELAY=${FM_BACKEND_HERDR_BLOCKED_CONFIRM_DELAY:-3}
+
 fm_backend_herdr_submit_confirm_budget() {  # <caller-budget-seconds>
   awk -v b="${1:-0}" -v m="$FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP" 'BEGIN {
     b += 0
@@ -2383,7 +2393,7 @@ fm_backend_herdr_escalation_marker() {  # <state_dir> <window>
 # with no output. <session> reconstructs the window ("<session>:<pane_id>") for
 # the marker key, matching the watcher's own key scheme.
 fm_backend_herdr_apply_transition() {  # <state_dir> <session> <record>
-  local state=$1 session=$2 record=$3 pane_id to action window marker
+  local state=$1 session=$2 record=$3 pane_id to action window marker current_status
   pane_id=$(fm_transition_pane_id "$record")
   [ -n "$pane_id" ] || return 1
   to=$(fm_transition_to_status "$record")
@@ -2393,6 +2403,25 @@ fm_backend_herdr_apply_transition() {  # <state_dir> <session> <record>
   case "$action" in
     actionable)
       if [ ! -e "$marker" ]; then
+        # Re-check: herdr can emit transient `blocked` transitions when the
+        # OpenCode TUI shows a brief input prompt between tool calls. Wait a
+        # short time, then re-query the live agent status. If the agent has
+        # already resumed `working` (or gone `idle`/`done`), absorb the
+        # transition instead of escalating a false alarm. This also covers
+        # long-running commands (e.g. `sleep 600`) where herdr reports
+        # `working` during command execution. A real wedge (permission dialog,
+        # stuck prompt) persists far longer than the confirm delay, so genuine
+        # escalations are only delayed by that many seconds.
+        # Set FM_BACKEND_HERDR_BLOCKED_CONFIRM_DELAY=0 to skip the re-check
+        # (used by tests that lack a live herdr server).
+        if [ "${FM_BACKEND_HERDR_BLOCKED_CONFIRM_DELAY:-3}" != "0" ]; then
+          sleep "$FM_BACKEND_HERDR_BLOCKED_CONFIRM_DELAY"
+          current_status=$(fm_backend_herdr_agent_status_raw "$session" "$pane_id")
+          if [ -n "$current_status" ] && [ "$current_status" != "blocked" ]; then
+            command -v triage_log >/dev/null 2>&1 && triage_log "absorbed transient blocked transition (agent now $current_status): $window"
+            return 1
+          fi
+        fi
         printf '%s' "$record"
         return 0
       fi

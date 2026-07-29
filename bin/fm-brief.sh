@@ -262,6 +262,10 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Use the existing global git identity for every commit. Never set \`user.name\`, \`user.email\`,
+   \`GIT_AUTHOR_NAME\`, \`GIT_AUTHOR_EMAIL\`, \`GIT_COMMITTER_NAME\`, or \`GIT_COMMITTER_EMAIL\`
+   to invent an agent identity. The captain's global git config already has the correct author;
+   do not override it.
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -374,6 +378,10 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Use the existing global git identity for every commit. Never set \`user.name\`, \`user.email\`,
+   \`GIT_AUTHOR_NAME\`, \`GIT_AUTHOR_EMAIL\`, \`GIT_COMMITTER_NAME\`, or \`GIT_COMMITTER_EMAIL\`
+   to invent an agent identity. The captain's global git config already has the correct author;
+   do not override it.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
