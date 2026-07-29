@@ -18,6 +18,17 @@
 #   (l) an ignored untracked directory with an incoming tracked collision refuses
 #   (m) staged mode-only dirt matching the incoming mode remains supported
 #   (n) an ignored file nested under an unignored directory keeps its hash proof
+#   (o) ignored symlinks preserve their readlink target without following it
+#   (p) target content changes behind an ignored symlink do not change its proof
+#   (q) ignored special files still refuse
+#   (r) large unresolved-path diagnostics are bounded
+#   (s) staged tracked-to-ignored symlinks are compared without following them
+#   (t) index flags cannot hide staged symlink target drift
+#   (u) index flags cannot hide staged symlink type drift
+#   (v) replacement refs cannot substitute staged symlink bytes
+#   (w) NUL bytes in a staged symlink blob cannot collapse during comparison
+#   (x) nested directly ignored directories are preserved without descending
+#   (y) current parent ignores cannot hide a narrower target directory boundary
 set -u
 
 # shellcheck disable=SC1091
@@ -410,6 +421,358 @@ test_staged_mode_only_dirt_matching_branch_permits() {
   pass "fm-merge-local retains the incoming mode for staged mode-only dirt"
 }
 
+test_branch_ignored_symlink_is_preserved() {
+  local case_dir link_target
+  case_dir=$(make_case ignored-symlink)
+  printf 'runtime-link\n' >"$case_dir/branch/.gitignore"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" commit -qm "ignore runtime symlink"
+  ln -s missing-runtime-target "$case_dir/project/runtime-link"
+  link_target=$(readlink "$case_dir/project/runtime-link")
+
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "ignored-symlink: merge should preserve an ignored symlink"
+
+  [ -L "$case_dir/project/runtime-link" ] \
+    || fail "ignored-symlink: merge removed the ignored symlink"
+  [ "$(readlink "$case_dir/project/runtime-link")" = "$link_target" ] \
+    || fail "ignored-symlink: merge changed the ignored symlink target"
+  assert_main_reached_branch "$case_dir" \
+    "ignored-symlink: main did not fast-forward to the task branch"
+  pass "fm-merge-local preserves an ignored symlink without following it"
+}
+
+test_branch_ignored_symlink_ignores_target_content_changes() {
+  local case_dir link_target
+  case_dir=$(make_case ignored-symlink-target-change)
+  printf 'runtime-link\n' >"$case_dir/branch/.gitignore"
+  printf 'tracked target\n' >"$case_dir/branch/tracked.txt"
+  git -C "$case_dir/branch" add .gitignore tracked.txt
+  git -C "$case_dir/branch" commit -qm "change target behind ignored symlink"
+  ln -s tracked.txt "$case_dir/project/runtime-link"
+  link_target=$(readlink "$case_dir/project/runtime-link")
+
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "ignored-symlink-target-change: target content changes must not invalidate the link proof"
+
+  [ -L "$case_dir/project/runtime-link" ] \
+    || fail "ignored-symlink-target-change: merge removed the ignored symlink"
+  [ "$(readlink "$case_dir/project/runtime-link")" = "$link_target" ] \
+    || fail "ignored-symlink-target-change: merge changed the ignored symlink target"
+  assert_grep 'tracked target' "$case_dir/project/runtime-link" \
+    "ignored-symlink-target-change: incoming tracked target did not land"
+  assert_main_reached_branch "$case_dir" \
+    "ignored-symlink-target-change: main did not fast-forward to the task branch"
+  pass "fm-merge-local proves an ignored symlink independently of its target content"
+}
+
+test_staged_tracked_to_ignored_symlink_is_preserved() {
+  local case_dir link_target
+  case_dir=$(make_case staged-ignored-symlink)
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s missing-initial-target "$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  git -C "$case_dir/project" commit -qm "track runtime symlink"
+  git -C "$case_dir/branch" merge -q --ff-only main
+  git -C "$case_dir/branch" rm -q --cached runtime-state.txt
+  printf 'runtime-state.txt\n' >"$case_dir/branch/.gitignore"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" commit -qm "ignore runtime symlink"
+  mkdir "$case_dir/directory-target"
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s ../directory-target "$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  link_target=$(readlink "$case_dir/project/runtime-state.txt")
+
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "staged-ignored-symlink: merge should preserve a staged ignored symlink"
+
+  [ -L "$case_dir/project/runtime-state.txt" ] \
+    || fail "staged-ignored-symlink: merge removed the ignored symlink"
+  [ "$(readlink "$case_dir/project/runtime-state.txt")" = "$link_target" ] \
+    || fail "staged-ignored-symlink: merge changed the staged symlink target"
+  assert_path_clean "$case_dir/project" runtime-state.txt \
+    "staged-ignored-symlink: preserved symlink remained dirty after merge"
+  assert_main_reached_branch "$case_dir" \
+    "staged-ignored-symlink: main did not fast-forward to the task branch"
+  pass "fm-merge-local preserves staged ignored symlinks without following them"
+}
+
+test_assume_unchanged_does_not_hide_staged_symlink_drift() {
+  local before case_dir rc
+  case_dir=$(make_case staged-ignored-symlink-assume-unchanged)
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s missing-initial-target "$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  git -C "$case_dir/project" commit -qm "track runtime symlink"
+  git -C "$case_dir/branch" merge -q --ff-only main
+  git -C "$case_dir/branch" rm -q --cached runtime-state.txt
+  printf 'runtime-state.txt\n' >"$case_dir/branch/.gitignore"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" commit -qm "ignore runtime symlink"
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s staged-target "$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  git -C "$case_dir/project" update-index --assume-unchanged -- runtime-state.txt
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s unstaged-target "$case_dir/project/runtime-state.txt"
+  before=$(git -C "$case_dir/project" rev-parse main)
+
+  set +e
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "staged-ignored-symlink-assume-unchanged: merge should refuse target drift"
+  assert_grep 'staged content or mode does not match' "$case_dir/stderr" \
+    "staged-ignored-symlink-assume-unchanged: refusal diagnostic changed"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "staged-ignored-symlink-assume-unchanged: refusal advanced main"
+  [ "$(readlink "$case_dir/project/runtime-state.txt")" = "unstaged-target" ] \
+    || fail "staged-ignored-symlink-assume-unchanged: refusal changed the link"
+  pass "fm-merge-local rejects staged symlink drift hidden by index flags"
+}
+
+test_assume_unchanged_does_not_hide_staged_symlink_type_drift() {
+  local before case_dir rc
+  case_dir=$(make_case staged-ignored-symlink-type-drift)
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s missing-initial-target "$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  git -C "$case_dir/project" commit -qm "track runtime symlink"
+  git -C "$case_dir/branch" merge -q --ff-only main
+  git -C "$case_dir/branch" rm -q --cached runtime-state.txt
+  printf 'runtime-state.txt\n' >"$case_dir/branch/.gitignore"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" commit -qm "ignore runtime symlink"
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s staged-target "$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  git -C "$case_dir/project" update-index --assume-unchanged -- runtime-state.txt
+  rm "$case_dir/project/runtime-state.txt"
+  printf '%s' staged-target >"$case_dir/project/runtime-state.txt"
+  before=$(git -C "$case_dir/project" rev-parse main)
+
+  set +e
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "staged-ignored-symlink-type-drift: merge should refuse type drift"
+  assert_grep 'staged content or mode does not match' "$case_dir/stderr" \
+    "staged-ignored-symlink-type-drift: refusal diagnostic changed"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "staged-ignored-symlink-type-drift: refusal advanced main"
+  if [ ! -f "$case_dir/project/runtime-state.txt" ] \
+    || [ -L "$case_dir/project/runtime-state.txt" ]; then
+    fail "staged-ignored-symlink-type-drift: refusal changed the file type"
+  fi
+  assert_grep 'staged-target' "$case_dir/project/runtime-state.txt" \
+    "staged-ignored-symlink-type-drift: refusal changed the file content"
+  pass "fm-merge-local rejects staged symlink type drift hidden by index flags"
+}
+
+test_replace_ref_does_not_substitute_staged_symlink_blob() {
+  local before case_dir index_oid rc replacement_oid
+  case_dir=$(make_case staged-ignored-symlink-replace-ref)
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s missing-initial-target "$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  git -C "$case_dir/project" commit -qm "track runtime symlink"
+  git -C "$case_dir/branch" merge -q --ff-only main
+  git -C "$case_dir/branch" rm -q --cached runtime-state.txt
+  printf 'runtime-state.txt\n' >"$case_dir/branch/.gitignore"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" commit -qm "ignore runtime symlink"
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s staged-target "$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  index_oid=$(
+    git -C "$case_dir/project" ls-files --stage -- runtime-state.txt \
+      | awk '{ print $2 }'
+  )
+  replacement_oid=$(
+    printf '%s' replacement-target \
+      | git -C "$case_dir/project" hash-object -w --stdin
+  )
+  git -C "$case_dir/project" replace "$index_oid" "$replacement_oid"
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s replacement-target "$case_dir/project/runtime-state.txt"
+  before=$(git -C "$case_dir/project" rev-parse main)
+
+  set +e
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "staged-ignored-symlink-replace-ref: merge should refuse substituted bytes"
+  assert_grep 'staged content or mode does not match' "$case_dir/stderr" \
+    "staged-ignored-symlink-replace-ref: refusal diagnostic changed"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "staged-ignored-symlink-replace-ref: refusal advanced main"
+  [ "$(readlink "$case_dir/project/runtime-state.txt")" = "replacement-target" ] \
+    || fail "staged-ignored-symlink-replace-ref: refusal changed the link"
+  pass "fm-merge-local rejects staged symlink substitution by replacement refs"
+}
+
+test_nul_in_staged_symlink_blob_refuses() {
+  local before case_dir index_oid rc
+  case_dir=$(make_case staged-ignored-symlink-nul)
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s initial-target "$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  git -C "$case_dir/project" commit -qm "track runtime symlink"
+  git -C "$case_dir/branch" merge -q --ff-only main
+  git -C "$case_dir/branch" rm -q --cached runtime-state.txt
+  printf 'runtime-state.txt\n' >"$case_dir/branch/.gitignore"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" commit -qm "ignore runtime symlink"
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s staged-target "$case_dir/project/runtime-state.txt"
+  index_oid=$(
+    printf 'staged\0-target' \
+      | git -C "$case_dir/project" hash-object -w --stdin
+  )
+  git -C "$case_dir/project" update-index --add \
+    --cacheinfo "120000,$index_oid,runtime-state.txt"
+  before=$(git -C "$case_dir/project" rev-parse main)
+
+  set +e
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "staged-ignored-symlink-nul: merge should refuse distinct binary staged bytes"
+  assert_grep 'staged content or mode does not match' "$case_dir/stderr" \
+    "staged-ignored-symlink-nul: refusal diagnostic changed"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "staged-ignored-symlink-nul: refusal advanced main"
+  [ "$(readlink "$case_dir/project/runtime-state.txt")" = "staged-target" ] \
+    || fail "staged-ignored-symlink-nul: refusal changed the link"
+  pass "fm-merge-local compares staged symlink blobs without Bash byte loss"
+}
+
+test_nested_directly_ignored_directory_preserves_special_entries() {
+  local case_dir
+  case_dir=$(make_case nested-ignored-directory-special-entry)
+  printf 'outer/cache/\n' >"$case_dir/branch/.gitignore"
+  printf 'incoming\n' >"$case_dir/branch/incoming.txt"
+  git -C "$case_dir/branch" add .gitignore incoming.txt
+  git -C "$case_dir/branch" commit -qm "ignore nested runtime cache"
+  mkdir -p "$case_dir/project/outer/cache"
+  mkfifo "$case_dir/project/outer/cache/runtime.pipe"
+
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "nested-ignored-directory-special-entry: merge should preserve the ignored directory"
+
+  [ -d "$case_dir/project/outer/cache" ] \
+    || fail "nested-ignored-directory-special-entry: merge removed the ignored directory"
+  [ -p "$case_dir/project/outer/cache/runtime.pipe" ] \
+    || fail "nested-ignored-directory-special-entry: merge inspected or changed the FIFO"
+  assert_main_reached_branch "$case_dir" \
+    "nested-ignored-directory-special-entry: main did not fast-forward to the task branch"
+  pass "fm-merge-local stops at nested target-ignored directory boundaries"
+}
+
+test_currently_ignored_parent_reclassifies_nested_target_directory() {
+  local case_dir
+  case_dir=$(make_case current-ignore-to-nested-target-ignore)
+  printf 'outer/\n' >"$case_dir/project/.gitignore"
+  git -C "$case_dir/project" add .gitignore
+  git -C "$case_dir/project" commit -qm "ignore outer runtime directory"
+  git -C "$case_dir/branch" merge -q --ff-only main
+  printf 'outer/cache/\n' >"$case_dir/branch/.gitignore"
+  printf 'incoming\n' >"$case_dir/branch/incoming.txt"
+  git -C "$case_dir/branch" add .gitignore incoming.txt
+  git -C "$case_dir/branch" commit -qm "narrow runtime directory ignore"
+  mkdir -p "$case_dir/project/outer/cache"
+  mkfifo "$case_dir/project/outer/cache/runtime.pipe"
+
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "current-ignore-to-nested-target-ignore: merge should preserve the nested ignored directory"
+
+  [ -d "$case_dir/project/outer/cache" ] \
+    || fail "current-ignore-to-nested-target-ignore: merge removed the nested ignored directory"
+  [ -p "$case_dir/project/outer/cache/runtime.pipe" ] \
+    || fail "current-ignore-to-nested-target-ignore: merge inspected or changed the FIFO"
+  assert_main_reached_branch "$case_dir" \
+    "current-ignore-to-nested-target-ignore: main did not fast-forward to the task branch"
+  pass "fm-merge-local reclassifies currently ignored parents against target rules"
+}
+
+test_branch_ignored_special_file_refuses() {
+  local before case_dir rc
+  case_dir=$(make_case ignored-special-file)
+  git -C "$case_dir/branch" rm -q --cached runtime-state.txt
+  printf 'runtime-state.txt\n' >"$case_dir/branch/.gitignore"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" commit -qm "leave runtime state ignored"
+  rm "$case_dir/project/runtime-state.txt"
+  mkfifo "$case_dir/project/runtime-state.txt"
+  before=$(git -C "$case_dir/project" rev-parse main)
+
+  set +e
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ignored-special-file: merge should refuse"
+  assert_grep 'runtime-state.txt' "$case_dir/stderr" \
+    "ignored-special-file: refusal did not name the special file"
+  assert_grep 'ignored path is neither absent nor hashable as a file' \
+    "$case_dir/stderr" \
+    "ignored-special-file: refusal diagnostic changed"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "ignored-special-file: refusal advanced main"
+  pass "fm-merge-local still refuses an ignored non-file, non-symlink entry"
+}
+
+test_unresolved_path_diagnostic_is_bounded() {
+  local before case_dir diagnostic_count i rc
+  case_dir=$(make_case bounded-diagnostic)
+  for i in $(seq -w 1 55); do
+    printf 'tracked runtime state\n' >"$case_dir/project/runtime-$i.pipe"
+  done
+  git -C "$case_dir/project" add runtime-*.pipe
+  git -C "$case_dir/project" commit -qm "track runtime state"
+  git -C "$case_dir/branch" merge -q --ff-only main
+  git -C "$case_dir/branch" rm -q --cached runtime-*.pipe
+  printf 'runtime-*.pipe\n' >"$case_dir/branch/.gitignore"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" commit -qm "leave runtime pipes ignored"
+  for i in $(seq -w 1 55); do
+    rm "$case_dir/project/runtime-$i.pipe"
+    mkfifo "$case_dir/project/runtime-$i.pipe"
+  done
+  before=$(git -C "$case_dir/project" rev-parse main)
+
+  set +e
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "bounded-diagnostic: merge should refuse"
+  diagnostic_count=$(grep -c '^  - ' "$case_dir/stderr")
+  [ "$diagnostic_count" -eq 50 ] \
+    || fail "bounded-diagnostic: expected 50 printed paths, got $diagnostic_count"
+  assert_grep 'runtime-01.pipe' "$case_dir/stderr" \
+    "bounded-diagnostic: refusal omitted the first unresolved path"
+  assert_grep 'runtime-50.pipe' "$case_dir/stderr" \
+    "bounded-diagnostic: refusal omitted the fiftieth unresolved path"
+  if grep -q 'runtime-51.pipe' "$case_dir/stderr"; then
+    fail "bounded-diagnostic: refusal printed paths beyond the cap"
+  fi
+  assert_grep '+5 more unresolved paths' "$case_dir/stderr" \
+    "bounded-diagnostic: refusal omitted the remaining-path summary"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "bounded-diagnostic: refusal advanced main"
+  pass "fm-merge-local bounds large unresolved-path diagnostics"
+}
+
 test_diverged_branch_still_refuses() {
   local case_dir rc
   case_dir=$(make_case diverged)
@@ -621,6 +984,17 @@ test_branch_ignored_directory_with_incoming_collision_refuses
 test_branch_ignored_directory_with_casefolded_incoming_collision_refuses
 test_tracked_path_replaced_by_directory_refuses_staged_state
 test_staged_mode_only_dirt_matching_branch_permits
+test_branch_ignored_symlink_is_preserved
+test_branch_ignored_symlink_ignores_target_content_changes
+test_staged_tracked_to_ignored_symlink_is_preserved
+test_assume_unchanged_does_not_hide_staged_symlink_drift
+test_assume_unchanged_does_not_hide_staged_symlink_type_drift
+test_replace_ref_does_not_substitute_staged_symlink_blob
+test_nul_in_staged_symlink_blob_refuses
+test_nested_directly_ignored_directory_preserves_special_entries
+test_currently_ignored_parent_reclassifies_nested_target_directory
+test_branch_ignored_special_file_refuses
+test_unresolved_path_diagnostic_is_bounded
 test_diverged_branch_still_refuses
 test_non_default_checkout_still_refuses
 test_mixed_resolved_and_unresolved_refuses
