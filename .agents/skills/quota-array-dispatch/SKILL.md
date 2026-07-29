@@ -20,16 +20,16 @@ Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-s
 ## Collect facts
 
 Run `quota-axi --json` once per intake and reuse that snapshot for every candidate.
-For each candidate, preserve its explicit `harness`, `model`, and `provider` tuple and record only the following inspectable facts; `harness-adapters` owns identity, and the model or provider never determines the harness:
+For each candidate, preserve explicit `harness`, `model`, and `provider`; `harness-adapters` owns identity, and model/provider never infer harness:
 
 - task/profile fit and required reasoning class
-- raw applicable headroom (`effectivePercentRemaining` or the tightest applicable remaining percentage)
-- effective pace status, signed reserve per applicable window, and worst applicable reserve (`worstReservePercentPoints` when present, else the minimum signed reserve)
-- whether any applicable window or effective summary is ahead of reset, or any applicable pace is `unknown`
+- raw applicable headroom (`effectivePercentRemaining` or tightest applicable percentage)
+- effective pace, signed reserve per window, and worst reserve (`worstReservePercentPoints` or minimum signed reserve)
+- whether applicable windows/summary are ahead, or pace is `unknown`
 - schema note when pace fields are absent
 
-Stale raw windows are diagnostic only, never current headroom.
-Read every bounding window named by `boundedBy`, `limitingWindowIds`, `aheadWindowIds`, `behindWindowIds`, `onPaceWindowIds`, and `unknownWindowIds`.
+Stale raw windows are diagnostic, never headroom.
+Read all windows named by `boundedBy`, `limitingWindowIds`, `aheadWindowIds`, `behindWindowIds`, `onPaceWindowIds`, and `unknownWindowIds`.
 
 ## Pace semantics
 
@@ -37,29 +37,29 @@ Read every bounding window named by `boundedBy`, `limitingWindowIds`, `aheadWind
 Negative reserve means usage is ahead of reset pace and creates conservation pressure.
 Positive reserve means usage is behind reset pace.
 `on_pace` is neutral.
-Conservation pressure is present when effective pace status is `ahead`, effective pace status is `mixed` and any `aheadWindowIds` remain, or any applicable bounding window itself has pace status `ahead`.
-`unknown` is valid explicit uncertainty from quota-axi, not a parser failure and not permission to assume the window is healthy or exhausted.
+Conservation pressure is present for effective pace status `ahead`, effective pace status is `mixed` and any `aheadWindowIds` remain, or a bounding window is `ahead`.
+`unknown` is valid explicit uncertainty from quota-axi, not parser failure or permission to assume health.
 
 ## Selection order
 
-Apply only among candidates that already satisfy required fit and the strongest reasoning class the request needs.
+Apply only among candidates satisfying required fit and strongest reasoning class.
 Never use pace or raw headroom to silently replace that reasoning class.
 
-1. Unresolved relationship or quota data: stop and report the candidate.
-2. All-tight: keep the strongest-reasoning class; dispatch inside it or stop and report that the tight choice cannot proceed.
-3. When fit and reasoning are comparable, prefer a candidate without ahead-of-reset conservation pressure over one with conservation pressure, even when the pressured candidate has somewhat higher raw remaining percentage.
+1. Unresolved relationship, auth, or quota: stop and report the tuple and concrete evidence.
+2. All-tight: keep strongest reasoning; dispatch inside it or report if blocked.
+3. Comparable fit/reasoning: prefer no ahead pressure over pressure, even with higher raw headroom.
 4. Among pressured candidates, prefer the least-negative worst applicable reserve.
-5. Among sustainable candidates, use known behind/on-pace evidence plus raw headroom transparently.
-   Prefer known sustainable evidence over `unknown` pace when otherwise comparable.
+5. Sustainable candidates: use known pace plus raw headroom.
+   Prefer known sustainable evidence over `unknown` when comparable.
    Do not collapse those facts into an opaque composite score.
-6. If the dispatch choice materially hinges on unresolved pace, report the uncertainty rather than inventing a conclusion.
-7. Absent pace or older schema: do not crash, fabricate pace, or silently reinterpret absence as healthy/`on_pace`.
-   Compare raw applicable headroom only, state that pace is unavailable, and keep every other safety rule.
+6. If unresolved pace changes the choice, report uncertainty.
+7. Absent pace or older schema: do not crash, fabricate pace, or treat absence as healthy/`on_pace`.
+   Compare raw headroom only, state pace is unavailable, and keep safety rules.
 8. Genuine ties: stop and report every tied candidate for captain choice.
    Do not select by array order, harness name, or another arbitrary identity ordering.
    Report duplicate concrete profiles as a configuration error.
 
 Name the inspectable facts used for every candidate.
-After selecting a candidate, check authentication only through that tuple's authentication surface; another harness CLI cannot block it.
+Check auth only through the selected tuple's surface; another harness CLI cannot block it.
 A blocked credential report must name `harness`, `model`, authentication surface, and concrete failure evidence; never emit a bare `Grok unauthenticated` statement.
 Never conclude with an unexplained "best quota" label.

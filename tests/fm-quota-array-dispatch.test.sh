@@ -161,15 +161,15 @@ test_owner_contains_selection_procedure() {
     'Positive reserve means usage is behind reset pace' \
     '`on_pace` is neutral' \
     'effective pace status is `mixed` and any `aheadWindowIds` remain' \
-    'prefer a candidate without ahead-of-reset conservation pressure over one with conservation pressure' \
-    'even when the pressured candidate has somewhat higher raw remaining percentage' \
+    'Comparable fit/reasoning: prefer no ahead pressure over pressure' \
+    'even with higher raw headroom' \
     'prefer the least-negative worst applicable reserve' \
-    'use known behind/on-pace evidence plus raw headroom transparently' \
+    'Sustainable candidates: use known pace plus raw headroom' \
     'Do not collapse those facts into an opaque composite score' \
     '`unknown` is valid explicit uncertainty from quota-axi' \
-    'Prefer known sustainable evidence over `unknown` pace when otherwise comparable' \
-    'If the dispatch choice materially hinges on unresolved pace, report the uncertainty' \
-    'do not crash, fabricate pace, or silently reinterpret absence as healthy' \
+    'Prefer known sustainable evidence over `unknown` when comparable' \
+    'If unresolved pace changes the choice, report uncertainty' \
+    'do not crash, fabricate pace, or treat absence as healthy' \
     'stop and report every tied candidate for captain choice' \
     'Do not select by array order, harness name, or another arbitrary identity ordering' \
     'Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-specific policy' \
@@ -193,7 +193,7 @@ test_owner_contains_selection_procedure() {
   words=$(wc -w < "$OWNER" | tr -d ' ')
   bytes=$(wc -c < "$OWNER" | tr -d ' ')
   [ "$lines" -le 65 ] || fail "quota-array-dispatch skill is too long: $lines lines (want <= 65)"
-  [ "$words" -le 600 ] || fail "quota-array-dispatch skill is too wordy: $words words (want <= 600)"
+  [ "$words" -le 550 ] || fail "quota-array-dispatch skill is too wordy: $words words (want <= 550)"
   [ "$bytes" -le 4600 ] || fail "quota-array-dispatch skill is too large: $bytes bytes (want <= 4600)"
   pass "quota-array-dispatch owns the compact pace procedure ($lines lines, $words words, $bytes bytes)"
 }
