@@ -191,11 +191,11 @@ The registry contains eight explicit profiles, but only six profiles are Fleet w
 
 The routed worker set is exactly `claude-1`, `claude-2`, `codex-1`, `codex-2`, `codex-3`, and `codex-4`.
 
-Only those six workers may be provisioned, authenticated, identity-bound, enabled, counted as routed capacity, placed in crew pools, probed, or used by canaries.
+Only those six workers may be provisioned, authenticated, identity-bound, enabled, counted as routed capacity, placed in worker pools, probed, or used by canaries.
 
 `claude-3` and `codex-5` are reserves with `safety_policy = "desktop_shared"` and manual-only pools.
 
-The reserve profiles remain disabled, unprovisioned, unauthenticated by Fleet, excluded from crew pools, excluded from routed counts, and untouched by stat, probe, seal, login, logout, or migration actions.
+The reserve profiles remain disabled, unprovisioned, unauthenticated by Fleet, excluded from worker pools, excluded from routed counts, and untouched by stat, probe, seal, login, logout, or migration actions.
 
 The Codex Desktop session may use `codex-5`, but Bridge never counts or routes that account.
 

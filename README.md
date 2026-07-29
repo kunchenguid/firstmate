@@ -18,10 +18,10 @@
   /></a>
 </p>
 
-<h3 align="center">Talk to one agent. Ship with a crew.</h3>
+<h3 align="center">Talk to one agent. Ship with crewmates.</h3>
 
 <p align="center">
-  <img alt="firstmate - talk to one agent, ship with a crew" src="assets/banner.png" width="100%" />
+  <img alt="firstmate - talk to one agent, ship with crewmates" src="assets/banner.png" width="100%" />
 </p>
 
 ## What it is
@@ -30,11 +30,11 @@ You can run one coding agent easily.
 But the moment you want three project tasks done in parallel - fixes, investigations, plans, audits - you become a tab-juggler: babysitting sessions, copy-pasting context between repos, forgetting which terminal had the failing test.
 
 firstmate flips the model.
-You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in a visible session backend, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
+You talk to a single agent - the first mate - and it coordinates crewmates for you: spawning autonomous agents in a visible session backend, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
 For larger fleets, you can opt in to persistent secondmates: domain supervisors that are still ordinary direct reports, but run from their own isolated firstmate homes.
 
 firstmate is not a model, not a harness, not a skill, not an MCP server, and not a CLI.
-firstmate is an agent distro for running a crew of agents.
+firstmate is an agent distro for running crewmates.
 An agent distro is a portable directory of instructions, skills, tooling, policies, and state conventions that turns a general-purpose agent into a specialized one.
 There is no app to install: the cloned repo is the distro - `AGENTS.md`, bundled firstmate skills, and helper scripts that any terminal coding agent can follow.
 Launching a supported harness inside it instantiates your first mate - and makes you the captain.
@@ -42,12 +42,12 @@ Launching a supported harness inside it instantiates your first mate - and makes
 ## Features
 
 - **One liaison** - you talk only to the first mate; it dispatches, supervises, escalates only real decisions, and reports plain outcomes.
-- **A visible crew** - every new crewmate works in its own tmux window, experimental herdr/zellij tab, or cmux workspace you can watch or type into; the first mate reconciles.
+- **Visible crewmates** - every new crewmate works in its own tmux window, experimental herdr/zellij tab, or cmux workspace you can watch or type into; the first mate reconciles.
 - **Disposable worktrees** - each new ship or scout task runs in a clean [treehouse](https://github.com/kunchenguid/treehouse) git worktree, so parallel work on one repo never collides.
 - **Two task shapes** - ship tasks deliver a change; scout tasks investigate, plan, reproduce, or audit and leave a report.
 - **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
 - **Optional secondmates** - opt in to persistent domain supervisors that run from isolated firstmate homes with their own `FM_HOME`, state, projects, and session lock, supervising project clones or a project-less firstmate-repo domain, kept on the primary firstmate version by guarded local fast-forwards and checked for live agent processes at session start.
-- **Optional multi-account routing** - route Claude and Codex crews through explicit or pooled [Agent Fleet](tools/agent-fleet/) profiles while preserving sticky recovery and provider-neutral continuation.
+- **Optional multi-account routing** - route Claude and Codex crewmates through explicit or pooled [Agent Fleet](tools/agent-fleet/) profiles while preserving sticky recovery and provider-neutral continuation.
 - **Durable completion reports** - every new ship and scout task publishes a detailed, visual, searchable report to one machine-global stack through fail-closed teardown.
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you; verified primary harnesses also get a turn-end backstop that blocks or follows up on a blind stop when work is in flight and supervision is not live.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post up to three public-safe completion follow-ups within seven days for genuine milestones and the final outcome without changing non-X behavior; dry-run preview records would-be replies and dismissals locally before go-live.
@@ -189,7 +189,7 @@ Firstmate's skills live in two separate places with different audiences:
 
 ## Documentation
 
-- [docs/architecture.md](docs/architecture.md) - how the crew, supervision, worktrees, secondmates, account routing, completion reports, and project modes work.
+- [docs/architecture.md](docs/architecture.md) - how crewmates, supervision, worktrees, secondmates, account routing, completion reports, and project modes work.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend and Agent Fleet account routing, optional X mode, the files you set, and harness support.
 - [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for wedged terminal-backed away-mode compatibility delivery.
 - [docs/tmux-backend.md](docs/tmux-backend.md) - setup guide for the tmux reference backend: prerequisites, attaching, and watching crewmate windows.

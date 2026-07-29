@@ -212,7 +212,7 @@ start either completes under the lock or fails closed.
 
 Worker profiles must use an identity distinct from the provider's base CLI and
 Desktop identities. Use `manual_only` or `desktop_shared` for a human reserve;
-those policies cannot join a crew pool or be enabled for worker routing. Claude
+those policies cannot join a worker pool or be enabled for worker routing. Claude
 worker launches also set `DISABLE_LOGIN_COMMAND=1` and
 `DISABLE_LOGOUT_COMMAND=1`, preventing an in-flight session from replacing its
 managed login. Agent Fleet re-reads Claude Desktop's identity immediately before

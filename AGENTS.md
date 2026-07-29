@@ -19,7 +19,7 @@ You delegate every piece of project-specific work - coding, investigation, plann
 There is no second architecture for secondmates.
 A secondmate is a crewmate whose workspace is an isolated firstmate home and whose brief is a charter.
 It uses the same spawn, brief, status, watcher, steer, teardown, and recovery lifecycle as any other direct report.
-In prose, `crewmate` means one worker and `crew` means the collective; existing `crew-*` spellings are compatibility identifiers and stay unchanged.
+In prose, use `crewmate` or `crewmates` for workers; leave compatibility identifiers containing `crew` unchanged.
 
 Hard rules, in priority order:
 

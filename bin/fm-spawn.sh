@@ -2954,9 +2954,9 @@ fi
 # The PATH a crewmate's tool commands run with. A harness executes tool commands
 # through a NON-interactive shell, and on this class of host that shell reads only
 # ~/.zshenv - never ~/.zprofile or ~/.zshrc, which is where Homebrew puts itself.
-# zsh's compiled-in default is /bin:/usr/bin:/usr/ucb:/usr/local/bin, so a crew can
+# zsh's compiled-in default is /bin:/usr/bin:/usr/ucb:/usr/local/bin, so a crewmate can
 # end up unable to see gh, node, or the axi tooling even though every one of them is
-# installed and its worktree is perfectly fine. Crews burned whole CI-repair rounds
+# installed and its worktree is perfectly fine. Crewmates burned whole CI-repair rounds
 # on "gh is absent" before this was traced to shell startup rather than the worktree.
 #
 # Firstmate's own PATH is the seed because it is proven by construction: firstmate
@@ -3673,7 +3673,7 @@ META_WRITE_LOCK=
 if [ "$BACKEND" != herdr ]; then
   build_launch_command
 fi
-# Export the crew PATH and GOTMPDIR into the crewmate's pane shell so the agent and
+# Export the crewmate PATH and GOTMPDIR into the crewmate's pane shell so the agent and
 # every child process (go build, go test, ...) inherit them. Sent before the launch
 # command so the env is set when the agent starts; the brief sleep lets it land.
 if [ "$BACKEND" = orca ]; then
