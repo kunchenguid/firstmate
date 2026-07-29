@@ -9,14 +9,13 @@ A qualifying implementation must auto-load from the trusted project, persist the
 The governing presentation policy allows genuine original user prompts, genuine user-facing assistant text, and Pi's native working activity.
 Changing persisted context to remove hidden content, filtering provider context, patching installed harness code, or claiming coverage outside a supported renderer does not satisfy that boundary.
 
-## Compatibility contract
+## Compatibility evidence
 
-Firstmate never refuses a Pi version solely for being newer than the last version this document was reverified against.
-0.81.1 was the Pi version installed when this feature was first built, not a version that introduced a required API: the Pi CHANGELOG shows no relevant API added at 0.81.1 or 0.82.0, and the exported classes this document names (`AssistantMessageComponent`, `InteractiveMode`) are undocumented internals with no stated version guarantee in either direction.
-There is no evidence to support a numeric minimum, so none is enforced.
-Instead, `.pi/extensions/lib/fm-calm-assistant-layout.ts` and `.pi/extensions/lib/fm-calm-operational-user-layout.ts` each probe for the exact method they patch (`AssistantMessageComponent.prototype.updateContent` and `InteractiveMode.prototype.addMessageToChat`) and throw a descriptive error only when that method is absent.
-`.pi/extensions/fm-calm.ts` catches that per-adapter and logs a clear skip diagnostic instead of blocking the rest of Calm or Pi; a future Pi that removes one presentation seam degrades only that adapter.
-`tests/fm-calm-pi-extension.test.sh` records the installed Pi version as dated evidence without gating on it and covers both the no-upper-bound contract and the degraded-adapter diagnostic path directly.
+[`calm.md`](calm.md#pi-compatibility) owns the current Pi compatibility contract.
+Pi 0.81.1 was installed when Calm was first built, and Pi 0.82.0 was the later reverification target.
+The inspected Pi CHANGELOG shows no relevant presentation API introduced at either version, so those versions remain verification evidence rather than compatibility bounds.
+The exported classes used by the adapters (`AssistantMessageComponent` and `InteractiveMode`) are undocumented internals with no stated version guarantee.
+`tests/fm-calm-pi-extension.test.sh` records the installed Pi version as evidence without gating on it and covers both newer synthetic versions and an unavailable adapter seam.
 
 ## Pi 0.81.1 end-to-end reproduction
 
@@ -67,7 +66,7 @@ PR 927 made Calm persistent and described controlled rows as gapless while retai
 PR 936 removed the unsafe operational-input reroute and preserved legacy zero-height entries but did not change assistant-message layout.
 
 The fix installs one idempotent presentation adapter, verified on Pi 0.81.1 through 0.82.0, on the exported `AssistantMessageComponent.updateContent` method.
-The adapter probes for that exact method and, per the [compatibility contract](#compatibility-contract), degrades independently with a diagnostic rather than gating on a version number.
+The adapter probes for that exact method and, per the [compatibility contract](calm.md#pi-compatibility), degrades independently with a diagnostic rather than gating on a version number.
 Only while Calm is active and Pi has collapsed thinking does the adapter pass a shallow thinking-free presentation copy into Pi's ordinary layout calculation, then retain the original message on the component for invalidation and thinking expansion.
 The persisted assistant message, provider context, tool execution, export data, and expansion history remain unchanged.
 Collapsed thinking-only assistant messages now render zero rows, thinking before visible assistant text adds no spacing beyond the text-only baseline, and expanding thinking still renders the original reasoning.
@@ -125,7 +124,7 @@ The leading cause would have been falsified if the row or height remained, the p
 None occurred.
 
 The fix installs a separate idempotent presentation adapter, verified on Pi 0.81.1 through 0.82.0, on the exported `InteractiveMode.addMessageToChat` method.
-The adapter probes for that exact method and, per the [compatibility contract](#compatibility-contract), degrades independently with a diagnostic rather than gating on a version number.
+The adapter probes for that exact method and, per the [compatibility contract](calm.md#pi-compatibility), degrades independently with a diagnostic rather than gating on a version number.
 It delegates current recognition to `bin/fm-operational-input.sh`, adds only the evidence-backed bare-U+2063 `Supervisor escalate (` presentation compatibility shape, mounts a `UserMessageComponent` subclass that preserves Pi's stock row plus leading spacer while Calm is off, and returns zero rendered lines while Calm is on.
 It never intercepts the input event, rewrites the message, changes its role, filters model context, or changes session data.
 Messages containing an image are left on Pi's ordinary path even when their text equals an operational envelope because Firstmate's authoritative producers are text-only.
@@ -183,7 +182,7 @@ The test fixture enumerates every class below through the centralized policy, an
 | `unknown` | Future or unclassified transcript component | Policy-hidden, but no generic renderer exists; never claimed as covered. |
 
 The installed extension API has no supported global transcript filter, user-message renderer, assistant-message renderer, chat-container API, or generic custom-tool wrapper.
-Pi 0.81.1 through 0.82.0 export `AssistantMessageComponent` and `InteractiveMode`, so Calm uses separate idempotent, API-probed adapters for assistant thinking layout and the complete operational-user transcript row while leaving all message data and non-Calm rendering unchanged; see the [compatibility contract](#compatibility-contract) for how a future Pi lacking one of those exports is handled.
+Pi 0.81.1 through 0.82.0 export `AssistantMessageComponent` and `InteractiveMode`, so Calm uses separate idempotent, API-probed adapters for assistant thinking layout and the complete operational-user transcript row while leaving all message data and non-Calm rendering unchanged; see the [compatibility contract](calm.md#pi-compatibility) for how a future Pi lacking one of those exports is handled.
 General component replacement, ANSI cursor erasure, provider-context mutation, and installed-file patching remain rejected as unsupported or preservation-breaking workarounds.
 
 ## Cross-harness verification record
@@ -271,7 +270,7 @@ skip: set FM_PI_LIVE_E2E=1 to run the isolated interactive Pi regression
 ## 2026-07-26 Pi 0.82.0 compatibility verification
 
 Pi 0.82.0 preserved both API-probed presentation seams and every deterministic Calm TUI guarantee.
-The globally installed declaration package remained 0.81.1, so the strict typecheck continued to cover that lower supported boundary while the real CLI exercised 0.82.0.
+The globally installed declaration package remained 0.81.1, so the strict typecheck continued to cover that earlier declaration-evidence version while the real CLI exercised 0.82.0.
 
 ```text
 $ pi --version
