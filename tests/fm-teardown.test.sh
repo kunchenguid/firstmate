@@ -1964,6 +1964,7 @@ SH
   done
   [ -f "$kill_started" ] || {
     : > "$allow_kill"
+    kill "$teardown_pid" 2>/dev/null || true
     wait "$teardown_pid" 2>/dev/null || true
     fail "managed generation teardown never reached endpoint cleanup"
   }
@@ -2076,6 +2077,7 @@ SH
   done
   [ -f "$kill_started" ] || {
     : > "$allow_kill"
+    kill "$teardown_pid" 2>/dev/null || true
     wait "$teardown_pid" 2>/dev/null || true
     fail "managed child teardown never reached endpoint cleanup: $(cat "$case_dir/stderr")"
   }
