@@ -175,6 +175,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/decompose`       | Break a sharpened spec into dependency-ordered, independently shippable vertical-slice backlog items sized to one crewmate, wiring `blocked-by` edges between slices via `tasks-axi`, before any work is dispatched; it plans and never builds |
 | `/updatefirstmate` | Merge upstream origin into this fleet's `fork/main`, self-update the running firstmate and its secondmates to it with fast-forward-only pulls, then re-read instructions and nudge secondmates |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, route each finding to its disk home per AGENTS.md, file undone next steps to the backlog, and report what is now safe to reset; it also owns the context-recycling cadence for a long-running supervision session, refusing the reset while any in-flight wake, decision, or landing still lives only in the conversation |
+| `/watch`           | Vendored third-party skill (MIT, [bradautomates/claude-video](https://github.com/bradautomates/claude-video)), not firstmate's own: watch a video from a URL or local path by extracting frames and a transcript. Needs external `ffmpeg` and `yt-dlp`, and its first run installs them on macOS and can upload audio to Groq or OpenAI, so it needs the captain's consent before first use |
 
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
 
@@ -182,7 +183,7 @@ Agent-only reference skills live under `.agents/skills/` and are loaded by first
 
 Firstmate's skills live in two separate places with different audiences:
 
-- `.agents/skills/` - agent-loaded skills (this section's table, plus firstmate's agent-only reference skills). Every one of these assumes a live firstmate home and is meaningless, or actively misleading, installed anywhere else, so each carries `metadata.internal: true` in its frontmatter. That flag hides them from installer discovery (tools like the [skills.sh](https://skills.sh) `npx skills add` installer) without affecting how firstmate itself loads them - frontmatter metadata is inert to the agent's own skill loader.
+- `.agents/skills/` - agent-loaded skills (this section's table, plus firstmate's agent-only reference skills). Each carries `metadata.internal: true` in its frontmatter, for one of two reasons: firstmate's own skills assume a live firstmate home and are meaningless, or actively misleading, installed anywhere else, and the vendored `/watch` skill is flagged so firstmate's installer surface does not redistribute third-party code. That flag hides them from installer discovery (tools like the [skills.sh](https://skills.sh) `npx skills add` installer) without affecting how firstmate itself loads them - frontmatter metadata is inert to the agent's own skill loader.
 - `skills/` - public, installer-facing skills meant to be installed standalone into any project, independent of firstmate.
   Each one is a self-contained skill with no dependency on firstmate's paths, tools, or vocabulary.
   Today that is `skills/stow`, a generic session-knowledge-sweep skill that routes findings by explicit instruction first, then existing local conventions, then a private `.stow-notes.md` fallback in the current directory, and closes with a resume pointer for the next session.
@@ -217,3 +218,4 @@ Contributions are welcome - see [CONTRIBUTING.md](CONTRIBUTING.md) for the workf
 ## License
 
 MIT - see [LICENSE](LICENSE).
+One bundled skill, `.agents/skills/watch/`, is vendored third-party code and stays under its own upstream MIT license in [`.agents/skills/watch/LICENSE`](.agents/skills/watch/LICENSE).

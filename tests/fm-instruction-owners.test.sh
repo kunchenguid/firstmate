@@ -13,6 +13,8 @@ HARNESS="$ROOT/.agents/skills/harness-adapters/SKILL.md"
 CODING="$ROOT/.agents/skills/firstmate-coding-guidelines/SKILL.md"
 RECOVERY="$ROOT/.agents/skills/stuck-crewmate-recovery/SKILL.md"
 SECONDMATE="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
+WATCH="$ROOT/.agents/skills/watch/SKILL.md"
+WATCH_LICENSE="$ROOT/.agents/skills/watch/LICENSE"
 CONFIG="$ROOT/docs/configuration.md"
 AGENTS="$ROOT/AGENTS.md"
 BRIEF="$ROOT/bin/fm-brief.sh"
@@ -39,6 +41,58 @@ test_new_skill_metadata_and_triggers() {
   assert_grep '`project-management` - load before adding, creating, removing, or initializing a project.' "$ROOT/AGENTS.md" \
     "AGENTS.md lost the project-management trigger"
   pass "new internal skills have one precise AGENTS.md trigger each"
+}
+
+# The watch skill is vendored third-party material, so its redistribution terms and
+# its upstream base must survive every future edit or an upstream refresh becomes
+# guesswork. It is captain-invocable, so its trigger belongs in an operating
+# section rather than the agent-only reference list.
+test_vendored_watch_skill_keeps_license_and_upstream_pin() {
+  local count script trigger pycache
+  assert_present "$WATCH" "vendored watch skill is missing"
+  assert_present "$WATCH_LICENSE" "vendored watch skill lost its upstream LICENSE"
+  assert_grep 'MIT License' "$WATCH_LICENSE" "vendored watch LICENSE is no longer the upstream MIT terms"
+  assert_grep 'name: watch' "$WATCH" "watch skill metadata has the wrong name"
+  assert_grep 'user-invocable: true' "$WATCH" "watch skill must stay captain-invocable"
+  assert_grep '  internal: true' "$WATCH" "watch skill must be internal"
+  assert_grep '  vendored-from: "bradautomates/claude-video@' "$WATCH" \
+    "watch skill lost the upstream commit pin a refresh diffs against"
+  assert_grep 'To refresh: re-copy upstream skills/watch' "$WATCH" \
+    "watch skill lost the vendoring banner's refresh procedure"
+  # The refresh path is a re-copy from upstream, so a truncated or partial copy is
+  # a realistic failure that would otherwise surface only when /watch next runs.
+  # Parsing is checked instead of content so a legitimate refresh still passes.
+  pycache=$(fm_test_tmproot fm-watch-pycompile)
+  for script in watch.py frames.py transcribe.py whisper.py download.py setup.py config.py; do
+    assert_present "$ROOT/.agents/skills/watch/scripts/$script" \
+      "vendored watch skill is missing scripts/$script"
+    PYTHONPYCACHEPREFIX="$pycache" python3 -m py_compile \
+      "$ROOT/.agents/skills/watch/scripts/$script" ||
+      fail "vendored watch scripts/$script does not parse - the upstream re-copy is truncated or partial"
+  done
+  [ -x "$ROOT/.agents/skills/watch/scripts/watch.py" ] || fail "scripts/watch.py is not executable"
+  assert_grep 'brew install ffmpeg yt-dlp' "$WATCH" \
+    "watch banner lost the macOS unattended-install disclosure"
+  assert_grep 'AUDIO EGRESS:' "$WATCH" \
+    "watch banner lost the third-party transcription upload disclosure"
+  assert_grep 'KEY-SOURCE TRAP, DELIBERATELY NOT PATCHED:' "$WATCH" \
+    "watch banner lost the working-directory .env key-source trap note"
+  assert_grep 'CLEANUP TRAP, DELIBERATELY NOT PATCHED:' "$WATCH" \
+    "watch banner lost the Step 5 rm -rf working-directory warning"
+  # The consent gate has to bind every installer path, not just the exit-code
+  # table, or a genuine first run installs before anyone is asked.
+  assert_grep 'covers EVERY path below this banner that can reach the installer' "$WATCH" \
+    "watch banner's install consent gate no longer binds every installer path"
+  count=$(grep -Fc -- 'Load the `watch` skill' "$AGENTS")
+  [ "$count" -eq 1 ] || fail "watch must have exactly one AGENTS.md trigger line, found $count"
+  trigger=$(grep -F -- 'Load the `watch` skill' "$AGENTS")
+  case "$trigger" in
+    *"consent before that first run"*) ;;
+    *) fail "the watch trigger line lost its first-run install and audio-egress consent gate" ;;
+  esac
+  assert_no_grep '- `watch` -' "$AGENTS" \
+    "captain-invocable watch must not be listed among the agent-only reference skills"
+  pass "vendored watch skill keeps its license, upstream pin, consent gate, and single trigger"
 }
 
 test_diagnostic_owner_covers_causal_procedure() {
@@ -287,6 +341,7 @@ test_compressed_agents_retains_authority_and_supervision_safety() {
 }
 
 test_new_skill_metadata_and_triggers
+test_vendored_watch_skill_keeps_license_and_upstream_pin
 test_diagnostic_owner_covers_causal_procedure
 test_project_management_owner_covers_guarded_operations
 test_generic_effort_fallback_respects_precedence
