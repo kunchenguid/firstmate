@@ -983,7 +983,15 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  cat > "$fb/treehouse" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${1:-}" = get ]; then
+  printf '%s\\n' "$wt"
+fi
+exit 0
+SH
+  chmod +x "$fb/treehouse"
   printf '%s\n' "$fb"
 }
 
@@ -1053,7 +1061,15 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  cat > "$fb/treehouse" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${1:-}" = get ]; then
+  printf '%s\\n' "$wt"
+fi
+exit 0
+SH
+  chmod +x "$fb/treehouse"
   printf '%s\n' "$fb"
 }
 
@@ -1066,6 +1082,7 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   wt="$TMP_ROOT/symlink-wt-$label"
   id="spawnsymlink$label"
   fm_git_worktree "$real_root/proj" "$wt" "fm/$id"
+  git -C "$wt" checkout --detach >/dev/null 2>&1
   # TMP_ROOT itself can already sit behind an OS-level symlink (e.g. macOS's
   # /var -> /private/var), so resolve the fakebin's "physical" reply with
   # pwd -P rather than string concatenation - it must match exactly what
@@ -1261,6 +1278,7 @@ test_spawn_default_backend_writes_no_meta_field() {
   proj="$TMP_ROOT/nobackend-project"; wt="$TMP_ROOT/nobackend-wt"; data="$TMP_ROOT/nobackend-data"
   id="nobackendz3"
   fm_git_worktree "$proj" "$wt" "fm/$id"
+  git -C "$wt" checkout --detach >/dev/null 2>&1
   local fb
   fb=$(make_spawn_fakebin "$TMP_ROOT/nobackend-fake" "$wt")
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
@@ -1284,6 +1302,7 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   proj="$TMP_ROOT/explicit-backend-project"; wt="$TMP_ROOT/explicit-backend-wt"; data="$TMP_ROOT/explicit-backend-data"
   id="explicitbackendz4"
   fm_git_worktree "$proj" "$wt" "fm/$id"
+  git -C "$wt" checkout --detach >/dev/null 2>&1
   fb=$(make_spawn_fakebin "$TMP_ROOT/explicit-backend-fake" "$wt")
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
   state="$TMP_ROOT/explicit-backend-state"; config="$TMP_ROOT/explicit-backend-config"
@@ -1308,6 +1327,7 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   proj="$TMP_ROOT/nest-project"; wt="$TMP_ROOT/nest-wt"; data="$TMP_ROOT/nest-data"
   id="nestbackendz5"
   fm_git_worktree "$proj" "$wt" "fm/$id"
+  git -C "$wt" checkout --detach >/dev/null 2>&1
   fb=$(make_spawn_fakebin "$TMP_ROOT/nest-fake" "$wt")
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
   state="$TMP_ROOT/nest-state"; config="$TMP_ROOT/nest-config"

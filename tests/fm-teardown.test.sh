@@ -3104,6 +3104,27 @@ test_teardown_refuses_unsafe_tasktmp_metadata() {
   pass "teardown only removes its exact task temp root"
 }
 
+test_teardown_removes_safe_tasktmp_and_accepts_absence() {
+  local case_dir tasktmp
+  tasktmp=/tmp/fm-task-x1
+  assert_absent "$tasktmp" "safe tasktmp fixture collided with an existing task temp root"
+  mkdir -p "$tasktmp/gotmp"
+  printf '%s\n' leftover > "$tasktmp/gotmp/build-artifact"
+
+  case_dir=$(make_case safe-tasktmp)
+  write_meta "$case_dir" local-only ship
+  printf 'tasktmp=%s\n' "$tasktmp" >> "$case_dir/state/task-x1.meta"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "teardown rejected its exact task temp root: $(cat "$case_dir/stderr")"
+  assert_absent "$tasktmp" "teardown retained its exact task temp root"
+
+  case_dir=$(make_case absent-tasktmp)
+  write_meta "$case_dir" local-only ship
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "teardown rejected backward-compatible metadata without tasktmp: $(cat "$case_dir/stderr")"
+  pass "teardown removes its exact task temp root and accepts metadata without tasktmp"
+}
+
 test_teardown_rejects_malformed_report_requirement() {
   local case_dir rc
   case_dir=$(make_case malformed-report-required)
@@ -4321,6 +4342,7 @@ test_secondmate_registry_updates_are_locked_and_literal() {
 }
 
 if [ "${FM_TEST_FOCUSED:-}" = tasktmp-safety ]; then
+  test_teardown_removes_safe_tasktmp_and_accepts_absence
   test_teardown_refuses_unsafe_tasktmp_metadata
   exit 0
 fi
@@ -4540,6 +4562,7 @@ test_nested_secondmate_cleanup_requires_child_home_lock
 test_secondmate_registry_updates_are_locked_and_literal
 test_teardown_retains_untracked_claude_skill_draft
 test_teardown_refuses_unsafe_tasktmp_metadata
+test_teardown_removes_safe_tasktmp_and_accepts_absence
 test_teardown_rejects_malformed_report_requirement
 test_secondmate_state_enumeration_fails_closed
 test_secondmate_missing_treehouse_child_is_retained

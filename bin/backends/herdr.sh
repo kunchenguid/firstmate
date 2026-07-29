@@ -2665,6 +2665,10 @@ fm_backend_herdr_expected_label_matches() {  # <target> [expected-label]
 # crewmate still launches only in a certified closed-shell server.
 fm_backend_herdr_server_reachable_for_readsteer() {  # <session>
   local session=$1 running
+  if fm_backend_herdr_test_hooks_enabled \
+    && [ "${FM_TEST_HERDR_READSTEER_REACHABLE:-}" = 1 ]; then
+    return 0
+  fi
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null \
     | fm_backend_herdr_control_jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = true ] || return 1

@@ -89,6 +89,7 @@ config/backend  runtime session-provider backend override for new tasks; LOCAL, 
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional active-alert directives for wedged terminal-backed away-mode compatibility delivery; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
+config/watcher.env   optional home-local watcher environment overrides; LOCAL, gitignored; sourced by bin/fm-watch.sh; see docs/configuration.md "Watcher overrides"
 data/                personal fleet records; LOCAL, gitignored as a whole
   autocompact-resume.md  Claude-only local compaction resume anchor; see docs/autocompact-recovery.md
   backlog.md         task queue, dependencies, history

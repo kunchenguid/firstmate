@@ -22,6 +22,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$ROOT/bin/fm-classify-lib.sh"
+# shellcheck source=bin/fm-transition-lib.sh
+. "$ROOT/bin/fm-transition-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -550,6 +552,48 @@ EOF
   pass "recognized Claude and Codex permission prompts surface immediately, while quoted prompt text in a busy pane stays non-actionable"
 }
 
+# A declared external wait must outrank the permission-prompt stale fast path.
+# Otherwise a static permission-shaped pane exits before handle_paused_stale can
+# create its durable pause marker, and a freshly armed watcher repeats the same
+# benign wake indefinitely.
+test_declared_pause_preempts_permission_prompt_stale() {
+  local dir state fakebin out capture_file statusf window key pid
+  dir=$(make_case paused-permission-prompt); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/paused-permission.status"
+  window="default:w6:p3H"
+  cat > "$capture_file" <<'EOF'
+Would you like to run the following command?
+
+$ wait-for-upstream-release
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for this command (p)
+  3. No, and tell Codex what to do differently (esc)
+
+Press enter to confirm or esc to cancel
+EOF
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/paused-permission.meta"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-paused-permission_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a declared pause fell through to the permission-prompt stale path: $(cat "$out")"
+  fi
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "declared pause did not create its suppression marker before permission-prompt detection"; }
+  [ ! -e "$state/.stale-permission-$key" ] || { reap "$pid"; fail "declared pause incorrectly entered permission-prompt escalation tracking"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "declared pause enqueued a permission-prompt stale wake"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "declared pause printed a permission-prompt stale wake: $(cat "$out")"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a declared pause enters pause suppression before permission-prompt stale detection"
+}
+
 # A macOS TCC dialog can block the foreground command while the harness footer
 # remains busy and its elapsed counter changes forever. The watcher therefore
 # hashes semantic progress without that footer: real output resets the timer,
@@ -806,7 +850,7 @@ test_nonterminal_stale_not_working_surfaced() {
 # the pause's own status-file age, so a churny idle pane cannot reset the cadence)
 # for a recheck, so a forgotten pause cannot rot invisibly.
 test_nonterminal_stale_paused_absorbed_then_resurfaced() {
-  local dir state fakebin out drain_out capture_file window key pane_hash sig pid back statusf
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid back statusf rf_before rf_after
   dir=$(make_case nonterminal-stale-paused); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-held"
@@ -847,10 +891,12 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  mkdir -p "$dir/config"
+  printf 'FM_PAUSE_RESURFACE_SECS=240\n' > "$dir/config/watcher.env"
   : > "$out"
   printf 'idle, holding for upstream (token 2)' > "$capture_file"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "watcher did not re-surface a declared pause past the threshold"
@@ -861,7 +907,53 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   [ ! -e "$state/.stale-since-$key" ] || fail "a paused re-surface must not use the wedge timer"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the paused re-surface failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "paused re-surface was not queued"
-  pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
+
+  # Phase C: a completely new watcher process inherits the same home config and
+  # must respect the durable recheck timestamp written by the prior wake.
+  # Re-arming must neither re-surface nor refresh the marker before the window.
+  rf_before=$(file_mtime "$state/.paused-resurfaced-$key")
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "freshly restarted watcher re-surfaced a declared pause before its configured window: $(cat "$out")"
+  fi
+  rf_after=$(file_mtime "$state/.paused-resurfaced-$key")
+  [ "$rf_after" = "$rf_before" ] || { reap "$pid"; fail "watcher restart refreshed the pause recheck marker before the window elapsed"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "watcher restart enqueued a premature pause recheck"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "watcher restart printed a premature pause recheck: $(cat "$out")"; }
+  reap "$pid"
+  pass "a declared pause re-surfaces once, persists its cadence across watcher restart, and loads the cadence from config/watcher.env"
+}
+
+test_herdr_blocked_transition_enters_pause_absorb_path() {
+  local dir state fakebin window key record
+  dir=$(make_case herdr-paused-transition); state="$dir/state"; fakebin="$dir/fakebin"
+  window="default:w6:p3H"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'window=%s\nbackend=herdr\nkind=ship\n' "$window" > "$state/herdr-paused.meta"
+  printf 'paused: awaiting an external release\n' > "$state/herdr-paused.status"
+  printf 'stable-pane-hash' > "$state/.hash-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting an external release'
+  record=$(fm_transition_record 'w6:p3H' 'w6' '' blocked codex)
+
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 bash -c '
+      # shellcheck disable=SC1090
+      . "$1"
+      wake() { echo "fresh Herdr pause unexpectedly surfaced from the transition path" >&2; exit 1; }
+      handle_push_transition herdr default "$2"
+    ' _ "$WATCH" "$record" || fail "fresh Herdr pause unexpectedly surfaced from the transition path"
+
+  [ -e "$state/.paused-$key" ] || fail "Herdr pane-id target did not enter the shared pause absorb path"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = stable-pane-hash ] \
+    || fail "Herdr pane-id target did not advance the shared stale suppressor"
+  [ -e "$state/.herdr-escalated-$key" ] || fail "absorbed Herdr blocked transition was not committed"
+  [ ! -s "$state/.wake-queue" ] || fail "absorbed Herdr blocked transition enqueued a stale wake"
+  unset FM_FAKE_CREW_STATE
+  pass "a Herdr pane-id blocked transition enters the shared declared-pause absorb path"
 }
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -1503,6 +1595,13 @@ if [ "${FM_TEST_FOCUSED:-}" = permission-prompts ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = pause-regressions ]; then
+  test_declared_pause_preempts_permission_prompt_stale
+  test_nonterminal_stale_paused_absorbed_then_resurfaced
+  test_herdr_blocked_transition_enters_pause_absorb_path
+  exit 0
+fi
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -1518,6 +1617,7 @@ test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_harness_permission_prompts_surface_immediately
+test_declared_pause_preempts_permission_prompt_stale
 test_busy_no_progress_suspects_system_permission_dialog
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
@@ -1526,6 +1626,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_herdr_blocked_transition_enters_pause_absorb_path
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking

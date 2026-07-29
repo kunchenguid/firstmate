@@ -48,9 +48,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 fm_refuse_if_gate_agent
+WATCHER_ENV="$CONFIG/watcher.env"
+if [ -e "$WATCHER_ENV" ] || [ -L "$WATCHER_ENV" ]; then
+  [ -f "$WATCHER_ENV" ] && [ ! -L "$WATCHER_ENV" ] \
+    || { echo "error: unsafe watcher config: $WATCHER_ENV" >&2; exit 1; }
+  # shellcheck disable=SC1090 # The effective home-local watcher config is intentionally dynamic.
+  . "$WATCHER_ENV" || { echo "error: could not source watcher config: $WATCHER_ENV" >&2; exit 1; }
+fi
 mkdir -p "$STATE"
 [ -d "$STATE" ] && [ ! -L "$STATE" ] || { echo "error: unsafe watcher state directory: $STATE" >&2; exit 1; }
 
@@ -156,6 +164,9 @@ esac
 # it re-surfaces once for a recheck every PAUSE_RESURFACE_SECS - far longer than the
 # wedge threshold, but finite so a forgotten pause cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+case "$PAUSE_RESURFACE_SECS" in
+  ''|*[!0-9]*|0) PAUSE_RESURFACE_SECS=$FM_PAUSE_RESURFACE_SECS_DEFAULT ;;
+esac
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
@@ -287,12 +298,20 @@ recorded_windows() {
 # Exit reporting a wake. Consecutive heartbeats with no other wake in between
 # mean an idle fleet, so the heartbeat interval backs off exponentially
 # (base * 2^streak, capped at HEARTBEAT_MAX); any real wake resets the cadence.
-wake() {
+wake() {  # <reason> [durable-resurface-marker]
+  local reason=$1 resurface_marker=${2:-}
   case "$1" in
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
-  echo "$1"
+  # A wake exits this watcher immediately and hands control back to the harness.
+  # Refresh a supplied cadence marker in this final return path so a newly armed
+  # watcher cannot observe the pre-wake age and re-fire the same bounded recheck.
+  if [ -n "$resurface_marker" ]; then
+    safe_touch_marker "$resurface_marker" \
+      || { echo "error: unsafe watcher re-surface marker: $resurface_marker" >&2; exit 1; }
+  fi
+  echo "$reason"
   exit 0
 }
 
@@ -366,8 +385,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
     reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
     fm_wake_append stale "$win" "$reason" || exit 1
-    date +%s > "$rf"
-    wake "$reason"
+    wake "$reason" "$rf"
   fi
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
 }
@@ -851,15 +869,21 @@ event_wait_or_sleep() {
 # machinery already understands it (queued by key=window, so a later poll-path
 # stale for the same pane collapses on drain).
 handle_push_transition() {  # <backend> <session> <record>
-  local backend=$1 session=$2 record=$3 pane_id to window task reason
+  local backend=$1 session=$2 record=$3 pane_id to window task key h reason
   pane_id=$(fm_transition_pane_id "$record")
   to=$(fm_transition_to_status "$record")
   [ -n "$pane_id" ] || { sleep 1; return; }
   window="$session:$pane_id"
   task=$(window_to_task "$window" "$STATE")
   if status_is_paused "$(last_status_line "$STATE/$task.status")"; then
-    triage_log "absorbed push $to (declared pause, awaiting external): $window"
+    # The durable status is the trusted gate on this native edge. Commit the
+    # handled transition, then enter the shared pause path so it owns the marker
+    # and bounded re-surface cadence even when no auxiliary crew-state read exists.
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    h=$(cat "$STATE/.hash-$key" 2>/dev/null || true)
     fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
+    handle_paused_stale "$window" "$task" "$h"
+    triage_log "absorbed push $to (declared pause, awaiting external): $window"
     return
   fi
   reason="stale: $window (herdr: agent $to - waiting on human, escalated immediately, not via wedge timer)"
@@ -1033,6 +1057,25 @@ EOF
     if window_is_busy "$w" "$tail40"; then
       window_busy=1
       mark_brief_processing_started "$task" || true
+    fi
+    # A declared external wait is its own idle state and must be classified
+    # before every stale fast path. Permission-prompt detection previously ran
+    # first, so a permission-shaped Herdr pane woke on every changing capture
+    # without ever creating .paused-<key>. Authoritative working state still
+    # outranks a stale paused log and falls through to ordinary stale handling.
+    if ! afk_present && [ "$window_busy" != 1 ] && status_is_paused "$last"; then
+      case "$(pause_state_class "$w" "$task")" in
+        paused)
+          handle_paused_stale "$w" "$task" "$h"
+          continue
+          ;;
+        working)
+          clear_pause_state "$w"
+          ;;
+        *)
+          clear_pause_tracking "$w"
+          ;;
+      esac
     fi
     if [ "$window_busy" != 1 ]; then
       allow_directory_trust=0

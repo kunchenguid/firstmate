@@ -53,27 +53,36 @@ pass() {
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
-# on EXIT. The first call installs the cleanup trap. A test file that needs
-# extra teardown (e.g. killing a daemon) should define its own EXIT trap and
-# call fm_test_cleanup from inside it so registered dirs are still removed.
+# on EXIT. Most callers use command substitution, whose subshell cannot update
+# a parent array and whose inherited EXIT trap runs on Bash 3, so a manifest
+# carries registrations back to the parent without deleting fixtures early.
+# A test file that needs extra teardown (e.g. killing a daemon) should define
+# its own EXIT trap and call fm_test_cleanup from inside it.
 
 FM_TEST_CLEANUP_DIRS=()
+FM_TEST_CLEANUP_MANIFEST=$(mktemp "${TMPDIR:-/tmp}/fm-test-cleanup.XXXXXX")
+trap fm_test_cleanup EXIT
 
 fm_test_cleanup() {
   local d
+  [ "${BASH_SUBSHELL:-0}" -eq 0 ] || return 0
+  if [ -f "$FM_TEST_CLEANUP_MANIFEST" ]; then
+    while IFS= read -r d; do
+      [ -n "$d" ] && rm -rf "$d"
+    done < "$FM_TEST_CLEANUP_MANIFEST"
+    rm -f "$FM_TEST_CLEANUP_MANIFEST"
+  fi
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
+  return 0
 }
 
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root
   root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
   root=$(cd "$root" && pwd -P)
-  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
-    trap fm_test_cleanup EXIT
-  fi
-  FM_TEST_CLEANUP_DIRS+=("$root")
+  printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_MANIFEST"
   printf '%s\n' "$root"
 }
 

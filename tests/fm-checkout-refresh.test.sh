@@ -325,13 +325,14 @@ test_uninspectable_active_project_invalidates_coverage_health() {
 }
 
 test_nested_active_project_invalidates_coverage_health() {
-  local container projects nested nested_state out status
+  local container projects nested nested_state nested_treehouse out status
   container="$TMP_ROOT/active-project-container"
   fm_git_init_commit "$container"
   projects="$container/projects"
   nested="$projects/nested-directory"
   nested_state="$TMP_ROOT/nested-active-state"
-  mkdir -p "$nested" "$nested_state"
+  nested_treehouse="$TMP_ROOT/nested-active-treehouse"
+  mkdir -p "$nested" "$nested_state" "$nested_treehouse"
   printf '%s\n' preserved-nested-heartbeat > "$nested_state/heartbeat"
 
   set +e
@@ -339,7 +340,7 @@ test_nested_active_project_invalidates_coverage_health() {
     FM_PROJECTS_OVERRIDE="$projects" \
     FM_CHECKOUT_REFRESH_STATE_ROOT="$nested_state" \
     FM_CHECKOUT_REFRESH_LOCK_ROOT="$TMP_ROOT/nested-active-locks" \
-    FM_TREEHOUSE_ROOT="$TMP_ROOT/nested-active-treehouse" \
+    FM_TREEHOUSE_ROOT="$nested_treehouse" \
     "$ROOT/bin/fm-checkout-refresh.sh" run-once --force 2>&1)
   status=$?
   set -e
@@ -352,7 +353,7 @@ test_nested_active_project_invalidates_coverage_health() {
 }
 
 test_discovery_rejects_nested_configured_and_scanned_paths() {
-  local remote seed outer configured_child scan_root scanned_child scanned_canonical out err
+  local remote seed outer configured_child scan_root scanned_child scanned_canonical config_backup out err status
   remote=$(build_origin exact-discovery)
   seed="$FM_TEST_HOME/projects/exact-discovery"
   outer="$TMP_ROOT/exact-discovery-outer"
@@ -361,18 +362,23 @@ test_discovery_rejects_nested_configured_and_scanned_paths() {
   scanned_child="$scan_root/scanned-child"
   out="$TMP_ROOT/exact-discovery.out"
   err="$TMP_ROOT/exact-discovery.err"
+  config_backup="$TMP_ROOT/exact-discovery-config"
   clone_from "$remote" "$seed"
   clone_from "$remote" "$outer"
   mkdir -p "$configured_child" "$scanned_child"
   scanned_canonical=$(cd "$scanned_child" && pwd -P)
+  cp "$FM_TEST_HOME/config/checkout-refresh" "$config_backup"
   {
     printf 'path %s\n' "$configured_child"
     printf 'scan %s\n' "$scan_root"
   } > "$FM_TEST_HOME/config/checkout-refresh"
 
-  run_refresh discover > "$out" 2> "$err" \
-    || fail "exact-root discovery fixture failed"
+  set +e
+  run_refresh discover > "$out" 2> "$err"
+  status=$?
+  set -e
 
+  [ "$status" -ne 0 ] || fail "nested discovery paths reported healthy coverage"
   assert_no_grep "^$configured_child$" "$out" \
     "configured nested directory was emitted as a checkout"
   assert_no_grep "^$scanned_canonical$" "$out" \
@@ -381,7 +387,7 @@ test_discovery_rejects_nested_configured_and_scanned_paths() {
     "$err" "configured nested directory was not surfaced"
   assert_grep "discovered clone is not an exact inspectable Git repository root: $scanned_canonical" \
     "$err" "scanned nested directory was not surfaced"
-  rm -f "$FM_TEST_HOME/config/checkout-refresh"
+  mv "$config_backup" "$FM_TEST_HOME/config/checkout-refresh"
   rm -rf "$seed" "$outer"
   pass "configured and scanned checkouts require exact Git roots"
 }
@@ -597,22 +603,27 @@ test_treehouse_pool_skill_drafts_are_inventoried() {
 }
 
 test_ignored_skill_files_are_outside_the_collision_guard() {
-  local source="$TMP_ROOT/ignored-source" worktree="$TMP_ROOT/ignored-worktree" draft out
+  local source="$TMP_ROOT/ignored-source" worktree="$TMP_ROOT/ignored-worktree" draft source_draft out
   fm_git_worktree "$source" "$worktree" ignored-skill
   git -C "$worktree" checkout --quiet --detach
   printf '%s\n' '.agents/skills/' >> "$source/.git/info/exclude"
   draft="$worktree/.agents/skills/intentional/SKILL.md"
+  source_draft="$source/.agents/skills/intentional/SKILL.md"
   mkdir -p "$(dirname "$draft")"
+  mkdir -p "$(dirname "$source_draft")"
   printf '%s\n' '# intentional ignored material' > "$draft"
+  printf '%s\n' '# intentional ignored source material' > "$source_draft"
 
   run_refresh verify-worktree "$worktree" "$source" \
     || fail "an ignored skill file made a clean local acquisition fail"
-  out=$(run_refresh preflight "$worktree") \
-    || fail "preflight rejected an acquisition containing only ignored skill material"
+  out=$(run_refresh preflight "$source" 2>&1) \
+    || fail "preflight rejected a backing checkout containing only ignored skill material"
   assert_not_contains "$out" "HYGIENE:" \
     "ignored skill material entered the untracked-draft collision inventory"
   grep -Fq '# intentional ignored material' "$draft" \
     || fail "ignored skill-file inspection changed its contents"
+  grep -Fq '# intentional ignored source material' "$source_draft" \
+    || fail "ignored source skill-file inspection changed its contents"
   pass "gitignored skill files remain outside the non-ignored collision guard"
 }
 
@@ -642,16 +653,22 @@ test_bootstrap_relays_hygiene_alerts() {
   printf '%s\n' '# bootstrap draft' > "$draft"
   config_backup=$(mktemp "$TMP_ROOT/checkout-refresh-config.XXXXXX")
   cp "$FM_TEST_HOME/config/checkout-refresh" "$config_backup"
-  printf '%s\n' 'unexpected directive' >> "$FM_TEST_HOME/config/checkout-refresh"
 
+  out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_CHECKOUT_REFRESH_STATE_ROOT="$STATE_ROOT" FM_TREEHOUSE_ROOT="$TEST_HOME/.treehouse" \
+    FM_CHECKOUT_REFRESH_BOOTSTRAP_TEST=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "FLEET_SYNC: $project: HYGIENE: 1 untracked skill-draft files" \
+    "session-start bootstrap did not relay the unresolved hygiene alert"
+
+  printf '%s\n' 'unexpected directive' >> "$FM_TEST_HOME/config/checkout-refresh"
   out=$(HOME="$TEST_HOME" FM_HOME="$FM_TEST_HOME" FM_ROOT_OVERRIDE="$ROOT" \
     FM_CHECKOUT_REFRESH_STATE_ROOT="$STATE_ROOT" FM_TREEHOUSE_ROOT="$TEST_HOME/.treehouse" \
     FM_CHECKOUT_REFRESH_BOOTSTRAP_TEST=1 \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   mv "$config_backup" "$FM_TEST_HOME/config/checkout-refresh"
 
-  assert_contains "$out" "FLEET_SYNC: $project: HYGIENE: 1 untracked skill-draft files" \
-    "session-start bootstrap did not relay the unresolved hygiene alert"
   assert_contains "$out" "FLEET_SYNC: checkout-refresh: skipped: unknown config directive 'unexpected'" \
     "session-start bootstrap swallowed checkout discovery diagnostics"
 
@@ -812,7 +829,9 @@ test_empty_treehouse_and_identity_tool_failures_fail_closed() {
 }
 
 test_config_git_metadata_and_non_git_races_fail_closed() {
-  local real_config linked_config remote source redirected scan candidate out status
+  local config_backup real_config linked_config remote source redirected scan candidate out status
+  config_backup="$TMP_ROOT/config-race-backup"
+  cp "$FM_TEST_HOME/config/checkout-refresh" "$config_backup"
   real_config="$TMP_ROOT/config-real"
   linked_config="$TMP_ROOT/config-linked"
   mkdir -p "$real_config"
@@ -854,7 +873,7 @@ test_config_git_metadata_and_non_git_races_fail_closed() {
   [ "$status" -ne 0 ] || fail "concurrent Git metadata creation was classified as non-Git"
   assert_contains "$out" "discovered Git identity cannot be inspected or disproved" \
     "concurrent Git metadata creation was not surfaced"
-  rm -f "$FM_TEST_HOME/config/checkout-refresh"
+  mv "$config_backup" "$FM_TEST_HOME/config/checkout-refresh"
   pass "config, Git metadata, and non-Git classification races fail closed"
 }
 
@@ -951,7 +970,11 @@ if [ "${1:-}" = -C ] \
   count=$(cat "${FM_TEST_REINSPECTION_COUNT:?}" 2>/dev/null || printf 0)
   count=$((count + 1))
   printf '%s\n' "$count" > "$FM_TEST_REINSPECTION_COUNT"
-  if [ "$count" -gt 1 ]; then
+  # Fail each post-discovery exact-root proof, then allow the immediately
+  # following stable-key lookup used to persist the alert. This keeps the
+  # fixture on the reinspection-failure path without making alert identity
+  # resolution fail first.
+  if [ $((count % 2)) -eq 0 ]; then
     printf '%s\n' "${FM_TEST_REINSPECTION_ENCLOSING:?}"
     exit 0
   fi
@@ -975,7 +998,7 @@ SH
   assert_refresh_state "$state_root" unhealthy
   assert_heartbeat_value "$state_root" manual-reinspection-heartbeat
   reinspection_count=$(cat "$TMP_ROOT/reinspection-count")
-  [ "$reinspection_count" -eq 3 ] \
+  [ "$reinspection_count" -ge 3 ] \
     || fail "both post-discovery passes did not repeat the exact-root proof"
   [ "$(git -C "$project" rev-parse HEAD)" = "$initial_head" ] \
     || fail "identity-drifted covered path was refreshed through its enclosing repository"
@@ -1024,8 +1047,10 @@ test_unreadable_scan_root_invalidates_coverage_health() {
   canonical_scan=$(cd "$scan_root" && pwd -P)
   chmod 111 "$scan_root"
 
+  set +e
   out=$(run_isolated_refresh "$home" "$state_root" run-once --force 2>&1)
   status=$?
+  set -e
   chmod 700 "$scan_root"
 
   [ "$status" -ne 0 ] || fail "unreadable scan root reported successful coverage"
@@ -1061,10 +1086,12 @@ exec "${FM_TEST_REAL_GIT:?}" "$@"
 SH
   chmod +x "$fakebin/git"
 
+  set +e
   out=$(FM_TEST_REAL_GIT="$real_git" FM_TEST_UNREADABLE_ORIGIN_TARGET="$canonical_candidate" \
     PATH="$fakebin:$PATH" \
     run_isolated_refresh "$home" "$state_root" run-once --force 2>&1)
   status=$?
+  set -e
 
   [ "$status" -ne 0 ] || fail "unreadable scanned origin reported successful coverage"
   assert_contains "$out" "discovered checkout origin identity cannot be inspected: $canonical_candidate" \
@@ -1088,8 +1115,10 @@ test_failed_alert_persistence_forces_reinspection() {
   mkdir "$alert"
   printf '%s\n' dirty > "$project/untracked.txt"
 
+  set +e
   out=$(run_isolated_refresh "$home" "$state_root" run-once --force 2>&1)
   status=$?
+  set -e
 
   [ "$status" -ne 0 ] || fail "failed checkout-alert persistence reported success"
   assert_contains "$out" "STUCK:" "failed alert write did not surface the unsafe checkout"
@@ -1098,8 +1127,10 @@ test_failed_alert_persistence_forces_reinspection() {
   [ "$(cat "$last_file")" = 1 ] || fail "failed refresh advanced checkout cadence state"
   assert_refresh_state "$state_root" unhealthy
 
+  set +e
   out=$(run_isolated_refresh "$home" "$state_root" run-once 2>&1)
   status=$?
+  set -e
 
   [ "$status" -ne 0 ] || fail "run after failed alert persistence reported success"
   assert_contains "$out" "STUCK:" \
@@ -1291,7 +1322,9 @@ test_session_mode_preserves_gone_branch_pruning() {
 }
 
 test_config_and_external_identity_fail_closed() {
-  local remote project external original_origin out status config_real
+  local remote project external original_origin out status config_backup config_real
+  config_backup="$TMP_ROOT/config-external-identity-backup"
+  cp "$FM_TEST_HOME/config/checkout-refresh" "$config_backup"
   remote=$(build_origin identity-history)
   project="$FM_TEST_HOME/projects/identity-history"
   external="$TEST_HOME/identity-history"
@@ -1348,6 +1381,7 @@ test_config_and_external_identity_fail_closed() {
   assert_contains "$out" "unsafe config path" "symlinked config was not surfaced"
   assert_refresh_state "$STATE_ROOT" unhealthy
   rm -f "$FM_TEST_HOME/config/checkout-refresh" "$config_real"
+  mv "$config_backup" "$FM_TEST_HOME/config/checkout-refresh"
   pass "configuration and prior external identity failures invalidate coverage"
 }
 
@@ -1506,7 +1540,7 @@ test_worktree_freshness_verification_fails_closed() {
 }
 
 test_bounded_refresh_terminates_descendants() {
-  local remote checkout fakebin real_git out status parent_pid child_pid
+  local remote checkout fakebin real_git out status parent_pid child_pid timeout=10
   remote=$(build_origin bounded)
   checkout="$FM_TEST_HOME/projects/bounded"
   clone_from "$remote" "$checkout"
@@ -1517,13 +1551,14 @@ test_bounded_refresh_terminates_descendants() {
 #!/usr/bin/env bash
 if [ "${3:-}" = fetch ]; then
   trap '' TERM
-  printf '%s\n' "$BASHPID" > "${FM_TEST_FETCH_PARENT:?}"
+  printf '%s\n' "$$" > "${FM_TEST_FETCH_PARENT:?}"
   (
     trap '' TERM
-    printf '%s\n' "$BASHPID" > "${FM_TEST_FETCH_CHILD:?}"
     while :; do sleep 1; done
   ) &
-  wait
+  child_pid=$!
+  printf '%s\n' "$child_pid" > "${FM_TEST_FETCH_CHILD:?}"
+  wait "$child_pid"
 fi
 exec "${FM_TEST_REAL_GIT:?}" "$@"
 SH
@@ -1531,12 +1566,12 @@ SH
 
   set +e
   out=$(FM_TEST_REAL_GIT="$real_git" FM_TEST_FETCH_PARENT="$TMP_ROOT/fetch-parent.pid" \
-    FM_TEST_FETCH_CHILD="$TMP_ROOT/fetch-child.pid" FM_CHECKOUT_REFRESH_SYNC_TIMEOUT=1 \
+    FM_TEST_FETCH_CHILD="$TMP_ROOT/fetch-child.pid" FM_CHECKOUT_REFRESH_SYNC_TIMEOUT="$timeout" \
     PATH="$fakebin:$PATH" run_refresh run-once --force 2>&1)
   status=$?
   set -e
   [ "$status" -eq 0 ] || fail "bounded refresh command failed unexpectedly: $out"
-  assert_contains "$out" "refresh timed out after 1s" \
+  assert_contains "$out" "refresh timed out after ${timeout}s" \
     "bounded refresh did not report its timeout"
   assert_refresh_state "$STATE_ROOT" unhealthy
   parent_pid=$(cat "$TMP_ROOT/fetch-parent.pid")

@@ -76,7 +76,9 @@ if [ -e "$STATE_DIR/.wake-queue" ] && grep -q 'stale' "$STATE_DIR/.wake-queue"; 
 fi
 [ ! -s "$WAKE_LOG" ] || fail "a declared-pause crew must not wake the supervisor from the event fast-path"
 grep -q 'absorbed push' "$STATE_DIR/.watch-triage.log" 2>/dev/null || fail "the paused absorb should be logged to the triage log"
-pass "handle_push_transition: a declared-pause crew is absorbed (no fast wake), left to the poll loop's long cadence"
+[ -e "$STATE_DIR/.paused-default_wG_pQ" ] || fail "the paused event path must create the shared pause marker"
+[ -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] || fail "the paused event path must commit the handled transition"
+pass "handle_push_transition: a declared-pause crew enters the shared pause cadence without a fast wake"
 
 # --- event_wait_or_sleep: secondmate windows are excluded from the pane list --
 

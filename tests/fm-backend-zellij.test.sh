@@ -907,7 +907,7 @@ test_kill_is_noop_when_session_absent() {
   pass "fm_backend_zellij_kill: never fails when the target session no longer exists"
 }
 
-test_teardown_passes_recorded_tab_id_to_zellij_kill() {
+test_teardown_rejects_uninspectable_project_before_zellij_kill() {
   local dir state data config project fb out status
   dir="$TMP_ROOT/teardown-zellij-ghost"; state="$dir/state"; data="$dir/data"; config="$dir/config"; project="$dir/project"
   mkdir -p "$state" "$data/zghost" "$config" "$project" "$dir/responses"
@@ -926,21 +926,21 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_SESSION_LIST="firstmate" \
     "$ROOT/bin/fm-teardown.sh" zghost 2>&1 )
   status=$?
-  expect_code 0 "$status" "fm-teardown should succeed for a zellij scout whose worktree is already gone: $out"
-  zellij_assert_call_order "$dir/log" $'\x1f''list-panes'$'\x1f''--json' $'\x1f''list-tabs'$'\x1f''--json' \
-    "fm-teardown did not verify the recorded zellij_tab_id against the task label"
-  assert_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id'$'\x1f''3' \
-    "fm-teardown did not pass a verified recorded zellij_tab_id through to kill"
-  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-pane' \
-    "fm-teardown should close the recorded tab id instead of falling back to close-pane"
-  pass "fm-teardown.sh: passes recorded zellij_tab_id with the expected task label"
+  expect_code 1 "$status" "fm-teardown must reject an uninspectable project before Zellij cleanup: $out"
+  assert_contains "$out" "teardown project metadata is not an exact inspectable repository root" \
+    "fm-teardown did not explain the project-identity refusal"
+  [ ! -e "$dir/log" ] || [ ! -s "$dir/log" ] \
+    || fail "fm-teardown touched Zellij before validating project identity: $(cat "$dir/log")"
+  pass "fm-teardown.sh: rejects uninspectable project metadata before touching Zellij"
 }
 
-test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
+test_forced_secondmate_teardown_rejects_uninspectable_home_before_zellij_cleanup() {
   local dir state data config home project fb out status child_title
   dir="$TMP_ROOT/teardown-zellij-secondmate-child"; state="$dir/state"; data="$dir/data"; config="$dir/config"; home="$dir/secondmate-home"; project="$dir/project"
   mkdir -p "$state" "$data" "$config" "$home/state" "$home/data" "$home/config" "$home/projects" "$project" "$dir/responses"
   printf 'smz\n' > "$home/.fm-secondmate-home"
+  printf '%s\n' "- smz - Zellij child cleanup (home: $home; scope: zellij cleanup; projects: none; added 2026-07-27)" \
+    > "$data/secondmates.md"
   fm_write_meta "$state/smz.meta" \
     "window=firstmate:99" \
     "backend=zellij" \
@@ -980,10 +980,12 @@ SH
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_CHILD_TITLE="$child_title" \
     "$ROOT/bin/fm-teardown.sh" smz --force 2>&1 )
   status=$?
-  expect_code 0 "$status" "fm-teardown should force-retire a secondmate with a zellij child: $out"
-  assert_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id'$'\x1f''4' \
-    "forced secondmate teardown did not close a child zellij tab scoped to the child home"
-  pass "fm-teardown.sh: force cleanup kills zellij children using the child home tag"
+  expect_code 1 "$status" "fm-teardown must reject an uninspectable secondmate home before Zellij cleanup: $out"
+  assert_contains "$out" "secondmate project metadata is not an exact repository root" \
+    "fm-teardown did not explain the secondmate project-identity refusal"
+  [ ! -e "$dir/log" ] || [ ! -s "$dir/log" ] \
+    || fail "fm-teardown touched Zellij before validating secondmate project identity: $(cat "$dir/log")"
+  pass "fm-teardown.sh: rejects an uninspectable secondmate home before touching Zellij"
 }
 
 # --- send_text_submit: delta-based verify-and-retry --------------------------
@@ -1196,8 +1198,8 @@ test_kill_falls_back_to_close_pane_when_tab_lookup_empty
 test_kill_closes_recorded_tab_when_pane_already_gone
 test_kill_skips_recorded_tab_when_label_mismatches
 test_kill_is_noop_when_session_absent
-test_teardown_passes_recorded_tab_id_to_zellij_kill
-test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag
+test_teardown_rejects_uninspectable_project_before_zellij_kill
+test_forced_secondmate_teardown_rejects_uninspectable_home_before_zellij_cleanup
 test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_send_failed_when_session_absent

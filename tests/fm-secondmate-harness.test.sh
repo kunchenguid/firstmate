@@ -251,22 +251,44 @@ SH
 # A minimal seeded secondmate home (validate_firstmate_home_for_spawn needs the
 # seed marker, AGENTS.md, bin/, and a charter to launch). config/ is intentionally
 # left absent so the spawn's propagation is what creates it.
+make_fixture_clone() {
+  local destination=$1
+  git clone -q --no-checkout "$ROOT" "$destination"
+  git -C "$destination" checkout -q -b main "$(git -C "$ROOT" rev-parse HEAD)"
+  git -C "$destination" update-ref refs/remotes/origin/main HEAD
+  git -C "$destination" remote set-head origin main
+}
+
 make_seeded_home() {
   local home=$1 id=$2
-  mkdir -p "$home/bin" "$home/data"
-  printf '# Firstmate\n' > "$home/AGENTS.md"
+  make_fixture_clone "$home"
+  mkdir -p "$home/data"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter\n' > "$home/data/charter.md"
 }
 
-# spawn_secondmate <world> <id> <home> [explicit-harness]
-# Runs fm-spawn.sh in secondmate mode. FM_ROOT is the real repo (so fm-harness.sh
-# resolves), the primary config dir is <world>/home/config, and CLAUDECODE pins
-# detect_own. stderr is discarded (the local-HEAD ff sync harmlessly skips a
-# non-worktree home). Inspect <world>/home/state/<id>.meta and <home>/config after.
-spawn_secondmate() {
-  local world=$1 id=$2 home=$3 harness=${4:-} fakebin
+prepare_spawn_world() {
+  local world=$1 id=$2 home=$3 home_real primary
   mkdir -p "$world/home/state" "$world/home/data"
+  primary="$world/primary"
+  if [ ! -d "$primary/.git" ]; then
+    make_fixture_clone "$primary"
+    git -C "$primary" remote set-url origin "$primary"
+  fi
+  git -C "$home" remote set-url origin "$primary"
+  git -C "$home" remote set-head origin main
+  home_real=$(cd "$home" && pwd -P)
+  printf -- '- %s - harness test (home: %s; scope: harness test; projects: ; added 2026-07-27)\n' \
+    "$id" "$home_real" > "$world/home/data/secondmates.md"
+  printf '%s\n' "$primary"
+}
+
+# spawn_secondmate <world> <id> <home> [explicit-harness]
+# Runs fm-spawn.sh in secondmate mode. CLAUDECODE pins detect_own. Inspect
+# <world>/home/state/<id>.meta and <home>/config after.
+spawn_secondmate() {
+  local world=$1 id=$2 home=$3 harness=${4:-} fakebin primary
+  primary=$(prepare_spawn_world "$world" "$id" "$home")
   fakebin=$(make_noop_tmux "$world/tmux-$id")
   # An empty harness must contribute zero args, not an empty positional; build the
   # arg list explicitly so the optional harness is omitted cleanly.
@@ -274,7 +296,7 @@ spawn_secondmate() {
   [ -n "$harness" ] && spawn_args+=("$harness")
   spawn_args+=(--secondmate)
   PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
+    FM_ROOT_OVERRIDE="$primary" FM_HOME="$world/home" \
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
     FM_SPAWN_NO_GUARD=1 \
@@ -374,12 +396,15 @@ test_spawn_explicit_harness_wins() {
 # The unverified-adapter guard holds on the resolved secondmate path: an unknown
 # config/secondmate-harness aborts the spawn (no meta written) and names the source.
 test_spawn_unverified_secondmate_harness_refused() {
-  local w sm fakebin err rc
+  local w sm sm_real fakebin err rc
   w="$TMP_ROOT/spawn-unverified"
   sm="$w/sm"
-  mkdir -p "$w/home/config" "$w/home/state"
+  mkdir -p "$w/home/config" "$w/home/state" "$w/home/data"
   printf 'bogus\n' > "$w/home/config/secondmate-harness"
   make_seeded_home "$sm" sm
+  sm_real=$(cd "$sm" && pwd -P)
+  printf -- '- sm - harness test (home: %s; scope: harness test; projects: ; added 2026-07-27)\n' \
+    "$sm_real" > "$w/home/data/secondmates.md"
   fakebin=$(make_noop_tmux "$w/tmux")
   err="$w/spawn.err"
   rc=0
@@ -441,6 +466,13 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = get ] || exit 0
+printf '%s\n' "${FM_FAKE_TREEHOUSE_WORKTREE:?}"
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -448,13 +480,13 @@ SH
 # Same shape as spawn_secondmate but captures the launch command into <launchlog>
 # and does not discard stderr, so callers can assert on both.
 spawn_secondmate_capture() {
-  local world=$1 id=$2 home=$3 launchlog=$4 fakebin
+  local world=$1 id=$2 home=$3 launchlog=$4 fakebin primary
   shift 4
-  mkdir -p "$world/home/state" "$world/home/data"
+  primary=$(prepare_spawn_world "$world" "$id" "$home")
   fakebin=$(make_launch_capturing_tmux "$world/tmux-$id")
   : > "$launchlog"
   PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
+    FM_ROOT_OVERRIDE="$primary" FM_HOME="$world/home" \
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
@@ -654,8 +686,10 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   proj="$w/crew-project"
   wt="$w/crew-wt"
   fakebin=$(make_launch_capturing_tmux "$w/tmux-crew")
-  fm_git_worktree "$proj" "$wt" "wt-crew"
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state"
+  fm_git_init_commit "$proj"
+  git -C "$proj" worktree add --quiet --detach "$wt" HEAD
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" \
+    "$home/treehouse-pools" "$home/checkout-refresh-state"
   printf 'brief\n' > "$home/data/$id/brief.md"
   : > "$launchlog"
   spawn_err="$w/crew-spawn.err"
@@ -665,7 +699,10 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_TREEHOUSE_ROOT="$home/treehouse-pools" \
+    FM_CHECKOUT_REFRESH_STATE_BASE="$home/checkout-refresh-state" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
+    FM_FAKE_TREEHOUSE_WORKTREE="$wt" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" >/dev/null 2>"$spawn_err"
   spawn_rc=$?
   expect_code 0 "$spawn_rc" "crew-unaffected spawn should succeed: $(cat "$spawn_err")"
