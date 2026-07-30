@@ -106,6 +106,14 @@ The documented project customization roots are `.agents`, `.agent`, `_agents`, a
 Live probes confirmed `.agents/hooks.json` and `.agent/hooks.json` discovery.
 A project plugin under `.agents/plugins/<name>/hooks.json` was not discovered by Agy 1.1.8 and is not used.
 
+A coexistence probe on 2026-07-30 placed a `hooks.json` with a distinct Stop hook in all four roots of one disposable workspace simultaneously.
+A single turn fired all four Stop hooks.
+Agy 1.1.8 therefore merges hooks from every coexisting customization root instead of loading only the highest-priority occupied root, matching Codex and Claude Code project hook coexistence.
+
+A second probe on 2026-07-30 reproduced the recursive Firstmate-on-Firstmate layout: `.agents/hooks.json` stayed project-owned while the generated token-bound task hook lived in `.agent/hooks.json` beside occupied `_agents` and `_agent` roots.
+One steer fired the project hooks and the task hook in the same Stop, and `bin/fm-agy-turnend-hook.sh` touched the registry-bound `*.turn-ended` marker end to end.
+This verifies the spawn-time first-unoccupied-root fallback as load-bearing behavior, not an assumption.
+
 A live Stop payload was:
 
 ```json
