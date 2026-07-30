@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 # Shared durable wake queue and portable lock helpers.
+#
+# This header owns the two queue artifacts under state/. The queue itself,
+# state/.wake-queue, is an append-only file of tab-separated records shaped
+# "epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload"; firstmate drains and reads those
+# raw records as its first work of a wake-handling turn. state/.wake-queue.lock
+# serializes append and drain across the watcher, the sub-supervisor, and the
+# session, so it is coordination state that is never edited or removed by hand.
 
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"

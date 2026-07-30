@@ -17,6 +17,11 @@
 #       claim state/x-context/<request_id>.offered.json, and print one compact
 #       line "x-mention <request_id>" (which becomes the watcher wake payload)
 #   an already offered request_id                -> print nothing, exit 0
+# The rate limiting is backed by two private mode-0600 dedupe markers under
+# state/: x-poll.error for relay auth, config, and inbox-write diagnostics, and
+# x-poll.claim-error for offer-claim failures. Each marker suppresses a repeat of
+# the same diagnostic and is cleared by the next clean poll or successful claim,
+# so their presence records an unresolved condition rather than history.
 # The full object is stashed verbatim, so any conversation context the relay
 # includes (in_reply_to: {author_handle, text}, null for a fresh mention) is
 # preserved for fmx-respond to handle follow-ups with continuity. The durable

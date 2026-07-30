@@ -54,6 +54,7 @@ Claude Code sets `stop_hook_active=true` on every stop after any stop-hook conti
 The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds) and allows the stop when the watcher is healthy, `state/.claude-autoarm.lock` has a live owner, or `state/.claude-autoarm-epoch` contains a fresh rewake outcome.
 When none of those proofs appears, it re-blocks up to `FM_CLAUDE_TURNEND_BLOCK_BUDGET` times (default 3, below Claude's 8-block override), then allows degraded with a visible `systemMessage`.
 Any allow resets the budget.
+That consecutive-block count lives in `state/.turnend-claude-blocks`, a guard-owned record that is never edited or removed by hand; deleting it silently grants the guard a fresh block budget.
 
 OpenCode, Pi, and pi-signed expose passive callbacks for this purpose.
 Their adapters fail open at the hook boundary to protect the user session but schedule one bounded follow-up when the predicate blocks.

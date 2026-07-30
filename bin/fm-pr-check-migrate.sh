@@ -6,6 +6,21 @@
 # registered custom checks remain armed, and every other task poll is
 # quarantined for private review. A current X-mode shim is preserved by exact
 # content, while the recognized older byte-static shim is refreshed in place.
+#
+# State artifacts this script owns, all private to the home:
+#   state/.pr-check-quarantine/       non-runnable storage for the checks this
+#       migration neutralized; kept for private review, never executed again.
+#   state/.pr-check-migration.log     per-task outcomes, distinguishing rebuilt
+#       or canonically registered replacement polls, quarantined unarmed polls,
+#       and incomplete migrations.
+#   state/.pr-check-migration-scan-v1 marker proving the non-executing scan
+#       disabled every unsafe legacy check.
+#   state/.pr-check-migration-v1      separate marker recording that the private
+#       repairs themselves completed.
+# Each marker holds its own name as its only line at mode 0600 and is published
+# only on a completed pass, so an absent marker means the migration still has
+# work rather than that it found nothing to do.
+#
 # Usage: fm-pr-check-migrate.sh [--checks-safe]
 set -u
 

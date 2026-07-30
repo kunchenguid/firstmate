@@ -16,6 +16,7 @@ The tracked code root contains the shared instruction, skill, documentation, wor
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 The producing PR and X helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
+Slow per-task checks live at `state/<id>.check.sh`: `bin/fm-pr-check.sh` publishes the authenticated merge poll there, and a hand-written custom check at that same path must be bound to its bytes with [`bin/fm-check-register.sh`](../bin/fm-check-register.sh), whose header is the single owner of the custom-check file, trust-record, and behavior requirements.
 Wake, watcher, away-mode, and X-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.

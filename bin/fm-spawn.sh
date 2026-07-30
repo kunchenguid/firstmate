@@ -106,7 +106,23 @@
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
-# plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# plus a gitignored .fm-grok-turnend worktree pointer and a state token,
+# state/<id>.grok-turnend-token; Kimi's equivalent is state/<id>.kimi-turnend-token.
+# Both are firstmate-owned registry tokens for the task and are removed by teardown.
+# This header is the owner of the BASE state/<id>.meta fields this script writes:
+#   window=              backend target the supervisor steers and reads
+#   endpoint_task_id=    endpoint identity for backends that name their own task
+#   worktree=            isolated task worktree, or the secondmate home itself
+#   project=             absolute project path; a secondmate records its validated
+#                        firstmate home here, matching worktree=
+#   harness=             the concrete resolved adapter, never the literal "default"
+#   model= effort=       the rest of the resolved dispatch profile, each recorded
+#                        as "default" when the spawn did not pin that axis
+#   kind= mode= yolo=    task kind, delivery mode, and autonomy posture
+#   tasktmp=             per-task scratch directory removed by teardown
+# kind=secondmate also records home= and projects=; a non-default runtime backend
+# records further backend-specific fields (docs/configuration.md "Runtime
+# backend"), and the PR and X helpers append the fields they own.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.

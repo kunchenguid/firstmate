@@ -63,6 +63,7 @@ If an addition needs more than a few lines of conditional detail (detail that ma
 A skill's cost is paid only by the sessions that actually load it.
 When in doubt, write the fact into the skill or doc first, and add only the one-line trigger to `AGENTS.md`.
 `AGENTS.md` must stay at or under 40000 bytes, Claude Code's agent-instruction warning threshold, because it is loaded as `CLAUDE.md` and crossing that threshold warns in every session of every fleet member.
+The budget tracks a harness threshold rather than a firstmate invariant, so raising it is a deliberate decision made explicitly and never by drift; the correct response to an overage is almost always to move the detail to its owning skill or doc.
 Check the size with `wc -c AGENTS.md` before proposing an addition, because the file normally sits close to the limit and a new line usually has to be paid for by removing another.
 
 ## Trigger hygiene

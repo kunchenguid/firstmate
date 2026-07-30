@@ -16,6 +16,17 @@
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
+#
+# The three private mode-0600 sidecars that carry those records, all beside the
+# byte-static poll published at state/<id>.check.sh:
+#   state/<id>.pr-poll               the validated data the byte-static poll
+#       reads, so no task or PR value is ever interpolated into shell source.
+#   state/<id>.pr-poll-registration  the transactional provenance record binding
+#       the task, its canonical metadata identity, the sidecar, and the published
+#       poll; the watcher runs a poll only while that binding still holds.
+#   state/<id>.pr-poll-retirement    the identity-bound crash-recovery receipt
+#       for one exact validated merged result, removed once its poll artifacts
+#       have retired.
 
 FM_PR_PROVIDER=
 FM_PR_URL=
