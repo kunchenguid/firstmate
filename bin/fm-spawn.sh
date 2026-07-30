@@ -127,6 +127,26 @@ esac
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+
+resolve_directory_input() {
+  local name=$1 path=$2 resolved
+  case "$path" in
+    /*) printf '%s\n' "$path"; return 0 ;;
+  esac
+  resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || {
+    echo "error: $name directory cannot be resolved: $path" >&2
+    return 1
+  }
+  printf '%s\n' "$resolved"
+}
+
+FM_HOME=$(resolve_directory_input FM_HOME "$FM_HOME") || exit 1
+if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+  FM_STATE_OVERRIDE=$(resolve_directory_input FM_STATE_OVERRIDE "$FM_STATE_OVERRIDE") || exit 1
+fi
+if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
+  FM_DATA_OVERRIDE=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 1
+fi
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
@@ -1520,6 +1540,16 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+# Crewmate panes are created by a long-lived tmux/herdr daemon that does not
+# inherit firstmate's current environment, so a bare `claude` in the pane falls
+# back to the default ~/.claude store even when firstmate itself runs under a
+# different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
+# Forward firstmate's own resolved store onto the claude launch so the crewmate
+# uses the same credential/config firstmate is authenticated with. Only when set;
+# an unset value is the single-store default and needs no prefix.
+if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"

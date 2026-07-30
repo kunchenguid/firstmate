@@ -52,7 +52,6 @@ Current deterministic and live entry points:
 
 ```sh
 tests/fm-sessionstart-nudge.test.sh
-tests/fm-captain-translation-contract.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh
 ```
@@ -94,6 +93,7 @@ The same run proved the Claude-compatible Stop entries stay inert under `GROK_AG
 
 The secondmate-home scope and manual-repair wake path were measured with Claude Code 2.1.207 on 2026-07-12, when a native background completion re-invoked the idle model with no human input.
 The current Stop-owned main/secondmate inclusion and child-worktree exclusion are covered deterministically by `tests/fm-claude-stop-autoarm.test.sh`.
+On 2026-07-28 with Claude Code 2.1.205, `fm_harness_ancestry_pid()` in `bin/fm-session-lock-lib.sh` was fixed to resolve the outermost pid of a contiguous nested-harness run instead of the first match, so the Stop auto-arm correctly reaches the session's true lock owner through Claude Code's multi-level `bg-spare` hook worker chain.
 
 The Claude product live path ran with Claude Code 2.1.219 on 2026-07-24:
 

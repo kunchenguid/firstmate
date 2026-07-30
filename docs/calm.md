@@ -18,6 +18,12 @@ Pi's supported presentation API does not expose a global transcript filter.
 Expanded reasoning and its reserved spacing, built-in tool images, user-bash rows, skill and summary rows, generic status notices, and arbitrary custom-tool or extension rows remain visible.
 These are supported-API boundaries rather than hidden-content failures.
 
+## Pi compatibility
+
+Calm has no numeric Pi version minimum or maximum and never refuses Pi solely because its version is newer than a previously verified version.
+The collapsed-thinking and operational-user-row presentation adapters probe the exact Pi API seam they patch when Calm loads.
+If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter; `/calm`, the other adapter, and unrelated Pi extensions remain available.
+
 [`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy and empirical evidence.
 [`configuration.md`](configuration.md#pi-calm-preference-configcalm) owns the persisted preference file and resolution rules.
 `.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, and `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter.

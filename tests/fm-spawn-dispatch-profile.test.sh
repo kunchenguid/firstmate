@@ -84,10 +84,15 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
+  # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
+  # explicitly (empty by default) instead of leaking the invoking shell's value,
+  # which would make launch assertions depend on the developer's environment.
+  # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -121,6 +126,153 @@ test_no_profile_keeps_claude_profile_defaults() {
   expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
+}
+
+test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
+  local rec id out status launch home_real
+  id=profile-relative-paths-z1b
+  rec=$(make_spawn_case profile-relative-paths pi "$id")
+  read_case_record "$rec"
+  home_real=$(cd "$HOME_DIR" && pwd -P)
+  mkdir -p "$CASE_DIR/cdpath/home/state" "$CASE_DIR/cdpath/home/data"
+  : > "$LAUNCH_LOG"
+
+  out=$(
+    cd "$CASE_DIR" || exit 1
+    CDPATH="$CASE_DIR/cdpath" FM_ROOT_OVERRIDE='' FM_HOME=home \
+      FM_STATE_OVERRIDE=home/state FM_DATA_OVERRIDE=home/data \
+      FM_PROJECTS_OVERRIDE=home/projects FM_CONFIG_OVERRIDE=home/config \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+      GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
+      "$SPAWN" "$id" "$PROJ_DIR" 2>&1
+  )
+  status=$?
+  expect_code 0 "$status" "spawn with relative home overrides should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "-e '$home_real/state/$id.pi-ext.ts'" \
+    "relative FM_STATE_OVERRIDE leaked into Pi's cross-process extension path"
+  assert_contains "$launch" "< '$home_real/data/$id/brief.md'" \
+    "relative FM_DATA_OVERRIDE leaked into the cross-process brief path"
+  pass "relative home overrides ignore CDPATH and become absolute before spawn launch construction"
+}
+
+test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
+  local rec relative_id absolute_id out status launch home_real linked_home
+  relative_id=profile-relative-home-defaults-z1c
+  absolute_id=profile-absolute-home-defaults-z1d
+  rec=$(make_spawn_case profile-home-defaults pi "$relative_id" "$absolute_id")
+  read_case_record "$rec"
+  home_real=$(cd "$HOME_DIR" && pwd -P)
+
+  : > "$LAUNCH_LOG"
+  out=$(
+    cd "$CASE_DIR" || exit 1
+    FM_ROOT_OVERRIDE='' FM_HOME=home \
+      FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+      FM_PROJECTS_OVERRIDE=home/projects FM_CONFIG_OVERRIDE=home/config \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+      GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
+      "$SPAWN" "$relative_id" "$PROJ_DIR" 2>&1
+  )
+  status=$?
+  expect_code 0 "$status" "spawn with relative FM_HOME defaults should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "-e '$home_real/state/$relative_id.pi-ext.ts'" \
+    "relative FM_HOME leaked into Pi's default cross-process extension path"
+  assert_contains "$launch" "< '$home_real/data/$relative_id/brief.md'" \
+    "relative FM_HOME leaked into the default cross-process brief path"
+
+  linked_home="$CASE_DIR/home-link"
+  ln -s "$HOME_DIR" "$linked_home"
+  : > "$LAUNCH_LOG"
+  out=$(
+    FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" \
+      FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+      FM_PROJECTS_OVERRIDE="$linked_home/projects" FM_CONFIG_OVERRIDE="$linked_home/config" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+      GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
+      "$SPAWN" "$absolute_id" "$PROJ_DIR" 2>&1
+  )
+  status=$?
+  expect_code 0 "$status" "spawn with absolute symlink-spelled FM_HOME defaults should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "-e '$linked_home/state/$absolute_id.pi-ext.ts'" \
+    "absolute FM_HOME spelling changed in Pi's default cross-process extension path"
+  assert_contains "$launch" "< '$linked_home/data/$absolute_id/brief.md'" \
+    "absolute FM_HOME spelling changed in the default cross-process brief path"
+  pass "FM_HOME defaults resolve relative paths and preserve absolute spellings"
+}
+
+test_absolute_override_spelling_is_preserved_in_launch_paths() {
+  local rec id out status launch linked_home
+  id=profile-absolute-paths-z1c
+  rec=$(make_spawn_case profile-absolute-paths pi "$id")
+  read_case_record "$rec"
+  linked_home="$CASE_DIR/home-link"
+  ln -s "$HOME_DIR" "$linked_home"
+  : > "$LAUNCH_LOG"
+
+  out=$(
+    FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" \
+      FM_STATE_OVERRIDE="$linked_home/state" FM_DATA_OVERRIDE="$linked_home/data" \
+      FM_PROJECTS_OVERRIDE="$linked_home/projects" FM_CONFIG_OVERRIDE="$linked_home/config" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+      GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
+      "$SPAWN" "$id" "$PROJ_DIR" 2>&1
+  )
+  status=$?
+  expect_code 0 "$status" "spawn with absolute symlink-spelled overrides should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "-e '$linked_home/state/$id.pi-ext.ts'" \
+    "absolute FM_STATE_OVERRIDE spelling changed in Pi's cross-process extension path"
+  assert_contains "$launch" "< '$linked_home/data/$id/brief.md'" \
+    "absolute FM_DATA_OVERRIDE spelling changed in the cross-process brief path"
+  pass "absolute override spellings are preserved in spawn launch paths"
+}
+
+test_unresolvable_relative_overrides_fail_loudly() {
+  local rec id out status
+  id=profile-unresolvable-paths-z1d
+  rec=$(make_spawn_case profile-unresolvable-paths pi "$id")
+  read_case_record "$rec"
+
+  out=$(
+    cd "$CASE_DIR" || exit 1
+    FM_ROOT_OVERRIDE='' FM_HOME=missing-home \
+      FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+      "$SPAWN" "$id" "$PROJ_DIR" 2>&1
+  )
+  status=$?
+  expect_code 1 "$status" "spawn with an unresolvable relative home should fail"
+  assert_contains "$out" "FM_HOME directory cannot be resolved: missing-home" \
+    "spawn did not name the unresolvable FM_HOME"
+
+  out=$(
+    cd "$CASE_DIR" || exit 1
+    FM_ROOT_OVERRIDE='' FM_HOME=home \
+      FM_STATE_OVERRIDE=missing-state FM_DATA_OVERRIDE=home/data \
+      "$SPAWN" "$id" "$PROJ_DIR" 2>&1
+  )
+  status=$?
+  expect_code 1 "$status" "spawn with an unresolvable relative state override should fail"
+  assert_contains "$out" "FM_STATE_OVERRIDE directory cannot be resolved: missing-state" \
+    "spawn did not name the unresolvable FM_STATE_OVERRIDE"
+
+  out=$(
+    cd "$CASE_DIR" || exit 1
+    FM_ROOT_OVERRIDE='' FM_HOME=home \
+      FM_STATE_OVERRIDE=home/state FM_DATA_OVERRIDE=missing-data \
+      "$SPAWN" "$id" "$PROJ_DIR" 2>&1
+  )
+  status=$?
+  expect_code 1 "$status" "spawn with an unresolvable relative data override should fail"
+  assert_contains "$out" "FM_DATA_OVERRIDE directory cannot be resolved: missing-data" \
+    "spawn did not name the unresolvable FM_DATA_OVERRIDE"
+  pass "unresolvable relative spawn overrides fail with named diagnostics"
 }
 
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
@@ -436,6 +588,55 @@ test_batch_forwards_shared_profile_flags() {
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
+test_claude_forwards_firstmate_config_dir_when_set() {
+  local rec id out status launch
+  id=profile-claude-cfgdir-z17
+  rec=$(make_spawn_case profile-claude-cfgdir claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+    "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
+  pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
+}
+
+test_claude_omits_config_dir_prefix_when_unset() {
+  local rec id out status launch
+  id=profile-claude-nocfgdir-z18
+  rec=$(make_spawn_case profile-claude-nocfgdir claude "$id")
+  read_case_record "$rec"
+
+  # run_spawn pins CLAUDE_CONFIG_DIR empty by default, exercising the single-store
+  # default path where fm-spawn adds no prefix.
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn without CLAUDE_CONFIG_DIR should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
+    "claude launch must not add a config-dir prefix when firstmate has no CLAUDE_CONFIG_DIR set"
+  pass "claude omits the config-dir prefix when firstmate runs with the single-store default"
+}
+
+test_non_claude_harness_ignores_config_dir() {
+  local rec id out status launch
+  id=profile-codex-nocfgdir-z19
+  rec=$(make_spawn_case profile-codex-nocfgdir codex "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn with CLAUDE_CONFIG_DIR set should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
+    "non-claude harness launch must not receive the claude-specific config-dir prefix"
+  pass "non-claude harnesses do not receive the claude CLAUDE_CONFIG_DIR prefix"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
   id=profile-secondmate-z16
@@ -455,6 +656,10 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_profile_defaults
+test_relative_home_overrides_launch_with_absolute_cross_process_paths
+test_home_defaults_preserve_absolute_or_resolve_relative_paths
+test_absolute_override_spelling_is_preserved_in_launch_paths
+test_unresolvable_relative_overrides_fail_loudly
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
@@ -472,6 +677,9 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
+test_claude_forwards_firstmate_config_dir_when_set
+test_claude_omits_config_dir_prefix_when_unset
+test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"
