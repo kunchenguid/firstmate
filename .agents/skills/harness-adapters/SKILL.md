@@ -233,6 +233,8 @@ Each command shell is its own POSIX session and process-group leader, but remain
 Codex injects one stable `CODEX_THREAD_ID` into command children, including a distinct value for a nested Codex session.
 A nested Codex process can retain the outer thread id in its own inherited environment while its command children receive the nested id, so the child value rather than the parent environment is authoritative for the active thread.
 `bin/fm-session-lock-lib.sh` owns the resulting Codex thread-identity sidecar and fail-closed ownership contract while preserving the numeric harness pid used by every other verified adapter.
+Because the command child's parent link does resolve, the sidecar narrows harness ancestry rather than replacing it: ownership needs the thread id to match and any resolvable ancestry to still name the lock pid, so another harness nested inside a Codex session never inherits ownership from the environment.
+The numeric holder's own reacquisition rebinds a mismatched sidecar, so a Codex process that moves to another thread recovers through session start instead of staying read-only.
 [`docs/verification/supervision.md`](../../../docs/verification/supervision.md#codex-01460-session-lock-identity) records the exact live probe and scratch lock evidence.
 
 ## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.6; 1.18.4 busy-queue re-verified 2026-07-20)

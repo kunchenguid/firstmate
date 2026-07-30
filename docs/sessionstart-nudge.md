@@ -36,7 +36,7 @@ That alternative expands trust and writes outside this repository, so Firstmate 
 ## Regression coverage
 
 `tests/fm-sessionstart-nudge.test.sh` proves wrapper silence for both gate signals, an unmarked linked worktree, a missing state directory, an ancestry-owned lock, and a Codex thread-owned lock whose harness ancestry is unavailable.
-It also proves that a different Codex thread fails closed to the nudge.
+It also proves that a different Codex thread and a nested foreign harness holding an inherited Codex thread id both fail closed to the nudge.
 It proves exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output for a plain primary and a marked linked secondmate primary.
 `tests/fm-pi-primary-live-e2e.test.sh` and `tests/fm-opencode-primary-live-e2e.test.sh` exercise native startup paths with first-message and later-message Ahoy regressions.
 `tests/fm-turnend-guard.test.sh`, `tests/fm-pi-watch-extension.test.sh`, and `tests/fm-daemon.test.sh` cover marked guard, monitoring, and away-mode delivery.

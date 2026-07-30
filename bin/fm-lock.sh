@@ -69,13 +69,11 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi
-  if [ "$old" = "$me" ] \
-    && { [ -e "$STATE/.lock.codex-thread" ] || [ -L "$STATE/.lock.codex-thread" ]; } \
-    && ! fm_codex_lock_identity_matches "$STATE" "$old"; then
-    echo "error: live session lock has a different or malformed Codex thread identity; operate read-only until resolved" >&2
-    exit 1
-  fi
 fi
+# The recorded holder is now either this caller's own harness ancestor or no
+# longer a live harness, so publication below rebinds a mismatched, stale, or
+# reused-pid Codex sidecar to this command's thread instead of leaving the holder
+# read-only. Cross-session protection is the live other-holder refusal above.
 if ! fm_session_lock_publish_identity "$STATE" "$me"; then
   echo "error: cannot publish session lock identity; operate read-only until resolved" >&2
   exit 1

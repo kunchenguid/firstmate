@@ -155,10 +155,20 @@ while [ "\$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
+nested=\${FM_FAKE_NESTED_HARNESS_PID:-}
 case "\$pid:\$field" in
   "$holder:comm=") printf '%s\n' codex ;;
   "$holder:args=") printf '%s\n' codex ;;
-  *:ppid=) printf '%s\n' 1 ;;
+  "\$nested:comm=") printf '%s\n' claude ;;
+  "\$nested:args=") printf '%s\n' claude ;;
+  "\$nested:ppid=") printf '%s\n' 1 ;;
+  *:ppid=)
+    if [ -n "\$nested" ]; then
+      printf '%s\n' "\$nested"
+    else
+      printf '%s\n' 1
+    fi
+    ;;
   *:comm=) printf '%s\n' bash ;;
   *:args=) printf '%s\n' bash ;;
   *) exit 1 ;;
@@ -175,12 +185,21 @@ SH
   out=$(CODEX_THREAD_ID="$other_thread_id" PATH="$fakebin:/usr/bin:/bin" \
     FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE" 2>&1) \
     || status=$?
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
   expect_code 0 "$status" "mismatched Codex thread nudge"
   [ "$out" = "$NUDGE_LINE" ] \
     || fail "mismatched Codex thread identity did not fail closed to a nudge: $out"
-  pass "fm-sessionstart-nudge: Codex thread identity replaces ancestry without admitting another thread"
+
+  status=0
+  out=$(CODEX_THREAD_ID="$thread_id" FM_FAKE_NESTED_HARNESS_PID="$((holder + 1))" \
+    PATH="$fakebin:/usr/bin:/bin" \
+    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE" 2>&1) \
+    || status=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 0 "$status" "nested foreign harness nudge"
+  [ "$out" = "$NUDGE_LINE" ] \
+    || fail "a nested foreign harness with an inherited Codex thread id was not nudged: $out"
+  pass "fm-sessionstart-nudge: Codex thread identity admits neither another thread nor a nested foreign harness"
 }
 
 test_opencode_plugin_delivers_exact_nudge_once() {

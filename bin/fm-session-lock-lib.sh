@@ -14,8 +14,14 @@
 # A Codex acquisition therefore also publishes state/.lock.codex-thread as
 # "<lock-pid>:<thread-id>". When that sidecar exists, ownership requires its
 # regular non-symlink shape, its pid to match state/.lock, its thread id to match
-# the current command environment, and the numeric holder to remain a live
-# verified harness. A mismatch fails closed instead of falling back to ancestry.
+# the current command environment, the numeric holder to remain a live verified
+# harness, and any resolvable harness ancestry to still name that same holder.
+# The sidecar narrows ancestry instead of replacing it: only a command whose
+# harness ancestry cannot be resolved at all may rely on the thread id alone, so
+# an unrelated harness nested inside a Codex session never inherits ownership
+# from the environment. A mismatch fails closed instead of falling back to
+# ancestry, and the holder's own next acquisition rebinds the sidecar so a Codex
+# process that moved to another thread recovers instead of staying read-only.
 # Locks without the sidecar retain the verified ancestry behavior for older
 # Codex sessions and every other harness.
 # This file is sourced by scripts and has no side effects on source.
@@ -23,7 +29,9 @@
 # Known harness command names; extend when a new adapter is verified.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
 
-# Print the validated Codex thread id inherited by command and hook children.
+# Print the validated Codex thread id. Command children are the empirically
+# verified carriers of this variable; any other child shape that never receives
+# it simply fails closed to the ancestry contract.
 # Codex uses lowercase UUID-shaped ids. Treat every other shape as absent so
 # malformed ambient state can never become lock authority.
 fm_codex_thread_id() {
@@ -149,6 +157,10 @@ fm_codex_lock_identity_matches() {
 # Publish or clear the Codex-specific identity sidecar for numeric lock pid $2.
 # The caller owns state/.lock.acquire. Publishing before state/.lock is safe:
 # readers require both files to name the same pid and otherwise fail closed.
+# This is also the recovery path for a mismatched sidecar: an acquisition that
+# the numeric holder itself may perform rebinds the file to the current thread,
+# and an acquisition with no Codex thread identity clears it, so no stale or
+# reused-pid sidecar can keep a live holder permanently read-only.
 fm_session_lock_publish_identity() {
   local state=$1 lock_pid=$2 identity_file thread_id tmp
   identity_file="$state/.lock.codex-thread"
@@ -168,9 +180,13 @@ fm_session_lock_publish_identity() {
 }
 
 # True when state dir $1 holds a session lock whose pid is the harness ancestor
-# of the current process, or whose Codex identity sidecar matches this command's
-# thread. A missing lock, a malformed or mismatched Codex identity, a lock held
-# by another live harness, or unresolved legacy ancestry all fail closed.
+# of the current process. When the Codex identity sidecar exists it must also
+# match this command's thread, and any harness ancestry that does resolve must
+# still name the lock pid; only a command with no resolvable harness ancestry may
+# rely on the sidecar alone, so a different harness nested inside the Codex
+# session cannot claim ownership from the inherited thread id. A missing lock, a
+# malformed or mismatched Codex identity, a lock held by another live harness, or
+# unresolved legacy ancestry all fail closed.
 fm_session_lock_owned_by_self() {
   local state=$1 lock_pid my_pid identity_file
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
@@ -179,7 +195,9 @@ fm_session_lock_owned_by_self() {
   esac
   identity_file="$state/.lock.codex-thread"
   if [ -e "$identity_file" ] || [ -L "$identity_file" ]; then
-    fm_codex_lock_identity_matches "$state" "$lock_pid"
+    fm_codex_lock_identity_matches "$state" "$lock_pid" || return 1
+    my_pid=$(fm_harness_ancestry_pid) || return 0
+    [ "$my_pid" = "$lock_pid" ]
     return
   fi
   my_pid=$(fm_harness_ancestry_pid) || return 1

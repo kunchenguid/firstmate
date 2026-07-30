@@ -98,6 +98,7 @@ The process shape is therefore a new POSIX session and process group for each co
 The command remains a direct child of `codex`, while the child-scoped `CODEX_THREAD_ID` distinguishes a nested session from its outer session.
 An additional `/proc/<parent>/environ` probe showed that the nested Codex parent retained the outer thread id while its command child received the nested id.
 This is why `bin/fm-session-lock-lib.sh` uses the command child's validated thread id as the Codex sidecar authority and retains the numeric Codex pid for liveness.
+Because that parent link resolves, the sidecar narrows the verified ancestry contract instead of replacing it: only a caller whose harness ancestry cannot be resolved at all may rely on the thread id alone, and the numeric holder's own reacquisition rebinds a mismatched sidecar.
 The test also seeds a dead numeric holder and mismatched old sidecar before proving status reports it stale, acquisition replaces it, and the new thread verifies ownership.
 
 ## Turn-end guard

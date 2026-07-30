@@ -751,16 +751,27 @@ SH
   pass "concurrent session-lock acquisition admits exactly one live harness"
 }
 
+# codex_owned_by_self <state-dir> <env assignment>...: run the shared ownership
+# predicate in a child shell so the fake ps ancestry of that child decides.
+codex_owned_by_self() {
+  local state=$1
+  shift
+  env "$@" HOME_STATE="$state" ROOT_UNDER_TEST="$ROOT" \
+    bash -c '. "$ROOT_UNDER_TEST/bin/fm-session-lock-lib.sh"; fm_session_lock_owned_by_self "$HOME_STATE"'
+}
+
 test_codex_session_lock_uses_thread_identity() {
   local rec root home fakebin codex_pid out status=0 lock_pid
   local thread_id=019fb044-acd6-7c20-97a2-f3e227def5d2
   local other_thread_id=019fb041-9ca2-76c1-a272-358bd63dfe7a
+  local nested_pid
   rec=$(new_world codex-thread-lock)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
   sleep 300 &
   codex_pid=$!
+  nested_pid=$((codex_pid + 1))
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -773,11 +784,17 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
+nested=${FM_FAKE_NESTED_HARNESS_PID:-}
 case "$pid:$field" in
   "$FM_FAKE_CODEX_PID:comm=") printf '%s\n' codex ;;
   "$FM_FAKE_CODEX_PID:args=") printf '%s\n' codex ;;
+  "$nested:comm=") printf '%s\n' claude ;;
+  "$nested:args=") printf '%s\n' claude ;;
+  "$nested:ppid=") printf '%s\n' 1 ;;
   *:ppid=)
-    if [ "${FM_FAKE_CODEX_ISOLATED:-0}" = 1 ]; then
+    if [ -n "$nested" ]; then
+      printf '%s\n' "$nested"
+    elif [ "${FM_FAKE_CODEX_ISOLATED:-0}" = 1 ]; then
       printf '%s\n' 1
     else
       printf '%s\n' "$FM_FAKE_CODEX_PID"
@@ -803,31 +820,59 @@ SH
   assert_contains "$out" "lock acquired: harness pid $codex_pid" \
     "Codex acquisition did not report its live harness pid"
 
+  # A second thread of the SAME live Codex process must be able to rebind the
+  # sidecar; otherwise a thread change leaves that process permanently read-only.
   status=0
   out=$(CODEX_THREAD_ID="$other_thread_id" FM_HOME="$home" FM_FAKE_CODEX_PID="$codex_pid" \
     PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
-  [ "$status" -ne 0 ] || fail "a different Codex thread replaced the live lock identity"
-  assert_contains "$out" "different or malformed Codex thread identity" \
-    "a different Codex thread did not fail closed with an ownership diagnostic"
+  expect_code 0 "$status" "same-pid Codex thread change"
+  [ "$(cat "$home/state/.lock")" = "$codex_pid" ] \
+    || fail "a same-pid Codex thread change lost the numeric lock holder"
+  [ "$(cat "$home/state/.lock.codex-thread")" = "$codex_pid:$other_thread_id" ] \
+    || fail "a same-pid Codex thread change did not rebind the lock identity"
+  if codex_owned_by_self "$home/state" CODEX_THREAD_ID="$thread_id" \
+    FM_FAKE_CODEX_PID="$codex_pid" PATH="$fakebin:$BASE_PATH"; then
+    fail "the replaced Codex thread still verified ownership after rebinding"
+  fi
+  status=0
+  out=$(CODEX_THREAD_ID="$thread_id" FM_HOME="$home" FM_FAKE_CODEX_PID="$codex_pid" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  expect_code 0 "$status" "Codex thread rebind back"
   [ "$(cat "$home/state/.lock.codex-thread")" = "$codex_pid:$thread_id" ] \
-    || fail "a refused Codex thread changed the live lock identity"
+    || fail "Codex reacquisition did not rebind the lock identity back to its thread"
 
-  CODEX_THREAD_ID="$thread_id" FM_FAKE_CODEX_PID="$codex_pid" FM_FAKE_CODEX_ISOLATED=1 \
-    PATH="$fakebin:$BASE_PATH" HOME_STATE="$home/state" ROOT_UNDER_TEST="$ROOT" \
-    bash -c '. "$ROOT_UNDER_TEST/bin/fm-session-lock-lib.sh"; fm_session_lock_owned_by_self "$HOME_STATE"' \
+  codex_owned_by_self "$home/state" CODEX_THREAD_ID="$thread_id" \
+    FM_FAKE_CODEX_PID="$codex_pid" FM_FAKE_CODEX_ISOLATED=1 PATH="$fakebin:$BASE_PATH" \
     || fail "Codex thread identity did not verify ownership after ancestry became unavailable"
-  if CODEX_THREAD_ID="$other_thread_id" FM_FAKE_CODEX_PID="$codex_pid" FM_FAKE_CODEX_ISOLATED=1 \
-    PATH="$fakebin:$BASE_PATH" HOME_STATE="$home/state" ROOT_UNDER_TEST="$ROOT" \
-    bash -c '. "$ROOT_UNDER_TEST/bin/fm-session-lock-lib.sh"; fm_session_lock_owned_by_self "$HOME_STATE"'; then
+  if codex_owned_by_self "$home/state" CODEX_THREAD_ID="$other_thread_id" \
+    FM_FAKE_CODEX_PID="$codex_pid" FM_FAKE_CODEX_ISOLATED=1 PATH="$fakebin:$BASE_PATH"; then
     fail "a different Codex thread verified ownership of the live lock"
   fi
+
+  # A different harness nested inside the Codex session inherits CODEX_THREAD_ID,
+  # so the sidecar alone must never grant it ownership: its own resolvable
+  # ancestry is not the lock holder, and acquisition refuses it too.
+  if codex_owned_by_self "$home/state" CODEX_THREAD_ID="$thread_id" \
+    FM_FAKE_CODEX_PID="$codex_pid" FM_FAKE_NESTED_HARNESS_PID="$nested_pid" \
+    PATH="$fakebin:$BASE_PATH"; then
+    fail "a nested foreign harness verified ownership from an inherited Codex thread id"
+  fi
+  status=0
+  out=$(CODEX_THREAD_ID="$thread_id" FM_HOME="$home" FM_FAKE_CODEX_PID="$codex_pid" \
+    FM_FAKE_NESTED_HARNESS_PID="$nested_pid" PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "a nested foreign harness acquired the live Codex lock"
+  assert_contains "$out" "another live firstmate session holds the lock (pid $codex_pid)" \
+    "a nested foreign harness did not fail closed with the live-owner diagnostic"
+  [ "$(cat "$home/state/.lock.codex-thread")" = "$codex_pid:$thread_id" ] \
+    || fail "a refused nested harness changed the live lock identity"
 
   kill "$codex_pid" 2>/dev/null || true
   wait "$codex_pid" 2>/dev/null || true
   out=$(FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" status)
   assert_contains "$out" "lock: stale" \
     "dead Codex holder was not classified as a releasable stale lock"
-  pass "Codex lock: thread identity survives isolated command ancestry and stale holders remain releasable"
+  pass "Codex lock: thread identity survives isolated command ancestry, rebinds for the holder, and refuses nested harnesses"
 }
 
 # --- output ordering ----------------------------------------------------------
