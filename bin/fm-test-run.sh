@@ -38,7 +38,7 @@
 #                   silently pass as a gate skip.
 #   --jobs N        run the selected scripts with up to N concurrent workers.
 #                   Default is 1 (serial). N>1 is allowed only when every
-#                   selected script is in the Phase 2 proven-isolated set
+#                   selected script is in the proven-isolated set
 #                   (bin/fm-test-isolation-proof.sh --list). Cap is 8. Stateful
 #                   families never schedule under --jobs.
 #   -h, --help      print this header
@@ -228,7 +228,7 @@ real-herdr-gated
 EOF
 }
 
-# Exact Phase 2 proven-isolated candidate set (same paths as
+# Exact proven-isolated candidate set (same paths as
 # bin/fm-test-isolation-proof.sh --list). Do not expand without a new concurrent
 # isolation proof archive.
 list_proven_isolated() {
@@ -260,10 +260,9 @@ tests/fm-x-mode.test.sh
 EOF
 }
 
-# Portable parallel shard 1: LPT balance of the proven-isolated set using
-# Phase 1 serial duration averages from CI timing artifacts on main after
-# #825/#832/#834 (docs/fm-test-portable-shards.md). Execution order is longest
-# first so wall-clock stays near the balanced sum.
+# Portable parallel shard 1: LPT balance of the proven-isolated set using the
+# current concurrent-proof durations in docs/fm-test-isolation-proof.json.
+# Execution order is longest first so wall-clock stays near the balanced sum.
 list_portable_parallel_1() {
   cat <<'EOF'
 tests/fm-x-mode.test.sh
