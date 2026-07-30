@@ -364,6 +364,7 @@ staged_fetch_scope_exit() {
 
 staged_fetch_scope_signal() {
   local signal=$1 signal_rc=$2
+  staged_fetch_scope_cleanup
   staged_fetch_scope_restore_signal_traps
   kill -s "$signal" "$$"
   return "$signal_rc"

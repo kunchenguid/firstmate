@@ -1298,6 +1298,44 @@ test_staged_fetch_signals_clean_scope_and_preserve_caller_traps() {
   pass "TERM and INT clean staged fetch scope and preserve caller traps"
 }
 
+test_staged_fetch_default_signals_clean_scope() {
+  local signal expected home clone fakebin out err marker stage rc realgit
+  for signal in TERM INT; do
+    case "$signal" in
+      TERM) expected=143 ;;
+      INT) expected=130 ;;
+    esac
+    home=$(new_home)
+    clone=$(build_pair "$home" "staged-fetch-default-signal-$signal")
+    advance_origin "$home" "staged-fetch-default-signal-$signal" C1
+    fakebin="$home/fb-staged-fetch-default-signal"; mkdir -p "$fakebin"
+    git_signal_during_staged_fetch "$fakebin"
+    out="$home/out-staged-fetch-default-signal"
+    err="$home/err-staged-fetch-default-signal"
+    marker="$home/staged-fetch-default-path"
+    realgit=$(command -v git)
+
+    set +e
+    PATH="$fakebin:$PATH" REAL_GIT_FOR_TEST="$realgit" \
+    GIT_STAGED_FETCH_SIGNAL="$signal" \
+    GIT_STAGED_FETCH_SIGNAL_MARKER="$marker" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      bash -c '
+        export FLEET_SYNC_SIGNAL_TARGET=$$
+        . "$1" "$2"
+      ' _ "$ROOT/bin/fm-fleet-sync.sh" "$clone" >"$out" 2>"$err"
+    rc=$?
+    set -e
+
+    [ "$rc" -eq "$expected" ] \
+      || fail "default $signal during staged fetch exited $rc instead of $expected"
+    assert_present "$marker" "default $signal did not expose its scoped directory"
+    stage=$(cat "$marker")
+    [ ! -e "$stage" ] || fail "default $signal left staged fetch directory $stage"
+  done
+  pass "default TERM and INT clean the exact staged fetch scope"
+}
+
 test_on_default_clean_behind_fast_forwards() {
   local home clone out
   home=$(new_home)
@@ -1637,6 +1675,7 @@ test_custom_refspec_updates_and_prunes_only_its_destinations
 test_auto_follow_tags_are_preserved
 test_staged_fetch_is_git_240_compatible_and_uses_one_remote_session
 test_staged_fetch_signals_clean_scope_and_preserve_caller_traps
+test_staged_fetch_default_signals_clean_scope
 test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
