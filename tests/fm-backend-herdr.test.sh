@@ -12,8 +12,15 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/herdr-test-safety.sh
+. "$(dirname "${BASH_SOURCE[0]}")/herdr-test-safety.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
+
+# These cases script a canned fake CLI; a Herdr pane identity leaked in from the
+# developer's own terminal would make the adapter resolve a launcher that this
+# fake never models. The launcher cases below set HERDR_PANE_ID themselves.
+herdr_forget_inherited_pane
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
@@ -280,6 +287,195 @@ test_cli_helper_sets_env_and_appends_trailing_session_flag() {
   assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''list'$'\x1f''--session'$'\x1f''fmtest' \
     "fm_backend_herdr_cli did not append a trailing --session <name> flag (the fix for the env-var-alone routing bug)"
   pass "fm_backend_herdr_cli: sets HERDR_SESSION AND appends a trailing --session flag on every call"
+}
+
+# --- launcher_identity: the exact workspace a worker must be placed in -------
+#
+# Herdr injects HERDR_ENV/HERDR_PANE_ID/HERDR_SESSION/HERDR_SOCKET_PATH into
+# every process it manages a pane for, so a firstmate or secondmate agent's own
+# tool calls carry the identity of the workspace the captain is watching it in.
+# Placement resolves from that identity because workspace labels are mutable and
+# non-unique, and the globally focused workspace is unrelated to the launcher.
+# The refusal cases matter as much as the resolution: a broken binding must stop
+# the spawn, never quietly degrade back to picking a workspace by label.
+
+test_launcher_identity_absent_without_a_herdr_pane() {
+  local dir log resp fb status
+  dir="$TMP_ROOT/launcher-none"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  ( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest' "$ROOT" )
+  status=$?
+  expect_code 2 "$status" "a process with no herdr pane must report 'no launcher to inherit' (2), not a refusal"
+  [ ! -s "$log" ] || fail "resolving an absent launcher identity must not call herdr at all"$'\n'"$(cat "$log")"
+  pass "fm_backend_herdr_launcher_identity: a firstmate not running inside herdr has no launcher workspace to inherit"
+}
+
+test_launcher_identity_absent_when_herdr_env_alone_is_set() {
+  local dir log resp fb status
+  dir="$TMP_ROOT/launcher-env-only"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  ( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_ENV=1 \
+    \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest' "$ROOT" )
+  status=$?
+  expect_code 2 "$status" "HERDR_ENV=1 alone is a backend-selection marker, not a parent binding"
+  pass "fm_backend_herdr_launcher_identity: HERDR_ENV=1 without a pane id selects the backend but binds no parent"
+}
+
+test_launcher_identity_resolves_the_exact_pane_tab_and_workspace() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/launcher-ok"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w7:p3","tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/1.out"
+  printf '{"result":{"tab":{"tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/2.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w7","label":"firstmate"}]}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest || exit 1
+      printf "%s|%s|%s" "$FM_BACKEND_HERDR_LAUNCHER_PANE_ID" "$FM_BACKEND_HERDR_LAUNCHER_TAB_ID" "$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID"' "$ROOT" )
+  [ "$out" = 'w7:p3|w7:t3|w7' ] \
+    || fail "launcher_identity should resolve the launcher's own pane, tab, and workspace, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get'$'\x1f''w7:p3' "launcher_identity did not read its own pane"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''get'$'\x1f''w7:t3' "launcher_identity did not cross-check the owning tab"
+  pass "fm_backend_herdr_launcher_identity: resolves the launcher's exact workspace even when a same-labeled workspace sorts first"
+}
+
+test_launcher_identity_refuses_a_pane_from_another_session_name() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/launcher-xsession"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=someother \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 1 "$status" "a launcher pane naming another herdr session must refuse"
+  assert_contains "$out" "cross-session parent identity" "the cross-session refusal did not explain itself"
+  [ ! -s "$log" ] || fail "a cross-session launcher identity must be refused before any herdr call"
+  pass "fm_backend_herdr_launcher_identity: refuses a launcher pane that names a different herdr session"
+}
+
+test_launcher_identity_refuses_a_pane_from_another_server_socket() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/launcher-xsocket"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: session list --json, resolving THIS session's own socket.
+  printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-unit/fmtest.sock"}]}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/other.sock \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 1 "$status" "a launcher pane on a different herdr server socket must refuse"
+  assert_contains "$out" "cross-session parent identity" "the cross-socket refusal did not explain itself"
+  assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get' "a cross-server launcher identity must be refused before its pane is trusted"
+  pass "fm_backend_herdr_launcher_identity: refuses a launcher pane whose injected socket belongs to another herdr server"
+}
+
+test_launcher_identity_refuses_an_unreadable_pane() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/launcher-stale"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '1\n' > "$resp/1.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 1 "$status" "a launcher pane that no longer reads must refuse, not fall back to a label search"
+  assert_contains "$out" "w7:p3" "the stale-pane refusal did not name the pane it could not resolve"
+  pass "fm_backend_herdr_launcher_identity: refuses when the launcher's own pane no longer resolves"
+}
+
+test_launcher_identity_refuses_a_pane_and_tab_that_disagree() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/launcher-contradictory"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w7:p3","tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/1.out"
+  # The tab claims a DIFFERENT owning workspace than the pane just did.
+  printf '{"result":{"tab":{"tab_id":"w7:t3","workspace_id":"w9"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 1 "$status" "a pane and tab that disagree about their workspace must refuse"
+  assert_contains "$out" "contradictory parent identity" "the contradictory-identity refusal did not explain itself"
+  pass "fm_backend_herdr_launcher_identity: refuses when the launcher's pane and tab disagree about their workspace"
+}
+
+test_launcher_identity_refuses_a_workspace_missing_from_the_session() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/launcher-gone"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w7:p3","tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/1.out"
+  printf '{"result":{"tab":{"tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/2.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 1 "$status" "a launcher workspace absent from the session listing must refuse"
+  assert_contains "$out" "stale parent identity" "the stale-workspace refusal did not explain itself"
+  pass "fm_backend_herdr_launcher_identity: refuses when the launcher's workspace is gone from its own session"
+}
+
+# --- workspace_ensure placement ---------------------------------------------
+
+test_workspace_ensure_prefers_the_launcher_over_the_first_label_match() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/ensure-launcher"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w7:p3","tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/1.out"
+  printf '{"result":{"tab":{"tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/2.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w7","label":"firstmate"}]}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest /tmp' "$ROOT" )
+  [ "$out" = w7 ] || fail "workspace_ensure should place the worker in the launcher's own workspace w7, got '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' "the launcher's existing workspace must be reused, not duplicated"
+  pass "fm_backend_herdr_workspace_ensure: places a worker in the launcher's exact workspace, not the first same-labeled one"
+}
+
+test_workspace_ensure_refuses_an_ambiguous_label_with_no_launcher() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/ensure-ambiguous"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w7","label":"firstmate"}]}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest /tmp' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 3 "$status" "two same-labeled home workspaces with no launcher identity must refuse"
+  assert_contains "$out" "labeled 'firstmate'" "the ambiguity refusal did not name the duplicated label"
+  assert_contains "$out" "w1 w7" "the ambiguity refusal did not name the candidate workspaces"
+  assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' "an ambiguous placement must not mint a third same-labeled workspace"
+  pass "fm_backend_herdr_workspace_ensure: refuses to guess between two same-labeled home workspaces"
+}
+
+test_workspace_ensure_other_home_ignores_the_launcher_identity() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/ensure-other-home"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Only a workspace list: the launcher's own pane is never consulted, because a
+  # --secondmate launch stands up a different home's workspace by design.
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest /tmp other-home' "$ROOT" )
+  [ "$out" = w1 ] || fail "an other-home container should resolve by this home's own label, got '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get' "an other-home container must not inherit the launcher's workspace"
+  pass "fm_backend_herdr_workspace_ensure: a --secondmate container resolves that home's own workspace, not the launcher's"
+}
+
+test_container_ensure_refuses_an_ambiguous_home_label() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/container-ambiguous"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w7","label":"firstmate"}]}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "container_ensure must fail when the home workspace is ambiguous"
+  assert_contains "$out" "labeled 'firstmate'" "container_ensure buried the specific ambiguity it refused"
+  assert_not_contains "$out" "failed to ensure herdr workspace" "container_ensure added a generic message over the specific one"
+  pass "fm_backend_herdr_container_ensure: surfaces the exact ambiguous-placement refusal instead of a generic failure"
 }
 
 # --- container_ensure / create_task ------------------------------------------
@@ -1102,6 +1298,54 @@ SH
   [ "$(wc -l < "$log" | tr -d '[:space:]')" = 1 ] \
     || fail "ambiguous projection ordering did more than one read-only workspace list"
   pass "herdr presentation ordering: an ambiguous existing worker block is warning-only and read-only"
+}
+
+test_projection_order_anchors_the_parent_by_exact_id() {
+  local dir log resp fb mover layout out status
+  layout='{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":false},{"workspace_id":"w7","label":"firstmate","focused":false},{"workspace_id":"wH","label":"human-notes","focused":false},{"workspace_id":"w8","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}'
+
+  # Without the exact parent id, two same-labeled parents make the whole layout
+  # ambiguous and ordering steps aside.
+  dir="$TMP_ROOT/projection-order-dup-label"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; : > "$log"
+  printf '%s\n' "$layout" > "$resp/1.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+echo called > "$FM_FAKE_MOVER_CALLED"
+exit 0
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_CALLED="$dir/called" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_order_best_effort fmtest w8 firstmate' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "ambiguous projection ordering must not fail the spawn"
+  assert_contains "$out" "ambiguous workspace layout" "a duplicated parent label should make label-anchored ordering step aside"
+  [ ! -e "$dir/called" ] || fail "ambiguous parent label attempted workspace.move"
+
+  # With the launcher's exact parent workspace id, the same layout is no longer
+  # ambiguous: ordering gets past parent selection and stops later, on this
+  # fake's protocol, having still moved nothing.
+  dir="$TMP_ROOT/projection-order-exact-parent"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; : > "$log"
+  printf '%s\n' "$layout" > "$resp/1.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+echo called > "$FM_FAKE_MOVER_CALLED"
+exit 0
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_CALLED="$dir/called" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_order_best_effort fmtest w8 firstmate w7' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "exact-parent projection ordering must not fail the spawn"
+  assert_not_contains "$out" "ambiguous workspace layout" "the exact parent id should have resolved the duplicated label"
+  assert_contains "$out" "protocol" "exact-parent ordering did not reach its protocol gate"
+  [ ! -e "$dir/called" ] || fail "exact-parent ordering attempted workspace.move below the required protocol"
+  pass "herdr presentation ordering: the launcher's exact parent workspace id disambiguates a duplicated home label without moving anything"
 }
 
 test_projection_order_foreign_new_child_before_parent_is_read_only() {
@@ -2830,6 +3074,18 @@ test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
+test_launcher_identity_absent_without_a_herdr_pane
+test_launcher_identity_absent_when_herdr_env_alone_is_set
+test_launcher_identity_resolves_the_exact_pane_tab_and_workspace
+test_launcher_identity_refuses_a_pane_from_another_session_name
+test_launcher_identity_refuses_a_pane_from_another_server_socket
+test_launcher_identity_refuses_an_unreadable_pane
+test_launcher_identity_refuses_a_pane_and_tab_that_disagree
+test_launcher_identity_refuses_a_workspace_missing_from_the_session
+test_workspace_ensure_prefers_the_launcher_over_the_first_label_match
+test_workspace_ensure_refuses_an_ambiguous_label_with_no_launcher
+test_workspace_ensure_other_home_ignores_the_launcher_identity
+test_container_ensure_refuses_an_ambiguous_home_label
 test_container_ensure_starts_server_and_workspace
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag
@@ -2868,6 +3124,7 @@ test_projection_order_allows_intervening_parent_child_block
 test_projection_order_human_spaces_never_move_targets
 test_projection_order_failure_warns_without_cleanup_or_spawn_failure
 test_projection_order_ambiguous_existing_block_is_read_only
+test_projection_order_anchors_the_parent_by_exact_id
 test_projection_order_foreign_new_child_before_parent_is_read_only
 test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes

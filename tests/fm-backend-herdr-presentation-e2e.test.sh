@@ -253,6 +253,14 @@ chmod +x "$FAKEBIN/herdr-workspace-mover"
 export PATH="$FAKEBIN:$PATH"
 export FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAKEBIN/herdr-workspace-mover"
 
+# shellcheck source=tests/herdr-test-safety.sh
+. "$ROOT/tests/herdr-test-safety.sh"
+# This suite runs against its own isolated lab session, so a Herdr pane
+# inherited from the terminal it was launched in must not follow spawn into it
+# as a cross-session parent identity. Every projection below is anchored on the
+# parent this suite sets up, not on the developer's own workspace.
+herdr_forget_inherited_pane
+
 HERDR_LAB_SESSION=$(PATH="$HERDR_ORIGINAL_PATH" \
   "$HERDR_LAB_HELPER" name fm-herdr-presentation-projection)
 export HERDR_SESSION="$HERDR_LAB_SESSION" HERDR_LAB_SESSION
