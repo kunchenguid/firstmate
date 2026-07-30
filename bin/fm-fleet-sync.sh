@@ -11,7 +11,7 @@
 # expected-old no-dereference transaction, when the local and remote commits
 # genuinely diverged with one unambiguous common base but resolve to the same
 # root tree: create and verify the deterministic
-# direct ref refs/fm-fleet-sync/squash-preserved/<default>/<old-oid> without
+# direct ref refs/fm-fleet-sync/squash-preserved/<default>/<full-old-oid> without
 # dereferencing it or overwriting a conflict, then atomically move the local
 # branch to the observed remote commit with no-dereference expected-old checks on
 # the preservation, remote-tracking, and local refs. Active merge, cherry-pick,
