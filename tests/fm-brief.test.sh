@@ -178,13 +178,14 @@ test_help_includes_entire_header() {
 }
 
 # Registry with one project per delivery mode, so each ship-mode DOD branch is
-# exercised. A project absent from the registry defaults to no-mistakes.
+# exercised. A project absent from the registry defaults to direct-PR.
 write_registry() {
   local home=$1
   mkdir -p "$home/data"
   cat > "$home/data/projects.md" <<'EOF'
 - direct-proj [direct-PR] - fixture for direct-PR mode (added 2026-07-01)
 - local-proj [local-only] - fixture for local-only mode (added 2026-07-01)
+- guarded-proj [no-mistakes] - fixture for no-mistakes mode (added 2026-07-30)
 EOF
 }
 
@@ -198,7 +199,7 @@ test_ship_modes_generate_clean_briefs() {
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
-  for id_proj in "brief-nomistakes-a1:no-registry-proj" "brief-directpr-a2:direct-proj" "brief-localonly-a3:local-proj"; do
+  for id_proj in "brief-nomistakes-a1:guarded-proj" "brief-directpr-a2:direct-proj" "brief-localonly-a3:local-proj"; do
     id=${id_proj%%:*}
     proj=${id_proj##*:}
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1; status=$?
@@ -244,7 +245,7 @@ test_no_mistakes_dod_wording() {
   home="$TMP_ROOT/wording-home"
   mkdir -p "$home/data"
   id="brief-wording-b1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
@@ -262,6 +263,29 @@ test_no_mistakes_dod_wording() {
   assert_grep "firstmate's authority check" "$brief" \
     "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
+}
+
+test_no_mistakes_escalation_is_ship_only() {
+  local home status
+  home="$TMP_ROOT/no-mistakes-escalation-home"
+  write_registry "$home"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-default ordinary-missing >/dev/null
+  assert_grep "ships **direct-PR**" "$home/data/brief-default/brief.md" "missing project did not use direct-PR"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-escalated direct-proj --no-mistakes >/dev/null
+  [ "$(cat "$home/data/brief-escalated/delivery-mode")" = no-mistakes ] || fail "escalation record is wrong"
+  assert_grep "no-mistakes itself provides" "$home/data/brief-escalated/brief.md" "escalated brief did not use no-mistakes"
+
+  for forbidden in "--scout" "--secondmate --no-projects"; do
+    set +e
+    # shellcheck disable=SC2086
+    FM_HOME="$home" FM_SECONDMATE_CHARTER=x "$ROOT/bin/fm-brief.sh" "brief-reject-${forbidden%% *}" direct-proj --no-mistakes $forbidden >/dev/null 2>&1
+    status=$?
+    set -e
+    expect_code 1 "$status" "--no-mistakes must be ship-only"
+  done
+  pass "fm-brief.sh: --no-mistakes escalates only ship briefs"
 }
 
 test_ship_project_memory_wording() {
@@ -624,6 +648,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_mistakes_escalation_is_ship_only
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

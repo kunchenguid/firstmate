@@ -4,20 +4,20 @@
 # no-mistakes|direct-PR|local-only and yolo is on|off.
 #
 # Registry line format (data/projects.md):
-#   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
+#   - <name> - <desc> (added <date>)                  -> direct-PR off  (ordinary default)
 #   - <name> [<mode>] - <desc> (added <date>)          -> <mode> off
 #   - <name> [<mode> +yolo] - <desc> (added <date>)    -> <mode> on
 #
 # mode = how a finished change reaches main:
-#   no-mistakes  full pipeline -> PR -> captain merge (default)
-#   direct-PR    push + PR via gh-axi, no pipeline -> captain merge
+#   no-mistakes  full pipeline -> PR -> captain merge (explicit project posture)
+#   direct-PR    push + PR via gh-axi, no pipeline -> captain merge (default)
 #   local-only   local branch, no remote/PR -> captain approve -> guarded local merge
 # yolo (orthogonal) = when on, firstmate may make routine approval decisions itself.
 #   AGENTS.md section 7 is the single owner of authority exceptions, including
 #   ask-user contract expansion and stronger captain boundaries.
 #
-# An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
-# to stderr, so a typo never silently drops the gate.
+# An unknown/missing project or unknown mode falls back to "direct-PR off" and warns
+# to stderr, so a typo follows the ordinary delivery path visibly.
 # Usage: fm-project-mode.sh <project-name>
 set -eu
 
@@ -29,15 +29,15 @@ REG="$DATA/projects.md"
 NAME=${1:?usage: fm-project-mode.sh <project-name>}
 
 if [ ! -f "$REG" ]; then
-  echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
-  echo "no-mistakes off"
+  echo "warn: no registry at $REG; defaulting $NAME to direct-PR off" >&2
+  echo "direct-PR off"
   exit 0
 fi
 
 # awk emits "<mode> <yolo>" (one line) or nothing if the project is absent.
 parsed=$(awk -v n="$NAME" '
   $1=="-" && $2==n {
-    mode="no-mistakes"; yolo="off";
+    mode="direct-PR"; yolo="off";
     if ($3 ~ /^\[/) {
       s="";
       for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
@@ -51,8 +51,8 @@ parsed=$(awk -v n="$NAME" '
 ' "$REG")
 
 if [ -z "$parsed" ]; then
-  echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
-  echo "no-mistakes off"
+  echo "warn: project \"$NAME\" not in registry; defaulting to direct-PR off" >&2
+  echo "direct-PR off"
   exit 0
 fi
 
@@ -60,7 +60,7 @@ mode=${parsed%% *}
 yolo=${parsed##* }
 case "$mode" in
   no-mistakes|direct-PR|local-only) ;;
-  *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;
+  *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to direct-PR off" >&2; mode=direct-PR; yolo=off ;;
 esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac
 echo "$mode $yolo"

@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab] [--no-mistakes]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -29,8 +29,8 @@
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
-#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
+#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (explicit posture)
+#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge (default)
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
@@ -94,6 +94,7 @@ fi
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+NO_MISTAKES=0
 POS=()
 for a in "$@"; do
   case "$a" in
@@ -101,6 +102,7 @@ for a in "$@"; do
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --no-mistakes) NO_MISTAKES=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -116,9 +118,26 @@ if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   exit 1
 fi
 
+if [ "$NO_MISTAKES" -eq 1 ] && [ "$KIND" != ship ]; then
+  echo "error: --no-mistakes applies only to ship briefs" >&2
+  exit 1
+fi
+
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
+MODE_OVERRIDE="$DATA/$ID/delivery-mode"
+if [ -e "$MODE_OVERRIDE" ] || [ -L "$MODE_OVERRIDE" ]; then
+  echo "error: task delivery-mode override already exists: $MODE_OVERRIDE" >&2
+  exit 1
+fi
 mkdir -p "$DATA/$ID"
+
+if [ "$NO_MISTAKES" -eq 1 ]; then
+  old_umask=$(umask)
+  umask 077
+  printf '%s\n' no-mistakes > "$MODE_OVERRIDE"
+  umask "$old_umask"
+fi
 
 shell_quote() {
   printf "'"
@@ -301,6 +320,7 @@ fi
 read -r MODE _ <<EOF
 $("$FM_ROOT/bin/fm-project-mode.sh" "$REPO")
 EOF
+[ "$NO_MISTAKES" -eq 0 ] || MODE=no-mistakes
 
 case "$MODE" in
   direct-PR)
@@ -326,7 +346,7 @@ When it is implemented and committed, append \`done: ready in branch fm/$ID\` to
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
     ;;
-  *)  # no-mistakes (default)
+  *)  # no-mistakes
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'

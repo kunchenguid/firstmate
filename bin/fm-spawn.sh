@@ -239,9 +239,6 @@ if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
   echo "error: backend=cmux does not support --secondmate spawns yet" >&2
   exit 1
 fi
-if [ "$BACKEND" = orca ]; then
-  fm_backend_orca_runtime_check || exit 1
-fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
@@ -308,7 +305,7 @@ spawn_abort_cleanup() {
             echo "project=$PROJ_ABS"
             echo "harness=$HARNESS"
             echo "kind=$KIND"
-            echo "mode=${MODE:-no-mistakes}"
+            echo "mode=${MODE:-direct-PR}"
             echo "yolo=${YOLO:-off}"
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
@@ -835,6 +832,39 @@ fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
+
+# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; the project-management skill and AGENTS.md task lifecycle).
+# Resolve a ship's task-scoped no-mistakes escalation before any backend endpoint
+# or worktree is created, so malformed private state cannot trigger a launch.
+SECONDMATE_PROJECTS=
+if [ "$KIND" = secondmate ]; then
+  MODE=secondmate
+  YOLO=off
+  SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
+else
+  PROJ_NAME=$(basename "$PROJ_ABS")
+  read -r MODE YOLO <<EOF
+$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
+EOF
+
+  MODE_OVERRIDE="$DATA/$ID/delivery-mode"
+  if [ -e "$MODE_OVERRIDE" ] || [ -L "$MODE_OVERRIDE" ]; then
+    [ "$KIND" = ship ] && [ -f "$MODE_OVERRIDE" ] && [ ! -L "$MODE_OVERRIDE" ] || {
+      echo "error: invalid task delivery-mode override" >&2
+      exit 1
+    }
+    override=$(cat "$MODE_OVERRIDE") || exit 1
+    [ "$override" = no-mistakes ] && [ "$(wc -l < "$MODE_OVERRIDE" | tr -d ' ')" -eq 1 ] || {
+      echo "error: invalid task delivery-mode override" >&2
+      exit 1
+    }
+    MODE=no-mistakes
+  fi
+fi
+
+if [ "$BACKEND" = orca ]; then
+  fm_backend_orca_runtime_check || exit 1
+fi
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
@@ -1435,22 +1465,6 @@ EOF
   esac
 fi
 
-# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; the project-management skill and AGENTS.md task lifecycle).
-# Recorded in meta so fm-teardown's safety check and the validate/merge stages can
-# branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
-# merge, so scout teardown ignores mode.
-SECONDMATE_PROJECTS=
-if [ "$KIND" = secondmate ]; then
-  MODE=secondmate
-  YOLO=off
-  SECONDMATE_PROJECTS=$(secondmate_registry_value "$ID" projects || true)
-else
-  PROJ_NAME=$(basename "$PROJ_ABS")
-  read -r MODE YOLO <<EOF
-$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
-EOF
-fi
-
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 {
@@ -1492,7 +1506,7 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$STATE/$ID.meta" || exit 1
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")

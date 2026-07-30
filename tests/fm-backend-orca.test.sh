@@ -491,7 +491,7 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
   expect_code 0 $? "fm-spawn.sh --backend orca should succeed with fake Orca"$'\n'"$out"
-  assert_contains "$out" "spawned $id harness=claude kind=ship mode=no-mistakes yolo=off window=fm-$id worktree=$wt" \
+  assert_contains "$out" "spawned $id harness=claude kind=ship mode=direct-PR yolo=off window=fm-$id worktree=$wt" \
     "spawn output missing Orca window/worktree summary"
   assert_grep "backend=orca" "$state/$id.meta" "meta missing backend=orca"
   assert_grep "window=fm-$id" "$state/$id.meta" "meta missing stable Orca window alias"
@@ -506,6 +506,65 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
     "spawn did not send the selected harness launch command through Orca"
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
+}
+
+test_spawn_accepts_only_no_mistakes_delivery_mode_override() {
+  local proj wt data state config id out status
+  id="orcaoverridez1"
+  proj="$TMP_ROOT/override-project"
+  wt="$TMP_ROOT/override-wt"
+  data="$TMP_ROOT/override-data"
+  state="$TMP_ROOT/override-state"
+  config="$TMP_ROOT/override-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  printf 'no-mistakes\n' > "$data/$id/delivery-mode"
+  touch "$state/.last-watcher-beat"
+  orca_case spawn-override
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-override"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-override","path":"%s"},"terminal":{"handle":"term-override"}}}\n' "$wt" > "$RESP/3.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
+  expect_code 0 $? "fm-spawn.sh --backend orca should accept a no-mistakes override"$'\n'"$out"
+  assert_contains "$out" "spawned $id harness=claude kind=ship mode=no-mistakes yolo=off window=fm-$id worktree=$wt" \
+    "spawn output did not use the no-mistakes override"
+  assert_grep "mode=no-mistakes" "$state/$id.meta" "meta did not use the no-mistakes override"
+
+  id="orcainvalidz1"
+  fm_git_worktree "$TMP_ROOT/invalid-project" "$TMP_ROOT/invalid-wt" "fm/$id"
+  mkdir -p "$data/$id"
+  printf 'brief\n' > "$data/$id/brief.md"
+  printf 'local-only\n' > "$data/$id/delivery-mode"
+  orca_case spawn-invalid-record
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$TMP_ROOT/invalid-project" claude --backend orca 2>&1 )
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "spawn accepted an invalid delivery-mode override"
+  assert_contains "$out" "invalid task delivery-mode override" "invalid override refusal was unclear"
+  [ ! -s "$LOG" ] || fail "invalid override called Orca before refusing"
+
+  rm "$data/$id/delivery-mode"
+  ln -s "$TMP_ROOT/elsewhere" "$data/$id/delivery-mode"
+  orca_case spawn-symlink-record
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$TMP_ROOT/invalid-project" claude --backend orca 2>&1 )
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "spawn accepted a symlinked delivery-mode override"
+  assert_contains "$out" "invalid task delivery-mode override" "symlink override refusal was unclear"
+  [ ! -s "$LOG" ] || fail "symlink override called Orca before refusing"
+  pass "fm-spawn.sh --backend orca: validates task delivery-mode overrides before Orca calls"
 }
 
 test_spawn_refuses_orca_secondmate_before_home_mutation() {
@@ -1303,6 +1362,7 @@ test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness
+test_spawn_accepts_only_no_mistakes_delivery_mode_override
 test_spawn_refuses_orca_secondmate_before_home_mutation
 test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
