@@ -19,7 +19,7 @@
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
-#          an origin fetch) AND its loaded instruction surface (AGENTS.md, bin/,
+#          a remote fetch) AND its loaded instruction surface (AGENTS.md, bin/,
 #          or .agents/skills/) actually changed, bootstrap immediately nudges it
 #          via FM_HOME=<active-home> bin/fm-send.sh fm-<id> so meta resolves the
 #          current backend target and the standard from-firstmate marker is
@@ -63,7 +63,7 @@
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
 #          numeric override, while non-numeric values fall back to 20s.
 #          When the override is unset or blank, the timeout is
-#          max(20, 5 + 3 * origin-backed project clone count). A timed-out
+#          max(20, 5 + 3 * remote-backed project clone count). A timed-out
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
@@ -102,14 +102,17 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
 
-fleet_sync_origin_backed_project_count() {
+# Count the clones fleet-sync will actually fetch: those with a publish remote
+# (bin/fm-remote-lib.sh, sourced via fm-ff-lib.sh). A fork-backed clone counts the
+# same as an origin-backed one, so the refresh timeout below scales with real work.
+fleet_sync_remote_backed_project_count() {
   local count proj
   count=0
   [ -d "$PROJECTS" ] || { echo 0; return 0; }
   for proj in "$PROJECTS"/*; do
     [ -d "$proj" ] || continue
     git -C "$proj" rev-parse --git-dir >/dev/null 2>&1 || continue
-    git -C "$proj" remote get-url origin >/dev/null 2>&1 || continue
+    fm_publish_remote "$proj" >/dev/null 2>&1 || continue
     count=$((count + 1))
   done
   echo "$count"
@@ -125,7 +128,7 @@ fleet_sync_bootstrap_timeout() {
     return 0
   fi
 
-  count=$(fleet_sync_origin_backed_project_count)
+  count=$(fleet_sync_remote_backed_project_count)
   timeout=$((5 + (3 * count)))
   [ "$timeout" -ge 20 ] || timeout=20
   echo "$timeout"
@@ -190,9 +193,9 @@ secondmate_sync() {
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   # Local-HEAD secondmate sync: fast-forward every LIVE secondmate home
   # to the primary checkout's current default-branch commit. Purely LOCAL - no
-  # fetch, no origin dependency: a linked-worktree home already holds the primary's
+  # fetch, no remote dependency: a linked-worktree home already holds the primary's
   # commit (fm-ff-lib.sh), while a standalone clone without it is skipped until
-  # /updatefirstmate refreshes it from origin. Startup sends reread nudges only
+  # /updatefirstmate refreshes it from its publish remote. Startup sends reread nudges only
   # for RUNNING secondmates whose instruction surface (AGENTS.md, bin/, or
   # .agents/skills/) actually changed, so a secondmate already on the primary's
   # version is never disturbed (AGENTS.md bootstrap + supervision). Unlike

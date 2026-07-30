@@ -26,7 +26,8 @@
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run
 #   --list          print selected script paths (one per line) and exit 0
-#   --base <ref>    with --changed, compare against this ref (default: origin/main)
+#   --base <ref>    with --changed, compare against this ref (default: the publish
+#                   remote's main; see bin/fm-remote-lib.sh)
 #   --exclude-family <name>
 #                   drop scripts whose primary family matches <name> after selection
 #                   (repeatable; portable CI lanes exclude real-herdr-gated so the
@@ -66,6 +67,8 @@ set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
+# shellcheck source=bin/fm-remote-lib.sh
+. "$ROOT/bin/fm-remote-lib.sh"
 
 MODE=
 LIST_ONLY=0
@@ -75,7 +78,7 @@ CHECK_COVERAGE=0
 AGGREGATE_OUT=
 FAMILY=
 LANE=
-BASE_REF=origin/main
+BASE_REF="$(fm_publish_remote "$ROOT" || echo origin)/main"
 JSON_PATH=
 SCRIPTS=()
 EXCLUDE_FAMILIES=()
@@ -660,6 +663,14 @@ families_for_changed_path() {
     bin/fm-secondmate*|bin/fm-home-seed.sh|bin/fm-backlog-handoff.sh|\
     bin/fm-config-inherit-lib.sh|bin/fm-config-push.sh|bin/fm-shared*)
       printf '%s\n' secondmate
+      ;;
+    bin/fm-remote-lib.sh)
+      # Publish-remote resolution feeds self-update/clone refresh, the landed-work
+      # and review-base checks, and the changed-test base ref.
+      printf '%s\n' session-bootstrap
+      printf '%s\n' pr-forge
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' backend-dispatch
       ;;
     bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-tangle*|bin/fm-update.sh|\

@@ -792,7 +792,7 @@ test_seed_marker_clean_when_gitignored() {
 # is still untracked-and-unignored, and the fix itself only arrives by fast-forward.
 # The marker-tolerant ff-skip (ignore_seed_marker=yes) bridges the gap for
 # linked-worktree homes, which bootstrap/spawn fast-forward from the primary's local HEAD.
-# Standalone-clone homes converge through /updatefirstmate's origin fetch instead.
+# Standalone-clone homes converge through /updatefirstmate's publish-remote fetch instead.
 # Once advanced, the now-ignored marker reads clean with no hand intervention.
 test_seed_marker_converges_existing_home() {
   local w c0 base

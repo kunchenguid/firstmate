@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # Refresh project clones: fast-forward the checked-out local default branch to
-# origin/<default> when safe, and prune local branches whose upstream tracking
+# <publish-remote>/<default> when safe, and prune local branches whose upstream tracking
 # branch is gone (the remote branch was deleted, i.e. its PR merged) and that no
 # worktree still needs.
 # Self-heals the one unambiguously safe drift: a clean, detached HEAD that holds
-# no unique commits (it is an ancestor of origin/<default>) and whose <default>
+# no unique commits (it is an ancestor of <publish-remote>/<default>) and whose <default>
 # branch is free to check out is re-attached and then fast-forwarded ("recovered:").
 # Every other off-default state - a non-default named branch, a detached HEAD with
 # unique commits, a dirty tree, or a diverged default - may hold real work, so it
 # is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
 # ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
 # stashed, or discarded.
-# Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
+# Still skips (benignly) local-only/no-remote projects, missing remotes/branches,
 # and fetch failures.
+# The publish remote is resolved per clone by bin/fm-remote-lib.sh, so a
+# fork-backed clone follows the remote its own work lands on instead of its upstream.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
@@ -35,6 +37,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-remote-lib.sh
+. "$SCRIPT_DIR/fm-remote-lib.sh"
 FM_LOCK_LOG_PREFIX=fleet-sync
 "$FM_ROOT/bin/fm-guard.sh" || true
 
@@ -148,7 +152,7 @@ packed_refs_lock_path() {
   esac
 }
 
-# Run `git -C "$PROJ" fetch origin --prune --quiet`, tolerating an orphaned
+# Run `git -C "$PROJ" fetch "$REMOTE" --prune --quiet`, tolerating an orphaned
 # packed-refs.lock left by a killed ref rewrite. Sets FETCH_OUTPUT to the git
 # command's combined output and returns its exit status. On the packed-refs.lock
 # signature ONLY: retry up to FLEET_SYNC_PACKED_REFS_LOCK_RETRIES times (a
@@ -161,7 +165,7 @@ packed_refs_lock_path() {
 # a session-start refresh (which discards fleet-sync stderr) still surfaces it.
 fetch_with_packed_refs_lock_guard() {
   local rc attempt=0 lock lock_desc
-  FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+  FETCH_OUTPUT=$(git -C "$PROJ" fetch "$REMOTE" --prune --quiet 2>&1); rc=$?
   [ "$rc" -eq 0 ] && return 0
   is_packed_refs_lock_error "$FETCH_OUTPUT" || return "$rc"
 
@@ -171,7 +175,7 @@ fetch_with_packed_refs_lock_guard() {
     attempt=$(( attempt + 1 ))
     echo "$label: fetch blocked by packed-refs lock ($lock_desc); waiting ${FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${FLEET_SYNC_PACKED_REFS_LOCK_RETRIES}) (owning process may be exiting)" >&2
     sleep "$FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS"
-    FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+    FETCH_OUTPUT=$(git -C "$PROJ" fetch "$REMOTE" --prune --quiet 2>&1); rc=$?
     if [ "$rc" -eq 0 ]; then
       echo "$label: fetch succeeded on retry; packed-refs lock cleared on its own" >&2
       # One stdout summary so a session-start refresh (which discards fleet-sync
@@ -195,7 +199,7 @@ fetch_with_packed_refs_lock_guard() {
         return "$rc"
       fi
       echo "$label: removed provably-stale packed-refs lock $lock (age >= ${FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS}s, no live holder) and retrying fetch" >&2
-      FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+      FETCH_OUTPUT=$(git -C "$PROJ" fetch "$REMOTE" --prune --quiet 2>&1); rc=$?
       if [ "$rc" -eq 0 ]; then
         echo "$label: fetch succeeded after stale packed-refs lock cleanup" >&2
         echo "$label: recovered: removed a stale packed-refs lock (no live holder)"
@@ -217,7 +221,7 @@ prune_gone_branches() {
   # that still has a worktree (a live or not-yet-torn-down task). "Gone" plus
   # "no worktree" already proves the work landed: teardown removes a branch's
   # worktree only after confirming the work reached the remote. We deliberately
-  # do NOT also require the branch to be an ancestor of origin/<default> - PRs in
+  # do NOT also require the branch to be an ancestor of <publish-remote>/<default> - PRs in
   # this fleet are squash-merged, so a merged branch is never an ancestor and
   # such a check would prune nothing. The no-worktree guard is the real safety
   # net. Set FM_FLEET_PRUNE=0 to skip pruning entirely.
@@ -281,7 +285,7 @@ stuck_state() {
 }
 
 # Loud, quantified report for a clone we deliberately leave untouched. Includes
-# how far behind origin/<default> it is, so a chronically-stuck clone is visibly
+# how far behind <publish-remote>/<default> it is, so a chronically-stuck clone is visibly
 # distinct from a benign one-off skip.
 report_stuck() {
   local state=$1 behind
@@ -307,7 +311,9 @@ sync_project() {
     echo "$label: skipped: local-only project"
     return 0
   fi
-  if ! git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+  if ! REMOTE=$(fm_publish_remote "$PROJ"); then
+    # Neither a fork nor an origin remote: a purely local clone, a benign skip
+    # that bin/fm-bootstrap.sh filters out of the session-start relay.
     echo "$label: skipped: no origin remote"
     return 0
   fi
@@ -327,7 +333,7 @@ sync_project() {
     echo "$label: skipped: cannot determine default branch"
     return 0
   }
-  BASE="origin/$DEFAULT"
+  BASE="$REMOTE/$DEFAULT"
   if ! git -C "$PROJ" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
     echo "$label: skipped: $BASE does not exist"
     return 0
@@ -341,7 +347,7 @@ sync_project() {
   if [ "$cur" != "$DEFAULT" ]; then
     # Off the default branch. Auto-recover only the one unambiguously safe drift:
     # a clean, detached HEAD that holds no unique commits (it is an ancestor of
-    # origin/<default>) and whose <default> branch is free to check out here.
+    # <publish-remote>/<default>) and whose <default> branch is free to check out here.
     # Re-attaching to an already-published commit strands nothing, and the
     # fast-forward path below then catches the clone up. Anything else - a
     # non-default named branch, a detached HEAD with unique commits, a dirty tree,

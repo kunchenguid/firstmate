@@ -96,6 +96,8 @@ init_changed_fixture_repo() {
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
+  # The runner sources this sibling lib to resolve its changed-file base ref.
+  cp "$ROOT/bin/fm-remote-lib.sh" "$repo/bin/fm-remote-lib.sh"
   for script in \
     fm-brief.test.sh \
     fm-captain-translation-contract.test.sh \
@@ -528,6 +530,8 @@ test_jobs_parallel_scheduler_and_failure_propagation() {
   d=tests/fm-supervision-instructions.test.sh
   mkdir -p "$repo/bin" "$repo/tests" "$evidence" "$fake_bin"
   cp "$RUNNER" "$runner"
+  # The runner sources this sibling lib on startup.
+  cp "$ROOT/bin/fm-remote-lib.sh" "$repo/bin/fm-remote-lib.sh"
   cat >"$fake_bin/stat" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = "-c" ] && [ "$2" = "%a" ]; then

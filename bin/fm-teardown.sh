@@ -110,6 +110,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-remote-lib.sh
+. "$SCRIPT_DIR/fm-remote-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -320,12 +322,14 @@ pr_number_from_target() {
   printf '%s' "$n"
 }
 
+# Fetch a PR head from the remote the PR actually lives on: the publish remote
+# (bin/fm-remote-lib.sh), not the upstream a fork-backed clone was forked from.
 ensure_commit_object() {
-  local target=$1 commit=$2 n
+  local target=$1 commit=$2 n remote
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   n=$(pr_number_from_target "$target") || return 1
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  remote=$(fm_publish_remote "$WT") || return 1
+  git -C "$WT" fetch --quiet "$remote" "refs/pull/$n/head" >/dev/null 2>&1 || return 1
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
@@ -489,13 +493,12 @@ nonempty_content_landed_in_ref() {
 # net-delta proof shows the content is already in the default branch. False only for
 # genuinely unlanded work or an inconclusive proof.
 work_is_landed() {
-  local branch=$1 name ref
+  local branch=$1 name ref remote
   pr_is_merged "$branch" && return 0
   name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin \
-      "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
-    ref="refs/remotes/origin/$name"
+  if remote=$(fm_publish_remote "$WT"); then
+    git -C "$WT" fetch --quiet "$remote" "+refs/heads/$name:refs/remotes/$remote/$name" >/dev/null 2>&1 || return 1
+    ref="refs/remotes/$remote/$name"
   elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else

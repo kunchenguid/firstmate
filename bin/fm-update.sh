@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Self-update a running firstmate and its secondmates to the latest origin.
+# Self-update a running firstmate and its secondmates to the latest published
+# default branch.
 #
 # Mechanical half of the /updatefirstmate skill. Fast-forwards the running
-# firstmate repo's default branch from origin, then fast-forwards every
+# firstmate repo's default branch from its PUBLISH remote, as resolved by
+# bin/fm-remote-lib.sh, then fast-forwards every
 # registered secondmate home (each a treehouse worktree of this same repo, or
 # a standalone clone) the same way. FAST-FORWARD ONLY, exactly like
 # fm-fleet-sync.sh: never force, never create a merge commit, never stash;
@@ -15,7 +17,7 @@
 # default branch, so a fast-forward there advances HEAD only and never touches
 # any other worktree's checkout or the shared `main` branch.
 #
-# The fast-forward mechanics live in bin/fm-ff-lib.sh (base_mode "origin" here);
+# The fast-forward mechanics live in bin/fm-ff-lib.sh (base_mode "publish" here);
 # the same library drives the local-HEAD secondmate sync used by fm-spawn.sh and
 # fm-bootstrap.sh, so there is one ff implementation, not several.
 #
@@ -50,7 +52,7 @@ fi
 # --- main firstmate repo ---------------------------------------------------
 
 reread_firstmate="no"
-ff_target "$FM_ROOT" "firstmate" origin no no
+ff_target "$FM_ROOT" "firstmate" publish no no
 if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
   reread_firstmate="yes"
 fi
@@ -65,7 +67,7 @@ FF_SEEN_HOMES=""
 
 # Live direct reports first: state/<id>.meta with kind=secondmate carries the
 # authoritative home= path.
-sweep_live_secondmate_metas "$STATE" origin no
+sweep_live_secondmate_metas "$STATE" publish no
 
 # Registry backstop: a secondmate registered in data/secondmates.md but without
 # a live meta (e.g. between restarts) is still its persistent on-disk home.
@@ -77,7 +79,7 @@ if [ -f "$SECONDMATES_MD" ]; then
     esac
     id=$(printf '%s\n' "$line" | sed -n 's/^- \([^ ][^ ]*\) - .*/\1/p')
     home=$(printf '%s\n' "$line" | sed -n 's/.*(home:[[:space:]]*\([^;]*\);.*/\1/p' | sed 's/[[:space:]]*$//')
-    process_secondmate "$id" "$home" "" origin no
+    process_secondmate "$id" "$home" "" publish no
   done < "$SECONDMATES_MD"
 fi
 
