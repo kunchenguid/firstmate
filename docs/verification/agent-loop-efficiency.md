@@ -19,8 +19,8 @@ Measured on 2026-07-30 against this branch tip with Pi-installed operator surfac
 | `agents_md_bytes` | 54986 |
 | `skill_description_bytes` | 7251 (19 skills) |
 | `skill_body_bytes` | 202200 (on-demand bodies, not always-loaded) |
-| `pi_extension_tool_description_bytes` | 884 |
-| `pi_extension_tool_count` | 3 description strings matched in tracked extensions |
+| `pi_extension_tool_description_bytes` | 727 |
+| `pi_extension_tool_count` | 1 named LLM-callable tool registered in tracked extensions |
 | `session_start_fixture_deterministic` | `true` |
 | `session_start_fixture_sorted_ids` | `true` |
 | `openai_server_compaction` | `present` |
@@ -37,7 +37,7 @@ Approximate tokens are a 4-byte heuristic for relative comparison only.
 Owner scripts:
 
 - `bin/fm-prompt-stable-lib.sh` - deterministic `LC_ALL=C` id listing
-- `bin/fm-session-start.sh` - stable meta bytes before volatile endpoint/status lines; sorted task and orphan status ids
+- `bin/fm-session-start.sh` - every sorted stable metadata record before any volatile endpoint/status line; sorted orphan status ids
 - `bin/fm-supervision-instructions.sh` - pure function of harness and flag inputs
 
 Regression entry point:
@@ -46,7 +46,7 @@ Regression entry point:
 bin/fm-test-run.sh tests/fm-agent-loop-efficiency.test.sh
 ```
 
-The suite compares public rendered outputs under fixed inputs, proves single-variable captain-file sensitivity, and proves sorted multi-entry task order.
+The suite compares public rendered outputs under fixed inputs, proves single-variable captain-file sensitivity, proves sorted multi-entry task order, and keeps the complete stable prefix byte-identical across a single volatile status change.
 
 ## Deferred discovery boundary
 
@@ -77,7 +77,7 @@ The baseline schema reports `code_mode_embedded_runtime=absent` so a later regre
 
 | Concern | Firstmate control | Current evidence |
 | --- | --- | --- |
-| `PI_CACHE_RETENTION=long` default on pi/pi-signed spawn | Yes, when unset | `tests/fm-agent-loop-efficiency.test.sh` spawn capture |
+| `PI_CACHE_RETENTION` on pi/pi-signed spawn | Always forwarded; `long` only when unset, while explicit empty/nonempty values are preserved | `tests/fm-agent-loop-efficiency.test.sh` spawn capture |
 | OpenAI `previous_response_id` / WebSocket stream | Operator Pi package only | `pi-openai-server-compaction` when installed; `openai/*` yes, `openai-codex/*` retains built-in transport per package README |
 | Server-side compaction threshold | Operator config | `compactThreshold=260000` when `~/.pi/agent/openai-server-compaction.json` is present |
 | Competing Firstmate compactors | None | Do not add a second path |

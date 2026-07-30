@@ -141,6 +141,10 @@ from pathlib import Path
 root = Path(sys.argv[1]) / ".pi" / "extensions"
 total = 0
 count = 0
+tool_call = re.compile(
+    r"(?ms)^(?P<indent>[ \t]*)[^\n]*\bregisterTool(?:\?\.)?\(\s*\{"
+    r"(?P<body>.*?)^(?P=indent)\}\);\s*$"
+)
 def byte_len(s: str) -> int:
     try:
         return len(bytes(s, "utf-8").decode("unicode_escape").encode("utf-8"))
@@ -149,15 +153,17 @@ def byte_len(s: str) -> int:
 
 for path in sorted(root.rglob("*.ts")):
     text = path.read_text(encoding="utf-8", errors="replace")
-    # Match registerTool description / promptSnippet / promptGuidelines string literals.
-    for key in ("description", "promptSnippet"):
-        for m in re.finditer(rf"{key}:\s*\"((?:\\.|[^\"\\])*)\"", text):
-            total += byte_len(m.group(1))
-            if key == "description":
-                count += 1
-    for m in re.finditer(r"promptGuidelines:\s*\[(.*?)\]", text, re.S):
-        for sm in re.finditer(r"\"((?:\\.|[^\"\\])*)\"", m.group(1)):
-            total += byte_len(sm.group(1))
+    for tool in tool_call.finditer(text):
+        body = tool.group("body")
+        if not re.search(r"(?m)^\s*name\s*:", body):
+            continue
+        count += 1
+        for key in ("description", "promptSnippet"):
+            for m in re.finditer(rf"{key}:\s*\"((?:\\.|[^\"\\])*)\"", body):
+                total += byte_len(m.group(1))
+        for m in re.finditer(r"promptGuidelines:\s*\[(.*?)\]", body, re.S):
+            for sm in re.finditer(r"\"((?:\\.|[^\"\\])*)\"", m.group(1)):
+                total += byte_len(sm.group(1))
 print(f"{total} {count}")
 PY
 }
@@ -169,10 +175,16 @@ supervision_doc_bytes() {
 
 supervision_render_bytes() {
   local harness=$1
-  local out
-  out=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
-    --harness "$harness" --read-only 0 --afk 0 --x-mode 0 2>/dev/null || true)
-  printf '%s' "$out" | wc -c | tr -d ' '
+  local out bytes
+  out=$(mktemp "${TMPDIR:-/tmp}/fm-supervision-render.XXXXXX") || return 1
+  if ! "$SCRIPT_DIR/fm-supervision-instructions.sh" \
+    --harness "$harness" --read-only 0 --afk 0 --x-mode 0 > "$out"; then
+    rm -f "$out"
+    return 1
+  fi
+  bytes=$(file_bytes "$out")
+  rm -f "$out"
+  printf '%s\n' "$bytes"
 }
 
 discover_openai_compaction() {
@@ -252,21 +264,27 @@ EOF
   # Hold the session lock as this process so the digest is lock-held.
   printf '%s\n' "$$" > "$home/state/.lock"
   out="$tmp/digest.txt"
-  env PATH="$fakebin:/usr/bin:/bin" \
+  if ! env PATH="$fakebin:/usr/bin:/bin" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" \
     FM_BOOTSTRAP_DETECT_ONLY=1 \
-    "$SCRIPT_DIR/fm-session-start.sh" > "$out" 2>/dev/null || true
+    "$SCRIPT_DIR/fm-session-start.sh" > "$out" 2>/dev/null; then
+    rm -rf "$tmp"
+    return 1
+  fi
   printf '%s\n' "$(file_bytes "$out")"
   # Determinism: second run must match excluding lock/bootstrap noise if any.
   local out2="$tmp/digest2.txt"
-  env PATH="$fakebin:/usr/bin:/bin" \
+  if ! env PATH="$fakebin:/usr/bin:/bin" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" \
     FM_BOOTSTRAP_DETECT_ONLY=1 \
-    "$SCRIPT_DIR/fm-session-start.sh" > "$out2" 2>/dev/null || true
+    "$SCRIPT_DIR/fm-session-start.sh" > "$out2" 2>/dev/null; then
+    rm -rf "$tmp"
+    return 1
+  fi
   if cmp -s "$out" "$out2"; then
     printf 'true\n'
   else
@@ -334,31 +352,53 @@ fi
 NOTES='Firstmate controls AGENTS.md, skill descriptions, supervision renders, session-start digests, and tracked Pi extension tools. Provider WebSocket/delta tokenization and GPU inference are outside Firstmate. Code Mode was not added: existing shell aggregates (fm-fleet-snapshot, fm-bearings-snapshot, fm-session-start) already batch fleet inspection. Sol/Terra/Luna dispatch is unchanged without measured same-task evidence. Single OpenAI compaction path remains operator-installed pi-openai-server-compaction at compactThreshold when present.'
 
 if [ "$JSON" -eq 1 ]; then
-  python3 - <<PY
+  FM_BASELINE_JSON_MEASURED_AT=$MEASURED_AT \
+  FM_BASELINE_JSON_AGENTS_BYTES=$AGENTS_BYTES \
+  FM_BASELINE_JSON_AGENTS_TOKENS=$AGENTS_TOKENS \
+  FM_BASELINE_JSON_SKILL_DESC_BYTES=$SKILL_DESC_BYTES \
+  FM_BASELINE_JSON_SKILL_DESC_COUNT=$SKILL_DESC_COUNT \
+  FM_BASELINE_JSON_SKILL_BODY_BYTES=$SKILL_BODY_BYTES \
+  FM_BASELINE_JSON_PI_TOOL_BYTES=$PI_TOOL_BYTES \
+  FM_BASELINE_JSON_PI_TOOL_COUNT=$PI_TOOL_COUNT \
+  FM_BASELINE_JSON_SUP_DOC=$SUP_DOC_JSON \
+  FM_BASELINE_JSON_SUP_RENDER=$SUP_RENDER_JSON \
+  FM_BASELINE_JSON_SESSION_BYTES=$SESSION_FIXTURE_BYTES \
+  FM_BASELINE_JSON_SESSION_DETERMINISTIC=$SESSION_FIXTURE_DETERMINISTIC \
+  FM_BASELINE_JSON_SESSION_SORTED=$SESSION_FIXTURE_SORTED \
+  FM_BASELINE_JSON_COMPACTION_STATE=$COMPACTION_STATE \
+  FM_BASELINE_JSON_COMPACT_THRESHOLD=$COMPACT_THRESHOLD \
+  FM_BASELINE_JSON_USE_PREV_RESP=$USE_PREV_RESP \
+  FM_BASELINE_JSON_PI_CACHE_RETENTION=$PI_CACHE_RETENTION_ENV \
+  FM_BASELINE_JSON_CODEX_MODELS=$CODEX_MODELS \
+  FM_BASELINE_JSON_LUNA_AVAILABLE=$LUNA_AVAILABLE \
+  FM_BASELINE_JSON_NOTES=$NOTES \
+  python3 - <<'PY'
 import json
+import os
+value = os.environ.__getitem__
 print(json.dumps({
   "schema": "fm-agent-loop-baseline.v1",
-  "measured_at": "$MEASURED_AT",
-  "agents_md_bytes": int("$AGENTS_BYTES"),
-  "agents_md_approx_tokens": int("$AGENTS_TOKENS"),
-  "skill_description_bytes": int("$SKILL_DESC_BYTES"),
-  "skill_description_count": int("$SKILL_DESC_COUNT"),
-  "skill_body_bytes": int("$SKILL_BODY_BYTES"),
-  "pi_extension_tool_description_bytes": int("$PI_TOOL_BYTES"),
-  "pi_extension_tool_count": int("$PI_TOOL_COUNT"),
-  "supervision_doc_bytes": json.loads('''$SUP_DOC_JSON'''),
-  "supervision_render_bytes": json.loads('''$SUP_RENDER_JSON'''),
-  "session_start_fixture_bytes": int("$SESSION_FIXTURE_BYTES"),
-  "session_start_fixture_deterministic": "$SESSION_FIXTURE_DETERMINISTIC",
-  "session_start_fixture_sorted_ids": "$SESSION_FIXTURE_SORTED",
-  "openai_server_compaction": "$COMPACTION_STATE",
-  "openai_compact_threshold": "$COMPACT_THRESHOLD",
-  "openai_use_previous_response_id": "$USE_PREV_RESP",
-  "pi_cache_retention_env": "$PI_CACHE_RETENTION_ENV",
-  "openai_codex_models": "$CODEX_MODELS",
-  "luna_available": "$LUNA_AVAILABLE",
+  "measured_at": value("FM_BASELINE_JSON_MEASURED_AT"),
+  "agents_md_bytes": int(value("FM_BASELINE_JSON_AGENTS_BYTES")),
+  "agents_md_approx_tokens": int(value("FM_BASELINE_JSON_AGENTS_TOKENS")),
+  "skill_description_bytes": int(value("FM_BASELINE_JSON_SKILL_DESC_BYTES")),
+  "skill_description_count": int(value("FM_BASELINE_JSON_SKILL_DESC_COUNT")),
+  "skill_body_bytes": int(value("FM_BASELINE_JSON_SKILL_BODY_BYTES")),
+  "pi_extension_tool_description_bytes": int(value("FM_BASELINE_JSON_PI_TOOL_BYTES")),
+  "pi_extension_tool_count": int(value("FM_BASELINE_JSON_PI_TOOL_COUNT")),
+  "supervision_doc_bytes": json.loads(value("FM_BASELINE_JSON_SUP_DOC")),
+  "supervision_render_bytes": json.loads(value("FM_BASELINE_JSON_SUP_RENDER")),
+  "session_start_fixture_bytes": int(value("FM_BASELINE_JSON_SESSION_BYTES")),
+  "session_start_fixture_deterministic": value("FM_BASELINE_JSON_SESSION_DETERMINISTIC"),
+  "session_start_fixture_sorted_ids": value("FM_BASELINE_JSON_SESSION_SORTED"),
+  "openai_server_compaction": value("FM_BASELINE_JSON_COMPACTION_STATE"),
+  "openai_compact_threshold": value("FM_BASELINE_JSON_COMPACT_THRESHOLD"),
+  "openai_use_previous_response_id": value("FM_BASELINE_JSON_USE_PREV_RESP"),
+  "pi_cache_retention_env": value("FM_BASELINE_JSON_PI_CACHE_RETENTION"),
+  "openai_codex_models": value("FM_BASELINE_JSON_CODEX_MODELS"),
+  "luna_available": value("FM_BASELINE_JSON_LUNA_AVAILABLE"),
   "code_mode_embedded_runtime": "absent",
-  "notes": """$NOTES""",
+  "notes": value("FM_BASELINE_JSON_NOTES"),
 }, indent=2, sort_keys=True))
 PY
   exit 0

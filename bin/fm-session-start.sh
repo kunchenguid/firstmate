@@ -39,10 +39,10 @@
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta in LC_ALL=C id order (stable meta
-#                       bytes before each task's volatile endpoint/status lines),
-#                       orphan status tails, state/.afk, and a cheap per-task
-#                       endpoint-liveness read: read-only, always runs.
+#                       every state/*.meta in LC_ALL=C id order (all stable meta
+#                       bytes before any volatile endpoint/status lines), orphan
+#                       status tails, state/.afk, and a cheap per-task endpoint-
+#                       liveness read: read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -347,10 +347,10 @@ print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
-subsection "Work under way (state/*.meta)"
-# Stable material (meta bytes) prints before volatile endpoint/status observations
-# for each task, and tasks themselves are LC_ALL=C id-ordered so repeated digests
-# keep a cache-stable multi-entry layout (bin/fm-prompt-stable-lib.sh).
+subsection "Work under way - stable metadata (state/*.meta)"
+# Tasks are staged once in LC_ALL=C id order. Every stable metadata record prints
+# before the separate volatile endpoint/status section.
+META_IDS=$(fm_prompt_stable_list_ids "$STATE" meta)
 META_FOUND=0
 while IFS= read -r id; do
   [ -n "$id" ] || continue
@@ -359,7 +359,19 @@ while IFS= read -r id; do
   META_FOUND=1
   printf '\n--- %s ---\n' "$id"
   cat "$meta"
+done <<EOF
+$META_IDS
+EOF
+[ "$META_FOUND" -eq 1 ] || printf '(none)\n'
 
+subsection "Work under way - volatile endpoint and status observations"
+VOLATILE_FOUND=0
+while IFS= read -r id; do
+  [ -n "$id" ] || continue
+  meta="$STATE/$id.meta"
+  [ -f "$meta" ] || continue
+  VOLATILE_FOUND=1
+  printf '\n--- %s endpoint/status ---\n' "$id"
   window=$(fm_meta_get "$meta" window)
   target=$(fm_backend_target_of_meta "$meta")
   if [ -n "$window" ]; then
@@ -379,8 +391,10 @@ while IFS= read -r id; do
   else
     printf 'status tail: (no status file yet: %s)\n' "$status"
   fi
-done < <(fm_prompt_stable_list_ids "$STATE" meta)
-[ "$META_FOUND" -eq 1 ] || printf '(none)\n'
+done <<EOF
+$META_IDS
+EOF
+[ "$VOLATILE_FOUND" -eq 1 ] || printf '(none)\n'
 
 subsection "Orphan status logs (state/*.status without matching .meta)"
 ORPHAN_STATUS_FOUND=0

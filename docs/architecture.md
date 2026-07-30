@@ -55,7 +55,7 @@ The default path remains local-only; live GitHub enrichment exists only behind t
 Optional X mode integrates with the watcher only after explicit opt-in; [configuration.md](configuration.md#x-mode-env) owns its generated-artifact and dispatch mechanics.
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
-Firstmate-controlled prompt construction keeps multi-entry fleet digests in deterministic id order with volatile endpoint observations after stable meta bytes.
+Firstmate-controlled prompt construction keeps multi-entry fleet digests in deterministic id order with every stable task metadata record before any volatile endpoint/status observation.
 `bin/fm-prompt-stable-lib.sh` owns the shared listing primitive.
 `bin/fm-agent-loop-baseline.sh` owns the reproducible overhead baseline.
 [Agent-loop efficiency verification](verification/agent-loop-efficiency.md) records measured boundaries for deferred tool discovery, Code Mode, transport, compaction, and Sol/Terra/Luna routing.

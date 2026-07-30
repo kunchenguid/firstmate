@@ -102,9 +102,8 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
-#   pi and pi-signed launches also prefix FM_PI_HARNESS=<harness> and, when the
-#   operator has not set PI_CACHE_RETENTION, PI_CACHE_RETENTION=long for extended
-#   provider prompt caching where the installed Pi build supports it.
+#   pi and pi-signed launches always forward a shell-quoted PI_CACHE_RETENTION.
+#   An unset value selects long; explicit values, including empty, are preserved.
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -520,13 +519,10 @@ esac
 
 case "$HARNESS" in
   pi|pi-signed)
-    # Prefer long provider prompt-cache retention when the operator has not set
-    # PI_CACHE_RETENTION already. Documented by Pi environment-variables.md;
-    # providers that ignore the flag stay unchanged.
-    if [ -z "${PI_CACHE_RETENTION+x}" ] || [ -z "${PI_CACHE_RETENTION}" ]; then
-      LAUNCH="PI_CACHE_RETENTION=long FM_PI_HARNESS=$HARNESS $LAUNCH"
+    if [ -z "${PI_CACHE_RETENTION+x}" ]; then
+      PI_CACHE_RETENTION_VALUE=long
     else
-      LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
+      PI_CACHE_RETENTION_VALUE=$PI_CACHE_RETENTION
     fi
     ;;
 esac
@@ -1523,6 +1519,11 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+case "$HARNESS" in
+  pi|pi-signed)
+    LAUNCH="PI_CACHE_RETENTION=$(shell_quote "$PI_CACHE_RETENTION_VALUE") FM_PI_HARNESS=$HARNESS $LAUNCH"
+    ;;
+esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a

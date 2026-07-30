@@ -3,7 +3,7 @@
 # Firstmate agent-loop efficiency surfaces:
 #   - bin/fm-prompt-stable-lib.sh deterministic id listing
 #   - bin/fm-agent-loop-baseline.sh baseline schema and fixture measurement
-#   - bin/fm-session-start.sh cache-stable task ordering and bounded-output reminder
+#   - bin/fm-session-start.sh stable metadata prefix and bounded-output reminder
 #   - bin/fm-supervision-instructions.sh byte-stable renders under fixed inputs
 #   - bin/fm-spawn.sh PI_CACHE_RETENTION default for pi launches
 #
@@ -137,7 +137,8 @@ test_supervision_render_byte_stable() {
 }
 
 test_session_start_sorted_and_bounded_reminder() {
-  local root home fakebin out out2 path_alpha path_zulu
+  local root home fakebin out out2 out3 path_alpha path_zulu path_volatile
+  local stable_prefix_a stable_prefix_b
   IFS='|' read -r root home fakebin < <(new_world sess-order)
   make_quiet_toolchain "$fakebin"
   printf 'manual\n' > "$home/config/backlog-backend"
@@ -172,8 +173,11 @@ EOF
 
   path_alpha=$(printf '%s\n' "$out" | grep -n '^--- alpha ---$' | head -1 | cut -d: -f1)
   path_zulu=$(printf '%s\n' "$out" | grep -n '^--- zulu ---$' | head -1 | cut -d: -f1)
+  path_volatile=$(printf '%s\n' "$out" | grep -n '^Work under way - volatile endpoint and status observations$' | cut -d: -f1)
   [ -n "$path_alpha" ] && [ -n "$path_zulu" ] || fail "missing meta headers in digest"
+  [ -n "$path_volatile" ] || fail "missing volatile endpoint/status section"
   [ "$path_alpha" -lt "$path_zulu" ] || fail "meta order was not alpha before zulu ($path_alpha >= $path_zulu)"
+  [ "$path_zulu" -lt "$path_volatile" ] || fail "volatile observations appeared before every stable metadata record"
 
   printf '%s\n' "$out" | grep -q 'fm-fleet-view.sh' \
     || fail "session-start closing reminder omitted fleet-view aggregate pointer"
@@ -190,7 +194,22 @@ EOF
   ) || fail "second session-start failed"
   [ "$out" = "$out2" ] || fail "session-start digest was not byte-identical across two fixed runs"
 
-  pass "session-start orders tasks stably, reminds aggregates, and is byte-stable"
+  printf 'working: a changed\n' > "$home/state/alpha.status"
+  out3=$(
+    env PATH="$fakebin:$BASE_PATH" \
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_CONFIG_OVERRIDE="$home/config" \
+      FM_BOOTSTRAP_DETECT_ONLY=1 \
+      "$SESSION_START"
+  ) || fail "session-start after volatile status change failed"
+  [ "$out2" != "$out3" ] || fail "volatile status change did not alter the digest"
+  stable_prefix_a=$(printf '%s\n' "$out2" | sed '/^Work under way - volatile endpoint and status observations$/,$d')
+  stable_prefix_b=$(printf '%s\n' "$out3" | sed '/^Work under way - volatile endpoint and status observations$/,$d')
+  [ "$stable_prefix_a" = "$stable_prefix_b" ] \
+    || fail "volatile status change altered the stable metadata prefix"
+
+  pass "session-start preserves its complete stable prefix across volatile changes"
 }
 
 test_session_start_single_variable_changes_expected_region() {
@@ -238,9 +257,25 @@ EOF
 }
 
 test_baseline_schema_and_fixture() {
-  local json kv
-  json=$("$BASELINE" --json --with-session-fixture) \
+  local json kv weird_now render_file render_bytes
+  weird_now=$'measured"\\value\nsecond line'
+  render_file="$TMP_ROOT/supervision-render.out"
+  FM_ROOT_OVERRIDE="$ROOT" \
+    "$SUPERVISION" --harness pi --read-only 0 --afk 0 --x-mode 0 > "$render_file" \
+    || fail "direct supervision render failed"
+  render_bytes=$(wc -c < "$render_file" | tr -d ' ')
+  json=$(FM_ROOT_OVERRIDE="$ROOT" FM_BASELINE_NOW="$weird_now" \
+    "$BASELINE" --json --with-session-fixture) \
     || fail "baseline --json --with-session-fixture failed"
+  printf '%s\n' "$json" | python3 -c '
+import json
+import sys
+data = json.load(sys.stdin)
+assert data["measured_at"] == sys.argv[1]
+assert data["pi_extension_tool_count"] == 1
+assert data["supervision_render_bytes"]["pi"] == int(sys.argv[2])
+' "$weird_now" "$render_bytes" \
+    || fail "baseline JSON did not preserve strings, count LLM tools, or measure exact render bytes"
   printf '%s\n' "$json" | grep -q '"schema": "fm-agent-loop-baseline.v1"' \
     || fail "baseline json missing schema"
   printf '%s\n' "$json" | grep -q '"agents_md_bytes"' \
@@ -252,7 +287,7 @@ test_baseline_schema_and_fixture() {
   printf '%s\n' "$json" | grep -q '"session_start_fixture_sorted_ids": "true"' \
     || fail "fixture digest did not sort ids: $json"
 
-  kv=$("$BASELINE") || fail "baseline kv mode failed"
+  kv=$(FM_ROOT_OVERRIDE="$ROOT" "$BASELINE") || fail "baseline kv mode failed"
   printf '%s\n' "$kv" | grep -q '^schema=fm-agent-loop-baseline.v1$' \
     || fail "kv baseline missing schema line"
   printf '%s\n' "$kv" | grep -q '^openai_server_compaction=' \
@@ -270,12 +305,14 @@ test_spawn_pi_cache_retention_default() {
   wt="$case_dir/wt"
   launchlog="$case_dir/launch.log"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
-  mkdir -p "$home/data/$id" "$home/data/${id}-keep" "$home/projects" "$home/state" "$home/config"
+  mkdir -p "$home/data/$id" "$home/data/${id}-keep" "$home/data/${id}-empty" \
+    "$home/projects" "$home/state" "$home/config"
   printf 'pi\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-pi-cache"
   touch "$home/state/.last-watcher-beat"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   printf 'brief for %s\n' "${id}-keep" > "$home/data/${id}-keep/brief.md"
+  printf 'brief for %s\n' "${id}-empty" > "$home/data/${id}-empty/brief.md"
 
   out=$(
     unset PI_CACHE_RETENTION
@@ -285,7 +322,7 @@ test_spawn_pi_cache_retention_default() {
   status=$?
   expect_code 0 "$status" "pi spawn for cache-retention default should succeed: $out"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "PI_CACHE_RETENTION=long" \
+  assert_contains "$launch" "PI_CACHE_RETENTION='long'" \
     "pi launch missing default PI_CACHE_RETENTION=long"
   assert_contains "$launch" "FM_PI_HARNESS=pi" \
     "pi launch missing FM_PI_HARNESS"
@@ -298,12 +335,29 @@ test_spawn_pi_cache_retention_default() {
   status=$?
   expect_code 0 "$status" "pi spawn with operator retention should succeed: $out"
   launch=$(cat "$launchlog")
-  assert_not_contains "$launch" "PI_CACHE_RETENTION=long" \
-    "operator PI_CACHE_RETENTION must not be overridden to long"
+  assert_contains "$launch" "PI_CACHE_RETENTION='short'" \
+    "operator PI_CACHE_RETENTION=short was not forwarded"
+  assert_not_contains "$launch" "PI_CACHE_RETENTION='long'" \
+    "operator PI_CACHE_RETENTION=short was overridden to long"
   assert_contains "$launch" "FM_PI_HARNESS=pi" \
     "pi launch missing FM_PI_HARNESS when retention preset"
 
-  pass "fm-spawn defaults PI_CACHE_RETENTION=long for pi and preserves operator overrides"
+  out=$(
+    PI_CACHE_RETENTION='' \
+      run_spawn_capture "$home" "$wt" "$fakebin" "$launchlog" \
+      "${id}-empty" "$proj" pi-signed
+  )
+  status=$?
+  expect_code 0 "$status" "pi-signed spawn with empty retention should succeed: $out"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "PI_CACHE_RETENTION=''" \
+    "explicit empty PI_CACHE_RETENTION was not forwarded"
+  assert_not_contains "$launch" "PI_CACHE_RETENTION='long'" \
+    "explicit empty PI_CACHE_RETENTION was treated as unset"
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed" \
+    "pi-signed launch missing FM_PI_HARNESS"
+
+  pass "fm-spawn forwards quoted unset, nonempty, and empty Pi retention values"
 }
 
 test_prompt_stable_list_ids_sorted
