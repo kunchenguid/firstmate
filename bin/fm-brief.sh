@@ -330,9 +330,39 @@ case "$MODE" in
 # Definition of done
 This project ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+Inspect \`git remote get-url origin\` before publishing.
+- For a GitHub origin (including github.com), push the generated \`fm/$ID\` branch and open the PR with \`gh-axi\`.
+- For a GitLab origin (including gitlab.com), resolve the target from \`refs/remotes/origin/HEAD\`, push the generated branch with GitLab's \`merge_request.create\` and \`merge_request.target=\$target\` push options, and capture the MR URL printed by GitLab.
+- For any other host, or when the default target cannot be resolved, append \`blocked: authenticated PR creation path is not configured for this remote\` and stop.
+Never invent credentials, guess a target branch, or merge the PR/MR.
+
+For a GitLab origin, run:
+\`\`\`bash
+target=\$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
+target=\${target#origin/}
+[ -n "\$target" ] || { echo "blocked: cannot resolve origin default branch" >> $STATUS_FILE; exit 1; }
+git push -u origin "fm/$ID" -o merge_request.create -o "merge_request.target=\$target"
+\`\`\`
+When it is published, append \`done: PR or MR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
+    IFS= read -r -d '' FOCUSED_VALIDATION <<'EOF' || true
+# Focused validation
+Before committing, choose the smallest check that proves the changed behavior:
+- Bug fix - reproduce the affected user path, apply the fix, and rerun the same reproduction.
+- Feature - run the nearest existing tests and exercise the changed UI, command, or API path.
+- Refactor - run the nearest existing tests that cover the preserved behavior.
+- Documentation - render, generate, or open the affected artifact when applicable; otherwise inspect the exact changed document.
+- Configuration - parse or load the configuration and exercise the affected command.
+Add or update a test only when the change introduces an observable contract not already covered or fixes a regression that needs permanent coverage.
+Run lint only when an existing lint command covers the changed files.
+Do not run a whole-repository local suite for a narrow change; repository CI owns the broad final result.
+Record the exact commands and outcomes in the PR or MR body under `## Validation`.
+EOF
+    FOCUSED_VALIDATION=${FOCUSED_VALIDATION%$'\n'}
+    DOD="$DOD
+
+$FOCUSED_VALIDATION"
     ;;
   local-only)
     SETUP2=""

@@ -238,6 +238,38 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
+test_direct_pr_brief_requires_focused_validation_evidence() {
+  local home id brief
+  home="$TMP_ROOT/focused-validation-home"
+  write_registry "$home"
+
+  id="brief-focused-direct-a5"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Bug fix - reproduce" "$brief" "bug-fix proof rule missing"
+  assert_grep "Feature - run the nearest existing tests" "$brief" "feature proof rule missing"
+  assert_grep "Refactor - run the nearest existing tests that cover the preserved behavior" "$brief" "refactor proof rule missing"
+  assert_grep "Documentation - render" "$brief" "documentation proof rule missing"
+  assert_grep "Configuration - parse or load" "$brief" "configuration proof rule missing"
+  assert_grep "## Validation" "$brief" "PR evidence section missing"
+  assert_grep "github.com" "$brief" "GitHub PR route missing"
+  assert_grep "gitlab" "$brief" "GitLab MR route missing"
+  assert_no_grep "LLM review" "$brief" "direct-PR brief added an LLM review"
+  assert_grep "Do not run a whole-repository local suite" "$brief" \
+    "direct-PR brief did not prohibit a broad local suite"
+
+  id="brief-focused-nomistakes-a5"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" guarded-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_no_grep "# Focused validation" "$brief" "no-mistakes brief received direct-PR validation"
+
+  id="brief-focused-local-a5"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_no_grep "# Focused validation" "$brief" "local-only brief received direct-PR validation"
+  pass "fm-brief.sh: direct-PR briefs require focused validation evidence only"
+}
+
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
@@ -647,6 +679,7 @@ test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
+test_direct_pr_brief_requires_focused_validation_evidence
 test_no_mistakes_dod_wording
 test_no_mistakes_escalation_is_ship_only
 test_ship_project_memory_wording
