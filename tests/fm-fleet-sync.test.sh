@@ -303,6 +303,29 @@ SH
   chmod +x "$1/git"
 }
 
+git_stage_origin_head_alias() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+is_clone=0
+for a in "$@"; do
+  [ "$a" = clone ] && is_clone=1
+done
+if [ "$is_clone" = 1 ]; then
+  stage=${!#}
+  "$real" "$@"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    "$real" --git-dir="$stage" symbolic-ref \
+      refs/remotes/origin/HEAD refs/remotes/origin/main
+  fi
+  exit "$rc"
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
 git_staged_fetch_compatibility_audit() {
   cat > "$1/git" <<'SH'
 #!/usr/bin/env bash
@@ -995,8 +1018,7 @@ test_active_git_operations_refuse_before_preservation() {
       "rebase rebase-merge directory" \
       "rebase rebase-apply directory" \
       "sequencer sequencer directory"; do
-    set -- $spec
-    operation=$1 marker=$2 kind=$3
+    read -r operation marker kind <<<"$spec"
     home=$(new_home)
     clone=$(build_tree_identical_squash_pair "$home" "operation-$marker")
     old=$(head_sha "$clone")
@@ -2042,6 +2064,28 @@ test_on_default_clean_behind_fast_forwards() {
   pass "on-default clean behind clone still fast-forwards"
 }
 
+test_origin_head_alias_does_not_block_staged_publication() {
+  local home clone fakebin out err
+  home=$(new_home)
+  clone=$(build_pair "$home" origin-head-alias)
+  advance_origin "$home" origin-head-alias C1
+  fakebin="$home/fb-origin-head-alias"; mkdir -p "$fakebin"
+  git_stage_origin_head_alias "$fakebin"
+  out="$home/out-origin-head-alias"
+  err="$home/err-origin-head-alias"
+
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" origin-head-alias
+
+  assert_contains "$(cat "$out")" "origin-head-alias: synced" \
+    "normal origin/HEAD alias blocked staged ref publication"
+  [ "$(git -C "$clone" symbolic-ref refs/remotes/origin/HEAD)" = \
+      refs/remotes/origin/main ] \
+    || fail "staged publication replaced the normal origin/HEAD alias"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse refs/remotes/origin/main)" ] \
+    || fail "origin/HEAD alias fixture did not fast-forward"
+  pass "normal origin/HEAD aliases are excluded from staged ref publication"
+}
+
 test_already_current_unchanged() {
   local home clone out before
   home=$(new_home)
@@ -2384,6 +2428,7 @@ test_staged_fetch_is_git_240_compatible_and_uses_one_remote_session
 test_staged_fetch_signals_clean_scope_and_preserve_caller_traps
 test_staged_fetch_default_signals_clean_scope
 test_on_default_clean_behind_fast_forwards
+test_origin_head_alias_does_not_block_staged_publication
 test_already_current_unchanged
 test_no_origin_skipped
 test_missing_remote_default_skipped

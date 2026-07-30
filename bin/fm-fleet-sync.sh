@@ -194,7 +194,9 @@ build_staged_ref_changes() {
       }
     }
   ' "$before" "$after" >"$unsorted" || return 1
-  awk -F '\t' '!($2 == "-" && $3 == "refs/remotes/origin/HEAD")' \
+  # origin/HEAD is an alias for the fetched default branch, not a direct fetch
+  # destination. Git versions differ on whether the mirror snapshot retains it.
+  awk -F '\t' '$3 != "refs/remotes/origin/HEAD"' \
     "$unsorted" >"$filtered" \
     || return 1
   LC_ALL=C sort -t $'\t' -k3,3 "$filtered" >"$changes"
@@ -409,6 +411,7 @@ fetch_and_publish_configured_refs() {
   local scoped_file_config scoped_file_include_config git_dir_pattern
   local output rc old_oid new_oid ref
   local saved_exit_trap saved_exit_action saved_term_trap saved_int_trap
+  local -a saved_exit_parts=()
   local -a fetched_refs=() recursion_refs=()
 
   FETCH_OUTPUT=
@@ -423,8 +426,8 @@ fetch_and_publish_configured_refs() {
   saved_int_trap=$(trap -p INT)
   saved_exit_action=
   if [ -n "$saved_exit_trap" ]; then
-    eval "set -- ${saved_exit_trap#trap -- }"
-    saved_exit_action=$1
+    eval "saved_exit_parts=(${saved_exit_trap#trap -- })"
+    saved_exit_action=${saved_exit_parts[0]}
   fi
   trap 'staged_fetch_scope_exit "$?"' EXIT
   trap 'staged_fetch_scope_signal TERM 143' TERM
@@ -648,7 +651,7 @@ linked_worktree_rebase_targets_default() {
 }
 
 linked_default_worktree_conflict() {
-  local git_dir listing_file field record_path= record_branch= current_ref
+  local git_dir listing_file field record_path='' record_branch='' current_ref
   local matches=0 rebase_conflict=no unreadable=no rebase_rc
   git_dir=$(git -C "$PROJ" rev-parse --absolute-git-dir 2>/dev/null) || {
     printf 'cannot inspect linked worktrees\n'
