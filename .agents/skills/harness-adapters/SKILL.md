@@ -127,7 +127,9 @@ The supported launch-profile flags below are verified locally; each row records 
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 
-Codex's `max` is model-scoped in codex-cli 0.145.0: the bundled catalog advertises it for `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`, while `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.2`, and `codex-auto-review` cap at `xhigh`.
+Codex's `max` is model-scoped in codex-cli 0.145.0: it is carried by `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`, and every other model in both catalogs caps at `xhigh`.
+Re-check that scoping with `codex debug models --bundled` for the static compiled catalog and `codex debug models` for the account's effective list.
+The two catalogs agree on the `max`-carrying models but differ in which older models they carry, so a bare model list from either one must not be trusted as the single catalog.
 Firstmate accepting `max` harness-wide for codex is therefore a deliberate decision, not a claim that every codex model supports it.
 Codex 0.145.0 also parses `model_reasoning_effort` as a free-form string at config load, unlike `approval_policy` and `sandbox_mode`, which reject an unknown value with `unknown variant`.
 So an unsupported model paired with `max` is accepted silently and its effective effort is undefined rather than loud.
