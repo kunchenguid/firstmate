@@ -58,7 +58,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ### Requirements
 
-- A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Codex, or OpenCode.
+- A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Codex, OpenCode, or Cursor.
 - Git.
 - GitHub homes should install the GitHub CLI and authenticate with `gh auth login`; GitLab-first or non-GitHub homes can opt out with `config/forge-auth`.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
@@ -74,6 +74,9 @@ All three have verified turn-end guard paths when launched with their documented
 Pick whichever one matches your subscription and workflow.
 
 Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
+
+Cursor (`cursor-agent`) is verified and supported for crewmate and secondmate launches and as a primary that uses bounded foreground checkpoints.
+Cursor discovers hooks only at a repository's `.cursor/hooks.json` with no per-invocation override, so its primary turn-end guard is intentionally fail-open behind the next-command alarm rather than a tracked hook, which is the widest supervision tradeoff of the supported primaries; workers still get a per-task turn-end hook.
 
 ### Install and launch
 

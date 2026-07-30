@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, and kimi.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, and cursor.
 user-invocable: false
 metadata:
   internal: true
@@ -58,6 +58,7 @@ The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, a
 `opencode`, `pi`, and `pi-signed` expose passive lifecycle callbacks and force one bounded follow-up when the shared predicate blocks.
 Grok selects native blocking or its pre-native bounded resume fallback from the exact running Stop payload; [`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns that contract.
 Kimi is outside the primary turn-end guard scope, while `docs/turnend-guard.md` owns its separate guarded global hook for crew wake signals.
+Cursor is likewise outside the primary blocking/passive-follow-up guard: it discovers hooks only at the project git root's `.cursor/hooks.json` with no per-invocation override, so a tracked primary hook would also fire in same-repo worker worktrees; the Cursor primary is intentionally fail-open behind `bin/fm-guard.sh` and its bounded foreground checkpoint, while its per-task interactive `stop` hook is the crew wake signal (`docs/turnend-guard.md`).
 The exact hook files, commands, scoping rules, and fail-open tradeoffs are owned by `docs/turnend-guard.md`.
 `docs/verification/supervision.md` "Turn-end guard" owns active validation evidence.
 When changing any primary turn-end hook, validate the real harness behavior in a scratch project or throwaway home before trusting it, then update that doc and the relevant concise fact below.
@@ -93,6 +94,7 @@ Full mechanics, scoping, and fail-open behavior live in `docs/sessionstart-nudge
 - `opencode`: verified on 1.17.18; `session.created` plus `client.session.promptAsync` starts the nudge turn in the TUI, while `opencode run` remains fail-open headless.
 - `pi` and `pi-signed`: verified native `session_start`; the existing primary extension handles `startup`, `new`, and `resume` and uses `pi.sendMessage` to inject context without racing a positional launch prompt.
 - `grok`: the 0.2.103 project `SessionStart` event fires with `source=new`, but stdout does not reach model context; the tracked project hook remains fail-open, and a global token-guarded fallback requires a captain decision.
+- `cursor`: the trial verified a `sessionStart` hook whose `additional_context` reaches model context, but firstmate does not wire a tracked primary `.cursor/hooks.json` (it would also load in same-repo worker worktrees), so session-start delivery is the behavioral `AGENTS.md` path plus the session-start digest, with no native nudge hook.
 
 ## Primary watcher supervision
 
@@ -102,6 +104,7 @@ Claude's Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns tokenles
 Codex uses bounded foreground checkpoints through `bin/fm-watch-checkpoint.sh` because Codex cannot reason while a foreground tool call is running.
 OpenCode uses `.opencode/plugins/fm-primary-watch-arm.js`, which coordinates with the turn-end guard plugin and wakes the TUI with `client.session.promptAsync`.
 Pi and pi-signed use the tracked `.pi/extensions/fm-primary-turnend-guard.ts` plus the tracked `.pi/extensions/fm-primary-pi-watch.ts`, both project-local extensions the Pi engine auto-discovers once trusted.
+Cursor uses the same bounded foreground checkpoint as Codex (`bin/fm-watch-checkpoint.sh --seconds "${FM_CURSOR_WATCH_CHECKPOINT:-180}"`) because it cannot reason during a foreground tool call and firstmate wires no cursor background-rewake capability; `docs/supervision-protocols/cursor.md` owns that protocol.
 When changing any primary watcher adapter, update `docs/supervision-protocols/`, `docs/turnend-guard.md` if a shared idle or turn-end hook changed, and the relevant concise fact below.
 
 ## Launch profile axes
@@ -127,6 +130,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
+| cursor | `--model <effort-bearing slug>` | none (effort is encoded in the model slug) | Verified 2026-07-30 on cursor-agent 2026.07.23. Generic `--effort` is rejected, and the tested bracketed model overrides (`gpt-5.6-sol[effort=low]`) failed account model validation. The account exposes effort-specific slugs `gpt-5.6-sol-{none,low,medium,high,xhigh,max}`, so encode effort in the model slug; the requested effort axis stays in task metadata and is never emitted as a flag. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 No script resolves that split for you: establish which credential store a tuple reads from the discovery surfaces below plus `quota-axi auth --json`'s per-provider sources, and show that reasoning rather than inferring it from a harness, model, or source name.
@@ -144,6 +148,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
+| cursor | Run `cursor-agent status`, which reports the authenticated account, subscription, and selected model; the effort-specific launch slugs come from the account's available-model list. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
@@ -163,6 +168,7 @@ Natural language is acceptable if uncertain.
 - pi and pi-signed: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the structural composer reader; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
+- cursor: natural language is the verified-safe form. The trial confirmed cursor discovers and reads the installed `no-mistakes` skill from a natural-language discovery request and from a `/no-mistakes` style request; use natural language if the exact slash form is uncertain.
 
 ## Submission acknowledgement hazards
 
@@ -397,3 +403,34 @@ The delivery-only spinner match covers the full moon-phase glyph set rather than
 Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, and the global hook touches that task's `state/<id>.turn-ended` only when the Stop payload's `cwd`, pointer, and registry entry all agree.
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal remains a wake notification; standalone Kimi has no busy-state source until one is live-verified.
+
+## cursor (VERIFIED 2026-07-30, cursor-agent 2026.07.23)
+
+Cursor Agent CLI. The executable is `cursor-agent` (resolved from `PATH`), not `cursor`.
+Firstmate launches the supervised interactive worker as `cursor-agent --force --trust --model <slug> "<brief>"`, one positional brief argument.
+
+| Fact | Value |
+|---|---|
+| Binary | `cursor-agent` from `PATH` (a versioned symlink target). |
+| Launch | Interactive `cursor-agent --force --trust [--model <slug>] "<brief>"`; the brief is one positional argument, delivered on the launch command. |
+| Autonomy | `--force` renders `Run Everything` in the footer and auto-runs every tool; `--trust` trusts the launch directory. Together they are the clean equivalent of claude's `--dangerously-skip-permissions`. `--yolo` and `--auto-review` were also accepted but are not used. |
+| Models | Effort-specific slugs `gpt-5.6-sol-{none,low,medium,high,xhigh,max}`; generic `--effort` and bracketed model overrides were rejected, so effort is encoded in the model slug (see the launch-profile-axes table). |
+| Busy-pane signature | A braille spinner followed by the ASCII word `Working` as the trailing token (e.g. `⠠⠛ Working`); the idle frame has no such line. This is a secondary liveness aid because Cursor's TUI strings are repaint-dependent; the per-turn stop-hook marker and the brief's status appends are the primary signals. |
+| Environment marker | `CURSOR_AGENT=1` (plus `CURSOR_INVOKED_AS=cursor-agent` and `CURSOR_CONVERSATION_ID`, which equals the session id); detection keys on `CURSOR_AGENT` first, then `cursor-agent` process ancestry. |
+| Sessions | The stable id is `session_id`, equal to the conversation/chat id (`CURSOR_CONVERSATION_ID`). Resume an exact worker with `cursor-agent --resume <session-id>`; `cursor-agent create-chat` mints an empty chat id. |
+| Continue | `--continue` selects the workspace-latest session and can pick the wrong worker when launches race; never use it for concurrently managed workers - persist and resume the explicit `session_id`. |
+| Delegation | The internal subagent tool presents to the model as `functions.Subagent` and records a `taskToolCall` in the stream; a bounded subagent call returned successfully. Delegation is available for bounded internal work but lifecycle ownership stays with the worker process and the firstmate status channel. |
+| Skill invocation | Natural language is the verified-safe form; the trial confirmed `no-mistakes` skill discovery from both a natural-language request and a `/no-mistakes` style request. |
+
+Autonomy modes, trust, the selected workspace, the model, and a stable session id are proven by the stream-json `system/init` record.
+The idle frame shows the prompt arrow with the placeholder `Plan, search, build anything` and a model/permission/workspace footer; those strings are repaint- and version-dependent, so steering leans on the shared submit-retry with busy-fallback rather than exact idle-string matching.
+
+Turn-end (crew): Cursor fires a per-turn `stop` hook while interactive, discovered only at the project git root's `.cursor/hooks.json` (no `--hooks-file` override).
+`fm-spawn.sh` writes an untracked worktree `.cursor/hooks.json` whose `stop` command is an executable `.cursor/fm-turn-end.sh` that touches `state/<id>.turn-ended`; both are git-excluded and discarded with the pooled worktree.
+It is installed only when the worktree has no `.cursor/hooks.json` already; a worktree that tracks or already has one (e.g. a firstmate-repo task) falls back to the brief's sparse status appends, because adding a hook to an existing file would dirty tracked state and block teardown.
+In `--print` mode Cursor emits no `stop` (only `sessionEnd` plus process exit), so a noninteractive worker's completion is process exit plus the terminal stream-json `result`, never a wait on `stop`.
+
+Primary session: Cursor is intentionally fail-open (no tracked primary `.cursor/hooks.json`), supervised by the bounded foreground checkpoint in `docs/supervision-protocols/cursor.md` and backed by the `bin/fm-guard.sh` next-command alarm.
+
+Not characterized by the trial: the interactive TUI exit command and the interrupt key.
+For recovery, use the recorded `session_id` and the recorded endpoint (process/pane) rather than an unverified keypress; relaunch or `--resume <session-id>` when the pane is wedged, and verify any new exit/interrupt fact live before relying on it.

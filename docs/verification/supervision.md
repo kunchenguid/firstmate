@@ -273,3 +273,33 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+
+## Cursor runtime integration
+
+The Cursor Agent CLI supervised trial ran on 2026-07-30 with cursor-agent 2026.07.23 (executable `cursor-agent`), authenticated Enterprise account, selected model `gpt-5.6-sol-high`.
+The full raw-launch and primary-hook transcripts, hashes, and process ancestry stay in the private report `data/cursor-runtime-trial/report.md`; the current guarantees this record supports are below.
+
+Launch and autonomy: the interactive worker launched as `cursor-agent --force --trust --model <slug> "<brief>"` and received the full brief verbatim (parent argv match; the received user record was 5,852 chars, SHA-256 `3401b880...4af59f3c`).
+`--force` rendered `Run Everything` (full autonomy) and `--trust` trusted the launch directory; `--yolo` and `--auto-review` were also accepted.
+Markers `CURSOR_AGENT=1`, `CURSOR_INVOKED_AS=cursor-agent`, and `CURSOR_CONVERSATION_ID` were stable in the raw launch.
+
+Model and effort: `--effort high` returned `error: unknown option '--effort'`, and bracketed model overrides (`gpt-5.6-sol[effort=low]`) failed account model validation, while the account's available-model list accepted `gpt-5.6-sol-{none,low,medium,high,xhigh,max}`.
+The verified conclusion is that effort is encoded in the model slug and never emitted as a flag.
+
+Sessions and delegation: `session_id` equals the conversation/chat id and is stable across `--resume <id>`; `--continue` selects the workspace-latest session; `cursor-agent create-chat` mints an empty chat id.
+Delegation is real: the internal `functions.Subagent` tool recorded a `taskToolCall` and a bounded subagent returned successfully.
+
+Hooks: interactively, a project `stop` hook at the git root's `.cursor/hooks.json` fired per turn and its `followup_message` auto-submitted a bounded continuation; a direct-block `stop` response could not block completion.
+In `--print` mode `sessionStart`, tool hooks, and `sessionEnd` ran but `stop` and `afterAgentResponse` did not, so noninteractive completion is process exit plus the terminal stream-json `result`.
+`sessionStart` `additional_context` reached model context and `env` propagated to later hook processes; a `preToolUse` deny and `beforeShellExecution` deny were both honored.
+Cursor discovers hooks only at `<git-root>/.cursor/hooks.json` and exposes no `--hooks-file` override, and a local `--plugin-dir` overlay was accepted syntactically but did not load its hooks.
+
+Integration decisions from this evidence: crew turn-end is the interactive worktree `.cursor/hooks.json` stop hook, installed only when the worktree has no such file (tracked-file safety), covered by `tests/fm-cursor-harness.test.sh`.
+The primary is intentionally fail-open (no tracked primary `.cursor/hooks.json`, which would also load in same-repo worker worktrees) behind `bin/fm-guard.sh` and the bounded foreground checkpoint in `docs/supervision-protocols/cursor.md`.
+Cursor's TUI busy/idle strings are repaint-dependent, so the `Working` busy signature is a secondary liveness aid; the stop-hook marker and the brief's status appends are the primary signals.
+
+Deterministic entry point:
+
+```sh
+tests/fm-cursor-harness.test.sh
+```

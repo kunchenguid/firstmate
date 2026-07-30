@@ -83,7 +83,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
@@ -675,7 +675,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -741,6 +741,15 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    # Cursor Agent CLI (cursor-agent): --force renders "Run Everything" full
+    # autonomy and --trust trusts the launch directory, the clean equivalent of
+    # claude's --dangerously-skip-permissions (verified, cursor-agent
+    # 2026.07.23). The brief is one positional argument. Effort is encoded in the
+    # model slug (gpt-5.6-sol-<effort>), so there is no __EFFORTFLAG__ here - the
+    # installed CLI rejected --effort. The per-turn turn-end signal is an
+    # interactive project stop hook installed below (worktree-local .cursor/hooks.json,
+    # tracked-file-safe), so the template is identical for ship/scout/secondmate.
+    cursor) printf '%s' 'cursor-agent --force --trust __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -853,7 +862,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -897,6 +906,9 @@ effort_flag_for_harness() {
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
     # kimi likewise has no reasoning-effort flag; the requested axis stays in
     # task metadata but never reaches the launch command.
+    # cursor rejects a generic --effort and rejects bracketed model overrides;
+    # effort is encoded in the model slug (gpt-5.6-sol-<effort>), so the requested
+    # effort axis stays in task metadata and is never emitted as a flag.
   esac
 }
 
@@ -1868,6 +1880,40 @@ EOF
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.kimi-turnend-token"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
       exclude_path '.fm-kimi-turnend'
+      ;;
+    cursor*)
+      # Cursor fires a per-turn `stop` hook while interactive (verified,
+      # cursor-agent 2026.07.23). Cursor discovers hooks ONLY at the project git
+      # root's .cursor/hooks.json and exposes no --hooks-file override, so the
+      # per-task turn-end hook lives at the worktree root. It is installed ONLY
+      # when the worktree has no .cursor/hooks.json already: adding a task hook to
+      # a tracked file would dirty tracked state and block teardown, and a
+      # pre-existing untracked project hook must not be clobbered, so a worktree
+      # that already has one (e.g. a firstmate-repo task that tracks it) falls
+      # back to the brief's sparse status appends instead (the verified
+      # tracked-file rule).
+      # The untracked hook file and script are git-excluded and discarded with the
+      # pooled worktree, like the other harnesses' worktree hook files. Cursor
+      # execs the hook `command` as an executable path (its probe hooks were
+      # executable script paths), so the command is the absolute script path and
+      # the marker path is embedded single-quoted inside that script.
+      if [ -e "$WT/.cursor/hooks.json" ]; then
+        echo "warning: $WT already has .cursor/hooks.json; relying on the brief's status appends for turn-end (leaving the existing hook file untouched)" >&2
+      else
+        mkdir -p "$WT/.cursor"
+        cat > "$WT/.cursor/fm-turn-end.sh" <<EOF
+#!/usr/bin/env bash
+# Firstmate cursor turn-end signal; written by fm-spawn. Cursor passes the stop
+# payload on stdin (ignored here); this only marks the per-turn boundary.
+touch '$TURNEND' 2>/dev/null || true
+exit 0
+EOF
+        chmod +x "$WT/.cursor/fm-turn-end.sh"
+        cursor_hook_command=$(json_escape "$WT/.cursor/fm-turn-end.sh")
+        printf '{"version":1,"hooks":{"stop":[{"command":"%s"}]}}\n' "$cursor_hook_command" > "$WT/.cursor/hooks.json"
+        exclude_path '.cursor/hooks.json'
+        exclude_path '.cursor/fm-turn-end.sh'
+      fi
       ;;
   esac
 fi

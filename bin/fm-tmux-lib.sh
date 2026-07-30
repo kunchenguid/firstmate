@@ -89,6 +89,15 @@ FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
+# Cursor Agent's busy frame is a braille spinner followed by the ASCII status
+# word `Working` as the whole trailing token (e.g. `⠠⠛ Working`); the idle frame
+# has no such line. The regex anchors on `Working` at end-of-line as a standalone
+# word so ordinary prose containing "Working ..." does not classify busy, and
+# avoids locale-fragile braille matching. Cursor's TUI strings are
+# repaint-dependent (verification report), so this busy signature is a secondary
+# liveness aid; the per-turn stop-hook marker and the brief's status appends are
+# the primary signals.
+FM_TMUX_CURSOR_BUSY_REGEX_DEFAULT='(^|[[:space:]])Working[[:space:]]*$'
 
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex
@@ -103,6 +112,7 @@ fm_busy_lines_match() {  # [harness]
       pi|pi-signed) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_TMUX_GROK_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_TMUX_KIMI_BUSY_REGEX_DEFAULT ;;
+      cursor) regex=$FM_TMUX_CURSOR_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_TMUX_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.

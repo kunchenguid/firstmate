@@ -9,7 +9,9 @@
 # This file is sourced by scripts and has no side effects on source.
 
 # Known harness command names; extend when a new adapter is verified.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
+# Cursor's executable is cursor-agent (verified, cursor-agent 2026.07.23); its
+# host markers are handled in fm_harness_marker_identity below.
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|cursor-agent|^pi$|^pi-signed$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the

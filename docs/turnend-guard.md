@@ -99,6 +99,9 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - Installation refuses before writing unless `python3` with `tomllib` and `jq` are available.
 - If `jq` is removed after installation, the hook remains silent and exits 0, turn-end wakes stop, and Kimi crews fall back to idle detection.
 - Unreadable hook input remains fail-open.
+- Cursor Agent CLI 2026.07.23 discovers hooks only at the project git root's `.cursor/hooks.json` and exposes no per-invocation override, and its interactive `stop` hook fires per turn (verified) while `--print` mode emits no `stop`.
+- Cursor is outside the primary blocking/passive-follow-up integrations: a tracked primary `.cursor/hooks.json` would also load in every same-repo worker worktree and block those workers from installing their own turn-end hook, so the Cursor primary is intentionally fail-open, backed by the next-command alarm (`bin/fm-guard.sh`) and the bounded foreground checkpoint (`docs/supervision-protocols/cursor.md`).
+- Cursor crew wake support is an interactive per-task `stop` hook that `bin/fm-spawn.sh` writes to the worktree's `.cursor/hooks.json` (with an executable `.cursor/fm-turn-end.sh` that touches `state/<id>.turn-ended`), git-excluded and discarded with the pooled worktree; it is installed only when the worktree does not already have a `.cursor/hooks.json`, otherwise the crew falls back to the brief's sparse status appends.
 - No harness adapter uses a shell ampersand to manufacture supervision.
 
 ## Regression coverage
