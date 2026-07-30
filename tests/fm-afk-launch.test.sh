@@ -718,6 +718,40 @@ unit_stop_confirms_daemon_exit() {
   rm -rf "$st"
 }
 
+# The stop budget must outlast a daemon that legitimately takes seconds to shut
+# down: its trap flushes escalations and then reaps its watcher child (task
+# afk-wedge-noc, the overnight away-mode wedge of 2026-07-29/30, where a correct
+# shutdown was reported as "did not exit after SIGTERM" and lifecycle state was
+# preserved for a retry that was never needed).
+# Wall time is compressed 10x by stubbing the poll sleep, so this asserts the POLL
+# BUDGET rather than the clock: a daemon that exits 2.5s into the compressed
+# budget must still be confirmed, where the pre-fix 40-poll budget gave up first.
+unit_stop_waits_out_a_slow_daemon_shutdown() {
+  local st daemon_pid
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-slow.XXXXXX")
+  mkdir -p "$st/state/.supervise-daemon.lock"
+  : > "$st/state/.afk"
+  printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+  bash -c 'trap "command sleep 2.5; exit 0" TERM; while :; do command sleep 0.05; done' &
+  daemon_pid=$!
+  printf '%s' "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid-identity" )
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    sleep() { command sleep 0.025; }
+    fm_afk_launch_stop
+  ' _ "$LAUNCH" >/dev/null 2>&1 \
+    && ! kill -0 "$daemon_pid" 2>/dev/null \
+    && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "stop budget: a daemon that shuts down slowly is confirmed, not reported as stuck"
+  else
+    fail "stop budget: a slow but correct daemon shutdown was reported as a failed stop"
+  fi
+  kill -KILL "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
 unit_refresh_validates_record() {
   local st daemon_pid
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh-record.XXXXXX")
@@ -935,6 +969,7 @@ unit_stop_validates_before_signal
 unit_lock_requires_complete_metadata
 unit_stop_surfaces_afk_removal_failure
 unit_stop_confirms_daemon_exit
+unit_stop_waits_out_a_slow_daemon_shutdown
 unit_refresh_validates_record
 unit_clear_failure_aborts_entry
 unit_confirmed_absence_succeeds

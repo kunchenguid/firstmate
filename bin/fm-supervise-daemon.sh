@@ -133,13 +133,18 @@
 #                                   not misread as pending input.
 #          FM_INJECT_CONFIRM_SLEEP  seconds between daemon submit checks
 #                                   (default 0.5)
+#          FM_WATCHER_REAP_SECS     seconds the shutdown trap waits for the
+#                                   watcher child after SIGTERM before killing it
+#                                   hard (default 3; invalid/zero uses the
+#                                   default). See WATCHER_REAP_SECS_DEFAULT.
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
 #          FM_STATE_OVERRIDE        alternate state dir (testing)
 #          Logs each wake to state/.supervise-daemon.log (size-capped). Single
 #          instance via portable lock on state/.supervise-daemon.lock. Trapped
-#          SIGTERM/SIGINT shut down within ~1s, flush escalations, release the
-#          lock. A crashing fm-watch.sh is logged and restarted, never killing
-#          the daemon; a tight crash-restart spin is detected and backed off.
+#          SIGTERM/SIGINT flush escalations, reap the watcher child within
+#          FM_WATCHER_REAP_SECS, and release the lock. A crashing fm-watch.sh is
+#          logged and restarted, never killing the daemon; a tight crash-restart
+#          spin is detected and backed off.
 set -u
 
 FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -203,6 +208,14 @@ WEDGE_ALARM_NOTIFIER_PID=
 INJECT_FAIL_SLEEP_DEFAULT=30
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
+# Seconds the shutdown trap may spend reaping the watcher child before killing it
+# hard. WHY (task afk-wedge-noc, overnight away-mode wedge 2026-07-29/30): the
+# watcher ends every cycle in a blocking foreground wait of FM_POLL seconds, and
+# bash runs no trap until that command returns, so a plain `wait` here took ~14s
+# and blew fm-afk-launch.sh's stop window. The watcher is stateless, so bounding
+# the reap is what keeps shutdown latency a property of this file rather than of
+# whichever point in the watcher's poll cycle the signal happened to land in.
+WATCHER_REAP_SECS_DEFAULT=3
 CRASH_THRESHOLD_DEFAULT=10
 CRASH_WINDOW_DEFAULT=60
 CRASH_BACKOFF_DEFAULT=60
@@ -784,8 +797,17 @@ wedge_alarm_via_osascript() {  # <summary>
 
 # Post a herdr UI notification - herdr's own surface, separate from the pane and
 # its status-line. Best-effort: logs and returns 1 on failure.
+#
+# The exit code alone is NOT delivery (task afk-wedge-noc, overnight away-mode
+# wedge 2026-07-29/30): herdr accepts the call and exits 0 even when the host has
+# toast delivery switched off, answering {"result":{"shown":false,...}}. Counting
+# that as a delivered alarm turns this channel into a silent stub on exactly the
+# hosts where the captain sees nothing - the failure mode the alarm exists to
+# prevent. Only an EXPLICIT shown:false is treated as a failed channel: a herdr
+# that prints nothing, or any response without the field, still counts as
+# delivered. Matched textually so the alarm path takes on no jq dependency.
 wedge_alarm_via_herdr() {  # <summary>
-  local summary=$1 rc
+  local summary=$1 rc resp
   wedge_alarm_os_notifier_override herdr "$summary"
   rc=$?
   case "$rc" in
@@ -794,10 +816,22 @@ wedge_alarm_via_herdr() {  # <summary>
   esac
   command -v herdr >/dev/null 2>&1 || {
     log "wedge alarm: herdr not found; cannot post a herdr notification"; return 1; }
+  resp=$(mktemp "${TMPDIR:-/tmp}/fm-wedge-herdr.XXXXXX") || resp=
   wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalations WEDGED" \
-    --body "$summary" --sound request >/dev/null 2>&1 && return 0
-  log "wedge alarm: herdr notification failed"
-  return 1
+    --body "$summary" --sound request >"${resp:-/dev/null}" 2>/dev/null
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ -n "$resp" ] && rm -f "$resp"
+    log "wedge alarm: herdr notification failed"
+    return 1
+  fi
+  if [ -n "$resp" ] && grep -qE '"shown"[[:space:]]*:[[:space:]]*false' "$resp" 2>/dev/null; then
+    rm -f "$resp"
+    log "wedge alarm: herdr accepted the notification but reported it was not shown (herdr toast delivery is off on this host); treating the channel as failed"
+    return 1
+  fi
+  [ -n "$resp" ] && rm -f "$resp"
+  return 0
 }
 
 # Run a captain-supplied command with the summary on $1 and on stdin, so an
@@ -1273,6 +1307,34 @@ trim_log() {
   tail -n "${FM_LOG_KEEP_LINES:-$LOG_KEEP_LINES_DEFAULT}" "$LOG" >"$tmp" 2>/dev/null && mv -f "$tmp" "$LOG"
 }
 
+# --- bounded child reap -----------------------------------------------------
+# reap_watcher: end the watcher child within a bounded time and return once it is
+# gone. TERM first (the watcher's own trap exits cleanly when it is between
+# blocking waits), then poll, then KILL. See WATCHER_REAP_SECS_DEFAULT for why
+# the bound exists; an invalid override falls back to the default rather than
+# turning the bound off.
+reap_watcher() {  # <pid>
+  local pid=$1 secs tenths=0 limit
+  [ -n "$pid" ] || return 0
+  secs=${FM_WATCHER_REAP_SECS:-$WATCHER_REAP_SECS_DEFAULT}
+  case "$secs" in
+    ''|*[!0-9]*) secs=$WATCHER_REAP_SECS_DEFAULT ;;
+    *) [ "$secs" -gt 0 ] 2>/dev/null || secs=$WATCHER_REAP_SECS_DEFAULT ;;
+  esac
+  limit=$((secs * 10))
+  kill "$pid" 2>/dev/null || true
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$tenths" -ge "$limit" ]; then
+      log "watcher pid $pid did not exit ${secs}s after SIGTERM; killing it"
+      kill -KILL "$pid" 2>/dev/null || true
+      break
+    fi
+    sleep 0.1
+    tenths=$((tenths + 1))
+  done
+  wait "$pid" 2>/dev/null || true
+}
+
 # ============================================================================
 # Everything below runs only when the script is EXECUTED, not sourced. The pure
 # classifiers above are sourceable for unit tests (tests/fm-daemon.test.sh).
@@ -1399,8 +1461,7 @@ fm_super_main() {
     wedge_alarm_stop_active_notifier
     escalate_flush "$STATE" 2>/dev/null || true
     if [ -n "${WATCHER_PID:-}" ]; then
-      kill "$WATCHER_PID" 2>/dev/null || true
-      wait "$WATCHER_PID" 2>/dev/null || true
+      reap_watcher "$WATCHER_PID"
     fi
     if [ -n "${CUR_TMP:-}" ]; then
       rm -f "$CUR_TMP" 2>/dev/null || true

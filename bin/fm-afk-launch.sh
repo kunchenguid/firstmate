@@ -74,6 +74,15 @@ FM_AFK_LAUNCH_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 FM_AFK_LAUNCH_RECORD="$FM_AFK_LAUNCH_STATE/.afk-daemon-terminal"
 FM_AFK_LAUNCH_LOCK="$FM_AFK_LAUNCH_STATE/.afk-launch.lock"
 FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
+# Polls of 0.25s the stop path waits for the daemon to exit after SIGTERM.
+# WHY (task afk-wedge-noc, overnight away-mode wedge 2026-07-29/30): the daemon's
+# shutdown trap flushes escalations and then reaps its watcher child, and that
+# reap can legitimately outlast a signal that lands mid poll-cycle. The old 10s
+# budget expired first, so a correct shutdown was reported as "did not exit after
+# SIGTERM" and lifecycle state was preserved for a retry that was never needed.
+# This is deliberate slack above the daemon's own bounded reap, not the bound
+# itself - the daemon owns that (WATCHER_REAP_SECS_DEFAULT there).
+FM_AFK_LAUNCH_STOP_POLLS=160
 
 # shellcheck source=bin/fm-backend.sh
 . "$FM_AFK_LAUNCH_DIR/fm-backend.sh"
@@ -594,7 +603,7 @@ fm_afk_launch_stop() {
       fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
       result=1
     fi
-    for _ in $(seq 1 40); do
+    for _ in $(seq 1 "$FM_AFK_LAUNCH_STOP_POLLS"); do
       fm_pid_alive "$pid" || break
       sleep 0.25
     done

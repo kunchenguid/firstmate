@@ -1507,6 +1507,91 @@ test_wedge_alarm_shutdown_stops_active_notifier_group() {
   pass "daemon shutdown stops and reaps the active notifier process group"
 }
 
+# The herdr channel's delivery signal is `.result.shown`, not the exit code (task
+# afk-wedge-noc): herdr ACKs the call and exits 0 on a host where toast delivery is
+# switched off, so trusting the exit code makes this channel a silent stub exactly
+# where the captain would see nothing.
+test_wedge_alarm_herdr_unshown_response_is_a_failed_channel() {
+  local dir log rc
+  dir=$(make_wedge_case wedge-herdr-unshown); log="$dir/daemon.log"
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '{"result":{"shown":false,"reason":"disabled"}}\n'
+exit 0
+SH
+  chmod +x "$dir/fakebin/herdr"
+  rc=0
+  LOG="$log" PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_EXEC='' \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a shown:false herdr response was reported as a delivered alarm"
+  grep -F 'not shown' "$log" >/dev/null \
+    || fail "the undelivered herdr notification was not logged: $(cat "$log")"
+  pass "wedge_alarm_via_herdr: a shown:false response is a failed channel, not a delivered alarm"
+}
+
+test_wedge_alarm_herdr_shown_and_silent_responses_are_delivered() {
+  local dir log rc
+  dir=$(make_wedge_case wedge-herdr-shown); log="$dir/daemon.log"
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '{"result":{"shown":true,"notification_id":"n1"}}\n'
+exit 0
+SH
+  chmod +x "$dir/fakebin/herdr"
+  rc=0
+  LOG="$log" PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_EXEC='' \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a shown:true herdr response was reported as a failed channel (rc $rc)"
+  # An older herdr prints nothing on success; absent evidence is not failure.
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/fakebin/herdr"
+  rc=0
+  LOG="$log" PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_EXEC='' \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a silent herdr success was reported as a failed channel (rc $rc)"
+  pass "wedge_alarm_via_herdr: shown:true and a silent success both count as delivered"
+}
+
+# Shutdown must never outlast its bound (task afk-wedge-noc): the watcher child
+# ends every cycle in a blocking foreground wait, and bash runs no trap until that
+# command returns, so an unbounded reap here held the daemon open ~14s and the
+# away-mode stop path reported a correct shutdown as a failed one.
+test_reap_watcher_is_bounded_and_leaves_no_child() {
+  local dir log
+  dir="$TMP_ROOT/reap-watcher"; mkdir -p "$dir"; log="$dir/daemon.log"; : > "$log"
+
+  # A child that honors SIGTERM between its waits: reaped promptly, inside the bound.
+  (
+    ready="$dir/ready-cooperative"
+    bash -c 'trap "exit 0" TERM; : > "$1"; while :; do sleep 0.05; done' bash "$ready" &
+    pid=$!
+    while [ ! -e "$ready" ]; do sleep 0.05; done
+    start=$SECONDS
+    LOG="$log" FM_WATCHER_REAP_SECS=1 reap_watcher "$pid"
+    [ $((SECONDS - start)) -le 3 ] || fail "reaping a cooperative watcher took too long"
+    ! kill -0 "$pid" 2>/dev/null || fail "a cooperative watcher survived the reap"
+  ) || fail "cooperative watcher reap case failed"
+  [ ! -s "$log" ] || fail "a cooperative reap logged a hard kill it never needed: $(cat "$log")"
+
+  # A child that does NOT exit on SIGTERM: bounded, then killed hard, and gone.
+  (
+    ready="$dir/ready-stuck"
+    bash -c 'trap "" TERM; : > "$1"; sleep 30' bash "$ready" &
+    pid=$!
+    while [ ! -e "$ready" ]; do sleep 0.05; done
+    start=$SECONDS
+    LOG="$log" FM_WATCHER_REAP_SECS=1 reap_watcher "$pid"
+    [ $((SECONDS - start)) -le 3 ] || fail "reaping an unresponsive watcher outlasted its bound"
+    ! kill -0 "$pid" 2>/dev/null || fail "an unresponsive watcher survived the reap"
+  ) || fail "unresponsive watcher reap case failed"
+  grep -F 'did not exit' "$log" >/dev/null \
+    || fail "the hard kill of an unresponsive watcher was not logged: $(cat "$log")"
+  pass "reap_watcher: bounded after SIGTERM, then a hard kill, and never leaves the child running"
+}
+
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend() {
   # The whole incident: a non-tmux (herdr) primary gets NO tmux status-line
   # flash, so inject_wedge_alarm must still emit the backend-independent alert
@@ -1898,6 +1983,9 @@ test_wedge_alarm_hung_channel_times_out_and_falls_through
 test_wedge_alarm_backgrounded_command_times_out_and_reaps_descendant
 test_wedge_alarm_hung_override_times_out_and_falls_through
 test_wedge_alarm_shutdown_stops_active_notifier_group
+test_wedge_alarm_herdr_unshown_response_is_a_failed_channel
+test_wedge_alarm_herdr_shown_and_silent_responses_are_delivered
+test_reap_watcher_is_bounded_and_leaves_no_child
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
 test_fm_send_exits_nonzero_on_confirmed_swallow

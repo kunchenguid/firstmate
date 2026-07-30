@@ -160,6 +160,35 @@ fm_composer_strip_ghost() {
   '
 }
 
+# fm_composer_blank_normalize: turn a harness's INVISIBLE composer padding into
+# ordinary spaces, so the POSIX [[:space:]] trims below can actually remove it.
+#
+# WHY (task afk-wedge-noc, the overnight away-mode wedge of 2026-07-29/30):
+# claude 2.1.220 draws its idle composer row as the bare agent glyph followed by
+# a NO-BREAK SPACE (bytes e2 9d af c2 a0). U+00A0 is not in [[:space:]] in any
+# glibc locale, so every trim left it in place, the exact-glyph cases below never
+# matched, and an IDLE composer classified as `pending` - i.e. as text a human
+# had typed but not sent. The away-mode injector defers on anything but `empty`,
+# so it deferred every escalation for 6h14m against a pane that was ready for
+# input the whole time.
+#
+# The escapes are OCTAL byte escapes, not \u, so these constants are the exact
+# UTF-8 bytes regardless of the caller's locale (the fleet runs LC_ALL=C in
+# places, where \u escapes and character-wise trimming both misbehave on
+# multibyte glyphs). Only characters that carry ZERO typed meaning are listed, so
+# a row holding nothing but these is empty by any reading and normalizing them
+# cannot swallow a human's half-typed line.
+fm_composer_blank_normalize() {  # <text>
+  local text=$1
+  text=${text//$'\302\240'/ }        # U+00A0 NO-BREAK SPACE (claude 2.1.220)
+  text=${text//$'\342\200\207'/ }    # U+2007 FIGURE SPACE
+  text=${text//$'\342\200\257'/ }    # U+202F NARROW NO-BREAK SPACE
+  text=${text//$'\342\200\213'/ }    # U+200B ZERO WIDTH SPACE
+  text=${text//$'\342\201\240'/ }    # U+2060 WORD JOINER
+  text=${text//$'\357\273\277'/ }    # U+FEFF ZERO WIDTH NO-BREAK SPACE / BOM
+  printf '%s' "$text"
+}
+
 # fm_composer_classify_content: the single shared composer-content verdict.
 #   <bordered> 1 when <content> came from a genuine agent-composer container (a
 #              bordered composer box, or a structurally-identified bare AGENT
@@ -183,6 +212,17 @@ fm_composer_idle_matches() {
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}
+  # Invisible padding must never read as typed content (task afk-wedge-noc).
+  # Normalize here, in the one owner of the verdict, then re-trim: the caller's
+  # own trim ran before this owner ever saw the row, and every decision below -
+  # the exact-glyph cases, the emptiness checks, the idle-placeholder match - is
+  # written against visible characters only.
+  content=$(fm_composer_blank_normalize "$content")
+  content="${content#"${content%%[![:space:]]*}"}"
+  content="${content%"${content##*[![:space:]]}"}"
+  plain_content=$(fm_composer_blank_normalize "$plain_content")
+  plain_content="${plain_content#"${plain_content%%[![:space:]]*}"}"
+  plain_content="${plain_content%"${plain_content##*[![:space:]]}"}"
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
       '❯'|'›') printf 'empty'; return 0 ;;

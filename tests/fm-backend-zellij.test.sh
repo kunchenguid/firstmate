@@ -20,7 +20,7 @@ TMP_ROOT=$(fm_test_tmproot fm-backend-zellij-tests)
 # unit-separated args, to $FM_ZELLIJ_LOG) and returns the canned response for
 # that call read from $FM_ZELLIJ_RESPONSES/<n>.out, consumed IN ORDER (call 1
 # reads 1.out, call 2 reads 2.out, ...), mirroring
-# tests/fm-backend-herdr.test.sh's make_herdr_fakebin. A missing response file
+# tests/herdr-helpers.sh's make_herdr_fakebin. A missing response file
 # means "succeed with empty stdout" (paste/send-keys/close-* are silent on
 # success on the real CLI). `--version` and `list-sessions` are handled
 # specially (not call-counted) since fm_backend_zellij_session_exists calls

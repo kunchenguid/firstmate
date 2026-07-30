@@ -1824,7 +1824,13 @@ fm_backend_herdr_strip_ansi() {  # <text>
 # afk-herdr-false-pending); it superseded a herdr-only faint byte-pattern check
 # that recognized only codex's bold-wrapped bare prompt and missed claude's own
 # dim ghost - the overnight away-mode injection wedge on the primary claude pane.
-FM_BACKEND_HERDR_COMPOSER_LINES=${FM_BACKEND_HERDR_COMPOSER_LINES:-20}
+# Rows of the pane tail the structural composer scan looks at. WHY 40 (task
+# afk-wedge-noc, overnight away-mode wedge 2026-07-29/30): a harness footer plus a
+# multi-line custom statusline can occupy 11-12 rows under the composer, and at 20
+# the composer row itself fell out of the window, which reads as `unknown` and
+# defers injection just as a false `pending` does. The read is free: the capture
+# already pulls 200 rows and this only bounds the tail it scans.
+FM_BACKEND_HERDR_COMPOSER_LINES=${FM_BACKEND_HERDR_COMPOSER_LINES:-40}
 # Known ghost/placeholder composer text. Extend this if another
 # herdr-verified harness needs its own idle placeholder recognized.
 FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}

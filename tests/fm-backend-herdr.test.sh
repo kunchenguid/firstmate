@@ -10,58 +10,24 @@
 # gated on the herdr binary actually being installed.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/herdr-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/herdr-helpers.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 
-# make_herdr_fakebin: a `herdr` stub that logs every invocation (one line,
-# unit-separated args, to $FM_HERDR_LOG) and returns the canned response for
-# that call read from $FM_HERDR_RESPONSES/<n>.out, consumed IN ORDER (call 1
-# reads 1.out, call 2 reads 2.out, ...) so a test can script a short sequence
-# of calls precisely. A missing response file means "succeed with empty
-# stdout" (mirrors send-text/send-keys/pane close/tab close, which are silent
-# on success in the real CLI - verified in herdr-verification-p2.md).
-make_herdr_fakebin() {  # <dir> -> echoes fakebin dir
-  local dir=$1 fb="$1/fakebin"
-  mkdir -p "$fb"
-  cat > "$fb/herdr" <<'SH'
-#!/usr/bin/env bash
-set -u
-LOG="${FM_HERDR_LOG:?}"
-RESP="${FM_HERDR_RESPONSES:?}"
-COUNT_FILE="$RESP/.count"
-next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
-{
-  printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"
-  for a in "$@"; do printf '\x1f%s' "$a"; done
-  printf '\n'
-} >> "$LOG"
-if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS:-0}" != 1 ]; then
-  printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
-  exit 0
-fi
-n=$next
-echo "$n" > "$COUNT_FILE"
-if [ -f "$RESP/$n.exit" ]; then
-  exit "$(cat "$RESP/$n.exit")"
-fi
-[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
-exit 0
-SH
-  chmod +x "$fb/herdr"
-  printf '%s\n' "$fb"
-}
+# The canned, call-numbered fake `herdr` CLI (make_herdr_fakebin) is shared with
+# the other suites that drive this adapter and lives in tests/herdr-helpers.sh,
+# sourced above.
 
 # make_herdr_statefake: a STATEFUL `herdr` stub that models the parts of herdr's
 # real container behavior the workspace-leak fix (and the default-tab-prune
 # safety fix) depend on, so a full spawn->teardown cycle can be replayed
 # repeatedly and the "one persistent firstmate workspace, no orphans"
 # invariant asserted end to end (the canned, call-numbered make_herdr_fakebin
-# above cannot model state carried ACROSS calls). Backed by a JSON state file
+# cannot model state carried ACROSS calls). Backed by a JSON state file
 # ($FM_FAKE_HERDR_STATE) mutated with real jq. Modeled behaviors, all
 # verified real-herdr facts recorded in docs/herdr-backend.md: `workspace
 # create` seeds the new workspace with one auto-created default tab (label
