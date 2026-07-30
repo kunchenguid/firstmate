@@ -128,7 +128,11 @@ if [ "$LOCAL_READY_MODE" = 1 ]; then
   PROJECT_COMMIT=$(git -C "$PROJECT" rev-parse --verify "refs/heads/$BRANCH" 2>/dev/null || true)
   [ "$PROJECT_COMMIT" = "$READY_COMMIT" ] \
     || { echo "error: local-ready branch $BRANCH does not resolve to worktree HEAD $READY_COMMIT in $PROJECT" >&2; exit 1; }
-  DIRTY=$(git -C "$WORKTREE" status --porcelain 2>/dev/null \
+  if ! WORKTREE_STATUS=$(git -C "$WORKTREE" status --porcelain 2>/dev/null); then
+    echo "error: cannot inspect local-ready worktree status: $WORKTREE" >&2
+    exit 1
+  fi
+  DIRTY=$(printf '%s\n' "$WORKTREE_STATUS" \
     | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' \
     | head -1 || true)
   [ -z "$DIRTY" ] \

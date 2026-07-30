@@ -77,7 +77,7 @@ secondmate_home() {
     echo "error: no secondmate registry at $DATA/secondmates.md" >&2
     return 1
   }
-  line=$(grep -E "^- $id( |$)" "$DATA/secondmates.md" | tail -1 || true)
+  line=$(awk -v id="$id" '$1 == "-" && $2 == id { line=$0 } END { print line }' "$DATA/secondmates.md")
   [ -n "$line" ] || {
     echo "error: secondmate $id is not registered in $DATA/secondmates.md" >&2
     return 1
@@ -190,7 +190,11 @@ EOF
     echo "error: task $ID worktree no longer matches ready $BRANCH at $READY_COMMIT" >&2
     exit 1
   }
-  WORKTREE_DIRTY=$(git -C "$WORKTREE" status --porcelain 2>/dev/null \
+  if ! WORKTREE_STATUS=$(git -C "$WORKTREE" status --porcelain 2>/dev/null); then
+    echo "error: cannot inspect ready worktree status for task $ID: $WORKTREE" >&2
+    exit 1
+  fi
+  WORKTREE_DIRTY=$(printf '%s\n' "$WORKTREE_STATUS" \
     | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' \
     | head -1 || true)
   [ -z "$WORKTREE_DIRTY" ] || {

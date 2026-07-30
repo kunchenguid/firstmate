@@ -749,22 +749,29 @@ test_secondmate_home_cannot_land_local_only_work() {
 }
 
 test_secondmate_ready_route_and_main_exact_landing_wait_on_dirty_checkout() {
-  local main sub source wt meta corr rec ready out rc
-  local status_before head_before dirty_hash stash_before
+  local main sub other_sub source wt meta corr rec ready out rc
+  local status_before head_before dirty_hash stash_before git_bin real_git meta_before
   main="$TMP_ROOT/local-ready-main"
   sub="$TMP_ROOT/local-ready-sub"
+  other_sub="$TMP_ROOT/local-ready-other-sub"
   source="$main/projects/alpha"
   wt="$TMP_ROOT/local-ready-worktree"
   meta="$sub/state/feature-a.meta"
-  mkdir -p "$main/projects" "$main/data" "$main/state" "$sub/projects" "$sub/state"
+  git_bin="$TMP_ROOT/local-ready-git-bin"
+  mkdir -p "$main/projects" "$main/data" "$main/state" "$sub/projects" "$sub/state" "$other_sub" "$git_bin"
   touch "$main/state/.last-watcher-beat"
   fm_git_init_commit "$source"
   git -C "$source" branch -m main
   printf '%s\n' '- alpha [local-only] - alpha project (added 2026-07-29)' > "$main/data/projects.md"
   git clone --quiet --no-hardlinks "$source" "$sub/projects/alpha"
-  printf '%s\n' design > "$sub/.fm-secondmate-home"
-  printf -- '- design - local work (home: %s; scope: local work; projects: alpha; added 2026-07-29)\n' \
-    "$(cd "$sub" && pwd -P)" > "$main/data/secondmates.md"
+  printf '%s\n' 'a.b' > "$sub/.fm-secondmate-home"
+  printf '%s\n' axb > "$other_sub/.fm-secondmate-home"
+  {
+    printf -- '- a.b - local work (home: %s; scope: local work; projects: alpha; added 2026-07-29)\n' \
+      "$(cd "$sub" && pwd -P)"
+    printf -- '- axb - other work (home: %s; scope: other work; projects: alpha; added 2026-07-29)\n' \
+      "$(cd "$other_sub" && pwd -P)"
+  } > "$main/data/secondmates.md"
 
   git -C "$sub/projects/alpha" worktree add --quiet -b fm/feature-a "$wt" main
   printf '%s\n' 'ready change' > "$wt/feature.txt"
@@ -781,13 +788,41 @@ test_secondmate_ready_route_and_main_exact_landing_wait_on_dirty_checkout() {
     'mode=local-only' \
     'yolo=off'
 
+  real_git=$(command -v git)
+  cat > "$git_bin/git" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = -C ] && [ "${2:-}" = "${FM_TEST_FAIL_STATUS_WORKTREE:-}" ] \
+  && [ "${3:-}" = status ]; then
+  exit 42
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+EOF
+  chmod +x "$git_bin/git"
+
   # shellcheck source=bin/fm-pending-reply-lib.sh disable=SC1091
   . "$ROOT/bin/fm-pending-reply-lib.sh"
-  corr=$(fm_pending_reply_create "$main" "$main/state" design 'implement feature-a')
+  corr=$(fm_pending_reply_create "$main" "$main/state" 'a.b' 'implement feature-a')
   fm_pending_reply_mark_delivered "$main/state" "$corr" \
     || fail "could not mark the routed request delivered"
+  meta_before=$(cat "$meta")
+  rc=0
+  out=$(PATH="$git_bin:$PATH" FM_TEST_REAL_GIT="$real_git" FM_TEST_FAIL_STATUS_WORKTREE="$wt" \
+    "$ROOT/bin/fm-secondmate-report.sh" --local-ready \
+    "$main/state/a.b.status" "$corr" "$meta" 'dotnet test tests/: passed' 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "local-ready reporting accepted a failed worktree status inspection"
+  assert_contains "$out" 'cannot inspect local-ready worktree status' \
+    "local-ready status inspection failure did not stop safely"
+  [ "$(cat "$meta")" = "$meta_before" ] \
+    || fail "failed local-ready status inspection changed task metadata"
+  assert_no_grep '^ready_commit=' "$meta" \
+    "failed local-ready status inspection recorded a ready commit"
+  if [ -f "$main/state/a.b.status" ]; then
+    assert_no_grep 'local-only ready task=' "$main/state/a.b.status" \
+      "failed local-ready status inspection routed a ready result"
+  fi
+
   "$ROOT/bin/fm-secondmate-report.sh" --local-ready \
-    "$main/state/design.status" "$corr" "$meta" 'dotnet test tests/: passed' \
+    "$main/state/a.b.status" "$corr" "$meta" 'dotnet test tests/: passed' \
     || fail "local-ready result did not route through the existing report helper"
   fm_pending_reply_try_resolve "$main/state" "$corr" \
     || fail "correlated local-ready result did not resolve the parent pending reply"
@@ -800,8 +835,19 @@ test_secondmate_ready_route_and_main_exact_landing_wait_on_dirty_checkout() {
   assert_grep 'ready_branch=fm/feature-a' "$meta" "local-ready metadata did not record the branch"
   assert_grep 'validation_evidence=dotnet test tests/: passed' "$meta" \
     "local-ready metadata did not record validation evidence"
-  assert_grep "local-only ready task=feature-a commit=$ready" "$main/state/design.status" \
+  assert_grep "local-only ready task=feature-a commit=$ready" "$main/state/a.b.status" \
     "local-ready result was not routed to the main status channel"
+
+  head_before=$(git -C "$source" rev-parse HEAD)
+  rc=0
+  out=$(PATH="$git_bin:$PATH" FM_TEST_REAL_GIT="$real_git" FM_TEST_FAIL_STATUS_WORKTREE="$wt" \
+    FM_HOME="$main" FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-merge-local.sh" feature-a --secondmate 'a.b' 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "cross-home local landing accepted a failed ready-worktree status inspection"
+  assert_contains "$out" 'cannot inspect ready worktree status' \
+    "ready-worktree status inspection failure did not stop landing safely"
+  [ "$(git -C "$source" rev-parse HEAD)" = "$head_before" ] \
+    || fail "failed ready-worktree status inspection changed authoritative HEAD"
 
   printf '%s\n' 'intentional untracked state' > "$source/keep-untracked.bin"
   status_before=$(git -C "$source" status --porcelain=v1 -uall)
@@ -810,7 +856,7 @@ test_secondmate_ready_route_and_main_exact_landing_wait_on_dirty_checkout() {
   stash_before=$(git -C "$source" stash list)
   rc=0
   out=$(FM_HOME="$main" FM_GUARD_GRACE=999999 \
-    "$ROOT/bin/fm-merge-local.sh" feature-a --secondmate design 2>&1) || rc=$?
+    "$ROOT/bin/fm-merge-local.sh" feature-a --secondmate 'a.b' 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "cross-home local landing ignored the authoritative dirty checkout"
   assert_contains "$out" 'ready, waiting:' \
     "dirty authoritative checkout did not surface the ready-waiting outcome"
@@ -825,7 +871,7 @@ test_secondmate_ready_route_and_main_exact_landing_wait_on_dirty_checkout() {
 
   rm "$source/keep-untracked.bin"
   out=$(FM_HOME="$main" FM_GUARD_GRACE=999999 \
-    "$ROOT/bin/fm-merge-local.sh" feature-a --secondmate design 2>&1) \
+    "$ROOT/bin/fm-merge-local.sh" feature-a --secondmate 'a.b' 2>&1) \
     || fail "main firstmate could not land the secondmate's exact ready commit"
   assert_contains "$out" "merged exact ready commit $ready" \
     "cross-home landing did not report the exact commit"
