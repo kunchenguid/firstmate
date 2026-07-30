@@ -402,6 +402,116 @@ test_status_verb_not_captain_relevant() {
   pass "self-heal: status report verb is non-captain-relevant and carries no corr token"
 }
 
+test_loop_damper_bounds_respawns() {
+  local w fb tmuxfb log out respawns
+  w=$(new_primary loop-damper)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  # A secondmate that is dead every pass (zsh in the pane) would respawn
+  # forever without the damper. Bound respawns at 3, run 8 passes.
+  out=$(PATH="$tmuxfb:$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$w/sm1" \
+    FM_PRIMARY_ROOT="$w/home" FM_TEST_PANE_CMD=zsh FM_TMUX_CALL_LOG="$log" \
+    FM_SELF_HEAL_MAX_RESPAWNS=3 FM_SELF_HEAL_MAX_PASSES=8 FM_SELF_HEAL_INTERVAL=1 \
+    "$ROOT/bin/fm-self-heal.sh" --loop 2>&1)
+
+  respawns=$(grep -c 'new-window' "$log")
+  [ "$respawns" -eq 3 ] || fail "damper should cap respawns at 3, got $respawns: $(cat "$log")"
+  assert_contains "$out" "crash-loop damper engaged after 3 consecutive respawns" \
+    "the damper should announce suppression once the bound is reached"
+  pass "self-heal: --loop caps consecutive respawns at the damper bound"
+}
+
+test_loop_damper_status_file_does_not_grow() {
+  local w fb tmuxfb log lines
+  w=$(new_primary loop-damper-status)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  PATH="$tmuxfb:$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$w/sm1" \
+    FM_PRIMARY_ROOT="$w/home" FM_TEST_PANE_CMD=zsh FM_TMUX_CALL_LOG="$log" \
+    FM_SELF_HEAL_MAX_RESPAWNS=3 FM_SELF_HEAL_MAX_PASSES=8 FM_SELF_HEAL_INTERVAL=1 \
+    "$ROOT/bin/fm-self-heal.sh" --loop >/dev/null 2>&1
+
+  lines=$(grep -c 'self-healed:' "$w/home/state/sm1.status")
+  [ "$lines" -eq 1 ] || fail "an ongoing crash loop should record one status line, got $lines: $(cat "$w/home/state/sm1.status")"
+  assert_not_contains "$(cat "$w/home/state/sm1.status")" "corr=" \
+    "the status report must NOT carry a corr= token even under the damper"
+  pass "self-heal: an ongoing crash loop does not accumulate one status line per pass"
+}
+
+test_loop_damper_resets_on_recovery() {
+  local w fb tmuxfb log out respawns
+  w=$(new_primary loop-damper-reset)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  # A per-pass scripted pane command (FM_TEST_MODE_SEQ, one token per pass)
+  # drives the liveness reading deterministically. The pane_current_command
+  # read happens exactly once per pass (only the liveness probe issues it - the
+  # spawn path reads pane_current_path/pane_id and list-windows instead), so a
+  # counter advanced on that read tracks passes precisely. An alive-reading pass
+  # mid-loop must reset the consecutive-respawn counter so later deaths
+  # re-authorize respawns up to the full bound again.
+  cat > "$tmuxfb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+ctr_file="${FM_TMUX_CALL_LOG:?}.pass"
+read_pass() { cat "$ctr_file" 2>/dev/null || printf '0'; }
+seq_mode() {
+  local idx=$1 i=0 tok
+  for tok in ${FM_TEST_MODE_SEQ:-}; do
+    [ "$i" -eq "$idx" ] && { printf '%s' "$tok"; return 0; }
+    i=$((i + 1))
+  done
+  printf '%s' zsh   # past the end: stay dead
+}
+case "${1:-}" in
+  display-message)
+    for a in "$@"; do
+      case "$a" in
+        *pane_current_command*)
+          idx=$(read_pass)
+          printf '%s\n' $(( idx + 1 )) > "$ctr_file"
+          printf '%s\n' "$(seq_mode "$idx")"; exit 0 ;;
+      esac
+    done
+    exit 0
+    ;;
+  list-windows)
+    [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf '%s\n' fm-sm1; exit 0
+    ;;
+  new-window|kill-window)
+    printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
+    [ "${1:-}" = kill-window ] && : > "${FM_TMUX_CALL_LOG}.killed"
+    [ "${1:-}" = new-window ] && rm -f "${FM_TMUX_CALL_LOG}.killed"
+    exit 0
+    ;;
+  has-session) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$tmuxfb/tmux"
+  rm -f "$log.pass" "$log.killed"
+
+  # 8 passes: dead dead dead (3 respawns, damper engaged at bound 3),
+  # alive (reset), dead dead dead (3 more respawns re-authorized). Total 6.
+  out=$(PATH="$tmuxfb:$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$w/sm1" \
+    FM_PRIMARY_ROOT="$w/home" FM_TMUX_CALL_LOG="$log" \
+    FM_TEST_MODE_SEQ="zsh zsh zsh claude zsh zsh zsh zsh" \
+    FM_SELF_HEAL_MAX_RESPAWNS=3 FM_SELF_HEAL_MAX_PASSES=8 FM_SELF_HEAL_INTERVAL=1 \
+    "$ROOT/bin/fm-self-heal.sh" --loop 2>&1)
+
+  respawns=$(grep -c 'new-window' "$log")
+  [ "$respawns" -eq 6 ] || fail "an alive reading should reset the damper so later deaths re-authorize the full bound (expected 6 respawns), got $respawns: $(cat "$log")"
+  assert_contains "$out" "self-heal: secondmate sm1: alive" \
+    "the recovery pass should read alive"
+  pass "self-heal: a recovered secondmate resets the crash-loop damper"
+}
+
 test_heals_no_meta_secondmate() {
   local w fb tmuxfb log out
   w=$(new_primary heal-no-meta)
@@ -438,6 +548,9 @@ test_all_mode_checks_every_secondmate
 test_all_mode_no_secondmates_is_noop
 test_not_a_secondmate_home_errors
 test_status_verb_not_captain_relevant
+test_loop_damper_bounds_respawns
+test_loop_damper_status_file_does_not_grow
+test_loop_damper_resets_on_recovery
 test_heals_no_meta_secondmate
 
 echo "# all fm-self-heal tests passed"

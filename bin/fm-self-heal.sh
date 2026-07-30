@@ -33,7 +33,8 @@
 #                          git worktree linkage to the primary)
 #   FM_SELF_HEAL_INTERVAL   loop interval in seconds (default 60)
 #
-# Printed reason lines (stdout for one-shot, stderr for loop):
+# Printed reason lines (successful alive/respawn lines go to stdout; skips,
+# errors, and respawn failures go to stderr; routing is identical in loop mode):
 #   self-heal: secondmate <id>: alive (backend=<backend>)
 #   self-heal: secondmate <id>: respawned after <cause> (backend=<backend>)
 #   self-heal: secondmate <id>: skipped: <reason> (backend=<backend>)
@@ -55,6 +56,19 @@ LOOP=0
 DRY_RUN=0
 ALL=0
 INTERVAL="${FM_SELF_HEAL_INTERVAL:-60}"
+
+# Crash-loop damper. In --loop mode a secondmate that dies immediately after
+# every launch would otherwise be respawned forever, and each respawn would
+# append an identical line to the primary's status file. RESPAWN_COUNT tracks
+# consecutive respawns per id; once it reaches FM_SELF_HEAL_MAX_RESPAWNS the
+# script stops respawning that id until a check reads alive (which resets it).
+# LAST_STATUS_KEY de-duplicates status writes so an ongoing failure records at
+# most one line. One-shot invocations start with empty maps, so a single
+# respawn always proceeds and one status line is written - behavior unchanged.
+FM_SELF_HEAL_MAX_RESPAWNS="${FM_SELF_HEAL_MAX_RESPAWNS:-5}"
+declare -A RESPAWN_COUNT=()
+declare -A DAMPED_ANNOUNCED=()
+declare -A LAST_STATUS_KEY=()
 
 usage() {
   sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
@@ -81,6 +95,11 @@ case "$INTERVAL" in
   ''|*[!0-9]*) echo "error: --interval must be a positive integer" >&2; exit 2 ;;
 esac
 [ "$INTERVAL" -gt 0 ] || { echo "error: --interval must be a positive integer" >&2; exit 2; }
+
+case "$FM_SELF_HEAL_MAX_RESPAWNS" in
+  ''|*[!0-9]*) echo "error: FM_SELF_HEAL_MAX_RESPAWNS must be a positive integer" >&2; exit 2 ;;
+esac
+[ "$FM_SELF_HEAL_MAX_RESPAWNS" -gt 0 ] || { echo "error: FM_SELF_HEAL_MAX_RESPAWNS must be a positive integer" >&2; exit 2; }
 
 # resolve_primary_root: find the primary firstmate checkout from this home's
 # git worktree linkage. A secondmate home is a git worktree of the same repo,
@@ -115,10 +134,64 @@ secondmate_id_from_marker() {
 # interfering with pending-reply detection. It never carries a corr= token.
 report_status() {  # <primary-state-dir> <id> <message>
   local state_dir=$1 id=$2 msg=$3 status_file
+  # De-duplicate: an ongoing crash loop respawns with an identical message every
+  # iteration; record it once rather than growing the status file without bound.
+  # The key resets when the id next reads alive (damper_reset), so a genuine
+  # later re-heal after recovery is recorded again.
+  [ "${LAST_STATUS_KEY[$id]:-}" = "$msg" ] && return 0
   status_file="$state_dir/$id.status"
   mkdir -p "$state_dir" 2>/dev/null || true
   [ -d "$state_dir" ] || return 0
   printf 'self-healed: %s (fm-self-heal watchdog, no corr)\n' "$msg" >> "$status_file" 2>/dev/null || true
+  LAST_STATUS_KEY[$id]=$msg
+}
+
+# --- crash-loop damper (loop mode) ------------------------------------------
+# Consecutive respawns per id are bounded so a secondmate that dies immediately
+# after every launch is not relaunched forever. The counter is process-local, so
+# one-shot invocations (which start with an empty map) always allow one respawn.
+
+# damper_allow_respawn: 0 if a respawn for <id> is still within the consecutive
+# bound, 1 if the bound is reached (respawn suppressed). Announces the
+# suppression once per id on stderr with a non-captain-relevant "skipped" verb.
+damper_allow_respawn() {  # <id>
+  local id=$1 count
+  count=${RESPAWN_COUNT[$id]:-0}
+  if [ "$count" -ge "$FM_SELF_HEAL_MAX_RESPAWNS" ]; then
+    if [ -z "${DAMPED_ANNOUNCED[$id]:-}" ]; then
+      echo "self-heal: secondmate $id: skipped: crash-loop damper engaged after $count consecutive respawns" >&2
+      DAMPED_ANNOUNCED[$id]=1
+    fi
+    return 1
+  fi
+  return 0
+}
+
+# damper_note_respawn: record one successful respawn attempt for <id>.
+damper_note_respawn() {  # <id>
+  RESPAWN_COUNT[$id]=$(( ${RESPAWN_COUNT[$id]:-0} + 1 ))
+}
+
+# damper_reset: clear all crash-loop state for <id> once it reads alive.
+damper_reset() {  # <id>
+  unset 'RESPAWN_COUNT[$id]' 'DAMPED_ANNOUNCED[$id]' 'LAST_STATUS_KEY[$id]'
+}
+
+# do_respawn: the single gated respawn path shared by every recovery branch.
+# Applies the crash-loop damper, performs the spawn, reports status on success,
+# and prints the standard success/failure lines. Returns 0 on success or a
+# damper-suppressed skip, 1 on spawn failure.
+do_respawn() {  # <id> <primary_root> <primary_state> <success_suffix> <status_msg> <fail_cause>
+  local id=$1 primary_root=$2 primary_state=$3 success_suffix=$4 status_msg=$5 fail_cause=$6 out
+  damper_allow_respawn "$id" || return 0
+  if out=$(fm_spawn_secondmate "$primary_root" "$id" 2>&1); then
+    damper_note_respawn "$id"
+    echo "self-heal: secondmate $id: $success_suffix"
+    report_status "$primary_state" "$id" "$status_msg"
+    return 0
+  fi
+  echo "self-heal: secondmate $id: respawn failed after $fail_cause: $(first_line "$out")" >&2
+  return 1
 }
 
 # fm_spawn_secondmate: invoke the primary's fm-spawn.sh to relaunch a secondmate.
@@ -146,7 +219,7 @@ fm_spawn_secondmate() {  # <primary_root> <id>
 # Returns: 0 on success or no-op, 1 on heal failure.
 check_and_heal_one() {  # <id> <primary_root>
   local id=$1 primary_root=$2
-  local primary_state meta backend target harness agent_state cause out
+  local primary_state meta backend target harness agent_state cause
   primary_state="$primary_root/state"
   meta="$primary_state/$id.meta"
 
@@ -160,14 +233,11 @@ check_and_heal_one() {  # <id> <primary_root>
       echo "self-heal: secondmate $id: dry-run: would respawn (no meta)" >&2
       return 0
     fi
-    if out=$(fm_spawn_secondmate "$primary_root" "$id" 2>&1); then
-      echo "self-heal: secondmate $id: respawned after no meta found (fm-self-heal watchdog)"
-      report_status "$primary_state" "$id" "secondmate $id respawned after no meta found"
-      return 0
-    else
-      echo "self-heal: secondmate $id: respawn failed after no meta found: $(first_line "$out")" >&2
-      return 1
-    fi
+    do_respawn "$id" "$primary_root" "$primary_state" \
+      "respawned after no meta found (fm-self-heal watchdog)" \
+      "secondmate $id respawned after no meta found" \
+      "no meta found"
+    return $?
   fi
 
   backend=$(fm_backend_of_meta "$meta")
@@ -182,14 +252,11 @@ check_and_heal_one() {  # <id> <primary_root>
       echo "self-heal: secondmate $id: dry-run: would respawn (no endpoint)" >&2
       return 0
     fi
-    if out=$(fm_spawn_secondmate "$primary_root" "$id" 2>&1); then
-      echo "self-heal: secondmate $id: respawned after no endpoint in meta (fm-self-heal watchdog)"
-      report_status "$primary_state" "$id" "secondmate $id respawned after no endpoint in meta"
-      return 0
-    else
-      echo "self-heal: secondmate $id: respawn failed after no endpoint in meta: $(first_line "$out")" >&2
-      return 1
-    fi
+    do_respawn "$id" "$primary_root" "$primary_state" \
+      "respawned after no endpoint in meta (fm-self-heal watchdog)" \
+      "secondmate $id respawned after no endpoint in meta" \
+      "no endpoint in meta"
+    return $?
   fi
 
   agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
@@ -206,6 +273,7 @@ check_and_heal_one() {  # <id> <primary_root>
 
   case "$agent_state" in
     alive)
+      damper_reset "$id"
       echo "self-heal: secondmate $id: alive (backend=$backend)"
       return 0
       ;;
@@ -215,15 +283,13 @@ check_and_heal_one() {  # <id> <primary_root>
         echo "self-heal: secondmate $id: dry-run: would kill and respawn after $cause (backend=$backend)" >&2
         return 0
       fi
+      damper_allow_respawn "$id" || return 0
       fm_backend_kill "$backend" "$target" 2>/dev/null || true
-      if out=$(fm_spawn_secondmate "$primary_root" "$id" 2>&1); then
-        echo "self-heal: secondmate $id: respawned after $cause (backend=$backend)"
-        report_status "$primary_state" "$id" "secondmate $id respawned after $cause (backend=$backend)"
-        return 0
-      else
-        echo "self-heal: secondmate $id: respawn failed after $cause: $(first_line "$out")" >&2
-        return 1
-      fi
+      do_respawn "$id" "$primary_root" "$primary_state" \
+        "respawned after $cause (backend=$backend)" \
+        "secondmate $id respawned after $cause (backend=$backend)" \
+        "$cause"
+      return $?
       ;;
     missing)
       cause="recorded endpoint confidently missing"
@@ -231,14 +297,11 @@ check_and_heal_one() {  # <id> <primary_root>
         echo "self-heal: secondmate $id: dry-run: would respawn after $cause (backend=$backend)" >&2
         return 0
       fi
-      if out=$(fm_spawn_secondmate "$primary_root" "$id" 2>&1); then
-        echo "self-heal: secondmate $id: respawned after $cause (backend=$backend)"
-        report_status "$primary_state" "$id" "secondmate $id respawned after $cause (backend=$backend)"
-        return 0
-      else
-        echo "self-heal: secondmate $id: respawn failed after $cause: $(first_line "$out")" >&2
-        return 1
-      fi
+      do_respawn "$id" "$primary_root" "$primary_state" \
+        "respawned after $cause (backend=$backend)" \
+        "secondmate $id respawned after $cause (backend=$backend)" \
+        "$cause"
+      return $?
       ;;
     ambiguous)
       echo "self-heal: secondmate $id: skipped: existing endpoint has ambiguous agent process (backend=$backend)" >&2
@@ -305,8 +368,17 @@ run_once() {
 }
 
 if [ "$LOOP" = 1 ]; then
+  # FM_SELF_HEAL_MAX_PASSES bounds the loop to N passes (0 = unlimited, the
+  # production default). It exists so the crash-loop damper, whose state spans
+  # iterations within one process, can be exercised deterministically; the
+  # final pass skips the trailing sleep so a bounded run returns promptly.
+  max_passes="${FM_SELF_HEAL_MAX_PASSES:-0}"
+  case "$max_passes" in ''|*[!0-9]*) max_passes=0 ;; esac
+  pass=0
   while true; do
     run_once || true
+    pass=$((pass + 1))
+    [ "$max_passes" -gt 0 ] && [ "$pass" -ge "$max_passes" ] && break
     sleep "$INTERVAL"
   done
 else
