@@ -10,18 +10,19 @@
 # branch ref. It never changes ordinary fm-fleet-sync.sh behavior.
 #
 # Source acquisition uses an empty --refmap together with a source-only refspec,
-# --no-write-fetch-head, --no-tags, and --no-recurse-submodules. This suppresses
-# configured destination refspecs, remote-tracking updates, FETCH_HEAD writes,
-# tag following, and submodule recursion. A fixed three-attempt loop tolerates a
-# source tip advancing between fetch and source-backed observation.
+# --no-write-fetch-head, --no-tags, --no-prune, --no-prune-tags, and
+# --no-recurse-submodules. This suppresses configured destination refspecs,
+# remote-tracking updates, FETCH_HEAD writes, tag following, pruning, and
+# submodule recursion. A fixed three-attempt loop tolerates a source tip
+# advancing between fetch and source-backed observation.
 #
 # Preservation refs have this form:
 #   refs/firstmate/identical-squash/<hex-encoded-default-branch>/<full-old-oid>
 # The branch encoding and complete old object identity make the name
 # deterministic. Existing exact direct refs are reused; conflicting or symbolic
 # refs are refused. Ref creation/verification and branch movement share one
-# `git update-ref --stdin` transaction with `option no-deref` and expected-old
-# verification.
+# `git update-ref --stdin` transaction with per-command `option no-deref` and
+# expected-old verification.
 #
 # A successful second invocation is recognized only when the local branch still
 # equals the source-backed remote tip and a valid preservation ref proves a prior
@@ -53,6 +54,32 @@ refuse() {
   exit 1
 }
 
+reject_ambient_git_overrides() {
+  local name
+  for name in \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    GIT_CONFIG \
+    GIT_CONFIG_PARAMETERS \
+    GIT_CONFIG_COUNT \
+    GIT_DIR \
+    GIT_WORK_TREE \
+    GIT_IMPLICIT_WORK_TREE \
+    GIT_COMMON_DIR \
+    GIT_INDEX_FILE \
+    GIT_OBJECT_DIRECTORY \
+    GIT_GRAFT_FILE \
+    GIT_SHALLOW_FILE \
+    GIT_NO_REPLACE_OBJECTS \
+    GIT_REPLACE_REF_BASE \
+    GIT_NAMESPACE \
+    GIT_QUARANTINE_PATH
+  do
+    if declare -p "$name" >/dev/null 2>&1; then
+      refuse "ambient Git environment override $name must be unset"
+    fi
+  done
+}
+
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   usage
   exit 0
@@ -60,6 +87,7 @@ fi
 [ "$#" -eq 1 ] || { usage; exit 2; }
 REPO_ARG=$1
 [ -d "$REPO_ARG" ] || refuse "repository directory does not exist"
+reject_ambient_git_overrides
 
 if ! inside=$(git -C "$REPO_ARG" rev-parse --is-inside-work-tree 2>/dev/null); then
   refuse "target is not an existing Git worktree"
@@ -89,6 +117,43 @@ trap 'exit 143' TERM
 
 repo_git() {
   git -C "$REPO" "$@"
+}
+
+history_state_valid() {
+  local shallow grafts replacements
+  HISTORY_ERROR=
+  if ! shallow=$(repo_git rev-parse --is-shallow-repository 2>/dev/null); then
+    HISTORY_ERROR="cannot determine whether repository history is shallow"
+    return 1
+  fi
+  case "$shallow" in
+    false) ;;
+    true)
+      HISTORY_ERROR="repository history is shallow"
+      return 1
+      ;;
+    *)
+      HISTORY_ERROR="repository shallow-history state is ambiguous"
+      return 1
+      ;;
+  esac
+  if ! grafts=$(repo_git rev-parse --path-format=absolute --git-path info/grafts 2>/dev/null); then
+    HISTORY_ERROR="cannot resolve the legacy graft path"
+    return 1
+  fi
+  if [ -e "$grafts" ] || [ -L "$grafts" ]; then
+    HISTORY_ERROR="legacy graft history is present"
+    return 1
+  fi
+  if ! replacements=$(repo_git for-each-ref --format='%(refname)' refs/replace 2>/dev/null); then
+    HISTORY_ERROR="cannot inspect replacement object refs"
+    return 1
+  fi
+  if [ -n "$replacements" ]; then
+    HISTORY_ERROR="replacement object history is present"
+    return 1
+  fi
+  return 0
 }
 
 require_clean() {
@@ -306,6 +371,7 @@ post_commit_fail() {
   exit 1
 }
 
+history_state_valid || refuse "$HISTORY_ERROR"
 if ! HEAD_REF=$(repo_git symbolic-ref --no-recurse -q HEAD 2>/dev/null); then
   refuse "HEAD is detached"
 fi
@@ -375,8 +441,9 @@ attempt=1
 REMOTE_OID=
 REMOTE_TREE=
 while [ "$attempt" -le "$MAX_SOURCE_ATTEMPTS" ]; do
-  if ! repo_git fetch --quiet --no-write-fetch-head --no-tags \
-      --no-recurse-submodules --refmap= "$AUTHORITATIVE_REMOTE" "$REMOTE_REF" \
+  if ! repo_git fetch --quiet --no-write-fetch-head --no-tags --no-prune \
+      --no-prune-tags --no-recurse-submodules --refmap= \
+      "$AUTHORITATIVE_REMOTE" "$REMOTE_REF" \
       >"$TMP_ROOT/fetch.out" 2>"$TMP_ROOT/fetch.err"; then
     refuse "source-only fetch from origin failed; inspect remote access without exposing credentials"
   fi
@@ -385,6 +452,7 @@ while [ "$attempt" -le "$MAX_SOURCE_ATTEMPTS" ]; do
   cmp -s "$TMP_ROOT/refs.initial" "$TMP_ROOT/refs.after-fetch" \
     || refuse "source acquisition changed a repository ref"
   fetch_head_unchanged || refuse "source acquisition changed FETCH_HEAD"
+  history_state_valid || refuse "$HISTORY_ERROR"
 
   observe_remote_default \
     || refuse "cannot observe origin's default branch after source-only fetch"
@@ -442,6 +510,7 @@ done
 [ -n "$REMOTE_OID" ] || refuse "could not obtain a stable source-backed origin tip"
 
 if [ "$LOCAL_OID" = "$REMOTE_OID" ]; then
+  history_state_valid || refuse "$HISTORY_ERROR"
   anchor_namespace_valid || refuse "$ANCHOR_ERROR"
   find_idempotent_anchor "$LOCAL_OID" "$REMOTE_TREE" \
     || refuse "local default branch already equals origin without valid prior reconciliation evidence"
@@ -474,6 +543,7 @@ require_clean || refuse "worktree or index changed before the atomic ref transac
 COUNT=$(worktree_count) || refuse "cannot re-enumerate repository worktrees"
 [ "$COUNT" -eq 1 ] || refuse "repository worktree count changed before the atomic ref transaction"
 active_operation_present && refuse "an active Git operation appeared before the atomic ref transaction"
+history_state_valid || refuse "$HISTORY_ERROR"
 anchor_namespace_valid || refuse "$ANCHOR_ERROR"
 if [ "$PRESERVE_MODE" = create ]; then
   repo_git show-ref --verify --quiet "$PRESERVE_REF" \
@@ -499,13 +569,15 @@ observe_remote_default \
   || refuse "origin changed at the atomic transaction boundary; rerun after quiescing writers"
 
 {
-  printf 'option no-deref\n'
   printf 'start\n'
   if [ "$PRESERVE_MODE" = create ]; then
+    printf 'option no-deref\n'
     printf 'create %s %s\n' "$PRESERVE_REF" "$LOCAL_OID"
   else
+    printf 'option no-deref\n'
     printf 'verify %s %s\n' "$PRESERVE_REF" "$LOCAL_OID"
   fi
+  printf 'option no-deref\n'
   printf 'update %s %s %s\n' "$HEAD_REF" "$REMOTE_OID" "$LOCAL_OID"
   printf 'prepare\n'
   printf 'commit\n'
@@ -543,6 +615,7 @@ CURRENT_PRESERVE=$(repo_git rev-parse --verify "$PRESERVE_REF" 2>/dev/null) \
   || post_commit_fail "preservation ref became unreadable after the transaction"
 [ "$CURRENT_PRESERVE" = "$LOCAL_OID" ] \
   || post_commit_fail "preservation ref no longer names the old local head"
+history_state_valid || post_commit_fail "$HISTORY_ERROR"
 CURRENT_TREE=$(repo_git rev-parse --verify "$REMOTE_OID^{tree}" 2>/dev/null) \
   || post_commit_fail "committed remote root tree became unreadable"
 [ "$CURRENT_TREE" = "$REMOTE_TREE" ] \

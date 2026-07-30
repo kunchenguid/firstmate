@@ -219,6 +219,79 @@ test_submodules_are_not_fetched() {
   pass "configured recursive submodule fetching is suppressed"
 }
 
+test_configured_pruning_is_suppressed() {
+  local local_tag_oid
+  new_divergent_fixture configured-pruning
+  git -C "$REPO" tag local-must-not-prune "$LOCAL_OLD"
+  local_tag_oid=$(git -C "$REPO" rev-parse refs/tags/local-must-not-prune)
+  git --git-dir="$REMOTE" tag remote-must-not-fetch "$REMOTE_NEW"
+  git -C "$REPO" config fetch.prune true
+  git -C "$REPO" config fetch.pruneTags true
+  git -C "$REPO" config remote.origin.prune true
+  git -C "$REPO" config remote.origin.pruneTags true
+
+  run_helper_plain "$REPO"
+
+  expect_code 0 "$RUN_RC" "configured pruning"
+  assert_direct_ref "$REPO" refs/heads/main "$REMOTE_NEW" "configured pruning branch"
+  [ "$(git -C "$REPO" rev-parse refs/tags/local-must-not-prune)" = "$local_tag_oid" ] \
+    || fail "configured pruning changed or deleted a local tag"
+  ! git -C "$REPO" show-ref --verify --quiet refs/tags/remote-must-not-fetch \
+    || fail "configured pruning fetched a remote tag"
+  pass "configured branch and tag pruning are suppressed"
+}
+
+test_ambient_git_overrides_refuse() {
+  local name
+  new_divergent_fixture ambient-git-overrides
+  for name in \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    GIT_CONFIG \
+    GIT_CONFIG_PARAMETERS \
+    GIT_CONFIG_COUNT \
+    GIT_DIR \
+    GIT_WORK_TREE \
+    GIT_IMPLICIT_WORK_TREE \
+    GIT_COMMON_DIR \
+    GIT_INDEX_FILE \
+    GIT_OBJECT_DIRECTORY \
+    GIT_GRAFT_FILE \
+    GIT_SHALLOW_FILE \
+    GIT_NO_REPLACE_OBJECTS \
+    GIT_REPLACE_REF_BASE \
+    GIT_NAMESPACE \
+    GIT_QUARANTINE_PATH
+  do
+    run_helper "$REPO" env "$name=$CASE_ROOT/ambient-override"
+    assert_refused_without_move "$REPO" "$LOCAL_OLD" "ambient $name"
+    assert_grep "ambient Git environment override $name must be unset" "$RUN_ERR" \
+      "ambient $name refusal did not precede repository resolution"
+  done
+  pass "ambient repository, object, index, and graph overrides refuse before resolution"
+}
+
+test_virtual_or_incomplete_history_refuses() {
+  new_divergent_fixture shallow-history
+  printf '%s\n' "$BASE_OID" > "$REPO/.git/shallow"
+  run_helper_plain "$REPO"
+  assert_refused_without_move "$REPO" "$LOCAL_OLD" shallow-history
+  assert_grep "repository history is shallow" "$RUN_ERR" "shallow-history refusal was not actionable"
+
+  new_divergent_fixture graft-history
+  printf '%s %s\n' "$LOCAL_OLD" "$BASE_OID" > "$REPO/.git/info/grafts"
+  run_helper_plain "$REPO"
+  assert_refused_without_move "$REPO" "$LOCAL_OLD" graft-history
+  assert_grep "legacy graft history is present" "$RUN_ERR" "graft-history refusal was not actionable"
+
+  new_divergent_fixture replacement-history
+  git -C "$REPO" replace "$LOCAL_OLD" "$BASE_OID"
+  run_helper_plain "$REPO"
+  assert_refused_without_move "$REPO" "$LOCAL_OLD" replacement-history
+  assert_grep "replacement object history is present" "$RUN_ERR" \
+    "replacement-history refusal was not actionable"
+  pass "shallow, grafted, and replacement-overlaid histories refuse"
+}
+
 test_dirty_refuses() {
   new_divergent_fixture dirty
   printf 'staged dirty\n' >> "$REPO/tracked.txt"
@@ -512,6 +585,36 @@ SH
   pass "expected-old race commits neither branch movement nor preservation ref"
 }
 
+test_symbolic_branch_race_is_atomic() {
+  local fakebin real_git claimant_ref
+  new_divergent_fixture symbolic-branch-race
+  fakebin="$CASE_ROOT/fakebin"
+  mkdir -p "$fakebin"
+  real_git=$(command -v git)
+  claimant_ref=refs/heads/direct-claimant
+  git -C "$REPO" update-ref "$claimant_ref" "$LOCAL_OLD"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+is_update=0
+for arg in "$@"; do [ "$arg" = update-ref ] && is_update=1; done
+if [ "$is_update" -eq 1 ] && [ "${RACE_INNER:-0}" != 1 ]; then
+  RACE_INNER=1 "${REAL_GIT_FOR_TEST:?}" -C "${RACE_REPO:?}" \
+    symbolic-ref refs/heads/main "${RACE_CLAIMANT_REF:?}" || exit $?
+fi
+exec "${REAL_GIT_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$fakebin/git"
+
+  run_helper "$REPO" env PATH="$fakebin:$PATH" REAL_GIT_FOR_TEST="$real_git" \
+    RACE_REPO="$REPO" RACE_CLAIMANT_REF="$claimant_ref"
+
+  expect_code 0 "$RUN_RC" "symbolic branch race"
+  assert_direct_ref "$REPO" refs/heads/main "$REMOTE_NEW" "symbolic branch race branch"
+  assert_direct_ref "$REPO" "$claimant_ref" "$LOCAL_OLD" "symbolic branch race claimant"
+  assert_direct_ref "$REPO" "$PRESERVE_REF" "$LOCAL_OLD" "symbolic branch race preservation"
+  pass "symbolic branch race cannot write through to its claimant"
+}
+
 test_post_commit_claimant_is_never_rolled_back() {
   local fakebin real_git claimant
   new_divergent_fixture post-commit-claimant
@@ -563,6 +666,9 @@ test_non_repository_refuses() {
 
 test_divergent_identical_succeeds_and_repeats
 test_submodules_are_not_fetched
+test_configured_pruning_is_suppressed
+test_ambient_git_overrides_refuse
+test_virtual_or_incomplete_history_refuses
 test_dirty_refuses
 test_detached_refuses
 test_off_default_refuses
@@ -582,5 +688,6 @@ test_missing_remote_ref_refuses
 test_fetch_failure_refuses
 test_source_advancement_is_bounded
 test_expected_old_race_is_atomic
+test_symbolic_branch_race_is_atomic
 test_post_commit_claimant_is_never_rolled_back
 test_non_repository_refuses
