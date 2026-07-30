@@ -619,14 +619,14 @@ test_commit_discipline_in_ship_and_scout() {
     assert_present "$brief" "$id: brief was not scaffolded"
     assert_grep "# Commit discipline" "$brief" \
       "$id: brief lost the commit-discipline section"
-    assert_grep "as raw evidence the moment it exists, in its own commit, before any analysis or polishing drawn from it" "$brief" \
-      "$id: brief did not require expensive evidence to be committed ahead of analysis"
+    assert_grep "preserve it the moment it exists, in a place that outlives this task, before any analysis or polishing drawn from it" "$brief" \
+      "$id: brief did not require expensive evidence to be preserved ahead of analysis"
     assert_grep "Never go more than about 15 minutes of changed files without a checkpoint commit" "$brief" \
       "$id: brief lost the checkpoint-commit interval"
     assert_grep "cost to reproduce, not task size" "$brief" \
       "$id: brief lost the cost-to-reproduce distinction that task size cannot express"
-    assert_grep "a successor will not trust loose output it does not remember producing" "$brief" \
-      "$id: brief lost the handoff reason for committing early"
+    assert_grep "a successor will not trust material it does not remember producing" "$brief" \
+      "$id: brief lost the handoff reason for preserving early"
     assert_grep "while a pipeline owns your branch, follow Definition of done and do not commit into the run" "$brief" \
       "$id: brief lost the active-validation-run carve-out"
     # The discipline is an addition, never a replacement: the scaffold's existing
@@ -642,6 +642,43 @@ test_commit_discipline_in_ship_and_scout() {
   assert_grep "SCOUT task" "$home/data/commit-scout/brief.md" \
     "scout brief lost its scout declaration"
   pass "fm-brief.sh: ship and scout scaffolds carry checkpoint-commit discipline"
+}
+
+# Preservation is only real if it names a place that outlives the task, so the
+# destination sentence has to differ by kind. A ship task's branch survives, but
+# a scout's worktree and every commit in it are discarded at teardown, so a
+# scout told to "commit" its raw evidence would lose exactly the irreplaceable
+# output this contract exists to protect. That was a live defect, so the scout
+# side is pinned negatively as well as positively.
+test_commit_discipline_destination_follows_surviving_artifact() {
+  local home ship scout
+  home="$TMP_ROOT/commit-destination-home"
+  write_registry "$home"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" dest-ship no-registry-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" dest-scout no-registry-proj --scout >/dev/null 2>&1
+  ship="$home/data/dest-ship/brief.md"
+  scout="$home/data/dest-scout/brief.md"
+
+  # A ship task's branch outlives the task, so its evidence is committed there.
+  assert_grep "Your task branch is that place, so give raw evidence its own commit ahead of any analysis drawn from it." "$ship" \
+    "ship brief did not send raw evidence to its surviving task branch"
+  assert_no_grep "Your worktree is not that place" "$ship" \
+    "ship brief wrongly carried the scout destination"
+
+  # A scout's worktree does not, so its evidence must reach the report directory.
+  assert_grep "Your worktree is not that place, because it and every commit in it are discarded at cleanup" "$scout" \
+    "scout brief did not warn that its worktree and commits are discarded"
+  assert_grep "so copy raw evidence into \`$home/data/dest-scout/\` and have the report cite it by name." "$scout" \
+    "scout brief did not route raw evidence to its surviving report directory"
+  # The regression: never tell a scout its commits preserve anything.
+  assert_no_grep "Your task branch is that place" "$scout" \
+    "scout brief told a scout to preserve evidence in a discarded worktree commit"
+
+  # Writing that evidence must actually be permitted by the scout write boundary.
+  assert_grep "the contents of your report directory \`$home/data/dest-scout/\`" "$scout" \
+    "scout write boundary does not permit the evidence it is told to preserve"
+  pass "fm-brief.sh: evidence destination follows the artifact that survives the task"
 }
 
 # Scout and secondmate paths still scaffold well-formed briefs.
@@ -681,4 +718,5 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_commit_discipline_in_ship_and_scout
+test_commit_discipline_destination_follows_surviving_artifact
 test_scout_and_secondmate_scaffold
