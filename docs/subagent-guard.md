@@ -221,7 +221,7 @@ SUBAGENT_TOOL=no
 `multi_tool_use.parallel` batches calls to the tools above; it does not spawn an agent.
 Codex is therefore not applicable today, and this table row is the tripwire: if a future Codex release adds a delegated-agent tool, wire `.codex/hooks.json` the same way its `Bash` PreToolUse entries already forward stdin to a checker.
 
-### Grok, OpenCode, and Pi, inspected but not wired
+### Grok, OpenCode, Pi, and Agy, inspected but not wired
 
 The integration surface of each was inspected and each is structurally wireable for the shipped guard.
 
@@ -240,6 +240,9 @@ Wiring an unvalidated matcher would trade a known gap for an unknown breakage.
 The bounded follow-up for each is identical to the Codex procedure above.
 On a host with the binary installed, ask the harness to enumerate its tools, then wire the matcher and re-run the live matrix below.
 `bin/fm-subagent-pretool-check.sh` needs no change for any of them: it already accepts Grok's stdin shape and the `--tool` CLI form OpenCode and Pi use, and it already emits the Grok stdout decision object by default.
+
+Agy 1.1.8 exposes a top-level `--agent` selection flag and `agy agent` listing command, but neither the CLI help nor the installed hook contract establishes an in-session delegation-shaped tool name.
+The Agy primary hook therefore does not guess a PreToolUse matcher for delegation.
 
 ## Live validation record, 2026-07-22
 

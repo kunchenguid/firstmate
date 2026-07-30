@@ -29,6 +29,8 @@ zsh
 
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
+Anti-Gravity CLI 1.1.8 was observed under `agy` on 2026-07-30 in a dedicated tmux server.
+Its empty and typed separator composers were classified through the shared executable interface, and `esc to cancel` was present only during an active turn.
 
 ### Agent liveness name sources
 
@@ -141,9 +143,15 @@ Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identiti
 Herdr uses native registered-agent state and needs no process-name branch.
 Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
 
+The Agy composer review covered all five backends.
+Tmux, Herdr, Orca, and cmux use the shared complete separator-container proof.
+Zellij retains its screen-diff submit acknowledgement because its adapter exposes no cursor or ANSI composer primitive.
+`tests/fm-agy-harness.test.sh` executes the shared and backend-specific interfaces, while [`agy-harness.md`](agy-harness.md) owns the live captures.
+
 The structural multi-row composer reader, Kimi pointer-delivery path, and OpenCode 1.18.4 busy-queue behavior are pinned by:
 
 ```sh
+tests/fm-agy-harness.test.sh
 tests/fm-composer-ghost.test.sh
 tests/fm-kimi-harness.test.sh
 tests/fm-tmux-submit-busy.test.sh
@@ -178,7 +186,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
-Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
+Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Muse, and Agy share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ## Herdr
 

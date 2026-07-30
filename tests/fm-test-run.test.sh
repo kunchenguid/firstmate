@@ -90,7 +90,7 @@ test_changed_file_selection_is_conservative() {
 
 init_changed_fixture_repo() {
   local repo=$1 script
-  mkdir -p "$repo/bin" "$repo/tests"
+  mkdir -p "$repo/bin" "$repo/tests/fixtures"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
@@ -107,6 +107,7 @@ init_changed_fixture_repo() {
     fm-pi-watch-extension.test.sh \
     fm-afk-return.test.sh \
     fm-bearings-snapshot.test.sh \
+    fm-agy-harness.test.sh \
     fm-backend-cmux.test.sh \
     fm-backend-zellij.test.sh \
     fm-backend-orca.test.sh; do
@@ -125,6 +126,9 @@ init_changed_fixture_repo() {
   : >"$repo/.claude/settings.json"
   : >"$repo/.pi/extensions/fm-primary-pi-watch.ts"
   : >"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  : >"$repo/.agents/hooks.json"
+  : >"$repo/tests/fixtures/fm-agy-fake-tmux.sh"
+  printf '# fm-agy-fake-tmux.sh\n' >>"$repo/tests/fm-agy-harness.test.sh"
   : >"$repo/src/unmapped.ts"
   git -C "$repo" init -q
   git -C "$repo" add .
@@ -160,15 +164,24 @@ test_changed_dependency_selection_and_unmapped_failure() {
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
+  printf '\n' >>"$repo/.agents/hooks.json"
   printf '\n' >>"$repo/.claude/settings.json"
   printf '\n' >>"$repo/.pi/extensions/fm-primary-pi-watch.ts"
   printf '\n' >>"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
   assert_contains "$listed" "tests/fm-ask-user-authority.test.sh" "skill source selects pure contract coverage"
+  assert_contains "$listed" "tests/fm-agy-harness.test.sh" "Agy hook source selects adapter coverage"
   assert_contains "$listed" "tests/fm-cd-pretool-check.test.sh" "Claude and Pi source selects hook coverage"
   assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" "Pi source selects watcher coverage"
   git -C "$repo" add .agents .claude .pi
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
+
+  printf '\n' >>"$repo/tests/fixtures/fm-agy-fake-tmux.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-agy-harness.test.sh" \
+    "Agy fixture change did not select its referencing adapter coverage"
+  git -C "$repo" add tests/fixtures/fm-agy-fake-tmux.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm agy-fixture-change
 
   printf '\n' >>"$repo/src/unmapped.ts"
   set +e

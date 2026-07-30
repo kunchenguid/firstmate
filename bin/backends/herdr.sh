@@ -2766,12 +2766,16 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
 
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
-  local identity agent agent_status row=0 generic_line=0
+  local identity agent agent_status row=0 generic_line=0 agy_state
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
   cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
     || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+  if agy_state=$(fm_composer_separated_state "$cap"); then
+    printf '%s' "$agy_state"
+    return 0
+  fi
   # Structural scan: locate the bottom-most composer row and remember its RAW
   # (styled) bytes. Shape detection runs on the plain row (fm_backend_herdr_strip_ansi
   # keeps ghost text so the border/prompt glyph is still visible); the raw row is

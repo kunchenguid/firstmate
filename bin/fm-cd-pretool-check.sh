@@ -16,9 +16,10 @@
 #   <PreToolUse JSON on stdin> | bin/fm-cd-pretool-check.sh
 #   bin/fm-cd-pretool-check.sh --command '<cmd>'
 #
-# Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
-# Claude and Codex. CLI mode is used by OpenCode and Pi after their adapters
-# extract the exact command string.
+# Stdin mode extracts .toolInput.command for Grok, .tool_input.command for
+# Claude and Codex, or .toolCall.args.CommandLine for Agy.
+# CLI mode is used by OpenCode and Pi after their adapters extract the exact
+# command string.
 #
 # Exit/output contract (identical shape to bin/fm-arm-pretool-check.sh):
 #   ALLOW - exit 0 and no output.
@@ -87,7 +88,7 @@ if [ "$CMD_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
   [ -n "$PAYLOAD" ] || exit 0
   command -v jq >/dev/null 2>&1 || exit 0
-  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
+  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // .toolCall.args.CommandLine // empty)' 2>/dev/null) || exit 0
 fi
 
 [ -n "$CMD" ] || exit 0

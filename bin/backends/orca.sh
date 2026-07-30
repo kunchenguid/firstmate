@@ -270,8 +270,12 @@ FM_BACKEND_ORCA_IDLE_RE=${FM_BACKEND_ORCA_IDLE_RE:-'^Type a message\.\.\.$'}
 # popup that closed by filling an argument-hint placeholder into the composer;
 # that first Enter selected the popup item, it did not submit the command.
 fm_backend_orca_composer_state() {  # <terminal-id> -> empty|pending|unknown
-  local terminal=$1 cap line trimmed stripped="" found=0
+  local terminal=$1 cap line trimmed stripped="" found=0 agy_state
   cap=$(fm_backend_orca_read_text_paged "$terminal" "$FM_BACKEND_ORCA_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+  if agy_state=$(fm_composer_separated_state "$cap"); then
+    printf '%s' "$agy_state"
+    return 0
+  fi
   while IFS= read -r line; do
     trimmed="${line#"${line%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"

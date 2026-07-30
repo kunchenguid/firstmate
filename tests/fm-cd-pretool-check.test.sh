@@ -5,7 +5,7 @@
 # bin/fm-cd-command-policy.mjs is the single owner of the block/allow decision;
 # it reuses the shell classifier owned by bin/fm-arm-command-policy.mjs.
 # bin/fm-cd-pretool-check.sh is the stable transport: it scopes the guard to the
-# real primary checkout, then drives all five harness entry forms. This suite
+# real primary checkout, then drives all six harness entry forms. This suite
 # proves the decision matrix, the harness-output shaping, the primary-checkout
 # scoping (including the deliberate secondmate-home difference from the turn-end
 # guard), the fail-open transport behavior, the prefilter fast path, the
@@ -166,6 +166,11 @@ run_matrix_entry() {
       printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
       rc=$?
       ;;
+    agy)
+      payload=$(jq -cn --arg command "$cmd" '{toolCall:{name:"run_command",args:{CommandLine:$command}}}')
+      printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
+      rc=$?
+      ;;
     opencode|pi)
       "$CHECK" --command "$cmd" >"$out_file" 2>"$err_file"
       rc=$?
@@ -196,7 +201,7 @@ run_matrix_entry() {
 test_full_acceptance_matrix() {
   local i entry
   for ((i = 0; i < ${#MATRIX_IDS[@]}; i++)); do
-    for entry in codex claude grok opencode pi; do
+    for entry in codex claude grok agy opencode pi; do
       run_matrix_entry "${MATRIX_IDS[$i]}" "${MATRIX_EXPECTED[$i]}" "$entry" "${MATRIX_COMMANDS[$i]}"
     done
   done

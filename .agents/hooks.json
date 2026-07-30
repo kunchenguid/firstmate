@@ -1,0 +1,30 @@
+{
+  "firstmate-primary-shell-seatbelts": {
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "../bin/fm-arm-pretool-check.sh; rc=$?; if [ \"$rc\" -eq 0 ]; then printf '{}\\n'; fi; exit \"$rc\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "../bin/fm-cd-pretool-check.sh; rc=$?; if [ \"$rc\" -eq 0 ]; then printf '{}\\n'; fi; exit \"$rc\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "firstmate-primary-turn-end": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "../bin/fm-turnend-guard-agy.sh",
+        "timeout": 10
+      }
+    ]
+  }
+}

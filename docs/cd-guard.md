@@ -74,7 +74,7 @@ It does not permit `cd /home/project`, because an absolute-path `cd` remains a p
 
 ## Transport and fail-open behavior
 
-`bin/fm-cd-pretool-check.sh` supports all five harness-engine entry shapes used by the tracked adapters, with pi-signed sharing Pi's shape:
+`bin/fm-cd-pretool-check.sh` supports all six harness-engine entry shapes used by the tracked adapters, with pi-signed sharing Pi's shape:
 
 - Claude sends stdin JSON at `.tool_input.command` and adds `--claude` to preserve Claude's stderr-only deny requirement.
 - Codex sends stdin JSON at `.tool_input.command` without `--claude`.
@@ -115,6 +115,7 @@ The cd-guard never duplicates shell lexing; it adds only the cd-specific decisio
 | Claude | `.claude/settings.json` PreToolUse Bash hook forwarding stdin with `--claude` | Blocks the tool call; stderr deny object, stdout empty. |
 | Codex | `.codex/hooks.json` PreToolUse hook that anchors from `pwd -P`, verifies the hook-loaded firstmate root, and forwards the payload | Blocks on exit 2 and displays stderr. |
 | Grok | `.grok/hooks/fm-primary-cd-check.json` PreToolUse hook anchored on `${GROK_WORKSPACE_ROOT:-}` | Consumes the stdout `decision=deny` object. |
+| Agy | `.agents/hooks.json` `run_command` PreToolUse hook | Consumes the stdout `decision=deny` object. |
 | OpenCode | `.opencode/plugins/fm-primary-cd-check.js` `tool.execute.before` | Throws, which surfaces as the failed tool result. |
 | Pi | `.pi/extensions/fm-primary-turnend-guard.ts` `tool_call` handler | Returns `{block: true}`; piggybacks on the already-loaded primary extension so no extra `-e` flag is needed. |
 
@@ -124,7 +125,7 @@ Every shell variable reference in the Grok hook command carries an inline defaul
 ## Automated validation
 
 `tests/fm-cd-pretool-check.test.sh` owns the acceptance matrix.
-Every block and allow case runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
+Every block and allow case runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, Agy-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
 The suite also proves the end-to-end cwd-leak regression (a firstmate-owned backlog write leaking into a project clone, then denied at the exact command), the checkout scoping (fires in a git-cloned secondmate fixture, inert in a crewmate/scout linked worktree, inert outside a firstmate checkout, inert outside a git repo), the fail-open transport behavior, the prefilter fast path, the policy CLI output contract, and the per-harness wiring.
 
 Run:

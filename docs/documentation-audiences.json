@@ -289,6 +289,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/supervision-protocols/agy.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/supervision-protocols/codex.md",
       "audience": "agent-runtime"
     },
@@ -319,6 +323,10 @@
     {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/verification/agy-harness.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/dispatch-auth.md",

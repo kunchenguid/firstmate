@@ -39,8 +39,8 @@
 #   fm-interrupt     a firstmate-controlled interruption of the worker
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, muse-session-log, missing,
-#   malformed, gen-mismatch, source-mismatch, kimi-unverified,
+#   endpoint-gone, herdr-native, grok-regex, agy-regex, muse-session-log,
+#   missing, malformed, gen-mismatch, source-mismatch, kimi-unverified,
 #   codex-unverified, capture-failed, no-target
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
@@ -50,13 +50,15 @@
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
-#      muse session-log pull source, then the Grok-only temporary regex fallback
-#      classifies a grok task from its rendered tail, then unknown missing
+#      muse session-log pull source, then the harness-scoped temporary regex
+#      fallbacks classify Grok and Agy tasks from their rendered tails, then
+#      unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
-# The Grok arm is the ONLY rendered-text classification that survives the
-# redesign, because Grok's structured lifecycle was not credited-live-verified
-# in the approved audit; it is scoped to harness=grok and can never classify
-# another adapter. The delivery guards in bin/fm-tmux-lib.sh match rendered
+# Grok and Agy are the ONLY rendered-text classifications that survive the
+# redesign because neither exposes a verified semantic turn-start source.
+# Each fallback uses a separately verified signature, is scoped to its recorded
+# harness, and can never classify another adapter. The delivery guards in
+# bin/fm-tmux-lib.sh match rendered
 # footers for submit acknowledgement and away-mode supervisor injection only;
 # neither is a recorded worker state source.
 #
@@ -169,11 +171,11 @@ fm_busy_current_gen() {  # <state-dir> <id>
 # fm_busy_sources_for_harness: the semantic sources trusted to classify a
 # task recorded with <harness>. One line, space-separated, possibly empty.
 # The firstmate-owned sources are appended for every converted adapter.
-# Grok and muse deliberately trust nothing: neither has a semantic WRITER, so
-# neither is armed, and both read their live source on demand in the classifier
-# (grok's rendered tail, muse's session log) rather than through a stored
-# record. Listing a source here without a writer that can clear it would seed a
-# busy record nothing could ever settle.
+# Grok, Agy, and muse deliberately trust nothing: none has a semantic WRITER,
+# so none is armed, and each reads its live source on demand in the classifier
+# (grok's and agy's rendered tails, muse's session log) rather than through a
+# stored record. Listing a source here without a writer that can clear it would
+# seed a busy record nothing could ever settle.
 fm_busy_sources_for_harness() {  # <harness>
   local adapter=
   case "${1:-}" in
@@ -559,6 +561,16 @@ fm_busy_grok_tail_busy() {
     | grep -qiE "${FM_BUSY_REGEX:-${FM_TMUX_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
 }
 
+# fm_busy_agy_tail_busy: the Agy-only rendered-tail fallback retained from the
+# verified adapter contribution. Agy 1.1.8 has a Stop hook but no verified
+# semantic turn-start event, so the stable ASCII `esc to cancel` footer remains
+# its narrowly scoped current-state source until a complete lifecycle replaces
+# it. FM_BUSY_REGEX retains the same operator override as the Grok fallback.
+fm_busy_agy_tail_busy() {
+  grep -v '^[[:space:]]*$' | tail -12 \
+    | grep -qiE "${FM_BUSY_REGEX:-${FM_TMUX_AGY_BUSY_REGEX_DEFAULT:-esc to cancel}}"
+}
+
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown plus the producing source (see header). Never probes
@@ -628,7 +640,7 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       esac
       return 0
       ;;
-    grok*)
+    grok*|agy*)
       if [ -z "$tail40" ]; then
         if command -v fm_backend_capture >/dev/null 2>&1; then
           tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || {
@@ -640,11 +652,22 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
           return 0
         fi
       fi
-      if printf '%s' "$tail40" | fm_busy_grok_tail_busy; then
-        printf 'busy grok-regex'
-      else
-        printf 'idle grok-regex'
-      fi
+      case "$harness" in
+        grok*)
+          if printf '%s' "$tail40" | fm_busy_grok_tail_busy; then
+            printf 'busy grok-regex'
+          else
+            printf 'idle grok-regex'
+          fi
+          ;;
+        agy*)
+          if printf '%s' "$tail40" | fm_busy_agy_tail_busy; then
+            printf 'busy agy-regex'
+          else
+            printf 'idle agy-regex'
+          fi
+          ;;
+      esac
       return 0
       ;;
   esac

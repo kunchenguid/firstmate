@@ -545,8 +545,12 @@ FM_BACKEND_CMUX_COMPOSER_LINES=${FM_BACKEND_CMUX_COMPOSER_LINES:-20}
 FM_BACKEND_CMUX_IDLE_RE=${FM_BACKEND_CMUX_IDLE_RE:-'^Type a message\.\.\.$'}
 
 fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending|unknown
-  local target=$1 expected_label=${2:-} cap line trimmed stripped="" found=0
+  local target=$1 expected_label=${2:-} cap line trimmed stripped="" found=0 agy_state
   cap=$(fm_backend_cmux_capture "$target" "$FM_BACKEND_CMUX_COMPOSER_LINES" "$expected_label") || { printf 'unknown'; return 0; }
+  if agy_state=$(fm_composer_separated_state "$cap"); then
+    printf '%s' "$agy_state"
+    return 0
+  fi
   while IFS= read -r line; do
     trimmed="${line#"${line%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
