@@ -7,8 +7,10 @@
 # ancestor of origin/<default>) and whose <default> branch is free to check out by
 # re-attaching it before the normal fast-forward ("recovered:"). One additional
 # narrow recovery handles a clean, checked-out default branch after a successful
-# fetch when the local and remote commits genuinely diverged with one unambiguous
-# common base but resolve to the same root tree: create and verify the deterministic
+# destination-free fetch whose observed remote heads are published through an
+# expected-old no-dereference transaction, when the local and remote commits
+# genuinely diverged with one unambiguous common base but resolve to the same root
+# tree: create and verify the deterministic
 # direct ref refs/fm-fleet-sync/squash-preserved/<default>/<old-oid> without
 # dereferencing it or overwriting a conflict, then atomically move the local
 # branch to the observed remote commit with no-dereference expected-old checks on
@@ -27,10 +29,11 @@
 # and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
-# When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
-# killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
-# it is retried with a bounded wait and removed only when provably stale; see
-# fetch_with_packed_refs_lock_guard and the FM_FLEET_SYNC_PACKED_REFS_LOCK_* knobs.
+# When remote-head publication fails on an orphaned .git/packed-refs.lock (left
+# by a ref rewrite killed mid-write - e.g. a timed-out bootstrap sync or a
+# teardown process kill), it is retried with a bounded wait and removed only when
+# provably stale; see fetch_with_packed_refs_lock_guard and the
+# FM_FLEET_SYNC_PACKED_REFS_LOCK_* knobs.
 # Usage: fm-fleet-sync.sh [<project-dir-or-name>]
 # The single-project form accepts either a path (absolute, or relative to the
 # caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
@@ -160,21 +163,215 @@ packed_refs_lock_path() {
   esac
 }
 
-# Run `git -C "$PROJ" fetch origin --prune --quiet`, tolerating an orphaned
-# packed-refs.lock left by a killed ref rewrite. Sets FETCH_OUTPUT to the git
-# command's combined output and returns its exit status. On the packed-refs.lock
-# signature ONLY: retry up to FLEET_SYNC_PACKED_REFS_LOCK_RETRIES times (a
-# transient lock self-clears as the owning process exits), then - only if the lock
-# is provably stale per fm-lock-lib.sh (still present, mtime age past the
-# threshold, no lsof holder of the lock or the clone worktree $PROJ) - remove it
-# and retry once more. A live lock, an unprovable one, or any other failure keeps
-# today's behavior. Every wait, retry, and removal prints to stderr, and a
-# successful recovery also prints one "$label: recovered: ..." summary to stdout so
-# a session-start refresh (which discards fleet-sync stderr) still surfaces it.
+remote_tracking_refs() {
+  local refs_dir path
+  git -C "$PROJ" for-each-ref --format='%(refname)' refs/remotes/origin 2>/dev/null || return 1
+  refs_dir=$(git -C "$PROJ" rev-parse --git-path refs/remotes/origin 2>/dev/null) || return 1
+  case "$refs_dir" in
+    /*) ;;
+    *) refs_dir="$PROJ/$refs_dir" ;;
+  esac
+  [ -d "$refs_dir" ] || return 0
+  while IFS= read -r -d '' path; do
+    printf 'refs/remotes/origin/%s\n' "${path#"$refs_dir"/}"
+  done < <(find "$refs_dir" -type f -print0 2>/dev/null)
+}
+
+remote_tracking_state() {
+  local refs ref oid
+  refs=$(remote_tracking_refs) || return 1
+  refs=$(printf '%s\n' "$refs" | LC_ALL=C sort -u)
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    [ "$ref" != refs/remotes/origin/HEAD ] || continue
+    ref_is_symbolic "$ref" && return 1
+    oid=$(direct_ref_oid "$ref" 2>/dev/null) || return 1
+    printf '%s\t%s\n' "$oid" "$ref"
+  done <<<"$refs"
+}
+
+remote_tracking_state_matches() {
+  local desired=$1 actual
+  actual=$(remote_tracking_state) || return 1
+  [ "$actual" = "$desired" ]
+}
+
+publish_remote_tracking_refs() {
+  local fetched=$1 null_source null_oid source_ref dest_ref new_oid old_oid
+  local existing_refs existing_ref commands= transaction_rc transaction_output desired actual
+  local -a protected_refs=()
+  local -a desired_lines=()
+
+  null_source=$(git -C "$PROJ" hash-object --stdin </dev/null) || {
+    FETCH_OUTPUT="cannot determine repository object format"
+    return 1
+  }
+  printf -v null_oid '%0*d' "${#null_source}" 0
+
+  while IFS=$'\t' read -r new_oid source_ref; do
+    [ -n "$new_oid" ] || continue
+    dest_ref="refs/remotes/origin/${source_ref#refs/heads/}"
+    if ! git check-ref-format "$dest_ref" >/dev/null 2>&1; then
+      FETCH_OUTPUT="invalid remote-tracking destination $dest_ref"
+      return 1
+    fi
+    if ref_is_symbolic "$dest_ref"; then
+      FETCH_REFUSAL="symbolic remote-tracking ref $dest_ref"
+      return 2
+    fi
+    old_oid=$(direct_ref_oid "$dest_ref" 2>/dev/null || true)
+    [ -n "$old_oid" ] || old_oid=$null_oid
+    commands="${commands}option no-deref
+update $dest_ref $new_oid $old_oid
+"
+    protected_refs+=("$dest_ref")
+    desired_lines+=("$new_oid"$'\t'"$dest_ref")
+  done <<<"$fetched"
+
+  desired=$(printf '%s\n' "${desired_lines[@]}" | sed '/^$/d' | LC_ALL=C sort -k2,2)
+  existing_refs=$(remote_tracking_refs) || {
+    FETCH_OUTPUT="cannot enumerate remote-tracking refs"
+    return 1
+  }
+  existing_refs=$(printf '%s\n' "$existing_refs" | LC_ALL=C sort -u)
+  while IFS= read -r existing_ref; do
+    [ -n "$existing_ref" ] || continue
+    [ "$existing_ref" != refs/remotes/origin/HEAD ] || continue
+    if printf '%s\n' "$desired" | cut -f2 | grep -Fxq -- "$existing_ref"; then
+      continue
+    fi
+    if ref_is_symbolic "$existing_ref"; then
+      FETCH_REFUSAL="symbolic remote-tracking ref $existing_ref"
+      return 2
+    fi
+    old_oid=$(direct_ref_oid "$existing_ref" 2>/dev/null) || {
+      FETCH_OUTPUT="cannot read remote-tracking ref $existing_ref"
+      return 1
+    }
+    commands="${commands}option no-deref
+delete $existing_ref $old_oid
+"
+    protected_refs+=("$existing_ref")
+  done <<<"$existing_refs"
+
+  if [ -z "$commands" ]; then
+    remote_tracking_state_matches "$desired" || {
+      FETCH_OUTPUT="remote-tracking refs changed during publication"
+      return 1
+    }
+    return 0
+  fi
+
+  commands=${commands%$'\n'}
+  if direct_ref_transaction "$commands" "${protected_refs[@]}"; then
+    transaction_rc=0
+  else
+    transaction_rc=$?
+  fi
+  transaction_output=$REF_TRANSACTION_OUTPUT
+  if remote_tracking_state_matches "$desired"; then
+    return 0
+  fi
+  if [ "$transaction_rc" -eq 2 ]; then
+    FETCH_REFUSAL="symbolic remote-tracking ${transaction_output#symbolic }"
+    return 2
+  fi
+  if [ "$transaction_rc" -eq 3 ]; then
+    FETCH_OUTPUT="remote-tracking transaction outcome is indeterminate"
+  else
+    FETCH_OUTPUT=${transaction_output:-remote-tracking transaction rejected}
+  fi
+  actual=$(remote_tracking_state 2>/dev/null || true)
+  [ "$actual" != "$desired" ] || return 0
+  return 1
+}
+
+fetch_and_publish_remote_heads() {
+  local remote_before remote_after fetch_porcelain fetched fetched_oids
+  local attempt fetch_rc publish_rc i
+  local -a source_refs=()
+  local -a oid_lines=()
+
+  FETCH_OUTPUT=
+  FETCH_REFUSAL=
+  attempt=0
+  while [ "$attempt" -lt 3 ]; do
+    attempt=$(( attempt + 1 ))
+    if ! remote_before=$(git -C "$PROJ" ls-remote --refs --heads origin 2>&1); then
+      FETCH_OUTPUT=$remote_before
+      return 1
+    fi
+    remote_before=$(printf '%s\n' "$remote_before" \
+      | awk '$1 ~ /^[0-9a-f]+$/ && index($2, "refs/heads/") == 1 { print $1 "\t" $2 }' \
+      | LC_ALL=C sort -k2,2)
+    source_refs=()
+    while IFS=$'\t' read -r _oid source_ref; do
+      [ -n "${source_ref:-}" ] && source_refs+=("$source_ref")
+    done <<<"$remote_before"
+
+    fetch_porcelain=
+    if [ "${#source_refs[@]}" -gt 0 ]; then
+      if fetch_porcelain=$(printf '%s\n' "${source_refs[@]}" \
+          | git -C "$PROJ" fetch --porcelain --no-tags --refmap= --stdin origin 2>&1); then
+        :
+      else
+        fetch_rc=$?
+        FETCH_OUTPUT=$fetch_porcelain
+        return "$fetch_rc"
+      fi
+    fi
+
+    fetched_oids=$(printf '%s\n' "$fetch_porcelain" \
+      | awk '$4 == "FETCH_HEAD" { print $3 }')
+    oid_lines=()
+    while IFS= read -r fetched_oid; do
+      [ -n "$fetched_oid" ] && oid_lines+=("$fetched_oid")
+    done <<<"$fetched_oids"
+    if [ "${#oid_lines[@]}" -ne "${#source_refs[@]}" ]; then
+      FETCH_OUTPUT="cannot parse staged fetch result"
+      return 1
+    fi
+
+    fetched=
+    for (( i=0; i<${#source_refs[@]}; i++ )); do
+      fetched="${fetched}${oid_lines[$i]}"$'\t'"${source_refs[$i]}"$'\n'
+    done
+    fetched=${fetched%$'\n'}
+    if ! remote_after=$(git -C "$PROJ" ls-remote --refs --heads origin 2>&1); then
+      FETCH_OUTPUT=$remote_after
+      return 1
+    fi
+    remote_after=$(printf '%s\n' "$remote_after" \
+      | awk '$1 ~ /^[0-9a-f]+$/ && index($2, "refs/heads/") == 1 { print $1 "\t" $2 }' \
+      | LC_ALL=C sort -k2,2)
+    [ "$fetched" = "$remote_after" ] && break
+  done
+  if [ "$fetched" != "$remote_after" ]; then
+    FETCH_OUTPUT="remote heads changed during staged fetch"
+    return 1
+  fi
+
+  if publish_remote_tracking_refs "$fetched"; then
+    return 0
+  else
+    publish_rc=$?
+    return "$publish_rc"
+  fi
+}
+
+# Fetch remote heads without ref destinations, then publish and prune
+# refs/remotes/origin through one no-dereference transaction. On a
+# packed-refs.lock signature, retry up to FLEET_SYNC_PACKED_REFS_LOCK_RETRIES
+# times, then remove only a lock proven stale by fm-lock-lib.sh and retry once.
 fetch_with_packed_refs_lock_guard() {
   local rc attempt=0 lock lock_desc
-  FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+  if fetch_and_publish_remote_heads; then
+    rc=0
+  else
+    rc=$?
+  fi
   [ "$rc" -eq 0 ] && return 0
+  [ "$rc" -ne 2 ] || return "$rc"
   is_packed_refs_lock_error "$FETCH_OUTPUT" || return "$rc"
 
   lock=$(packed_refs_lock_path) || lock=""
@@ -183,22 +380,20 @@ fetch_with_packed_refs_lock_guard() {
     attempt=$(( attempt + 1 ))
     echo "$label: fetch blocked by packed-refs lock ($lock_desc); waiting ${FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${FLEET_SYNC_PACKED_REFS_LOCK_RETRIES}) (owning process may be exiting)" >&2
     sleep "$FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS"
-    FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+    if fetch_and_publish_remote_heads; then
+      rc=0
+    else
+      rc=$?
+    fi
     if [ "$rc" -eq 0 ]; then
       echo "$label: fetch succeeded on retry; packed-refs lock cleared on its own" >&2
-      # One stdout summary so a session-start refresh (which discards fleet-sync
-      # stderr and relays only stdout) still surfaces the recovery.
       echo "$label: recovered: packed-refs lock cleared on its own during retry"
       return 0
     fi
+    [ "$rc" -ne 2 ] || return "$rc"
     is_packed_refs_lock_error "$FETCH_OUTPUT" || return "$rc"
   done
 
-  # Retries exhausted and still the lock signature. Clear ONLY if provably stale.
-  # The companion liveness dir is $PROJ (the clone worktree): a live `git -C "$PROJ"`
-  # keeps its cwd there even in the narrow window after it closes packed-refs.lock
-  # and before it exits, so lsof on $PROJ still catches a holder the lock-file check
-  # alone would miss.
   lock=$(packed_refs_lock_path) || lock=""
   if [ -n "$lock" ] && [ -e "$lock" ]; then
     if fm_lock_is_provably_stale "$lock" "$PROJ" "$FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS"; then
@@ -207,7 +402,11 @@ fetch_with_packed_refs_lock_guard() {
         return "$rc"
       fi
       echo "$label: removed provably-stale packed-refs lock $lock (age >= ${FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS}s, no live holder) and retrying fetch" >&2
-      FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+      if fetch_and_publish_remote_heads; then
+        rc=0
+      else
+        rc=$?
+      fi
       if [ "$rc" -eq 0 ]; then
         echo "$label: fetch succeeded after stale packed-refs lock cleanup" >&2
         echo "$label: recovered: removed a stale packed-refs lock (no live holder)"
@@ -393,18 +592,24 @@ direct_ref_transaction() {
     fi
   done
 
-  printf 'commit\n' >&8
-  IFS= read -r response <&9 || response=
+  response=
+  if printf 'commit\n' >&8; then
+    IFS= read -r response <&9 || response=
+  fi
   exec 8>&-
   exec 9<&-
-  wait "$pid" 2>/dev/null
-  rc=$?
+  if wait "$pid" 2>/dev/null; then
+    rc=0
+  else
+    rc=$?
+  fi
   if [ "$rc" -ne 0 ] || [ "$response" != "commit: ok" ]; then
     REF_TRANSACTION_OUTPUT=$(first_line "$(cat "$error_file" 2>/dev/null || true)")
-    [ -n "$REF_TRANSACTION_OUTPUT" ] || REF_TRANSACTION_OUTPUT="ref transaction commit failed"
+    [ -n "$REF_TRANSACTION_OUTPUT" ] \
+      || REF_TRANSACTION_OUTPUT="ref transaction commit acknowledgement lost"
     rm -f "$input_pipe" "$output_pipe" "$error_file"
     rmdir "$txn_dir" 2>/dev/null || true
-    return 1
+    return 3
   fi
   rm -f "$input_pipe" "$output_pipe" "$error_file"
   rmdir "$txn_dir" 2>/dev/null || true
@@ -459,7 +664,9 @@ ensure_preservation_ref() {
 reconcile_tree_identical_divergence() {
   local anchor_oid branch_ref head_oid local_oid remote_oid local_tree_now operation
   local remote_tree_now common_base_now worktree_status update_input update_output
-  local post_branch post_head post_local post_remote post_tree post_status rollback_output
+  local transaction_rc=0 post_branch post_head post_local post_remote post_tree post_status
+  local rollback_output rollback_branch rollback_head rollback_local rollback_remote
+  local rollback_tree rollback_anchor rollback_status
 
   PRESERVE_REF="refs/fm-fleet-sync/squash-preserved/$DEFAULT/$local_rev"
   if ! git check-ref-format "$PRESERVE_REF" >/dev/null 2>&1; then
@@ -540,9 +747,12 @@ reconcile_tree_identical_divergence() {
   if direct_ref_transaction "$update_input" "$PRESERVE_REF" "$REMOTE_REF" "$LOCAL_REF"; then
     :
   else
+    transaction_rc=$?
     update_output=$REF_TRANSACTION_OUTPUT
-    reconciliation_refusal "atomic update rejected; preserved $PRESERVE_REF$(if [ -n "$update_output" ]; then printf ': %s' "$(first_line "$update_output")"; fi)"
-    return 0
+    if [ "$transaction_rc" -ne 3 ]; then
+      reconciliation_refusal "atomic update rejected; preserved $PRESERVE_REF$(if [ -n "$update_output" ]; then printf ': %s' "$(first_line "$update_output")"; fi)"
+      return 0
+    fi
   fi
 
   post_branch=$(git -C "$PROJ" symbolic-ref --quiet --no-recurse HEAD 2>/dev/null || true)
@@ -556,7 +766,28 @@ reconcile_tree_identical_divergence() {
       || [ "$post_local" != "$remote_rev" ] || [ "$post_remote" != "$remote_rev" ] \
       || [ "$post_tree" != "$local_tree" ] || [ "$anchor_oid" != "$local_rev" ] \
       || [ -n "$post_status" ]; then
-    if rollback_output=$(git -C "$PROJ" update-ref --no-deref "$LOCAL_REF" "$local_rev" "$remote_rev" 2>&1); then
+    if [ "$transaction_rc" -eq 3 ] && [ "$post_branch" = "$LOCAL_REF" ] \
+        && [ "$post_head" = "$local_rev" ] && [ "$post_local" = "$local_rev" ] \
+        && [ "$post_remote" = "$remote_rev" ] && [ "$post_tree" = "$local_tree" ] \
+        && [ "$anchor_oid" = "$local_rev" ] && [ -z "$post_status" ]; then
+      reconciliation_refusal "atomic update did not commit after acknowledgement loss; preserved $PRESERVE_REF"
+      return 0
+    fi
+
+    rollback_output=$(git -C "$PROJ" update-ref --no-deref \
+      "$LOCAL_REF" "$local_rev" "$remote_rev" 2>&1) || true
+    rollback_branch=$(git -C "$PROJ" symbolic-ref --quiet --no-recurse HEAD 2>/dev/null || true)
+    rollback_head=$(git -C "$PROJ" rev-parse --verify "HEAD^{commit}" 2>/dev/null || true)
+    rollback_local=$(direct_ref_oid "$LOCAL_REF" 2>/dev/null || true)
+    rollback_remote=$(direct_ref_oid "$REMOTE_REF" 2>/dev/null || true)
+    rollback_tree=$(git -C "$PROJ" rev-parse --verify "HEAD^{tree}" 2>/dev/null || true)
+    rollback_anchor=$(preservation_ref_oid 2>/dev/null || true)
+    rollback_status=$(git -C "$PROJ" status --porcelain 2>/dev/null) \
+      || rollback_status=unreadable
+    if [ "$rollback_branch" = "$LOCAL_REF" ] && [ "$rollback_head" = "$local_rev" ] \
+        && [ "$rollback_local" = "$local_rev" ] && [ "$rollback_remote" = "$remote_rev" ] \
+        && [ "$rollback_tree" = "$local_tree" ] && [ "$rollback_anchor" = "$local_rev" ] \
+        && [ -z "$rollback_status" ]; then
       reconciliation_refusal "post-update verification failed and the local branch was restored; preserved $PRESERVE_REF"
     else
       reconciliation_refusal "post-update verification failed and atomic restore was refused; preserved $PRESERVE_REF$(if [ -n "$rollback_output" ]; then printf ': %s' "$(first_line "$rollback_output")"; fi)"
@@ -591,7 +822,17 @@ sync_project() {
     return 0
   fi
 
-  if ! fetch_with_packed_refs_lock_guard; then
+  fetch_rc=0
+  if fetch_with_packed_refs_lock_guard; then
+    :
+  else
+    fetch_rc=$?
+  fi
+  if [ "$fetch_rc" -ne 0 ]; then
+    if [ "$fetch_rc" -eq 2 ]; then
+      echo "$label: STUCK: ${FETCH_REFUSAL:-symbolic remote-tracking ref} - needs attention"
+      return 0
+    fi
     reason="fetch failed"
     if [ -n "$FETCH_OUTPUT" ]; then
       reason="$reason: $(first_line "$FETCH_OUTPUT")"

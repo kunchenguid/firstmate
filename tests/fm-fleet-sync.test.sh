@@ -14,7 +14,7 @@
 # The pre-existing fast-forward / already-current / local-only / no-origin paths
 # must be unchanged, and bootstrap must relay the new outcomes as FLEET_SYNC lines.
 #
-# It also pins the orphaned .git/packed-refs.lock recovery in the fetch step
+# It also pins the orphaned .git/packed-refs.lock recovery in remote publication
 # (fetch_with_packed_refs_lock_guard, backed by bin/fm-lock-lib.sh's shared
 # staleness proof): a provably-stale lock is retried then removed and the clone
 # syncs (with a "recovered:" summary on stdout so a session-start refresh, which
@@ -140,10 +140,11 @@ run_sync() {
 # --- packed-refs.lock fixtures ----------------------------------------------
 
 # build_packed_prunable <home> <name>: like build_pair, but the clone has PACKED
-# refs plus a local `feature` branch tracking a since-deleted origin/feature, so a
-# fetch --prune must rewrite packed-refs - which an orphaned .git/packed-refs.lock
-# blocks with Git's "Unable to create '...packed-refs.lock': File exists". origin/main
-# is advanced by one commit so a successful sync fast-forwards. Echoes the clone path.
+# refs plus a local `feature` branch tracking a since-deleted origin/feature, so
+# safe remote-head publication must rewrite packed-refs, which an orphaned
+# .git/packed-refs.lock blocks with Git's "Unable to create
+# '...packed-refs.lock': File exists". origin/main is advanced by one commit so a
+# successful sync fast-forwards. Echoes the clone path.
 build_packed_prunable() {
   local home=$1 name=$2 work remote clone remote_abs
   work="$home/work-$name"
@@ -228,6 +229,32 @@ SH
   chmod +x "$1/git"
 }
 
+git_symbolic_remote_after_staged_fetch() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+is_fetch=0; has_empty_refmap=0
+for a in "$@"; do
+  [ "$a" = fetch ] && is_fetch=1
+  [ "$a" = --refmap= ] && has_empty_refmap=1
+done
+if [ "$is_fetch" = 1 ] && [ "$has_empty_refmap" = 1 ]; then
+  "$real" "$@"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    oid=$("$real" -C "${GIT_RACE_CLONE:?}" rev-parse --verify refs/remotes/origin/main)
+    "$real" -C "$GIT_RACE_CLONE" update-ref --no-deref \
+      -d refs/remotes/origin/main "$oid"
+    "$real" -C "$GIT_RACE_CLONE" symbolic-ref \
+      refs/remotes/origin/main refs/heads/main
+  fi
+  exit "$rc"
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
 # Refuse the multi-ref expected-old transaction while recording its exact input.
 # All other git commands, including preservation-ref creation, delegate unchanged.
 git_ref_transaction_refusal() {
@@ -243,7 +270,7 @@ if [ "$is_update" = 1 ] && [ "$is_stdin" = 1 ]; then
   n=$(cat "${GIT_REF_TRANSACTION_COUNTER:?}" 2>/dev/null || echo 0)
   n=$(( n + 1 ))
   printf '%s\n' "$n" > "$GIT_REF_TRANSACTION_COUNTER"
-  if [ "$n" -eq 1 ]; then
+  if [ "$n" -le 2 ]; then
     exec "$real" "$@"
   fi
   : > "${GIT_REF_TRANSACTION_LOG:?}"
@@ -253,6 +280,47 @@ if [ "$is_update" = 1 ] && [ "$is_stdin" = 1 ]; then
   done
   echo "simulated expected-old ref transaction refusal" >&2
   exit 1
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
+git_ref_transaction_ack_loss() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+is_update=0; is_stdin=0
+for a in "$@"; do
+  [ "$a" = update-ref ] && is_update=1
+  [ "$a" = --stdin ] && is_stdin=1
+done
+if [ "$is_update" = 1 ] && [ "$is_stdin" = 1 ]; then
+  transaction=$(mktemp)
+  while IFS= read -r line; do
+    [ "$line" = prepare ] && break
+    printf '%s\n' "$line" >> "$transaction"
+  done
+  printf 'prepare: ok\n'
+  IFS= read -r command
+  [ "$command" = commit ] || { rm -f "$transaction"; exit 1; }
+  if grep -F 'update refs/heads/main ' "$transaction" >/dev/null; then
+    if [ "${GIT_ACK_LOSS_MODE:?}" = committed ]; then
+      "$real" "$@" <"$transaction" >/dev/null 2>&1 \
+        || { rc=$?; rm -f "$transaction"; exit "$rc"; }
+    fi
+    rm -f "$transaction"
+    exit 1
+  fi
+  if "$real" "$@" <"$transaction" >/dev/null 2>&1; then
+    rm -f "$transaction"
+    printf 'commit: ok\n'
+    exit 0
+  else
+    rc=$?
+    rm -f "$transaction"
+    exit "$rc"
+  fi
 fi
 exec "$real" "$@"
 SH
@@ -643,6 +711,58 @@ test_operation_starting_after_preservation_refuses_before_transaction() {
   pass "an operation starting after preservation still blocks the transaction"
 }
 
+test_prefetch_symbolic_remote_tracking_ref_does_not_write_through() {
+  local home clone out old remote tracking
+  home=$(new_home)
+  clone=$(build_tree_identical_squash_pair "$home" prefetch-symbolic-remote)
+  old=$(head_sha "$clone")
+  remote=$(git -C "$home/work-prefetch-symbolic-remote" rev-parse main)
+  tracking=$(git -C "$clone" rev-parse refs/remotes/origin/main)
+  git -C "$clone" update-ref --no-deref -d refs/remotes/origin/main "$tracking"
+  git -C "$clone" symbolic-ref refs/remotes/origin/main refs/heads/main
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "symbolic remote-tracking ref refs/remotes/origin/main" \
+    "pre-fetch symbolic remote-tracking ref was not refused"
+  [ "$(head_sha "$clone")" = "$old" ] \
+    || fail "destination-free fetch wrote through the symbolic remote-tracking ref"
+  [ "$(git -C "$clone" symbolic-ref refs/remotes/origin/main)" = refs/heads/main ] \
+    || fail "symbolic remote-tracking ref was replaced"
+  [ "$(git -C "$clone" rev-parse refs/heads/main)" != "$remote" ] \
+    || fail "symbolic remote-tracking fetch destination moved the checked-out branch"
+  [ -z "$(preservation_refs "$clone")" ] \
+    || fail "prefetch symbolic remote-tracking refusal created a preservation ref"
+  pass "fetch never writes through a pre-existing symbolic remote-tracking ref"
+}
+
+test_staged_fetch_symbolic_destination_race_does_not_write_through() {
+  local home clone fakebin out err old remote
+  home=$(new_home)
+  clone=$(build_tree_identical_squash_pair "$home" staged-fetch-symbolic-race)
+  old=$(head_sha "$clone")
+  remote=$(git -C "$home/work-staged-fetch-symbolic-race" rev-parse main)
+  fakebin="$home/fb-staged-fetch-symbolic-race"; mkdir -p "$fakebin"
+  git_symbolic_remote_after_staged_fetch "$fakebin"
+  out="$home/out-staged-fetch-symbolic-race"
+  err="$home/err-staged-fetch-symbolic-race"
+  export GIT_RACE_CLONE="$clone"
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" staged-fetch-symbolic-race
+  unset GIT_RACE_CLONE
+
+  assert_contains "$(cat "$out")" "symbolic remote-tracking ref refs/remotes/origin/main" \
+    "symbolic destination race after staged fetch was not refused"
+  [ "$(head_sha "$clone")" = "$old" ] \
+    || fail "staged fetch destination race moved the checked-out branch"
+  [ "$(git -C "$clone" symbolic-ref refs/remotes/origin/main)" = refs/heads/main ] \
+    || fail "staged fetch destination race replaced the symbolic ref"
+  [ "$(git -C "$clone" rev-parse refs/heads/main)" != "$remote" ] \
+    || fail "staged fetch destination race wrote through to the checked-out branch"
+  [ -z "$(preservation_refs "$clone")" ] \
+    || fail "staged fetch destination race created a preservation ref"
+  pass "staged fetch refuses a raced symbolic destination without write-through"
+}
+
 test_symbolic_reconciliation_refs_are_refused() {
   local home clone out old remote anchor target fakebin err
 
@@ -780,6 +900,58 @@ test_tree_identical_expected_old_transaction_refusal() {
   [ "$(git -C "$clone" rev-parse "$anchor")" = "$old" ] \
     || fail "ref transaction refusal lost the anchored old head"
   pass "an expected-old ref transaction refusal leaves the default branch unmoved"
+}
+
+test_committed_transaction_with_lost_ack_is_verified() {
+  local home clone fakebin out err old remote anchor
+  home=$(new_home)
+  clone=$(build_tree_identical_squash_pair "$home" committed-lost-ack)
+  old=$(head_sha "$clone")
+  remote=$(git -C "$home/work-committed-lost-ack" rev-parse main)
+  anchor=$(preservation_ref_for "$clone" main "$old")
+  fakebin="$home/fb-committed-lost-ack"; mkdir -p "$fakebin"
+  git_ref_transaction_ack_loss "$fakebin"
+  out="$home/out-committed-lost-ack"; err="$home/err-committed-lost-ack"
+  export GIT_ACK_LOSS_MODE=committed
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" committed-lost-ack
+  unset GIT_ACK_LOSS_MODE
+
+  assert_contains "$(cat "$out")" "committed-lost-ack: recovered:" \
+    "committed transaction with a lost acknowledgement was not verified"
+  [ "$(head_sha "$clone")" = "$remote" ] \
+    || fail "committed transaction with a lost acknowledgement left HEAD unverified"
+  [ "$(git -C "$clone" rev-parse "$anchor")" = "$old" ] \
+    || fail "committed transaction with a lost acknowledgement lost its preservation ref"
+  [ -z "$(git -C "$clone" status --porcelain)" ] \
+    || fail "committed transaction with a lost acknowledgement dirtied the clone"
+  pass "a committed transaction survives lost acknowledgement after full verification"
+}
+
+test_uncommitted_transaction_with_lost_ack_is_reconciled() {
+  local home clone fakebin out err old remote anchor
+  home=$(new_home)
+  clone=$(build_tree_identical_squash_pair "$home" uncommitted-lost-ack)
+  old=$(head_sha "$clone")
+  remote=$(git -C "$home/work-uncommitted-lost-ack" rev-parse main)
+  anchor=$(preservation_ref_for "$clone" main "$old")
+  fakebin="$home/fb-uncommitted-lost-ack"; mkdir -p "$fakebin"
+  git_ref_transaction_ack_loss "$fakebin"
+  out="$home/out-uncommitted-lost-ack"; err="$home/err-uncommitted-lost-ack"
+  export GIT_ACK_LOSS_MODE=uncommitted
+  run_sync_guarded "$home" "$fakebin" "$out" "$err" uncommitted-lost-ack
+  unset GIT_ACK_LOSS_MODE
+
+  assert_contains "$(cat "$out")" "atomic update did not commit after acknowledgement loss" \
+    "uncommitted transaction with a lost acknowledgement was not distinguished"
+  [ "$(head_sha "$clone")" = "$old" ] \
+    || fail "uncommitted transaction with a lost acknowledgement moved HEAD"
+  [ "$(git -C "$clone" rev-parse refs/remotes/origin/main)" = "$remote" ] \
+    || fail "uncommitted transaction lost the freshly published remote head"
+  [ "$(git -C "$clone" rev-parse "$anchor")" = "$old" ] \
+    || fail "uncommitted transaction with a lost acknowledgement lost its preservation ref"
+  [ -z "$(git -C "$clone" status --porcelain)" ] \
+    || fail "uncommitted transaction with a lost acknowledgement dirtied the clone"
+  pass "an uncommitted transaction is identified safely after lost acknowledgement"
 }
 
 test_symbolic_transaction_races_do_not_write_through() {
@@ -1191,10 +1363,14 @@ test_unpublished_ahead_equal_tree_is_not_normalized
 test_tree_identical_conflicting_anchor_refuses
 test_active_git_operations_refuse_before_preservation
 test_operation_starting_after_preservation_refuses_before_transaction
+test_prefetch_symbolic_remote_tracking_ref_does_not_write_through
+test_staged_fetch_symbolic_destination_race_does_not_write_through
 test_symbolic_reconciliation_refs_are_refused
 test_preservation_creation_symbolic_race_does_not_write_through
 test_resolving_preservation_creation_symbolic_race_refuses
 test_tree_identical_expected_old_transaction_refusal
+test_committed_transaction_with_lost_ack_is_verified
+test_uncommitted_transaction_with_lost_ack_is_reconciled
 test_symbolic_transaction_races_do_not_write_through
 test_symbolic_rollback_race_does_not_write_through
 test_prunes_gone_branch_during_ordinary_sync
