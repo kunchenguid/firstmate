@@ -102,6 +102,9 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+#   pi and pi-signed launches also prefix FM_PI_HARNESS=<harness> and, when the
+#   operator has not set PI_CACHE_RETENTION, PI_CACHE_RETENTION=long for extended
+#   provider prompt caching where the installed Pi build supports it.
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -516,7 +519,16 @@ case "$ARG3" in
 esac
 
 case "$HARNESS" in
-  pi|pi-signed) LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH" ;;
+  pi|pi-signed)
+    # Prefer long provider prompt-cache retention when the operator has not set
+    # PI_CACHE_RETENTION already. Documented by Pi environment-variables.md;
+    # providers that ignore the flag stay unchanged.
+    if [ -z "${PI_CACHE_RETENTION+x}" ] || [ -z "${PI_CACHE_RETENTION}" ]; then
+      LAUNCH="PI_CACHE_RETENTION=long FM_PI_HARNESS=$HARNESS $LAUNCH"
+    else
+      LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
+    fi
+    ;;
 esac
 
 # pi-signed is an explicitly selected executable identity, not an alias that may

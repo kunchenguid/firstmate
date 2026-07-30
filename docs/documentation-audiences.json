@@ -304,6 +304,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/verification/agent-loop-efficiency.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/runtime-backends.md",
       "audience": "maintainer-verification"
     },

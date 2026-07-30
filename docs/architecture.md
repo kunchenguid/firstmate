@@ -55,6 +55,10 @@ The default path remains local-only; live GitHub enrichment exists only behind t
 Optional X mode integrates with the watcher only after explicit opt-in; [configuration.md](configuration.md#x-mode-env) owns its generated-artifact and dispatch mechanics.
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
+Firstmate-controlled prompt construction keeps multi-entry fleet digests in deterministic id order with volatile endpoint observations after stable meta bytes.
+`bin/fm-prompt-stable-lib.sh` owns the shared listing primitive.
+`bin/fm-agent-loop-baseline.sh` owns the reproducible overhead baseline.
+[Agent-loop efficiency verification](verification/agent-loop-efficiency.md) records measured boundaries for deferred tool discovery, Code Mode, transport, compaction, and Sol/Terra/Luna routing.
 That block owns the live wait shape for the running primary harness: Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked primary extensions, and OpenCode uses its TUI plugin.
 `bin/fm-watch-arm.sh` remains the verified arm wrapper for protocols that call it; it forks the watcher as a tracked child, verifies it is genuinely alive with a fresh liveness beacon, and prints an honest `started`, `attached`, or nonzero `FAILED` status.
 On `attached` it stays live across identity-matched successors, and an unexplained clean child close either attaches to a verified healthy successor or becomes the typed nonzero `watcher: FAILED - cycle ended without an actionable reason` result.

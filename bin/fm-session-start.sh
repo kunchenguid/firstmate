@@ -39,9 +39,10 @@
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       every state/*.meta in LC_ALL=C id order (stable meta
+#                       bytes before each task's volatile endpoint/status lines),
+#                       orphan status tails, state/.afk, and a cheap per-task
+#                       endpoint-liveness read: read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -103,6 +104,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-prompt-stable-lib.sh
+. "$SCRIPT_DIR/fm-prompt-stable-lib.sh"
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
@@ -345,11 +348,15 @@ section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
 subsection "Work under way (state/*.meta)"
+# Stable material (meta bytes) prints before volatile endpoint/status observations
+# for each task, and tasks themselves are LC_ALL=C id-ordered so repeated digests
+# keep a cache-stable multi-entry layout (bin/fm-prompt-stable-lib.sh).
 META_FOUND=0
-for meta in "$STATE"/*.meta; do
+while IFS= read -r id; do
+  [ -n "$id" ] || continue
+  meta="$STATE/$id.meta"
   [ -f "$meta" ] || continue
   META_FOUND=1
-  id=$(basename "$meta" .meta)
   printf '\n--- %s ---\n' "$id"
   cat "$meta"
 
@@ -372,19 +379,20 @@ for meta in "$STATE"/*.meta; do
   else
     printf 'status tail: (no status file yet: %s)\n' "$status"
   fi
-done
+done < <(fm_prompt_stable_list_ids "$STATE" meta)
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
 
 subsection "Orphan status logs (state/*.status without matching .meta)"
 ORPHAN_STATUS_FOUND=0
-for status in "$STATE"/*.status; do
+while IFS= read -r id; do
+  [ -n "$id" ] || continue
+  status="$STATE/$id.status"
   [ -f "$status" ] || continue
-  id=$(basename "$status" .status)
   [ -f "$STATE/$id.meta" ] && continue
   ORPHAN_STATUS_FOUND=1
   printf '\n--- %s ---\n' "$id"
   print_status_tail "$status"
-done
+done < <(fm_prompt_stable_list_ids "$STATE" status)
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
 subsection "AFK"
@@ -437,6 +445,8 @@ history is actually needed. Re-reading everything defeats the entire point
 of this command. Re-read a file only if this digest flagged it ABSENT (then
 rebuild or create it per AGENTS.md), its contents looked unparseable/corrupt,
 or an individual full status log is needed for older wake-event history.
+For whole-fleet heartbeat or catch-up reviews, use bin/fm-fleet-view.sh or
+bin/fm-bearings-snapshot.sh once instead of serial per-task inspection loops.
 EOF
 
 exit 0
