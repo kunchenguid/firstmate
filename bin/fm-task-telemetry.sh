@@ -19,26 +19,31 @@
 #   id recorded_at kind difficulty harness model effort prompt_tokens completion_tokens total_tokens difficulty_points tokens_per_difficulty_point source
 #
 # Usage collection is best-effort because harnesses expose token data differently.
-# Supported sources, in order:
+# Every recorded number excludes cached prompt re-reads, so one harness is not
+# scaled differently from another by how much of its context each turn is served
+# from cache. Sources are tried in precedence order and the first kind that
+# yields a reading wins; files within that kind are summed.
 #   - explicit per-task usage sidecars at state/<id>.usage.json[l],
 #     state/<id>.usage, worktree/.fm-token-usage.json[l], and
 #     worktree/.fm-token-usage.
 #   - Codex JSONL sessions under ~/.codex/sessions whose session cwd matches the
 #     recorded worktree; token_count events are cumulative, so the last total per
-#     session file is used.
+#     session file is used. Codex reports input_tokens inclusive of
+#     cached_input_tokens, so the cached part is subtracted from both the prompt
+#     and the total.
 #   - Claude JSONL transcripts under ~/.claude/projects/<cwd encoded with slash
 #     as dash>; repeated content chunks for one assistant message are deduped by
 #     message id or request id. Per-turn cache_read_input_tokens (the growing
-#     context re-read from cache each turn) is excluded from the prompt sum so
-#     the total stays comparable to Codex cumulative usage instead of inflating
-#     with turn count; input_tokens plus cache_creation_input_tokens (the newly
-#     supplied prompt each turn) is counted.
+#     context re-read from cache each turn) is excluded from the prompt sum;
+#     input_tokens plus cache_creation_input_tokens (the newly supplied prompt
+#     each turn) is counted.
 #   - a generic usage-object reading of any of the above when the harness-specific
 #     parser finds nothing. It takes at most one usage object per record, favouring
 #     a cumulative-looking key over a sibling per-turn delta, and excludes
-#     cache_read_input_tokens like the Claude parser. It cannot tell cumulative
-#     totals from deltas across records, so its rows are labelled
-#     `<harness>-generic` rather than as a normalized harness reading.
+#     cache_read_input_tokens and cached_input_tokens like the harness parsers. It
+#     cannot tell cumulative totals from deltas across records, so its rows are
+#     labelled `<harness>-generic` and `summary` keeps them in their own group
+#     rather than averaging them into a normalized harness reading.
 # Unknown or unsupported harness logs still get a durable row with source=unavailable.
 set -u
 
@@ -79,8 +84,11 @@ difficulty_points() {
   esac
 }
 
+# Entries are extended-regex fragments matched as whole words, so one concept
+# spelled several ways stays a single scored keyword.
 TELEMETRY_KEYWORDS=(
-  migration database schema security auth concurrency race deadlock refactor
+  migration database schema security 'auth(entication|orization)?'
+  concurrency race deadlock refactor
   architecture multi-project secondmate backend watcher teardown spawn dispatch
   no-mistakes ci e2e integration browser performance telemetry token quota
   recovery diagnose investigate audit design report
@@ -187,10 +195,14 @@ json_usage_generic() {
               | $rec | getpath($preferred // $top[0])
             end
         end;
+    # Cached prompt re-reads are excluded exactly as the harness parsers do:
+    # codex folds them into input_tokens/total_tokens, claude reports them
+    # separately as cache_read_input_tokens.
     reduce (.[] | pick) as $u ({prompt:0, completion:0, total:0};
-      .prompt += (n($u.input_tokens?) + n($u.prompt_tokens?) + n($u.cache_creation_input_tokens?))
+      n($u.cached_input_tokens?) as $cached
+      | .prompt += ([n($u.input_tokens?) + n($u.prompt_tokens?) + n($u.cache_creation_input_tokens?) - $cached, 0] | max)
       | .completion += (n($u.output_tokens?) + n($u.completion_tokens?))
-      | .total += n($u.total_tokens?)
+      | .total += ([n($u.total_tokens?) - $cached, 0] | max)
     )
     | .total = (if .total > 0 then .total else (.prompt + .completion) end)
     | select(.total > 0)
@@ -212,7 +224,14 @@ json_usage_codex() {
       ] | last?
     ) as $u
     | select($u != null)
-    | [n($u.input_tokens), n($u.output_tokens), n($u.total_tokens)]
+    # Codex counts the cached prompt prefix inside input_tokens (and so inside
+    # total_tokens) every turn; Claude reports it separately and it is excluded
+    # there, so drop it here too and keep the two harnesses on one scale.
+    | n($u.cached_input_tokens) as $cached
+    | ([n($u.input_tokens) - $cached, 0] | max) as $prompt
+    | n($u.output_tokens) as $completion
+    | ([n($u.total_tokens) - $cached, 0] | max) as $total
+    | [$prompt, $completion, (if $total > 0 then $total else ($prompt + $completion) end)]
     | select(.[2] > 0)
     | @tsv
   ' "$file" 2>/dev/null
@@ -306,9 +325,14 @@ usage_from_file() {
 
 collect_usage() {
   local id=$1 meta=$2 harness=$3 worktree=$4 source file usage prompt completion total read_as
-  local prompt_sum=0 completion_sum=0 total_sum=0 sources='' found=0
+  local prompt_sum=0 completion_sum=0 total_sum=0 sources='' found=0 accepted=''
+  # candidate_files emits candidates in precedence order. The first kind that
+  # yields a reading wins outright; mixing kinds would double-count a task that
+  # has both an explicit sidecar and a harness session log. Several files of the
+  # accepted kind (e.g. a resumed harness session) are still summed.
   while IFS="$(printf '\t')" read -r source file; do
     [ -n "$source" ] && [ -n "$file" ] || continue
+    [ -z "$accepted" ] || [ "$source" = "$accepted" ] || continue
     usage=$(usage_from_file "$source" "$file" | tail -1 || true)
     [ -n "$usage" ] || continue
     IFS="$(printf '\t')" read -r prompt completion total read_as <<EOF
@@ -319,6 +343,7 @@ EOF
     completion_sum=$((completion_sum + completion))
     total_sum=$((total_sum + total))
     found=1
+    accepted=$source
     case "+$sources+" in
       *"+$read_as+"*) ;;
       *) sources="${sources:+$sources+}$read_as" ;;
@@ -400,11 +425,13 @@ EOF
 
 summary() {
   [ -f "$LEDGER" ] || { echo "no telemetry ledger at $LEDGER"; return 0; }
-  printf 'difficulty\tharness\tmodel\ttasks\tavg_total_tokens\tavg_tokens_per_difficulty_point\n'
+  printf 'difficulty\tharness\tmodel\tsource\ttasks\tavg_total_tokens\tavg_tokens_per_difficulty_point\n'
   awk -F '\t' '
     NR == 1 { next }
     $10 ~ /^[0-9]+$/ {
-      key = $4 "\t" $5 "\t" $6
+      # source is part of the key: a lower-fidelity <harness>-generic reading
+      # must never be averaged into a normalized harness reading.
+      key = $4 "\t" $5 "\t" $6 "\t" $13
       count[key] += 1
       total[key] += $10
       point_total[key] += $11

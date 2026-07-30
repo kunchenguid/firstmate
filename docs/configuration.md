@@ -29,11 +29,13 @@ The exact scoring and usage-log mechanics live in `bin/fm-task-telemetry.sh`, wh
 `fm-teardown.sh` runs `fm-task-telemetry.sh collect <id>` before volatile task state or worktree files are removed, and removes the marker with the rest of that task's state.
 Collection is best-effort and never blocks cleanup.
 It reads explicit per-task usage sidecars when present, Codex JSONL `token_count` events for sessions whose cwd matches the task worktree, and Claude JSONL assistant-message usage for the encoded task worktree path.
+Those kinds are tried in that precedence order and the first one that yields a reading wins, so a task with both a sidecar and a harness session log is not counted twice.
+Recorded prompt and total counts exclude the cached prompt prefix re-read each turn - Codex reports it inside `input_tokens` and `total_tokens` as `cached_input_tokens`, Claude reports it separately as `cache_read_input_tokens` - so the two harnesses stay on one scale instead of differing by how much of each turn is served from cache.
 A harness log that carries usage-shaped JSON but no harness-specific token events falls back to a generic reading, recorded as `source=<harness>-generic` so a lower-fidelity number is never mistaken for a normalized harness reading.
 Unsupported harnesses, missing `jq`, absent logs, or unreadable transcripts produce a durable row with `source=unavailable` rather than failing the task lifecycle.
 The completed-task ledger is local and gitignored at `data/task-telemetry.tsv`.
 Rows record task id, completion timestamp, kind, difficulty, harness, model, effort, prompt tokens, completion tokens, total tokens, difficulty points, tokens per difficulty point, and usage source.
-Run `bin/fm-task-telemetry.sh summary` to group completed rows by difficulty, harness, and model.
+Run `bin/fm-task-telemetry.sh summary` to group completed rows by difficulty, harness, model, and usage source; source is part of the grouping so a `<harness>-generic` fallback row never averages into a normalized harness reading.
 Use that output with `config/crew-dispatch.json` by lowering the default profile or individual rule profile when a cheaper harness/model repeatedly clears a difficulty bucket with acceptable token use.
 
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.

@@ -65,6 +65,33 @@ test_estimate_keywords_match_words_not_substrings() {
   pass "task telemetry keyword scoring matches whole words only"
 }
 
+test_estimate_counts_spelled_out_auth_words() {
+  local home brief
+  home=$(make_home estimate-auth-words)
+  # Two keywords (schema, migration) score one point; the auth concept is the
+  # third that tips the bucket, so each case isolates whether it counted.
+  brief="$home/control.md"
+  printf 'Update the schema migration for the author and the authority.\n' > "$brief"
+  [ "$(run_telemetry "$home" estimate "$brief")" = simple ] \
+    || fail "author/authority must not count as the auth keyword"
+
+  brief="$home/authentication.md"
+  printf 'Update the schema migration and the authentication path.\n' > "$brief"
+  [ "$(run_telemetry "$home" estimate "$brief")" = intermediate ] \
+    || fail "authentication must count as the auth keyword"
+
+  brief="$home/authorization.md"
+  printf 'Update the schema migration and the authorization path.\n' > "$brief"
+  [ "$(run_telemetry "$home" estimate "$brief")" = intermediate ] \
+    || fail "authorization must count as the auth keyword"
+
+  brief="$home/both.md"
+  printf 'Update the schema migration with authentication and authorization.\n' > "$brief"
+  [ "$(run_telemetry "$home" estimate "$brief")" = intermediate ] \
+    || fail "auth spellings must score as one concept, not several keywords"
+  pass "task telemetry counts authentication and authorization as the auth keyword"
+}
+
 scaffold_brief() {
   local home=$1 id=$2
   shift 2
@@ -151,9 +178,63 @@ test_collect_explicit_usage_sidecar() {
   assert_contains "$ledger" $'\tintermediate\tcodex\tgpt-5\thigh\t100\t25\t125\t2\t62\tgeneric' \
     "ledger row did not record ratio and source"
   summary=$(run_telemetry "$home" summary)
-  assert_contains "$summary" $'intermediate\tcodex\tgpt-5\t1\t125\t62' \
+  assert_contains "$summary" $'intermediate\tcodex\tgpt-5\tgeneric\t1\t125\t62' \
     "summary did not aggregate token-to-difficulty ratio"
   pass "task telemetry collects sidecar usage and summarizes ratios"
+}
+
+test_sidecar_wins_over_harness_session_log() {
+  local home codex_dir session ledger old_home
+  home=$(make_home source-precedence)
+  codex_dir="$home/codex/.codex/sessions/2026/07/24"
+  mkdir -p "$codex_dir"
+  fm_write_meta "$home/state/tokens-prec-a8.meta" \
+    "window=fm-tokens-prec-a8" \
+    "worktree=$home/wt" \
+    "project=$home/project" \
+    "harness=codex" \
+    "model=gpt-5" \
+    "effort=medium" \
+    "difficulty=simple" \
+    "kind=ship"
+  : > "$home/state/tokens-prec-a8.spawn-ref"
+  printf '{"usage":{"input_tokens":100,"output_tokens":25,"total_tokens":125}}\n' \
+    > "$home/state/tokens-prec-a8.usage.json"
+  sleep 1
+  session="$codex_dir/rollout.jsonl"
+  cat > "$session" <<EOF
+{"type":"session_meta","payload":{"cwd":"$home/wt"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":40,"cached_input_tokens":0,"output_tokens":8,"total_tokens":48}}}}
+EOF
+
+  old_home=$HOME
+  HOME="$home/codex"
+  export HOME
+  run_telemetry "$home" collect tokens-prec-a8 || fail "collect with both sources failed"
+  HOME=$old_home
+  export HOME
+  ledger=$(cat "$home/data/task-telemetry.tsv")
+  assert_contains "$ledger" $'\t100\t25\t125\t1\t125\tgeneric' \
+    "the higher-precedence sidecar should win outright, not be summed with the session log"
+  pass "task telemetry honors source precedence instead of summing kinds"
+}
+
+test_summary_keeps_fallback_rows_out_of_normalized_groups() {
+  local home ledger summary
+  home=$(make_home summary-fidelity)
+  printf '%s\n' \
+    'id	recorded_at	kind	difficulty	harness	model	effort	prompt_tokens	completion_tokens	total_tokens	difficulty_points	tokens_per_difficulty_point	source' \
+    'a	2026-07-24T00:00:00Z	ship	simple	codex	gpt-5	medium	40	8	48	1	48	codex' \
+    'b	2026-07-24T00:00:00Z	ship	simple	codex	gpt-5	medium	900	100	1000	1	1000	codex-generic' \
+    > "$home/data/task-telemetry.tsv"
+  summary=$(run_telemetry "$home" summary)
+  assert_contains "$summary" $'simple\tcodex\tgpt-5\tcodex\t1\t48\t48' \
+    "normalized codex rows should stand alone in the summary"
+  assert_contains "$summary" $'simple\tcodex\tgpt-5\tcodex-generic\t1\t1000\t1000' \
+    "lower-fidelity fallback rows should aggregate separately"
+  ledger=$(printf '%s\n' "$summary" | grep -c 'gpt-5' || true)
+  [ "$ledger" = 2 ] || fail "fallback and normalized rows must not collapse into one group"
+  pass "task telemetry summary never averages fallback rows into harness rows"
 }
 
 test_collect_codex_cumulative_session() {
@@ -191,6 +272,45 @@ EOF
   assert_contains "$ledger" $'\t40\t8\t48\t3\t16\tcodex' \
     "codex collector did not use the last cumulative token_count event"
   pass "task telemetry collects Codex cumulative token_count sessions"
+}
+
+test_collect_codex_excludes_cached_input() {
+  local home codex_dir session ledger old_home
+  home=$(make_home codex-cached)
+  codex_dir="$home/codex/.codex/sessions/2026/07/24"
+  mkdir -p "$codex_dir"
+  fm_write_meta "$home/state/tokens-codex-a9.meta" \
+    "window=fm-tokens-codex-a9" \
+    "worktree=$home/wt" \
+    "project=$home/project" \
+    "harness=codex" \
+    "model=gpt-5" \
+    "effort=medium" \
+    "difficulty=intermediate" \
+    "kind=ship"
+  : > "$home/state/tokens-codex-a9.spawn-ref"
+  sleep 1
+  session="$codex_dir/rollout.jsonl"
+  # Real Codex rollouts fold the re-read prompt prefix into input_tokens and
+  # total_tokens; Claude reports it separately and it is excluded there.
+  cat > "$session" <<EOF
+{"type":"session_meta","payload":{"cwd":"$home/wt"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":900,"output_tokens":20,"total_tokens":1020}}}}
+EOF
+
+  old_home=$HOME
+  HOME="$home/codex"
+  export HOME
+  run_telemetry "$home" collect tokens-codex-a9 \
+    || fail "collect from cached-input Codex session failed"
+  HOME=$old_home
+  export HOME
+  assert_grep "usage_prompt_tokens=100" "$home/state/tokens-codex-a9.meta" \
+    "codex prompt total should exclude cached_input_tokens"
+  ledger=$(cat "$home/data/task-telemetry.tsv")
+  assert_contains "$ledger" $'\t100\t20\t120\t2\t60\tcodex' \
+    "codex collector counted the cached prompt prefix in prompt and total"
+  pass "task telemetry excludes Codex cached input from prompt totals"
 }
 
 test_collect_uses_spawn_ref_after_meta_rewrite() {
@@ -377,13 +497,17 @@ test_generic_fallback_excludes_cache_read() {
 
 test_estimate_simple_and_complex
 test_estimate_keywords_match_words_not_substrings
+test_estimate_counts_spelled_out_auth_words
 test_estimate_ignores_scaffold_boilerplate
 test_estimate_ignores_unknown_scaffold_sections
 test_generic_fallback_for_harness_log_without_token_events
 test_generic_fallback_does_not_double_count_sibling_usage
 test_generic_fallback_excludes_cache_read
 test_collect_explicit_usage_sidecar
+test_sidecar_wins_over_harness_session_log
+test_summary_keeps_fallback_rows_out_of_normalized_groups
 test_collect_codex_cumulative_session
+test_collect_codex_excludes_cached_input
 test_collect_uses_spawn_ref_after_meta_rewrite
 test_collect_claude_excludes_cache_read
 

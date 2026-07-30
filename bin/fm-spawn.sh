@@ -1455,7 +1455,7 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-TASK_DIFFICULTY=$("$SCRIPT_DIR/fm-task-telemetry.sh" estimate "$BRIEF" 2>/dev/null || printf 'unknown\n')
+TASK_DIFFICULTY=$("$FM_ROOT/bin/fm-task-telemetry.sh" estimate "$BRIEF" 2>/dev/null || printf 'unknown\n')
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
