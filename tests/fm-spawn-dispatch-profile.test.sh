@@ -360,6 +360,29 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
+test_raw_launch_command_dash_leading_harness_word_is_basename_operand() {
+  # A raw launch-command's harness word (the first non-VAR=val token) is fed to
+  # `basename` to derive the reported harness name. A dash-leading word must be
+  # a basename OPERAND, not parsed as an option (macOS BSD basename otherwise
+  # rejects it, matching firstmate issue 1280's ancestry-walk defect class).
+  local rec id out status launch
+  id=profile-raw-dash-z16
+  rec=$(make_spawn_case profile-raw-dash claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness "-strange-agent --flag")
+  status=$?
+  expect_code 0 "$status" "dash-leading raw launch harness should satisfy the dispatch-profile requirement"
+  assert_contains "$out" "spawned $id harness=-strange-agent" "spawn did not report the dash-leading raw command harness"
+  ! grep -qF 'illegal option' <<<"$out" || fail "dash-leading raw launch harness wrote basename option noise: $out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" -strange-agent default default
+  launch=$(cat "$LAUNCH_LOG")
+  [ "$launch" = "-strange-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  pass "raw launch-command harness word starting with a dash is a basename operand, not an option"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=profile-claude-z2
@@ -677,6 +700,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_raw_launch_command_dash_leading_harness_word_is_basename_operand
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

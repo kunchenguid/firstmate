@@ -500,7 +500,7 @@ case "$ARG3" in
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
+      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename -- "$word"); break ;; esac
     done
     ;;
   '')

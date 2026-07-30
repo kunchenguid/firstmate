@@ -329,8 +329,10 @@ attach_and_wait() {
       report_attached
       continue
     fi
-    if close_unobserved_cycle; then
-      cycle_log_append unknown unknown attached-delivered-wake none
+    local recovered
+    if recovered=$(queue_reason_since "$cycle_started_at"); then
+      cycle_log_append unknown unknown "recovered-$(classify_reason_line "$recovered")" none
+      echo "$recovered"
       return 0
     fi
     cycle_log_append unknown unknown attached-cycle-ended none
@@ -355,16 +357,51 @@ watch_output_has_wake() {
   grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$out" 2>/dev/null
 }
 
-watch_output_reason_type() {
-  local out=$1 line
-  line=$(grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$out" 2>/dev/null | head -1 || true)
-  case "$line" in
+# classify_reason_line: the single owner of reason-line -> ledger-classification
+# mapping, shared by a started cycle's own redirected stdout (watch_output_reason_type)
+# and an attached cycle's queue-recovered reason (queue_reason_since_type), so the
+# two paths can never drift into different classifications for the same text.
+classify_reason_line() {  # <line>
+  case "$1" in
     signal:*) printf 'actionable-signal' ;;
     stale:*) printf 'actionable-stale' ;;
     check:*) printf 'actionable-check' ;;
     heartbeat*) printf 'actionable-heartbeat' ;;
     *) printf 'none' ;;
   esac
+}
+
+watch_output_reason_type() {
+  local out=$1 line
+  line=$(grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$out" 2>/dev/null | head -1 || true)
+  classify_reason_line "$line"
+}
+
+# queue_reason_since: recover an ATTACHED cycle's actual wake reason from the
+# durable wake queue (report firstmate/863). An attached arm did not start the
+# watcher it is following, so it has no redirected child_out to read the way a
+# starter arm does; but every actionable exit already durably records its exact
+# reason text via fm_wake_append before calling wake(), so the queue holds the
+# same line the starter arm would have printed. Peeks only (never consumes: the
+# queue's real consumer is the session-start drain) and returns the freshest
+# row appended at or after <since_epoch> whose payload matches an actionable
+# reason shape, so an unrelated older queue entry or a genuine crash with no
+# fresh wake both correctly fall through to the FAILED path.
+queue_reason_since() {  # <since_epoch>
+  local since=$1 epoch seq kind key payload best=''
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  if [ -f "$FM_WAKE_QUEUE" ]; then
+    while IFS=$'\t' read -r epoch seq kind key payload; do
+      case "$epoch" in ''|*[!0-9]*) continue ;; esac
+      [ "$epoch" -ge "$since" ] || continue
+      case "$payload" in
+        signal:*|stale:*|check:*|heartbeat|heartbeat:*) best=$payload ;;
+      esac
+    done < "$FM_WAKE_QUEUE"
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  [ -n "$best" ] || return 1
+  printf '%s' "$best"
 }
 
 print_watch_output() {

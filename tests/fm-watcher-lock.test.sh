@@ -585,6 +585,87 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   pass "arm attaches to a live fresh watcher and fails loudly when that cycle has no successor"
 }
 
+test_attached_arm_recovers_actionable_reason_from_wake_queue() {
+  # firstmate/863: an ATTACHED arm (one that followed an already-healthy watcher
+  # it did not start) has no redirected child_out to read when that cycle ends,
+  # so it used to report a bare "FAILED - cycle ended without an actionable
+  # reason" even when the cycle genuinely delivered a wake - the durable wake
+  # queue always held the real reason all along. Drive a real check-triggered
+  # wake on the SEED watcher after a separate arm has already attached to it,
+  # with no successor watcher started afterward, and confirm the attached arm
+  # relays the queued reason (exit 0) instead of the stale FAILED line, while
+  # leaving the queue entry itself untouched for the ordinary session drain.
+  local dir state fakebin out armout check_file i wpid armpid status marker
+  dir=$(make_case attached-arm-queue-recovery)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  check_file="$state/task.check.sh"
+  marker="https://example.test/pr/9"
+  mark_pr_check_migration_complete "$state"
+
+  # Seed watcher: its first loop iteration always scans checks (age_of an
+  # absent .last-check is "due immediately") and finds nothing, then gates on
+  # the real FM_CHECK_INTERVAL from there. A small nonzero interval gives the
+  # attach + check-file registration below a race-free window before the seed
+  # ever re-scans "$STATE"/*.check.sh, instead of racing a mid-write file
+  # against a FM_CHECK_INTERVAL=0 scan on every 0.2s poll.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=2 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$wpid" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$wpid" "$armout" || fail "arm did not attach to the seed watcher before the queued wake"
+
+  # Only now register the check the attached seed will discover on its next
+  # cycle, triggering a genuine actionable exit (fm_wake_append then wake()).
+  cat > "$check_file" <<SH
+#!/usr/bin/env bash
+printf 'merged: $marker\n'
+SH
+  chmod 0700 "$check_file"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
+    || fail "could not register the post-attach check"
+
+  wait_for_exit "$wpid" 150
+  is_live_non_zombie "$wpid" && fail "seed watcher did not exit after its check fired"
+
+  # No successor is ever started, so the attached arm's peer-wait must lapse
+  # before it falls back to the durable queue.
+  wait_for_exit "$armpid" 80
+  status=$?
+  [ "$status" -eq 0 ] || fail "attached arm did not exit 0 after recovering a queued reason (status $status): $(cat "$armout")"
+  grep -qF "check: $check_file: merged: $marker" "$armout" \
+    || fail "attached arm did not relay the queued check reason: $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED' "$armout" \
+    || fail "attached arm still reported FAILED despite a genuinely delivered wake: $(cat "$armout")"
+  grep -q "reason=recovered-actionable-check" "$state/.watch-cycle-exits.log" \
+    || fail "recovered reason was not classified in the lifecycle ledger"
+
+  # The recovery must be a peek, not a consume: the durable queue still holds
+  # the record for the ordinary session-start drain to pick up.
+  grep -qF "$(printf '\tcheck\t')" "$state/.wake-queue" || fail "queue recovery consumed the durable wake record"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" || fail "drain after queue-recovered wake failed"
+  grep -F "check: $check_file: merged: $marker" "$dir/drain.out" >/dev/null \
+    || fail "session drain no longer saw the wake after arm-level queue recovery"
+
+  pass "attached arm recovers a genuinely delivered wake reason from the durable queue instead of reporting FAILED"
+}
+
 test_attached_arm_signal_is_recorded_in_cycle_ledger() {
   local dir state fakebin out armout i wpid armpid status
   dir=$(make_case attached-arm-signal-ledger)
@@ -1041,6 +1122,7 @@ test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
+test_attached_arm_recovers_actionable_reason_from_wake_queue
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
