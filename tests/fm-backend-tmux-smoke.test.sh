@@ -55,13 +55,13 @@ fm_backend_source tmux || fail "fm_backend_source tmux failed"
 
 SESSION="smoke"
 WINDOW="fm-smoke1"
-TARGET="$SESSION:$WINDOW"
+DISPLAY_LABEL="review flow"
 
 # --- create session ----------------------------------------------------------
 
 tmux new-session -d -s "$SESSION" -x 200 -y 50 \
   || fail "real tmux: new-session failed"
-fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" \
+WINDOW_ID=$(fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME") \
   || fail "fm_backend_tmux_create_task failed to create the task window"
 tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WINDOW" \
   || fail "created window is not visible in the real session"
@@ -72,6 +72,14 @@ if fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" 2>/dev/null; then
   fail "fm_backend_tmux_create_task should refuse an existing window name"
 fi
 pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a duplicate"
+
+fm_backend_tmux_rename_task "$WINDOW_ID" "$DISPLAY_LABEL" \
+  || fail "fm_backend_tmux_rename_task failed to apply the display label"
+tmux list-windows -t "$SESSION" -F '#{window_id}	#{window_name}' \
+  | grep -Fqx "$WINDOW_ID	$DISPLAY_LABEL" \
+  || fail "the stable window id did not retain the human-readable display label"
+TARGET="$SESSION:$WINDOW_ID"
+pass "real tmux: the task window shows its human-readable label while operations retain the stable window id"
 
 # --- send text + Enter -------------------------------------------------------
 
@@ -146,9 +154,10 @@ pass "real tmux: fm_backend_tmux_capture's -S -N bound trims old history for a s
 
 # --- resolve_bare_selector (live-window-listing) -----------------------------
 
-resolved=$(fm_backend_tmux_resolve_bare_selector "$WINDOW") \
+resolved=$(fm_backend_tmux_resolve_bare_selector "$DISPLAY_LABEL") \
   || fail "fm_backend_tmux_resolve_bare_selector failed to find the live window"
-[ "$resolved" = "$TARGET" ] || fail "fm_backend_tmux_resolve_bare_selector resolved to '$resolved', expected '$TARGET'"
+[ "$resolved" = "$SESSION:$DISPLAY_LABEL" ] \
+  || fail "fm_backend_tmux_resolve_bare_selector resolved to '$resolved', expected '$SESSION:$DISPLAY_LABEL'"
 pass "real tmux: fm_backend_tmux_resolve_bare_selector (list-live) finds the created window by name"
 
 if fm_backend_tmux_resolve_bare_selector "no-such-window-xyz" 2>/dev/null; then
@@ -159,7 +168,7 @@ pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that d
 # --- kill and recovery-grade missing-window classification ------------------
 
 fm_backend_tmux_kill "$TARGET"
-if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$WINDOW"; then
+if tmux list-windows -t "$SESSION" -F '#{window_id}' 2>/dev/null | grep -Fqx "$WINDOW_ID"; then
   fail "fm_backend_tmux_kill did not remove the window"
 fi
 state=$(fm_backend_agent_state tmux "$TARGET")

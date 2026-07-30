@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--label <short-human-label>] [--scout]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--label <short-human-label>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
+#   --label <short-human-label> sets the endpoint's human-readable display name.
+#   Without it, hyphens in the task id become spaces (for example,
+#   grist-review-flow becomes "grist review flow"). The label is recorded for
+#   respawns but never participates in endpoint lookup, ownership, or cleanup.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
@@ -24,6 +28,8 @@
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
 #   absent backend= means tmux. cmux does not support --secondmate spawns yet.
+#   Display labels are applied to tmux windows and Herdr tabs. Zellij and cmux
+#   retain their identity-bearing titles, and Orca has no trivial rename surface.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -88,7 +94,7 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend applies to every pair.
+#   source of truth; shared --scout/--harness/--model/--effort/--backend/--label applies to every pair.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
@@ -172,10 +178,12 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+LABEL_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+LABEL_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -188,6 +196,7 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      label) LABEL_ARG=$a; LABEL_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -204,6 +213,8 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --label) want_value=label ;;
+    --label=*) LABEL_ARG=${a#--label=}; LABEL_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -212,6 +223,10 @@ done
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
+[ "$LABEL_SET" -eq 0 ] || [ -n "$LABEL_ARG" ] || { echo "error: --label requires a non-empty value" >&2; exit 1; }
+case "$LABEL_ARG" in
+  *$'\n'*|*$'\r'*) echo "error: --label must be a single line" >&2; exit 1 ;;
+esac
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
@@ -313,6 +328,7 @@ spawn_abort_cleanup() {
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
+            echo "label=${LABEL:-$ID}"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -378,6 +394,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  [ "$LABEL_SET" -eq 0 ] || shared_args+=(--label "$LABEL_ARG")
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -403,6 +420,15 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+if [ "$LABEL_SET" -eq 1 ]; then
+  LABEL=$LABEL_ARG
+else
+  LABEL=
+  if [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    LABEL=$(fm_backend_meta_exact_value "$STATE/$ID.meta" label 2>/dev/null || true)
+  fi
+  [ -n "$LABEL" ] || LABEL=${ID//-/ }
+fi
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -895,9 +921,11 @@ herdr_projection_meta_field_exact() {  # <meta> <key>
 # Under the session lock, authoritative metadata must identify one positively
 # dead or agent-free endpoint before token inspection may allow flat fallback.
 # Exact Herdr fields are retained for the narrower version 2 reclaim path.
-herdr_projection_existing_meta_allows_flat() {  # <meta>
+herdr_existing_meta_allows_spawn() {  # <meta>
   local meta=$1 old_backend old_target old_session old_pane old_state target_session target_pane
-  HERDR_RECOVERY_BACKEND=""
+  SPAWN_RECOVERY_BACKEND=""
+  SPAWN_RECOVERY_TARGET=""
+  SPAWN_RECOVERY_STATE=""
   HERDR_RECOVERY_WORKSPACE_ID=""
   HERDR_RECOVERY_TAB_ID=""
   HERDR_RECOVERY_PANE_ID=""
@@ -907,7 +935,8 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
     echo "error: existing metadata for $ID has no endpoint; refusing duplicate launch while its herdr presentation journal is quarantined" >&2
     return 1
   }
-  HERDR_RECOVERY_BACKEND=$old_backend
+  SPAWN_RECOVERY_BACKEND=$old_backend
+  SPAWN_RECOVERY_TARGET=$old_target
   if [ "$old_backend" = herdr ]; then
     fm_backend_herdr_parse_target "$old_target" || {
       echo "error: existing herdr endpoint for $ID is malformed; refusing duplicate launch" >&2
@@ -941,6 +970,7 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
       return 1
     }
     old_state=$(fm_backend_herdr_pane_agent_state "$old_session" "$old_pane")
+    SPAWN_RECOVERY_STATE=$old_state
     case "$old_state" in
       dead|no-agent) return 0 ;;
       live|unknown)
@@ -949,10 +979,11 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
         ;;
     esac
   fi
-  old_state=$(fm_backend_agent_alive "$old_backend" "$old_target")
+  old_state=$(fm_backend_agent_state "$old_backend" "$old_target")
+  SPAWN_RECOVERY_STATE=$old_state
   case "$old_state" in
-    dead) return 0 ;;
-    alive|unknown)
+    dead|missing) return 0 ;;
+    alive|ambiguous|unreadable|unverified)
       echo "error: existing $old_backend endpoint for $ID is $old_state; refusing duplicate launch" >&2
       return 1
       ;;
@@ -962,15 +993,25 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 W="fm-$ID"
 case "$BACKEND" in
   tmux)
+    TMUX_REPLACE_OLD=0
+    if [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+      herdr_existing_meta_allows_spawn "$STATE/$ID.meta" || exit 1
+      if [ "$SPAWN_RECOVERY_BACKEND" = tmux ] && [ "$SPAWN_RECOVERY_STATE" = dead ]; then
+        TMUX_REPLACE_OLD=1
+      fi
+    fi
     SES=$(fm_backend_tmux_container_ensure)
-    T="$SES:$W"
-    # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
-    # id and pins the window name (automatic-rename/allow-rename off) so a captain's
-    # non-default tmux config cannot rename the window away from fm-<id> once
-    # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
-    # rename-critical worktree-detection steps below; the persisted window= handle
-    # stays $T (the name form), which is safe now that rename is disabled.
+    # Create under the identity-shaped compatibility name, capture the stable
+    # window id, then replace only the display name. Every operation and the
+    # persisted endpoint target use the id, never the mutable human label.
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    fm_backend_tmux_rename_task "$WID" "$LABEL" || exit 1
+    T="$SES:$WID"
+    if [ "$TMUX_REPLACE_OLD" -eq 1 ] \
+       && ! fm_backend_tmux_replace_recorded_dead "$SPAWN_RECOVERY_TARGET" "$T"; then
+      fm_backend_tmux_kill "$T" || true
+      exit 1
+    fi
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -990,6 +1031,12 @@ case "$BACKEND" in
       HERDR_LABEL_HOME=$PROJ_ABS
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+    HERDR_FLAT_REPLACE_OLD=0
+    if [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] \
+       && [ ! -e "$HERDR_PRESENTATION_JOURNAL" ] && [ ! -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+      herdr_existing_meta_allows_spawn "$STATE/$ID.meta" || exit 1
+      [ "${SPAWN_RECOVERY_BACKEND:-}" = herdr ] && HERDR_FLAT_REPLACE_OLD=1
+    fi
     HERDR_PROJECTED=0
     if [ "$KIND" != secondmate ] && [ -f "$CONFIG/herdr-presentation-spaces" ]; then
       HERDR_SES=$(fm_backend_herdr_session)
@@ -1004,16 +1051,16 @@ case "$BACKEND" in
           exit 1
         }
         if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
-          herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || exit 1
+          herdr_existing_meta_allows_spawn "$STATE/$ID.meta" || exit 1
         fi
         fm_backend_herdr_projection_recovery_allows_flat \
           "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
-        if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ]; then
+        if [ "${SPAWN_RECOVERY_BACKEND:-}" = herdr ]; then
           set +e
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" "$PROJ_ABS" "$LABEL"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
@@ -1070,6 +1117,7 @@ case "$BACKEND" in
             HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
             HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
             HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+            fm_backend_herdr_rename_task "$HERDR_SES" "$HERDR_TAB_ID" "$LABEL" || exit 1
             fm_backend_herdr_projection_order_best_effort \
               "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL"
             HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)
@@ -1077,11 +1125,11 @@ case "$BACKEND" in
                && fm_backend_herdr_projection_live_binding_matches \
                  "$HERDR_SES" "$HERDR_PROJECTION_ID" "$HERDR_WORKSPACE_ID" \
                  "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$HERDR_PARENT_WORKSPACE_ID" \
-                 "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W" \
+                 "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$LABEL" \
                && fm_backend_herdr_projection_journal_bind \
                  "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_HOME_ID" "$HERDR_SES" \
                  "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
-                 "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W"; then
+                 "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$LABEL"; then
               :
             else
               echo "warning: herdr presentation could not publish an exact restart binding; this task will use flat fallback after a restart" >&2
@@ -1108,6 +1156,14 @@ case "$BACKEND" in
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
+      fm_backend_herdr_rename_task "$HERDR_SES" "$HERDR_TAB_ID" "$LABEL" || exit 1
+      if [ "$HERDR_FLAT_REPLACE_OLD" -eq 1 ] \
+         && ! fm_backend_herdr_replace_recorded_husk \
+           "$HERDR_SES" "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" \
+           "$HERDR_RECOVERY_PANE_ID" "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID"; then
+        fm_backend_herdr_kill "$HERDR_SES:$HERDR_PANE_ID" || true
+        exit 1
+      fi
     fi
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
       echo "error: herdr did not return a tab/pane id for $W" >&2
@@ -1465,6 +1521,7 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  echo "label=$LABEL"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).

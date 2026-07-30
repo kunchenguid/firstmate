@@ -30,22 +30,23 @@ If the primary harness runs outside tmux, Firstmate creates or reuses a detached
 tmux attach -t firstmate
 ```
 
-Each task window is named `fm-<id>`.
+Each task window shows the short human label passed to `fm-spawn.sh --label`, or the task id with hyphens converted to spaces when no label is supplied.
 
 ```sh
 tmux list-windows -t <session-name>
-tmux select-window -t <session-name>:fm-<id>
 ```
 
+The mutable window name is display-only.
+Task metadata records the stable tmux window id, and routine operations resolve the task id through that metadata instead of targeting the display label.
 Typing into an attached task window is authoritative direct intervention.
 Routine supervision does not require attachment: `bin/fm-peek.sh <id>` captures a bounded tail and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` steers the recorded endpoint.
 
-Verify setup by spawning a small task and confirming its `fm-<id>` window appears in the selected session.
+Verify setup by spawning a small task and confirming its human-readable label appears in the selected session.
 
 ## Current behavior and safety
 
 A target-existence check proves only that the pane exists.
-The deeper tmux agent-liveness probe first verifies exact window membership, then reads `#{pane_current_command}` to distinguish a running harness process from a bare idle shell.
+The deeper tmux agent-liveness probe first verifies exact stable window-id membership, then reads `#{pane_current_command}` to distinguish a running harness process from a bare idle shell.
 It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, and Kimi process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
 

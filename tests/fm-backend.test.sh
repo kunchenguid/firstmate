@@ -798,8 +798,11 @@ make_spawn_fakebin() {  # <dir> <fake-worktree-path> -> echoes fakebin dir
 set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
 case "\${1:-}" in
+  new-window) printf '@42\\n'; exit 0 ;;
+  rename-window) printf '%s\\n' "\${4:-}" > "\${FM_TMUX_LABEL_FILE:?}"; exit 0 ;;
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
+    for a in "\$@"; do case "\$a" in *window_name*) cat "\${FM_TMUX_LABEL_FILE:?}"; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
 esac
@@ -814,10 +817,11 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
   local bin=$1 fb=$2 log=$3 state=$4 data=$5 config=$6 proj=$7; shift 7
   [ "${1:-}" = -- ] && shift
   : > "$log"
+  : > "$log.label"
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$bin" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" \
-    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_TMUX_LOG="$log" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_TMUX_LOG="$log" FM_TMUX_LABEL_FILE="$log.label" \
     "$bin/bin/fm-spawn.sh" "$@"
 }
 
@@ -860,6 +864,8 @@ make_spawn_symlink_fakebin() {  # <dir> <initial-project-path> <worktree-path> -
 set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
 case "\${1:-}" in
+  new-window) printf '@42\\n'; exit 0 ;;
+  rename-window) printf '%s\\n' "\${4:-}" > "\${FM_TMUX_LABEL_FILE:?}"; exit 0 ;;
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*)
       printf x >> "$counter"
@@ -870,6 +876,7 @@ case "\${1:-}" in
       fi
       exit 0
     ;; esac; done
+    for a in "\$@"; do case "\$a" in *window_name*) cat "\${FM_TMUX_LABEL_FILE:?}"; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
 esac
@@ -1071,13 +1078,73 @@ test_spawn_default_backend_writes_no_meta_field() {
   out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
-    FM_TMUX_LOG="$TMP_ROOT/nobackend.log" \
+    FM_TMUX_LOG="$TMP_ROOT/nobackend.log" FM_TMUX_LABEL_FILE="$TMP_ROOT/nobackend.log.label" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend tmux 2>&1)
   expect_code 0 $? "explicit --backend tmux should spawn successfully"$'\n'"$out"
   assert_no_grep 'backend=' "$state/$id.meta" \
     "an explicit --backend tmux (the default) must not write backend= to meta (P1 compatibility contract)"
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh: an explicit --backend tmux resolves silently and writes no backend= (missing means tmux)"
+}
+
+test_spawn_records_and_applies_labels() {
+  local proj wt data id state config fb out log help custom_id custom_wt meta_tmp
+  proj="$TMP_ROOT/label-project"
+  wt="$TMP_ROOT/label-wt"
+  data="$TMP_ROOT/label-data"
+  id="grist-review-flow"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  fb=$(make_spawn_fakebin "$TMP_ROOT/label-fake" "$wt")
+  mkdir -p "$data/$id"
+  printf 'brief\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/label-state"
+  config="$TMP_ROOT/label-config"
+  log="$TMP_ROOT/label-spawn.log"
+  mkdir -p "$state" "$config"
+
+  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" \
+    -- "$id" "$proj" claude --backend tmux 2>&1)
+  expect_code 0 $? "spawn with a derived label should succeed"$'\n'"$out"
+  assert_grep 'label=grist review flow' "$state/$id.meta" \
+    "spawn did not record the task-id-derived human label: $(cat "$state/$id.meta")"
+  assert_grep 'window=firstmate:@42' "$state/$id.meta" \
+    "spawn did not persist the stable tmux window id instead of the display label"
+  assert_contains "$(cat "$log")" $'\x1f''rename-window'$'\x1f''-t'$'\x1f''@42'$'\x1f''grist review flow' \
+    "spawn did not apply the derived label to the tmux window"
+
+  meta_tmp="$state/$id.meta.tmp"
+  grep -v '^label=' "$state/$id.meta" > "$meta_tmp"
+  printf 'label=persisted review label\n' >> "$meta_tmp"
+  mv "$meta_tmp" "$state/$id.meta"
+  out=$(run_spawn_case "$ROOT" "$fb" "$log.respawn" "$state" "$data" "$config" "$proj" \
+    -- "$id" "$proj" claude --backend tmux 2>&1)
+  expect_code 0 $? "respawn with a recorded label should succeed"$'\n'"$out"
+  assert_grep 'label=persisted review label' "$state/$id.meta" \
+    "respawn did not preserve the recorded display label"
+  assert_contains "$(cat "$log.respawn")" $'\x1f''rename-window'$'\x1f''-t'$'\x1f''@42'$'\x1f''persisted review label' \
+    "respawn did not reapply the recorded display label"
+
+  custom_id="grist-review-custom"
+  custom_wt="$TMP_ROOT/label-custom-wt"
+  fm_git_worktree "$proj" "$custom_wt" "fm/$custom_id"
+  fb=$(make_spawn_fakebin "$TMP_ROOT/label-custom-fake" "$custom_wt")
+  mkdir -p "$data/$custom_id"
+  printf 'brief\n' > "$data/$custom_id/brief.md"
+  out=$(run_spawn_case "$ROOT" "$fb" "$log.custom" "$state" "$data" "$config" "$proj" \
+    -- "$custom_id" "$proj" claude --backend tmux --label "review billing flow" 2>&1)
+  expect_code 0 $? "spawn with an explicit label should succeed"$'\n'"$out"
+  assert_grep 'label=review billing flow' "$state/$custom_id.meta" \
+    "spawn did not record the explicit human label"
+  assert_contains "$(cat "$log.custom")" $'\x1f''rename-window'$'\x1f''-t'$'\x1f''@42'$'\x1f''review billing flow' \
+    "spawn did not apply the explicit label to the tmux window"
+
+  help=$("$ROOT/bin/fm-spawn.sh" --help)
+  assert_contains "$help" "--label <short-human-label>" "fm-spawn help did not document --label"
+  assert_contains "$help" 'grist-review-flow becomes "grist review flow"' \
+    "fm-spawn help did not document the derived default"
+
+  rm -rf "/tmp/fm-$id" "/tmp/fm-$custom_id"
+  pass "fm-spawn.sh: derives or accepts display labels, applies them by stable tmux id, and records them in metadata"
 }
 
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
@@ -1095,7 +1162,7 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
-    FM_TMUX_LOG="$TMP_ROOT/explicit-backend.log" \
+    FM_TMUX_LOG="$TMP_ROOT/explicit-backend.log" FM_TMUX_LABEL_FILE="$TMP_ROOT/explicit-backend.log.label" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend tmux 2>&1)
   expect_code 0 $? "explicit --backend tmux should spawn successfully even with HERDR_ENV=1 set"$'\n'"$out"
   assert_no_grep 'backend=' "$state/$id.meta" \
@@ -1122,7 +1189,7 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
-    FM_TMUX_LOG="$TMP_ROOT/nest.log" \
+    FM_TMUX_LOG="$TMP_ROOT/nest.log" FM_TMUX_LABEL_FILE="$TMP_ROOT/nest.log.label" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude 2>&1)
   expect_code 0 $? "fm-spawn.sh should auto-detect tmux and spawn successfully for nested tmux-in-herdr"$'\n'"$out"
   assert_no_grep 'backend=' "$state/$id.meta" \
@@ -1159,5 +1226,6 @@ test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag
 test_spawn_refuses_unknown_fm_backend_env
 test_spawn_default_backend_writes_no_meta_field
+test_spawn_records_and_applies_labels
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env
 test_spawn_autodetect_nesting_resolves_tmux_silently

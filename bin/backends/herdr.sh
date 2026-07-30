@@ -40,11 +40,10 @@
 # function has no herdr-specific logic; it just returns meta's window=
 # verbatim).
 #
-# Authoritative task recovery/orphan discovery (ids may not deterministically match live state
-# after a server restart in a differently-configured session; see the
-# verification doc) uses LABEL matching (fm-<id> tab labels), never trusts a
-# stored pane id blindly: fm_backend_herdr_list_live. The presentation journal
-# is deliberately excluded from that path.
+# Normal operations and recovery use exact endpoint metadata. Human-readable
+# task labels are mutable display state and never endpoint or ownership
+# authority. The presentation journal is deliberately excluded from normal
+# endpoint selection.
 #
 # Requires: herdr (CLI + socket), jq (JSON parsing). Bootstrap detects these
 # through fm_backend_required_tools only when herdr is the resolved backend;
@@ -267,7 +266,7 @@ fm_backend_herdr_projection_journal_field() {  # <journal> <key>
 # journal or a version 2 exact projection binding without sourcing shell code.
 # Version 2 sets FM_BACKEND_HERDR_JOURNAL_* globals for same-process callers.
 fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
-  local journal=$1 id=$2 lines expected_label expected_task_label exact
+  local journal=$1 id=$2 lines expected_label exact
   FM_BACKEND_HERDR_JOURNAL_VERSION=""
   FM_BACKEND_HERDR_JOURNAL_TASK_ID=""
   FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=""
@@ -322,9 +321,7 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" ] \
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" ] || return 1
   expected_label=$(fm_backend_herdr_projection_workspace_label "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
-  expected_task_label="fm-$id"
-  [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$expected_label" ] \
-    && [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" = "$expected_task_label" ]
+  [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$expected_label" ]
 }
 
 # fm_backend_herdr_projection_journal_token: validate and read either journal
@@ -383,25 +380,26 @@ fm_backend_herdr_projection_journal_bind() {  # <journal> <task-id> <home> <sess
 
 # fm_backend_herdr_projection_journal_replace_endpoint: atomically advance one
 # exact version 2 binding after its old husk was replaced successfully.
-fm_backend_herdr_projection_journal_replace_endpoint() {  # <journal> <task-id> <old-tab> <old-pane> <new-tab> <new-pane>
-  local journal=$1 id=$2 old_tab=$3 old_pane=$4 new_tab=$5 new_pane=$6
+fm_backend_herdr_projection_journal_replace_endpoint() {  # <journal> <task-id> <old-tab> <old-pane> <new-tab> <new-pane> [new-task-label]
+  local journal=$1 id=$2 old_tab=$3 old_pane=$4 new_tab=$5 new_pane=$6 new_task_label=${7:-}
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
   [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
     && [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" = "$old_tab" ] \
     && [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$old_pane" ] || return 1
+  [ -n "$new_task_label" ] || new_task_label=$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL
   fm_backend_herdr_projection_journal_write_v2 \
     "$journal" "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
     "$FM_BACKEND_HERDR_JOURNAL_HOME" "$FM_BACKEND_HERDR_JOURNAL_SESSION" \
     "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" "$new_tab" "$new_pane" \
     "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" \
-    "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL"
+    "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$new_task_label"
 }
 
 # fm_backend_herdr_projection_concise_task_label: strip redundant owner
 # prefixes from a task id used only in the presentation workspace label.
 # Removes firstmate/, 2ndmate-<id>/, and a presentation-level fm- owner
-# prefix when present. The ordinary task tab remains fm-<id> and is not
-# built by this helper.
+# prefix when present. The ordinary task tab's display label is not built by
+# this helper.
 fm_backend_herdr_projection_concise_task_label() {  # <task-id>
   local task=$1
   case "$task" in
@@ -1191,6 +1189,50 @@ EOF
   printf '%s %s' "$tab_id" "$pane_id"
 }
 
+# fm_backend_herdr_rename_task: set and verify the mutable display label of one
+# exact response-derived tab id. No caller resolves an endpoint from this label.
+fm_backend_herdr_rename_task() {  # <session> <tab-id> <display-label>
+  local session=$1 tab_id=$2 label=$3 info
+  fm_backend_herdr_cli "$session" tab rename "$tab_id" "$label" >/dev/null || return 1
+  info=$(fm_backend_herdr_cli "$session" tab get "$tab_id" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg tab "$tab_id" --arg label "$label" \
+    '.result.tab.tab_id == $tab and .result.tab.label == $label' >/dev/null 2>&1 || {
+    echo "error: herdr tab $tab_id did not retain display label '$label'" >&2
+    return 1
+  }
+}
+
+# fm_backend_herdr_replace_recorded_husk: after a replacement task tab exists,
+# remove only one exact metadata-recorded dead or agent-free predecessor.
+# Human labels are never read. A live, unknown, malformed, or mismatched
+# predecessor refuses without closing either tab.
+fm_backend_herdr_replace_recorded_husk() {  # <session> <old-workspace> <old-tab> <old-pane> <new-workspace> <new-tab> <new-pane>
+  local session=$1 old_workspace=$2 old_tab=$3 old_pane=$4
+  local new_workspace=$5 new_tab=$6 new_pane=$7 old_info new_info state
+  [ "$old_tab" != "$new_tab" ] && [ "$old_pane" != "$new_pane" ] || return 1
+  new_info=$(fm_backend_herdr_cli "$session" tab get "$new_tab" 2>/dev/null) || return 1
+  printf '%s' "$new_info" | jq -e --arg tab "$new_tab" --arg workspace "$new_workspace" '
+    .result.tab.tab_id == $tab and .result.tab.workspace_id == $workspace
+  ' >/dev/null 2>&1 || return 1
+  new_info=$(fm_backend_herdr_cli "$session" pane get "$new_pane" 2>/dev/null) || return 1
+  printf '%s' "$new_info" | jq -e --arg pane "$new_pane" --arg tab "$new_tab" --arg workspace "$new_workspace" '
+    .result.pane.pane_id == $pane
+    and .result.pane.tab_id == $tab
+    and .result.pane.workspace_id == $workspace
+  ' >/dev/null 2>&1 || return 1
+  old_info=$(fm_backend_herdr_cli "$session" tab get "$old_tab" 2>/dev/null) || return 0
+  printf '%s' "$old_info" | jq -e --arg tab "$old_tab" --arg workspace "$old_workspace" '
+    .result.tab.tab_id == $tab and .result.tab.workspace_id == $workspace
+  ' >/dev/null 2>&1 || return 1
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$old_pane")
+  case "$state" in
+    dead|no-agent) ;;
+    live|unknown) return 1 ;;
+  esac
+  fm_backend_herdr_cli "$session" tab close "$old_tab" >/dev/null 2>&1 || return 1
+  [ "$(fm_backend_herdr_pane_agent_state "$session" "$old_pane")" = dead ]
+}
+
 # fm_backend_herdr_projection_create_task: create one disposable presentation
 # workspace and its normal fm-<id> task tab without looking up, adopting, or
 # reusing any existing workspace.
@@ -1419,9 +1461,10 @@ fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-pane>
 # Return 0 means exact reclaim, 2 means non-mutating or exactly rolled-back
 # refusal with flat fallback permitted, and 1 means a live/unknown or
 # post-mutation uncertainty that must refuse the launch.
-fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <parent-label> <task-label> <cwd>
+fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <parent-label> <task-label> <cwd> [display-label]
   local session=$1 journal=$2 id=$3 home=$4 meta_workspace=$5 meta_tab=$6 meta_pane=$7
-  local parent_label=$8 task_label=$9 cwd=${10} canonical_home state focus_before active_tab out new_tab new_pane info close_status
+  local parent_label=$8 task_label=$9 cwd=${10} display_label=${11:-$9}
+  local canonical_home state focus_before active_tab out new_tab new_pane info close_status
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=""
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=""
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
@@ -1485,6 +1528,12 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     echo "warning: herdr presentation reclaim for $id returned ambiguous replacement ids; spawning flat" >&2
     return 2
   fi
+  if [ "$display_label" != "$task_label" ] \
+     && ! fm_backend_herdr_rename_task "$session" "$new_tab" "$display_label"; then
+    fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
+    echo "warning: herdr presentation reclaim for $id could not label its exact replacement; spawning flat" >&2
+    return 2
+  fi
   fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "husk replacement create" || return 1
   info=$(fm_backend_herdr_cli "$session" tab get "$new_tab" 2>/dev/null) || info=
   if ! printf '%s' "$info" | jq -e --arg tab "$new_tab" --arg workspace "$meta_workspace" '
@@ -1546,13 +1595,13 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     "$session" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
     "$meta_workspace" "$new_tab" "$new_pane" \
     "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" "$parent_label" \
-    "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$task_label"; then
+    "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$display_label"; then
     fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
     echo "warning: herdr presentation reclaim for $id did not converge exactly; spawning flat" >&2
     return 2
   fi
   if ! fm_backend_herdr_projection_journal_replace_endpoint \
-    "$journal" "$id" "$meta_tab" "$meta_pane" "$new_tab" "$new_pane"; then
+    "$journal" "$id" "$meta_tab" "$meta_pane" "$new_tab" "$new_pane" "$display_label"; then
     fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
     echo "warning: herdr presentation reclaim for $id could not publish its replacement binding; spawning flat" >&2
     return 2
@@ -2269,17 +2318,11 @@ EOF
   return 1
 }
 
-# fm_backend_herdr_list_live: recovery/orphan discovery. Lists every tab whose
-# label looks like a firstmate task window (fm-<id>) in <session>'s, THIS
-# HOME'S OWN workspace (fm_backend_herdr_workspace_label - never another
-# home's), by LABEL - never by trusting a stored pane id, since ids are not
-# guaranteed stable across every server lifecycle (see herdr-verification-p2.md
-# "ID stability"). A caller running as a given home (e.g. a secondmate
-# recovering its own in-flight work) naturally scopes to that home's own
-# workspace because FM_HOME already names it - no glue needed, unlike the
-# primary-spawns-a-secondmate path in fm-spawn.sh. Read-only: a session/
-# workspace that does not exist yet simply lists nothing. One
-# "<session>:<pane_id>\t<label>" line per live task tab.
+# fm_backend_herdr_list_live: legacy diagnostic inventory for pre-label task
+# tabs whose labels still start with fm-. New human-labeled tasks intentionally
+# do not use this display scan for recovery or ownership; their exact endpoint
+# metadata is authoritative. The scan remains scoped to this home's workspace
+# and is read-only. One "<session>:<pane_id>\t<label>" line per legacy tab.
 fm_backend_herdr_list_live() {  # <session>
   local session=$1 wsid tabs tab_id label pane_id
   wsid=$(fm_backend_herdr_workspace_find "$session") || return 0

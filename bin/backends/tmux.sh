@@ -94,6 +94,35 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
   printf '%s\n' "$wid"
 }
 
+# fm_backend_tmux_rename_task: set and verify the mutable human display name of
+# one response-derived window id. The id remains the only target returned to
+# callers and persisted in task metadata.
+fm_backend_tmux_rename_task() {  # <window-id> <display-label>
+  local wid=$1 label=$2 actual
+  tmux rename-window -t "$wid" "$label" || return 1
+  actual=$(tmux display-message -p -t "$wid" '#{window_name}') || return 1
+  [ "$actual" = "$label" ] || {
+    echo "error: tmux window $wid did not retain display label '$label'" >&2
+    return 1
+  }
+}
+
+# fm_backend_tmux_replace_recorded_dead: after a replacement window exists,
+# remove only one exact metadata-recorded predecessor that is still a dead
+# shell. Mutable window names are never inspected.
+fm_backend_tmux_replace_recorded_dead() {  # <old-target> <new-target>
+  local old_target=$1 new_target=$2 state
+  [ "$old_target" != "$new_target" ] || return 1
+  state=$(fm_backend_tmux_agent_state "$old_target")
+  case "$state" in
+    missing) return 0 ;;
+    dead) ;;
+    alive|ambiguous|unreadable) return 1 ;;
+  esac
+  fm_backend_tmux_kill "$old_target" || return 1
+  [ "$(fm_backend_tmux_agent_state "$old_target")" = missing ]
+}
+
 # fm_backend_tmux_current_path: the live pane's current working directory, or
 # empty on any tmux error. Mirrors fm-spawn.sh's worktree-discovery poll:
 # `tmux display-message -p -t "$T" '#{pane_current_path}'`.
@@ -121,7 +150,7 @@ fm_backend_tmux_send_literal() {  # <target> <text>
 # Empty, omitted, and malformed targets return nonzero before invoking tmux so
 # tmux can never interpret an empty target as the caller's current window.
 fm_backend_tmux_kill() {  # <target>
-  local target=${1:-} session window
+  local target=${1:-} session window windows
   case "$target" in
     *:*)
       session=${target%%:*}
@@ -132,7 +161,16 @@ fm_backend_tmux_kill() {  # <target>
   case "$session:$window" in
     :*|*:|*:*:*) return 1 ;;
   esac
-  tmux kill-window -t "=$session:=$window" 2>/dev/null || true
+  case "$window" in
+    @*)
+      windows=$(tmux list-windows -t "$session" -F '#{window_id}' 2>/dev/null) || return 0
+      printf '%s\n' "$windows" | grep -Fqx "$window" || return 0
+      tmux kill-window -t "$window" 2>/dev/null || true
+      ;;
+    *)
+      tmux kill-window -t "=$session:=$window" 2>/dev/null || true
+      ;;
+  esac
 }
 
 # fm_backend_tmux_current_command: <target>'s live foreground process name -
@@ -158,7 +196,7 @@ fm_backend_tmux_current_command() {  # <target>
 # `missing`; any other inventory or pane read failure is `unreadable`, so a
 # transient tmux problem never licenses a duplicate.
 fm_backend_tmux_agent_state() {  # <target>
-  local target=$1 comm session window windows inventory_status
+  local target=$1 comm session window windows inventory_status inventory_format
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
@@ -166,7 +204,11 @@ fm_backend_tmux_agent_state() {  # <target>
   esac
   session=${target%%:*}
   window=${target#*:}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+  case "$window" in
+    @*) inventory_format='#{window_id}' ;;
+    *) inventory_format='#{window_name}' ;;
+  esac
+  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F "$inventory_format" 2>&1); then
     inventory_status=0
   else
     inventory_status=$?

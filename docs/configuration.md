@@ -68,6 +68,8 @@ A cmux spawn additionally version-gates against the installed `cmux` binary's ve
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 Every new task records `endpoint_task_id=` as the cleanup binding between the metadata filename and its opaque runtime endpoint.
+Every new task records `label=` as mutable display state that never participates in endpoint identity, ownership, or cleanup.
+New tmux tasks record `window=<session>:@<window-id>` so their human-readable window names can change without changing the endpoint.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
@@ -80,7 +82,8 @@ Only metadata-routed task selectors carry secondmate-marker and Codex-harness co
 These five sentences are the single owner of the task-selector vocabulary; backend guides and other documents point here instead of restating the resolution order.
 `fm-teardown.sh <id>` takes a task id directly and validates the complete metadata-only endpoint identity before any runtime dispatch or cleanup mutation.
 Missing, empty, duplicate, malformed, backend-inconsistent, or task-mismatched endpoint records are preserved and refused.
-Legacy tmux metadata remains cleanup-compatible when its exact window name is `fm-<id>`; opaque non-tmux endpoints require their recorded `endpoint_task_id=` binding.
+Legacy tmux metadata remains cleanup-compatible when its exact window name is `fm-<id>`.
+New id-addressed tmux endpoints and opaque non-tmux endpoints require their recorded `endpoint_task_id=` binding.
 By default, Herdr workspaces are derived from `FM_HOME`: the primary home uses `firstmate`, and a secondmate home marked by `.fm-secondmate-home` uses `2ndmate-<secondmate-id>`.
 The default-container spawn, list-live, and recovery paths read that label from the active home, so a secondmate's own crewmates stay inside that secondmate home's herdr space.
 The optional local `config/herdr-presentation-spaces` presence flag instead enables Herdr's default-off disposable single-task visual projection; [Optional presentation spaces](herdr-backend.md#optional-presentation-spaces) owns its behavior, safety limits, recovery contract, and narrow locked session-start cleanup of exact restored idle-shell children.

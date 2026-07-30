@@ -144,6 +144,7 @@ The current structural gate removes label inference from cleanup authority.
 ```text
 backend=herdr
 window=<session>:<pane-id>
+label=<human-display-label>
 herdr_session=<session>
 herdr_workspace_id=<workspace-id>
 herdr_tab_id=<tab-id>
@@ -153,6 +154,7 @@ herdr_pane_id=<pane-id>
 A Herdr pane id contains a colon, so the adapter splits `window=` on the first colon only.
 The recorded pane is the operational fast path.
 Workspace and tab ids support verification and cleanup but are not inferred from mutable labels during normal operation.
+On an ordinary respawn, Firstmate creates and labels the replacement first, then removes only the exact metadata-recorded dead or agent-free predecessor.
 
 ## Current transport behavior
 
@@ -202,8 +204,8 @@ No Herdr-specific copy of that protocol exists.
 ## Restart and liveness behavior
 
 Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids, but the underlying harness processes and live agent registrations do not survive.
-A restored same-labeled tab with a missing pane or no registered agent is a husk.
-Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
+A restored metadata-recorded tab with a missing pane or no registered agent is a husk.
+Create replaces only that exact confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
 
 The generic Herdr agent-liveness probe reuses the same classifier.
