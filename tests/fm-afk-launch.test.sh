@@ -908,6 +908,136 @@ e2e_tmux() {
   rm -rf "$home_tmp" 2>/dev/null || true
 }
 
+# ---------------------------------------------------------------------------
+# UNIT 4: unexpected daemon death is durable and active, while a PID-and-
+# identity-scoped intent suppresses only the exact lifecycle stop it authorizes.
+# These run a real daemon in a disposable FM_HOME and target a uniquely named
+# tmux session, so no process or state outside this test home is touched.
+# ---------------------------------------------------------------------------
+death_test_start_daemon() {  # <home> <captain-session> <captain-pane>
+  local home=$1 captain_session=$2 captain_pane=$3 notifier pid
+  mkdir -p "$home/config"
+  notifier="$home/record-alarm"
+  cat > "$notifier" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-}" >> "$(dirname "$0")/alarms"
+SH
+  chmod +x "$notifier"
+  printf 'command:%s\n' "$notifier" > "$home/config/wedge-alarm"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_SUPERVISOR_TARGET="$captain_pane" \
+    FM_SUPERVISOR_BACKEND=tmux FM_WEDGE_ALARM_EXEC="$notifier" "$LAUNCH" start >/dev/null 2>&1 || return 1
+  for _ in $(seq 1 100); do
+    pid=$(cat "$home/state/.supervise-daemon.pid" 2>/dev/null || true)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null \
+      && [ -d "$home/state/.supervise-daemon.lock" ]; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  return 1
+}
+
+death_test_stop_home() {  # <home> <captain-session>
+  FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" "$LAUNCH" stop >/dev/null 2>&1 || true
+  tmux kill-session -t "$2" 2>/dev/null || true
+  rm -rf "$1" 2>/dev/null || true
+}
+
+unit_expected_stop_does_not_alarm() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (daemon death stop)"; return 0; }
+  local home captain_session captain_pane
+  home=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-death-stop.XXXXXX")
+  captain_session="fm-afk-death-stop-cap-$$"
+  tmux new-session -d -s "$captain_session" 2>/dev/null || { fail "daemon death stop: captain session creation failed"; rm -rf "$home"; return 0; }
+  captain_pane=$(tmux display-message -p -t "$captain_session" '#{pane_id}')
+  if death_test_start_daemon "$home" "$captain_session" "$captain_pane" \
+    && FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$LAUNCH" stop >/dev/null 2>&1 \
+    && [ ! -e "$home/state/.supervise-daemon.unexpected-exit" ] \
+    && [ ! -s "$home/alarms" ] \
+    && [ ! -e "$home/state/.supervise-daemon.stop-intent" ]; then
+    pass "daemon death: launcher stop records an exact intent and raises no alarm"
+  else
+    fail "daemon death: a deliberate launcher stop left an unexpected-exit alarm"
+  fi
+  death_test_stop_home "$home" "$captain_session"
+}
+
+unit_external_daemon_term_alarms() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (daemon death TERM)"; return 0; }
+  local home captain_session captain_pane pid marker
+  home=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-death-term.XXXXXX")
+  captain_session="fm-afk-death-term-cap-$$"
+  tmux new-session -d -s "$captain_session" 2>/dev/null || { fail "daemon death TERM: captain session creation failed"; rm -rf "$home"; return 0; }
+  captain_pane=$(tmux display-message -p -t "$captain_session" '#{pane_id}')
+  marker="$home/state/.supervise-daemon.unexpected-exit"
+  if death_test_start_daemon "$home" "$captain_session" "$captain_pane"; then
+    pid=$(cat "$home/state/.supervise-daemon.pid" 2>/dev/null || true)
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 1 100); do [ -s "$marker" ] && break; sleep 0.05; done
+  fi
+  if [ -s "$marker" ] \
+    && grep -F 'signal=TERM' "$marker" >/dev/null \
+    && grep -Eq '^recorded_at=[0-9]{4}-[0-9]{2}-[0-9]{2}T' "$marker" \
+    && grep -F "pid=$pid" "$marker" >/dev/null \
+    && grep -F 'pid_identity=' "$marker" >/dev/null; then
+    pass "daemon death: external TERM while afk writes identity marker and fires wedge alarm channel"
+  else
+    fail "daemon death: external TERM did not leave a durable active alarm"
+  fi
+  death_test_stop_home "$home" "$captain_session"
+}
+
+unit_stop_intent_wins_exit_race() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (daemon death race)"; return 0; }
+  local home captain_session captain_pane pid identity
+  home=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-death-race.XXXXXX")
+  captain_session="fm-afk-death-race-cap-$$"
+  tmux new-session -d -s "$captain_session" 2>/dev/null || { fail "daemon death race: captain session creation failed"; rm -rf "$home"; return 0; }
+  captain_pane=$(tmux display-message -p -t "$captain_session" '#{pane_id}')
+  if death_test_start_daemon "$home" "$captain_session" "$captain_pane"; then
+    pid=$(cat "$home/state/.supervise-daemon.pid" 2>/dev/null || true)
+    identity=$(cat "$home/state/.supervise-daemon.lock/pid-identity" 2>/dev/null || true)
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c \
+      '. "$1"; fm_afk_stop_intent_publish "$2" "$3" "$4"' _ \
+      "$ROOT/bin/fm-afk-death-lib.sh" "$home/state" "$pid" "$identity" \
+      && kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
+  fi
+  if [ ! -e "$home/state/.supervise-daemon.unexpected-exit" ] \
+    && [ ! -s "$home/alarms" ] \
+    && [ ! -e "$home/state/.supervise-daemon.stop-intent" ]; then
+    pass "daemon death race: published exact intent wins a concurrent external TERM"
+  else
+    fail "daemon death race: exact stop intent produced a false alarm or leaked"
+  fi
+  death_test_stop_home "$home" "$captain_session"
+}
+
+unit_refresh_and_reconcile_do_not_refire_death_alarm() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (daemon death reconcile)"; return 0; }
+  local home captain_session captain_pane pid alarm_count
+  home=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-death-reconcile.XXXXXX")
+  captain_session="fm-afk-death-reconcile-cap-$$"
+  tmux new-session -d -s "$captain_session" 2>/dev/null || { fail "daemon death reconcile: captain session creation failed"; rm -rf "$home"; return 0; }
+  captain_pane=$(tmux display-message -p -t "$captain_session" '#{pane_id}')
+  if death_test_start_daemon "$home" "$captain_session" "$captain_pane"; then
+    pid=$(cat "$home/state/.supervise-daemon.pid" 2>/dev/null || true)
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 1 100); do [ -s "$home/alarms" ] && break; sleep 0.05; done
+    alarm_count=$(wc -l < "$home/alarms" 2>/dev/null | tr -d ' ')
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_SUPERVISOR_TARGET="$captain_pane" \
+      FM_SUPERVISOR_BACKEND=tmux "$LAUNCH" start >/dev/null 2>&1 || true
+  fi
+  if [ "${alarm_count:-0}" = 1 ] \
+    && [ "$(wc -l < "$home/alarms" 2>/dev/null | tr -d ' ')" = 1 ] \
+    && [ -s "$home/state/.supervise-daemon.pid" ]; then
+    pass "daemon death: refresh reconciles its terminal and starts a replacement without refiring"
+  else
+    fail "daemon death: refresh or terminal reconciliation refired the prior death alarm"
+  fi
+  death_test_stop_home "$home" "$captain_session"
+}
+
 unit_clear_stale
 unit_relative_paths_are_absolute_before_daemon_launch
 unit_fresh_vs_refresh
@@ -935,6 +1065,10 @@ unit_stop_validates_before_signal
 unit_lock_requires_complete_metadata
 unit_stop_surfaces_afk_removal_failure
 unit_stop_confirms_daemon_exit
+unit_expected_stop_does_not_alarm
+unit_external_daemon_term_alarms
+unit_stop_intent_wins_exit_race
+unit_refresh_and_reconcile_do_not_refire_death_alarm
 unit_refresh_validates_record
 unit_clear_failure_aborts_entry
 unit_confirmed_absence_succeeds

@@ -2,6 +2,7 @@
 
 The away-mode sub-supervisor (`bin/fm-supervise-daemon.sh`) buffers escalations and injects them into Firstmate's own pane.
 When injection cannot confirm a submit past `FM_MAX_DEFER_SECS`, `inject_wedge_alarm` raises a loud, rate-limited alarm so the stall never stays invisible.
+An away-mode daemon exit without its exact lifecycle stop intent raises this same channel and writes `state/.supervise-daemon.unexpected-exit` with the exit signal, timestamp, PID, and process identity.
 The active alert is pane-independent because a tmux status-line flash has no cross-backend equivalent and cannot reach an unattended captain reliably.
 The durable marker and tmux flash remain as additional signals.
 

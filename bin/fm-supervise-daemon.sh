@@ -1287,6 +1287,8 @@ fm_super_main() {
   # Export FM_STATE_OVERRIDE so the lib resolves the same state dir.
   # shellcheck source=bin/fm-wake-lib.sh
   FM_STATE_OVERRIDE="$STATE" . "$FM_DAEMON_DIR/fm-wake-lib.sh"
+  # shellcheck source=bin/fm-afk-death-lib.sh
+  . "$FM_DAEMON_DIR/fm-afk-death-lib.sh"
 
   local WATCH="$FM_DAEMON_DIR/fm-watch.sh"
   local LOG="$STATE/.supervise-daemon.log"
@@ -1310,8 +1312,14 @@ fm_super_main() {
     fi
     exit 1
   fi
-  echo "$$" > "$PIDFILE"
-  fm_pid_identity "${BASHPID:-$$}" > "$LOCK/pid-identity" 2>/dev/null || true
+  local DAEMON_PID="${BASHPID:-$$}" DAEMON_IDENTITY
+  DAEMON_IDENTITY=$(fm_pid_identity "$DAEMON_PID" 2>/dev/null) || {
+    echo "error: cannot identify away-mode daemon pid $DAEMON_PID" >&2
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    exit 1
+  }
+  echo "$DAEMON_PID" > "$PIDFILE"
+  printf '%s\n' "$DAEMON_IDENTITY" > "$LOCK/pid-identity" 2>/dev/null || true
 
   # --- auto-discover the supervisor BACKEND (tmux vs herdr) first -----------
   # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1
@@ -1394,12 +1402,43 @@ fm_super_main() {
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------
   local WATCHER_PID="" CUR_TMP=""
+  record_daemon_exit() {  # <signal-or-exit>
+    local signal=$1 marker
+    afk_active "$STATE" || return 0
+    if [ -n "$DAEMON_IDENTITY" ] \
+      && fm_afk_stop_intent_matches "$STATE" "$DAEMON_PID" "$DAEMON_IDENTITY"; then
+      fm_afk_stop_intent_retire "$STATE" "$DAEMON_PID" "$DAEMON_IDENTITY" || true
+      log "daemon expected stop observed (signal=$signal pid=$DAEMON_PID)"
+      return 0
+    fi
+    marker=$(fm_afk_unexpected_exit_path "$STATE")
+    if fm_afk_unexpected_exit_record "$STATE" "$signal" "$DAEMON_PID" "$DAEMON_IDENTITY"; then
+      log "ERROR: away-mode daemon exited unexpectedly (signal=$signal pid=$DAEMON_PID identity=$DAEMON_IDENTITY); alarm marker written"
+      wedge_alarm_notify "away-mode daemon exited unexpectedly (signal=$signal pid=$DAEMON_PID) - see $marker" "$marker"
+    else
+      log "ERROR: away-mode daemon exited unexpectedly (signal=$signal pid=$DAEMON_PID); failed to write alarm marker"
+      wedge_alarm_notify "away-mode daemon exited unexpectedly (signal=$signal pid=$DAEMON_PID) - durable marker write failed" "$marker"
+    fi
+  }
   cleanup() {
-    trap - TERM INT
+    local signal=${1:-EXIT}
+    trap - TERM INT HUP
+    # Persist and emit before any best-effort flush or child reap can stall.
+    # The death signal must survive even when the watcher is itself wedged.
+    record_daemon_exit "$signal"
     wedge_alarm_stop_active_notifier
     escalate_flush "$STATE" 2>/dev/null || true
     if [ -n "${WATCHER_PID:-}" ]; then
       kill "$WATCHER_PID" 2>/dev/null || true
+      for _ in $(seq 1 20); do
+        fm_pid_alive "$WATCHER_PID" || break
+        sleep 0.05
+      done
+      # A watcher inherited from a detached terminal can itself ignore TERM.
+      # It is this daemon's exact child, so bounded reaping may escalate safely.
+      if fm_pid_alive "$WATCHER_PID"; then
+        kill -KILL "$WATCHER_PID" 2>/dev/null || true
+      fi
       wait "$WATCHER_PID" 2>/dev/null || true
     fi
     if [ -n "${CUR_TMP:-}" ]; then
@@ -1408,9 +1447,13 @@ fm_super_main() {
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
     log "daemon shutting down"
+    trap - EXIT
     exit 0
   }
-  trap cleanup TERM INT
+  trap 'cleanup TERM' TERM
+  trap 'cleanup INT' INT
+  trap 'cleanup HUP' HUP
+  trap 'cleanup EXIT' EXIT
 
   # --- crash-loop guard -----------------------------------------------------
   local crash_times=() backoff_secs=$CRASH_NORMAL_SLEEP
