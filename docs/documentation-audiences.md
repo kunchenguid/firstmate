@@ -4,6 +4,15 @@
 `bin/fm-doc-audience-check.sh` validates exact inventory coverage, README setup routing, required owner pointers, and local link targets.
 Audience metadata is centralized there rather than copied into front matter on every page.
 
+Every surface declares three required fields, and the check refuses a surface that omits any of them rather than defaulting one:
+
+- `audience` - who reads it, from the classes below.
+- `injection` - how it reaches a reader: `always` (in context at every session with no action), `lazy` (loaded at a named trigger), `generated` (reaches a reader only through a renderer), `referenced` (cited and read on demand), or `never` (never loaded into an agent session).
+- `responsibility` - the single sentence this surface uniquely owns.
+
+The one-sentence limit on `responsibility` is the enforcement, not a style preference: a surface that needs two sentences owns too much, and the fix is to split the document rather than widen the field.
+Because `injection` is declared per surface, the always-loaded set is a queryable list instead of a claim, so growth in it is visible in review.
+
 The audience classes have one placement purpose each:
 
 - `public-product` introduces the product or provides standalone public material.

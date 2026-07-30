@@ -182,7 +182,8 @@ Bearings invocation examples:
 - `/bearings file` replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch and links it from the four-section chat digest.
 - `/bearings file include PRs` combines the dated report with live PR enrichment.
 
-Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
+Agent-only reference skills live under `.agents/skills/` and are marked `user-invocable: false`; firstmate loads each at the trigger stated in that skill's own frontmatter `description:`.
+Harnesses that inject skill descriptions surface those triggers on their own, and on any harness that does not, `bin/fm-skill-index.sh` renders the same triggers into the session-start digest.
 
 ### Two-tier skill layout
 

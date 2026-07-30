@@ -46,6 +46,12 @@
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
 #
+# The supervision-block step (4) also emits the agent-only skill trigger index
+# via fm-skill-index.sh, which owns both its content and the emit/suppress
+# decision: silent on a harness that already injects skill descriptions, full
+# index everywhere else. That replaced AGENTS.md section 13's hand-maintained
+# roster, so a new agent-only skill is registered only in its own frontmatter.
+#
 # On a Pi primary, the supervision-block step also checks whether Pi's two
 # tracked primary extensions are loaded and prints a PI_WATCH_EXTENSION
 # reminder line when one is missing.
@@ -333,6 +339,18 @@ fi
   --read-only "$READ_ONLY" \
   --afk "$AFK_PRESENT" \
   --x-mode "$X_MODE_PRESENT"
+
+# Agent-only skill trigger index, rendered from each skill's own frontmatter.
+# fm-skill-index.sh owns both the content and the emit/suppress decision: it
+# prints nothing on a harness that already injects skill descriptions (so the
+# index is never a duplicate) and prints the full index everywhere else (so a
+# harness without that injection still sees every trigger). AGENTS.md keeps only
+# the one-line rule, not the roster.
+SKILL_INDEX_OUT=$("$SCRIPT_DIR/fm-skill-index.sh" --harness "$PRIMARY_HARNESS" 2>/dev/null)
+if [ -n "$SKILL_INDEX_OUT" ]; then
+  subsection "AGENT-ONLY SKILLS"
+  printf '%s\n' "$SKILL_INDEX_OUT"
+fi
 
 # --- 4. context digest -----------------------------------------------------
 section "CONTEXT"

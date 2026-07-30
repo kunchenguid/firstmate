@@ -45,6 +45,14 @@ elif mode.name == "missing-owner-pointer":
     }
 elif mode.name == "shrink-scope":
     data["scope"]["trackedPatterns"] = ["README.md"]
+elif mode.name == "missing-injection":
+    del data["surfaces"][0]["injection"]
+elif mode.name == "bad-injection":
+    data["surfaces"][0]["injection"] = "sometimes"
+elif mode.name == "missing-responsibility":
+    del data["surfaces"][0]["responsibility"]
+elif mode.name == "two-sentence-responsibility":
+    data["surfaces"][0]["responsibility"] = "Owns one thing. It also owns another thing."
 else:
     raise SystemExit(f"unknown mode: {mode.name}")
 destination.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
@@ -77,6 +85,48 @@ test_duplicate_and_setup_classification_fail() {
   pass "classification, setup routing, and maintained-prose scope fail safely"
 }
 
+test_injection_and_responsibility_are_required() {
+  local missing_injection="$TMP_ROOT/missing-injection.json"
+  local bad_injection="$TMP_ROOT/bad-injection.json"
+  local missing_responsibility="$TMP_ROOT/missing-responsibility.json"
+  local two_sentence="$TMP_ROOT/two-sentence.json"
+  mutate_inventory "$INVENTORY" "$missing_injection" missing-injection
+  mutate_inventory "$INVENTORY" "$bad_injection" bad-injection
+  mutate_inventory "$INVENTORY" "$missing_responsibility" missing-responsibility
+  mutate_inventory "$INVENTORY" "$two_sentence" two-sentence-responsibility
+  run_expect_failure "unsupported injection" \
+    "$CHECK" --inventory "$missing_injection"
+  run_expect_failure "unsupported injection 'sometimes'" \
+    "$CHECK" --inventory "$bad_injection"
+  run_expect_failure "responsibility must be a non-empty one-sentence string" \
+    "$CHECK" --inventory "$missing_responsibility"
+  run_expect_failure "responsibility must be exactly one sentence" \
+    "$CHECK" --inventory "$two_sentence"
+  pass "every surface must declare a supported injection and exactly one sentence of responsibility"
+}
+
+test_always_loaded_set_is_queryable() {
+  local always
+  always=$(python3 - "$INVENTORY" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+for entry in data["surfaces"]:
+    if entry["injection"] == "always":
+        print(entry["path"])
+PY
+) || fail "could not query the always-loaded set"
+  assert_contains "$always" "AGENTS.md" \
+    "the always-loaded set does not name the operating contract"
+  # The always-loaded plane is the scarcest resource in the fleet; a surface
+  # joining it should be a deliberate, visible review event, not a default.
+  [ "$(printf '%s\n' "$always" | grep -c .)" -le 2 ] \
+    || fail "the always-loaded prose set grew beyond AGENTS.md and its symlink alias"
+  pass "the always-loaded prose set is a queryable list, not a claim"
+}
+
 test_required_pointer_fails() {
   local missing_pointer="$TMP_ROOT/missing-pointer.json"
   mutate_inventory "$INVENTORY" "$missing_pointer" missing-owner-pointer
@@ -92,16 +142,21 @@ write_fixture_inventory() {
   "version": 1,
   "scope": {"trackedPatterns": ["*.md", "*.mdx", "*.rst", "*.txt", "docs/examples/*"]},
   "allowedAudiences": ["public-product", "operator-current", "maintainer-verification"],
+  "allowedInjections": ["always", "lazy", "generated", "referenced", "never"],
   "setupAudiences": ["public-product", "operator-current"],
   "readmeSetupTargets": ["docs/setup.md"],
   "requiredOwnerPointers": [
     {"source": "README.md", "target": "docs/policy.md"}
   ],
   "surfaces": [
-    {"path": "README.md", "audience": "public-product"},
-    {"path": "docs/evidence.md", "audience": "maintainer-verification"},
-    {"path": "docs/policy.md", "audience": "operator-current"},
-    {"path": "docs/setup.md", "audience": "operator-current"}
+    {"path": "README.md", "audience": "public-product", "injection": "never",
+     "responsibility": "Introduces the fixture product."},
+    {"path": "docs/evidence.md", "audience": "maintainer-verification", "injection": "referenced",
+     "responsibility": "Records fixture verification evidence."},
+    {"path": "docs/policy.md", "audience": "operator-current", "injection": "referenced",
+     "responsibility": "Owns the fixture policy."},
+    {"path": "docs/setup.md", "audience": "operator-current", "injection": "referenced",
+     "responsibility": "Owns fixture setup."}
   ]
 }
 JSON
@@ -137,5 +192,7 @@ MD
 
 test_repository_inventory_passes
 test_duplicate_and_setup_classification_fail
+test_injection_and_responsibility_are_required
+test_always_loaded_set_is_queryable
 test_required_pointer_fails
 test_local_links_and_no_keyword_heuristic

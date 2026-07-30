@@ -6,6 +6,12 @@
 #   bin/fm-doc-audience-check.sh --root <repo> [--inventory <path>]
 #
 # The inventory owns classification and setup routing.
+# Every surface must declare audience (who reads it), injection (how it reaches
+# a reader), and responsibility (the one sentence it uniquely owns). All three
+# are REQUIRED: an unclassifiable surface is the signal that it owns too much or
+# has no reason to exist, so the check refuses rather than defaulting a field.
+# The responsibility must be exactly one sentence - if it needs two, split the
+# document instead of widening the field.
 # This check validates structure only and does not keyword-lint prose.
 set -eu
 
@@ -27,6 +33,10 @@ from urllib.parse import unquote, urlsplit
 MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 HTML_LINK_RE = re.compile(r"\b(?:href|src)=[\"']([^\"']+)[\"']", re.IGNORECASE)
 REQUIRED_TRACKED_PATTERNS = ["*.md", "*.mdx", "*.rst", "*.txt", "docs/examples/*"]
+# A sentence terminator followed by more prose means the responsibility is not
+# one sentence. A dot inside a path or filename (bin/fm-lint.sh) has no
+# following whitespace, so it does not match.
+SENTENCE_BREAK_RE = re.compile(r"[.!?]\s+\S")
 
 
 class CheckError(Exception):
@@ -149,6 +159,7 @@ def validate(root: Path, inventory_path: Path) -> tuple[int, int]:
     setup_audiences = set(list_of_strings(data.get("setupAudiences"), "setupAudiences"))
     if not setup_audiences <= audiences:
         fail("setupAudiences contains an audience outside allowedAudiences")
+    injections = set(list_of_strings(data.get("allowedInjections"), "allowedInjections"))
 
     surfaces = data.get("surfaces")
     if not isinstance(surfaces, list):
@@ -160,10 +171,24 @@ def validate(root: Path, inventory_path: Path) -> tuple[int, int]:
             fail(f"surfaces[{index}] must be an object")
         path = entry.get("path")
         audience = entry.get("audience")
+        injection = entry.get("injection")
+        responsibility = entry.get("responsibility")
         if not isinstance(path, str) or not path:
             fail(f"surfaces[{index}].path must be a non-empty string")
         if audience not in audiences:
             fail(f"{path}: unsupported audience {audience!r}")
+        if injection not in injections:
+            fail(f"{path}: unsupported injection {injection!r}")
+        if not isinstance(responsibility, str) or not responsibility.strip():
+            fail(f"{path}: responsibility must be a non-empty one-sentence string")
+        responsibility = responsibility.strip()
+        if not responsibility.endswith("."):
+            fail(f"{path}: responsibility must be one sentence ending in a period")
+        if SENTENCE_BREAK_RE.search(responsibility):
+            fail(
+                f"{path}: responsibility must be exactly one sentence - "
+                "split the document instead of widening the field"
+            )
         paths.append(path)
         classifications[path] = audience
 

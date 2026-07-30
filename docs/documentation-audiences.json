@@ -18,6 +18,13 @@
     "maintainer-verification",
     "agent-runtime"
   ],
+  "allowedInjections": [
+    "always",
+    "lazy",
+    "generated",
+    "referenced",
+    "never"
+  ],
   "setupAudiences": [
     "public-product",
     "operator-current",
@@ -105,239 +112,357 @@
   "surfaces": [
     {
       "path": ".agents/skills/afk/SKILL.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "lazy",
+      "responsibility": "Runs the away-mode daemon lifecycle and its return gate."
     },
     {
       "path": ".agents/skills/ahoy/SKILL.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "lazy",
+      "responsibility": "Recaps visible session events since the prior real captain message."
     },
     {
       "path": ".agents/skills/ask-user-authority/SKILL.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "lazy",
+      "responsibility": "Decides whether an ask-user finding is a correction within accepted intent or a contract expansion needing the captain."
     },
     {
       "path": ".agents/skills/bearings/SKILL.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "lazy",
+      "responsibility": "Renders a pick-up-where-I-left-off fleet digest from live fleet state."
     },
     {
       "path": ".agents/skills/bootstrap-diagnostics/SKILL.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "lazy",
+      "responsibility": "Maps each actionable session-start bootstrap diagnostic line to its owner procedure."
     },
     {
       "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "lazy",
+      "responsibility": "Guarantees an unresolved captain decision found during investigation reaches the backlog before completion."
     },
     {
       "path": ".agents/skills/diagnostic-reasoning/SKILL.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "lazy",
+      "responsibility": "Owns end-user-aligned reproduction and causal separation for a reported bug."
     },
     {
       "path": ".agents/skills/firstmate-codexapp/SKILL.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "lazy",
+      "responsibility": "Coordinates a visible Codex Desktop thread without treating it as a selectable spawn backend."
     },
     {
       "path": ".agents/skills/firstmate-coding-guidelines/SKILL.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "lazy",
+      "responsibility": "Owns knowledge placement and repo style for changes to firstmate's own shared tracked material."
     },
     {
       "path": ".agents/skills/firstmate-orca/SKILL.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "lazy",
+      "responsibility": "Operator checklist for spawning, supervising, and reconciling work on the Orca runtime backend."
     },
     {
       "path": ".agents/skills/fmx-respond/SKILL.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "lazy",
+      "responsibility": "Handles one X-mode mention or milestone from classification through public reply, task linking, and follow-ups."
     },
     {
       "path": ".agents/skills/harness-adapters/SKILL.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "lazy",
+      "responsibility": "Holds the verified per-harness spawn, interrupt, resume, dialog, and skill-invocation facts for every supported harness."
     },
     {
       "path": ".agents/skills/project-management/SKILL.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "lazy",
+      "responsibility": "Owns project add, create, clone, remove, and initialize plus the project registry and delivery-mode choice."
     },
     {
       "path": ".agents/skills/quota-array-dispatch/SKILL.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "lazy",
+      "responsibility": "Chooses among a matched dispatch-profile array using current quota data and quota-window pace."
     },
     {
       "path": ".agents/skills/secondmate-provisioning/SKILL.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "lazy",
+      "responsibility": "Owns every mutation to a secondmate home's existence, seeding, harness pin, inherited material, and retirement."
     },
     {
       "path": ".agents/skills/stow/SKILL.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "lazy",
+      "responsibility": "Sweeps a session for uncaptured durable knowledge and files it under the startup-memory bound."
     },
     {
       "path": ".agents/skills/stuck-crewmate-recovery/SKILL.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "lazy",
+      "responsibility": "Reconciles a stuck or missing ordinary direct report before escalating to relaunch or failure."
     },
     {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "lazy",
+      "responsibility": "Fast-forwards this firstmate home and every registered secondmate home from origin."
     },
     {
       "path": "AGENTS.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "always",
+      "responsibility": "States who firstmate is and the operating contract every session needs before it can act."
     },
     {
       "path": "CLAUDE.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "always",
+      "responsibility": "Symlink alias that lets a Claude-compatible harness auto-load AGENTS.md; it holds no content of its own."
     },
     {
       "path": "CONTRIBUTING.md",
-      "audience": "maintainer-architecture"
+      "audience": "maintainer-architecture",
+      "injection": "never",
+      "responsibility": "States the contributor workflow and repo conventions for people changing firstmate itself."
     },
     {
       "path": "README.md",
-      "audience": "public-product"
+      "audience": "public-product",
+      "injection": "never",
+      "responsibility": "Introduces the product and routes a new operator to setup."
     },
     {
       "path": "docs/architecture.md",
-      "audience": "maintainer-architecture"
+      "audience": "maintainer-architecture",
+      "injection": "referenced",
+      "responsibility": "Explains firstmate's supervision, spawn, and state mechanisms and the boundaries between them."
     },
     {
       "path": "docs/arm-pretool-check.md",
-      "audience": "maintainer-architecture"
+      "audience": "maintainer-architecture",
+      "injection": "referenced",
+      "responsibility": "States the human-readable contract for the watcher arm PreToolUse seatbelt whose semantic owner is bin/fm-arm-command-policy.mjs."
     },
     {
       "path": "docs/calm-mode-feasibility.md",
-      "audience": "maintainer-verification"
+      "audience": "maintainer-verification",
+      "injection": "referenced",
+      "responsibility": "Records the version-scoped feasibility evidence and supported-API boundaries behind Pi calm mode."
     },
     {
       "path": "docs/calm.md",
-      "audience": "operator-current"
+      "audience": "operator-current",
+      "injection": "referenced",
+      "responsibility": "Owns the current user-facing /calm usage and limitation contract."
     },
     {
       "path": "docs/cd-guard.md",
-      "audience": "maintainer-architecture"
+      "audience": "maintainer-architecture",
+      "injection": "referenced",
+      "responsibility": "States the human-readable contract for the cd-guard PreToolUse seatbelt whose decision owner is bin/fm-cd-command-policy.mjs."
     },
     {
       "path": "docs/cmux-backend.md",
-      "audience": "operator-current"
+      "audience": "operator-current",
+      "injection": "referenced",
+      "responsibility": "Owns cmux backend setup, limits, and runtime-detection behavior."
     },
     {
       "path": "docs/codex-app-backend.md",
-      "audience": "operator-current"
+      "audience": "operator-current",
+      "injection": "referenced",
+      "responsibility": "Records why Codex App is not a selectable runtime backend and what the host-tool boundary actually supports."
     },
     {
       "path": "docs/configuration.md",
-      "audience": "operator-current"
+      "audience": "operator-current",
+      "injection": "referenced",
+      "responsibility": "Single owner of the operational-home layout and every configuration schema an operator sets."
     },
     {
       "path": "docs/decision-hold-lifecycle.md",
-      "audience": "maintainer-architecture"
+      "audience": "maintainer-architecture",
+      "injection": "referenced",
+      "responsibility": "Records the deterministic mechanism and regression evidence behind the decision-hold policy the skill owns."
     },
     {
       "path": "docs/documentation-audiences.md",
-      "audience": "maintainer-architecture"
+      "audience": "maintainer-architecture",
+      "injection": "referenced",
+      "responsibility": "Explains the audience classes and points at their machine-consumed owner."
     },
     {
       "path": "docs/examples/crew-dispatch.json",
-      "audience": "operator-example"
+      "audience": "operator-example",
+      "injection": "referenced",
+      "responsibility": "Supplies a copyable crew-dispatch profile example an operator adapts into config/crew-dispatch.json."
     },
     {
       "path": "docs/examples/wedge-alarm",
-      "audience": "operator-example"
+      "audience": "operator-example",
+      "injection": "referenced",
+      "responsibility": "Supplies copyable wedge-alarm channel directives an operator adapts into config/wedge-alarm."
     },
     {
       "path": "docs/fm-test-isolation-proof.md",
-      "audience": "maintainer-verification"
+      "audience": "maintainer-verification",
+      "injection": "referenced",
+      "responsibility": "Records the concurrent isolation proof for the portable parallel test candidate set."
     },
     {
       "path": "docs/fm-test-portable-shards.md",
-      "audience": "maintainer-verification"
+      "audience": "maintainer-verification",
+      "injection": "referenced",
+      "responsibility": "Records which test shards are portable and how the portable lane is composed."
     },
     {
       "path": "docs/gitlab-merge-watch.md",
-      "audience": "maintainer-verification"
+      "audience": "maintainer-verification",
+      "injection": "referenced",
+      "responsibility": "Records the empirical merge-watch verification for GitLab alongside the GitHub watch."
     },
     {
       "path": "docs/herdr-backend.md",
-      "audience": "operator-current"
+      "audience": "operator-current",
+      "injection": "referenced",
+      "responsibility": "Owns Herdr backend setup, supported protocol versions, limits, and projection behavior."
     },
     {
       "path": "docs/orca-backend.md",
-      "audience": "operator-current"
+      "audience": "operator-current",
+      "injection": "referenced",
+      "responsibility": "Owns Orca backend setup and the worktree-plus-endpoint ownership model it implies."
     },
     {
       "path": "docs/scripts.md",
-      "audience": "operator-current"
+      "audience": "operator-current",
+      "injection": "referenced",
+      "responsibility": "Gives one purpose clause per bin/ script and routes the reader to each script's own header for behavior."
     },
     {
       "path": "docs/sessionstart-nudge.md",
-      "audience": "operator-current"
+      "audience": "operator-current",
+      "injection": "referenced",
+      "responsibility": "Owns what the tracked native session-open adapters do and how they stay compatible with the digest."
     },
     {
       "path": "docs/subagent-guard.md",
-      "audience": "maintainer-architecture"
+      "audience": "maintainer-architecture",
+      "injection": "referenced",
+      "responsibility": "States the contract for the guard that stops a firstmate primary from delegating work outside the fleet."
     },
     {
       "path": "docs/supervision-protocols/claude.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "generated",
+      "responsibility": "Supplies the Claude Stop-hook supervision block that session start renders for a Claude primary."
     },
     {
       "path": "docs/supervision-protocols/codex.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "generated",
+      "responsibility": "Supplies the Codex foreground-checkpoint supervision block that session start renders for a Codex primary."
     },
     {
       "path": "docs/supervision-protocols/grok.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "generated",
+      "responsibility": "Supplies the Grok background-notify supervision block that session start renders for a Grok primary."
     },
     {
       "path": "docs/supervision-protocols/opencode.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "generated",
+      "responsibility": "Supplies the OpenCode plugin background-wake supervision block that session start renders for an OpenCode primary."
     },
     {
       "path": "docs/supervision-protocols/pi.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "generated",
+      "responsibility": "Supplies the Pi extension background-wake supervision block that session start renders for a Pi primary."
     },
     {
       "path": "docs/supervision-protocols/unknown.md",
-      "audience": "agent-runtime"
+      "audience": "agent-runtime",
+      "injection": "generated",
+      "responsibility": "Supplies the fallback supervision block session start renders when the primary harness has no verified wake adapter."
     },
     {
       "path": "docs/tmux-backend.md",
-      "audience": "operator-current"
+      "audience": "operator-current",
+      "injection": "referenced",
+      "responsibility": "Owns tmux backend behavior as the verified reference runtime and secondmate baseline."
     },
     {
       "path": "docs/turnend-guard.md",
-      "audience": "operator-current"
+      "audience": "operator-current",
+      "injection": "referenced",
+      "responsibility": "States the current contract for the no-turn-ends-blind primary turn-end backstop."
     },
     {
       "path": "docs/verification/dispatch-auth.md",
-      "audience": "maintainer-verification"
+      "audience": "maintainer-verification",
+      "injection": "referenced",
+      "responsibility": "Records the evidence supporting the selected-surface authentication guarantee for quota-informed dispatch."
     },
     {
       "path": "docs/verification/public-followup.md",
-      "audience": "maintainer-verification"
+      "audience": "maintainer-verification",
+      "injection": "referenced",
+      "responsibility": "Records the evidence supporting the promised-public-reply durability and opt-in-cost guarantees."
     },
     {
       "path": "docs/verification/runtime-backends.md",
-      "audience": "maintainer-verification"
+      "audience": "maintainer-verification",
+      "injection": "referenced",
+      "responsibility": "Records reusable version-scoped evidence for the active runtime-backend guarantees."
     },
     {
       "path": "docs/verification/stow-memory.md",
-      "audience": "maintainer-verification"
+      "audience": "maintainer-verification",
+      "injection": "referenced",
+      "responsibility": "Records the evidence supporting the bounded-memory and whole-file curation guarantees for /stow."
     },
     {
       "path": "docs/verification/supervision.md",
-      "audience": "maintainer-verification"
+      "audience": "maintainer-verification",
+      "injection": "referenced",
+      "responsibility": "Records the evidence supporting current session-start, turn-end, watcher-continuity, and wedge-alarm guarantees."
     },
     {
       "path": "docs/watcher-continuity.md",
-      "audience": "operator-current"
+      "audience": "operator-current",
+      "injection": "referenced",
+      "responsibility": "Owns how must-work watcher continuity survives above the one-shot watcher process boundary."
     },
     {
       "path": "docs/wedge-alarm.md",
-      "audience": "operator-current"
+      "audience": "operator-current",
+      "injection": "referenced",
+      "responsibility": "Owns the away-mode injection wedge alarm and its configurable alert channels."
     },
     {
       "path": "docs/zellij-backend.md",
-      "audience": "operator-current"
+      "audience": "operator-current",
+      "injection": "referenced",
+      "responsibility": "Owns Zellij backend setup and its explicit-only selection rule."
     },
     {
       "path": "skills/stow/SKILL.md",
-      "audience": "public-product"
+      "audience": "public-product",
+      "injection": "never",
+      "responsibility": "The standalone installer-facing stow skill for users who do not run a firstmate home."
     }
   ]
 }
