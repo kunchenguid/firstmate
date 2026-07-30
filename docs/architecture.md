@@ -171,6 +171,8 @@ When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without 
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, and muse while preserving the requested profile for later audit.
+For every verified harness, the same launch path supplies the `AGENTS.md` section 9 output contract ahead of ordinary ship and scout task instructions while leaving secondmate charters unchanged.
+This launch-time boundary also covers custom task briefs without reading captain-private preference files; `tests/fm-spawn-dispatch-profile.test.sh` and `tests/fm-kimi-harness.test.sh` cover the streaming and readiness-gated adapter shapes.
 
 ## Optional secondmates
 

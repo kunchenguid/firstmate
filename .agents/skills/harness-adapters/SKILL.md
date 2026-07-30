@@ -278,7 +278,7 @@ Firstmate launches the selected executable name from `PATH`, records `pi-signed`
 The observed signed process tree is an exact `pi-signed` wrapper parent with the Pi application as its child, while tmux reports the foreground command as the exact `pi-launcher` name for both selected executables.
 The installed plain `pi` command also execs that signed launcher, so `FM_PI_HARNESS=pi-signed` is the authoritative selection marker and shared unmarked ancestry remains `pi`.
 Firstmate sets `FM_PI_HARNESS` explicitly for both worker launch identities, and a signed primary uses the README launch command to establish the same boundary.
-Keep the brief as one positional argument.
+Keep the combined ordinary-crewmate output contract and task brief as one positional argument; secondmates still receive their charter unchanged.
 Multiple positional args become separate queued messages; `fm-spawn`'s template already does this correctly.
 
 Project trust dialog can appear on the first pi run in any not-yet-trusted directory, observed even on clean worktrees.
@@ -300,7 +300,7 @@ When a secondmate is launched on Pi or pi-signed, `fm-spawn.sh --secondmate` lau
 ## grok (VERIFIED 2026-06-29, grok 0.2.73; slash-submit re-verified 2026-07-03 on 0.2.82; reasoning-effort ceiling re-verified 2026-07-13 on 0.2.99; exit paths re-verified 2026-07-19 on grok 0.2.103)
 
 Grok Build TUI (`grok`), a Claude-Code-compatible CLI from xAI.
-Launch with a positional prompt: `grok --always-approve "$(cat <brief>)"`.
+Launch with one positional prompt containing the ordinary-crewmate output contract followed by the task brief; secondmates receive their charter unchanged.
 For Grok's supported reasoning-effort values and omission behavior, see the [launch-profile-axes table](#launch-profile-axes).
 
 | Fact | Value |

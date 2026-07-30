@@ -108,6 +108,9 @@
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
+#   Every ship/scout launch supplies AGENTS.md section 9's output contract ahead
+#   of the task instructions across all verified harnesses, including custom
+#   briefs. Secondmate launches encode their charter unchanged.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
