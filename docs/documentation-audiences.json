@@ -308,6 +308,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/stow-memory.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/supervision.md",
       "audience": "maintainer-verification"
     },
