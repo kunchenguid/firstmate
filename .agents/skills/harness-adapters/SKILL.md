@@ -373,7 +373,8 @@ Kimi Code CLI launches from the absolute path resolved from `PATH`, falling back
 | Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
 | Effort | No reasoning-effort flag exists, so requested effort is recorded in task metadata but omitted from launch. |
 
-`fm-spawn.sh` launches Kimi bare, waits for the composer box or `Welcome to Kimi Code!`, sends the one-line output contract plus the exact absolute brief pointer for ordinary crewmates, and requires a cleared composer plus either the echoed `✨` submission or nonzero context before accepting delivery.
+`fm-spawn.sh` launches Kimi bare, waits for the composer box or `Welcome to Kimi Code!`, then sends one line: ordinary crewmates receive the output contract followed by `Read the brief at <absolute-path> and follow it exactly.`, while secondmates receive that exact absolute brief pointer alone.
+Delivery succeeds only after the composer clears and either the echoed `✨` submission or nonzero context appears.
 This launch-then-send shape is mandatory because Kimi rejects a positional brief as an unknown command.
 Sending before readiness was reproduced as a silent drop with a zero exit status, an empty composer, `context: 0%`, no echoed user message, and a healthy-looking idle pane.
 The brief path must be absolute because the brief lives outside the task worktree, and Kimi reads it there without `--add-dir`.
