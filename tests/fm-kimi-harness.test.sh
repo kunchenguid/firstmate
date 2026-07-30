@@ -200,7 +200,7 @@ test_kimi_launch_then_send_is_verified() {
 
   brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md"
   pointer=$(cat "$CASE_DIR/pointer.log")
-  output_contract="Default non-UI engineering work to plain Markdown reports and chat. Report complexity, technical structure, or multiple sections do not justify opening Lavish. Use Lavish only when the task explicitly requests an interactive or visual review, or for genuine UI or visual work when a visual surface materially improves review."
+  output_contract="Default non-UI engineering work to plain Markdown reports and chat. Report complexity, technical structure, or multiple sections do not justify opening Lavish. Use Lavish only when the task brief states that the captain explicitly requested an interactive or visual review, or for genuine UI or visual work when a visual surface materially improves review."
   [ "$pointer" = "$output_contract Read the brief at $brief_real and follow it exactly." ] \
     || fail "kimi pointer did not combine the shared output contract with the exact absolute brief path: $pointer"
   meta="$HOME_DIR/state/$id.meta"

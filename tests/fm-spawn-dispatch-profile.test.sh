@@ -129,7 +129,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  output_contract="Default non-UI engineering work to plain Markdown reports and chat. Report complexity, technical structure, or multiple sections do not justify opening Lavish. Use Lavish only when the task explicitly requests an interactive or visual review, or for genuine UI or visual work when a visual surface materially improves review."
+  output_contract="Default non-UI engineering work to plain Markdown reports and chat. Report complexity, technical structure, or multiple sections do not justify opening Lavish. Use Lavish only when the task brief states that the captain explicitly requested an interactive or visual review, or for genuine UI or visual work when a visual surface materially improves review."
   expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$({ printf '%s\\n\\n' '$output_contract'; cat '$HOME_DIR/data/$id/brief.md'; } | '${ROOT}/bin/fm-operational-input.sh' encode launch-brief)\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
@@ -158,8 +158,8 @@ EOF
       "$harness launch did not receive the Markdown default"
     assert_contains "$launch" "Report complexity, technical structure, or multiple sections do not justify opening Lavish." \
       "$harness launch treated report structure as a Lavish trigger"
-    assert_contains "$launch" "Use Lavish only when the task explicitly requests an interactive or visual review, or for genuine UI or visual work when a visual surface materially improves review." \
-      "$harness launch did not preserve explicit and genuinely visual Lavish use"
+    assert_contains "$launch" "Use Lavish only when the task brief states that the captain explicitly requested an interactive or visual review, or for genuine UI or visual work when a visual surface materially improves review." \
+      "$harness launch did not require explicit captain intent or preserve genuinely visual Lavish use"
     assert_not_contains "$launch" "lavish-axi for structured decisions or reports" \
       "$harness launch retained the broad structured-report Lavish trigger"
     assert_contains "$launch" "cat '$brief'" \

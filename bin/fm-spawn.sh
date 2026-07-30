@@ -245,7 +245,7 @@ want_value=
 # AGENTS.md section 9 owns this policy. Launch-time reinforcement is deliberate:
 # unlike a scaffold-only rule, it also reaches custom briefs and never exposes or
 # parses captain-private preference files.
-CREWMATE_OUTPUT_CONTRACT='Default non-UI engineering work to plain Markdown reports and chat. Report complexity, technical structure, or multiple sections do not justify opening Lavish. Use Lavish only when the task explicitly requests an interactive or visual review, or for genuine UI or visual work when a visual surface materially improves review.'
+CREWMATE_OUTPUT_CONTRACT='Default non-UI engineering work to plain Markdown reports and chat. Report complexity, technical structure, or multiple sections do not justify opening Lavish. Use Lavish only when the task brief states that the captain explicitly requested an interactive or visual review, or for genuine UI or visual work when a visual surface materially improves review.'
 for a in "$@"; do
   if [ -n "$want_value" ]; then
     case "$a" in
@@ -857,7 +857,7 @@ launch_template() {
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__LAUNCHBRIEF__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
-    # only an absolute brief pointer after the TUI readiness gate below.
+    # its output contract and absolute brief pointer after the TUI readiness gate.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
