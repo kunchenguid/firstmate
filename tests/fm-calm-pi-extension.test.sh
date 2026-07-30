@@ -1790,7 +1790,7 @@ for (let width = 4; width <= 120; width += 1) {
   }
 }
 
-// --- Lifecycle through the Calm extension's registered handlers --------------------
+// --- Lifecycle through the Calm extension handlers --------------------
 let liveTimers = 0;
 const realSetInterval = globalThis.setInterval;
 const realClearInterval = globalThis.clearInterval;
@@ -1839,7 +1839,7 @@ const ui = {
   setWorkingVisible(visible) {
     this.workingVisible.push(visible);
   },
-  // Mirrors Pi's documented widget contract: the previous component under a key is
+  // Mirrors the documented widget contract: the previous component under a key is
   // disposed before a replacement is installed, and clearing disposes it too.
   setWidget(key, content, options) {
     const existing = this.widgets.get(key);
@@ -1872,7 +1872,7 @@ const reset = () => {
 const shipWidget = () => ui.widgets.get(CALM_WORKING_SHIP_WIDGET_KEY);
 
 
-// --- Calm off keeps Pi's stock working row and registers no widget ----------------
+// --- Calm off keeps the stock working row and registers no widget ----------------
 await fire("session_start", { reason: "startup" });
 check(
   ui.workingVisible.every((visible) => visible === true),
@@ -1899,7 +1899,7 @@ await calmCommand.handler("", ctx);
 check(ui.widgetOps.length === 0, "toggling Calm on while idle installed a working widget");
 check(
   ui.workingVisible.every((visible) => visible === true),
-  "toggling Calm on while idle hid Pi's stock working row",
+  "toggling Calm on while idle hid the stock working row",
 );
 check(liveTimers === 0, "toggling Calm on while idle started an animation timer");
 
@@ -1918,7 +1918,7 @@ check(
 );
 check(
   ui.workingVisible[ui.workingVisible.length - 1] === false,
-  "Calm on did not hide Pi's stock working row",
+  "Calm on did not hide the stock working row",
 );
 check(liveTimers === 1, `Calm on kept ${liveTimers} animation timers instead of one`);
 
@@ -1944,7 +1944,7 @@ check(liveTimers === 1, `repeated starts left ${liveTimers} animation timers`);
 check(ui.widgets.size === 1, `repeated starts left ${ui.widgets.size} widgets`);
 check(shipWidget() === widget, "repeated starts replaced the running widget");
 
-// --- The animation drives Pi's renderer -------------------------------------------
+// --- The animation drives the renderer -------------------------------------------
 {
   const before = renderRequests;
   await new Promise((resolve) => setTimeout(resolve, 420));
@@ -1964,10 +1964,10 @@ check(liveTimers === 0, `settling left ${liveTimers} animation timers`);
 check(ui.widgets.size === 0, "settling left a residual widget");
 check(
   ui.workingVisible[ui.workingVisible.length - 1] === true,
-  "settling did not restore Pi's stock working row",
+  "settling did not restore the stock working row",
 );
 
-// --- Abort and failure share Pi's agent_settled path ------------------------------
+// --- Abort and failure share the agent_settled path ------------------------------
 // Pi emits agent_settled from a finally block, so an aborted or failed run reaches
 // exactly this handler; the real-TUI regression covers the Escape abort path.
 for (const outcome of ["abort", "failure"]) {
@@ -1979,7 +1979,7 @@ for (const outcome of ["abort", "failure"]) {
   check(ui.widgets.size === 0, `${outcome} left a residual widget`);
   check(
     ui.workingVisible[ui.workingVisible.length - 1] === true,
-    `${outcome} did not restore Pi's stock working row`,
+    `${outcome} did not restore the stock working row`,
   );
 }
 
@@ -1993,7 +1993,7 @@ for (const reason of ["quit", "reload", "new", "resume", "fork"]) {
   check(ui.widgets.size === 0, `session_shutdown(${reason}) left a residual widget`);
   check(
     ui.workingVisible[ui.workingVisible.length - 1] === true,
-    `session_shutdown(${reason}) did not restore Pi's stock working row`,
+    `session_shutdown(${reason}) did not restore the stock working row`,
   );
   if (reason === "quit") continue;
   reset();
@@ -2012,7 +2012,7 @@ check(liveTimers === 0, "toggling Calm off during a run left the animation runni
 check(ui.widgets.size === 0, "toggling Calm off during a run left the boat on screen");
 check(
   ui.workingVisible[ui.workingVisible.length - 1] === true,
-  "toggling Calm off during a run did not restore Pi's stock working row",
+  "toggling Calm off during a run did not restore the stock working row",
 );
 
 // Toggling Calm back on during the same run returns the boat.
@@ -2021,7 +2021,7 @@ await calmCommand.handler("", ctx);
 check(liveTimers === 1, "toggling Calm on during a run did not return the boat");
 check(
   ui.workingVisible[ui.workingVisible.length - 1] === false,
-  "toggling Calm on during a run did not hide Pi's stock working row",
+  "toggling Calm on during a run did not hide the stock working row",
 );
 await fire("agent_settled");
 check(liveTimers === 0, "the toggled-on run did not clean up");
