@@ -18,6 +18,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fleet-snapshot.sh`   | Print the read-only structured fleet snapshot JSON (schema `fm-fleet-snapshot.v1`)   |
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-bearings-snapshot.sh` | Project the fleet snapshot to the compact TOON bearings view; local-only unless `--include-prs` |
+| `fm-convergence-scoreboard.sh` | Measure one clean local ref against one explicit upstream ref as deterministic TOON |
 | `fm-update.sh`           | Fast-forward-only self-update of firstmate and local or remote secondmate homes from the publish remote |
 | `fm-on.sh`               | Execute one tracked Firstmate command in a configured remote secondmate home, using its job worker except for the doctor bootstrap |
 | `fm-remote-job-lib.sh`   | Shared bounded remote job queue, worker readiness, LaunchAgent contract, and filesystem-composed PATH |
@@ -120,3 +121,14 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-public-followup-lib.sh` | Shared relay-activation gate, O(1) presence checks, and private transport paths for promised public replies |
 | `fm-public-followup.sh`  | Reconcile typed terminal work results into a public commitment and deliver its final reply once |
 | `fm-public-followup-emit.sh` | Report one typed terminal work result into the home that owes the public reply    |
+
+## Convergence scoreboard
+
+Run `bin/fm-convergence-scoreboard.sh <local-ref> <upstream-ref>` from a clean worktree before convergence starts and after every convergence step.
+Keep both ref arguments explicit and record the emitted commit identities with the measurements so a result can be reproduced after branch names move.
+Use `--help` for the current origin/upstream examples, and fully qualify any ref name that collides across namespaces.
+The command emits deterministic TOON and fails instead of returning partial metrics when it cannot complete a measurement.
+
+Stated limitation: the cleanliness preflight assumes repo-local `.git/info/attributes`, filter configuration, and fsmonitor configuration are benign ambient inputs; they can affect whether the command proceeds, but they do not enter the isolated ref measurement.
+
+The script header owns the exact measurement basis, isolation guarantees, metric meanings, path membership, output schema, and exit contract.
