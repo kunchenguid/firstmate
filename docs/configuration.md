@@ -85,7 +85,8 @@ By default, Herdr workspaces are derived from `FM_HOME`: the primary home uses `
 The default-container spawn, list-live, and recovery paths read that label from the active home, so a secondmate's own crewmates stay inside that secondmate home's herdr space.
 The optional local `config/herdr-presentation-spaces` presence flag instead enables Herdr's default-off disposable single-task visual projection; [Optional presentation spaces](herdr-backend.md#optional-presentation-spaces) owns its behavior, safety limits, recovery contract, and narrow locked session-start cleanup of exact restored idle-shell children.
 The flag is default-off and inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
-For normal herdr operations, `HERDR_SESSION` selects the named session, but destructive test cleanup must not rely on `HERDR_SESSION` alone.
+Outside Herdr, `HERDR_SESSION` selects the named session for normal operations; inside a Herdr pane it identifies the inherited owning session and cannot authorize cross-session selection.
+[`docs/herdr-backend.md`](herdr-backend.md#setup) owns the nested single-server guard and its fail-closed limits.
 Use the explicit guarded cleanup path described in [`docs/herdr-backend.md`](herdr-backend.md) instead of `herdr server stop`.
 For normal zellij operations, `FM_ZELLIJ_SESSION` selects the named session and defaults to `firstmate`.
 Zellij has no per-home workspace split: primary and secondmate tasks share that one session, and visible tab titles are scoped by the active `FM_HOME` readable label plus a short hash of the resolved `FM_ROOT` path as `fm-<home-label>-<id>`.
@@ -378,7 +379,7 @@ FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for the Linux process-identity read in fm-wake-lib.sh, mainly for tests
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
-HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
+HERDR_SESSION=default  # herdr-only: selected session outside Herdr, inherited owner inside a Herdr pane; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned by composer-state guard/fallback paths; idle-baseline submit confirmation uses agent-state
 FM_BACKEND_HERDR_IDLE_RE='^Type a message\.\.\.$'  # herdr-only: empty-composer placeholder regex after shared ghost extraction plus border and prompt stripping
 FM_BACKEND_HERDR_BARE_PROMPT_RE='^(❯|›)'  # herdr-only: verified agent glyphs recognized as an UNBORDERED (bare) composer row, e.g. Claude's ❯ or Codex's ›; an alternation, not a `[...]` bracket expression, so a C-locale byte-decomposed match can never misfire on an unrelated multibyte glyph; shell glyphs remain unknown rather than empty, and de-emphasised ghost/placeholder text reads empty through shared fm_composer_strip_ghost (docs/herdr-backend.md "Composer and injection safety")

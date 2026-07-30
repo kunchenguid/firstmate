@@ -209,19 +209,20 @@ fm_backend_zellij_cli() {  # <session> <action-subcommand-and-args...>
 }
 
 # fm_backend_zellij_session_exists: passive, READ-ONLY liveness check - never
-# starts or creates a session (unlike herdr's target_ready, which DOES
-# auto-start its server: a herdr server restart is non-destructive and
-# recovers persisted state, but zellij's `kill-session` is destructive and
-# recreating an unrelated target session under the same name would silently
-# orphan whatever the caller actually meant to reach). Every op below calls
-# this first and fails rather than guessing.
+# starts or creates a session (unlike herdr's target_ready, which may start its
+# server only for an outside owner and refuses a nested status miss). A herdr
+# server restart is non-destructive and recovers persisted state, but zellij's
+# `kill-session` is destructive and recreating an unrelated target session
+# under the same name would silently orphan whatever the caller actually meant
+# to reach. Every op below calls this first and fails rather than guessing.
 fm_backend_zellij_session_exists() {  # <session>
   zellij list-sessions --short --no-formatting 2>/dev/null | grep -qxF "$1"
 }
 
 # fm_backend_zellij_server_ensure: create the named session in the background,
 # headless (no attached client), if it does not already exist - mirrors
-# tmux's `tmux has-session || tmux new-session -d` and herdr's server_ensure.
+# tmux's `tmux has-session || tmux new-session -d` and herdr's outside-owner
+# server_ensure path.
 # Verified: `zellij attach -b <name>` with stdin redirected from /dev/null and
 # no controlling TTY creates the session and returns promptly (it cannot
 # actually attach without a TTY, so it exits after creating); running it again
