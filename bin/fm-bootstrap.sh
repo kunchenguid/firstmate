@@ -720,6 +720,9 @@ crew_dispatch_validate() {
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON"
     return 0
   fi
+  # The per-harness effort sets below track the verified launch contract owned by
+  # harness-adapters, the same contract effort_flag_for_harness in fm-spawn.sh threads
+  # into launch; a harness with no verified effort flag rejects any configured effort.
   err=$(jq -r '
     def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi"] | index($h);
     def effort_ok($h; $e):
