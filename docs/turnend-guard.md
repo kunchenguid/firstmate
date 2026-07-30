@@ -13,7 +13,8 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 
 `bin/fm-guard.sh` is a pull-based warning that runs only when another supervision command invokes it.
 The turn-end guard closes the remaining gap at the primary's own turn boundary.
-When work is in flight and no identity-matched watcher has a fresh beacon, the harness integration must either block the turn end or force one bounded follow-up that uses the recovery instruction from the emitted session-start protocol.
+When a home needs supervision, in-flight work counted from `state/*.meta` or an armed X-mode relay poll at `state/x-watch.check.sh`, and no identity-matched watcher has a fresh beacon, the harness integration must either block the turn end or force one bounded follow-up that uses the recovery instruction from the emitted session-start protocol.
+That supervision-need predicate is shared in `bin/fm-supervision-lib.sh` and binds every primary harness integration equally, so the in-flight task count alone never decides the gate.
 The guard remains a backstop; [`watcher-continuity.md`](watcher-continuity.md) owns normal continuity.
 
 ## Shared predicate
