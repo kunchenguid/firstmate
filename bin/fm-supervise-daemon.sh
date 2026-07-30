@@ -1127,8 +1127,11 @@ composer_defer_diag_threshold() {  # -> N (0 disables)
 _composer_defer_streak_file() { printf '%s/.subsuper-composer-defer-streak' "$1"; }
 
 _composer_defer_streak_read() {  # <state> <field: count|verdict>
-  local count='' verdict=''
-  IFS=$'\t' read -r count verdict < "$(_composer_defer_streak_file "$1")" 2>/dev/null || true
+  local count='' verdict='' file
+  file=$(_composer_defer_streak_file "$1")
+  if [ -r "$file" ]; then
+    IFS=$'\t' read -r count verdict < "$file" || true
+  fi
   case "$2" in
     count)
       case "$count" in ''|*[!0-9]*) count=0 ;; esac

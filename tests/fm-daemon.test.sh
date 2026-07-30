@@ -1180,6 +1180,23 @@ test_identical_verdict_streak_records_diagnostic_at_threshold() {
   pass "recurring identical composer verdicts record the verdict, offending bytes, and reader at the threshold"
 }
 
+test_deferral_without_streak_file_keeps_stderr_silent() {
+  # The streak file is absent on a healthy fleet and the arming check reads it on
+  # every inject attempt, so a missing file must not leak "No such file or
+  # directory" onto the daemon's stderr (its foreground pane).
+  local dir state err
+  dir=$(defer_case defer-diag-quiet 'human draft'); state="$dir/state"
+  err="$dir/stderr.log"
+  [ ! -e "$state/.subsuper-composer-defer-streak" ] || fail "fixture already has a streak file"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$dir/sent.log" \
+    FM_COMPOSER_DEFER_DIAG_COUNT=5 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    inject_msg "the digest" "$state" >/dev/null 2>"$err" || true
+  [ ! -s "$err" ] || fail "a deferral with no streak file wrote to stderr: $(cat "$err")"
+  [ "$(_composer_defer_streak_read "$state" count)" -eq 1 ] \
+    || fail "the deferral did not still fold into the streak"
+  pass "a composer deferral with no streak file keeps stderr silent"
+}
+
 test_identical_verdict_streak_refreshes_every_threshold() {
   local dir state diag first i
   dir=$(defer_case defer-diag-refresh 'human draft'); state="$dir/state"
@@ -2075,6 +2092,7 @@ test_max_defer_empty_swallow_types_once_and_alarms
 test_max_defer_flushes_empty_idle_pane
 test_max_defer_pending_composer_alarms_without_typing
 test_identical_verdict_streak_records_diagnostic_at_threshold
+test_deferral_without_streak_file_keeps_stderr_silent
 test_identical_verdict_streak_refreshes_every_threshold
 test_changed_verdict_resets_the_streak
 test_streak_survives_a_daemon_restart

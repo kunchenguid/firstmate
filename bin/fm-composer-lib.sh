@@ -270,8 +270,12 @@ fm_composer_diag_field() {  # <label> <text> -> "<label>_len=N <label>_hex=H <la
 
 # fm_composer_diag_record: append ONE candidate row's sanitised record. Adapters
 # that evaluate several rows per read (a bordered box) append one line each; the
-# daemon reports the LAST one, which is the deciding row because the readers
-# return on the first row that classifies non-empty.
+# daemon reports the LAST one. For a `pending` verdict that is the deciding row,
+# because the readers return on the first row that classifies non-empty. For the
+# geometry-ambiguous `unknown` verdict every box row classifies empty and the
+# verdict comes from the ambiguity flag instead, so the last record is simply the
+# last row evaluated, not an offending row; rows_evaluated plus the real pane
+# bytes keep the record diagnostic either way.
 fm_composer_diag_record() {  # <reader> <raw-row> <content>
   local reader=$1 raw=$2 content=$3
   [ -n "${FM_COMPOSER_DIAG_FILE:-}" ] || return 0
