@@ -256,6 +256,9 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $HERDR_SECTION
 
+# Code intelligence
+For coding work or code-focused investigation, read and follow \`$FM_ROOT/.agents/skills/code-intelligence-routing/SKILL.md\` before repository inspection or edits.
+
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
@@ -364,6 +367,9 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
+
+# Code intelligence
+For coding work or code-focused investigation, read and follow \`$FM_ROOT/.agents/skills/code-intelligence-routing/SKILL.md\` before repository inspection or edits.
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.

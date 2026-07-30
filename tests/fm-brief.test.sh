@@ -278,6 +278,23 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+test_code_intelligence_routing_pointer() {
+  local home ship scout
+  home="$TMP_ROOT/code-intelligence-routing-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" code-intelligence-ship sample >/dev/null 2>&1
+  ship="$home/data/code-intelligence-ship/brief.md"
+  assert_grep "$ROOT/.agents/skills/code-intelligence-routing/SKILL.md" "$ship" \
+    "ship brief did not point coding work to the code-intelligence routing policy"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" code-intelligence-scout sample --scout >/dev/null 2>&1
+  scout="$home/data/code-intelligence-scout/brief.md"
+  assert_grep "$ROOT/.agents/skills/code-intelligence-routing/SKILL.md" "$scout" \
+    "scout brief did not point code-focused investigation to the code-intelligence routing policy"
+  pass "fm-brief.sh: ship and scout briefs load the code-intelligence routing policy"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -638,6 +655,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_code_intelligence_routing_pointer
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
