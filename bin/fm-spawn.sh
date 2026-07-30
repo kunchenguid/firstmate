@@ -2135,18 +2135,30 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # primary checkout's current working branch. Treehouse warms its pool from the
   # primary's HEAD, so a worktree acquired while the primary sits on a feature
   # branch would carry that branch's unmerged commits into the crewmate's PR
-  # (the base-pollution that produced 18-commit-wide diffs). Best-effort and
-  # fail-open: skip cleanly for local-only repos (no origin) and never abort the
-  # spawn. A crewmate that deliberately needs a non-default base still checks it
-  # out explicitly.
+  # (the base-pollution that produced 18-commit-wide diffs). Local-only repos
+  # skip this step; an origin-backed spawn refuses to launch unless its base is
+  # established. A crewmate that deliberately needs a non-default base still
+  # checks it out explicitly.
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    _fm_def=$(git -C "$WT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')
-    _fm_def=${_fm_def:-main}
-    if git -C "$WT" fetch --quiet origin "$_fm_def" 2>/dev/null \
-      && git -C "$WT" checkout --quiet --detach FETCH_HEAD 2>/dev/null; then
-      :
-    else
-      echo "warning: could not base worktree on origin/$_fm_def; crewmate must base its branch on origin/$_fm_def itself" >&2
+    if ! _fm_remote_head=$(git -C "$WT" ls-remote --symref origin HEAD 2>/dev/null); then
+      echo "error: could not resolve origin's default branch; refusing to launch" >&2
+      exit 1
+    fi
+    _fm_default_ref=$(printf '%s\n' "$_fm_remote_head" | awk '$1 == "ref:" && $3 == "HEAD" { print $2; exit }')
+    case "$_fm_default_ref" in
+      refs/heads/?*) _fm_default_branch=${_fm_default_ref#refs/heads/} ;;
+      *)
+        echo "error: origin did not advertise a default branch; refusing to launch" >&2
+        exit 1
+        ;;
+    esac
+    if ! git -C "$WT" fetch --quiet origin "$_fm_default_ref" 2>/dev/null; then
+      echo "error: could not fetch origin's default branch '$_fm_default_branch'; refusing to launch" >&2
+      exit 1
+    fi
+    if ! git -C "$WT" checkout --quiet --detach FETCH_HEAD 2>/dev/null; then
+      echo "error: could not check out origin's default branch '$_fm_default_branch'; refusing to launch" >&2
+      exit 1
     fi
   fi
 fi
