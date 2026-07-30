@@ -197,7 +197,7 @@ A project-level `.claude/settings.json` only takes effect when Claude Code's pro
 After those settings are loaded, hook command resolution is still cwd-sensitive because Claude Code runs commands through `/bin/sh` against the session's current cwd; keep the tracked commands anchored through `"$CLAUDE_PROJECT_DIR"/bin/...` and see `docs/turnend-guard.md` for the verified Stop-hook details.
 Claude Code's primary watcher protocol is Stop-owned: the auto-arm hook fires on every Stop and foregrounds `bin/fm-watch-arm.sh` when the home is eligible and still needs supervision, and its exit-2 `asyncRewake` rewake is the wake; the model drains and handles wakes but never runs a routine re-arm command.
 
-## codex (VERIFIED 2026-07-29, codex-cli 0.146.0)
+## codex (VERIFIED 2026-06-11, codex-cli 0.139.0; session-lock identity re-verified 2026-07-29 on codex-cli 0.146.0)
 
 | Fact | Value |
 |---|---|

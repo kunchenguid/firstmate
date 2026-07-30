@@ -162,6 +162,7 @@ FM_GROK_STOP_LIVE_E2E=1 FM_GROK_NATIVE_BIN="$native_grok" FM_GROK_LEGACY_BIN="$p
 ## Watcher continuity
 
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24, all against isolated project and home state.
+Codex's row was re-verified separately on 2026-07-29 with codex-cli 0.146.0 when its session-lock identity contract changed; [Codex 0.146.0 session-lock identity](#codex-01460-session-lock-identity) owns that evidence, and the versions below remain those of the 2026-07-17 pass.
 No credential material was copied into a fixture.
 
 ```text
