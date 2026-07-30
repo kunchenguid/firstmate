@@ -761,18 +761,22 @@ codex_owned_by_self() {
     bash -c '. "$ROOT_UNDER_TEST/bin/fm-session-lock-lib.sh"; fm_session_lock_owned_by_self "$HOME_STATE"'
 }
 
-test_codex_session_lock_uses_thread_identity() {
-  local rec root home fakebin codex_pid out status=0 lock_pid
-  local thread_id=019fb044-acd6-7c20-97a2-f3e227def5d2
-  local other_thread_id=019fb041-9ca2-76c1-a272-358bd63dfe7a
-  local nested_pid
-  rec=$(new_world codex-thread-lock)
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  sleep 300 &
-  codex_pid=$!
-  nested_pid=$((codex_pid + 1))
+# codex_thread_id_accepted <value>: true when the shared validator treats <value>
+# as a usable Codex thread id, decided by the lib itself rather than a copy of
+# its shape rule here.
+codex_thread_id_accepted() {
+  # shellcheck disable=SC2016 # Variables must expand in the child shell, not this test shell.
+  env CODEX_THREAD_ID="$1" ROOT_UNDER_TEST="$ROOT" \
+    bash -c '. "$ROOT_UNDER_TEST/bin/fm-session-lock-lib.sh"; fm_codex_thread_id' >/dev/null 2>&1
+}
+
+# make_fake_ps_codex <fakebin>: the Codex ancestry shape. FM_FAKE_CODEX_PID is
+# the live codex harness and every other pid is a plain shell descending from
+# it, unless FM_FAKE_CODEX_ISOLATED=1 (the real command-child shape: no harness
+# resolvable in ancestry) or FM_FAKE_NESTED_HARNESS_PID names a foreign harness
+# nested between the caller and codex.
+make_fake_ps_codex() {
+  local fakebin=$1
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -807,6 +811,21 @@ case "$pid:$field" in
 esac
 SH
   chmod +x "$fakebin/ps"
+}
+
+test_codex_session_lock_uses_thread_identity() {
+  local rec root home fakebin codex_pid out status=0 lock_pid
+  local thread_id=019fb044-acd6-7c20-97a2-f3e227def5d2
+  local other_thread_id=019fb041-9ca2-76c1-a272-358bd63dfe7a
+  local nested_pid
+  rec=$(new_world codex-thread-lock)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  sleep 300 &
+  codex_pid=$!
+  nested_pid=$((codex_pid + 1))
+  make_fake_ps_codex "$fakebin"
 
   printf '%s\n' 9999999 > "$home/state/.lock"
   printf '%s\n' "9999999:$other_thread_id" > "$home/state/.lock.codex-thread"
@@ -874,6 +893,146 @@ SH
   assert_contains "$out" "lock: stale" \
     "dead Codex holder was not classified as a releasable stale lock"
   pass "Codex lock: thread identity survives isolated command ancestry, rebinds for the holder, and refuses nested harnesses"
+}
+
+# A UUID-shaped LINE inside a multi-line ambient value must never become lock
+# authority: grep's per-line anchoring would accept it, publish a sidecar the
+# reader then rejects, and wedge every caller read-only behind a malformed file.
+test_codex_thread_id_rejects_multiline_values() {
+  local rec root home fakebin codex_pid out status=0 value
+  local thread_id=019fb044-acd6-7c20-97a2-f3e227def5d2
+  rec=$(new_world codex-thread-multiline)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  sleep 300 &
+  codex_pid=$!
+  make_fake_ps_codex "$fakebin"
+
+  codex_thread_id_accepted "$thread_id" \
+    || fail "the validator rejected a well-formed Codex thread id"
+  if codex_thread_id_accepted "$thread_id"$'\nx'; then
+    fail "the validator accepted a multi-line value whose first line is UUID-shaped"
+  fi
+  if codex_thread_id_accepted $'x\n'"$thread_id"; then
+    fail "the validator accepted a multi-line value whose last line is UUID-shaped"
+  fi
+  if codex_thread_id_accepted "$thread_id"$'\n'; then
+    fail "the validator accepted a Codex thread id carrying a trailing newline"
+  fi
+
+  for value in "$thread_id"$'\nx' $'x\n'"$thread_id" "$thread_id"$'\n'; do
+    status=0
+    out=$(CODEX_THREAD_ID="$value" FM_HOME="$home" FM_FAKE_CODEX_PID="$codex_pid" \
+      PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+    expect_code 0 "$status" "acquisition under a multi-line CODEX_THREAD_ID"
+    assert_contains "$out" "lock acquired: harness pid $codex_pid" \
+      "a multi-line CODEX_THREAD_ID did not fall back to the verified ancestry contract"
+    if [ -e "$home/state/.lock.codex-thread" ] || [ -L "$home/state/.lock.codex-thread" ]; then
+      fail "a multi-line CODEX_THREAD_ID left an identity sidecar: $(cat "$home/state/.lock.codex-thread" 2>/dev/null)"
+    fi
+    [ "$(cat "$home/state/.lock")" = "$codex_pid" ] \
+      || fail "a multi-line CODEX_THREAD_ID did not record the live harness pid"
+  done
+
+  kill "$codex_pid" 2>/dev/null || true
+  wait "$codex_pid" 2>/dev/null || true
+  pass "a multi-line CODEX_THREAD_ID never becomes lock authority and never publishes a sidecar"
+}
+
+# `status` is the documented inspection path, so the state that makes a live
+# holder unverifiable - and therefore every caller read-only - must be readable
+# there instead of only by hand-reading state files.
+test_lock_status_reports_codex_identity() {
+  local rec root home fakebin codex_pid out sidecar before
+  local thread_id=019fb044-acd6-7c20-97a2-f3e227def5d2
+  local other_thread_id=019fb041-9ca2-76c1-a272-358bd63dfe7a
+  rec=$(new_world codex-lock-status)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  sleep 300 &
+  codex_pid=$!
+  make_fake_ps_codex "$fakebin"
+  sidecar="$home/state/.lock.codex-thread"
+
+  out=$(FM_HOME="$home" FM_FAKE_CODEX_PID="$codex_pid" PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-lock.sh" status)
+  [ "$out" = "lock: free" ] \
+    || fail "a free lock gained an identity line it has no holder to describe: $out"
+
+  CODEX_THREAD_ID="$thread_id" FM_HOME="$home" FM_FAKE_CODEX_PID="$codex_pid" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" >/dev/null \
+    || fail "Codex acquisition failed while seeding the status fixture"
+
+  out=$(CODEX_THREAD_ID="$thread_id" FM_HOME="$home" FM_FAKE_CODEX_PID="$codex_pid" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: held by live harness pid $codex_pid" \
+    "status lost its holder line"
+  assert_contains "$out" \
+    "identity: codex sidecar pid $codex_pid thread $thread_id; pid matches lock, thread matches this command" \
+    "status did not report the verifiable Codex identity"
+
+  # The read-only wedge itself: a live holder no current caller can verify.
+  out=$(CODEX_THREAD_ID="$other_thread_id" FM_HOME="$home" FM_FAKE_CODEX_PID="$codex_pid" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "lock: held by live harness pid $codex_pid" \
+    "status stopped reporting a live holder once the thread diverged"
+  assert_contains "$out" \
+    "identity: codex sidecar pid $codex_pid thread $thread_id; pid matches lock, thread differs from this command" \
+    "status did not diagnose the diverged Codex thread"
+
+  out=$(FM_HOME="$home" FM_FAKE_CODEX_PID="$codex_pid" PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "pid matches lock, this command has no codex thread id" \
+    "status did not distinguish an absent caller thread id from a diverged one"
+
+  before=$(cat "$sidecar")
+  [ "$before" = "$codex_pid:$thread_id" ] \
+    || fail "status mutated the identity sidecar it only inspects: $before"
+  [ "$(cat "$home/state/.lock")" = "$codex_pid" ] \
+    || fail "status mutated the session lock it only inspects"
+
+  printf '%s\n' "9999999:$thread_id" > "$sidecar"
+  out=$(CODEX_THREAD_ID="$thread_id" FM_HOME="$home" FM_FAKE_CODEX_PID="$codex_pid" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" \
+    "identity: codex sidecar pid 9999999 thread $thread_id; pid does not match lock pid $codex_pid" \
+    "status did not report a sidecar bound to a different pid than the lock"
+
+  printf '%s\n' 'not-an-identity' > "$sidecar"
+  out=$(CODEX_THREAD_ID="$thread_id" FM_HOME="$home" FM_FAKE_CODEX_PID="$codex_pid" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "identity: codex sidecar unusable" \
+    "status did not report a malformed identity sidecar"
+
+  printf '%s\n' "$codex_pid:$thread_id" > "$home/state/real-identity"
+  rm -f "$sidecar"
+  ln -s "$home/state/real-identity" "$sidecar"
+  out=$(CODEX_THREAD_ID="$thread_id" FM_HOME="$home" FM_FAKE_CODEX_PID="$codex_pid" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "identity: codex sidecar unusable" \
+    "status trusted a symlinked identity sidecar that ownership refuses"
+
+  rm -f "$sidecar"
+  out=$(CODEX_THREAD_ID="$thread_id" FM_HOME="$home" FM_FAKE_CODEX_PID="$codex_pid" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" "identity: codex sidecar absent; harness ancestry decides ownership" \
+    "status did not report a lock governed by the ancestry contract alone"
+
+  # A sidecar whose pid was reused by some other live harness still fails closed,
+  # so the line must not claim a clean match.
+  printf '%s\n' "$codex_pid:$thread_id" > "$sidecar"
+  out=$(CODEX_THREAD_ID="$thread_id" FM_HOME="$home" FM_FAKE_CODEX_PID=1 \
+    FM_FAKE_NESTED_HARNESS_PID="$codex_pid" PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$out" \
+    "identity: codex sidecar pid $codex_pid thread $thread_id; pid matches lock but is not a live codex process" \
+    "status claimed a verifiable identity for a holder that is not a live codex process"
+
+  kill "$codex_pid" 2>/dev/null || true
+  wait "$codex_pid" 2>/dev/null || true
+  pass "fm-lock.sh status reports sidecar presence, pid agreement, and thread agreement"
 }
 
 # --- output ordering ----------------------------------------------------------
@@ -1533,6 +1692,8 @@ test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_session_lock_concurrent_single_winner
 test_codex_session_lock_uses_thread_identity
+test_codex_thread_id_rejects_multiline_values
+test_lock_status_reports_codex_identity
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start
 test_session_start_relaunches_missing_pi_secondmate

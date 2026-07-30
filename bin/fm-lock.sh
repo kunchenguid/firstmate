@@ -4,7 +4,11 @@
 # identity contract. Codex also writes a thread-identity sidecar because its
 # command children have isolated POSIX sessions/process groups.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
-#        fm-lock.sh status    print holder and liveness; always exits 0
+#        fm-lock.sh status    print holder, liveness, and - whenever a lock pid
+#                             is recorded - one Codex identity-sidecar line so a
+#                             live-holder-but-unverifiable read-only state is
+#                             diagnosable without hand-reading state files;
+#                             always exits 0
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,6 +33,7 @@ if [ "${1:-}" = "status" ]; then
     exit 0
   }
   if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  fm_session_lock_identity_status "$STATE" "$old"
   exit 0
 fi
 
