@@ -166,6 +166,10 @@ Each secondmate is a firstmate in its own home, so it runs recovery on startup a
 A secondmate's recovery reconciles only work that is already its own and then idles.
 It never initiates a survey or audit during recovery.
 
+### Local self-heal watchdog
+
+Each secondmate home also carries `bin/fm-self-heal.sh`, a local recovery watchdog that reanimates the secondmate's own dead session without depending on the primary firstmate's watcher being alive (Option B, approved 2026-07-28). It resolves the primary checkout from the home's git worktree linkage, reads the secondmate's `state/<id>.meta` from the primary, checks `fm_backend_agent_state`, and relaunches with the same `fm-spawn.sh --secondmate` parameters the primary's session-start liveness sweep uses. It does NOT create tasks, dispatch work, or communicate with the captain; the primary retains ownership of lost-response (pending-reply) detection. It can run one-shot (`fm-self-heal.sh`), in a loop (`--loop`), from the primary for all secondmates (`--all`), or in dry-run mode (`--dry-run`). A cron job or background loop in each secondmate home can invoke it periodically so a dead session is reanimated even when the primary's monitoring cycle is also down.
+
 ## Retirement and teardown
 
 A secondmate is persistent by default.
