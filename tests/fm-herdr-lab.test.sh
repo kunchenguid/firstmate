@@ -31,15 +31,26 @@ default_socket=$(cat "$state/default-socket")
 lab_state=absent
 [ ! -f "$state/$session" ] || lab_state=$(cat "$state/$session")
 
+# The default session's own state is a fixture knob so the lab gate can be
+# proven in both directions: FM_FAKE_HERDR_DEFAULT_RUNNING=false is the ordinary
+# machine where herdr is installed and no default session runs,
+# FM_FAKE_HERDR_DEFAULT_ABSENT=1 has no default entry at all, and
+# FM_FAKE_HERDR_LIST_FAIL=1 cannot be read.
+default_running=${FM_FAKE_HERDR_DEFAULT_RUNNING:-true}
 case "$1 ${2:-}" in
   "session list")
-    if [ "$lab_state" = absent ] || [ "$lab_state" = deleted ]; then
-      jq -nc --arg socket "$default_socket" '{sessions:[{default:true,name:"default",running:true,socket_path:$socket}]}'
+    [ "${FM_FAKE_HERDR_LIST_FAIL:-}" != 1 ] || { echo "fake herdr: session list failed" >&2; exit 94; }
+    if [ "${FM_FAKE_HERDR_DEFAULT_ABSENT:-}" = 1 ]; then
+      printf '%s\n' '{"sessions":[]}'
+    elif [ "$lab_state" = absent ] || [ "$lab_state" = deleted ]; then
+      jq -nc --arg socket "$default_socket" --argjson default_running "$default_running" \
+        '{sessions:[{default:true,name:"default",running:$default_running,socket_path:$socket}]}'
     else
       running=false
       [ "$lab_state" = running ] && running=true
       jq -nc --arg socket "$default_socket" --arg name "$session" --argjson running "$running" \
-        '{sessions:[{default:true,name:"default",running:true,socket_path:$socket},{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]}'
+        --argjson default_running "$default_running" \
+        '{sessions:[{default:true,name:"default",running:$default_running,socket_path:$socket},{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]}'
     fi
     ;;
   "server --session")
@@ -82,8 +93,83 @@ run_with_fake() {
     FM_FAKE_HERDR_SERVER_DELAY="${FM_FAKE_HERDR_SERVER_DELAY:-0}" \
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
+    FM_FAKE_HERDR_DEFAULT_RUNNING="${FM_FAKE_HERDR_DEFAULT_RUNNING:-true}" \
+    FM_FAKE_HERDR_DEFAULT_ABSENT="${FM_FAKE_HERDR_DEFAULT_ABSENT:-}" \
+    FM_FAKE_HERDR_LIST_FAIL="${FM_FAKE_HERDR_LIST_FAIL:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
+}
+
+# The gate exists because "command -v herdr" proves a binary is on PATH and
+# proves nothing about session state, so every real-Herdr test hard-failed on an
+# ordinary machine with herdr installed and no default session running. Both
+# directions matter: a gate that always skipped would hide the same regressions
+# a red suite does, so these cases prove the gate LETS WORK THROUGH whenever a
+# lab is actually provisionable, and that its verdict always agrees with what
+# provisioning would really do.
+test_gate_tracks_actual_lab_availability() {
+  local status=0 reason nobin jqless name
+
+  # Direction 1: a running default session - gate passes silently AND provision
+  # really succeeds, so nothing skips when the precondition is met.
+  reason=$(run_with_fake fm_herdr_lab_gate) || status=$?
+  expect_code 0 "$status" "gate must pass when a running default session exists"
+  [ -z "$reason" ] || fail "a passing gate must print nothing, got: $reason"
+  name="fm-lab-gate-agrees-$$"
+  run_with_fake fm_herdr_lab_provision "$name" \
+    || fail "gate passed but provision failed; the gate and the tripwire disagree"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "teardown after the agreeing provision failed"
+
+  # Direction 2: the ordinary machine - herdr installed, default session stopped.
+  status=0
+  reason=$(FM_FAKE_HERDR_DEFAULT_RUNNING=false run_with_fake fm_herdr_lab_gate) || status=$?
+  expect_code 1 "$status" "gate must refuse when the default session is stopped"
+  assert_contains "$reason" "herdr lab unavailable" "gate reason lost its stable skip token"
+  assert_contains "$reason" "no running default Herdr session" "gate reason did not name the missing precondition"
+  [ "$(printf '%s\n' "$reason" | wc -l | tr -d ' ')" = 1 ] || fail "gate must print exactly one reason line, got: $reason"
+  status=0
+  name="fm-lab-gate-agrees-stopped-$$"
+  FM_FAKE_HERDR_DEFAULT_RUNNING=false run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "gate refused but provision succeeded; the gate and the tripwire disagree"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" "refused provision must leave no tripwire behind"
+
+  # Remaining causes each get their own reason, all under the same token.
+  status=0
+  reason=$(FM_FAKE_HERDR_DEFAULT_ABSENT=1 run_with_fake fm_herdr_lab_gate) || status=$?
+  expect_code 1 "$status" "gate must refuse when no default session exists at all"
+  assert_contains "$reason" "no running default Herdr session" "absent default produced the wrong reason"
+  status=0
+  reason=$(FM_FAKE_HERDR_LIST_FAIL=1 run_with_fake fm_herdr_lab_gate) || status=$?
+  expect_code 1 "$status" "gate must refuse when the session list cannot be read"
+  assert_contains "$reason" "cannot list Herdr sessions" "unreadable fleet produced the wrong reason"
+
+  nobin="$TMP_ROOT/gate-nobin"
+  mkdir -p "$nobin"
+  status=0
+  reason=$(PATH="$nobin" FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" fm_herdr_lab_gate) || status=$?
+  expect_code 1 "$status" "gate must refuse when herdr is not installed"
+  assert_contains "$reason" "herdr not found" "missing herdr produced the wrong reason"
+
+  jqless="$TMP_ROOT/gate-jqless"
+  mkdir -p "$jqless"
+  ln -sf "$FAKEBIN/herdr" "$jqless/herdr"
+  status=0
+  reason=$(PATH="$jqless" FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" fm_herdr_lab_gate) || status=$?
+  expect_code 1 "$status" "gate must refuse when jq is missing"
+  assert_contains "$reason" "jq not found" "missing jq produced the wrong reason"
+
+  status=0
+  reason=$(run_with_fake fm_herdr_lab_gate default) || status=$?
+  expect_code 1 "$status" "gate must refuse an unsafe probe session name"
+  assert_contains "$reason" "invalid lab session name" "unsafe probe name produced the wrong reason"
+
+  # The token is the contract the required CI Herdr lane keys on, so renaming it
+  # here without updating that lane must not pass quietly.
+  [ -n "$FM_HERDR_LAB_GATE_TOKEN" ] || fail "the gate token must be a named constant"
+  grep -Fq -- "--fail-on-gate-skip '$FM_HERDR_LAB_GATE_TOKEN'" "$ROOT/.github/workflows/ci.yml" \
+    || fail "the required Herdr CI lane does not fail on '$FM_HERDR_LAB_GATE_TOKEN' skips"
+
+  pass "fm-herdr-lab: the gate mirrors real lab availability in both directions"
 }
 
 test_refuses_unsafe_names() {
@@ -235,6 +321,7 @@ SH
 }
 
 test_refuses_unsafe_names
+test_gate_tracks_actual_lab_availability
 test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
