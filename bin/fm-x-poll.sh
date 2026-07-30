@@ -14,9 +14,10 @@
 #   a newly offered mention with non-empty text -> stash the full object to
 #       state/x-inbox/<request_id>.json, record the durable per-request reply
 #       context to state/x-context/<request_id>.json (best-effort), atomically
-#       claim state/x-context/<request_id>.offered.json, and print one compact
-#       line "x-mention <request_id>" (which becomes the watcher wake payload)
-#   an already offered request_id                -> print nothing, exit 0
+#       claim state/x-context/<request_id>.offered.json, print one compact line
+#       "x-mention <request_id>" (which becomes the watcher wake payload), and
+#       only then commit that marker as emitted
+#   a request_id with an emitted wake marker     -> print nothing, exit 0
 # The full object is stashed verbatim, so any conversation context the relay
 # includes (in_reply_to: {author_handle, text}, null for a fresh mention) is
 # preserved for fmx-respond to handle follow-ups with continuity. The durable
@@ -122,7 +123,9 @@ esac
 # successful answer or dismiss. Checking it before the inbox stash keeps both a
 # still-pending request and the relay's brief post-answer re-offer silent without
 # recreating a drained inbox. The startup prune above bounds marker retention.
-if fmx_private_artifact_file_valid "$STATE/x-context" "$REQ.offered.json" 600; then
+# Only a marker whose wake was actually emitted suppresses the re-offer: a marker
+# left behind by an interrupted offer below must fall through to be re-offered.
+if fmx_offer_registry_emitted "$STATE" "$REQ"; then
   clear_error
   clear_claim_error
   exit 0
@@ -151,10 +154,27 @@ if [ -n "$POLL_CTX" ]; then
   fmx_context_registry_set "$STATE" "$REQ" "$POLL_PLATFORM" "$POLL_MAX" 2>/dev/null || true
 fi
 
+# Claim, emit, then commit. The claim stays first because it is the atomic gate
+# that stops two polls from offering one request, but it deliberately records an
+# UNEMITTED marker: committing before the wake is written would let any death in
+# that gap leave a marker that swallows every later relay re-offer above, losing
+# the mention for the rest of the retention window with no trace. In this order
+# an interrupted offer costs at most one repeated wake - the noise the marker
+# exists to trim - instead of a silently dropped mention.
 fmx_offer_registry_claim "$STATE" "$REQ"
 offer_rc=$?
 case "$offer_rc" in
-  0) clear_error; clear_claim_error; printf 'x-mention %s\n' "$REQ" ;;
-  1) clear_error; clear_claim_error; exit 0 ;;
+  # 1 is an unemitted marker from an interrupted earlier offer, because the check
+  # above already returned for an emitted one; re-offer it rather than exiting.
+  0|1) clear_error; clear_claim_error ;;
   *) emit_claim_error_once "cannot record mention offer"; exit 0 ;;
 esac
+# One line of output per poll is the watcher's wake-payload contract, so a failed
+# commit stays silent here: its only cost is the next cycle re-offering.
+# This closes the poll's own window, not every window: the watcher reads this
+# output, deletes the capture, and only then appends the durable wake record, so
+# a watcher that dies in that gap still loses the wake. Closing that one belongs
+# in the watcher's check dispatch, not here. Because a wake can also be repeated,
+# the single public answer per request is enforced in bin/fm-x-reply.sh.
+printf 'x-mention %s\n' "$REQ" || exit 0
+fmx_offer_registry_commit "$STATE" "$REQ" || true

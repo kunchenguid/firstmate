@@ -330,8 +330,16 @@ Its request handling remains in X-specific `bin/` scripts and the `fmx-respond` 
 
 `bin/fm-x-poll.sh` calls `GET /connector/poll` with `Authorization: Bearer <FMX_PAIRING_TOKEN>`.
 HTTP 204 is silent.
-A newly offered pending mention with non-empty `text` is stored at `state/x-inbox/<request_id>.json` and wakes firstmate exactly once with `x-mention <request_id>`.
-The poll atomically claims `state/x-context/<request_id>.offered.json` before emitting that wake, and subsequent offers of the same request stay silent even after the inbox is drained following an answer or dismiss.
+A newly offered pending mention with non-empty `text` is stored at `state/x-inbox/<request_id>.json` and wakes firstmate with `x-mention <request_id>`.
+The poll atomically claims `state/x-context/<request_id>.offered.json` before emitting that wake and marks the marker `wake_emitted` only after the wake line is written, and subsequent offers of the same request stay silent even after the inbox is drained following an answer or dismiss.
+Only an emitted marker suppresses a later offer, so a poll that dies between the claim and the wake re-offers the mention on its next cycle instead of silencing it; a marker written before this field existed counts as emitted.
+The wake is therefore at least once rather than exactly once, because a repeated wake is recoverable and a silenced mention is not.
+Exactly-once is enforced where the public action happens: `bin/fm-x-reply.sh` atomically writes `state/x-context/<request_id>.answered.json` with `answered:false` before posting an initial answer, then confirms it with `answered:true` only after a 2xx response.
+A repeated wake cannot become a second public reply: a confirmed marker refuses with exit 10, while an unconfirmed or legacy marker refuses with exit 11 and leaves the inbox in place for visible escalation because the earlier outcome cannot be proven.
+The claim is released only when the answer provably did not land, including failures before transmission and readable non-2xx responses other than 409.
+A 409, transport failure, or unreadable HTTP status holds the unconfirmed claim and exits 11, while a failed release emits a warning that later attempts will refuse until the claim is cleared.
+The answer claim does not apply to follow-ups, which the relay caps instead.
+A residual delivery window remains outside the poll: the watcher reads the poll's output, deletes the capture, and only then appends the durable wake record, so a watcher that dies in that gap still loses the wake.
 Offer markers share the context registry's bounded seven-day retention, so losing or expiring the local marker lets a relay offer wake firstmate again.
 The full relay object is preserved, including `in_reply_to: {author_handle, text}` when the mention is a reply in a conversation or `null` for fresh mentions.
 At the same time the poll records a durable per-request reply context at `state/x-context/<request_id>.json` (`{request_id, platform, reply_max_chars, recorded_at}`) from the same authoritative relay payload, best-effort and keyed by `request_id` so concurrent requests never overwrite each other; it survives the inbox cleanup that follows the acknowledgement, so a delayed follow-up can recover the original platform and split budget even with no task link.

@@ -104,7 +104,7 @@ state/               volatile runtime signals; gitignored
   ops-watch.check.sh  generated operational alert inbox watch, registered like any custom check; present when auto mode finds this home's alert inbox or config explicitly enables the watch, with its dedupe record in .ops-inbox-wake (docs/ops-inbox-wake.md)
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
-  x-context/         generated X-mode durable per-request reply context and one-wake offer markers, keyed by request_id; survives inbox cleanup and expires within seven days (section 14; bin/fm-x-lib.sh)
+  x-context/         generated X-mode durable per-request reply context and delivery markers, keyed by request_id; survives inbox cleanup and expires within seven days (section 14; docs/configuration.md)
   x-outbox/          generated X-mode dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
   x-poll.error x-poll.claim-error  generated X-mode relay and offer-claim diagnostic dedupe markers
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
