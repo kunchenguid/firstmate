@@ -33,6 +33,9 @@ herdr_safe_stop_and_delete() { # <session>
 herdr_test_neutral_config() {
   local dir
   dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-neutral-config.XXXXXX") || return 1
+  # Consumed by the sourcing test file's cleanup trap, not by this library, so
+  # it reads as "unused" here.
+  # shellcheck disable=SC2034
   NEUTRAL_CONFIG=$dir
   export FM_CONFIG_OVERRIDE="$dir"
 }
