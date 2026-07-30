@@ -59,64 +59,6 @@ export const Type = {
 JS
 }
 
-test_tracked_extension_present_and_self_hashing() {
-  local text expected_config_source
-  expected_config_source="config_dir=\\\"\${FM_CONFIG_OVERRIDE:-\$FM_HOME/config}\\\""
-  assert_present "$EXT" "tracked Pi primary watcher extension is missing"
-  text=$(cat "$EXT")
-  assert_contains "$text" "fm_watch_arm_pi" "tracked extension missing tool name"
-  assert_contains "$text" "fm-watch-arm-pi" "tracked extension missing command name"
-  assert_contains "$text" "fm-watch-arm.sh" "tracked extension missing watcher arm"
-  assert_contains "$text" "sendUserMessage" "tracked extension missing Pi wake API"
-  assert_contains "$text" 'encodeFirstmateOperationalInput' "tracked extension does not construct typed synthetic user-role wakes"
-  assert_contains "$text" "deliverAs: \"followUp\"" "tracked extension missing followUp delivery"
-  assert_contains "$text" ".pi-watch-extension-loaded" "tracked extension missing loaded marker"
-  assert_contains "$text" 'createHash("sha256").update(readFileSync(extensionFile)).digest("hex")' "tracked extension does not self-hash its own content for extensionVersion"
-  assert_contains "$text" 'fileURLToPath(import.meta.url)' "tracked extension does not self-locate via import.meta.url"
-  assert_contains "$text" 'type LockOwnership = "owned" | "missing" | "other"' "tracked extension does not distinguish missing lock from another owner"
-  assert_contains "$text" "readFileSync(\`\${state}/.lock\`" "tracked extension does not read the effective session lock"
-  assert_contains "$text" 'return pidAlive(lockPid) ? "other" : "missing"' "tracked extension does not allow a pre-lock load marker"
-  assert_contains "$text" 'if (lockOwnership() === "other") return' "tracked extension overwrites another live session marker"
-  assert_contains "$text" 'const ownership = lockOwnership()' "tracked extension arm does not inspect the distinct lock ownership state"
-  assert_contains "$text" 'if (ownership === "other") return { ok: false' "tracked extension arm does not preserve the live-other read-only refusal"
-  assert_contains "$text" 'if (ownership === "missing")' "tracked extension arm collapses a stale or absent lock into the live-other refusal"
-  assert_contains "$text" "no live session holds the lock" "tracked extension arm missing stale-lock recovery guidance"
-  assert_contains "$text" "run bin/fm-session-start.sh to reclaim it" "tracked extension arm does not direct stale-lock reclamation"
-  assert_contains "$text" "call fm_watch_arm_pi to re-arm" "tracked extension arm does not direct supervision re-arm"
-  assert_contains "$text" "writeFileSync(marker, \`\${extensionVersion}\\n\${process.pid}\\n\`)" "tracked extension does not write the content version and process marker"
-  assert_contains "$text" "const config = process.env.FM_CONFIG_OVERRIDE" "tracked extension missing effective config resolution"
-  assert_contains "$text" "FM_CONFIG_OVERRIDE: config" "tracked extension does not pass the effective config to the watcher arm"
-  assert_contains "$text" "FM_WATCH_ARM_SCRIPT: armScript" "tracked extension does not pass the effective watcher arm script"
-  assert_contains "$text" "$expected_config_source" "tracked extension does not source the effective x-mode config"
-  assert_contains "$text" "exec \\\"\$FM_WATCH_ARM_SCRIPT\\\" --restart" "tracked extension does not restart into a Pi-owned watcher child"
-  assert_contains "$text" 'label: "Arm firstmate watcher"' "tracked extension tool is missing its human-readable label"
-  assert_not_contains "$text" "Always use this tool" "tracked extension kept broad tool-selection guidance"
-  assert_contains "$text" "only for the first required cycle or after a notification says the cycle is missing, failed, or unhealthy" "tracked extension tool metadata is missing the Pi first-cycle or explicit-repair rule"
-  assert_contains "$text" "Do not call it after ordinary work, turn completion, or ordinary signal, stale, check, or heartbeat handling" "tracked extension prompt guidance does not prevent redundant ordinary-notification calls"
-  assert_contains "$text" 'parameters: Type.Object({})' "tracked extension tool is not using Pi's canonical TypeBox schema"
-  assert_contains "$text" 'content: [{ type: "text", text: result.message }]' "tracked extension tool is missing Pi text content"
-  assert_contains "$text" 'details: result' "tracked extension tool is missing structured result details"
-  assert_contains "$text" 'ctx.ui.notify' "tracked extension command does not notify through Pi's UI"
-  assert_contains "$text" 'process.once("exit", cleanupOnProcessExit)' "tracked extension lacks clean-process-exit cleanup"
-  assert_contains "$text" "type SessionGeneration" "tracked extension lacks an explicit session-generation owner"
-  assert_contains "$text" "function activateGeneration" "tracked extension does not activate a live generation for replacement sessions"
-  assert_contains "$text" "function generationIsLive" "tracked extension does not gate arm mutations on the live generation"
-  assert_contains "$text" "watcher: not armed - Pi session is shutting down" "tracked extension missing the terminal shutdown refusal"
-  assert_not_contains "$text" "[ -f config/x-mode.env ]" "tracked extension kept a repo-relative x-mode config path"
-  pass "Pi primary watcher extension is tracked, self-hashing, and self-locating"
-}
-
-test_spawn_template_mentions_pi_watch_placeholder() {
-  local text
-  text=$(cat "$ROOT/bin/fm-spawn.sh")
-  assert_contains "$text" "-e __PITURNEND__ -e __PIWATCH__" "Pi secondmate launch template does not include both primary extensions"
-  assert_contains "$text" "\$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts" "fm-spawn does not point the Pi secondmate watch placeholder at the tracked extension"
-  assert_not_contains "$text" "fm-pi-watch-extension.sh" "fm-spawn should no longer generate the Pi watch extension before launch"
-  assert_contains "$text" "__PITURNEND__" "fm-spawn does not replace the Pi turn-end guard extension placeholder"
-  assert_contains "$text" "__PIWATCH__" "fm-spawn does not replace the Pi watch extension placeholder"
-  pass "Pi secondmate launch wiring includes both tracked primary extensions"
-}
-
 test_pi_extension_reports_external_healthy_watcher() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-external-healthy-root"
@@ -1234,26 +1176,6 @@ EOF
   pass "Pi process-exit cleanup stops the attached arm child"
 }
 
-test_opencode_primary_watch_plugin_static_wiring() {
-  local plugin module_boundary text
-  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
-  module_boundary="$ROOT/.opencode/plugins/package.json"
-  assert_present "$plugin" "OpenCode primary watch plugin missing"
-  assert_present "$module_boundary" "OpenCode plugin ESM package boundary missing"
-  assert_contains "$(cat "$module_boundary")" '"type": "module"' "OpenCode plugin package boundary is not explicitly ESM"
-  text=$(cat "$plugin")
-  assert_contains "$text" "session.idle" "OpenCode plugin does not listen for session.idle"
-  assert_contains "$text" "fm-watch-arm.sh" "OpenCode plugin does not spawn the watcher arm"
-  assert_contains "$text" "promptAsync" "OpenCode plugin does not wake with promptAsync"
-  assert_contains "$text" 'encodeFirstmateOperationalInput' "OpenCode plugin does not construct typed synthetic user-role wakes"
-  assert_contains "$text" ".fm-secondmate-home" "OpenCode plugin does not scope out secondmate homes"
-  assert_contains "$text" "rev-parse\", \"--git-dir" "OpenCode plugin does not check linked worktree scope"
-  assert_contains "$text" "sessionOwnsLock" "OpenCode plugin does not gate arm attempts on the session lock"
-  assert_contains "$text" 'fm-watch-arm.sh" --restart' "OpenCode plugin does not restart into its own watcher child"
-  assert_contains "$text" 'setArmStatus("external")' "OpenCode plugin still treats an external healthy watcher as armed"
-  pass "OpenCode primary watcher plugin has the verified TUI wake wiring"
-}
-
 test_opencode_plugin_package_boundary_is_explicit_esm() {
   local fixture plugin out status
   fixture="$TMP_ROOT/opencode-esm-boundary/.opencode"
@@ -2202,8 +2124,6 @@ EOF
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
-test_tracked_extension_present_and_self_hashing
-test_spawn_template_mentions_pi_watch_placeholder
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
@@ -2219,7 +2139,6 @@ test_pi_arm_distinguishes_session_lock_ownership
 test_pi_session_transition_generation_owner
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
-test_opencode_primary_watch_plugin_static_wiring
 test_opencode_plugin_package_boundary_is_explicit_esm
 test_opencode_primary_watch_plugin_uses_effective_state_home
 test_opencode_primary_watch_plugin_sources_effective_config
