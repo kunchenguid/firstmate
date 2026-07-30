@@ -293,7 +293,9 @@ while [ "$i" -lt 120 ]; do
 done
 [ -f "$HOME_DIR/state/.pi-turnend-extension-loaded" ] || fail "Pi turn-end extension did not load"
 [ -f "$HOME_DIR/state/.pi-watch-extension-loaded" ] || fail "Pi watcher extension did not load"
-wait_for_text "(openai-codex)" 120 || fail "Pi did not reach its ready composer"
+# Pi's ready composer footer names the pinned model; 0.82.x prints it without the
+# provider prefix this probe used to match, so pin the model id itself.
+wait_for_text "gpt-5.6-sol" 120 || fail "Pi did not reach its ready composer"
 sleep 1
 
 send_prompt "/calm"
