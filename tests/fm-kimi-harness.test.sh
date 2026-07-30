@@ -9,10 +9,17 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 KIMI_HOOK="$ROOT/bin/fm-kimi-turnend-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-kimi-harness)
+KIMI_RUNTIME_TASK_TMP=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
+
+cleanup_kimi_harness() {
+  [ -z "$KIMI_RUNTIME_TASK_TMP" ] || rm -rf "$KIMI_RUNTIME_TASK_TMP"
+  rm -rf "$TMP_ROOT"
+}
+trap cleanup_kimi_harness EXIT
 
 make_spawn_fakebin() {
   local dir=$1 fakebin
@@ -171,7 +178,10 @@ EOF
 
 test_kimi_launch_then_send_is_verified() {
   local id rec out rc launch pointer brief_real meta task_tmp
-  id=kimi-success-z1
+  id="kimi-success-z1-$$"
+  task_tmp="/tmp/fm-$id"
+  KIMI_RUNTIME_TASK_TMP=$task_tmp
+  rm -rf "$task_tmp"
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
   out=$(FM_FAKE_KIMI_SWALLOW_FIRST=yes run_spawn \
@@ -193,8 +203,6 @@ test_kimi_launch_then_send_is_verified() {
   [ "$pointer" = "Read the brief at $brief_real and follow it exactly." ] \
     || fail "kimi pointer was not the exact absolute-path-only instruction: $pointer"
   meta="$HOME_DIR/state/$id.meta"
-  task_tmp="/tmp/fm-$id"
-  FM_TEST_CLEANUP_DIRS+=("$task_tmp")
   assert_grep 'model=kimi-code/k3' "$meta" "kimi meta lost the requested model"
   assert_grep 'effort=high' "$meta" "kimi meta did not retain the unsupported effort axis"
   assert_grep "tasktmp=$task_tmp" "$meta" "kimi meta did not record its task temp root"
