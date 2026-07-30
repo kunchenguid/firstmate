@@ -88,9 +88,11 @@ See [docs/herdr-backend.md](herdr-backend.md) for Herdr setup.
 
 ## One primary per home
 
-Before creating anything, the launcher looks for a primary already running in this home.
-If it finds one, it offers to reattach instead of starting a second, so two sessions can never contend for the same home's session lock.
+Before creating anything, the launcher takes a short-lived launch lock in `state/` and, while holding it, looks for a primary already running in this home.
+If it finds one, it offers to reattach instead of starting a second.
+The lock is held from that check until the new session's launch command has been sent, so two concurrent runs of this launcher cannot both pass the check: the second refuses with one line while the first is still starting, and a launcher that dies mid-launch leaves a lock the next run reclaims on its own.
 A leftover tab whose agent is gone is not a running session and is replaced normally.
+The guarantee is scoped to launches made through this launcher: it does not police a primary started by other means, though once such a session's agent is registered, the reattach check sees it like any other.
 
 ## When something goes wrong
 
