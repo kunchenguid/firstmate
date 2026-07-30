@@ -820,10 +820,19 @@ direct_ref_transaction() {
     exec 9<&-
     wait "$pid" 2>/dev/null || true
     REF_TRANSACTION_OUTPUT=$(first_line "$(cat "$error_file" 2>/dev/null || true)")
+    # Some Git versions reject a raced symbolic ref during preparation before this process can inspect it.
+    rc=1
+    for ref in "$@"; do
+      if ref_is_symbolic "$ref"; then
+        REF_TRANSACTION_OUTPUT="symbolic ref at $ref"
+        rc=2
+        break
+      fi
+    done
     rm -f "$input_pipe" "$output_pipe" "$error_file"
     rmdir "$txn_dir" 2>/dev/null || true
     [ -n "$REF_TRANSACTION_OUTPUT" ] || REF_TRANSACTION_OUTPUT="ref transaction preparation failed"
-    return 1
+    return "$rc"
   fi
 
   for ref in "$@"; do

@@ -1310,14 +1310,14 @@ test_resolving_preservation_creation_symbolic_race_refuses() {
   run_sync_guarded "$home" "$fakebin" "$out" "$err" preservation-resolving-symbolic-race
   unset GIT_RACE_CLONE GIT_SYMBOLIC_RACE_REF GIT_SYMBOLIC_RACE_TARGET
 
-  assert_contains "$(cat "$out")" "cannot create preservation ref" \
-    "resolving symbolic preservation creation race did not refuse during preparation"
+  assert_contains "$(cat "$out")" "symbolic preservation ref appeared before creation" \
+    "resolving symbolic preservation creation race was not classified as symbolic"
   [ "$(head_sha "$clone")" = "$old" ] || fail "resolving symbolic preservation race moved the branch"
   [ "$(git -C "$clone" symbolic-ref "$anchor")" = "$target" ] \
     || fail "resolving symbolic preservation race replaced the named ref"
   [ "$(git -C "$clone" rev-parse "$target")" = "$old" ] \
     || fail "resolving symbolic preservation race moved its referent"
-  pass "resolving symbolic preservation creation refuses during preparation"
+  pass "resolving symbolic preservation creation is classified consistently"
 }
 
 test_tree_identical_expected_old_transaction_refusal() {
