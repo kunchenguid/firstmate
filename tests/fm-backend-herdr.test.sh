@@ -358,7 +358,7 @@ test_workspace_label_secondmate_marker_beats_config() {
 }
 
 test_workspace_label_invalid_config_refuses_loudly() {
-  local entry case_name body
+  local entry case_name body nul_home
   # One case per rejected shape: two lines, an inner space, a control
   # character, a path separator, a leading dash, a leading dot, over the
   # length bound, and the reserved secondmate namespace.
@@ -379,6 +379,12 @@ test_workspace_label_invalid_config_refuses_loudly() {
     [ -z "$RESOLVE_OUT" ] || fail "an invalid configured label ($case_name) must print no label at all, got '$RESOLVE_OUT'"
     assert_contains "$RESOLVE_ERR" "herdr-workspace-label" "the refusal for $case_name should name the offending file"
   done
+  nul_home=$(label_home invalid-nul)
+  printf 'bad\0label' > "$nul_home/config/herdr-workspace-label"
+  resolve_label "$nul_home"
+  [ "$RESOLVE_STATUS" -ne 0 ] || fail "a NUL byte in a configured label must refuse, but resolved to '$RESOLVE_OUT'"
+  [ -z "$RESOLVE_OUT" ] || fail "a NUL byte in a configured label must print no label at all, got '$RESOLVE_OUT'"
+  assert_contains "$RESOLVE_ERR" "herdr-workspace-label" "the NUL-byte refusal should name the offending file"
   assert_contains "$RESOLVE_ERR" "remove the file to use the default 'firstmate'" \
     "the refusal should tell the captain how to get back to the default"
   pass "fm_backend_herdr_workspace_label: an unusable configured label refuses loudly and never falls back to 'firstmate'"

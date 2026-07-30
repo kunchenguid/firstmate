@@ -193,6 +193,10 @@ fm_backend_herdr_workspace_label() {  # -> label on stdout, or 1 + a diagnostic
   fi
   file=$(fm_backend_herdr_workspace_label_config_path)
   if [ -f "$file" ]; then
+    if LC_ALL=C od -An -v -tx1 "$file" 2>/dev/null | grep -Eq '(^|[[:space:]])00([[:space:]]|$)'; then
+      echo "error: $file contains a NUL byte, which is not a valid herdr workspace label; use 1-$FM_BACKEND_HERDR_WORKSPACE_LABEL_MAX characters from A-Z a-z 0-9 . _ - starting with a letter or digit and not with the reserved '2ndmate-' prefix, or remove the file to use the default 'firstmate'" >&2
+      return 1
+    fi
     # Command substitution strips trailing newlines, so an ordinary one-line
     # file never trips the multi-line refusal below.
     raw=$(cat "$file" 2>/dev/null) || {

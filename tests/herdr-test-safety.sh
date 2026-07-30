@@ -23,7 +23,8 @@ herdr_safe_stop_and_delete() { # <session>
 }
 
 # herdr_test_neutral_config: point this test process at an empty scratch config
-# directory. Call it from any test that asserts the DEFAULT "firstmate"
+# directory and set NEUTRAL_CONFIG to that directory.
+# Call it from any test that asserts the DEFAULT "firstmate"
 # workspace label while resolving the adapter against this repo root: when that
 # root is also a live firstmate home, its own config/herdr-workspace-label would
 # otherwise change the label under test. Not applied at source time, because a
@@ -32,6 +33,6 @@ herdr_safe_stop_and_delete() { # <session>
 herdr_test_neutral_config() {
   local dir
   dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-neutral-config.XXXXXX") || return 1
+  NEUTRAL_CONFIG=$dir
   export FM_CONFIG_OVERRIDE="$dir"
-  printf '%s' "$dir"
 }

@@ -36,7 +36,7 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 SESSION="fm-lab-prune-safety-e2e-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-prune-safety.XXXXXX")
-NEUTRAL_CONFIG=$(herdr_test_neutral_config) || { echo "skip: could not create a scratch config dir"; exit 0; }
+herdr_test_neutral_config || { echo "skip: could not create a scratch config dir"; exit 0; }
 cleanup_all() {
   herdr_safe_stop_and_delete "$SESSION"
   rm -rf "$SCRATCH" "$NEUTRAL_CONFIG"
