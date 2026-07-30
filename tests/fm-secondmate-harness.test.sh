@@ -183,12 +183,16 @@ SH
   got=$("${nomarkers[@]}" PATH="$fakebin:$BASE_PATH" PI_CODING_AGENT=true FM_TEST_SIGNED_SHAPE=helper "$ROOT/bin/fm-harness.sh")
   [ "$got" = pi ] || fail "unrelated pi-signed-helper ancestry resolved '$got', expected pi"
 
+  # shellcheck disable=SC2016 # single quotes are deliberate: the bash -c body is a
+  # literal, and its $0 is the "$ROOT" operand passed after it
   got=$("${nomarkers[@]}" PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; fm_harness_ancestry_pid' "$ROOT")
   [ "$got" = 100 ] || fail "session-lock ancestry selected '$got', expected the inner Pi engine pid 100"
+  # shellcheck disable=SC2016 # as above: literal bash -c bodies, $0 is the operand
   "${nomarkers[@]}" PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 200' "$ROOT" \
     || fail "session-lock liveness rejected exact pi-signed holder"
+  # shellcheck disable=SC2016 # as above: literal bash -c bodies, $0 is the operand
   if "${nomarkers[@]}" PATH="$fakebin:$BASE_PATH" FM_TEST_SIGNED_SHAPE=helper bash -c \
     '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 200' "$ROOT"; then
     fail "session-lock liveness accepted unrelated pi-signed-helper"
