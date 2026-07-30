@@ -799,7 +799,7 @@ set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
 case "\${1:-}" in
   new-window) printf '@42\\n'; exit 0 ;;
-  rename-window) printf '%s\\n' "\${4:-}" > "\${FM_TMUX_LABEL_FILE:?}"; exit 0 ;;
+  rename-window) printf '%s\\n' "\${!#}" > "\${FM_TMUX_LABEL_FILE:?}"; exit 0 ;;
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
     for a in "\$@"; do case "\$a" in *window_name*) cat "\${FM_TMUX_LABEL_FILE:?}"; exit 0 ;; esac; done
@@ -865,7 +865,7 @@ set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
 case "\${1:-}" in
   new-window) printf '@42\\n'; exit 0 ;;
-  rename-window) printf '%s\\n' "\${4:-}" > "\${FM_TMUX_LABEL_FILE:?}"; exit 0 ;;
+  rename-window) printf '%s\\n' "\${!#}" > "\${FM_TMUX_LABEL_FILE:?}"; exit 0 ;;
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*)
       printf x >> "$counter"
@@ -1109,7 +1109,7 @@ test_spawn_records_and_applies_labels() {
     "spawn did not record the task-id-derived human label: $(cat "$state/$id.meta")"
   assert_grep 'window=firstmate:@42' "$state/$id.meta" \
     "spawn did not persist the stable tmux window id instead of the display label"
-  assert_contains "$(cat "$log")" $'\x1f''rename-window'$'\x1f''-t'$'\x1f''@42'$'\x1f''grist review flow' \
+  assert_contains "$(cat "$log")" $'\x1f''rename-window'$'\x1f''-t'$'\x1f''@42'$'\x1f''--'$'\x1f''grist review flow' \
     "spawn did not apply the derived label to the tmux window"
 
   meta_tmp="$state/$id.meta.tmp"
@@ -1121,7 +1121,7 @@ test_spawn_records_and_applies_labels() {
   expect_code 0 $? "respawn with a recorded label should succeed"$'\n'"$out"
   assert_grep 'label=persisted review label' "$state/$id.meta" \
     "respawn did not preserve the recorded display label"
-  assert_contains "$(cat "$log.respawn")" $'\x1f''rename-window'$'\x1f''-t'$'\x1f''@42'$'\x1f''persisted review label' \
+  assert_contains "$(cat "$log.respawn")" $'\x1f''rename-window'$'\x1f''-t'$'\x1f''@42'$'\x1f''--'$'\x1f''persisted review label' \
     "respawn did not reapply the recorded display label"
 
   custom_id="grist-review-custom"
@@ -1135,8 +1135,20 @@ test_spawn_records_and_applies_labels() {
   expect_code 0 $? "spawn with an explicit label should succeed"$'\n'"$out"
   assert_grep 'label=review billing flow' "$state/$custom_id.meta" \
     "spawn did not record the explicit human label"
-  assert_contains "$(cat "$log.custom")" $'\x1f''rename-window'$'\x1f''-t'$'\x1f''@42'$'\x1f''review billing flow' \
+  assert_contains "$(cat "$log.custom")" $'\x1f''rename-window'$'\x1f''-t'$'\x1f''@42'$'\x1f''--'$'\x1f''review billing flow' \
     "spawn did not apply the explicit label to the tmux window"
+
+  out=$(run_spawn_case "$ROOT" "$fb" "$log.reserved" "$state" "$data" "$config" "$proj" \
+    -- "$custom_id" "$proj" claude --backend tmux --label "fm-other-task" 2>&1)
+  expect_code 1 $? "an explicit label with the reserved fm- prefix must be refused"$'\n'"$out"
+  assert_contains "$out" "reserved fm- prefix" \
+    "the fm- label refusal did not name the reserved prefix: $out"
+
+  out=$(run_spawn_case "$ROOT" "$fb" "$log.dash" "$state" "$data" "$config" "$proj" \
+    -- "$custom_id" "$proj" claude --backend tmux --label='-leading dash' 2>&1)
+  expect_code 1 $? "an explicit label starting with '-' must be refused"$'\n'"$out"
+  assert_contains "$out" "must not start with '-'" \
+    "the leading-dash label refusal did not explain itself: $out"
 
   help=$("$ROOT/bin/fm-spawn.sh" --help)
   assert_contains "$help" "--label <short-human-label>" "fm-spawn help did not document --label"

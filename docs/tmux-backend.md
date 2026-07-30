@@ -31,6 +31,7 @@ tmux attach -t firstmate
 ```
 
 Each task window shows the short human label passed to `fm-spawn.sh --label`, or the task id with hyphens converted to spaces when no label is supplied.
+Explicit labels must not start with `fm-` (that name shape is reserved for legacy endpoint windows that are still targeted by name) or with `-`.
 
 ```sh
 tmux list-windows -t <session-name>

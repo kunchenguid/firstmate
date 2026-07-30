@@ -9,6 +9,8 @@
 #   Without it, hyphens in the task id become spaces (for example,
 #   grist-review-flow becomes "grist review flow"). The label is recorded for
 #   respawns but never participates in endpoint lookup, ownership, or cleanup.
+#   Explicit labels must not start with "fm-" (reserved for legacy tmux
+#   endpoint names, which are still targeted by name) or with "-".
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
@@ -226,6 +228,8 @@ done
 [ "$LABEL_SET" -eq 0 ] || [ -n "$LABEL_ARG" ] || { echo "error: --label requires a non-empty value" >&2; exit 1; }
 case "$LABEL_ARG" in
   *$'\n'*|*$'\r'*) echo "error: --label must be a single line" >&2; exit 1 ;;
+  fm-*) echo "error: --label must not start with the reserved fm- prefix (legacy tmux endpoint namespace)" >&2; exit 1 ;;
+  -*) echo "error: --label must not start with '-'" >&2; exit 1 ;;
 esac
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
@@ -932,7 +936,7 @@ herdr_existing_meta_allows_spawn() {  # <meta>
   old_backend=$(fm_backend_of_meta "$meta")
   old_target=$(fm_backend_target_of_meta "$meta")
   [ -n "$old_target" ] || {
-    echo "error: existing metadata for $ID has no endpoint; refusing duplicate launch while its herdr presentation journal is quarantined" >&2
+    echo "error: existing metadata for $ID has no recorded endpoint; refusing duplicate launch until the existing task record is inspected or torn down" >&2
     return 1
   }
   SPAWN_RECOVERY_BACKEND=$old_backend

@@ -31,8 +31,9 @@
 # steering an arbitrary first match.
 fm_backend_tmux_resolve_bare_selector() {  # <name>
   local name=$1 matches count
-  matches=$(tmux list-windows -a -F '#{session_name}:#{window_name}' | grep ":$name\$") \
-    || { echo "error: no window named $name" >&2; return 1; }
+  matches=$(tmux list-windows -a -F '#{session_name}:#{window_name}' \
+    | FM_SELECTOR="$name" awk 'BEGIN { n = ENVIRON["FM_SELECTOR"] } { i = index($0, ":"); if (i && substr($0, i + 1) == n) print }')
+  [ -n "$matches" ] || { echo "error: no window named $name" >&2; return 1; }
   count=$(printf '%s\n' "$matches" | grep -c .)
   if [ "$count" -gt 1 ]; then
     {
@@ -112,7 +113,7 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
 # callers and persisted in task metadata.
 fm_backend_tmux_rename_task() {  # <window-id> <display-label>
   local wid=$1 label=$2 actual
-  tmux rename-window -t "$wid" "$label" || return 1
+  tmux rename-window -t "$wid" -- "$label" || return 1
   actual=$(tmux display-message -p -t "$wid" '#{window_name}') || return 1
   [ "$actual" = "$label" ] || {
     echo "error: tmux window $wid did not retain display label '$label'" >&2
