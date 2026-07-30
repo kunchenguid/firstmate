@@ -340,6 +340,16 @@ copy_fetch_config_to_stage() {
     && apply_fetch_config_dump "$stage" "$worktree_config"
 }
 
+literal_gitdir_pattern() {
+  local pattern=$1
+  pattern="${pattern//\\/\\\\}"
+  pattern="${pattern//\*/\\*}"
+  pattern="${pattern//\?/\\?}"
+  pattern="${pattern//\[/\\[}"
+  pattern="${pattern//\]/\\]}"
+  printf '%s\n' "$pattern"
+}
+
 staged_fetch_scope_cleanup() {
   if [ -n "${stage_root:-}" ]; then
     rm -rf -- "$stage_root" 2>/dev/null || true
@@ -396,7 +406,8 @@ staged_fetch_scope_signal() {
 
 fetch_and_publish_configured_refs() {
   local git_dir stage_root stage before after changes local_config worktree_config
-  local scoped_file_config output rc old_oid new_oid ref
+  local scoped_file_config scoped_file_include_config git_dir_pattern
+  local output rc old_oid new_oid ref
   local saved_exit_trap saved_exit_action saved_term_trap saved_int_trap
   local -a fetched_refs=() recursion_refs=()
 
@@ -430,6 +441,7 @@ fetch_and_publish_configured_refs() {
   local_config="$stage_root/local-config"
   worktree_config="$stage_root/worktree-config"
   scoped_file_config="$stage_root/scoped-file-config"
+  scoped_file_include_config="$stage_root/scoped-file-include-config"
 
   if ! output=$(git -c protocol.file.allow=always \
       clone --quiet --mirror --shared --origin origin "$PROJ" "$stage" 2>&1); then
@@ -457,6 +469,13 @@ fetch_and_publish_configured_refs() {
     return 1
   fi
   if ! git config --file "$scoped_file_config" protocol.file.allow always; then
+    FETCH_OUTPUT="cannot configure scoped staged-object transfer"
+    staged_fetch_scope_finish
+    return 1
+  fi
+  git_dir_pattern=$(literal_gitdir_pattern "$git_dir")
+  if ! git config --file "$scoped_file_include_config" \
+      "includeIf.gitdir:$git_dir_pattern.path" "$scoped_file_config"; then
     FETCH_OUTPUT="cannot configure scoped staged-object transfer"
     staged_fetch_scope_finish
     return 1
@@ -497,7 +516,7 @@ fetch_and_publish_configured_refs() {
     recursion_refs=(HEAD)
   fi
   if ! output=$(git -C "$PROJ" \
-      -c "includeIf.gitdir:$git_dir.path=$scoped_file_config" \
+      -c "include.path=$scoped_file_include_config" \
       fetch --quiet --no-tags --no-write-fetch-head --refmap= \
       "$stage" "${recursion_refs[@]}" 2>&1); then
     FETCH_OUTPUT=$output

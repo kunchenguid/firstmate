@@ -681,7 +681,8 @@ for a in "$@"; do
   if [ "$previous" = -c ]; then
     [ "$a" != protocol.file.allow=always ] || file_override=1
     case "$a" in
-      includeIf.gitdir:*.path=*) scoped_include=1 ;;
+      includeIf.gitdir:*) exit 95 ;;
+      include.path=*) scoped_include=1 ;;
     esac
     previous=
     continue
@@ -1700,6 +1701,50 @@ test_internal_object_fetch_overrides_file_policy_only_locally() {
   pass "file transport override is isolated from configured submodule recursion"
 }
 
+test_scoped_file_include_handles_equals_in_gitdir() {
+  local home clone moved remote out
+  home=$(new_home)
+  clone=$(build_pair "$home" gitdir-equals-source)
+  remote=$(cd "$home/remotes/gitdir-equals-source.git" && pwd)
+  advance_origin "$home" gitdir-equals-source C1
+  moved="$home/projects/gitdir=equals"
+  mv "$clone" "$moved"
+  clone=$moved
+  git -C "$clone" config --local protocol.file.allow never
+  git -C "$clone" config --local protocol.ext.allow always
+  git -C "$clone" remote set-url origin "ext::git-upload-pack $remote"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "gitdir=equals: synced" \
+    "equals sign in the Git directory broke the scoped file include"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse refs/remotes/origin/main)" ] \
+    || fail "equals-sign Git directory did not publish and fast-forward"
+  pass "scoped file include handles equals signs in Git directories"
+}
+
+test_scoped_file_include_escapes_gitdir_globs() {
+  local home clone moved remote out
+  home=$(new_home)
+  clone=$(build_pair "$home" gitdir-glob-source)
+  remote=$(cd "$home/remotes/gitdir-glob-source.git" && pwd)
+  advance_origin "$home" gitdir-glob-source C1
+  moved="$home/projects/gitdir=[*?]"
+  mv "$clone" "$moved"
+  clone=$moved
+  git -C "$clone" config --local protocol.file.allow never
+  git -C "$clone" config --local protocol.ext.allow always
+  git -C "$clone" remote set-url origin "ext::git-upload-pack $remote"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "gitdir=[*?]: synced" \
+    "Git-directory glob characters were not matched literally"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse refs/remotes/origin/main)" ] \
+    || fail "glob-character Git directory did not publish and fast-forward"
+  pass "scoped file include escapes Git-directory glob characters"
+}
+
 test_internal_file_override_does_not_reach_submodule_fetches() {
   local home clone remote submodule old tracking out new_submodule
   home=$(new_home)
@@ -2327,6 +2372,8 @@ test_staged_fetch_preserves_valueless_boolean_config
 test_staging_clone_forces_origin_remote_name
 test_staging_clone_overrides_file_policy_only_locally
 test_internal_object_fetch_overrides_file_policy_only_locally
+test_scoped_file_include_handles_equals_in_gitdir
+test_scoped_file_include_escapes_gitdir_globs
 test_internal_file_override_does_not_reach_submodule_fetches
 test_configured_submodule_fetch_runs_under_original_policy
 test_staged_fetch_origin_removal_failure_is_fatal
