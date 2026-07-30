@@ -133,6 +133,16 @@ test_missing_state_is_silent() {
 
 test_owned_lock_is_silent() {
   local root="$TMP_ROOT/already-ran" out status=0
+  # FM_LOCK_OS_OVERRIDE=posix (below) forces the POSIX ancestry walk, which
+  # resolves the harness pid with `ps -o comm= -p` / `ps -o ppid= -p`. Git
+  # Bash/MSYS/Cygwin ships a `ps` that rejects those flags - the very reason the
+  # Windows ancestry path exists - so the forced-POSIX contract genuinely cannot
+  # run there and would fail closed. Skip it on such hosts; POSIX CI (where the
+  # non-Windows path is what matters) still exercises it fully.
+  if ! ps -o ppid= -p "$$" >/dev/null 2>&1; then
+    pass "fm-sessionstart-nudge: owned-lock POSIX contract skipped (ps lacks -o/-p on this host)"
+    return 0
+  fi
   make_primary "$root"
   # Run the nudge as a child of the fake 'claude' harness and record THAT
   # harness pid as the lock owner, so the harness ancestry resolves to the
@@ -153,7 +163,8 @@ test_opencode_plugin_delivers_exact_nudge_once() {
   local root="$TMP_ROOT/opencode-primary" out status=0
   make_primary "$root"
   cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
-    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
+    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" \
+    "$ROOT/bin/fm-session-lock-lib.sh" "$root/bin/"
   chmod +x "$root/bin/fm-sessionstart-nudge.sh"
   out=$(PLUGIN="$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
     WORKTREE="$root" EXPECTED="$NUDGE_LINE" node --input-type=module 2>&1 <<'EOF'
