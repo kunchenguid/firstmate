@@ -135,8 +135,11 @@
 #                                   (default 0.5)
 #          FM_WATCHER_REAP_SECS     seconds the shutdown trap waits for the
 #                                   watcher child after SIGTERM before killing it
-#                                   hard (default 3; invalid/zero uses the
-#                                   default). See WATCHER_REAP_SECS_DEFAULT.
+#                                   hard (default FM_POLL + 5, at least 20, so the
+#                                   bound clears one watcher poll; invalid/zero
+#                                   uses that default). An explicit value is used
+#                                   verbatim, with no floor applied. See
+#                                   WATCHER_REAP_SECS_DEFAULT.
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
 #          FM_STATE_OVERRIDE        alternate state dir (testing)
 #          Logs each wake to state/.supervise-daemon.log (size-capped). Single
@@ -209,13 +212,29 @@ INJECT_FAIL_SLEEP_DEFAULT=30
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
 # Seconds the shutdown trap may spend reaping the watcher child before killing it
-# hard. WHY (task afk-wedge-noc, overnight away-mode wedge 2026-07-29/30): the
-# watcher ends every cycle in a blocking foreground wait of FM_POLL seconds, and
-# bash runs no trap until that command returns, so a plain `wait` here took ~14s
-# and blew fm-afk-launch.sh's stop window. The watcher is stateless, so bounding
-# the reap is what keeps shutdown latency a property of this file rather than of
-# whichever point in the watcher's poll cycle the signal happened to land in.
-WATCHER_REAP_SECS_DEFAULT=3
+# hard. WHY (task afk-wedge-noc, overnight away-mode wedge 2026-07-29/30): a plain
+# unbounded `wait` here held the daemon open ~14s and blew fm-afk-launch.sh's stop
+# window, and the watcher is stateless, so the reap is bounded. The budget is
+# deliberately set ABOVE one watcher poll: the watcher ends every cycle in a
+# blocking foreground wait of FM_POLL seconds and bash runs no trap until that
+# command returns, so a signal landing early in a wait cannot be honored for
+# nearly a full poll. A tighter bound would make SIGKILL the routine path and skip
+# the watcher's own cleanup trap, leaving a stale state/.watch.lock after every
+# clean stop. The ~14s worst case fits inside the 40s away-mode stop budget that
+# FM_AFK_LAUNCH_STOP_POLLS grants in bin/fm-afk-launch.sh, so the graceful path is
+# reachable and the hard kill is back to being the backstop.
+WATCHER_POLL_SECS_FALLBACK=15   # bin/fm-watch.sh's own FM_POLL default
+WATCHER_REAP_SLACK_SECS=5
+WATCHER_REAP_FLOOR_SECS=20
+WATCHER_REAP_POLL_SECS=${FM_POLL:-$WATCHER_POLL_SECS_FALLBACK}
+case "$WATCHER_REAP_POLL_SECS" in
+  ''|*[!0-9]*) WATCHER_REAP_POLL_SECS=$WATCHER_POLL_SECS_FALLBACK ;;
+  *) [ "$WATCHER_REAP_POLL_SECS" -gt 0 ] 2>/dev/null \
+       || WATCHER_REAP_POLL_SECS=$WATCHER_POLL_SECS_FALLBACK ;;
+esac
+WATCHER_REAP_SECS_DEFAULT=$((10#$WATCHER_REAP_POLL_SECS + WATCHER_REAP_SLACK_SECS))
+[ "$WATCHER_REAP_SECS_DEFAULT" -ge "$WATCHER_REAP_FLOOR_SECS" ] \
+  || WATCHER_REAP_SECS_DEFAULT=$WATCHER_REAP_FLOOR_SECS
 CRASH_THRESHOLD_DEFAULT=10
 CRASH_WINDOW_DEFAULT=60
 CRASH_BACKOFF_DEFAULT=60
@@ -1309,9 +1328,10 @@ trim_log() {
 
 # --- bounded child reap -----------------------------------------------------
 # reap_watcher: end the watcher child within a bounded time and return once it is
-# gone. TERM first (the watcher's own trap exits cleanly when it is between
-# blocking waits), then poll, then KILL. See WATCHER_REAP_SECS_DEFAULT for why
-# the bound exists; an invalid override falls back to the default rather than
+# gone. TERM first, then poll for up to the budget so the watcher's own trap can
+# run once its blocking wait returns, then KILL as the backstop. See
+# WATCHER_REAP_SECS_DEFAULT for why the bound exists and why it sits above one
+# watcher poll; an invalid override falls back to that default rather than
 # turning the bound off.
 reap_watcher() {  # <pid>
   local pid=$1 secs tenths=0 limit

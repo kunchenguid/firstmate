@@ -24,8 +24,6 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
 
-command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
-
 NBSP=$'\302\240'
 TMP_ROOT=$(fm_test_tmproot fm-composer-nbsp-tests)
 
@@ -165,6 +163,13 @@ test_every_normalized_blank_reads_empty
 test_invisible_padding_never_swallows_typed_text
 test_dead_shell_refusal_survives_normalization
 test_verdict_is_locale_independent
+
+# Only level 2 needs jq: it drives the real herdr adapter, which parses the JSON
+# capture. Level 1 above is pure shell and IS the regression guard for the
+# 2026-07-29/30 wedge, so it must run on every host, jq or not - hence the gate
+# sits here rather than at the top of the file (task afk-wedge-noc).
+command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter cases)"; exit 0; }
+
 test_herdr_recorded_idle_screen_is_empty
 test_herdr_recorded_typed_screen_is_pending
 test_herdr_tall_statusline_keeps_the_composer_row_in_window

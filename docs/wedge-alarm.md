@@ -17,7 +17,8 @@ It lists channel directives, one per non-empty, non-comment line, and every list
 - `osascript` posts a macOS Notification Center banner outside the terminal pane.
 - `herdr` calls `herdr notification show` outside the supervised pane.
   Delivery is read from the response `shown` field, not from the exit code, because Herdr accepts and acknowledges the call on a host whose toast delivery is switched off.
-  An explicit `shown: false` counts as a failed channel and falls through to the next one, so this channel cannot report an alarm the captain never saw.
+  Every configured directive fires unconditionally and independently, so there is no failover between channels.
+  An explicit `shown: false` is recorded as a failed channel in `state/.supervise-daemon.log` instead of being counted as a delivered alarm just because Herdr exited 0.
 - `command:<cmd>` runs `<cmd>` through `sh -c` with the alarm summary as `$1` and on stdin, allowing delivery to a phone or pager service.
 
 An absent `config/wedge-alarm` behaves as `auto`, which is default-on on macOS.
