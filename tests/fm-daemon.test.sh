@@ -1592,6 +1592,35 @@ test_reap_watcher_is_bounded_and_leaves_no_child() {
   pass "reap_watcher: bounded after SIGTERM, then a hard kill, and never leaves the child running"
 }
 
+# The away-mode stop path (fm_afk_launch_stop_polls in bin/fm-afk-launch.sh) sizes
+# its wait from the record this daemon publishes rather than re-deriving it, because
+# the daemon is spawned with a three-variable env allowlist and the two sides can
+# read a different FM_POLL (task afk-wedge-noc). So the recorded value must be
+# exactly the budget reap_watcher will spend - under the FM_POLL derivation, under
+# an explicit FM_WATCHER_REAP_SECS, and after the base-10 normalization - and it
+# must land at the path that reader opens.
+test_watcher_reap_record_publishes_the_effective_budget() {
+  local dir spec poll wreap expected state recorded effective
+  dir="$TMP_ROOT/reap-record"
+  for spec in 15::20 36::41 120::125 15:45:45 15:08:8; do
+    poll=${spec%%:*}
+    wreap=${spec#*:}; wreap=${wreap%:*}
+    expected=${spec##*:}
+    state="$dir/poll-$poll-override-${wreap:-none}"; mkdir -p "$state"
+    recorded=$(FM_POLL="$poll" FM_WATCHER_REAP_SECS="$wreap" bash -c '
+      . "$1" >/dev/null 2>&1
+      write_watcher_reap_record "$2"
+      cat "$2/.supervise-daemon.reap-secs"' _ "$DAEMON" "$state")
+    effective=$(FM_POLL="$poll" FM_WATCHER_REAP_SECS="$wreap" \
+      bash -c '. "$1" >/dev/null 2>&1; watcher_reap_secs' _ "$DAEMON")
+    [ "$recorded" = "$expected" ] \
+      || fail "the reap record says '$recorded' at FM_POLL=$poll FM_WATCHER_REAP_SECS='$wreap', expected $expected"
+    [ "$recorded" = "$effective" ] \
+      || fail "the reap record ('$recorded') disagrees with the budget reap_watcher would spend ('$effective')"
+  done
+  pass "write_watcher_reap_record: publishes the effective reap budget the stop path reads"
+}
+
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend() {
   # The whole incident: a non-tmux (herdr) primary gets NO tmux status-line
   # flash, so inject_wedge_alarm must still emit the backend-independent alert
@@ -1986,6 +2015,7 @@ test_wedge_alarm_shutdown_stops_active_notifier_group
 test_wedge_alarm_herdr_unshown_response_is_a_failed_channel
 test_wedge_alarm_herdr_shown_and_silent_responses_are_delivered
 test_reap_watcher_is_bounded_and_leaves_no_child
+test_watcher_reap_record_publishes_the_effective_budget
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
 test_fm_send_exits_nonzero_on_confirmed_swallow

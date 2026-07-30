@@ -81,44 +81,38 @@ FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
 # reap can legitimately outlast a signal that lands mid poll-cycle. The old 10s
 # budget expired first, so a correct shutdown was reported as "did not exit after
 # SIGTERM" and lifecycle state was preserved for a retry that was never needed.
-# A hand-tuned replacement constant would fail the same way again as soon as the
-# watcher poll or the reap override grows, so this budget is DERIVED from the
-# daemon's own reap budget instead of restating it: bin/fm-supervise-daemon.sh is
-# the single owner (watcher_reap_secs), and the ordering rule between the two
-# budgets is the INVARIANT stated there at WATCHER_REAP_SECS_DEFAULT. The daemon
-# is read in a SUBSHELL because sourcing it in library mode exports a notifier
-# seam and defines ~150 functions that must not leak into this lifecycle script.
-# The headroom covers the rest of the shutdown trap (escalation flush, notifier
-# stop, lock and pidfile release). The floor keeps the stock poll at exactly the
-# 160 polls this path already used, so only a longer poll widens the window; an
-# unreadable daemon leaves the floor standing.
+# A hand-tuned replacement constant fails the same way again as soon as the watcher
+# poll or the reap override grows, and this script cannot re-derive the number
+# either: the daemon is spawned with a three-variable env allowlist into a terminal
+# owned by the multiplexer server (fm_afk_launch_create_tmux/_herdr below), so the
+# two sides can legitimately read a different FM_POLL. The daemon therefore RECORDS
+# the reap budget it actually resolved, beside its pidfile, and this reads that
+# record and never re-derives it - one producer of the number, per the INVARIANT
+# stated at WATCHER_REAP_SECS_DEFAULT in bin/fm-supervise-daemon.sh. The headroom
+# covers the rest of that daemon's shutdown trap (escalation flush, notifier stop,
+# lock and pidfile release). No usable record - an older daemon, a crash, a partial
+# or non-numeric write - means the plain floor, which is the 40s window this path
+# used before the record existed, never a guess at what the daemon chose.
+FM_AFK_LAUNCH_REAP_RECORD="$FM_AFK_LAUNCH_STATE/.supervise-daemon.reap-secs"
 FM_AFK_LAUNCH_STOP_POLLS_FLOOR=160
 FM_AFK_LAUNCH_STOP_HEADROOM_SECS=10
 
-fm_afk_launch_daemon_reap_secs() {
-  (
-    # shellcheck source=bin/fm-supervise-daemon.sh
-    . "$FM_AFK_LAUNCH_DIR/fm-supervise-daemon.sh" >/dev/null 2>&1 \
-      && watcher_reap_secs
-  ) 2>/dev/null
-}
-
 fm_afk_launch_stop_polls() {
   local reap polls
-  reap=$(fm_afk_launch_daemon_reap_secs) || reap=
+  reap=$(cat "$FM_AFK_LAUNCH_REAP_RECORD" 2>/dev/null) || reap=
   case "$reap" in
-    ''|*[!0-9]*)
-      printf '%s\n' "$FM_AFK_LAUNCH_STOP_POLLS_FLOOR"
-      return 0
-      ;;
+    ''|*[!0-9]*) reap="" ;;
+    *) [ "$reap" -gt 0 ] 2>/dev/null || reap="" ;;
   esac
-  polls=$(((reap + FM_AFK_LAUNCH_STOP_HEADROOM_SECS) * 4))
+  if [ -z "$reap" ]; then
+    printf '%s\n' "$FM_AFK_LAUNCH_STOP_POLLS_FLOOR"
+    return 0
+  fi
+  polls=$(((10#$reap + FM_AFK_LAUNCH_STOP_HEADROOM_SECS) * 4))
   [ "$polls" -ge "$FM_AFK_LAUNCH_STOP_POLLS_FLOOR" ] \
     || polls=$FM_AFK_LAUNCH_STOP_POLLS_FLOOR
   printf '%s\n' "$polls"
 }
-
-FM_AFK_LAUNCH_STOP_POLLS=$(fm_afk_launch_stop_polls)
 
 # shellcheck source=bin/fm-backend.sh
 . "$FM_AFK_LAUNCH_DIR/fm-backend.sh"
@@ -618,7 +612,7 @@ fm_afk_launch_start_native() {
 }
 
 fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result
+  local pid pid_identity current_identity result=0 read_result stop_polls
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
@@ -635,11 +629,12 @@ fm_afk_launch_stop() {
     pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
   fi
   if [ -n "$pid" ]; then
+    stop_polls=$(fm_afk_launch_stop_polls)
     if ! kill -TERM "$pid" 2>/dev/null; then
       fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
       result=1
     fi
-    for _ in $(seq 1 "$FM_AFK_LAUNCH_STOP_POLLS"); do
+    for _ in $(seq 1 "$stop_polls"); do
       fm_pid_alive "$pid" || break
       sleep 0.25
     done

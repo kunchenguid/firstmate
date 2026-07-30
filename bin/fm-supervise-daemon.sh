@@ -222,12 +222,13 @@ INJECT_CONFIRM_SLEEP_DEFAULT=0.5
 # the watcher's own cleanup trap, leaving a stale state/.watch.lock after every
 # clean stop.
 # INVARIANT (named here, pointed at from bin/fm-afk-launch.sh): the away-mode stop
-# budget must outlast a full graceful reap plus the rest of this shutdown trap, so
-# FM_AFK_LAUNCH_STOP_POLLS is DERIVED from watcher_reap_secs below instead of being
-# a second hand-tuned constant. Two independent constants held only at the stock
-# poll: a fixed 40s stop window is already too small at FM_POLL=36, where this
-# bound alone reaches 41s. Deriving both from the same number is what keeps the
-# graceful path reachable and the hard kill a backstop rather than the routine path.
+# budget must outlast a full graceful reap plus the rest of this shutdown trap. A
+# hand-tuned constant there held only at the stock poll, since a fixed 40s window
+# is already too small at FM_POLL=36 where this bound alone reaches 41s; and a
+# re-derivation there would hold only while both processes read the same FM_POLL,
+# which the daemon's spawn environment does not guarantee. So this process RECORDS
+# the budget it will actually use (write_watcher_reap_record below) and the stop
+# path reads that record: one producer of the number, no environment agreement.
 WATCHER_POLL_SECS_FALLBACK=15   # bin/fm-watch.sh's own FM_POLL default
 WATCHER_REAP_SLACK_SECS=5
 WATCHER_REAP_FLOOR_SECS=20
@@ -1332,13 +1333,12 @@ trim_log() {
 }
 
 # --- bounded child reap -----------------------------------------------------
-# watcher_reap_secs: the effective graceful-reap budget in whole seconds, and the
-# SINGLE OWNER of that number - bin/fm-afk-launch.sh reads it from here to size its
-# own stop budget, per the INVARIANT at WATCHER_REAP_SECS_DEFAULT. An explicit
-# FM_WATCHER_REAP_SECS wins verbatim (no floor); a non-numeric or zero value falls
-# back to the derived default rather than turning the bound off. The value is
-# normalized to base 10 because bash reads a zero-padded 08 as invalid octal, which
-# would abort the shutdown trap before it releases the daemon lock.
+# watcher_reap_secs: the effective graceful-reap budget in whole seconds, resolved
+# in the daemon's OWN environment. An explicit FM_WATCHER_REAP_SECS wins verbatim
+# (no floor); a non-numeric or zero value falls back to the derived default rather
+# than turning the bound off. The value is normalized to base 10 because bash reads
+# a zero-padded 08 as invalid octal, which would abort the shutdown trap before it
+# releases the daemon lock.
 watcher_reap_secs() {
   local secs=${FM_WATCHER_REAP_SECS:-$WATCHER_REAP_SECS_DEFAULT}
   case "$secs" in
@@ -1346,6 +1346,21 @@ watcher_reap_secs() {
     *) [ "$secs" -gt 0 ] 2>/dev/null || secs=$WATCHER_REAP_SECS_DEFAULT ;;
   esac
   printf '%s\n' "$((10#$secs))"
+}
+
+# The volatile lifecycle record that publishes the resolved budget to the away-mode
+# stop path (fm_afk_launch_stop_polls in bin/fm-afk-launch.sh), which sizes its own
+# wait from it and never re-derives it - see the INVARIANT at
+# WATCHER_REAP_SECS_DEFAULT for why the number must come from this process. It
+# lives beside the pidfile in the same state dir, is written at startup before this
+# daemon can be asked to stop, and is removed on shutdown exactly as the pidfile is,
+# so an absent record means "no daemon of this branch is holding a reap budget" and
+# the stop path keeps its own floor.
+WATCHER_REAP_RECORD_NAME=.supervise-daemon.reap-secs
+
+write_watcher_reap_record() {  # <state>
+  watcher_reap_secs > "$1/$WATCHER_REAP_RECORD_NAME" 2>/dev/null \
+    || rm -f "$1/$WATCHER_REAP_RECORD_NAME" 2>/dev/null || true
 }
 
 # reap_watcher: end the watcher child within a bounded time and return once it is
@@ -1391,6 +1406,7 @@ fm_super_main() {
   local WATCH_ERR="$STATE/.supervise-daemon.watcher.err"
   local LOCK="$STATE/.supervise-daemon.lock"
   local PIDFILE="$STATE/.supervise-daemon.pid"
+  local REAPFILE="$STATE/$WATCHER_REAP_RECORD_NAME"
   local INJECT_FAIL_SLEEP=${FM_INJECT_FAIL_SLEEP:-$INJECT_FAIL_SLEEP_DEFAULT}
   local CRASH_THRESHOLD=${FM_CRASH_THRESHOLD:-$CRASH_THRESHOLD_DEFAULT}
   local CRASH_WINDOW=${FM_CRASH_WINDOW:-$CRASH_WINDOW_DEFAULT}
@@ -1410,6 +1426,7 @@ fm_super_main() {
   fi
   echo "$$" > "$PIDFILE"
   fm_pid_identity "${BASHPID:-$$}" > "$LOCK/pid-identity" 2>/dev/null || true
+  write_watcher_reap_record "$STATE"
 
   # --- auto-discover the supervisor BACKEND (tmux vs herdr) first -----------
   # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1
@@ -1443,7 +1460,7 @@ fm_super_main() {
     echo "error: away-mode daemon does not support supervisor backend '$BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
     log "startup failed: unsupported supervisor backend '$BACKEND' (source=$backend_source)"
     fm_lock_release "$LOCK" 2>/dev/null || true
-    rm -f "$PIDFILE" 2>/dev/null || true
+    rm -f "$PIDFILE" "$REAPFILE" 2>/dev/null || true
     exit 1
   fi
 
@@ -1481,7 +1498,7 @@ fm_super_main() {
     echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found (backend=$BACKEND)"
     fm_lock_release "$LOCK" 2>/dev/null || true
-    rm -f "$PIDFILE" 2>/dev/null || true
+    rm -f "$PIDFILE" "$REAPFILE" 2>/dev/null || true
     exit 1
   fi
 
@@ -1503,7 +1520,7 @@ fm_super_main() {
       rm -f "$CUR_TMP" 2>/dev/null || true
     fi
     fm_lock_release "$LOCK" 2>/dev/null || true
-    rm -f "$PIDFILE" 2>/dev/null || true
+    rm -f "$PIDFILE" "$REAPFILE" 2>/dev/null || true
     log "daemon shutting down"
     exit 0
   }

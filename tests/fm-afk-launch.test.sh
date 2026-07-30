@@ -752,39 +752,85 @@ unit_stop_waits_out_a_slow_daemon_shutdown() {
   rm -rf "$st"
 }
 
+launch_stop_polls() {  # <home> -> polls fm_afk_launch_stop would wait for
+  FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" \
+    bash -c '. "$1"; fm_afk_launch_stop_polls' _ "$LAUNCH"
+}
+
 # The stop budget and the daemon's own graceful-reap budget are ONE invariant, not
 # two constants that happen to be ordered at the stock poll (task afk-wedge-noc,
 # the invariant is stated at WATCHER_REAP_SECS_DEFAULT in the daemon): the stop
 # window must always outlast a full reap plus the rest of the shutdown trap, or a
-# correct shutdown is reported as "did not exit after SIGTERM" again. Both knobs
-# that move the reap budget are covered - FM_POLL, which the daemon derives its
-# default from (at 36 the reap bound alone reaches 41s, which the fixed 160-poll
-# 40s window could not outlast), and an explicit FM_WATCHER_REAP_SECS, which wins
-# verbatim. Pure arithmetic over both derivations, so the guard costs no wall time.
-unit_stop_budget_outlasts_the_daemon_reap_budget() {
-  local spec poll wreap reap polls broke=""
+# correct shutdown is reported as "did not exit after SIGTERM" again. The daemon
+# publishes the budget it resolved into state/.supervise-daemon.reap-secs and this
+# path follows THAT, never its own environment - the daemon is spawned with a
+# three-variable env allowlist, so the two sides can read a different FM_POLL. Both
+# knobs that move the recorded budget are covered (FM_POLL, where 36 puts the reap
+# bound at 41s that the fixed 160-poll 40s window could not outlast, and an explicit
+# FM_WATCHER_REAP_SECS), plus the FM_POLL-disagreement case. Pure arithmetic over a
+# written record, so the guard costs no wall time.
+unit_stop_budget_follows_the_daemon_reap_record() {
+  local st spec poll wreap reap polls broke=""
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-budget.XXXXXX")
+  mkdir -p "$st/state"
   for spec in 15: 36: 120: 15:45 15:08; do
     poll=${spec%%:*}
     wreap=${spec##*:}
     reap=$(FM_POLL="$poll" FM_WATCHER_REAP_SECS="$wreap" \
       bash -c '. "$1" >/dev/null 2>&1; watcher_reap_secs' _ "$ROOT/bin/fm-supervise-daemon.sh")
-    polls=$(FM_POLL="$poll" FM_WATCHER_REAP_SECS="$wreap" \
-      bash -c '. "$1"; printf "%s\n" "$FM_AFK_LAUNCH_STOP_POLLS"' _ "$LAUNCH")
-    case "$reap" in ''|*[!0-9]*) broke="reap budget unreadable at FM_POLL=$poll FM_WATCHER_REAP_SECS=$wreap"; break ;; esac
-    case "$polls" in ''|*[!0-9]*) broke="stop budget unreadable at FM_POLL=$poll FM_WATCHER_REAP_SECS=$wreap"; break ;; esac
+    case "$reap" in ''|*[!0-9]*) broke="daemon reap budget unreadable at FM_POLL=$poll FM_WATCHER_REAP_SECS=$wreap"; break ;; esac
+    printf '%s\n' "$reap" > "$st/state/.supervise-daemon.reap-secs"
+    polls=$(launch_stop_polls "$st")
+    case "$polls" in ''|*[!0-9]*) broke="stop budget unreadable for a recorded ${reap}s reap"; break ;; esac
     [ "$((polls * 25))" -gt "$((reap * 100))" ] || {
-      broke="stop budget ${polls} polls does not outlast a ${reap}s reap at FM_POLL=$poll FM_WATCHER_REAP_SECS=$wreap"
+      broke="stop budget ${polls} polls does not outlast the recorded ${reap}s reap (FM_POLL=$poll FM_WATCHER_REAP_SECS=$wreap)"
       break
     }
   done
-  polls=$(FM_POLL=15 bash -c '. "$1"; printf "%s\n" "$FM_AFK_LAUNCH_STOP_POLLS"' _ "$LAUNCH")
-  if [ -z "$broke" ] && [ "$polls" = 160 ]; then
-    pass "stop budget: derived from the daemon's reap budget, so it outlasts it at every poll and override"
-  elif [ -n "$broke" ]; then
-    fail "stop budget: $broke"
-  else
-    fail "stop budget: the stock FM_POLL=15 window changed from 160 polls to $polls"
+  # The record wins over this process's own environment: a launcher that never saw
+  # the daemon's FM_POLL must still honour the daemon's recorded 125s budget.
+  if [ -z "$broke" ]; then
+    printf '125\n' > "$st/state/.supervise-daemon.reap-secs"
+    polls=$(launch_stop_polls "$st")
+    [ "$polls" = 540 ] || broke="a recorded 125s reap gave $polls polls instead of the recorded-budget 540"
   fi
+  # Stock: a daemon that recorded the stock 20s budget leaves this path at exactly
+  # the 160 polls it used before the record existed.
+  if [ -z "$broke" ]; then
+    printf '20\n' > "$st/state/.supervise-daemon.reap-secs"
+    polls=$(launch_stop_polls "$st")
+    [ "$polls" = 160 ] || broke="the stock 20s reap window changed from 160 polls to $polls"
+  fi
+  if [ -z "$broke" ]; then
+    pass "stop budget: follows the daemon's recorded reap budget, so it outlasts it at every poll and override"
+  else
+    fail "stop budget: $broke"
+  fi
+  rm -rf "$st"
+}
+
+# No record means no daemon of this branch published a budget (an older daemon, a
+# crash, a partial write), and a malformed body means the same: fall back to the
+# 160-poll window this path used before the record existed, never to a re-derived
+# guess at what the daemon chose (task afk-wedge-noc).
+unit_stop_budget_falls_back_without_a_usable_record() {
+  local st polls body broke=""
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-fallback.XXXXXX")
+  mkdir -p "$st/state"
+  polls=$(FM_POLL=120 launch_stop_polls "$st")
+  [ "$polls" = 160 ] || broke="an absent record gave $polls polls instead of the 160-poll floor"
+  for body in '' 'abc' '0' '12 34' $'20\n41'; do
+    [ -z "$broke" ] || break
+    printf '%s' "$body" > "$st/state/.supervise-daemon.reap-secs"
+    polls=$(FM_POLL=120 launch_stop_polls "$st")
+    [ "$polls" = 160 ] || broke="a malformed record gave $polls polls instead of the 160-poll floor"
+  done
+  if [ -z "$broke" ]; then
+    pass "stop budget: an absent or malformed reap record falls back to the 160-poll floor"
+  else
+    fail "stop budget: $broke"
+  fi
+  rm -rf "$st"
 }
 
 unit_refresh_validates_record() {
@@ -1005,7 +1051,8 @@ unit_lock_requires_complete_metadata
 unit_stop_surfaces_afk_removal_failure
 unit_stop_confirms_daemon_exit
 unit_stop_waits_out_a_slow_daemon_shutdown
-unit_stop_budget_outlasts_the_daemon_reap_budget
+unit_stop_budget_follows_the_daemon_reap_record
+unit_stop_budget_falls_back_without_a_usable_record
 unit_refresh_validates_record
 unit_clear_failure_aborts_entry
 unit_confirmed_absence_succeeds
