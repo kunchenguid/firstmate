@@ -4,8 +4,8 @@
 # Measures Firstmate-controlled always-loaded surfaces and deterministic render
 # contracts. It does not call model APIs and does not invent provider-side
 # inference claims. Provider cache/usage telemetry, WebSocket transport, and
-# server-side compaction remain outside Firstmate control except where a
-# documented operator package is already installed.
+# server-side compaction remain outside Firstmate control. Package and config
+# fields below are local inventory only, not proof of runtime activation.
 #
 # Output schema (stdout, key=value unless --json):
 #   schema=fm-agent-loop-baseline.v1
@@ -17,13 +17,13 @@
 #   supervision_<harness>_bytes for each docs/supervision-protocols/*.md
 #   supervision_render_<harness>_bytes for fm-supervision-instructions.sh output
 #   session_start_fixture_bytes (optional; requires --with-session-fixture)
-#   openai_server_compaction=<present|absent>
-#   openai_compact_threshold=<int or empty>
-#   openai_use_previous_response_id=<true|false|unknown>
-#   pi_cache_retention_env=<value or unset>
-#   openai_codex_models=<comma list when discoverable>
-#   luna_available=<true|false|unknown>
-#   code_mode_embedded_runtime=<absent>
+#   openai_server_compaction=<present|absent> (global config-file inventory)
+#   openai_compact_threshold=<configured int or empty>
+#   openai_use_previous_response_id=<configured true|false|unknown>
+#   pi_cache_retention_env=<ambient value or unset>
+#   openai_codex_models=<local model-store comma list when discoverable>
+#   luna_available=<true|false|unknown> (local model-store inventory)
+#   code_mode_embedded_runtime=<absent> (declared boundary, not runtime detection)
 #   notes=...
 #
 # Usage:

@@ -8,8 +8,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | Script                   | Purpose                                                                              |
 | ------------------------ | ------------------------------------------------------------------------------------ |
 | `fm-session-start.sh`    | Compose lock, bootstrap, and wake drain into the single ordered session-start digest |
-| `fm-prompt-stable-lib.sh` | Shared deterministic listing helper for cache-stable Firstmate digests |
-| `fm-agent-loop-baseline.sh` | Measure Firstmate-controlled agent-loop overhead and cache/compaction boundaries |
+| `fm-prompt-stable-lib.sh` | Provide the deterministic id-listing primitive used by cache-stable Firstmate digests |
+| `fm-agent-loop-baseline.sh` | Report Firstmate prompt-surface sizes, deterministic fixture results, and local operator inventory |
 | `fm-sessionstart-nudge.sh` | Print the native session-start hook nudge when the primary has not already run the digest |
 | `fm-operational-input.sh` | Construct and parse the canonical cross-language operational-input protocol |
 | `fm-bootstrap.sh`        | Detect toolchain and fleet problems, run the locked session-start sweeps, and install approved tools |
