@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Bind an intentional custom watcher check to its current bytes.
 # Usage: fm-check-register.sh <id>
+#        fm-check-register.sh --help
 # Prints "registered: state/<id>.check.sh" on success. Exit 2 rejects a missing
 # or malformed <id>; exit 1 reports an unusable state directory, check file,
 # trust path, or a host with neither shasum nor sha256sum on PATH.
+# `-h` or `--help` prints this header and exits 0, so the contract below is
+# reachable from the command line and never restated elsewhere.
 #
 # This header is the owner of the custom-check file requirements that AGENTS.md
 # section 7 delegates here. Registration writes state/<id>.check-trust (mode
@@ -59,6 +62,19 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$0"
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"

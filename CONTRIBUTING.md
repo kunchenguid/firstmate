@@ -59,6 +59,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 Tracked changes to firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and `skills/` - ship through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
 Before making any such change, load the agent-only `firstmate-coding-guidelines` skill (`.agents/skills/firstmate-coding-guidelines/SKILL.md`).
 It has the knowledge-placement rules that keep `AGENTS.md` from regrowing after each diet pass.
+That diet has a hard budget: `AGENTS.md` must stay at or under 40000 bytes, Claude Code's agent-instruction warning threshold, so check `wc -c AGENTS.md` before proposing an addition and expect to pay for a new line by removing another.
 There is no reliable way for `bin/fm-brief.sh`'s scaffold to detect that a task's repo is firstmate itself, so firstmate adds this skill's load line to firstmate-repo briefs by hand.
 A crewmate picking up such a brief should load the skill even if the brief predates this instruction.
 When supervising live crewmates, keep firstmate's own long validation or build commands in the background so watcher wakes can still be handled.

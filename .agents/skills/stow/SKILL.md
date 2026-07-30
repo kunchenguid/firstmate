@@ -24,7 +24,7 @@ The goal is a session that is safe to reset or destroy because everything durabl
    - Undone next steps: anything left open that has not yet been filed as backlog work.
 
 2. **Route each finding using AGENTS.md's knowledge-routing table.**
-   AGENTS.md (section 6, "Knowledge routing") is the single source of truth for where each kind of knowledge belongs.
+   AGENTS.md section 6's "Route durable knowledge to its most specific owner" list is the single source of truth for where each kind of knowledge belongs.
    Read that table and route each finding there instead of re-deriving the mapping here.
 
 3. **Write within firstmate's existing write boundaries.**

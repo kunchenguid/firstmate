@@ -2294,6 +2294,97 @@ test_direct_registration_refreshes_v1_x_shim() {
   pass "direct registration refreshes authenticated v1 X shims across marker states"
 }
 
+# The registration script's header is the declared owner of the custom-check
+# requirements AGENTS.md delegates to it, so that header has to be reachable
+# from the command line rather than only by opening the file. Help must never be
+# mistaken for a task id, and adding it must not move any other exit code.
+test_registration_help_and_argument_contract() {
+  local dir state before rc out expected args
+  dir=$(make_case registration-help-contract)
+  state="$dir/home/state"
+  before=$(state_snapshot "$state")
+
+  set +e
+  FM_HOME="$dir/home" "$REGISTER" --help > "$dir/help.out" 2> "$dir/help.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "--help did not exit 0"
+  [ ! -s "$dir/help.err" ] || fail "--help wrote to stderr"
+  assert_grep 'Usage: fm-check-register.sh <id>' "$dir/help.out" \
+    "--help omitted the usage line"
+  assert_grep 'mode exactly 0700' "$dir/help.out" \
+    "--help omitted the custom-check file requirements"
+  assert_grep 'fm-custom-check-v1' "$dir/help.out" \
+    "--help omitted the trust-record contract"
+  assert_grep 'Print nothing when firstmate should not wake' "$dir/help.out" \
+    "--help omitted the behavior the check itself must honor"
+
+  set +e
+  FM_HOME="$dir/home" "$REGISTER" -h > "$dir/help-short.out" 2> "$dir/help-short.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "-h did not exit 0"
+  [ ! -s "$dir/help-short.err" ] || fail "-h wrote to stderr"
+  [ "$(cat "$dir/help-short.out")" = "$(cat "$dir/help.out")" ] \
+    || fail "-h and --help printed different text"
+
+  # Help is rendered from the header comment itself, so the printed contract can
+  # never drift into a second copy of the header.
+  expected=$(awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$REGISTER")
+  [ "$(cat "$dir/help.out")" = "$expected" ] \
+    || fail "help output is a separate copy of the header rather than the header itself"
+  [ "$(state_snapshot "$state")" = "$before" ] || fail "help changed durable state"
+
+  # Every rejection keeps its exact message and exit code.
+  for args in '' 'custom extra' 'bad/id' '../escape'; do
+    set +e
+    # shellcheck disable=SC2086
+    FM_HOME="$dir/home" "$REGISTER" $args > "$dir/reject.out" 2> "$dir/reject.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 2 ] || fail "registration did not exit 2 for arguments '$args'"
+    [ "$(cat "$dir/reject.err")" = "error: invalid custom check registration" ] \
+      || fail "registration changed its rejection message for arguments '$args'"
+    [ ! -s "$dir/reject.out" ] || fail "rejected registration wrote to stdout for '$args'"
+  done
+  [ "$(state_snapshot "$state")" = "$before" ] || fail "rejected registration changed durable state"
+
+  # A well-formed id with no check file still reports the unusable check at 1.
+  set +e
+  FM_HOME="$dir/home" "$REGISTER" custom > "$dir/absent.out" 2> "$dir/absent.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "registration did not exit 1 for an absent check"
+  [ "$(cat "$dir/absent.err")" = "error: custom check is unavailable" ] \
+    || fail "registration changed its absent-check message"
+
+  # A valid id with a conforming check still registers exactly as before.
+  printf '#!/usr/bin/env bash\nprintf "custom-ready\\n"\n' > "$state/custom.check.sh"
+  chmod 0700 "$state/custom.check.sh"
+  set +e
+  FM_HOME="$dir/home" "$REGISTER" custom > "$dir/register.out" 2> "$dir/register.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "registration failed for a conforming check: $(cat "$dir/register.err")"
+  [ "$(cat "$dir/register.out")" = "registered: state/custom.check.sh" ] \
+    || fail "registration changed its success line"
+  fm_custom_check_registered "$state" custom \
+    || fail "registration did not authenticate a conforming custom check"
+
+  # Help stays help even once a same-named check exists, because it is handled
+  # before any argument is treated as a task id.
+  out=$(FM_HOME="$dir/home" "$REGISTER" --help)
+  case "$out" in
+    "Bind an intentional custom watcher check"*) ;;
+    *) fail "--help was interpreted as a task id" ;;
+  esac
+  pass "custom-check registration exposes its owner header and keeps every exit code"
+}
+
 test_bootstrap_migrates_before_other_mutations() {
   local dir state
   dir=$(make_case bootstrap-boundary)
@@ -3356,6 +3447,7 @@ test_obligation_namespace_compatibility
 test_nonexecuting_migration
 test_historical_x_shim_transition_matrix
 test_direct_registration_refreshes_v1_x_shim
+test_registration_help_and_argument_contract
 test_bootstrap_migrates_before_other_mutations
 test_bootstrap_isolates_incomplete_poll_migration
 test_custom_snapshot_cleanup_on_signal
