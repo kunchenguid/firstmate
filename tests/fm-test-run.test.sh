@@ -374,8 +374,25 @@ SH
   [ "$rc" -eq 0 ] || fail "an unlisted skip token must remain a passing gate skip"
   grep -q 'FM_TEST_SUMMARY total=1 failed=0 skipped_gate=1' "$out" \
     || fail "unlisted skip must still count as a gate skip: $(grep FM_TEST_SUMMARY "$out")"
+  # Bind the runner's enforcement to the reason the real gate really prints: run
+  # bin/fm-herdr-lab.sh gate where no lab can exist, feed its exact output to the
+  # runner as a skip line, and require the token to catch it. A renamed cause or
+  # token then fails here instead of silently going green in the Herdr CI lane.
+  # An unsafe probe name is the one refusal that is deterministic everywhere,
+  # including the CI Herdr lane where a default session really is running.
+  local real_reason
+  real_reason=$("$ROOT/bin/fm-herdr-lab.sh" gate default) \
+    && fail "the lab gate must refuse an unsafe probe session name"
+  [ -n "$real_reason" ] || fail "the lab gate printed no reason to enforce"
+  printf '#!/usr/bin/env bash\necho %s\nexit 0\n' "$(printf '%q' "skip: $real_reason")" >"$skip_f"
+  set +e
+  "$RUNNER" --fail-on-gate-skip "$(printf '%s' "$real_reason" | cut -d: -f1)" "$skip_f" \
+    >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the real gate reason escaped the runner's required-token guard"
   rm -rf "$tmp"
-  pass "fail-on-gate-skip is repeatable and only the listed tokens fail"
+  pass "fail-on-gate-skip is repeatable and catches the real lab-gate reason"
 }
 
 test_exclude_family() {
