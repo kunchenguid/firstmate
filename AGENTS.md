@@ -294,7 +294,7 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 ### Validate
 
 For user-visible work, treat relevant Figma evidence as design ground truth and the actual applicable app running in an emulator, device, or browser as behavioral and rendered ground truth.
-When that evidence can inform the change, use available MCP tools to exercise real flows, inspect results, and iterate on every discrepancy; static tests never justify accepting even small unverified deviations.
+When that evidence can inform the change, require the crewmate to use available MCP tools to exercise relevant app flows, inspect runtime results, and iterate on every discrepancy; static tests never justify accepting even small unverified deviations.
 Do not require emulator, device, or browser work when runtime evidence cannot inform the change.
 
 For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
