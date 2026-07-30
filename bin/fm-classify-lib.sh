@@ -17,9 +17,9 @@
 # working/paused wrappers). It is NOT a pure status-file read: it reuses
 # bin/fm-crew-state.sh, which may make a bounded no-mistakes call, to decide
 # whether a crew that just stopped its turn or went stale is working, deliberately
-# paused, or neither. Callers run it ONLY on no-verb signal handling and first
-# sighting of a stale hash, never on every wake, so the per-wake triage stays
-# cheap.
+# paused, or neither. Callers run it ONLY on no-verb signal handling, first
+# sighting of a stale hash, and its bounded pre-escalation recheck, so the
+# per-wake triage stays cheap.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -329,8 +329,9 @@ signal_reason_is_actionable() {  # <file> ...
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
-# run it only on no-verb signal and first-sighting stale paths, never every wake.
-# FM_CREW_STATE_BIN lets tests stub the verdict.
+# run it only on no-verb signals, first-sighting stale paths, and bounded stale
+# pre-escalation rechecks, never every wake. FM_CREW_STATE_BIN lets tests stub
+# the verdict.
 crew_absorb_class() {  # <id>
   local id=$1 line state src
   [ -n "$id" ] || { printf 'none'; return; }
@@ -354,6 +355,15 @@ crew_absorb_class() {  # <id>
 # run. See crew_absorb_class for the exact working/paused/none decision.
 crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
+}
+
+# 0 if a stale worker still has positive current-state evidence of an active
+# execution at its bounded pre-escalation recheck. This deliberately reuses the
+# same authoritative run-step-or-busy-pane predicate used at first sight, so a
+# stopped worker remains actionable immediately instead of extending the stale
+# threshold blindly.
+crew_stale_recheck_is_active() {  # <id>
+  crew_is_provably_working "$1"
 }
 
 # 0 if crew <id>'s authoritative current state is a declared external-wait pause.

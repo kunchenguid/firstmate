@@ -30,6 +30,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
+  cp "$ROOT/bin/fm-watch.sh" "$dir/bin/fm-watch.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
@@ -327,6 +328,33 @@ test_failed_close_rewakes_with_failure_banner() {
   pass "auto-arm: watcher: FAILED translates to an exit-2 alarm rewake"
 }
 
+test_failed_close_with_healthy_successor_closes_quietly() {
+  local dir out status watcher identity
+  dir=$(cd "$(make_primary_dir "$TMP_ROOT/failed-with-successor")" && pwd)
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+  sleep 60 &
+  watcher=$!
+  identity=$(FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$watcher") || {
+    kill "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    fail "could not identify the healthy successor watcher"
+  }
+  mkdir "$dir/state/.watch.lock"
+  printf '%s\n' "$watcher" > "$dir/state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$dir/state/.watch.lock/fm-home"
+  printf '%s\n' "$dir/bin/fm-watch.sh" > "$dir/state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$dir/state/.watch.lock/pid-identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$watcher" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+  expect_code 0 "$status" "a previous failed cycle must not rewake behind a healthy successor"
+  [ -z "$out" ] || fail "healthy successor close produced a false failure banner: $out"
+  [ "$(epoch_outcome "$dir")" = clean ] || fail "healthy successor must record outcome=clean, got: $(epoch_outcome "$dir")"
+  pass "auto-arm: a healthy lock holder and fresh beacon suppress a superseded watcher failure"
+}
+
 test_clean_close_exits_silently() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/clean")
@@ -426,6 +454,7 @@ test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
 test_failed_close_rewakes_with_failure_banner
+test_failed_close_with_healthy_successor_closes_quietly
 test_clean_close_exits_silently
 test_arms_for_x_mode_poll_need_without_inflight
 test_single_flight_admits_exactly_one_owner

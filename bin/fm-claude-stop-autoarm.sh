@@ -162,15 +162,24 @@ if [ -n "$OUT" ]; then
 fi
 [ "$RC" -ne 0 ] && FAILED=1
 
-if [ "$ACTIONABLE" -eq 0 ] && [ "$FAILED" -eq 0 ]; then
+# The need may have vanished mid-cycle (fleet torn down, X opted out): nothing
+# left to supervise, so close quietly instead of waking the model.
+if ! need_supervision; then
   write_epoch clean
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi
 
-# The need may have vanished mid-cycle (fleet torn down, X opted out): nothing
-# left to supervise, so close quietly instead of waking the model.
-if ! need_supervision; then
+# An arm close can report the prior watcher's failure after another Stop hook
+# already installed a healthy successor for this home. The live, identity-bound
+# watcher lock and fresh beacon are authoritative here, not that historical
+# close result. Keep a real actionable wake actionable, but never translate a
+# superseded failure into a false "supervision is down" recovery turn.
+if [ "$FAILED" -eq 1 ] && fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
+  FAILED=0
+fi
+
+if [ "$ACTIONABLE" -eq 0 ] && [ "$FAILED" -eq 0 ]; then
   write_epoch clean
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
