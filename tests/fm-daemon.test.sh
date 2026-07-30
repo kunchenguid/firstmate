@@ -138,8 +138,8 @@ test_stale_transient_self_records_marker() {
   pass "transient stale self-handles and records a persistence marker"
 }
 
-test_stale_diagnostic_suffix_uses_canonical_window() {
-  local dir state fakebin out key win pane reason log
+test_stale_diagnostic_wedge_survives_busy_housekeeping() {
+  local dir state fakebin key win pane reason log
   dir=$(make_supercase stale-diagnostic-suffix)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -149,23 +149,23 @@ test_stale_diagnostic_suffix_uses_canonical_window() {
   reason="stale: $win (idle 500s, possible wedge, escalation 2)"
   fm_write_meta "$state/suffix-w4.meta" "window=$win" "backend=tmux"
   printf 'working: building\n' > "$state/suffix-w4.status"
-  printf 'idle prompt $\n' > "$pane"
+  printf 'Working...\n' > "$pane"
   key=$(printf '%s' "suffix-w4" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
 
   LOG="$log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
-  [ -e "$state/.subsuper-stale-$key" ] \
-    || fail "diagnostic stale reason did not record its canonical window marker"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "enriched wedge retained an ordinary stale marker for busy housekeeping"
+  grep -F "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
+    || fail "enriched wedge did not reach the existing escalation buffer"
   grep -F "$reason" "$log" >/dev/null \
     || fail "daemon log did not preserve the stale diagnostic suffix"
 
-  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
-    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
-  grep -F "possible wedge): $win" "$state/.subsuper-escalations" >/dev/null \
-    || fail "housekeeping did not resolve the canonical window from an enriched stale wake"
-  [ ! -e "$state/.subsuper-stale-$key" ] \
-    || fail "housekeeping did not clear the canonical stale marker after escalation"
-  pass "diagnostic stale reasons preserve detail and use the canonical window through housekeeping"
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  grep -F "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
+    || fail "busy-pane housekeeping absorbed the enriched wedge escalation"
+  pass "enriched stale wedges reach the existing buffer despite a still-busy pane"
 }
 
 test_stale_terminal_escalates() {
@@ -1803,7 +1803,7 @@ test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
-test_stale_diagnostic_suffix_uses_canonical_window
+test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
 test_handle_wake_paused_records_pause_marker
