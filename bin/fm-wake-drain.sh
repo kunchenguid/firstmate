@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Atomically drain durable watcher wake records, optionally annotate validated
-# signal status keys after raw consumption commits, then assert liveness.
+# Atomically drain durable watcher wake records, then after raw consumption
+# commits: optionally annotate validated signal status keys, record the
+# wake-outcome ledger's wake half (bin/fm-wake-ledger.sh), and assert liveness.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
