@@ -10,56 +10,76 @@ metadata:
 
 # stow
 
-Sweep this session for durable knowledge that only exists in conversation right now, and write it to the disk locations firstmate already prints in the next session-start context digest.
-The goal is a session that is safe to reset or destroy because everything durable has already been captured.
+Sweep this session for durable knowledge that exists only in conversation, then leave the next session with a compact current operating map rather than an accumulating journal.
+This skill writes only through the existing Firstmate ownership and write boundaries.
 
-## What it does
+## Required startup-memory pass
+
+Every `/stow` invocation performs this complete pass, even when the session contains no new finding:
+
+1. Run `bin/fm-startup-memory-budget.sh report` before considering a write.
+   Record its effective budget and each file's estimated-token total.
+   The helper's stable estimate is the documented conservative local approximation, not provider-exact accounting.
+   If it rejects the setting or a memory file, do not infer a default or silently continue.
+   Report that concrete exception and do not call the session reset-safe.
+2. Read every current memory file completely: `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`.
+   Treat an absent local file as absent, not as an invitation to manufacture content.
+   In a primary home, all three are curation inputs under their existing ownership rules.
+   In a secondmate home, `data/captain-shared.md` is a read-only primary-owned input: count it, never edit it, and curate only the editable local files.
+3. Build one whole-file retention plan before editing.
+   Retain, in order: current captain preferences, authority and safety boundaries, and recurring working style; stable home-local operating facts that repeatedly affect future work and are expensive to rediscover; then concise pointers to an existing authoritative report, project document, configuration, or backlog item.
+   Retain lower-priority material only while budget remains.
+4. Consolidate every editable memory file as needed, not only the file apparently related to a new finding.
+   Prefer one concise current rule or authoritative pointer over duplicate prose.
+   Remove, merge, or route completed incident and release chronology, stale versions and paths, transient task state, resolved alternatives, old metrics, superseded claims, duplicates, and report-sized procedures.
+   Do not remove a unique current fact unless it is preserved directly elsewhere through a stronger existing owner.
+5. Run `bin/fm-startup-memory-budget.sh report` again after the complete pass.
+   Finish at or below the effective budget unless a concrete inability remains.
+   A secondmate must explicitly report `primary-owned-shared-file-alone-exceeds-budget` when the inherited shared file alone exceeds its allowance, because local curation cannot resolve it.
+   Any other unresolved excess must identify the fact that cannot safely be removed or routed and why.
+
+A net increase is allowed only for a genuinely new current fact with no stronger owner.
+Before allowing it, consolidate enough lower-priority material to remain within budget.
+Never describe the session as reset-safe while the memory total is over budget or an exception is unresolved.
+
+## Knowledge sweep and routing
 
 1. **Sweep the session for uncaptured durable knowledge.**
-   Read back over this conversation and look for:
-   - Operational learnings: fleet-local facts and gotchas discovered while operating firstmate (a script's sharp edge, a harness quirk, a recurring false alarm and its real cause).
-   - Captain preferences expressed in passing: a working-style or approval preference the captain stated conversationally rather than through the destination selected by AGENTS.md's knowledge-routing table.
-   - Project-intrinsic facts discovered: build, test, release, or architecture facts about a project that belong in that project's own `AGENTS.md`.
-   - Decisions made: a standing choice the captain made this session that should outlive it.
-   - Undone next steps: anything left open that has not yet been filed as backlog work.
-
+   Look for operational learnings, captain preferences expressed in passing, project-intrinsic facts, standing decisions, and undone next steps.
 2. **Route each finding using AGENTS.md's knowledge-routing table.**
-   AGENTS.md (section 6, "Knowledge routing") is the single source of truth for where each kind of knowledge belongs.
-   Read that table and route each finding there instead of re-deriving the mapping here.
-
-3. **Write within firstmate's existing write boundaries.**
-   This skill does not grant any new write permission; it only prompts firstmate to use the boundaries that already exist (AGENTS.md section 1):
-   - Captain preferences and fleet-local operational facts: hand-write directly to the destination selected by AGENTS.md's knowledge-routing table, using inspect-then-update every time.
-     Before writing, inspect the destination, find the existing bullet or section the finding duplicates or supersedes, and rewrite it in place rather than adding a new trailing entry.
-     `data/learnings.md` may not exist yet; create it on first local learning, in the same dated, evidence-backed, curated style as the captain-preference files.
-   - Project-intrinsic knowledge: never hand-write a project's `AGENTS.md`.
-     Route it through a normal ship task so a crewmate records it via `bin/fm-ensure-agents-md.sh` and commits it through that project's delivery pipeline, exactly as section 6 describes.
-     If the fleet is live, delegate this to a crewmate rather than doing it inline.
-   - Knowledge generalizable to every firstmate user: this repo's own `AGENTS.md` (or other shared, tracked material), shipped through the normal branch -> no-mistakes -> PR -> captain-merge pipeline for this repo (section 1), never hand-committed straight to `main`.
-   - Task-scoped notes: inspect the relevant backlog item with `tasks-axi show <id> --full`, judge whether the new note is new, duplicate, superseding, or obsolete, then write a considered replacement body with `tasks-axi update <id> --body-file <path>`.
-     When the replacement intentionally supersedes prior state that should remain recoverable, add `--archive-body` to that update command so the prior body stays recoverable without copying it into the replacement.
+   AGENTS.md section 6 is the source of truth for destinations.
+   Do not re-derive or duplicate that mapping here.
+3. **Write within the existing boundaries.**
+   - Captain preferences and fleet-local operational facts belong in the destination selected by AGENTS.md after the required whole-file curation pass.
+     Create `data/learnings.md` only for a genuinely new local learning with no stronger owner.
+   - In a primary home, curate shared captain preferences only under the existing primary-authoritative shared-preference contract.
+     In a secondmate home, route a newly discovered shared preference to the main firstmate through marked status or a document pointer instead of editing the inherited file.
+   - Project-intrinsic knowledge never goes directly into a project's `AGENTS.md`.
+     Route it through a normal ship task so a crewmate records it with `bin/fm-ensure-agents-md.sh` and the project's delivery path.
+   - Knowledge general to every Firstmate user belongs in this repo's shared tracked material through the normal branch, no-mistakes, PR, and captain-merge path.
+   - For task-scoped notes, inspect the item with `tasks-axi show <id> --full`, classify the change as new, duplicate, superseding, or obsolete, then use a considered replacement body through `tasks-axi update <id> --body-file <path>`.
+     Use `--archive-body` when recoverability matters.
      Never append.
-     If hand-editing `data/backlog.md` per the active backend, make the same inspect-then-update edit in place.
-   - Undone next steps: file each as a queued backlog item (section 10), with `blocked-by` recorded if it genuinely depends on something else.
+   - File each undone next step as a queued backlog item with a genuine `blocked-by` dependency when applicable.
+4. **Use inspect-then-update.**
+   For every retained fact, ask which current statement it supersedes, whether it can be a one-sentence rewrite, and whether a stale entry should be deleted, retired, or routed to an existing stronger owner.
+   The only graduation moves are promotion to tracked shared material through a PR, folding a learning into the captain-preference destination selected by AGENTS.md, or deletion of a stale entry.
+   Do not invent another graduation path.
 
-4. **Curate with inspect-then-update.**
-   Every write starts by reading the current destination and deciding how the finding changes what is already there.
-   Use this checklist before writing:
-   - Which existing bullet, section, or task body does this supersede?
-   - Can this be a one-sentence rewrite instead of a new entry?
-   - Should an older bullet or note be deleted, retired, or archived because it is now obsolete?
-   When a finding overlaps or supersedes something already on disk, rewrite or prune the existing entry instead of piling on a new one.
-   Graduation moves are limited to exactly three: promote a learning to the shared `AGENTS.md` via PR, fold it into the captain-preference destination selected by AGENTS.md, or delete a stale entry.
-   Do not invent other graduation paths.
+## Completion receipt
 
-5. **Report to the captain.**
-   Summarize, in plain outcome language (section 9): what was stowed and where, what was filed to the backlog, and whether the session is now safe to reset or destroy - i.e. whether every durable finding from this sweep now lives on disk rather than only in this conversation.
-   If something could not be captured yet (for example, project-intrinsic knowledge waiting on a crewmate to land it), say so explicitly rather than reporting the session fully safe.
+Report the outcome in plain captain-facing language with all of these facts:
+
+- effective startup-memory budget and total estimated tokens before and after;
+- one or more actions for each of `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`: `unchanged`, `added`, `rewritten`, `pruned`, or `routed`;
+- each durable finding filed outside memory and its authoritative owner;
+- every unresolved exception, including a primary-owned shared-file constraint in a secondmate home;
+- whether the session is safe to reset, only when all durable findings are captured and the post-pass result is within budget with no exception.
+
+Do not hide an over-budget result behind a reset-safe claim.
 
 ## Scope exclusion: no skill storage
 
-`/stow` must **never** store, create, or edit a skill as a destination for any finding.
+`/stow` must never store, create, or edit a skill as a destination for any finding.
 There is no "graduate this to a skill" move in this skill's routing.
-This is a deliberate, standing exclusion, not an oversight: even with the two-tier skill layout, a stow sweep is a memory-routing operation, not a way to author or mutate skills.
-Writing learnings into either `.agents/skills/` or public `skills/` would still risk mixing fleet-local material with shared firstmate behavior or standalone installer-facing behavior.
-Until a human deliberately scopes a skill change as firstmate repo work, route generalizable knowledge to the shared `AGENTS.md` (or other shared, tracked material) via the pipeline, and fleet-local knowledge to `data/`, never to a skill.
+Until a human deliberately scopes a skill change as Firstmate repository work, route generalizable knowledge to shared tracked material through its pipeline and fleet-local knowledge to `data/`, never to `.agents/skills/` or public `skills/`.

@@ -6,7 +6,8 @@
 # profile rules, primary config/crew-harness=codex makes a secondmate's crewmates
 # spawn on codex too, primary config/backlog-backend=manual makes that home
 # hand-edit backlog files too, primary config/backend pins that home's local
-# runtime-backend default for future spawns, and primary
+# runtime-backend default for future spawns, primary config/startup-memory-budget
+# bounds that home's startup-memory curation, and primary
 # config/herdr-presentation-spaces enables the same default-off Herdr presentation
 # projection). It also pushes the one primary-authoritative shared
 # captain-preference file, data/captain-shared.md, into each secondmate home's
@@ -32,6 +33,9 @@
 # is deliberately NOT in the list: it is the primary's own setting for launching
 # secondmates, and a secondmate never spawns secondmates, so it must not flow
 # downstream.
+#
+# shellcheck source=bin/fm-startup-memory-budget-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"
 
 # The one shared data file in this inheritance contract. There is deliberately
 # no shared learnings file.
@@ -42,7 +46,7 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget}"
 
 fm_inherit_file_mode() {
   if [ "$(uname)" = Darwin ]; then
@@ -401,6 +405,47 @@ propagate_inheritable_config() {
     esac
     src="$src_config/$item"
     dest="$dest_config/$item"
+    # This one scalar config is consumed as a local safety boundary, so reject
+    # every unsafe or malformed source/destination artifact before the generic
+    # byte-copy behavior below can treat it as ordinary inherited material.
+    if [ "$item" = "$FM_STARTUP_MEMORY_BUDGET_FILE" ]; then
+      if [ -e "$src_config" ] || [ -L "$src_config" ]; then
+        if ! fm_startup_memory_budget_config_dir_safe "$src_config"; then
+          reason="unsafe primary config directory: $FM_STARTUP_MEMORY_BUDGET_ERROR"
+          warn_inheritable_config_error "$item" "$src_config" "$reason"
+          record_inheritable_config_result "$item" error "$reason"
+          rc=1
+          continue
+        fi
+      fi
+      if [ -e "$dest_config" ] || [ -L "$dest_config" ]; then
+        if ! fm_startup_memory_budget_config_dir_safe "$dest_config"; then
+          reason="unsafe destination config directory: $FM_STARTUP_MEMORY_BUDGET_ERROR"
+          warn_inheritable_config_error "$item" "$dest_config" "$reason"
+          record_inheritable_config_result "$item" error "$reason"
+          rc=1
+          continue
+        fi
+      fi
+      if [ -e "$src" ] || [ -L "$src" ]; then
+        if ! fm_startup_memory_budget_file_valid "$src"; then
+          reason="unsafe or invalid primary source: $FM_STARTUP_MEMORY_BUDGET_ERROR"
+          warn_inheritable_config_error "$item" "$src" "$reason"
+          record_inheritable_config_result "$item" error "$reason"
+          rc=1
+          continue
+        fi
+      fi
+      if [ -e "$dest" ] || [ -L "$dest" ]; then
+        if ! fm_startup_memory_budget_file_valid "$dest"; then
+          reason="unsafe or invalid destination: $FM_STARTUP_MEMORY_BUDGET_ERROR"
+          warn_inheritable_config_error "$item" "$dest" "$reason"
+          record_inheritable_config_result "$item" error "$reason"
+          rc=1
+          continue
+        fi
+      fi
+    fi
     if [ -f "$src" ]; then
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
         reason=$(inheritable_config_skip_reason)
