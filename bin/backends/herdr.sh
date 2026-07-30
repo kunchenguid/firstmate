@@ -157,6 +157,11 @@ fm_backend_herdr_workspace_label_valid() {  # <candidate>
   [ "${#value}" -le "$FM_BACKEND_HERDR_WORKSPACE_LABEL_MAX" ]
 }
 
+fm_backend_herdr_workspace_label_refuse() {  # <file> <reason>
+  local file=$1 reason=$2
+  echo "error: $file $reason; use 1-$FM_BACKEND_HERDR_WORKSPACE_LABEL_MAX characters from A-Z a-z 0-9 . _ - starting with a letter or digit and not with the reserved '2ndmate-' prefix, or remove the file to use the default 'firstmate'" >&2
+}
+
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
 # label (docs/herdr-backend.md "Watching and task containers"). A SECONDMATE
 # home resolves to "2ndmate-<secondmate-id>", so its tasks land in their own
@@ -194,27 +199,27 @@ fm_backend_herdr_workspace_label() {  # -> label on stdout, or 1 + a diagnostic
   file=$(fm_backend_herdr_workspace_label_config_path)
   if [ -f "$file" ]; then
     if LC_ALL=C od -An -v -tx1 "$file" 2>/dev/null | grep -Eq '(^|[[:space:]])00([[:space:]]|$)'; then
-      echo "error: $file contains a NUL byte, which is not a valid herdr workspace label; use 1-$FM_BACKEND_HERDR_WORKSPACE_LABEL_MAX characters from A-Z a-z 0-9 . _ - starting with a letter or digit and not with the reserved '2ndmate-' prefix, or remove the file to use the default 'firstmate'" >&2
+      fm_backend_herdr_workspace_label_refuse "$file" \
+        "contains a NUL byte, which is not a valid herdr workspace label"
       return 1
     fi
-    # Command substitution strips trailing newlines, so an ordinary one-line
-    # file never trips the multi-line refusal below.
     raw=$(cat "$file" 2>/dev/null) || {
       echo "error: could not read $file; refusing to guess this home's herdr workspace label" >&2
       return 1
     }
-    case "$raw" in
-      *$'\n'*)
-        echo "error: $file must hold a single line, but contains more than one; write one workspace label or remove the file to use the default 'firstmate'" >&2
-        return 1
-        ;;
-    esac
     value=$raw
     value=${value#"${value%%[![:space:]]*}"}
     value=${value%"${value##*[![:space:]]}"}
     if [ -n "$value" ]; then
+      case "$value" in
+        *$'\n'*)
+          echo "error: $file must hold a single line, but contains more than one; write one workspace label or remove the file to use the default 'firstmate'" >&2
+          return 1
+          ;;
+      esac
       if ! fm_backend_herdr_workspace_label_valid "$value"; then
-        echo "error: $file holds an unusable herdr workspace label; use 1-$FM_BACKEND_HERDR_WORKSPACE_LABEL_MAX characters from A-Z a-z 0-9 . _ - starting with a letter or digit and not with the reserved '2ndmate-' prefix, or remove the file to use the default 'firstmate'" >&2
+        fm_backend_herdr_workspace_label_refuse "$file" \
+          "holds an unusable herdr workspace label"
         return 1
       fi
       printf '%s' "$value"

@@ -331,7 +331,7 @@ test_workspace_label_config_value_wins_for_a_primary_home() {
 }
 
 test_workspace_label_config_value_is_trimmed() {
-  resolve_label "$(label_home trim $'  second.home_2 \t\n\n')"
+  resolve_label "$(label_home trim $'\n  second.home_2 \t\n \n')"
   [ "$RESOLVE_STATUS" -eq 0 ] || fail "surrounding whitespace must not make a configured label unusable: $RESOLVE_ERR"
   [ "$RESOLVE_OUT" = "second.home_2" ] || fail "a configured label should be trimmed of surrounding whitespace, got '$RESOLVE_OUT'"
   pass "fm_backend_herdr_workspace_label: trims surrounding whitespace around a configured label"
